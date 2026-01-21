@@ -1,0 +1,168 @@
+# Canopy PEG Grammar for Bash Command Parsing
+# Identifies commands, file read operations, and file write operations
+#
+# Usage: canopy bash_parser.peg --lang python
+#
+# This grammar parses bash command lines and extracts:
+# - Commands (executable operations)
+# - Read operations (files being read from)
+# - Write operations (files being written to)
+
+grammar BashParser
+
+# ============================================================================
+# Top-level rule
+# ============================================================================
+
+command_line <- spacing compound_command spacing
+
+# ============================================================================
+# Compound commands - connected by control operators
+# ============================================================================
+
+# A compound command is pipelines connected by control operators
+# The trailing_background/trailing_semicolon handles commands ending in & or ; without another command after
+compound_command <- pipeline (control_op pipeline)* (trailing_background / trailing_semicolon)?
+
+control_op <- and_op / or_op / semicolon / background
+and_op <- spacing "&&" spacing
+or_op <- spacing "||" spacing
+semicolon <- spacing ";" spacing
+background <- spacing "&" !"&" spacing
+
+# Trailing & at end of command (no following command)
+trailing_background <- spacing "&" !"&" spacing?
+
+# Trailing ; at end of command (common in brace groups)
+trailing_semicolon <- spacing ";" spacing?
+
+# ============================================================================
+# Pipeline - commands connected by pipes
+# ============================================================================
+
+pipeline <- pipeline_element (pipe pipeline_element)*
+
+pipe <- spacing "|" !"|" spacing
+
+pipeline_element <- subshell / brace_group / simple_command
+
+# ============================================================================
+# Subshells and brace groups
+# ============================================================================
+
+# Subshell: (command) - recursively contains compound commands
+# Note: $(command) is handled separately as cmd_substitution
+subshell <- "(" spacing compound_command spacing ")"
+
+# Brace group: { command; } - recursively contains compound commands
+brace_group <- "{" spacing compound_command spacing "}"
+
+# ============================================================================
+# Simple command - single command with redirections
+# ============================================================================
+
+simple_command <- (redirection / cmd_substitution / command_word)+
+
+command_word <- !reserved_word word spacing
+
+# ============================================================================
+# Redirections - explicit file I/O
+# ============================================================================
+
+redirection <- append_redirect / output_redirect / heredoc / input_redirect / stderr_redirect / stderr_to_stdout / fd_redirect
+
+# > file (write)
+output_redirect <- fd_num? ">" !">" spacing file_path spacing
+
+# << DELIMITER (here-document)
+heredoc <- "<<" "-"? spacing heredoc_delimiter spacing heredoc_content?
+
+heredoc_delimiter <- single_quoted / double_quoted / unquoted_heredoc_word
+unquoted_heredoc_word <- [a-zA-Z_] [a-zA-Z0-9_]*
+
+# Here-doc content - capture inline content like "... EOF" at end of single-line examples
+heredoc_content <- (![\n\r] .)*
+
+# >> file (append write)
+append_redirect <- fd_num? ">>" spacing file_path spacing
+
+# < file (read) - must not be <<
+input_redirect <- "<" !"<" spacing file_path spacing
+
+# 2> file (stderr write)
+stderr_redirect <- "2>" !">" spacing file_path spacing
+
+# 2>&1 (stderr to stdout merge)
+stderr_to_stdout <- "2>&1" spacing
+
+# n>&m or n<&m
+fd_redirect <- fd_num (">&" / "<&") fd_num spacing
+
+fd_num <- [0-9]+
+
+# ============================================================================
+# Command substitution
+# ============================================================================
+
+cmd_substitution <- dollar_paren_sub / backtick_sub
+
+# $(command) - recursively parses the inner command
+# Note: trailing spacing allows multiple substitutions like: echo $(cmd1) $(cmd2)
+dollar_paren_sub <- "$(" spacing compound_command spacing ")" spacing
+
+# `command` - recursively parses the inner command
+# Note: trailing spacing allows multiple substitutions
+backtick_sub <- "`" spacing compound_command spacing "`" spacing
+
+# ============================================================================
+# File paths
+# ============================================================================
+
+file_path <- quoted_path / unquoted_path
+
+quoted_path <- single_quoted / double_quoted
+
+unquoted_path <- path_start path_char*
+
+path_start <- "/" / "~" / "." / [a-zA-Z_]
+path_char <- [a-zA-Z0-9_./-] / escaped_char
+escaped_char <- "\\" .
+
+# ============================================================================
+# Words and tokens
+# ============================================================================
+
+word <- quoted_string / unquoted_word
+
+quoted_string <- single_quoted / double_quoted / dollar_quoted
+
+single_quoted <- "'" single_content "'"
+single_content <- (!"'" .)*
+
+double_quoted <- '"' double_content '"'
+double_content <- (escaped_char / var_ref / cmd_substitution / !'"' .)*
+
+dollar_quoted <- "$'" dollar_content "'"
+dollar_content <- (escaped_char / !"'" .)*
+
+# Allow variable references within unquoted words
+unquoted_word <- (escaped_char / var_ref / !delimiter .)+
+
+var_ref <- "$" identifier / "${" identifier var_modifier? "}" / "$" special_var
+
+identifier <- [a-zA-Z_] [a-zA-Z0-9_]*
+var_modifier <- ":" [-+=?] [^}]*
+special_var <- [?$!#@*0-9-]
+
+# ============================================================================
+# Reserved words
+# ============================================================================
+
+reserved_word <- ("if" / "then" / "else" / "elif" / "fi" / "case" / "esac" / "for" / "while" / "until" / "do" / "done" / "in" / "function") ![a-zA-Z0-9_]
+
+# ============================================================================
+# Delimiters and spacing
+# ============================================================================
+
+delimiter <- [ \t\n\r|&;<>(){}$`"']
+spacing <- [ \t]*
