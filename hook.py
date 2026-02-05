@@ -19,15 +19,24 @@ import sys
 from pathlib import PurePath
 from typing import Any, Dict, List, Tuple
 
+from toolguard.auto_migrate import load_config_sync_settings, run_auto_migration
 from toolguard.compound import check_compound_permission
-from toolguard.config import discover_config_files, find_project_root, load_governed_tools, load_permissions
+from toolguard.config import (
+    discover_config_files,
+    find_project_root,
+    load_governed_tools,
+    load_permissions,
+    load_takeover_mode_config,
+)
+from toolguard.config_divergence import check_and_warn_divergence
+from toolguard.config_validation import validate_permissions
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_warning
 from toolguard.log_writer import log_command
 from toolguard.normalization import expand_tilde
+from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 from toolguard.toml_config import load_toml_config
-from toolguard.config_validation import validate_permissions
 
 # Tools that operate on file paths (use GLOB matching)
 FILE_PATH_TOOLS = {'Read', 'Write', 'Edit'}
@@ -35,8 +44,9 @@ FILE_PATH_TOOLS = {'Read', 'Write', 'Edit'}
 # Tools that execute commands (use compound command parsing)
 COMMAND_TOOLS = {'Bash', 'mcp__jetbrains__execute_terminal_command', 'mcp__local-tools__checked_bash'}
 
-# Module-level flag to ensure validation runs only once per session
+# Module-level flags to ensure checks run only once per session
 _validation_done = False
+_divergence_check_done = False
 
 
 def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None) -> None:
@@ -322,6 +332,39 @@ def main() -> None:
         # Run startup validation (once per session) using cwd from hook input
         _run_startup_validation(env_config, cwd)
 
+        # Load takeover mode configuration and issue warning if enabled
+        takeover_config = load_takeover_mode_config(cwd)
+        if takeover_config['enabled']:
+            log_dir = env_config.get('log_dir')
+            if log_dir:
+                issue_takeover_warning(log_dir, to_stdout=True, to_error_log=True)
+
+        # Check for config divergence (once per session)
+        global _divergence_check_done
+        if not _divergence_check_done:
+            _divergence_check_done = True
+            log_dir = env_config.get('log_dir')
+            if log_dir:
+                try:
+                    project_root = find_project_root(cwd)
+                    divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_config)
+
+                    # Auto-migration: consolidate permissions if configured
+                    if divergent_patterns:
+                        config_files = discover_config_files(cwd)
+                        config_sync = load_config_sync_settings(config_files)
+
+                        if config_sync['auto_migrate']:
+                            # Auto-migration enabled - run it
+                            run_auto_migration(project_root, log_dir, config_sync, takeover_config)
+                        else:
+                            # Auto-migration disabled - warning already shown by check_and_warn_divergence
+                            pass
+
+                except RuntimeError:
+                    # No project root found - skip divergence check
+                    pass
+
         # Load list of governed tools (using cwd from hook input for project discovery)
         governed_tools = load_governed_tools(cwd)
 
@@ -391,6 +434,9 @@ def main() -> None:
         # Load permissions from settings (using cwd from hook input for project discovery)
         allow_patterns, deny_patterns = load_permissions(cwd)
 
+        # Use takeover mode configuration loaded earlier
+        # (takeover_config already loaded at startup for warning check)
+
         if not allow_patterns:
             # No allow patterns - deny everything (fail closed)
             reason = 'No Bash permissions found in settings - all commands blocked'
@@ -402,6 +448,14 @@ def main() -> None:
         # Check permission (handles both simple and compound commands)
         extended_syntax = env_config.get('extended_syntax', True)
         decision, reason = check_compound_permission(command, allow_patterns, deny_patterns, [], extended_syntax)
+
+        # Apply takeover mode no_match_fallback if enabled and command was denied for not matching
+        if takeover_config['enabled'] and decision == 'deny' and 'does not match any allow patterns' in reason.lower():
+            if takeover_config['no_match_fallback'] == 'warn_deny':
+                reason = (
+                    'Command does not match any allow patterns. '
+                    'Consider adding a rule to toolguard_hook.toml to explicitly allow or deny this command.'
+                )
 
         # Log the decision with agent identification
         if decision == 'allow':

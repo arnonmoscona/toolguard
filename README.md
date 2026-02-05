@@ -516,6 +516,696 @@ The following bash constructs are **not currently parsed** - their inner command
 }
 ```
 
+### Takeover Mode (Alpha)
+
+**Takeover Mode** is an advanced configuration that allows Claude Code to receive blanket permissions while toolguard acts as the real security gatekeeper. This eliminates permission prompts during Claude Code operation while maintaining full security control.
+
+#### What is Takeover Mode?
+
+In takeover mode:
+1. **Claude Code sees blanket allows** - No permission prompts interrupt workflow
+2. **Toolguard enforces real permissions** - All commands/file operations are validated by toolguard's rules
+3. **Best of both worlds** - Uninterrupted workflow with full security control
+
+#### When to Use Takeover Mode
+
+**Use takeover mode when:**
+- You want Claude to work without permission interruptions
+- You trust toolguard's permission system to enforce security
+- You have well-defined allow/deny patterns in toolguard configuration
+- You want consistent permission enforcement across all tools
+
+**Don't use takeover mode when:**
+- You're still configuring and testing permissions
+- You prefer explicit Claude Code permission prompts as a second layer
+- You're in a high-security environment requiring multi-layer validation
+
+#### How It Works
+
+Takeover mode operates by creating a split configuration:
+
+1. **In `.claude/settings.local.json`**: Add blanket allow patterns that Claude Code sees:
+   ```json
+   {
+     "permissions": {
+       "allow": [
+         "Bash(*)",
+         "Read(*)",
+         "Write(*)",
+         "Edit(*)"
+       ]
+     }
+   }
+   ```
+
+2. **In `.claude/toolguard_hook.toml`**: Define real permissions that toolguard enforces:
+   ```toml
+   [takeover_mode]
+   enabled = true
+
+   [permissions]
+   allow = [
+       "Bash(git status:*)",
+       "Bash(git log:*)",
+       "Read(~/projects/**)",
+       "Write(~/projects/myapp/**)"
+   ]
+   deny = [
+       "Bash(rm -rf:*)",
+       "Read(**/.env)",
+       "Write(**/.ssh/**)"
+   ]
+   ```
+
+When `takeover_mode.enabled = true`, toolguard filters out blanket allow patterns (like `Bash(*)`) from its configuration to prevent them from bypassing the real permissions you've defined.
+
+#### Configuration Options
+
+```toml
+[takeover_mode]
+# Enable takeover mode (default: false)
+enabled = false
+
+# Patterns to ignore from settings.local.json (default list shown)
+ignored_allow_patterns = [
+    "Bash(*)",
+    "Read(*)",
+    "Write(*)",
+    "Edit(*)",
+    "mcp__jetbrains__execute_terminal_command(*)"
+]
+
+# Add custom patterns to ignore list (beyond defaults)
+additional_ignored_patterns = []
+
+# What to do when no allow pattern matches (default: "deny")
+# Options: "deny" or "ask"
+no_match_fallback = "deny"
+```
+
+**Example with custom patterns**:
+```toml
+[takeover_mode]
+enabled = true
+additional_ignored_patterns = [
+    "Bash(~/projects/**)",  # Ignore overly broad project access
+]
+no_match_fallback = "ask"  # Prompt instead of deny on no match
+```
+
+#### Security Warnings
+
+**⚠️ CRITICAL**: If toolguard fails to run (e.g., Python error, missing dependencies), Claude Code will see only the blanket allow patterns and execute ANY command without restriction.
+
+**To mitigate this risk**:
+1. **Test thoroughly** before enabling takeover mode
+2. **Monitor logs** regularly at `logs/toolguard-YYYY-MM-DD.md`
+3. **Check error logs** at `logs/toolguard-error-YYYY-MM-DD.md`
+4. **Start with `no_match_fallback = "ask"`** until you're confident in your patterns
+5. **Use deny patterns** for critical resources (e.g., `**/.env`, `**/.ssh/**`)
+
+**Verify toolguard is running**:
+```bash
+# Commands should appear in daily logs
+tail -f logs/toolguard-$(date +%Y-%m-%d).md
+```
+
+If no logs appear after Claude Code executes commands, toolguard is NOT running and blanket allows are exposed.
+
+#### Example Configuration
+
+Complete takeover mode setup:
+
+**`.claude/settings.local.json`** (blanket allows for Claude Code):
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)"
+    ]
+  }
+}
+```
+
+**`.claude/toolguard_hook.toml`** (real permissions for toolguard):
+```toml
+governed_tools = ["Bash", "Read", "Write", "Edit"]
+
+[takeover_mode]
+enabled = true
+no_match_fallback = "deny"
+
+[permissions]
+allow = [
+    # Git operations
+    "Bash(git status:*)",
+    "Bash(git log:*)",
+    "Bash(git diff:*)",
+    "Bash(git branch:*)",
+
+    # Testing
+    "Bash(uv run pytest:*)",
+
+    # File access
+    "Read(~/projects/**)",
+    "Write(~/projects/myapp/**)",
+    "Edit(~/projects/myapp/**)"
+]
+
+deny = [
+    # Dangerous commands
+    "Bash(rm -rf:*)",
+    "Bash(sudo:*)",
+    "[regex]rm\\s+-rf\\s+/",
+
+    # Sensitive files
+    "Read(**/.env)",
+    "Read(**/.env.*)",
+    "Read(**/.ssh/**)",
+    "Write(**/.env)",
+    "Write(**/.ssh/**)",
+    "Edit(**/.env)"
+]
+```
+
+### Configuration Sync & Migration
+
+As you work with toolguard, permissions may accumulate in `settings.local.json` that would be better managed in `toolguard_hook.toml`. Toolguard provides tools to detect and migrate these permissions automatically.
+
+#### What is Config Divergence?
+
+**Config divergence** occurs when:
+- Permissions exist in `settings.local.json` but not in `toolguard_hook.toml`
+- You're managing permissions in two places, making maintenance harder
+- Extended syntax patterns (`[regex]`, `[glob]`) can't be used because they're in the wrong file
+
+#### Why It Matters
+
+1. **Maintainability**: Single source of truth for permissions
+2. **Extended features**: Use advanced patterns only available in `toolguard_hook.toml`
+3. **Clarity**: Separation between Claude Code's view (blanket allows) and real permissions
+4. **Takeover mode**: Essential for clean takeover mode configuration
+
+#### Manual Migration
+
+Toolguard includes a migration script to detect and migrate permissions:
+
+**Dry run** (see what would change):
+```bash
+uv run python -m toolguard.scripts.migrate_permissions --dry-run
+```
+
+**Execute migration**:
+```bash
+uv run python -m toolguard.scripts.migrate_permissions
+```
+
+**What the migration does**:
+1. Scans `settings.local.json` for Bash/Read/Write/Edit permissions
+2. Identifies patterns not present in `toolguard_hook.toml`
+3. Adds missing patterns to `toolguard_hook.toml`
+4. Creates backup before making changes
+5. Optionally sorts patterns for readability
+
+**Example output**:
+```
+Found 12 patterns in settings.local.json
+Found 8 patterns in toolguard_hook.toml
+Identified 4 patterns to migrate:
+  - Bash(git push:*)
+  - Bash(git pull:*)
+  - Read(~/projects/docs/**)
+  - Write(/tmp/**)
+
+Creating backup: logs/config-backups/toolguard_hook-2026-02-05-140523.toml
+Migrating patterns...
+✓ Migration complete
+```
+
+#### Auto-Migration
+
+Enable automatic migration to keep configurations in sync:
+
+```toml
+[config_sync]
+# Enable automatic migration on hook startup
+auto_migrate = false
+
+# Directory for configuration backups
+backup_dir = "logs/config-backups"
+
+# Sort patterns alphabetically after migration
+auto_sort_on_migrate = true
+```
+
+**When to enable auto-migration**:
+- You're actively developing permission patterns
+- You want new patterns automatically moved to `toolguard_hook.toml`
+- You trust the migration logic (test with dry-run first)
+
+**When to disable auto-migration**:
+- You prefer manual control over migrations
+- You're in production with stable permissions
+- You want to review changes before applying them
+
+#### Backup Handling
+
+**Backup location**: `logs/config-backups/` (configurable via `backup_dir`)
+
+**Backup naming**: `toolguard_hook-YYYY-MM-DD-HHMMSS.toml`
+
+**Example**:
+```
+logs/config-backups/
+├── toolguard_hook-2026-02-05-140523.toml
+├── toolguard_hook-2026-02-04-093012.toml
+└── toolguard_hook-2026-02-03-151445.toml
+```
+
+**Restoring from backup**:
+```bash
+# Copy backup to main config
+cp logs/config-backups/toolguard_hook-2026-02-05-140523.toml .claude/toolguard_hook.toml
+```
+
+**Backup retention**: Toolguard does not automatically delete old backups. Clean up manually as needed:
+```bash
+# Keep only last 10 backups
+cd logs/config-backups
+ls -t | tail -n +11 | xargs rm
+```
+
+#### Similarity Detection and Duplicate Removal
+
+The migration script automatically identifies and handles redundant patterns using advanced similarity detection.
+
+**Redundant Pattern Removal**:
+
+The migration automatically removes patterns from `settings.local.json` that are:
+1. **Exact duplicates** - Pattern exists identically in both files
+2. **Subsets** - Pattern is covered by a broader rule in `toolguard_hook.toml`
+
+**Example**:
+```
+Found 3 pattern(s) to migrate:
+  ALLOW:
+    - Bash(find:*)
+    - Bash(uv run ruff format:*)  ← COVERED BY: Bash(uv run ruff:*)
+    - Bash(~/bin/open_note_by_title.sh:*)
+
+Found 2 redundant pattern(s) to remove (already in toolguard config):
+  ALLOW:
+    - Bash(uv run pytest:*)  (exact duplicate)
+    - Bash(git push:*)  (covered by Bash(git:*))
+```
+
+**Superset Detection**:
+
+For `:*)` patterns, the migration detects when a broader pattern covers a more specific one:
+- `Bash(uv run ruff:*)` covers `Bash(uv run ruff format:*)`
+- `Bash(git:*)` covers `Bash(git push:*)`, `Bash(git pull:*)`, etc.
+- Only works with simple `:*)` postfix patterns (not extended syntax)
+- Requires word boundary (space) to avoid false positives
+
+**Similarity Ranking**:
+
+The migration uses Python's `difflib` to rank similar patterns by similarity score:
+
+```
+Similar patterns (top 3 by similarity):
+  'Bash(~/bin/open_note_by_title.sh:*)' similar to 'Bash(~/bin/open_note_by_title.sh :*)' (0.97)
+  'Bash(uv run ruff format:*)' similar to 'Bash(uv run ruff:*)' (0.85) [SUPERSET]
+```
+
+**Configuration**:
+
+Control similarity detection with the `max_similar_matches` setting:
+
+```toml
+[config_sync]
+# Maximum similar patterns to show (default: 3)
+max_similar_matches = 3
+```
+
+**Notes**:
+- Extended syntax patterns (`[regex]`, `[glob]`, `[native]`) are skipped for superset detection
+- If too many patterns share the same prefix, they won't be flagged as similar (not discriminating)
+- Similarity uses a 0.7 cutoff threshold to balance precision and recall
+
+### Session Warnings
+
+Toolguard includes a session-based warning system to alert you about configuration issues without flooding your terminal.
+
+#### How Warnings Work
+
+**Warning frequency**:
+- **Once per session** (default): Warning appears only once per Claude Code session
+- **Once per day**: Warning appears once per calendar day
+
+**Warning persistence**: Warnings are tracked using marker files in `/tmp/toolguard-warnings/`
+
+**Example workflow**:
+1. Configuration issue detected (e.g., ungoverned tool in permissions)
+2. Warning printed to stderr and logged to `logs/toolguard-error-YYYY-MM-DD.md`
+3. Marker file created at `/tmp/toolguard-warnings/<warning-hash>.marker`
+4. Subsequent occurrences of same warning are suppressed until marker expires
+
+#### Marker Files Location
+
+**Directory**: `/tmp/toolguard-warnings/`
+
+**Naming**: Each warning type gets a unique hash-based filename:
+```
+/tmp/toolguard-warnings/
+├── a3f2e1d9c8b7a6f5.marker  # Ungoverned tool warning
+├── b4e3d2c1f0e9d8c7.marker  # TOML/JSON conflict warning
+└── c5d4e3f2a1b0c9d8.marker  # Unsupported tool warning
+```
+
+**Content**: Marker files contain the timestamp when the warning was first issued.
+
+#### Marker Cleanup
+
+**Automatic cleanup**: Marker files in `/tmp/` are typically cleared on system reboot
+
+**Manual cleanup** (to see warnings again):
+```bash
+# Clear all toolguard warning markers
+rm -rf /tmp/toolguard-warnings/
+
+# Clear specific warning (find hash in logs/toolguard-error-YYYY-MM-DD.md)
+rm /tmp/toolguard-warnings/a3f2e1d9c8b7a6f5.marker
+```
+
+**When to clear markers**:
+- You've fixed a configuration issue and want to verify it's resolved
+- You want to see all warnings again for debugging
+- You're testing warning behavior
+
+#### Warning Types
+
+Common warnings that use the session warning system:
+
+| Warning Type | Description |
+|--------------|-------------|
+| Ungoverned tools | Tools in permissions but not in `governed_tools` list |
+| Unsupported tools | Tools not recognized by toolguard |
+| TOML/JSON conflict | Both `.toml` and `.json` config files exist |
+| Migration available | Patterns in `settings.local.json` can be migrated |
+
+All warnings are logged to `logs/toolguard-error-YYYY-MM-DD.md` regardless of marker status.
+
+### Configuration Reference
+
+Complete TOML configuration structure with all available sections:
+
+```toml
+# ============================================================================
+# TOOLGUARD CONFIGURATION REFERENCE
+# ============================================================================
+
+# List of tools that toolguard will govern (required)
+governed_tools = [
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "mcp__jetbrains__execute_terminal_command"
+]
+
+# Additional custom tools to recognize as valid (optional)
+additional_supported_tools = [
+    "mcp__custom__my_bash_tool"
+]
+
+# ============================================================================
+# TAKEOVER MODE - Claude sees blanket allows, toolguard enforces real rules
+# ============================================================================
+[takeover_mode]
+# Enable takeover mode (default: false)
+enabled = false
+
+# Blanket patterns to ignore from settings.local.json (these are defaults)
+ignored_allow_patterns = [
+    "Bash(*)",
+    "Read(*)",
+    "Write(*)",
+    "Edit(*)",
+    "mcp__jetbrains__execute_terminal_command(*)"
+]
+
+# Additional patterns to ignore (beyond defaults)
+additional_ignored_patterns = []
+
+# Fallback when no pattern matches: "deny" or "ask" (default: "deny")
+no_match_fallback = "deny"
+
+# ============================================================================
+# CONFIG SYNC - Automatic migration from settings.local.json
+# ============================================================================
+[config_sync]
+# Enable automatic migration on startup (default: false)
+auto_migrate = false
+
+# Directory for configuration backups (default: "logs/config-backups")
+backup_dir = "logs/config-backups"
+
+# Sort patterns after migration (default: true)
+auto_sort_on_migrate = true
+
+# ============================================================================
+# PERMISSIONS - Define allow/deny/ask patterns
+# ============================================================================
+[permissions]
+# Allowed patterns - commands/files that are permitted
+allow = [
+    # Standard patterns (Claude Code compatible)
+    "Bash(git status:*)",
+    "Bash(git log:*)",
+    "Bash(uv run pytest:*)",
+    "Read(~/projects/**)",
+    "Write(~/projects/myapp/**)",
+
+    # Extended syntax patterns (toolguard only)
+    "[regex]^git (status|log|diff|branch)",
+    "[glob]~/projects/**/*.py",
+    "[native]docker * --rm *"
+]
+
+# Denied patterns - explicitly blocked (take precedence over allow)
+deny = [
+    # Dangerous commands
+    "Bash(rm -rf:*)",
+    "Bash(sudo:*)",
+    "[regex]rm\\s+-rf\\s+/",
+
+    # Sensitive files
+    "Read(**/.env)",
+    "Read(**/.env.*)",
+    "Read(**/.ssh/**)",
+    "Write(**/.env)",
+    "Write(**/.ssh/**)",
+    "Edit(**/.env)"
+]
+
+# Ask patterns - require explicit user confirmation (optional)
+ask = [
+    "Bash(alembic:*)",
+    "Bash(uv run alembic:*)",
+    "Write(~/projects/production-db/**)"
+]
+```
+
+**Configuration notes**:
+- **Comments**: TOML format supports inline comments (not available in JSON)
+- **Pattern order**: Patterns within each section (allow/deny/ask) are checked in order
+- **Deny precedence**: Deny patterns always take precedence over allow patterns
+- **Extended syntax**: Only supported in `toolguard_hook.toml`, not in `settings.local.json`
+
+### Security Best Practices
+
+#### Blanket Allow Risks
+
+**⚠️ Never use blanket allows without toolguard protection**
+
+```json
+// DANGEROUS - DO NOT USE unless takeover mode is enabled
+{
+  "permissions": {
+    "allow": ["Bash(*)", "Write(*)"]
+  }
+}
+```
+
+**Why this is dangerous**:
+- Claude can execute ANY command or write ANY file
+- No protection against mistakes or malicious suggestions
+- Bypasses all security controls
+
+**Safe approaches**:
+
+1. **Specific patterns only** (no takeover mode):
+   ```json
+   {
+     "permissions": {
+       "allow": [
+         "Bash(git status:*)",
+         "Write(~/projects/myapp/**)"
+       ]
+     }
+   }
+   ```
+
+2. **Takeover mode with toolguard** (blanket allows OK):
+   ```toml
+   # In settings.local.json: Bash(*), Write(*)
+   # In toolguard_hook.toml:
+   [takeover_mode]
+   enabled = true
+
+   [permissions]
+   allow = ["Bash(git status:*)", "Write(~/projects/myapp/**)"]
+   deny = ["Bash(rm -rf:*)", "Write(**/.env)"]
+   ```
+
+#### Backup Importance
+
+**Always test changes with backups**:
+
+1. **Before enabling takeover mode**:
+   ```bash
+   # Backup your configs
+   cp .claude/settings.local.json .claude/settings.local.json.backup
+   cp .claude/toolguard_hook.toml .claude/toolguard_hook.toml.backup
+   ```
+
+2. **Before running migration**:
+   ```bash
+   # Dry run first
+   uv run python -m toolguard.scripts.migrate_permissions --dry-run
+
+   # Migration creates automatic backup, but manual backup doesn't hurt
+   cp .claude/toolguard_hook.toml logs/manual-backup-$(date +%Y-%m-%d).toml
+   ```
+
+3. **Regular backups**:
+   ```bash
+   # Weekly backup script
+   cp .claude/toolguard_hook.toml ~/backups/toolguard-$(date +%Y-%m-%d).toml
+   ```
+
+#### Testing with Dry-Run
+
+**Always test migrations before executing**:
+
+```bash
+# Step 1: See what would change
+uv run python -m toolguard.scripts.migrate_permissions --dry-run
+
+# Step 2: Review output carefully
+# - Are the patterns correct?
+# - Any unexpected migrations?
+# - Similar patterns that should be consolidated?
+
+# Step 3: Execute only if dry-run looks good
+uv run python -m toolguard.scripts.migrate_permissions
+
+# Step 4: Verify the result
+diff .claude/toolguard_hook.toml logs/config-backups/toolguard_hook-*.toml
+```
+
+#### Monitoring and Verification
+
+**Verify toolguard is working**:
+
+1. **Check logs after commands**:
+   ```bash
+   tail -20 logs/toolguard-$(date +%Y-%m-%d).md
+   ```
+   You should see entries for every command Claude executes.
+
+2. **Monitor error logs**:
+   ```bash
+   tail -f logs/toolguard-error-$(date +%Y-%m-%d).md
+   ```
+   Watch for warnings about configuration issues.
+
+3. **Test with intentional violation**:
+   ```bash
+   # If "rm -rf /" is denied, this command should be blocked
+   # Try it via Claude Code and verify it's logged as refused
+   ```
+
+**Red flags that toolguard is NOT working**:
+- No entries in `logs/toolguard-YYYY-MM-DD.md` after Claude executes commands
+- Commands execute that should be denied
+- No warnings/errors in logs when you expect them
+
+#### Recommended Deny Patterns
+
+**Always include these in your deny list**:
+
+```toml
+[permissions]
+deny = [
+    # Destructive commands
+    "Bash(rm -rf:*)",
+    "[regex]rm\\s+-rf\\s+/",
+    "Bash(dd:*)",
+
+    # Privilege escalation
+    "Bash(sudo:*)",
+    "Bash(su:*)",
+
+    # Sensitive files
+    "Read(**/.env)",
+    "Read(**/.env.*)",
+    "Read(**/.aws/**)",
+    "Read(**/.ssh/**)",
+    "Write(**/.env)",
+    "Write(**/.aws/**)",
+    "Write(**/.ssh/**)",
+    "Edit(**/.env)",
+
+    # System directories
+    "Write(/etc/**)",
+    "Write(/usr/**)",
+    "Write(/bin/**)",
+    "Write(/sbin/**)"
+]
+```
+
 ---
 
 ## Technical Architecture

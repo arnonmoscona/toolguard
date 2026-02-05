@@ -285,6 +285,84 @@ def merge_governed_tools(tools_lists: List[List[str]]) -> List[str]:
     return unique_tools
 
 
+def load_takeover_mode_config(start_dir: Path = None) -> dict:
+    """
+    Load takeover_mode configuration from toolguard_hook files.
+
+    Only reads from toolguard_hook files (NOT from Claude settings files).
+    Merges configuration from multiple sources.
+
+    Args:
+        start_dir: Directory to start searching for project root from. Defaults to cwd.
+
+    Returns:
+        Dictionary with takeover_mode configuration:
+        {
+            'enabled': bool,
+            'ignored_allow_patterns': List[str],
+            'additional_ignored_patterns': List[str],
+            'no_match_fallback': str  # 'deny' or 'warn_deny'
+        }
+        Returns default config if no takeover_mode found in any file.
+    """
+    default_config = {
+        'enabled': False,
+        'ignored_allow_patterns': [],
+        'additional_ignored_patterns': [],
+        'no_match_fallback': 'deny',
+    }
+
+    # Discover config files in hierarchy
+    config_files = discover_config_files(start_dir)
+
+    # Filter to only toolguard_hook files (NOT Claude settings files)
+    hook_files = [(path, fmt) for path, source_type, fmt in config_files if source_type == 'toolguard_hook']
+
+    if not hook_files:
+        return default_config
+
+    # Load takeover_mode from all hook files and merge
+    merged_config = default_config.copy()
+
+    for path, fmt in hook_files:
+        try:
+            if fmt == 'toml':
+                import tomllib
+
+                with open(path, 'rb') as f:
+                    config = tomllib.load(f)
+            else:
+                with open(path, 'r') as f:
+                    config = json.load(f)
+
+            takeover_mode = config.get('takeover_mode', {})
+            if not takeover_mode:
+                continue
+
+            # Merge enabled (OR logic - any file can enable it)
+            if takeover_mode.get('enabled', False):
+                merged_config['enabled'] = True
+
+            # Merge ignored_allow_patterns (union)
+            for pattern in takeover_mode.get('ignored_allow_patterns', []):
+                if pattern not in merged_config['ignored_allow_patterns']:
+                    merged_config['ignored_allow_patterns'].append(pattern)
+
+            # Merge additional_ignored_patterns (union)
+            for pattern in takeover_mode.get('additional_ignored_patterns', []):
+                if pattern not in merged_config['additional_ignored_patterns']:
+                    merged_config['additional_ignored_patterns'].append(pattern)
+
+            # Use last no_match_fallback found (priority order)
+            if 'no_match_fallback' in takeover_mode:
+                merged_config['no_match_fallback'] = takeover_mode['no_match_fallback']
+
+        except Exception:
+            continue
+
+    return merged_config
+
+
 def load_governed_tools(start_dir: Path = None) -> List[str]:
     """
     Load list of tools to govern from config files.
@@ -350,6 +428,11 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     3. User ~/.claude/settings.local.json + ~/.claude/toolguard_hook.local.json
     4. User ~/.claude/settings.json + ~/.claude/toolguard_hook.json
 
+    Respects takeover_mode configuration:
+    - When takeover_mode.enabled is True, filters out patterns from native Claude config
+      that match ignored_allow_patterns or additional_ignored_patterns
+    - Patterns from toolguard_hook files are NEVER filtered
+
     Args:
         start_dir: Directory to start searching for project root from. Defaults to cwd.
 
@@ -359,6 +442,11 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     Raises:
         SystemExit: If CLAUDE_SETTINGS_PATH is set but file cannot be loaded
     """
+    # Load takeover mode configuration
+    takeover_config = load_takeover_mode_config(start_dir)
+    takeover_enabled = takeover_config['enabled']
+    ignored_patterns = set(takeover_config['ignored_allow_patterns'] + takeover_config['additional_ignored_patterns'])
+
     settings_path = os.environ.get('CLAUDE_SETTINGS_PATH')
 
     # If CLAUDE_SETTINGS_PATH is set, load from that file AND adjacent toolguard_hook files
@@ -368,8 +456,15 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
 
         # Load from the settings file
         try:
-            perms = load_permissions_from_file(Path(settings_path), 'claude', 'json', strict=True)
-            permissions_list.append(perms)
+            allow_perms, deny_perms = load_permissions_from_file(Path(settings_path), 'claude', 'json', strict=True)
+
+            # Apply takeover mode filtering for native Claude config
+            if takeover_enabled:
+                filtered_allow = [p for p in allow_perms if p not in ignored_patterns]
+                permissions_list.append((filtered_allow, deny_perms))
+            else:
+                permissions_list.append((allow_perms, deny_perms))
+
         except FileNotFoundError:
             print(f'Error: Settings file not found: {settings_path}', file=sys.stderr)
             sys.exit(1)
@@ -385,13 +480,13 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
         if hook_toml.exists():
             try:
                 perms = load_permissions_from_file(hook_toml, 'toolguard_hook', 'toml')
-                permissions_list.append(perms)
+                permissions_list.append(perms)  # Never filter toolguard_hook patterns
             except Exception as e:
                 print(f'Warning: Failed to load {hook_toml}: {e}', file=sys.stderr)
         elif hook_json.exists():
             try:
                 perms = load_permissions_from_file(hook_json, 'toolguard_hook', 'json')
-                permissions_list.append(perms)
+                permissions_list.append(perms)  # Never filter toolguard_hook patterns
             except Exception as e:
                 print(f'Warning: Failed to load {hook_json}: {e}', file=sys.stderr)
 
@@ -422,8 +517,18 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     permissions_list = []
     for path, source_type, fmt in config_files:
         try:
-            perms = load_permissions_from_file(path, source_type, fmt)
-            permissions_list.append(perms)
+            allow_perms, deny_perms = load_permissions_from_file(path, source_type, fmt)
+
+            # Apply takeover mode filtering for native Claude config files
+            if takeover_enabled and source_type == 'claude':
+                # Filter out patterns that match ignored patterns (exact string match)
+                filtered_allow = [p for p in allow_perms if p not in ignored_patterns]
+                filtered_deny = deny_perms  # Don't filter deny patterns
+                permissions_list.append((filtered_allow, filtered_deny))
+            else:
+                # No filtering for toolguard_hook files or when takeover mode disabled
+                permissions_list.append((allow_perms, deny_perms))
+
         except Exception as e:
             print(f'Warning: Failed to load {path}: {e}', file=sys.stderr)
             continue

@@ -25,14 +25,14 @@ class TestTomlConfigLoader(unittest.TestCase):
 
     def test_load_valid_toml_config(self):
         """Test loading a valid TOML config file."""
-        toml_content = b'''
+        toml_content = b"""
 governed_tools = ["Bash", "Read"]
 
 [permissions]
 allow = ["Bash(ls:*)", "Read(/tmp/**)"]
 deny = ["Bash(rm -rf:*)"]
 ask = ["Bash(alembic:*)"]
-'''
+"""
         with tempfile.NamedTemporaryFile(suffix='.toml', delete=False) as f:
             f.write(toml_content)
             f.flush()
@@ -49,9 +49,9 @@ ask = ["Bash(alembic:*)"]
 
     def test_load_toml_with_missing_optional_sections(self):
         """Test loading TOML with only governed_tools (no permissions)."""
-        toml_content = b'''
+        toml_content = b"""
 governed_tools = ["Bash"]
-'''
+"""
         with tempfile.NamedTemporaryFile(suffix='.toml', delete=False) as f:
             f.write(toml_content)
             f.flush()
@@ -66,13 +66,13 @@ governed_tools = ["Bash"]
 
     def test_load_toml_with_additional_supported_tools(self):
         """Test loading TOML with additional_supported_tools."""
-        toml_content = b'''
+        toml_content = b"""
 governed_tools = ["Bash", "mcp__custom__tool"]
 additional_supported_tools = ["mcp__custom__tool"]
 
 [permissions]
 allow = ["Bash(ls:*)", "mcp__custom__tool(*)"]
-'''
+"""
         with tempfile.NamedTemporaryFile(suffix='.toml', delete=False) as f:
             f.write(toml_content)
             f.flush()
@@ -86,9 +86,9 @@ allow = ["Bash(ls:*)", "mcp__custom__tool(*)"]
 
     def test_load_invalid_toml_raises_error(self):
         """Test that invalid TOML raises an error."""
-        toml_content = b'''
+        toml_content = b"""
 invalid toml [
-'''
+"""
         with tempfile.NamedTemporaryFile(suffix='.toml', delete=False) as f:
             f.write(toml_content)
             f.flush()
@@ -180,7 +180,9 @@ class TestExtractToolName(unittest.TestCase):
 
     def test_extract_mcp_tool(self):
         """Test extracting MCP tool names."""
-        self.assertEqual(extract_tool_name('mcp__jetbrains__execute_terminal_command'), 'mcp__jetbrains__execute_terminal_command')
+        self.assertEqual(
+            extract_tool_name('mcp__jetbrains__execute_terminal_command'), 'mcp__jetbrains__execute_terminal_command'
+        )
 
 
 class TestValidatePermissions(unittest.TestCase):
@@ -319,6 +321,7 @@ class TestErrorLog(unittest.TestCase):
 
             # Timestamp format: YYYY-MM-DD HH:MM:SS
             import re
+
             timestamp_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
             self.assertTrue(re.search(timestamp_pattern, content))
 
