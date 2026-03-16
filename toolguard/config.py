@@ -307,7 +307,13 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
     """
     default_config = {
         'enabled': False,
-        'ignored_allow_patterns': [],
+        'ignored_allow_patterns': [
+            'Bash(*)',
+            'Read(*)',
+            'Write(*)',
+            'Edit(*)',
+            'mcp__jetbrains__execute_terminal_command(*)',
+        ],
         'additional_ignored_patterns': [],
         'no_match_fallback': 'deny',
     }
@@ -446,6 +452,21 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     takeover_config = load_takeover_mode_config(start_dir)
     takeover_enabled = takeover_config['enabled']
     ignored_patterns = set(takeover_config['ignored_allow_patterns'] + takeover_config['additional_ignored_patterns'])
+
+    # Normalize ignored patterns: strip tool wrappers to match the extracted format
+    # that load_permissions_from_file() produces (e.g. "Bash(*)" -> "*", "Read(/tmp/**)" -> "/tmp/**")
+    _tool_prefixes = ['Bash(', 'Read(', 'Write(', 'Edit(', 'mcp__jetbrains__execute_terminal_command(']
+    normalized_ignored = set()
+    for p in ignored_patterns:
+        stripped = False
+        for prefix in _tool_prefixes:
+            if p.startswith(prefix) and p.endswith(')'):
+                normalized_ignored.add(p[len(prefix):-1])
+                stripped = True
+                break
+        if not stripped:
+            normalized_ignored.add(p)  # Already in extracted format
+    ignored_patterns = normalized_ignored
 
     settings_path = os.environ.get('CLAUDE_SETTINGS_PATH')
 

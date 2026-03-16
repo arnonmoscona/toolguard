@@ -208,6 +208,41 @@ class TestCompoundPermission(unittest.TestCase):
         self.assertEqual(decision, 'allow')
 
 
+class TestCompoundPermissionMatchDetails(unittest.TestCase):
+    """Test that compound permission returns per-sub-command match details."""
+
+    def test_compound_allowed_includes_match_details(self):
+        """Test that all-allowed compound command includes per-sub-command match info."""
+        decision, reason = check_compound_permission('git status && git log', ['git *'], [])
+        self.assertEqual(decision, 'allow')
+        self.assertIn('git status -> git *', reason)
+        self.assertIn('git log -> git *', reason)
+
+    def test_compound_allowed_different_patterns(self):
+        """Test compound command where sub-commands match different allow patterns."""
+        decision, reason = check_compound_permission('git status && cat file', ['git *', 'cat *'], [])
+        self.assertEqual(decision, 'allow')
+        self.assertIn('git status -> git *', reason)
+        self.assertIn('cat file -> cat *', reason)
+
+    def test_compound_three_commands_match_details(self):
+        """Test three sub-commands each with match details."""
+        decision, reason = check_compound_permission(
+            'git status && cat file | grep pattern', ['git *', 'cat *', 'grep *'], []
+        )
+        self.assertEqual(decision, 'allow')
+        self.assertIn('git status -> git *', reason)
+        self.assertIn('cat file -> cat *', reason)
+        self.assertIn('grep pattern -> grep *', reason)
+
+    def test_simple_command_no_compound_format(self):
+        """Test that single command does not use compound match format."""
+        decision, reason = check_compound_permission('git status', ['git *'], [])
+        self.assertEqual(decision, 'allow')
+        # Single commands go through check_permission directly, no compound format
+        self.assertNotIn('sub-commands allowed', reason)
+
+
 class TestGetCommandBreakdown(unittest.TestCase):
     """Test the command breakdown utility function."""
 

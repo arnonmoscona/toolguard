@@ -20,6 +20,7 @@ def log_command(
     log_dir: Optional[Path] = None,
     extra_info: Optional[str] = None,
     config: Optional[dict] = None,
+    matched_rule: Optional[str] = None,
 ) -> None:
     """
     Log command execution to file if logging is enabled.
@@ -35,6 +36,7 @@ def log_command(
                  directory directly instead of resolving from environment or project root.
         extra_info: Optional additional info to include in the log entry (e.g., agent identification)
         config: Optional environment config dict (from get_env_config())
+        matched_rule: Optional pattern string that permitted the command (for allowed commands)
     """
     # Check if logging is enabled (backward compatibility with CHECKED_BASH_LOGGING_ON)
     if config is not None:
@@ -109,6 +111,8 @@ def log_command(
                     'command': command_str,
                     'violated_rules': violated_rules,
                 }
+                if matched_rule:
+                    entry['matched_rule'] = matched_rule
                 if extra_info:
                     entry['extra_info'] = extra_info
                 f.write(json.dumps(entry) + '\n\n')
@@ -117,6 +121,8 @@ def log_command(
                 f.write(f'## {timestamp}\n\n')
                 f.write(f'- **Status**: {status.upper()}\n')
                 f.write(f'- **Command**: `{command_str}`\n')
+                if matched_rule:
+                    f.write(f'- **Matched Rule**: `{matched_rule}`\n')
                 if violated_rules:
                     f.write(f'- **Violated Rules**: {", ".join(f"`{rule}`" for rule in violated_rules)}\n')
                 if extra_info:

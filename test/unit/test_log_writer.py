@@ -200,5 +200,124 @@ class TestLogging(unittest.TestCase):
             self.assertIn('Logging directory does not exist', stderr_output)
 
 
+class TestMatchedRuleLogging(unittest.TestCase):
+    """Test matched_rule parameter in log entries."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.env_patcher = patch.dict('os.environ', {'CHECKED_BASH_LOGGING_ON': 'true'})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        """Clean up after tests."""
+        self.env_patcher.stop()
+
+    def test_matched_rule_in_markdown_format(self):
+        """Test that matched_rule appears in markdown log output."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command('git status', 'executed', matched_rule='git *', log_dir=log_dir)
+
+            expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn('**Matched Rule**', content)
+            self.assertIn('`git *`', content)
+
+    def test_matched_rule_in_jsonlines_format(self):
+        """Test that matched_rule appears in JSONLines log output."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict('os.environ', {'CHECKED_BASH_LOGGING_FORMAT': 'jsonlines'}):
+                log_command('git status', 'executed', matched_rule='git *', log_dir=log_dir)
+
+                expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.jsonlines'
+                content = (log_dir / expected_filename).read_text().strip()
+                lines = [line for line in content.split('\n') if line.strip()]
+                entry = json.loads(lines[0])
+
+                self.assertEqual(entry['matched_rule'], 'git *')
+
+    def test_no_matched_rule_when_not_provided(self):
+        """Test that matched_rule field is absent when not provided."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command('git status', 'executed', log_dir=log_dir)
+
+            expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertNotIn('Matched Rule', content)
+
+    def test_no_matched_rule_in_jsonlines_when_not_provided(self):
+        """Test that matched_rule is absent from JSON entry when not provided."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict('os.environ', {'CHECKED_BASH_LOGGING_FORMAT': 'jsonlines'}):
+                log_command('git status', 'executed', log_dir=log_dir)
+
+                expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.jsonlines'
+                content = (log_dir / expected_filename).read_text().strip()
+                lines = [line for line in content.split('\n') if line.strip()]
+                entry = json.loads(lines[0])
+
+                self.assertNotIn('matched_rule', entry)
+
+    def test_denied_command_no_matched_rule(self):
+        """Test that denied commands still work without matched_rule."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command('rm -rf /', 'refused', violated_rules=['rm *'], log_dir=log_dir)
+
+            expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn('REFUSED', content)
+            self.assertIn('Violated Rules', content)
+            self.assertNotIn('Matched Rule', content)
+
+    def test_matched_rule_with_extra_info(self):
+        """Test matched_rule alongside extra_info (agent) field."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command('git status', 'executed', matched_rule='git *', extra_info='main', log_dir=log_dir)
+
+            expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn('`git *`', content)
+            self.assertIn('**Agent**: main', content)
+
+    def test_matched_rule_ordering_in_markdown(self):
+        """Test that Matched Rule appears between Command and Agent in markdown."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command('git status', 'executed', matched_rule='git *', extra_info='main', log_dir=log_dir)
+
+            expected_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+            content = (log_dir / expected_filename).read_text()
+
+            command_pos = content.index('**Command**')
+            matched_pos = content.index('**Matched Rule**')
+            agent_pos = content.index('**Agent**')
+
+            self.assertLess(command_pos, matched_pos, 'Matched Rule should appear after Command')
+            self.assertLess(matched_pos, agent_pos, 'Matched Rule should appear before Agent')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -37,37 +37,37 @@ Add hook matchers for each tool in `.claude/settings.local.json`. For example:
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "/path/to/project/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "mcp__jetbrains__execute_terminal_command",
         "hooks": [
-          { "type": "command", "command": "/path/to/project/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "mcp__local-tools__checked_bash",
         "hooks": [
-          { "type": "command", "command": "/path/to/project/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "Read",
         "hooks": [
-          { "type": "command", "command": "/path/to/project/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
-          { "type": "command", "command": "/path/to/project/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "Edit",
         "hooks": [
-          { "type": "command", "command": "/path/to/project/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       }
     ]
@@ -75,7 +75,7 @@ Add hook matchers for each tool in `.claude/settings.local.json`. For example:
 }
 ```
 
-**Important**: Replace `/path/to/project/toolguard/hook.py` with the absolute path to your hook.py file.
+**Important**: Replace `/path/to/toolguard/run_hook.sh` with the absolute path to the `run_hook.sh` wrapper script in your toolguard checkout. This wrapper invokes `python -m toolguard.hook` using the project's virtual environment.
 
 #### Step 2: Configure Governed Tools
 
@@ -644,25 +644,25 @@ Complete takeover mode setup:
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "Read",
         "hooks": [
-          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
-          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       },
       {
         "matcher": "Edit",
         "hooks": [
-          { "type": "command", "command": "/path/to/toolguard/hook.py" }
+          { "type": "command", "command": "/path/to/toolguard/run_hook.sh" }
         ]
       }
     ]
@@ -1213,30 +1213,50 @@ deny = [
 ### Package Structure
 
 ```
-toolguard/
-├── __init__.py
-├── hook.py              # Main hook entry point (reads stdin, writes stdout)
-├── config.py            # Configuration loading and merging
-├── config_validation.py # Validates tool permissions at startup
-├── toml_config.py       # TOML configuration loader
-├── error_log.py         # Warning/error logging to toolguard-error-*.md
-├── permissions.py       # Permission checking logic
-├── patterns.py          # Pattern type parsing and matching
-├── normalization.py     # Path normalization functions
-├── compound.py          # Compound command handling
-├── log_writer.py        # Command logging to markdown files
-├── parser/              # PEG-based bash command parser
+toolguard/                   # Project root
+├── pyproject.toml           # Package metadata (hatchling build backend)
+├── run_hook.sh              # Wrapper script for Claude Code hook configuration
+├── toolguard/               # Python package
 │   ├── __init__.py
-│   └── bash_parser.py   # Canopy-generated parser
-└── test/
-    └── unit/            # Comprehensive unit tests
+│   ├── hook.py              # Main hook entry point (reads stdin, writes stdout)
+│   ├── config.py            # Configuration loading and merging
+│   ├── config_validation.py # Validates tool permissions at startup
+│   ├── toml_config.py       # TOML configuration loader
+│   ├── env_config.py        # Environment configuration (.env loading)
+│   ├── error_log.py         # Warning/error logging to toolguard-error-*.md
+│   ├── permissions.py       # Permission checking logic
+│   ├── patterns.py          # Pattern type parsing and matching
+│   ├── normalization.py     # Path normalization functions
+│   ├── compound.py          # Compound command handling
+│   ├── log_writer.py        # Command logging to markdown/JSONLines files
+│   ├── auto_migrate.py      # Config auto-migration logic
+│   ├── config_divergence.py # Config divergence detection
+│   ├── session_warnings.py  # Session-level warnings (e.g., takeover mode)
+│   ├── subagent.py          # Agent context identification
+│   ├── validation.py        # Input validation utilities
+│   ├── parser/              # PEG-based bash command parser
+│   │   ├── __init__.py
+│   │   ├── bash_parser.peg  # Grammar definition
+│   │   ├── bash_parser.py   # Canopy-generated parser
+│   │   └── command_extractor.py  # Command extraction from parsed AST
+│   └── scripts/             # Utility scripts
+│       └── migrate_permissions.py
+└── test/                    # Tests (at project root, not inside package)
+    └── unit/
+        ├── test_auto_migrate.py
+        ├── test_bash_parser.py
         ├── test_compound.py
         ├── test_config.py
+        ├── test_config_divergence.py
+        ├── test_env_config.py
         ├── test_hook.py
-        ├── test_logging.py
+        ├── test_log_writer.py
+        ├── test_migration.py
         ├── test_normalization.py
         ├── test_patterns.py
         ├── test_permissions.py
+        ├── test_session_warnings.py
+        ├── test_takeover_mode.py
         └── test_toml_config.py
 ```
 
@@ -1250,7 +1270,7 @@ toolguard/
          │ JSON via stdin
          ▼
 ┌─────────────────┐
-│   hook.py       │
+│  run_hook.sh    │──► python -m toolguard.hook
 │  parse_input()  │
 └────────┬────────┘
          │
@@ -1356,21 +1376,43 @@ Extended patterns (`[regex]`, `[glob]`, `[native]`) are only supported in `toolg
 
 ### Logging
 
-All decisions are logged to `logs/toolguard-YYYY-MM-DD.md` with:
+All decisions are logged to `logs/toolguard-YYYY-MM-DD.md` (or `.jsonlines`) with:
 - Timestamp
 - Operation (command or file path with tool name)
 - Decision (allow/deny)
-- Matching pattern or reason for denial
+- **Matched Rule** (for allowed commands: the pattern that permitted it)
+- Violated Rules (for denied commands: the pattern or reason for denial)
+- Agent identification
 
-Example log entries:
+For compound commands (e.g., `git status && git log`), each sub-command is logged as a **separate entry** with its own matched rule.
+
+Example log entries (markdown format):
 ```markdown
-## 2025-01-14
+## 2026-01-14 10:15:23
 
-| Time | Command | Decision | Notes |
-|------|---------|----------|-------|
-| 10:15:23 | git status | executed | main |
-| 10:15:45 | Read(/tmp/test.txt) | executed | main |
-| 10:16:02 | Write(/etc/passwd) | refused | Path does not match any allow patterns |
+- **Status**: EXECUTED
+- **Command**: `git status`
+- **Matched Rule**: `git *`
+- **Agent**: main
+
+## 2026-01-14 10:15:45
+
+- **Status**: EXECUTED
+- **Command**: `Read(/tmp/test.txt)`
+- **Matched Rule**: `/tmp/**`
+- **Agent**: main
+
+## 2026-01-14 10:16:02
+
+- **Status**: REFUSED
+- **Command**: `Write(/etc/passwd)`
+- **Violated Rules**: `Path does not match any allow patterns`
+- **Agent**: main
+```
+
+Example (JSONLines format):
+```json
+{"timestamp": "2026-01-14T10:15:23", "status": "executed", "command": "git status", "violated_rules": [], "matched_rule": "git *", "extra_info": "main"}
 ```
 
 ### Error and Warning Logs
@@ -1401,16 +1443,41 @@ Configuration issues and validation warnings are logged to a separate file: `log
 ## Requirements
 
 - Python >= 3.14 (for `PurePath.full_match()` globstar support)
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip for package management
 - Claude Code with PreToolUse hook support
+
+## Installation
+
+Toolguard uses [hatchling](https://hatch.pypa.io/) as its build backend. To install in development mode:
+
+```bash
+cd /path/to/toolguard
+uv pip install -e .
+```
+
+To add toolguard as an editable dependency in another project (e.g., via uv):
+
+```toml
+# In the consuming project's pyproject.toml
+[project]
+dependencies = ["toolguard"]
+
+[tool.uv.sources]
+toolguard = { path = "/path/to/toolguard", editable = true }
+```
+
+Then run `uv sync` in the consuming project.
 
 ## Testing
 
 ```bash
-# Run all toolguard tests
-uv run pytest toolguard/test/unit/ -v
+cd /path/to/toolguard
 
-# Run specific test file
-uv run pytest toolguard/test/unit/test_patterns.py -v
+# Run all toolguard tests
+uv run python -m unittest discover -s test/unit -v
+
+# Run a specific test file
+uv run python -m unittest discover -s test/unit -p "test_patterns.py" -v
 ```
 
-Current test coverage: **375 tests** covering all pattern types, compound commands, command substitution extraction, subshell extraction, brace group extraction, file path permissions, configuration, TOML configuration, config validation, error logging, environment variables, security bypass attempts, parser robustness, and edge cases.
+Current test coverage: **538 tests** covering all pattern types, compound commands, command substitution extraction, subshell extraction, brace group extraction, file path permissions, configuration, TOML configuration, config validation, config divergence, auto-migration, error logging, environment variables, matched rule logging, session warnings, takeover mode, security bypass attempts, parser robustness, and edge cases.

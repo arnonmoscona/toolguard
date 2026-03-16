@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from toolguard.hook import (
     FILE_PATH_TOOLS,
+    _log_allowed_command,
+    _parse_compound_match_details,
     check_file_path_permission,
     create_hook_output,
     load_file_path_patterns,
@@ -474,6 +476,68 @@ allow = ["Bash(ls:*)", "Read(/tmp/**)"]
         finally:
             # Restore original flag
             hook_module._validation_done = original_flag
+
+
+class TestParseCompoundMatchDetails(unittest.TestCase):
+    """Test parsing of compound match details from reason strings."""
+
+    def test_parse_two_subcommands(self):
+        """Test parsing reason with two sub-commands."""
+        reason = 'All 2 sub-commands allowed: [git status -> git *, git log -> git *]'
+        result = _parse_compound_match_details(reason)
+        self.assertEqual(result, [('git status', 'git *'), ('git log', 'git *')])
+
+    def test_parse_three_subcommands(self):
+        """Test parsing reason with three sub-commands."""
+        reason = 'All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pattern -> grep *]'
+        result = _parse_compound_match_details(reason)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0], ('git status', 'git *'))
+        self.assertEqual(result[1], ('cat file', 'cat *'))
+        self.assertEqual(result[2], ('grep pattern', 'grep *'))
+
+    def test_non_compound_reason_returns_none(self):
+        """Test that non-compound reasons return None."""
+        reason = 'Command matches allow pattern: git *'
+        result = _parse_compound_match_details(reason)
+        self.assertIsNone(result)
+
+    def test_simple_allow_reason_returns_none(self):
+        """Test that a simple allow reason returns None."""
+        reason = 'Path matches allow pattern: /tmp/**'
+        result = _parse_compound_match_details(reason)
+        self.assertIsNone(result)
+
+
+class TestLogAllowedCommand(unittest.TestCase):
+    """Test the _log_allowed_command helper function."""
+
+    @patch('toolguard.hook.log_command')
+    def test_simple_command_logs_matched_rule(self, mock_log):
+        """Test that a simple allowed command logs with matched_rule."""
+        _log_allowed_command('git status', 'Command matches allow pattern: git *', 'main', {})
+        mock_log.assert_called_once_with(
+            'git status', 'executed', matched_rule='git *', extra_info='main', config={}
+        )
+
+    @patch('toolguard.hook.log_command')
+    def test_compound_command_logs_per_subcommand(self, mock_log):
+        """Test that a compound allowed command logs each sub-command separately."""
+        reason = 'All 2 sub-commands allowed: [git status -> git *, git log -> git *]'
+        _log_allowed_command('git status && git log', reason, 'main', {})
+        self.assertEqual(mock_log.call_count, 2)
+        mock_log.assert_any_call('git status', 'executed', matched_rule='git *', extra_info='main', config={})
+        mock_log.assert_any_call('git log', 'executed', matched_rule='git *', extra_info='main', config={})
+
+    @patch('toolguard.hook.log_command')
+    def test_compound_three_commands(self, mock_log):
+        """Test compound command with three sub-commands."""
+        reason = 'All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pat -> grep *]'
+        _log_allowed_command('git status && cat file | grep pat', reason, 'sub-agent', {})
+        self.assertEqual(mock_log.call_count, 3)
+        mock_log.assert_any_call('git status', 'executed', matched_rule='git *', extra_info='sub-agent', config={})
+        mock_log.assert_any_call('cat file', 'executed', matched_rule='cat *', extra_info='sub-agent', config={})
+        mock_log.assert_any_call('grep pat', 'executed', matched_rule='grep *', extra_info='sub-agent', config={})
 
 
 if __name__ == '__main__':

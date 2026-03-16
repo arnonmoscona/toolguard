@@ -91,8 +91,13 @@ def check_compound_permission(
         cmd, reason = ask_commands[0]
         return 'ask', f'Compound command contains sub-command requiring approval: {cmd} ({reason})'
 
-    # 3. All allowed → allow entire command
-    return 'allow', f'All {len(commands)} sub-commands in compound command are allowed'
+    # 3. All allowed → allow entire command with per-sub-command match details
+    match_details = []
+    for cmd, reason in allowed_commands:
+        # Extract pattern from reason like "Command matches allow pattern: git *"
+        pattern = reason.split(': ', 1)[1] if ': ' in reason else '?'
+        match_details.append(f'{cmd} -> {pattern}')
+    return 'allow', f'All {len(commands)} sub-commands allowed: [{", ".join(match_details)}]'
 
 
 def get_command_breakdown(command: str) -> List[str]:

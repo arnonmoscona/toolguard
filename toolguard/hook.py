@@ -15,6 +15,7 @@ Exit code: Always 0 (errors communicated via JSON output)
 """
 
 import json
+import re
 import sys
 from pathlib import PurePath
 from typing import Any, Dict, List, Tuple
@@ -215,6 +216,8 @@ def load_file_path_patterns(tool_name: str, start_dir: str = None) -> Tuple[List
     Load allow/deny patterns for file path tools (Read, Write, Edit).
 
     Extracts patterns like 'Read(/tmp/**)' from the permissions config.
+    Respects takeover_mode: when enabled, filters out patterns from native Claude config
+    files that match ignored_allow_patterns (e.g. blanket 'Read(*)').
 
     Args:
         tool_name: The tool name to load patterns for (Read, Write, or Edit)
@@ -224,6 +227,25 @@ def load_file_path_patterns(tool_name: str, start_dir: str = None) -> Tuple[List
         Tuple of (allow_patterns, deny_patterns) - path patterns without tool prefix
     """
     config_files = discover_config_files(start_dir)
+
+    # Load takeover mode config for filtering
+    takeover_config = load_takeover_mode_config(start_dir)
+    takeover_enabled = takeover_config['enabled']
+
+    # Build normalized ignored patterns (strip tool wrappers to match extracted format)
+    ignored_patterns = set()
+    if takeover_enabled:
+        raw_ignored = takeover_config['ignored_allow_patterns'] + takeover_config['additional_ignored_patterns']
+        tool_prefixes = ['Bash(', 'Read(', 'Write(', 'Edit(', 'mcp__jetbrains__execute_terminal_command(']
+        for p in raw_ignored:
+            stripped = False
+            for tp in tool_prefixes:
+                if p.startswith(tp) and p.endswith(')'):
+                    ignored_patterns.add(p[len(tp):-1])
+                    stripped = True
+                    break
+            if not stripped:
+                ignored_patterns.add(p)
 
     allow_patterns = []
     deny_patterns = []
@@ -248,10 +270,15 @@ def load_file_path_patterns(tool_name: str, start_dir: str = None) -> Tuple[List
             if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(suffix):
                 # Extract the path pattern between "ToolName(" and ")"
                 pattern = perm[len(prefix) : -1]
+
+                # Apply takeover mode filtering for native Claude config files
+                if takeover_enabled and source_type == 'claude' and pattern in ignored_patterns:
+                    continue
+
                 if pattern not in allow_patterns:
                     allow_patterns.append(pattern)
 
-        # Extract patterns for this tool from deny list
+        # Extract patterns for this tool from deny list (never filtered)
         for perm in permissions.get('deny', []):
             if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(suffix):
                 pattern = perm[len(prefix) : -1]
@@ -298,6 +325,57 @@ def check_file_path_permission(file_path: str, allow_patterns: List[str], deny_p
 
     # Default: deny (not explicitly allowed)
     return 'deny', 'Path does not match any allow patterns'
+
+
+_COMPOUND_MATCH_PATTERN = re.compile(r'All \d+ sub-commands allowed: \[(.+)\]')
+
+
+def _parse_compound_match_details(reason: str):
+    """
+    Parse per-sub-command match details from a compound command's allow reason.
+
+    Args:
+        reason: The reason string from check_compound_permission, e.g.
+                "All 2 sub-commands allowed: [git status -> git *, git log -> git *]"
+
+    Returns:
+        List of (sub_command, matched_rule) tuples, or None if not a compound match reason.
+    """
+    m = _COMPOUND_MATCH_PATTERN.match(reason)
+    if not m:
+        return None
+
+    details = []
+    for part in m.group(1).split(', '):
+        if ' -> ' in part:
+            cmd, rule = part.rsplit(' -> ', 1)
+            details.append((cmd.strip(), rule.strip()))
+    return details if details else None
+
+
+def _log_allowed_command(command: str, reason: str, agent_info: str, env_config: dict) -> None:
+    """
+    Log an allowed command, handling compound commands by logging each sub-command separately.
+
+    For simple commands or single-command results, logs one entry with the matched rule.
+    For compound commands where check_compound_permission returns per-sub-command details,
+    logs a separate entry for each sub-command with its own matched rule.
+
+    Args:
+        command: The original command string
+        reason: The allow reason from permission checking
+        agent_info: Agent identification string
+        env_config: Environment configuration dict
+    """
+    compound_details = _parse_compound_match_details(reason)
+    if compound_details:
+        # Compound command: log each sub-command separately
+        for sub_cmd, matched_rule in compound_details:
+            log_command(sub_cmd, 'executed', matched_rule=matched_rule, extra_info=agent_info, config=env_config)
+    else:
+        # Simple command: extract matched rule from reason
+        matched_rule = reason.split(': ', 1)[1] if ': ' in reason else None
+        log_command(command, 'executed', matched_rule=matched_rule, extra_info=agent_info, config=env_config)
 
 
 def main() -> None:
@@ -414,7 +492,8 @@ def main() -> None:
             # Log the decision
             log_target = f'{tool_name}({file_path})'
             if decision == 'allow':
-                log_command(log_target, 'executed', extra_info=agent_info, config=env_config)
+                matched_rule = reason.split(': ', 1)[1] if ': ' in reason else None
+                log_command(log_target, 'executed', matched_rule=matched_rule, extra_info=agent_info, config=env_config)
             else:
                 violated_rules = [reason.split(': ', 1)[1] if ': ' in reason else reason]
                 log_command(log_target, 'refused', violated_rules, extra_info=agent_info, config=env_config)
@@ -459,7 +538,7 @@ def main() -> None:
 
         # Log the decision with agent identification
         if decision == 'allow':
-            log_command(command, 'executed', extra_info=agent_info, config=env_config)
+            _log_allowed_command(command, reason, agent_info, env_config)
         else:
             # Extract violated rule from reason for logging
             violated_rules = [reason.split(': ', 1)[1] if ': ' in reason else reason]
