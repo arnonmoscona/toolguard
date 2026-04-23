@@ -2,6 +2,33 @@
 
 A pre-tool-use hook for Claude Code that provides comprehensive permission checking for bash commands, file operations, and other tools. Supports multiple tool types, extended pattern syntax, and detailed logging.
 
+## Table of Contents
+
+- [Motivation](#motivation)
+  - [Goals of Toolguard](#goals-of-toolguard)
+- [How-To Guide](#how-to-guide)
+  - [Configuration](#configuration)
+  - [Environment Variables](#environment-variables)
+  - [Pattern Types](#pattern-types)
+  - [Pattern Examples](#pattern-examples)
+  - [Path Normalization](#path-normalization)
+  - [Compound Commands](#compound-commands)
+  - [Takeover Mode (Alpha)](#takeover-mode-alpha)
+  - [Configuration Sync & Migration](#configuration-sync--migration)
+  - [Session Warnings](#session-warnings)
+  - [Configuration Reference](#configuration-reference)
+  - [Security Best Practices](#security-best-practices)
+- [Technical Architecture](#technical-architecture)
+  - [Package Structure](#package-structure)
+  - [Hook Flow](#hook-flow)
+  - [Configuration Hierarchy](#configuration-hierarchy)
+  - [Pattern Matching Implementation](#pattern-matching-implementation)
+  - [Logging](#logging)
+  - [Error and Warning Logs](#error-and-warning-logs)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Testing](#testing)
+
 ## Motivation
 
 Toolguard is a drop-in replacement for the native Claude code permissions system for Bash, Read, Write, and Edit tools. It is backwards compatible (as of January 2026), and has extended capabilities, and better coverage and safety. It also addresses some of the bugs that have existed for a while in the native system, which have not been fixed as of this writing.
@@ -150,7 +177,7 @@ Also, check your MCP tool list. **Any tool that can execute bash commands should
 | `Write` | Claude Code file write tool | If you want GLOB pattern control over file writing |
 | `Edit` | Claude Code file edit tool | If you want GLOB pattern control over file editing |
 
-**Why govern file path tools?** Claude Code has a [known bug](https://github.com/anthropics/claude-code/issues/16170) where `**` globstar patterns work correctly for `Read` permissions but NOT for `Write` or `Edit`. Toolguard uses Python's `PurePath.full_match()` which correctly implements globstar semantics for all file operations. There are also bugs where the native permissions system sometimes prompts youfor permissions that are already granted in the configuration. This can stop a flow dead in its tracks while you're away from the terminal. Toolguard reclaims your time.
+**Why govern file path tools?** Claude Code has a [known bug](https://github.com/anthropics/claude-code/issues/16170) where `**` globstar patterns work correctly for `Read` permissions but NOT for `Write` or `Edit`. Toolguard uses Python's `PurePath.full_match()` which correctly implements globstar semantics for all file operations. There are also bugs where the native permissions system sometimes prompts you for permissions that are already granted in the configuration. This can stop a flow dead in its tracks while you're away from the terminal. Toolguard reclaims your time.
 
 **Note on Subagents**: Subagents use the same tools as the main agent. If a subagent is configured to use a specific tool (e.g., an MCP bash tool), that tool must be in both the hook matchers AND the governed_tools list, or commands will bypass toolguard entirely.
 
@@ -218,21 +245,25 @@ File path patterns use GLOB syntax with proper `**` globstar support. Each tool 
 
 For advanced pattern matching, add extended syntax patterns to `.claude/toolguard_hook.toml` (preferred) or `.claude/toolguard_hook.json`.
 
+**Important:** Extended-syntax prefixes (`[regex]`, `[glob]`, `[native]`) must appear **inside** the tool wrapper, e.g. `Bash([regex]...)`, `Write([glob]...)`, `Read([regex]...)`. Bare patterns without a tool wrapper (e.g. `"[regex]^git.*"`) are ignored by the config loader — every permission rule must identify which tool it governs.
+
 **TOML format** (recommended - supports comments):
 
 ```toml
-governed_tools = ["Bash", "mcp__jetbrains__execute_terminal_command"]
+governed_tools = ["Bash", "mcp__jetbrains__execute_terminal_command", "Write", "Read"]
 
 [permissions]
-# Extended syntax patterns - see Pattern Types section
+# Extended syntax patterns — prefix lives inside the tool wrapper
 allow = [
-    "[regex]^git (log|diff|status|branch)",
-    "[glob]~/projects/**/*.py",
-    "[native]docker * --rm *"
+    "Bash([regex]^git (log|diff|status|branch))",
+    "Bash([glob]~/projects/**/*.py)",
+    "Bash([native]docker * --rm *)",
+    "Write([regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*\\.md$)",
+    "Read([glob]~/projects/**)"
 ]
 deny = [
-    "[regex]rm\\s+-rf\\s+/",
-    "[glob]**/.env*"
+    "Bash([regex]rm\\s+-rf\\s+/)",
+    "Write([glob]**/.env*)"
 ]
 ask = [
     "Bash(alembic:*)",
@@ -244,16 +275,18 @@ ask = [
 
 ```json
 {
-  "governed_tools": ["Bash", "mcp__jetbrains__execute_terminal_command"],
+  "governed_tools": ["Bash", "mcp__jetbrains__execute_terminal_command", "Write", "Read"],
   "permissions": {
     "allow": [
-      "[regex]^git (log|diff|status|branch)",
-      "[glob]~/projects/**/*.py",
-      "[native]docker * --rm *"
+      "Bash([regex]^git (log|diff|status|branch))",
+      "Bash([glob]~/projects/**/*.py)",
+      "Bash([native]docker * --rm *)",
+      "Write([regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*\\.md$)",
+      "Read([glob]~/projects/**)"
     ],
     "deny": [
-      "[regex]rm\\s+-rf\\s+/",
-      "[glob]**/.env*"
+      "Bash([regex]rm\\s+-rf\\s+/)",
+      "Write([glob]**/.env*)"
     ]
   }
 }
@@ -264,7 +297,7 @@ Extended pattern types:
 - `[glob]` - True glob patterns with proper `**` globstar support
 - `[native]` - Claude Code 2.10 word-level wildcard matching
 
-See [Pattern Types](#pattern-types) for detailed syntax and examples.
+All three prefixes work for both command tools (`Bash(...)`, `mcp__jetbrains__execute_terminal_command(...)`) and file-path tools (`Read(...)`, `Write(...)`, `Edit(...)`). See [Pattern Types](#pattern-types) for detailed syntax and examples.
 
 #### Verifying Configuration
 
@@ -331,7 +364,7 @@ Toolguard supports two categories of pattern matching:
 
 **2. File Path Patterns** (for Read, Write, Edit tools)
 
-File path tools use GLOB pattern matching exclusively via `PurePath.full_match()`. This provides proper globstar (`**`) support that Claude Code's native permissions lack for Write/Edit operations.
+File path tools use GLOB pattern matching by default via `PurePath.full_match()` — this provides proper globstar (`**`) support that Claude Code's native permissions lack for Write/Edit operations. Extended prefixes (`[regex]`, `[glob]`, `[native]`) may also be used inside the tool wrapper (e.g. `Write([regex]...)`) when stricter or alternate matching is needed.
 
 ### Pattern Examples
 
@@ -340,67 +373,75 @@ File path tools use GLOB pattern matching exclusively via `PurePath.full_match()
 The default pattern type uses fnmatch with colon syntax for prefix matching:
 
 ```
-Bash(git status:*)       # git status with any arguments
-Bash(cat ./*:*)          # cat files in current directory
-Bash(uv run pytest:*)    # pytest with any arguments
-Bash(git log:*)          # git log with any arguments
+Bash(git status:*)                # git status with any arguments
+Bash(cat ./*:*)                   # cat files in current directory
+Bash(uv run pytest:*)             # pytest with any arguments
+Bash(git log:*)                   # git log with any arguments
+Bash(./bin/precommit_checks.sh:*) # matches both `./bin/...` and `bin/...` invocations
 ```
 
 The `:*` suffix enables prefix matching - the command must start with the pattern before the colon.
 
+**Relative-path commands are canonicalized**: `bin/script.sh` and `./bin/script.sh` are treated as equivalent on both sides of the match, so a single rule `Bash(./bin/script.sh:*)` covers both forms. See [Path Normalization](#path-normalization) for details.
+
 #### REGEX Patterns
 
-Use `[regex]` prefix for regular expression matching with `re.search()`:
+Use `[regex]` prefix (inside the tool wrapper) for regular expression matching with `re.search()`:
 
 ```
-[regex]^git (log|diff|status)    # git log, diff, or status at start
-[regex]npm (install|run)         # npm install or run anywhere
-[regex]^curl -s https?://        # curl with -s flag and http(s) URL
-[regex]pytest.*-v                # pytest with -v flag anywhere
+Bash([regex]^git (log|diff|status))    # git log, diff, or status at start
+Bash([regex]npm (install|run))         # npm install or run anywhere
+Bash([regex]^curl -s https?://)        # curl with -s flag and http(s) URL
+Bash([regex]pytest.*-v)                # pytest with -v flag anywhere
+Write([regex]^/tmp/logs/.*\.log$)      # write to .log files under /tmp/logs
 ```
 
-REGEX patterns match anywhere in the command unless anchored with `^` or `$`.
+REGEX patterns match anywhere in the command (or path) unless anchored with `^` or `$`. No path normalization is applied, so write absolute paths or explicit anchors when you need them.
 
 #### GLOB Patterns
 
-Use `[glob]` prefix for true glob matching with proper globstar (`**`) support:
+Use `[glob]` prefix (inside the tool wrapper) for true glob matching with proper globstar (`**`) support:
 
 ```
-[glob]~/projects/**/*.py         # Any .py file under ~/projects (recursive)
-[glob]/tmp/*.txt                 # .txt files directly in /tmp only
-[glob]/tmp/**/*.txt              # .txt files anywhere under /tmp
-[glob]~/projects/*/*.js          # .js files one level deep only
+Bash([glob]cat ~/projects/**/*.py)     # cat any .py file under ~/projects
+Write([glob]/tmp/*.txt)                # write .txt files directly in /tmp only
+Read([glob]/tmp/**/*.txt)              # read .txt files anywhere under /tmp
+Read([glob]~/projects/*/*.js)          # .js files one level deep only
 ```
 
 **Important**: GLOB patterns properly distinguish `*` from `**`:
 - `*` matches any characters **except** path separator `/`
 - `**` matches any characters **including** path separators (recursive)
 
+For file-path tools, the default (un-prefixed) form already uses glob semantics — the `[glob]` prefix is only needed when disambiguating from `[regex]`/`[native]` in a mixed list or when `TOOLGUARD_EXTENDED_SYNTAX` is disabled.
+
 #### NATIVE Patterns
 
-Use `[native]` prefix for Claude Code 2.10 wildcard syntax:
+Use `[native]` prefix (inside the tool wrapper) for Claude Code 2.10 wildcard syntax:
 
 ```
-[native]git * main               # git checkout main, git merge main, etc.
-[native]* install                # npm install, pip install, cargo install
-[native]npm *                    # Any npm command
-[native]git * origin *           # git push origin main, git pull origin dev
-[native]docker * --rm *          # docker run --rm, docker exec --rm, etc.
+Bash([native]git * main)               # git checkout main, git merge main, etc.
+Bash([native]* install)                # npm install, pip install, cargo install
+Bash([native]npm *)                    # Any npm command
+Bash([native]git * origin *)           # git push origin main, git pull origin dev
+Bash([native]docker * --rm *)          # docker run --rm, docker exec --rm, etc.
 ```
 
 NATIVE patterns use word-level matching where `*` matches any sequence of characters. Segments must appear in order.
 
 #### File Path Patterns (Read, Write, Edit)
 
-File path patterns use GLOB syntax with proper `**` globstar support:
+File path patterns use GLOB syntax with proper `**` globstar support by default, and accept extended-syntax prefixes inside the tool wrapper when you need regex or native semantics:
 
 ```
-Read(~/projects/**)              # Any file under ~/projects (recursive)
-Read(/tmp/**)                    # Any file under /tmp (recursive)
-Read(/tmp/*)                     # Files directly in /tmp only (not recursive)
-Write(~/projects/myapp/**)       # Write to any file in myapp project
-Write(/tmp/**/*.log)             # Write to any .log file under /tmp
-Edit(~/projects/**/src/*.py)     # Edit .py files in any src directory
+Read(~/projects/**)                                    # glob (default): any file under ~/projects
+Read(/tmp/**)                                          # glob: any file under /tmp (recursive)
+Read(/tmp/*)                                           # glob: files directly in /tmp only
+Write(~/projects/myapp/**)                             # glob: write any file in myapp project
+Write(/tmp/**/*.log)                                   # glob: write any .log file under /tmp
+Edit(~/projects/**/src/*.py)                           # glob: .py files in any src directory
+Write([regex]^/Users/[^/]+/\.claude/.*/memory/.*\.md$) # regex: tool-specific, no path normalization
+Read([native]/Users/*/projects/*)                      # native: word-level wildcard matching
 ```
 
 **Key differences between `*` and `**`**:
@@ -428,20 +469,23 @@ With the above config, toolguard allows reading any file under `~/projects/` EXC
 
 ### Path Normalization
 
-Toolguard normalizes paths for consistent matching:
+Toolguard normalizes paths in commands — and the command-name portion of DEFAULT patterns — to a canonical form so that equivalent paths match:
 
 | Normalization | Example |
 |---------------|---------|
 | Tilde conversion | `/Users/arnon/projects` → `~/projects` |
 | Symlink resolution | Up to 3 iterations to prevent loops |
 | Leading slashes | `//tmp` → `/tmp` |
-| Relative paths | `file.txt` → `./file.txt` |
+| Relative path args | `cat file.txt` → `cat ./file.txt` |
+| Relative path as command | `bin/script.sh` → `./bin/script.sh` (only when the first token contains `/`; bare names like `ls`, `git` are left alone) |
+
+**Effect on rules**: a single rule `Bash(./bin/script.sh:*)` covers both `./bin/script.sh` and `bin/script.sh` invocations, and likewise `Bash(bin/script.sh:*)` covers both — the match is symmetric in either direction. You no longer need to list both `./bin/X` and `bin/X` variants.
 
 **Normalization by pattern type**:
 
 | Pattern Type | Pattern Normalization | Command Normalization |
 |--------------|----------------------|----------------------|
-| DEFAULT | Full | Full |
+| DEFAULT | Command-name (`base_cmd`) canonicalized when it contains `/`; rest of pattern untouched | Full |
 | GLOB | Tilde expansion only | Tilde expansion only |
 | REGEX | None | None |
 | NATIVE | None | None |
@@ -506,12 +550,12 @@ The following bash constructs are **not currently parsed** - their inner command
 
 **Note**: Analysis of historical command logs shows Claude Code rarely generates shell control structures at the start of commands. When `if/for/while` appear, they are typically inside Python one-liners or awk scripts where they are treated as string arguments rather than shell parsing constructs. This makes the risk of bypassing toolguard via control structures very low in practice.
 
-**Mitigation**: Use deny patterns that match dangerous commands even when nested:
+**Mitigation**: Use deny patterns that match dangerous commands even when nested. Remember that extended-syntax prefixes must live inside the tool wrapper:
 ```json
 {
   "deny": [
-    "[regex]rm\\s+-rf",
-    "[regex]rm\\s+.*-rf"
+    "Bash([regex]rm\\s+-rf)",
+    "Bash([regex]rm\\s+.*-rf)"
   ]
 }
 ```
@@ -707,7 +751,7 @@ deny = [
     # Dangerous commands
     "Bash(rm -rf:*)",
     "Bash(sudo:*)",
-    "[regex]rm\\s+-rf\\s+/",
+    "Bash([regex]rm\\s+-rf\\s+/)",
 
     # Sensitive files
     "Read(**/.env)",
@@ -1017,10 +1061,11 @@ allow = [
     "Read(~/projects/**)",
     "Write(~/projects/myapp/**)",
 
-    # Extended syntax patterns (toolguard only)
-    "[regex]^git (status|log|diff|branch)",
-    "[glob]~/projects/**/*.py",
-    "[native]docker * --rm *"
+    # Extended syntax patterns (toolguard only) - prefix lives inside the tool wrapper
+    "Bash([regex]^git (status|log|diff|branch))",
+    "Bash([glob]cat ~/projects/**/*.py)",
+    "Bash([native]docker * --rm *)",
+    "Write([regex]^/Users/[^/]+/\\.claude/.*/memory/.*\\.md$)"
 ]
 
 # Denied patterns - explicitly blocked (take precedence over allow)
@@ -1028,7 +1073,7 @@ deny = [
     # Dangerous commands
     "Bash(rm -rf:*)",
     "Bash(sudo:*)",
-    "[regex]rm\\s+-rf\\s+/",
+    "Bash([regex]rm\\s+-rf\\s+/)",
 
     # Sensitive files
     "Read(**/.env)",
@@ -1181,7 +1226,7 @@ diff .claude/toolguard_hook.toml logs/config-backups/toolguard_hook-*.toml
 deny = [
     # Destructive commands
     "Bash(rm -rf:*)",
-    "[regex]rm\\s+-rf\\s+/",
+    "Bash([regex]rm\\s+-rf\\s+/)",
     "Bash(dd:*)",
 
     # Privilege escalation
@@ -1346,7 +1391,8 @@ Extended patterns (`[regex]`, `[glob]`, `[native]`) are only supported in `toolg
 
 **DEFAULT** (`permissions.py`):
 - Uses `fnmatch.fnmatch()` with colon syntax
-- Applies full path normalization to both pattern and command
+- Applies full path normalization to the command (tilde, symlinks, leading slashes, relative-path canonicalization including the first token when it's a path)
+- Canonicalizes the pattern's command-name portion (`base_cmd`) when it contains `/`, so `./bin/X:*` and `bin/X:*` match symmetrically
 - Handles special path component patterns like `**/.env/**`
 
 **REGEX** (`patterns.py`):
@@ -1367,10 +1413,11 @@ Extended patterns (`[regex]`, `[glob]`, `[native]`) are only supported in `toolg
 #### File Path Tool Patterns
 
 **Read, Write, Edit** (`hook.py`):
-- Uses `PurePath.full_match()` for GLOB matching
-- Patterns extracted from settings via `load_file_path_patterns()`
-- Pattern syntax: `ToolName(pattern)` e.g., `Read(/tmp/**)`
-- Tilde expansion applied to both patterns and file paths
+- Default: `PurePath.full_match()` GLOB matching
+- Extended prefixes inside the tool wrapper are honored: `Write([regex]...)`, `Write([glob]...)`, `Write([native]...)`
+- Patterns extracted from settings via `load_file_path_patterns()`, which strips the `ToolName(...)` wrapper; the inner pattern is then passed through `parse_pattern` + `match_pattern`
+- Pattern syntax: `ToolName(pattern)` e.g., `Read(/tmp/**)`, `Write([regex]^/tmp/.*\.log$)`
+- Tilde expansion applied to both patterns and file paths (GLOB / DEFAULT only; REGEX and NATIVE match literally)
 - Deny patterns checked first (take precedence)
 - Each tool type has separate patterns (Read pattern ≠ Write permission)
 
@@ -1480,4 +1527,4 @@ uv run python -m unittest discover -s test/unit -v
 uv run python -m unittest discover -s test/unit -p "test_patterns.py" -v
 ```
 
-Current test coverage: **538 tests** covering all pattern types, compound commands, command substitution extraction, subshell extraction, brace group extraction, file path permissions, configuration, TOML configuration, config validation, config divergence, auto-migration, error logging, environment variables, matched rule logging, session warnings, takeover mode, security bypass attempts, parser robustness, and edge cases.
+Current test coverage: **563 tests** covering all pattern types, compound commands, command substitution extraction, subshell extraction, brace group extraction, file path permissions, configuration, TOML configuration, config validation, config divergence, auto-migration, error logging, environment variables, matched rule logging, session warnings, takeover mode, security bypass attempts, parser robustness, and edge cases.

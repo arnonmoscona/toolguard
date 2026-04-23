@@ -2,7 +2,11 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[options]
+exclude-newer = "2026-04-16T12:09:34.546172Z"
+exclude-newer-span = "P1W"
+
 [[package]]
 name = "toolguard"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "." }

@@ -156,9 +156,20 @@ def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
     normalized_tokens = []
 
     for i, token in enumerate(tokens):
-        # Skip the first token (command itself) and flags
-        if i == 0 or token.startswith('-'):
+        # Skip flags (they never look like paths)
+        if token.startswith('-'):
             normalized_tokens.append(token)
+            continue
+
+        # The first token is usually a bare command name (ls, git, python) and
+        # should be left alone. But if it clearly looks like a path (contains /),
+        # normalize it so e.g. `bin/script.sh` becomes `./bin/script.sh` — matching
+        # the canonical form a user would write in a rule.
+        if i == 0:
+            if '/' in token:
+                normalized_tokens.append(normalize_path(token, project_root))
+            else:
+                normalized_tokens.append(token)
             continue
 
         # Check if token looks like a path

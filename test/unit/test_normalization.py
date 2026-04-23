@@ -200,6 +200,30 @@ class TestNormalizeCommand(unittest.TestCase):
         result = normalize_command(command)
         self.assertEqual(result, 'diff ~/abs.txt ./rel.txt')
 
+    def test_normalize_command_is_a_relative_path(self):
+        """First token that is a relative path should get ./ prefix."""
+        self.assertEqual(normalize_command('bin/script.sh'), './bin/script.sh')
+
+    def test_normalize_command_already_dot_slash(self):
+        """First token that already has ./ prefix is preserved."""
+        self.assertEqual(normalize_command('./bin/script.sh'), './bin/script.sh')
+
+    def test_normalize_command_relative_path_with_args_and_flag(self):
+        """First token as relative path is normalized; flags preserved."""
+        result = normalize_command('bin/script.sh --verbose other.txt')
+        self.assertEqual(result, './bin/script.sh --verbose ./other.txt')
+
+    def test_normalize_command_bare_command_name_unchanged(self):
+        """Bare command names (no /) must NOT be treated as paths."""
+        self.assertEqual(normalize_command('ls'), 'ls')
+        self.assertEqual(normalize_command('git status'), 'git status')
+        self.assertEqual(normalize_command('python'), 'python')
+
+    def test_normalize_command_absolute_first_token_under_home(self):
+        """Absolute first-token path under home is converted to ~."""
+        path = str(self.home / 'bin' / 'myscript')
+        self.assertEqual(normalize_command(path), f'~/bin/myscript')
+
 
 if __name__ == '__main__':
     unittest.main()

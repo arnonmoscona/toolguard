@@ -13,7 +13,7 @@ import fnmatch
 from typing import List, Tuple, Optional
 
 from .patterns import parse_pattern, match_pattern, PatternType
-from .normalization import normalize_command
+from .normalization import normalize_command, normalize_path
 
 
 def normalize_path_in_command(command_str: str) -> str:
@@ -126,8 +126,8 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
         # Parse pattern to determine type
         pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
 
-        # REGEX and GLOB patterns bypass all DEFAULT logic
-        if pattern_type == PatternType.REGEX or pattern_type == PatternType.GLOB:
+        # REGEX, GLOB, and NATIVE patterns bypass all DEFAULT logic
+        if pattern_type in (PatternType.REGEX, PatternType.GLOB, PatternType.NATIVE):
             # Match directly against command (no normalization, no colon syntax)
             if match_pattern(pattern_type, actual_pattern, command_str):
                 return True, pattern
@@ -153,19 +153,34 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
             cmd_pattern = cmd_pattern.strip()
             args_pattern = args_pattern.strip()
 
+            # Extract the base command from the pattern (e.g., "cat" from "cat ./*")
+            pattern_parts = cmd_pattern.split(None, 1)
+            base_cmd = pattern_parts[0]
+
+            # Normalize the pattern's base_cmd the same way we normalize commands,
+            # so e.g. `bin/x:*` and `./bin/x:*` both canonicalize to `./bin/x` —
+            # matching a command `bin/x` whose own first token normalizes the same way.
+            base_cmd_variants = [base_cmd]
+            if '/' in base_cmd:
+                normalized_base = normalize_path(base_cmd)
+                if normalized_base != base_cmd:
+                    base_cmd_variants.append(normalized_base)
+
             for cmd_var in command_variants:
                 # If args pattern is * or empty, just match the command prefix
                 if args_pattern in ('*', '**', ''):
                     # Match command prefix more flexibly
-                    # Extract the base command from the pattern (e.g., "cat" from "cat ./*")
-                    pattern_parts = cmd_pattern.split(None, 1)
-                    base_cmd = pattern_parts[0]
-
-                    # Check if command starts with the same base command
-                    if cmd_var.startswith(base_cmd + ' ') or cmd_var == base_cmd:
+                    matched_base = any(
+                        cmd_var.startswith(bc + ' ') or cmd_var == bc
+                        for bc in base_cmd_variants
+                    )
+                    if matched_base:
                         # Now check if the full command matches the pattern
-                        if fnmatch.fnmatch(cmd_var, cmd_pattern + '*'):
-                            return True, pattern
+                        # Try each base_cmd variant as the pattern prefix
+                        for bc in base_cmd_variants:
+                            full_cmd_pattern = bc + cmd_pattern[len(base_cmd):] + '*'
+                            if fnmatch.fnmatch(cmd_var, full_cmd_pattern):
+                                return True, pattern
                 else:
                     # More specific args pattern - match the full command
                     full_pattern = cmd_pattern + ' ' + args_pattern

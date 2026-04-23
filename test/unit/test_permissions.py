@@ -139,6 +139,38 @@ class TestMatchCommand(unittest.TestCase):
         self.assertTrue(matched)
         self.assertEqual(pattern, 'git **')
 
+    def test_relative_path_command_matches_dotslash_pattern(self):
+        """Pattern `./bin/X:*` must match command `bin/X` (equivalent paths)."""
+        patterns = ['./bin/precommit_checks.sh:*']
+
+        matched, pattern = match_command('bin/precommit_checks.sh', patterns)
+        self.assertTrue(matched)
+        self.assertEqual(pattern, './bin/precommit_checks.sh:*')
+
+        matched, _ = match_command('bin/precommit_checks.sh --dry-run', patterns)
+        self.assertTrue(matched)
+
+    def test_dotslash_command_matches_relative_pattern(self):
+        """Pattern `bin/X:*` must match command `./bin/X` (reverse direction)."""
+        patterns = ['bin/precommit_checks.sh:*']
+
+        matched, pattern = match_command('./bin/precommit_checks.sh', patterns)
+        self.assertTrue(matched)
+        self.assertEqual(pattern, 'bin/precommit_checks.sh:*')
+
+        matched, _ = match_command('./bin/precommit_checks.sh --flag', patterns)
+        self.assertTrue(matched)
+
+    def test_relative_path_no_false_positive(self):
+        """Normalization must not accidentally match unrelated relative paths."""
+        patterns = ['./bin/precommit_checks.sh:*']
+
+        matched, _ = match_command('other/precommit_checks.sh', patterns)
+        self.assertFalse(matched)
+
+        matched, _ = match_command('bin/other_script.sh', patterns)
+        self.assertFalse(matched)
+
 
 class TestCheckPermission(unittest.TestCase):
     """Test permission checking logic."""
@@ -484,6 +516,36 @@ class TestExtendedPatterns(unittest.TestCase):
         glob_patterns = ['[glob]* .env']
         matched, pattern = match_command('cat .env', glob_patterns)
         self.assertTrue(matched)  # Glob wildcard matches
+
+    def test_native_pattern_uses_native_semantics(self):
+        """[native] patterns in match_command must use word-level segment matching,
+        not fall through to fnmatch."""
+        patterns = ['[native]git * main']
+
+        matched, pattern = match_command('git checkout main', patterns)
+        self.assertTrue(matched)
+        self.assertEqual(pattern, '[native]git * main')
+
+        matched, pattern = match_command('git merge main', patterns)
+        self.assertTrue(matched)
+
+        # "git * main" should NOT match commands where 'main' is not the final token
+        # position in an expected-order-sequence way via NATIVE semantics
+        matched, pattern = match_command('git checkout develop', patterns)
+        self.assertFalse(matched)
+
+    def test_native_pattern_in_deny_list(self):
+        """[native] patterns in deny list should block matching commands."""
+        allow_patterns = ['git *']
+        deny_patterns = ['[native]git push *']
+
+        decision, reason = check_permission('git push origin main', allow_patterns, deny_patterns)
+        self.assertEqual(decision, 'deny')
+        self.assertIn('[native]git push *', reason)
+
+        # git status is allowed because only "git push *" is denied
+        decision, _ = check_permission('git status', allow_patterns, deny_patterns)
+        self.assertEqual(decision, 'allow')
 
 
 if __name__ == '__main__':

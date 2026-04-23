@@ -17,11 +17,11 @@ Exit code: Always 0 (errors communicated via JSON output)
 import json
 import re
 import sys
-from pathlib import PurePath
 from typing import Any, Dict, List, Tuple
 
 from toolguard.auto_migrate import load_config_sync_settings, run_auto_migration
 from toolguard.compound import check_compound_permission
+from toolguard.patterns import PatternType, match_pattern, parse_pattern
 from toolguard.config import (
     discover_config_files,
     find_project_root,
@@ -288,16 +288,46 @@ def load_file_path_patterns(tool_name: str, start_dir: str = None) -> Tuple[List
     return allow_patterns, deny_patterns
 
 
-def check_file_path_permission(file_path: str, allow_patterns: List[str], deny_patterns: List[str]) -> Tuple[str, str]:
+def _match_file_path_pattern(pattern: str, expanded_path: str, extended_syntax: bool) -> bool:
+    """
+    Match a file path against a single pattern, respecting extended syntax prefixes.
+
+    DEFAULT patterns are treated as GLOB (backwards compatible with existing behavior).
+    Extended prefixes ([regex], [glob], [native]) are honored inside tool wrappers
+    e.g. "Write([regex]/path/.*)" — the wrapper is stripped by the caller, and this
+    function sees just "[regex]/path/.*".
+    """
+    pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
+
+    # For file paths, DEFAULT patterns use the same semantics as GLOB
+    if pattern_type == PatternType.DEFAULT:
+        pattern_type = PatternType.GLOB
+
+    try:
+        return match_pattern(pattern_type, actual_pattern, expanded_path)
+    except (ValueError, TypeError):
+        return False
+
+
+def check_file_path_permission(
+    file_path: str,
+    allow_patterns: List[str],
+    deny_patterns: List[str],
+    extended_syntax: bool = True,
+) -> Tuple[str, str]:
     """
     Check if a file path is permitted based on allow and deny patterns.
 
-    Uses GLOB pattern matching with proper globstar (**) support via PurePath.full_match().
+    Uses GLOB pattern matching by default (with proper globstar ** support via
+    PurePath.full_match()). Extended syntax prefixes are honored when wrapped in
+    the tool form, e.g. "Write([regex]...)", "Write([glob]...)", "Write([native]...)" —
+    the tool wrapper is stripped before reaching this function.
 
     Args:
         file_path: The file path to check
-        allow_patterns: List of glob patterns that allow access
-        deny_patterns: List of glob patterns that deny access
+        allow_patterns: List of patterns that allow access (may contain extended prefixes)
+        deny_patterns: List of patterns that deny access (may contain extended prefixes)
+        extended_syntax: If False, treat all patterns as plain glob
 
     Returns:
         Tuple of (decision, reason) where decision is 'allow' or 'deny'
@@ -307,21 +337,13 @@ def check_file_path_permission(file_path: str, allow_patterns: List[str], deny_p
 
     # Check deny list first
     for pattern in deny_patterns:
-        expanded_pattern = expand_tilde(pattern)
-        try:
-            if PurePath(expanded_path).full_match(expanded_pattern):
-                return 'deny', f'Path matches deny pattern: {pattern}'
-        except (ValueError, TypeError):
-            continue
+        if _match_file_path_pattern(pattern, expanded_path, extended_syntax):
+            return 'deny', f'Path matches deny pattern: {pattern}'
 
     # Check allow list
     for pattern in allow_patterns:
-        expanded_pattern = expand_tilde(pattern)
-        try:
-            if PurePath(expanded_path).full_match(expanded_pattern):
-                return 'allow', f'Path matches allow pattern: {pattern}'
-        except (ValueError, TypeError):
-            continue
+        if _match_file_path_pattern(pattern, expanded_path, extended_syntax):
+            return 'allow', f'Path matches allow pattern: {pattern}'
 
     # Default: deny (not explicitly allowed)
     return 'deny', 'Path does not match any allow patterns'
@@ -486,8 +508,11 @@ def main() -> None:
                 print(json.dumps(output))
                 sys.exit(0)
 
-            # Check file path permission using GLOB matching
-            decision, reason = check_file_path_permission(file_path, allow_patterns, deny_patterns)
+            # Check file path permission using GLOB matching (with optional extended syntax)
+            extended_syntax = env_config.get('extended_syntax', True)
+            decision, reason = check_file_path_permission(
+                file_path, allow_patterns, deny_patterns, extended_syntax
+            )
 
             # Log the decision
             log_target = f'{tool_name}({file_path})'

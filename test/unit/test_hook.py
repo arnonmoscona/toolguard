@@ -233,6 +233,112 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertEqual(decision, 'deny')
 
 
+class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
+    """Test that extended syntax prefixes work inside tool wrappers for file path tools.
+
+    These patterns arrive here already stripped of the Write(...)/Read(...)/Edit(...)
+    wrapper by load_file_path_patterns, so they look like "[regex]..." or "[glob]..."
+    or "[native]...".
+    """
+
+    def test_regex_prefix_matches_file_path(self):
+        """A [regex]... pattern (from Write([regex]...)) must match via re.search."""
+        allow_patterns = ['[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*']
+        deny_patterns = []
+
+        decision, reason = check_file_path_permission(
+            '/Users/arnon/.claude/projects/proj/memory/note.md', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'allow')
+        self.assertIn('[regex]', reason)
+
+    def test_regex_prefix_does_not_match_other_paths(self):
+        """A [regex]... pattern must not allow paths outside its pattern."""
+        allow_patterns = ['[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*']
+        deny_patterns = []
+
+        decision, reason = check_file_path_permission(
+            '/Users/arnon/documents/secret.md', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'deny')
+
+    def test_glob_prefix_matches_file_path(self):
+        """A [glob]... pattern (from Write([glob]...)) must match via globstar glob."""
+        allow_patterns = ['[glob]/Users/*/projects/**/memory/**']
+        deny_patterns = []
+
+        decision, reason = check_file_path_permission(
+            '/Users/arnon/projects/myproj/memory/sub/note.md', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'allow')
+        self.assertIn('[glob]', reason)
+
+    def test_glob_prefix_single_star_no_recursion(self):
+        """[glob] must distinguish * (single level) from ** (recursive)."""
+        allow_patterns = ['[glob]/tmp/*']
+        deny_patterns = []
+
+        # Single * should NOT match nested path
+        decision, _ = check_file_path_permission(
+            '/tmp/sub/file.txt', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'deny')
+
+        # Same path with ** should match
+        decision, _ = check_file_path_permission(
+            '/tmp/sub/file.txt', ['[glob]/tmp/**'], deny_patterns
+        )
+        self.assertEqual(decision, 'allow')
+
+    def test_regex_prefix_in_deny_list(self):
+        """[regex] patterns in deny list block matching paths."""
+        allow_patterns = ['[glob]/Users/*/**']
+        deny_patterns = ['[regex]\\.env(\\.|$)']
+
+        decision, reason = check_file_path_permission(
+            '/Users/arnon/project/.env', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'deny')
+        self.assertIn('deny pattern', reason)
+
+    def test_default_pattern_still_works_like_glob(self):
+        """Backwards compat: patterns without a prefix continue to use glob semantics."""
+        allow_patterns = ['/tmp/**']
+        deny_patterns = []
+
+        decision, _ = check_file_path_permission(
+            '/tmp/a/b/c.txt', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'allow')
+
+    def test_extended_syntax_disabled_treats_prefix_as_literal(self):
+        """When extended_syntax=False, [regex]/[glob] prefixes are not parsed."""
+        allow_patterns = ['[regex]^/tmp/.*']
+        deny_patterns = []
+
+        # With extended syntax: regex matches
+        decision, _ = check_file_path_permission(
+            '/tmp/file.txt', allow_patterns, deny_patterns, extended_syntax=True
+        )
+        self.assertEqual(decision, 'allow')
+
+        # Without extended syntax: [regex]... treated as glob literal, won't match
+        decision, _ = check_file_path_permission(
+            '/tmp/file.txt', allow_patterns, deny_patterns, extended_syntax=False
+        )
+        self.assertEqual(decision, 'deny')
+
+    def test_native_prefix_matches_file_path(self):
+        """A [native]... pattern uses word-level segment matching against the path."""
+        allow_patterns = ['[native]/Users/*/projects/*']
+        deny_patterns = []
+
+        decision, _ = check_file_path_permission(
+            '/Users/arnon/projects/myproj', allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, 'allow')
+
+
 class TestLoadFilePathPatterns(unittest.TestCase):
     """Test loading file path patterns from config."""
 
