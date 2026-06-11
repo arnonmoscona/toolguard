@@ -3,4 +3,5 @@ logs
 .mcp.json
 .DS_Store
 .idea/
+tmp/
 
