@@ -29,7 +29,11 @@ class TestLogging(unittest.TestCase):
         self.env_patcher.stop()
 
     def test_log_file_creation_with_correct_name_format(self):
-        """Test that log file is created with correct name format (toolguard-YYYY-MM-DD.md)."""
+        """
+        Given logging is enabled and a fresh log directory
+        When a command is logged
+        Then a log file named toolguard-YYYY-MM-DD.md is created in that directory
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -45,7 +49,11 @@ class TestLogging(unittest.TestCase):
             self.assertTrue(log_file.exists(), f'Log file {log_file} was not created')
 
     def test_markdown_structure_is_correct(self):
-        """Test that markdown structure includes headers and formatting."""
+        """
+        Given logging is enabled
+        When a command is logged in markdown format
+        Then the file contains a header, Status and Command fields, and the command rendered as inline code
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -66,7 +74,11 @@ class TestLogging(unittest.TestCase):
             self.assertIn('`git status`', content, 'Command not formatted as code')
 
     def test_content_includes_command_status_violated_rules(self):
-        """Test that content includes command, status, and violated rules."""
+        """
+        Given a refused command with a list of violated rules
+        When the command is logged
+        Then the log content includes the REFUSED status, the command, and every violated rule
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -89,7 +101,11 @@ class TestLogging(unittest.TestCase):
             self.assertIn('**/.env/**', content, 'Second violated rule not found')
 
     def test_multiple_log_entries_append_correctly(self):
-        """Test that multiple log entries append to the same file."""
+        """
+        Given logging is enabled
+        When three commands are logged in sequence
+        Then all three appear in the same daily file as three separate markdown entries
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -115,7 +131,11 @@ class TestLogging(unittest.TestCase):
             self.assertEqual(header_count, 3, f'Expected 3 entries, found {header_count}')
 
     def test_logging_respects_disabled_flag(self):
-        """Test that logging is disabled when CHECKED_BASH_LOGGING_ON is false."""
+        """
+        Given CHECKED_BASH_LOGGING_ON is set to false
+        When a command is logged
+        Then no log file is created
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,7 +150,11 @@ class TestLogging(unittest.TestCase):
                 self.assertEqual(len(log_files), 0, 'Log file should not be created when logging is disabled')
 
     def test_jsonlines_format(self):
-        """Test that JSONLines format works correctly."""
+        """
+        Given CHECKED_BASH_LOGGING_FORMAT is set to jsonlines
+        When a command is logged
+        Then a .jsonlines file is created whose first line parses to a JSON entry with timestamp, status, command, and violated_rules matching the logged values
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -161,7 +185,11 @@ class TestLogging(unittest.TestCase):
                 self.assertEqual(entry['command'], 'git status')
 
     def test_log_without_violated_rules(self):
-        """Test that logging works correctly when no violated rules are provided."""
+        """
+        Given a command logged without any violated rules
+        When the log file is written
+        Then it contains no Violated Rules section
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -179,7 +207,11 @@ class TestLogging(unittest.TestCase):
             self.assertNotIn('Violated Rules', content, 'Violated rules should not be present')
 
     def test_log_directory_must_exist(self):
-        """Test that logging fails gracefully if log directory does not exist."""
+        """
+        Given a log directory path that does not exist
+        When a command is logged
+        Then the process exits with code 1 and stderr reports that the logging directory does not exist
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -213,7 +245,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
         self.env_patcher.stop()
 
     def test_matched_rule_in_markdown_format(self):
-        """Test that matched_rule appears in markdown log output."""
+        """
+        Given a command logged with a matched_rule
+        When the markdown log is written
+        Then it contains a Matched Rule field showing the rule as inline code
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -227,7 +263,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
             self.assertIn('`git *`', content)
 
     def test_matched_rule_in_jsonlines_format(self):
-        """Test that matched_rule appears in JSONLines log output."""
+        """
+        Given jsonlines format and a command logged with a matched_rule
+        When the entry is parsed
+        Then its matched_rule field equals the supplied rule
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -243,7 +283,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
                 self.assertEqual(entry['matched_rule'], 'git *')
 
     def test_no_matched_rule_when_not_provided(self):
-        """Test that matched_rule field is absent when not provided."""
+        """
+        Given a command logged without a matched_rule
+        When the markdown log is written
+        Then it contains no Matched Rule field
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -256,7 +300,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
             self.assertNotIn('Matched Rule', content)
 
     def test_no_matched_rule_in_jsonlines_when_not_provided(self):
-        """Test that matched_rule is absent from JSON entry when not provided."""
+        """
+        Given jsonlines format and a command logged without a matched_rule
+        When the entry is parsed
+        Then it has no matched_rule key
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -272,7 +320,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
                 self.assertNotIn('matched_rule', entry)
 
     def test_denied_command_no_matched_rule(self):
-        """Test that denied commands still work without matched_rule."""
+        """
+        Given a refused command logged with violated rules but no matched_rule
+        When the markdown log is written
+        Then it shows REFUSED and a Violated Rules section but no Matched Rule field
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,7 +339,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
             self.assertNotIn('Matched Rule', content)
 
     def test_matched_rule_with_extra_info(self):
-        """Test matched_rule alongside extra_info (agent) field."""
+        """
+        Given a command logged with both matched_rule and extra_info (agent)
+        When the markdown log is written
+        Then it shows the matched rule as inline code and an Agent field with the extra_info value
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -301,7 +357,11 @@ class TestMatchedRuleLogging(unittest.TestCase):
             self.assertIn('**Agent**: main', content)
 
     def test_matched_rule_ordering_in_markdown(self):
-        """Test that Matched Rule appears between Command and Agent in markdown."""
+        """
+        Given a command logged with matched_rule and extra_info
+        When the markdown log is written
+        Then the Matched Rule field appears after Command and before Agent
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:

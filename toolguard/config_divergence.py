@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List
 
+from toolguard.config import toolguard_permissions_from_sources
 from toolguard.error_log import log_warning
 
 
@@ -154,35 +155,9 @@ def get_toolguard_permissions(config_files: List[tuple]) -> Dict[str, List[str]]
     Returns:
         Dictionary with keys 'allow', 'deny', 'ask', each containing list of patterns
     """
-    result = {'allow': [], 'deny': [], 'ask': []}
-
-    for file_path, source_type, file_format in config_files:
-        # Only process toolguard_hook files
-        if source_type != 'toolguard_hook':
-            continue
-
-        try:
-            if file_format == 'toml':
-                import tomllib
-
-                with open(file_path, 'rb') as f:
-                    config = tomllib.load(f)
-            else:
-                with open(file_path, 'r') as f:
-                    config = json.load(f)
-
-            permissions = config.get('permissions', {})
-
-            for perm_type in ['allow', 'deny', 'ask']:
-                for perm in permissions.get(perm_type, []):
-                    if isinstance(perm, str) and perm not in result[perm_type]:
-                        result[perm_type].append(perm)
-
-        except Exception as e:
-            print(f'Warning: Failed to load {file_path}: {e}', file=sys.stderr)
-            continue
-
-    return result
+    # Delegate parsing/format handling to the config module so this client never
+    # opens files or branches on file format.
+    return toolguard_permissions_from_sources(config_files)
 
 
 def find_divergent_patterns(

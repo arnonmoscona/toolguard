@@ -24,7 +24,11 @@ class TestMarkerFiles(unittest.TestCase):
     """Test marker file operations."""
 
     def test_get_marker_file_path(self):
-        """Test marker file path generation."""
+        """
+        Given a logs directory and a specific date
+        When get_marker_file_path builds the path
+        Then it is logs_dir/.toolguard-divergence-warned-YYYY-MM-DD for that date
+        """
         logs_dir = Path('/tmp/logs')
         test_date = date(2025, 2, 5)
         marker_path = get_marker_file_path(logs_dir, test_date)
@@ -32,7 +36,11 @@ class TestMarkerFiles(unittest.TestCase):
         self.assertEqual(marker_path, Path('/tmp/logs/.toolguard-divergence-warned-2025-02-05'))
 
     def test_marker_exists_for_today(self):
-        """Test checking for today's marker file."""
+        """
+        Given a logs directory with no marker, then today's marker created
+        When marker_exists_for_today is checked before and after
+        Then it returns False initially and True once the marker exists
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -47,7 +55,11 @@ class TestMarkerFiles(unittest.TestCase):
             self.assertTrue(marker_exists_for_today(logs_dir))
 
     def test_create_marker_file(self):
-        """Test creating marker file."""
+        """
+        Given a logs directory that does not yet exist
+        When create_marker_file runs
+        Then the directory is created and today's divergence marker exists
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir) / 'logs'
 
@@ -62,7 +74,11 @@ class TestMarkerFiles(unittest.TestCase):
             self.assertTrue(marker_exists_for_today(logs_dir))
 
     def test_cleanup_old_markers(self):
-        """Test cleaning up old marker files."""
+        """
+        Given markers for today, 3 days ago, and 10 days ago
+        When cleanup_old_markers runs with a 7-day threshold
+        Then the 10-day-old marker is deleted while the recent and today markers remain
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -92,7 +108,11 @@ class TestGetNativePermissions(unittest.TestCase):
     """Test extracting permissions from settings.local.json."""
 
     def test_extract_bash_patterns(self):
-        """Test extracting Bash patterns from native config."""
+        """
+        Given a settings.local.json with Bash and non-governed-tool patterns across allow/deny/ask
+        When get_native_permissions reads it
+        Then only the governed Bash patterns are returned in each permission list
+        """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / 'settings.local.json'
 
@@ -118,7 +138,11 @@ class TestGetNativePermissions(unittest.TestCase):
             self.assertEqual(result['ask'], ['Bash(git push:*)'])
 
     def test_extract_file_tool_patterns(self):
-        """Test extracting Read/Write/Edit patterns from native config."""
+        """
+        Given a settings.local.json with Read, Write, Edit, and Bash allow patterns
+        When get_native_permissions reads it
+        Then all four governed file-tool and Bash patterns are present in allow
+        """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / 'settings.local.json'
 
@@ -134,13 +158,21 @@ class TestGetNativePermissions(unittest.TestCase):
             self.assertIn('Bash(ls:*)', result['allow'])
 
     def test_missing_file(self):
-        """Test handling missing settings.local.json."""
+        """
+        Given a path to a settings.local.json that does not exist
+        When get_native_permissions reads it
+        Then it returns empty allow, deny, and ask lists
+        """
         result = get_native_permissions(Path('/nonexistent/settings.local.json'))
 
         self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
 
     def test_invalid_json(self):
-        """Test handling invalid JSON."""
+        """
+        Given a settings.local.json containing invalid JSON
+        When get_native_permissions reads it
+        Then it returns empty allow, deny, and ask lists without raising
+        """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / 'settings.local.json'
             settings_path.write_text('{ invalid json }')
@@ -154,7 +186,11 @@ class TestGetToolguardPermissions(unittest.TestCase):
     """Test extracting permissions from toolguard_hook files."""
 
     def test_extract_from_json(self):
-        """Test extracting from toolguard_hook.json."""
+        """
+        Given a toolguard_hook.json with allow and deny permissions
+        When get_toolguard_permissions reads it
+        Then the allow and deny patterns are returned and ask is empty
+        """
         with TemporaryDirectory() as tmpdir:
             hook_path = Path(tmpdir) / 'toolguard_hook.json'
 
@@ -170,7 +206,11 @@ class TestGetToolguardPermissions(unittest.TestCase):
             self.assertEqual(result['ask'], [])
 
     def test_ignore_claude_settings(self):
-        """Test that Claude settings files are ignored."""
+        """
+        Given a config source typed as 'claude'
+        When get_toolguard_permissions reads it
+        Then it returns empty permissions because claude files are ignored
+        """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / 'settings.local.json'
 
@@ -185,7 +225,11 @@ class TestGetToolguardPermissions(unittest.TestCase):
             self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
 
     def test_merge_multiple_files(self):
-        """Test merging permissions from multiple toolguard_hook files."""
+        """
+        Given two toolguard_hook files each with a distinct allow pattern
+        When get_toolguard_permissions merges them
+        Then both patterns appear in the merged allow list
+        """
         with TemporaryDirectory() as tmpdir:
             hook1 = Path(tmpdir) / 'toolguard_hook.json'
             hook2 = Path(tmpdir) / 'toolguard_hook.local.json'
@@ -204,7 +248,11 @@ class TestGetToolguardPermissions(unittest.TestCase):
             self.assertIn('Bash(ls:*)', result['allow'])
 
     def test_deduplicate_patterns(self):
-        """Test that duplicate patterns are not repeated."""
+        """
+        Given two toolguard_hook files with the same allow pattern
+        When get_toolguard_permissions merges them
+        Then the shared pattern appears only once
+        """
         with TemporaryDirectory() as tmpdir:
             hook1 = Path(tmpdir) / 'toolguard_hook.json'
             hook2 = Path(tmpdir) / 'toolguard_hook.local.json'
@@ -227,7 +275,11 @@ class TestFindDivergentPatterns(unittest.TestCase):
     """Test finding divergent patterns."""
 
     def test_find_new_patterns(self):
-        """Test finding patterns in native but not in toolguard."""
+        """
+        Given a native allow list with one pattern absent from toolguard
+        When find_divergent_patterns compares them
+        Then only the native-only pattern is reported as divergent
+        """
         native = {'allow': ['Bash(git status:*)', 'Bash(git push:*)'], 'deny': [], 'ask': []}
 
         toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
@@ -239,7 +291,11 @@ class TestFindDivergentPatterns(unittest.TestCase):
         self.assertEqual(result['ask'], [])
 
     def test_ignore_patterns_in_takeover_mode(self):
-        """Test that ignored patterns are filtered out in takeover mode."""
+        """
+        Given native-only patterns that are all listed as ignored
+        When find_divergent_patterns is given that ignored list
+        Then no divergent allow patterns are reported
+        """
         native = {'allow': ['Bash(git status:*)', 'Bash(uv run pytest:*)', 'Bash(open:*)'], 'deny': [], 'ask': []}
 
         toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
@@ -252,7 +308,11 @@ class TestFindDivergentPatterns(unittest.TestCase):
         self.assertEqual(result['allow'], [])
 
     def test_exact_string_matching(self):
-        """Test that pattern matching is exact (no wildcards)."""
+        """
+        Given a native pattern that differs from a toolguard pattern only by trailing whitespace
+        When find_divergent_patterns compares them
+        Then the whitespace-different pattern is reported as divergent (matching is exact)
+        """
         native = {
             'allow': ['Bash(git status:*)', 'Bash(git status:*)  '],  # Trailing space
             'deny': [],
@@ -267,7 +327,11 @@ class TestFindDivergentPatterns(unittest.TestCase):
         self.assertIn('Bash(git status:*)  ', result['allow'])
 
     def test_all_permission_types(self):
-        """Test finding divergences in allow, deny, and ask."""
+        """
+        Given native allow, deny, and ask patterns absent from toolguard
+        When find_divergent_patterns compares them
+        Then divergences are reported for all three permission types
+        """
         native = {'allow': ['Bash(ls:*)'], 'deny': ['Bash(rm:*)'], 'ask': ['Bash(git push:*)']}
 
         toolguard = {'allow': [], 'deny': [], 'ask': []}
@@ -279,7 +343,11 @@ class TestFindDivergentPatterns(unittest.TestCase):
         self.assertEqual(result['ask'], ['Bash(git push:*)'])
 
     def test_no_divergence(self):
-        """Test when there's no divergence."""
+        """
+        Given identical native and toolguard permission sets
+        When find_divergent_patterns compares them
+        Then no divergences are reported in any permission type
+        """
         native = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
 
         toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
@@ -293,7 +361,11 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
     """Test the main divergence check function."""
 
     def test_no_divergence(self):
-        """Test when there's no divergence."""
+        """
+        Given matching native settings and toolguard_hook configs in a project
+        When check_and_warn_divergence runs
+        Then it returns an empty list (no divergence to warn about)
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -322,7 +394,11 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             self.assertEqual(result, [])
 
     def test_with_divergence(self):
-        """Test when divergence exists."""
+        """
+        Given native settings allowing a pattern that the toolguard_hook config lacks
+        When check_and_warn_divergence runs
+        Then the divergent pattern is included in the returned list
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -350,7 +426,11 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             self.assertIn('Bash(git push:*)', result)
 
     def test_deduplication(self):
-        """Test that warnings are deduplicated."""
+        """
+        Given a divergent native pattern with no matching toolguard config
+        When check_and_warn_divergence runs twice in a row
+        Then the first call reports the divergence and the second is deduplicated to an empty list
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -376,7 +456,11 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             self.assertEqual(result2, [])
 
     def test_takeover_mode_ignored_patterns(self):
-        """Test that ignored patterns work in takeover mode."""
+        """
+        Given takeover mode ignoring one of two divergent native patterns
+        When check_and_warn_divergence runs
+        Then only the non-ignored pattern is reported as divergent
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'

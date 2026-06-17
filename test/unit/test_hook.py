@@ -8,8 +8,11 @@ Includes tests for file path tools (Read, Write, Edit) with GLOB pattern matchin
 import json
 import unittest
 from io import StringIO
+from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import patch
 
+from toolguard.config import ConfigLayer, Configuration, Provenance, TakeoverConfig
 from toolguard.hook import (
     FILE_PATH_TOOLS,
     _log_allowed_command,
@@ -21,69 +24,133 @@ from toolguard.hook import (
     parse_hook_input,
 )
 
+_NO_TAKEOVER = TakeoverConfig(False, (), (), 'deny')
+
+
+def _fake_config(
+    governed=('Bash',),
+    bash=((), ()),
+    file_patterns=None,
+    takeover=_NO_TAKEOVER,
+):
+    """
+    Build a stand-in Configuration for hook tests.
+
+    Patching ``toolguard.hook.load_configuration`` with this lets the tests
+    assert hook OUTCOMES (allow/deny decisions, governed-tool gating, file-path
+    gating) without touching files -- the same intents the old white-box tests
+    pinned, re-expressed against the public Configuration surface.
+
+    Args:
+        governed: Governed tool names the config reports.
+        bash: (allow, deny) tuple returned by ``bash_permissions()``.
+        file_patterns: Optional mapping of tool name -> (allow, deny) returned by
+            ``allow_deny_for()``. Missing tools resolve to empty patterns.
+        takeover: TakeoverConfig returned by ``takeover_mode()``.
+
+    Returns:
+        An object exposing the Configuration accessors that ``main`` consumes.
+    """
+    file_patterns = file_patterns or {}
+
+    class _FakeConfig:
+        def governed_tools(self_inner):
+            return tuple(governed)
+
+        def bash_permissions(self_inner):
+            return bash
+
+        def allow_deny_for(self_inner, tool_name):
+            return file_patterns.get(tool_name, ((), ()))
+
+        def takeover_mode(self_inner):
+            return takeover
+
+        def config_sync_settings(self_inner):
+            return MappingProxyType(
+                {'auto_migrate': False, 'backup_dir': 'logs/config-backups', 'auto_sort_on_migrate': True}
+            )
+
+        def validation_issues(self_inner):
+            return ()
+
+    return _FakeConfig()
+
 
 class TestHookToolGovernance(unittest.TestCase):
     """Test that hook correctly governs different tools."""
 
     def test_bash_tool_is_governed(self):
-        """Test that Bash tool is governed (checked against permissions)."""
+        """
+        Given Bash is governed and 'git *' is an allow pattern
+        When main() processes a 'git status' Bash invocation
+        Then the hook output decision is 'allow'
+        """
         hook_input = {
             'tool_name': 'Bash',
             'tool_input': {'command': 'git status'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Bash'], bash=(['git *'], []))
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Bash']):
-                    with patch('toolguard.hook.load_permissions', return_value=(['git *'], [])):
-                        with patch('toolguard.hook.log_command'):
-                            try:
-                                main()
-                            except SystemExit:
-                                pass
+                with patch('toolguard.hook.load_configuration', return_value=config):
+                    with patch('toolguard.hook.log_command'):
+                        try:
+                            main()
+                        except SystemExit:
+                            pass
 
-                            output = json.loads(mock_stdout.getvalue())
-                            # Should be allowed because 'git status' matches 'git *'
-                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                        output = json.loads(mock_stdout.getvalue())
+                        # Should be allowed because 'git status' matches 'git *'
+                        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
 
     def test_jetbrains_terminal_is_governed(self):
-        """Test that JetBrains terminal tool can be governed."""
+        """
+        Given the JetBrains terminal tool is in the governed list and 'git *' is allowed
+        When main() processes a 'git status' invocation of that tool
+        Then the hook output decision is 'allow'
+        """
         hook_input = {
             'tool_name': 'mcp__jetbrains__execute_terminal_command',
             'tool_input': {'command': 'git status'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(
+            governed=['Bash', 'mcp__jetbrains__execute_terminal_command'],
+            bash=(['git *'], []),
+        )
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch(
-                    'toolguard.hook.load_governed_tools',
-                    return_value=['Bash', 'mcp__jetbrains__execute_terminal_command'],
-                ):
-                    with patch('toolguard.hook.load_permissions', return_value=(['git *'], [])):
-                        with patch('toolguard.hook.log_command'):
-                            try:
-                                main()
-                            except SystemExit:
-                                pass
+                with patch('toolguard.hook.load_configuration', return_value=config):
+                    with patch('toolguard.hook.log_command'):
+                        try:
+                            main()
+                        except SystemExit:
+                            pass
 
-                            output = json.loads(mock_stdout.getvalue())
-                            # Should be allowed because tool is governed and command matches
-                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                        output = json.loads(mock_stdout.getvalue())
+                        # Should be allowed because tool is governed and command matches
+                        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
 
     def test_ungoverned_tool_is_allowed(self):
-        """Test that tools not in governed list are allowed through."""
+        """
+        Given only Bash is governed
+        When main() processes an invocation of an ungoverned tool
+        Then the decision is 'allow' and the reason states it is not a governed tool
+        """
         hook_input = {
             'tool_name': 'SomeOtherTool',
             'tool_input': {'command': 'dangerous command'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Bash'])
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Bash']):
-                    # No need to mock permissions since tool shouldn't be checked
+                with patch('toolguard.hook.load_configuration', return_value=config):
                     try:
                         main()
                     except SystemExit:
@@ -100,7 +167,11 @@ class TestHookInputParsing(unittest.TestCase):
     """Test hook input parsing."""
 
     def test_parse_valid_input(self):
-        """Test parsing valid JSON input."""
+        """
+        Given valid hook JSON on stdin
+        When parse_hook_input() reads it
+        Then the parsed dict exposes the tool_name and tool_input command
+        """
         hook_input = {
             'tool_name': 'Bash',
             'tool_input': {'command': 'git status'},
@@ -113,7 +184,11 @@ class TestHookInputParsing(unittest.TestCase):
             self.assertEqual(result['tool_input']['command'], 'git status')
 
     def test_parse_missing_required_field(self):
-        """Test that missing required field raises ValueError."""
+        """
+        Given hook JSON on stdin missing the tool_input field
+        When parse_hook_input() reads it
+        Then a ValueError mentioning tool_input is raised
+        """
         hook_input = {
             'tool_name': 'Bash',
             # Missing tool_input
@@ -126,7 +201,11 @@ class TestHookInputParsing(unittest.TestCase):
             self.assertIn('tool_input', str(ctx.exception))
 
     def test_parse_empty_input(self):
-        """Test that empty input raises ValueError."""
+        """
+        Given empty stdin
+        When parse_hook_input() reads it
+        Then a ValueError mentioning 'Empty input' is raised
+        """
         with patch('sys.stdin', StringIO('')):
             with self.assertRaises(ValueError) as ctx:
                 parse_hook_input()
@@ -137,13 +216,21 @@ class TestHookOutput(unittest.TestCase):
     """Test hook output formatting."""
 
     def test_create_allow_output(self):
-        """Test creating allow output."""
+        """
+        Given an allow decision and a reason string
+        When create_hook_output() builds the response
+        Then the hookSpecificOutput carries decision 'allow' and the given reason
+        """
         output = create_hook_output('allow', 'Command matches allow pattern')
         self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
         self.assertEqual(output['hookSpecificOutput']['permissionDecisionReason'], 'Command matches allow pattern')
 
     def test_create_deny_output(self):
-        """Test creating deny output."""
+        """
+        Given a deny decision and a reason string
+        When create_hook_output() builds the response
+        Then the hookSpecificOutput carries decision 'deny' and the given reason
+        """
         output = create_hook_output('deny', 'Command matches deny pattern')
         self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(output['hookSpecificOutput']['permissionDecisionReason'], 'Command matches deny pattern')
@@ -153,7 +240,11 @@ class TestFilePathTools(unittest.TestCase):
     """Test file path tool constants and identification."""
 
     def test_file_path_tools_constant(self):
-        """Test that FILE_PATH_TOOLS contains expected tools."""
+        """
+        Given the FILE_PATH_TOOLS constant
+        When its membership and size are inspected
+        Then it contains exactly Read, Write, and Edit
+        """
         self.assertIn('Read', FILE_PATH_TOOLS)
         self.assertIn('Write', FILE_PATH_TOOLS)
         self.assertIn('Edit', FILE_PATH_TOOLS)
@@ -164,7 +255,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
     """Test file path permission checking with GLOB patterns."""
 
     def test_simple_glob_match(self):
-        """Test simple glob pattern matching."""
+        """
+        Given an allow pattern '/tmp/*' and no deny patterns
+        When check_file_path_permission evaluates '/tmp/test.txt'
+        Then the decision is 'allow'
+        """
         allow_patterns = ['/tmp/*']
         deny_patterns = []
 
@@ -172,7 +267,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertEqual(decision, 'allow')
 
     def test_globstar_recursive_match(self):
-        """Test ** globstar matches nested paths."""
+        """
+        Given an allow pattern '/tmp/**'
+        When check_file_path_permission evaluates a deeply nested path under /tmp
+        Then the decision is 'allow' because ** matches across separators
+        """
         allow_patterns = ['/tmp/**']
         deny_patterns = []
 
@@ -181,7 +280,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertEqual(decision, 'allow')
 
     def test_single_star_does_not_match_nested(self):
-        """Test * does not match path separators (unlike **)."""
+        """
+        Given an allow pattern '/tmp/*'
+        When check_file_path_permission evaluates a nested path '/tmp/subdir/file.txt'
+        Then the decision is 'deny' because a single * does not cross separators
+        """
         allow_patterns = ['/tmp/*']
         deny_patterns = []
 
@@ -190,7 +293,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertEqual(decision, 'deny')
 
     def test_deny_takes_precedence(self):
-        """Test deny patterns are checked first."""
+        """
+        Given an allow pattern that matches and a deny pattern that also matches
+        When check_file_path_permission evaluates the path
+        Then the decision is 'deny' because deny is checked first
+        """
         allow_patterns = ['/tmp/**']
         deny_patterns = ['/tmp/secret/**']
 
@@ -199,7 +306,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertEqual(decision, 'deny')
 
     def test_no_match_returns_deny(self):
-        """Test that paths not matching any allow pattern are denied."""
+        """
+        Given an allow pattern '/home/**' that does not match the target path
+        When check_file_path_permission evaluates '/tmp/file.txt'
+        Then the decision is 'deny' and the reason says it does not match
+        """
         allow_patterns = ['/home/**']
         deny_patterns = []
 
@@ -208,7 +319,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertIn('does not match', reason)
 
     def test_tilde_expansion(self):
-        """Test that tilde is expanded in patterns and paths."""
+        """
+        Given an allow pattern using '~/projects/**'
+        When check_file_path_permission evaluates an absolute path under the expanded home
+        Then the decision is 'allow' because the tilde is expanded before matching
+        """
         import os
 
         home = os.path.expanduser('~')
@@ -220,7 +335,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         self.assertEqual(decision, 'allow')
 
     def test_file_extension_pattern(self):
-        """Test glob pattern with file extensions."""
+        """
+        Given an allow pattern '/tmp/**/*.txt'
+        When check_file_path_permission evaluates a .txt path and a .py path
+        Then the .txt path is allowed and the .py path is denied
+        """
         allow_patterns = ['/tmp/**/*.txt']
         deny_patterns = []
 
@@ -242,7 +361,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
     """
 
     def test_regex_prefix_matches_file_path(self):
-        """A [regex]... pattern (from Write([regex]...)) must match via re.search."""
+        """
+        Given an allow pattern carrying a [regex] prefix
+        When check_file_path_permission evaluates a path matching that regex
+        Then the decision is 'allow' and the reason notes the [regex] match
+        """
         allow_patterns = ['[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*']
         deny_patterns = []
 
@@ -253,7 +376,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertIn('[regex]', reason)
 
     def test_regex_prefix_does_not_match_other_paths(self):
-        """A [regex]... pattern must not allow paths outside its pattern."""
+        """
+        Given an allow pattern carrying a [regex] prefix
+        When check_file_path_permission evaluates a path outside that regex
+        Then the decision is 'deny'
+        """
         allow_patterns = ['[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*']
         deny_patterns = []
 
@@ -263,7 +390,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertEqual(decision, 'deny')
 
     def test_glob_prefix_matches_file_path(self):
-        """A [glob]... pattern (from Write([glob]...)) must match via globstar glob."""
+        """
+        Given an allow pattern carrying a [glob] prefix with globstars
+        When check_file_path_permission evaluates a matching nested path
+        Then the decision is 'allow' and the reason notes the [glob] match
+        """
         allow_patterns = ['[glob]/Users/*/projects/**/memory/**']
         deny_patterns = []
 
@@ -274,7 +405,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertIn('[glob]', reason)
 
     def test_glob_prefix_single_star_no_recursion(self):
-        """[glob] must distinguish * (single level) from ** (recursive)."""
+        """
+        Given a [glob]/tmp/* pattern and a [glob]/tmp/** pattern
+        When check_file_path_permission evaluates a nested path against each
+        Then the single-star pattern denies but the globstar pattern allows
+        """
         allow_patterns = ['[glob]/tmp/*']
         deny_patterns = []
 
@@ -291,7 +426,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertEqual(decision, 'allow')
 
     def test_regex_prefix_in_deny_list(self):
-        """[regex] patterns in deny list block matching paths."""
+        """
+        Given a broad [glob] allow pattern and a [regex] deny pattern for .env files
+        When check_file_path_permission evaluates a matching .env path
+        Then the decision is 'deny' and the reason cites the deny pattern
+        """
         allow_patterns = ['[glob]/Users/*/**']
         deny_patterns = ['[regex]\\.env(\\.|$)']
 
@@ -302,7 +441,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertIn('deny pattern', reason)
 
     def test_default_pattern_still_works_like_glob(self):
-        """Backwards compat: patterns without a prefix continue to use glob semantics."""
+        """
+        Given an unprefixed allow pattern '/tmp/**'
+        When check_file_path_permission evaluates a nested path
+        Then the decision is 'allow', preserving glob semantics for backwards compatibility
+        """
         allow_patterns = ['/tmp/**']
         deny_patterns = []
 
@@ -312,7 +455,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertEqual(decision, 'allow')
 
     def test_extended_syntax_disabled_treats_prefix_as_literal(self):
-        """When extended_syntax=False, [regex]/[glob] prefixes are not parsed."""
+        """
+        Given a '[regex]^/tmp/.*' allow pattern
+        When check_file_path_permission evaluates '/tmp/file.txt' with extended_syntax on then off
+        Then it is allowed with extended syntax but denied without, where the prefix is a literal glob
+        """
         allow_patterns = ['[regex]^/tmp/.*']
         deny_patterns = []
 
@@ -329,7 +476,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         self.assertEqual(decision, 'deny')
 
     def test_native_prefix_matches_file_path(self):
-        """A [native]... pattern uses word-level segment matching against the path."""
+        """
+        Given an allow pattern carrying a [native] prefix with single-star segments
+        When check_file_path_permission evaluates a path matching those segments
+        Then the decision is 'allow'
+        """
         allow_patterns = ['[native]/Users/*/projects/*']
         deny_patterns = []
 
@@ -342,61 +493,81 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
 class TestLoadFilePathPatterns(unittest.TestCase):
     """Test loading file path patterns from config."""
 
+    @staticmethod
+    def _config_from_permissions(permissions):
+        """Build a one-layer Configuration whose native layer holds permissions."""
+        layer = ConfigLayer(
+            Provenance('project', 'claude', 'json', Path('/fake/.claude/settings.local.json')),
+            MappingProxyType({'permissions': permissions}),
+        )
+        return Configuration(layers=(layer,))
+
     def test_load_patterns_from_config(self):
-        """Test loading Read patterns from config files."""
-        mock_config = {
-            'permissions': {
+        """
+        Given a config with allow/deny entries for Read, Write, and Bash
+        When load_file_path_patterns is asked for 'Read'
+        Then only the Read allow and deny patterns are returned, unwrapped
+        """
+        config = self._config_from_permissions(
+            {
                 'allow': ['Read(/tmp/**)', 'Read(/home/**)', 'Write(/tmp/*)', 'Bash(git status:*)'],
                 'deny': ['Read(/tmp/secret/**)'],
             }
-        }
+        )
 
-        with patch('toolguard.hook.discover_config_files', return_value=[('/fake/path', 'claude', 'json')]):
-            with patch('builtins.open', unittest.mock.mock_open(read_data=json.dumps(mock_config))):
-                allow, deny = load_file_path_patterns('Read')
+        # Pass the config in directly so the adapter routes through the public
+        # Configuration surface rather than opening files.
+        allow, deny = load_file_path_patterns('Read', config=config)
 
-                # Should only get Read patterns, not Write or Bash
-                self.assertEqual(len(allow), 2)
-                self.assertIn('/tmp/**', allow)
-                self.assertIn('/home/**', allow)
+        # Should only get Read patterns, not Write or Bash
+        self.assertEqual(len(allow), 2)
+        self.assertIn('/tmp/**', allow)
+        self.assertIn('/home/**', allow)
 
-                # Should get deny patterns for Read
-                self.assertEqual(len(deny), 1)
-                self.assertIn('/tmp/secret/**', deny)
+        # Should get deny patterns for Read
+        self.assertEqual(len(deny), 1)
+        self.assertIn('/tmp/secret/**', deny)
 
     def test_load_write_patterns(self):
-        """Test loading Write patterns from config files."""
-        mock_config = {
-            'permissions': {
+        """
+        Given a config with allow entries for Read and Write
+        When load_file_path_patterns is asked for 'Write'
+        Then only the two Write patterns are returned, unwrapped
+        """
+        config = self._config_from_permissions(
+            {
                 'allow': ['Read(/tmp/**)', 'Write(/tmp/*)', 'Write(~/projects/**)'],
                 'deny': [],
             }
-        }
+        )
 
-        with patch('toolguard.hook.discover_config_files', return_value=[('/fake/path', 'claude', 'json')]):
-            with patch('builtins.open', unittest.mock.mock_open(read_data=json.dumps(mock_config))):
-                allow, deny = load_file_path_patterns('Write')
+        allow, deny = load_file_path_patterns('Write', config=config)
 
-                # Should only get Write patterns
-                self.assertEqual(len(allow), 2)
-                self.assertIn('/tmp/*', allow)
-                self.assertIn('~/projects/**', allow)
+        # Should only get Write patterns
+        self.assertEqual(len(allow), 2)
+        self.assertIn('/tmp/*', allow)
+        self.assertIn('~/projects/**', allow)
 
 
 class TestFilePathToolsInMain(unittest.TestCase):
     """Test that main() correctly handles file path tools."""
 
     def test_read_tool_allowed(self):
-        """Test Read tool with matching allow pattern."""
+        """
+        Given Read is governed and patterns allow '/tmp/**'
+        When main() processes a Read of '/tmp/test.txt'
+        Then the decision is 'allow'
+        """
         hook_input = {
             'tool_name': 'Read',
             'tool_input': {'file_path': '/tmp/test.txt'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Read', 'Write', 'Edit'])
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Read', 'Write', 'Edit']):
+                with patch('toolguard.hook.load_configuration', return_value=config):
                     with patch('toolguard.hook.load_file_path_patterns', return_value=(['/tmp/**'], [])):
                         with patch('toolguard.hook.log_command'):
                             with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
@@ -409,16 +580,21 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
 
     def test_write_tool_denied(self):
-        """Test Write tool denied when no matching pattern."""
+        """
+        Given Write is governed and patterns only allow '/tmp/**'
+        When main() processes a Write to '/etc/passwd'
+        Then the decision is 'deny'
+        """
         hook_input = {
             'tool_name': 'Write',
             'tool_input': {'file_path': '/etc/passwd'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Read', 'Write', 'Edit'])
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Read', 'Write', 'Edit']):
+                with patch('toolguard.hook.load_configuration', return_value=config):
                     with patch('toolguard.hook.load_file_path_patterns', return_value=(['/tmp/**'], [])):
                         with patch('toolguard.hook.log_command'):
                             with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
@@ -431,16 +607,21 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
 
     def test_edit_tool_with_deny_pattern(self):
-        """Test Edit tool blocked by deny pattern."""
+        """
+        Given Edit is governed with allow '/tmp/**' and deny '/tmp/secret/**'
+        When main() processes an Edit of '/tmp/secret/config.txt'
+        Then the decision is 'deny' and the reason cites the deny pattern
+        """
         hook_input = {
             'tool_name': 'Edit',
             'tool_input': {'file_path': '/tmp/secret/config.txt'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Read', 'Write', 'Edit'])
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Read', 'Write', 'Edit']):
+                with patch('toolguard.hook.load_configuration', return_value=config):
                     with patch(
                         'toolguard.hook.load_file_path_patterns', return_value=(['/tmp/**'], ['/tmp/secret/**'])
                     ):
@@ -456,16 +637,21 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 self.assertIn('deny pattern', output['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_read_no_file_path_denied(self):
-        """Test Read tool with missing file_path is denied."""
+        """
+        Given Read is governed but the tool input has no file_path
+        When main() processes the invocation
+        Then the decision is 'deny' and the reason mentions file_path
+        """
         hook_input = {
             'tool_name': 'Read',
             'tool_input': {},  # Missing file_path
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Read', 'Write', 'Edit'])
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Read', 'Write', 'Edit']):
+                with patch('toolguard.hook.load_configuration', return_value=config):
                     with patch('toolguard.hook.log_command'):
                         with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
                             try:
@@ -478,16 +664,21 @@ class TestFilePathToolsInMain(unittest.TestCase):
                             self.assertIn('file_path', output['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_read_no_allow_patterns_denied(self):
-        """Test Read tool with no allow patterns is denied."""
+        """
+        Given Read is governed but there are no allow patterns configured
+        When main() processes a Read of '/tmp/test.txt'
+        Then the decision is 'deny' and the reason notes there are no Read permissions
+        """
         hook_input = {
             'tool_name': 'Read',
             'tool_input': {'file_path': '/tmp/test.txt'},
             'hook_event_name': 'PreToolUse',
         }
 
+        config = _fake_config(governed=['Read', 'Write', 'Edit'])
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_governed_tools', return_value=['Read', 'Write', 'Edit']):
+                with patch('toolguard.hook.load_configuration', return_value=config):
                     with patch('toolguard.hook.load_file_path_patterns', return_value=([], [])):  # No patterns
                         with patch('toolguard.hook.log_command'):
                             with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
@@ -507,16 +698,19 @@ class TestStartupValidation(unittest.TestCase):
     """Test startup validation only validates toolguard_hook files."""
 
     def test_validation_ignores_settings_local_json(self):
-        """Test that validation does NOT warn about tools in settings.local.json.
+        """
+        Given a native settings.local.json listing unsupported tools alongside a valid toolguard_hook config
+        When _run_startup_validation runs and delegates to Configuration.validation_issues()
+        Then no error log warns about the native-only tools (WebSearch, WebFetch, mcp__unknown__tool)
 
-        Only toolguard_hook.toml/json files should be validated.
-        settings.local.json contains Claude's native permission format which
-        toolguard doesn't understand, so it should be ignored.
+        Only toolguard_hook.toml/json files should be validated; settings.local.json
+        holds Claude's native permission format which toolguard does not understand,
+        so its tools must never appear in the logged warnings.
         """
         import tempfile
-        from pathlib import Path
 
         import toolguard.hook as hook_module
+        from toolguard.config import Configuration
 
         # Reset validation flag for this test
         original_flag = hook_module._validation_done
@@ -532,40 +726,34 @@ class TestStartupValidation(unittest.TestCase):
                 logs_dir = project_dir / 'logs'
                 logs_dir.mkdir()
 
-                # Create settings.local.json with unsupported tools (should be IGNORED)
-                settings_local = {
-                    'permissions': {
-                        'allow': ['WebSearch', 'WebFetch', 'mcp__unknown__tool'],
-                    }
-                }
-                (claude_dir / 'settings.local.json').write_text(json.dumps(settings_local))
-
-                # Create toolguard_hook.toml with valid config (should be validated)
-                toolguard_toml = """
-governed_tools = ["Bash", "Read"]
-
-[permissions]
-allow = ["Bash(ls:*)", "Read(/tmp/**)"]
-"""
-                (claude_dir / 'toolguard_hook.toml').write_text(toolguard_toml)
+                # Native settings.local.json with unsupported tools (should be IGNORED)
+                native_layer = ConfigLayer(
+                    Provenance('project', 'claude', 'json', claude_dir / 'settings.local.json'),
+                    MappingProxyType(
+                        {'permissions': {'allow': ['WebSearch', 'WebFetch', 'mcp__unknown__tool']}}
+                    ),
+                )
+                # toolguard_hook with valid config (should be validated, no issues)
+                hook_layer = ConfigLayer(
+                    Provenance('project', 'toolguard_hook', 'toml', claude_dir / 'toolguard_hook.toml'),
+                    MappingProxyType(
+                        {
+                            'governed_tools': ['Bash', 'Read'],
+                            'permissions': {'allow': ['Bash(ls:*)', 'Read(/tmp/**)']},
+                        }
+                    ),
+                )
+                config = Configuration(layers=(native_layer, hook_layer))
 
                 env_config = {'log_dir': logs_dir}
 
                 with patch('toolguard.hook.find_project_root', return_value=project_dir):
-                    with patch('toolguard.hook.discover_config_files') as mock_discover:
-                        # Return both settings.local.json and toolguard_hook.toml
-                        mock_discover.return_value = [
-                            (claude_dir / 'settings.local.json', 'claude', 'json'),
-                            (claude_dir / 'toolguard_hook.toml', 'toolguard_hook', 'toml'),
-                        ]
+                    # Reset flag again before calling
+                    hook_module._validation_done = False
 
-                        # Reset flag again before calling
-                        hook_module._validation_done = False
+                    from toolguard.hook import _run_startup_validation
 
-                        # Import and call the validation function
-                        from toolguard.hook import _run_startup_validation
-
-                        _run_startup_validation(env_config, str(project_dir))
+                    _run_startup_validation(env_config, str(project_dir), config)
 
                 # Check log file - should NOT have warnings for WebSearch, WebFetch
                 # because those are in settings.local.json which is ignored
@@ -583,18 +771,95 @@ allow = ["Bash(ls:*)", "Read(/tmp/**)"]
             # Restore original flag
             hook_module._validation_done = original_flag
 
+    def test_validation_logs_issues_from_config(self):
+        """
+        Given a config whose validation_issues() returns one warning Issue
+        When _run_startup_validation runs
+        Then log_warning is called once with that issue's message and corrective steps
+        """
+        from toolguard.config import Issue
+        import toolguard.hook as hook_module
+
+        original_flag = hook_module._validation_done
+        hook_module._validation_done = False
+        try:
+            issue = Issue('warning', 'bad tool WebSearch', 'remove it')
+
+            class _IssueConfig:
+                def validation_issues(self_inner):
+                    return (issue,)
+
+            env_config = {'log_dir': Path('/fake/logs')}
+            with patch('toolguard.hook.log_warning') as mock_log_warning:
+                from toolguard.hook import _run_startup_validation
+
+                _run_startup_validation(env_config, '/some/dir', _IssueConfig())
+                mock_log_warning.assert_called_once_with('bad tool WebSearch', 'remove it', Path('/fake/logs'))
+        finally:
+            hook_module._validation_done = original_flag
+
+    def test_validation_loads_config_when_none(self):
+        """
+        Given no config argument is passed to _run_startup_validation
+        When it runs for a given directory
+        Then it calls load_configuration with that directory to obtain one itself
+        """
+        import toolguard.hook as hook_module
+
+        original_flag = hook_module._validation_done
+        hook_module._validation_done = False
+        try:
+            class _EmptyConfig:
+                def validation_issues(self_inner):
+                    return ()
+
+            env_config = {'log_dir': Path('/fake/logs')}
+            with patch('toolguard.hook.load_configuration', return_value=_EmptyConfig()) as mock_load:
+                with patch('toolguard.hook.log_warning'):
+                    from toolguard.hook import _run_startup_validation
+
+                    _run_startup_validation(env_config, '/some/dir')
+                    mock_load.assert_called_once_with('/some/dir')
+        finally:
+            hook_module._validation_done = original_flag
+
+
+class TestLoadFilePathPatternsAdapter(unittest.TestCase):
+    """load_file_path_patterns loads a config itself when none is passed."""
+
+    def test_loads_configuration_when_none(self):
+        """
+        Given no config is passed to load_file_path_patterns
+        When it is called for 'Read' with a directory
+        Then it loads a configuration for that directory and returns its Read allow/deny patterns
+        """
+        config = _fake_config(file_patterns={'Read': (('/tmp/**',), ('/tmp/secret/**',))})
+        with patch('toolguard.hook.load_configuration', return_value=config) as mock_load:
+            allow, deny = load_file_path_patterns('Read', '/some/dir')
+            mock_load.assert_called_once_with('/some/dir')
+            self.assertEqual(allow, ['/tmp/**'])
+            self.assertEqual(deny, ['/tmp/secret/**'])
+
 
 class TestParseCompoundMatchDetails(unittest.TestCase):
     """Test parsing of compound match details from reason strings."""
 
     def test_parse_two_subcommands(self):
-        """Test parsing reason with two sub-commands."""
+        """
+        Given a compound allow reason listing two sub-command -> rule mappings
+        When _parse_compound_match_details parses it
+        Then it returns the two (command, rule) pairs in order
+        """
         reason = 'All 2 sub-commands allowed: [git status -> git *, git log -> git *]'
         result = _parse_compound_match_details(reason)
         self.assertEqual(result, [('git status', 'git *'), ('git log', 'git *')])
 
     def test_parse_three_subcommands(self):
-        """Test parsing reason with three sub-commands."""
+        """
+        Given a compound allow reason listing three sub-command -> rule mappings
+        When _parse_compound_match_details parses it
+        Then it returns all three (command, rule) pairs in order
+        """
         reason = 'All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pattern -> grep *]'
         result = _parse_compound_match_details(reason)
         self.assertEqual(len(result), 3)
@@ -603,13 +868,21 @@ class TestParseCompoundMatchDetails(unittest.TestCase):
         self.assertEqual(result[2], ('grep pattern', 'grep *'))
 
     def test_non_compound_reason_returns_none(self):
-        """Test that non-compound reasons return None."""
+        """
+        Given a simple (non-compound) command allow reason
+        When _parse_compound_match_details parses it
+        Then it returns None
+        """
         reason = 'Command matches allow pattern: git *'
         result = _parse_compound_match_details(reason)
         self.assertIsNone(result)
 
     def test_simple_allow_reason_returns_none(self):
-        """Test that a simple allow reason returns None."""
+        """
+        Given a simple path-match allow reason
+        When _parse_compound_match_details parses it
+        Then it returns None
+        """
         reason = 'Path matches allow pattern: /tmp/**'
         result = _parse_compound_match_details(reason)
         self.assertIsNone(result)
@@ -620,7 +893,11 @@ class TestLogAllowedCommand(unittest.TestCase):
 
     @patch('toolguard.hook.log_command')
     def test_simple_command_logs_matched_rule(self, mock_log):
-        """Test that a simple allowed command logs with matched_rule."""
+        """
+        Given a simple allowed command and its single-rule allow reason
+        When _log_allowed_command runs
+        Then log_command is called once with status 'executed' and the matched rule
+        """
         _log_allowed_command('git status', 'Command matches allow pattern: git *', 'main', {})
         mock_log.assert_called_once_with(
             'git status', 'executed', matched_rule='git *', extra_info='main', config={}
@@ -628,7 +905,11 @@ class TestLogAllowedCommand(unittest.TestCase):
 
     @patch('toolguard.hook.log_command')
     def test_compound_command_logs_per_subcommand(self, mock_log):
-        """Test that a compound allowed command logs each sub-command separately."""
+        """
+        Given a compound allowed command with a two-sub-command allow reason
+        When _log_allowed_command runs
+        Then log_command is called once per sub-command with its own matched rule
+        """
         reason = 'All 2 sub-commands allowed: [git status -> git *, git log -> git *]'
         _log_allowed_command('git status && git log', reason, 'main', {})
         self.assertEqual(mock_log.call_count, 2)
@@ -637,7 +918,11 @@ class TestLogAllowedCommand(unittest.TestCase):
 
     @patch('toolguard.hook.log_command')
     def test_compound_three_commands(self, mock_log):
-        """Test compound command with three sub-commands."""
+        """
+        Given a compound allowed command with a three-sub-command allow reason
+        When _log_allowed_command runs
+        Then log_command is called three times, once per sub-command with its matched rule and agent
+        """
         reason = 'All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pat -> grep *]'
         _log_allowed_command('git status && cat file | grep pat', reason, 'sub-agent', {})
         self.assertEqual(mock_log.call_count, 3)

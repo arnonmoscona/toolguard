@@ -19,25 +19,17 @@ import re
 import sys
 from typing import Any, Dict, List, Tuple
 
-from toolguard.auto_migrate import load_config_sync_settings, run_auto_migration
+from toolguard.auto_migrate import run_auto_migration
 from toolguard.compound import check_compound_permission
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
-from toolguard.config import (
-    discover_config_files,
-    find_project_root,
-    load_governed_tools,
-    load_permissions,
-    load_takeover_mode_config,
-)
+from toolguard.config import find_project_root, load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
-from toolguard.config_validation import validate_permissions
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_warning
 from toolguard.log_writer import log_command
 from toolguard.normalization import expand_tilde
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
-from toolguard.toml_config import load_toml_config
 
 # Tools that operate on file paths (use GLOB matching)
 FILE_PATH_TOOLS = {'Read', 'Write', 'Edit'}
@@ -50,19 +42,24 @@ _validation_done = False
 _divergence_check_done = False
 
 
-def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None) -> None:
+def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None, config=None) -> None:
     """
     Run configuration validation once at startup.
 
-    Loads full config from discovered files and validates permissions.
-    Logs warnings for:
-    - Both TOML and JSON config files existing at same level
+    Obtains the resolved :class:`~toolguard.config.Configuration` and renders the
+    structured issues it reports. The hook performs NO file discovery, parsing,
+    or format branching here -- those concerns live entirely in the config
+    module. The hook only renders/logs the returned issues. Issues surfaced:
+    - Both TOML and JSON config files existing at the same level
     - Unsupported tools in permissions
     - Ungoverned tools in permissions
 
     Args:
         env_config: Environment configuration dict with log_dir
         start_dir: Directory to start searching for project root from. Defaults to cwd.
+        config: Pre-loaded Configuration to reuse. When None, one is loaded via
+            ``load_configuration(start_dir)`` so this function remains usable on
+            its own.
     """
     global _validation_done
     if _validation_done:
@@ -77,74 +74,13 @@ def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None) -
         except RuntimeError:
             return  # Can't log without log dir
 
-    # Discover config files and check for duplicates
-    config_files = discover_config_files(start_dir)
+    if config is None:
+        config = load_configuration(start_dir)
 
-    # Check for duplicate TOML+JSON at same level
-    seen_bases = {}  # base_name -> (path, format)
-    for path, source_type, file_format in config_files:
-        # Extract base name (e.g., 'toolguard_hook' from 'toolguard_hook.toml')
-        base_name = path.stem
-        parent = str(path.parent)
-        key = (parent, base_name)
-
-        if key in seen_bases:
-            prev_path, prev_format = seen_bases[key]
-            if prev_format != file_format:
-                log_warning(
-                    f'Both {base_name}.toml and {base_name}.json exist in {parent}',
-                    f'Remove one of the files to avoid confusion. TOML ({path.name}) is being used.',
-                    log_dir,
-                )
-        else:
-            seen_bases[key] = (path, file_format)
-
-    # Build merged config for validation - ONLY from toolguard_hook files
-    # (settings.local.json permissions are for Claude's native system, not toolguard)
-    merged_config = {'governed_tools': [], 'permissions': {'allow': [], 'deny': [], 'ask': []}}
-
-    for path, source_type, file_format in config_files:
-        # Only process toolguard_hook files for validation
-        if source_type != 'toolguard_hook':
-            continue
-
-        try:
-            if file_format == 'toml':
-                config = load_toml_config(path)
-            else:
-                with open(path, 'r') as f:
-                    config = json.load(f)
-
-            # Merge governed_tools
-            if 'governed_tools' in config:
-                for tool in config['governed_tools']:
-                    if tool not in merged_config['governed_tools']:
-                        merged_config['governed_tools'].append(tool)
-
-            # Merge additional_supported_tools
-            if 'additional_supported_tools' in config:
-                if 'additional_supported_tools' not in merged_config:
-                    merged_config['additional_supported_tools'] = []
-                for tool in config['additional_supported_tools']:
-                    if tool not in merged_config['additional_supported_tools']:
-                        merged_config['additional_supported_tools'].append(tool)
-
-            # Merge permissions
-            if 'permissions' in config:
-                for perm_type in ['allow', 'deny', 'ask']:
-                    if perm_type in config['permissions']:
-                        for perm in config['permissions'][perm_type]:
-                            if perm not in merged_config['permissions'][perm_type]:
-                                merged_config['permissions'][perm_type].append(perm)
-        except Exception:
-            continue  # Skip files that can't be loaded
-
-    # Run validation
-    warnings = validate_permissions(merged_config)
-
-    # Log each warning
-    for warning in warnings:
-        log_warning(warning['message'], warning['corrective_steps'], log_dir)
+    # The config module detects content-level issues and returns them; the hook
+    # only decides where to log. No files are opened or parsed here.
+    for issue in config.validation_issues():
+        log_warning(issue.message, issue.corrective_steps, log_dir)
 
 
 def parse_hook_input() -> Dict[str, Any]:
@@ -211,81 +147,29 @@ def create_hook_output(decision: str, reason: str) -> Dict[str, Any]:
     }
 
 
-def load_file_path_patterns(tool_name: str, start_dir: str = None) -> Tuple[List[str], List[str]]:
+def load_file_path_patterns(tool_name: str, start_dir: str = None, config=None) -> Tuple[List[str], List[str]]:
     """
     Load allow/deny patterns for file path tools (Read, Write, Edit).
 
-    Extracts patterns like 'Read(/tmp/**)' from the permissions config.
-    Respects takeover_mode: when enabled, filters out patterns from native Claude config
-    files that match ignored_allow_patterns (e.g. blanket 'Read(*)').
+    Thin adapter over the config abstraction: it asks the resolved
+    :class:`~toolguard.config.Configuration` for the flattened, de-duplicated
+    allow/deny patterns for ``tool_name`` (tool wrapper already stripped and
+    takeover filtering already applied per layer). The hook itself opens no
+    files and makes no format/location decisions.
 
     Args:
         tool_name: The tool name to load patterns for (Read, Write, or Edit)
         start_dir: Directory to start searching for project root from. Defaults to cwd.
+        config: Pre-loaded Configuration to reuse. When None, one is loaded via
+            ``load_configuration(start_dir)``.
 
     Returns:
         Tuple of (allow_patterns, deny_patterns) - path patterns without tool prefix
     """
-    config_files = discover_config_files(start_dir)
-
-    # Load takeover mode config for filtering
-    takeover_config = load_takeover_mode_config(start_dir)
-    takeover_enabled = takeover_config['enabled']
-
-    # Build normalized ignored patterns (strip tool wrappers to match extracted format)
-    ignored_patterns = set()
-    if takeover_enabled:
-        raw_ignored = takeover_config['ignored_allow_patterns'] + takeover_config['additional_ignored_patterns']
-        tool_prefixes = ['Bash(', 'Read(', 'Write(', 'Edit(', 'mcp__jetbrains__execute_terminal_command(']
-        for p in raw_ignored:
-            stripped = False
-            for tp in tool_prefixes:
-                if p.startswith(tp) and p.endswith(')'):
-                    ignored_patterns.add(p[len(tp):-1])
-                    stripped = True
-                    break
-            if not stripped:
-                ignored_patterns.add(p)
-
-    allow_patterns = []
-    deny_patterns = []
-
-    prefix = f'{tool_name}('
-    suffix = ')'
-
-    for file_path, source_type, file_format in config_files:
-        try:
-            if file_format == 'toml':
-                config = load_toml_config(file_path)
-            else:
-                with open(file_path, 'r') as f:
-                    config = json.load(f)
-        except (json.JSONDecodeError, IOError, Exception):
-            continue
-
-        permissions = config.get('permissions', {})
-
-        # Extract patterns for this tool from allow list
-        for perm in permissions.get('allow', []):
-            if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(suffix):
-                # Extract the path pattern between "ToolName(" and ")"
-                pattern = perm[len(prefix) : -1]
-
-                # Apply takeover mode filtering for native Claude config files
-                if takeover_enabled and source_type == 'claude' and pattern in ignored_patterns:
-                    continue
-
-                if pattern not in allow_patterns:
-                    allow_patterns.append(pattern)
-
-        # Extract patterns for this tool from deny list (never filtered)
-        for perm in permissions.get('deny', []):
-            if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(suffix):
-                pattern = perm[len(prefix) : -1]
-                if pattern not in deny_patterns:
-                    deny_patterns.append(pattern)
-
-    return allow_patterns, deny_patterns
+    if config is None:
+        config = load_configuration(start_dir)
+    allow, deny = config.allow_deny_for(tool_name)
+    return list(allow), list(deny)
 
 
 def _match_file_path_pattern(pattern: str, expanded_path: str, extended_syntax: bool) -> bool:
@@ -429,15 +313,29 @@ def main() -> None:
         tool_input = hook_data['tool_input']
         cwd = hook_data.get('cwd', None)
 
-        # Run startup validation (once per session) using cwd from hook input
-        _run_startup_validation(env_config, cwd)
+        # Obtain the resolved configuration once via the public abstraction.
+        # All file discovery, parsing, and format/location decisions live in the
+        # config module; the hook only consumes semantic accessors from here on.
+        config = load_configuration(cwd)
 
-        # Load takeover mode configuration and issue warning if enabled
-        takeover_config = load_takeover_mode_config(cwd)
-        if takeover_config['enabled']:
+        # Run startup validation (once per session), reusing the loaded config.
+        _run_startup_validation(env_config, cwd, config)
+
+        # Resolve takeover mode configuration and issue warning if enabled
+        takeover = config.takeover_mode()
+        if takeover.enabled:
             log_dir = env_config.get('log_dir')
             if log_dir:
                 issue_takeover_warning(log_dir, to_stdout=True, to_error_log=True)
+
+        # Divergence/auto-migration tooling still consumes a plain dict; build it
+        # from the resolved TakeoverConfig so those clients stay unchanged.
+        takeover_dict = {
+            'enabled': takeover.enabled,
+            'ignored_allow_patterns': list(takeover.ignored_allow_patterns),
+            'additional_ignored_patterns': list(takeover.additional_ignored_patterns),
+            'no_match_fallback': takeover.no_match_fallback,
+        }
 
         # Check for config divergence (once per session)
         global _divergence_check_done
@@ -447,16 +345,15 @@ def main() -> None:
             if log_dir:
                 try:
                     project_root = find_project_root(cwd)
-                    divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_config)
+                    divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_dict)
 
                     # Auto-migration: consolidate permissions if configured
                     if divergent_patterns:
-                        config_files = discover_config_files(cwd)
-                        config_sync = load_config_sync_settings(config_files)
+                        config_sync = config.config_sync_settings()
 
                         if config_sync['auto_migrate']:
                             # Auto-migration enabled - run it
-                            run_auto_migration(project_root, log_dir, config_sync, takeover_config)
+                            run_auto_migration(project_root, log_dir, dict(config_sync), takeover_dict)
                         else:
                             # Auto-migration disabled - warning already shown by check_and_warn_divergence
                             pass
@@ -465,8 +362,8 @@ def main() -> None:
                     # No project root found - skip divergence check
                     pass
 
-        # Load list of governed tools (using cwd from hook input for project discovery)
-        governed_tools = load_governed_tools(cwd)
+        # Resolve the list of governed tools via the config abstraction
+        governed_tools = list(config.governed_tools())
 
         # Only handle tools in the governed list
         if tool_name not in governed_tools:
@@ -491,8 +388,8 @@ def main() -> None:
                 print(json.dumps(output))
                 sys.exit(0)
 
-            # Load patterns for this specific tool
-            allow_patterns, deny_patterns = load_file_path_patterns(tool_name, cwd)
+            # Load patterns for this specific tool (reusing the loaded config)
+            allow_patterns, deny_patterns = load_file_path_patterns(tool_name, cwd, config)
 
             if not allow_patterns:
                 # No allow patterns - deny (fail closed)
@@ -535,11 +432,11 @@ def main() -> None:
             print(json.dumps(output))
             sys.exit(0)
 
-        # Load permissions from settings (using cwd from hook input for project discovery)
-        allow_patterns, deny_patterns = load_permissions(cwd)
+        # Resolve Bash command permissions via the config abstraction
+        allow_patterns, deny_patterns = config.bash_permissions()
 
-        # Use takeover mode configuration loaded earlier
-        # (takeover_config already loaded at startup for warning check)
+        # Use takeover mode configuration resolved earlier
+        # (takeover already resolved at startup for the warning check)
 
         if not allow_patterns:
             # No allow patterns - deny everything (fail closed)
@@ -554,8 +451,8 @@ def main() -> None:
         decision, reason = check_compound_permission(command, allow_patterns, deny_patterns, [], extended_syntax)
 
         # Apply takeover mode no_match_fallback if enabled and command was denied for not matching
-        if takeover_config['enabled'] and decision == 'deny' and 'does not match any allow patterns' in reason.lower():
-            if takeover_config['no_match_fallback'] == 'warn_deny':
+        if takeover.enabled and decision == 'deny' and 'does not match any allow patterns' in reason.lower():
+            if takeover.no_match_fallback == 'warn_deny':
                 reason = (
                     'Command does not match any allow patterns. '
                     'Consider adding a rule to toolguard_hook.toml to explicitly allow or deny this command.'

@@ -27,7 +27,11 @@ class TestMarkerFiles(unittest.TestCase):
     """Test marker file operations for once-per-day execution."""
 
     def test_get_marker_file_path(self):
-        """Test marker file path generation."""
+        """
+        Given a logs directory and a specific date
+        When get_marker_file_path builds the path
+        Then it is logs_dir/.toolguard-migration-YYYY-MM-DD for that date
+        """
         logs_dir = Path('/tmp/logs')
         test_date = date(2026, 2, 5)
 
@@ -36,7 +40,11 @@ class TestMarkerFiles(unittest.TestCase):
         self.assertEqual(marker_path, logs_dir / '.toolguard-migration-2026-02-05')
 
     def test_marker_exists_for_today_false(self):
-        """Test marker_exists_for_today returns False when no marker exists."""
+        """
+        Given an empty logs directory
+        When marker_exists_for_today is checked
+        Then it returns False
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -45,7 +53,11 @@ class TestMarkerFiles(unittest.TestCase):
             self.assertFalse(result)
 
     def test_marker_exists_for_today_true(self):
-        """Test marker_exists_for_today returns True when marker exists."""
+        """
+        Given today's migration marker exists in the logs directory
+        When marker_exists_for_today is checked
+        Then it returns True
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
             today_marker = get_marker_file_path(logs_dir, date.today())
@@ -56,7 +68,11 @@ class TestMarkerFiles(unittest.TestCase):
             self.assertTrue(result)
 
     def test_create_marker_file(self):
-        """Test creating marker file."""
+        """
+        Given a logs directory that does not yet exist
+        When create_marker_file runs
+        Then the directory is created and today's migration marker exists
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir) / 'logs'
 
@@ -67,7 +83,11 @@ class TestMarkerFiles(unittest.TestCase):
             self.assertTrue(logs_dir.exists())
 
     def test_cleanup_old_markers(self):
-        """Test cleanup of old marker files."""
+        """
+        Given migration markers for today, 5 days ago, and 10 days ago
+        When cleanup_old_markers runs with 7-day retention
+        Then the 10-day-old marker is deleted while today's and the recent one remain
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -90,7 +110,11 @@ class TestMarkerFiles(unittest.TestCase):
             self.assertFalse(old_marker.exists())
 
     def test_cleanup_old_markers_no_logs_dir(self):
-        """Test cleanup when logs directory doesn't exist."""
+        """
+        Given a logs directory that does not exist
+        When cleanup_old_markers runs
+        Then it completes without raising an error
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir) / 'nonexistent'
 
@@ -98,7 +122,11 @@ class TestMarkerFiles(unittest.TestCase):
             cleanup_old_markers(logs_dir, days=7)
 
     def test_cleanup_old_markers_invalid_filename(self):
-        """Test cleanup skips invalid marker filenames."""
+        """
+        Given an old valid marker and a marker with an unparseable date
+        When cleanup_old_markers runs with 7-day retention
+        Then the old valid marker is removed and the invalid-format one is preserved
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -120,7 +148,11 @@ class TestConfigSyncSettings(unittest.TestCase):
     """Test loading config_sync settings from config files."""
 
     def test_load_config_sync_defaults(self):
-        """Test default config_sync settings when no config files present."""
+        """
+        Given an empty list of config files
+        When load_config_sync_settings runs
+        Then it returns the documented defaults (auto_migrate off, default backup_dir, auto_sort on)
+        """
         config_files = []
 
         result = load_config_sync_settings(config_files)
@@ -130,7 +162,11 @@ class TestConfigSyncSettings(unittest.TestCase):
         self.assertEqual(result['auto_sort_on_migrate'], True)
 
     def test_load_config_sync_from_toml(self):
-        """Test loading config_sync from TOML file."""
+        """
+        Given a TOML hook file with an explicit config_sync section
+        When load_config_sync_settings runs
+        Then the auto_migrate, backup_dir, and auto_sort_on_migrate values are read from the file
+        """
         with TemporaryDirectory() as tmpdir:
             toml_file = Path(tmpdir) / 'toolguard_hook.toml'
             toml_file.write_text(
@@ -151,7 +187,11 @@ auto_sort_on_migrate = false
             self.assertEqual(result['auto_sort_on_migrate'], False)
 
     def test_load_config_sync_from_json(self):
-        """Test loading config_sync from JSON file."""
+        """
+        Given a JSON hook file with an explicit config_sync section
+        When load_config_sync_settings runs
+        Then the auto_migrate, backup_dir, and auto_sort_on_migrate values are read from the file
+        """
         with TemporaryDirectory() as tmpdir:
             json_file = Path(tmpdir) / 'toolguard_hook.json'
             json_file.write_text(
@@ -169,7 +209,11 @@ auto_sort_on_migrate = false
             self.assertEqual(result['auto_sort_on_migrate'], True)
 
     def test_load_config_sync_ignores_claude_files(self):
-        """Test that config_sync is only loaded from toolguard_hook files."""
+        """
+        Given a claude settings file that defines config_sync
+        When load_config_sync_settings runs
+        Then the claude file is ignored and defaults are returned
+        """
         with TemporaryDirectory() as tmpdir:
             claude_file = Path(tmpdir) / 'settings.local.json'
             claude_file.write_text(json.dumps({'config_sync': {'auto_migrate': True}}))
@@ -182,7 +226,11 @@ auto_sort_on_migrate = false
             self.assertEqual(result['auto_migrate'], False)
 
     def test_load_config_sync_partial_config(self):
-        """Test loading config_sync with partial settings (uses defaults for missing)."""
+        """
+        Given a TOML hook file setting only auto_migrate
+        When load_config_sync_settings runs
+        Then auto_migrate is taken from the file and the other keys fall back to defaults
+        """
         with TemporaryDirectory() as tmpdir:
             toml_file = Path(tmpdir) / 'toolguard_hook.toml'
             toml_file.write_text(
@@ -201,7 +249,11 @@ auto_migrate = true
             self.assertEqual(result['auto_sort_on_migrate'], True)  # default
 
     def test_load_config_sync_last_file_wins(self):
-        """Test that last config file wins for conflicting settings."""
+        """
+        Given two hook files setting conflicting auto_migrate values
+        When load_config_sync_settings merges them
+        Then the last file's value wins
+        """
         with TemporaryDirectory() as tmpdir:
             file1 = Path(tmpdir) / 'hook1.toml'
             file1.write_text('[config_sync]\nauto_migrate = false\n')
@@ -217,7 +269,11 @@ auto_migrate = true
             self.assertEqual(result['auto_migrate'], True)
 
     def test_load_config_sync_invalid_file(self):
-        """Test loading config_sync handles invalid files gracefully."""
+        """
+        Given an invalid TOML file followed by a valid one
+        When load_config_sync_settings runs
+        Then the invalid file is skipped and settings are loaded from the valid file
+        """
         with TemporaryDirectory() as tmpdir:
             invalid_toml = Path(tmpdir) / 'invalid.toml'
             invalid_toml.write_text('invalid toml content [[[')
@@ -240,7 +296,11 @@ class TestShouldRunMigration(unittest.TestCase):
     """Test should_run_migration logic."""
 
     def test_should_run_migration_no_marker(self):
-        """Test should_run_migration returns True when no marker exists."""
+        """
+        Given no migration marker exists for today
+        When should_run_migration is checked
+        Then it returns True
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -249,7 +309,11 @@ class TestShouldRunMigration(unittest.TestCase):
             self.assertTrue(result)
 
     def test_should_run_migration_marker_exists(self):
-        """Test should_run_migration returns False when marker exists."""
+        """
+        Given today's migration marker already exists
+        When should_run_migration is checked
+        Then it returns False
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
             create_marker_file(logs_dir)
@@ -263,7 +327,11 @@ class TestRunAutoMigration(unittest.TestCase):
     """Test run_auto_migration function."""
 
     def test_run_auto_migration_already_ran_today(self):
-        """Test auto-migration skips when already ran today."""
+        """
+        Given today's migration marker already exists
+        When run_auto_migration is invoked
+        Then it skips and returns False
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -280,7 +348,11 @@ class TestRunAutoMigration(unittest.TestCase):
             self.assertFalse(result)
 
     def test_run_auto_migration_no_settings_file(self):
-        """Test auto-migration when settings.local.json doesn't exist."""
+        """
+        Given no settings.local.json exists in the project
+        When run_auto_migration is invoked
+        Then it returns False because there is nothing to migrate
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -300,7 +372,11 @@ class TestRunAutoMigration(unittest.TestCase):
     def test_run_auto_migration_no_divergence(
         self, mock_discover, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
-        """Test auto-migration when no divergent patterns found."""
+        """
+        Given a settings file exists but native and toolguard permissions show no divergence
+        When run_auto_migration is invoked
+        Then it returns False because there is nothing to migrate
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -329,7 +405,11 @@ class TestRunAutoMigration(unittest.TestCase):
     def test_run_auto_migration_takeover_mode_ignored_patterns(
         self, mock_discover, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
-        """Test auto-migration respects takeover mode ignored patterns."""
+        """
+        Given takeover mode ignores Bash(*) and divergence detection filters it out
+        When run_auto_migration is invoked
+        Then no divergence remains and it returns False
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -365,7 +445,11 @@ class TestRunAutoMigration(unittest.TestCase):
     def test_run_auto_migration_success(
         self, mock_discover, mock_migrate, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
-        """Test successful auto-migration."""
+        """
+        Given a divergent native pattern and a migrate call that succeeds
+        When run_auto_migration is invoked
+        Then it returns True, creates today's marker, and calls migrate once
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -399,7 +483,11 @@ class TestRunAutoMigration(unittest.TestCase):
     def test_run_auto_migration_custom_backup_dir(
         self, mock_discover, mock_migrate, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
-        """Test auto-migration uses custom backup directory."""
+        """
+        Given config_sync specifies a custom backup_dir and auto_sort disabled
+        When run_auto_migration triggers a migration
+        Then migrate is called once with that backup directory and auto_sort=False
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'
@@ -434,7 +522,11 @@ class TestRunAutoMigration(unittest.TestCase):
     def test_run_auto_migration_migrate_failure(
         self, mock_discover, mock_migrate, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
-        """Test auto-migration handles migration failure gracefully."""
+        """
+        Given a divergent pattern but migrate returns a non-zero failure code
+        When run_auto_migration is invoked
+        Then it returns False and does not create today's marker
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             logs_dir = project_root / 'logs'

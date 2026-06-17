@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List
 
+from toolguard.config import config_sync_settings_from_sources
 from toolguard.config_divergence import (
     find_divergent_patterns,
     get_native_permissions,
@@ -120,53 +121,10 @@ def load_config_sync_settings(config_files: List[tuple]) -> Dict:
         }
         Returns defaults if no config_sync section found.
     """
-    default_config = {
-        'auto_migrate': False,  # OPT-IN for safety
-        'backup_dir': 'logs/config-backups',
-        'auto_sort_on_migrate': True,
-    }
-
-    # Filter to only toolguard_hook files
-    hook_files = [(path, fmt) for path, source_type, fmt in config_files if source_type == 'toolguard_hook']
-
-    if not hook_files:
-        return default_config
-
-    # Load config_sync from hook files (last one wins for conflicts)
-    merged_config = default_config.copy()
-
-    for path, fmt in hook_files:
-        try:
-            if fmt == 'toml':
-                import tomllib
-
-                with open(path, 'rb') as f:
-                    config = tomllib.load(f)
-            else:
-                import json
-
-                with open(path, 'r') as f:
-                    config = json.load(f)
-
-            config_sync = config.get('config_sync', {})
-            if not config_sync:
-                continue
-
-            # Update settings (last file wins)
-            if 'auto_migrate' in config_sync:
-                merged_config['auto_migrate'] = config_sync['auto_migrate']
-
-            if 'backup_dir' in config_sync:
-                merged_config['backup_dir'] = config_sync['backup_dir']
-
-            if 'auto_sort_on_migrate' in config_sync:
-                merged_config['auto_sort_on_migrate'] = config_sync['auto_sort_on_migrate']
-
-        except Exception as e:
-            print(f'Warning: Failed to load config_sync from {path}: {e}', file=sys.stderr)
-            continue
-
-    return merged_config
+    # Delegate parsing/format handling to the config module so this client never
+    # opens files or branches on file format. Last-occurrence-wins resolution
+    # and defaults are owned by the config module.
+    return config_sync_settings_from_sources(config_files)
 
 
 def should_run_migration(logs_dir: Path) -> bool:

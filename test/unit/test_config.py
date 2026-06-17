@@ -27,25 +27,41 @@ class TestPatternParsing(unittest.TestCase):
     """Test extended pattern syntax parsing."""
 
     def test_parse_default_pattern(self):
-        """Test parsing default patterns without prefix."""
+        """
+        Given a pattern string with no type prefix
+        When parse_pattern parses it
+        Then the type is DEFAULT and the pattern is returned unchanged
+        """
         pattern_type, pattern = parse_pattern('git *')
         self.assertEqual(pattern_type, PatternType.DEFAULT)
         self.assertEqual(pattern, 'git *')
 
     def test_parse_regex_pattern(self):
-        """Test parsing regex patterns with [regex] prefix."""
+        """
+        Given a pattern string prefixed with [regex]
+        When parse_pattern parses it
+        Then the type is REGEX and the prefix is stripped from the pattern body
+        """
         pattern_type, pattern = parse_pattern('[regex]^git (status|log).*')
         self.assertEqual(pattern_type, PatternType.REGEX)
         self.assertEqual(pattern, '^git (status|log).*')
 
     def test_parse_glob_pattern(self):
-        """Test parsing glob patterns with [glob] prefix."""
+        """
+        Given a pattern string prefixed with [glob]
+        When parse_pattern parses it
+        Then the type is GLOB and the prefix is stripped from the pattern body
+        """
         pattern_type, pattern = parse_pattern('[glob]/Users/*/projects/**/*.py')
         self.assertEqual(pattern_type, PatternType.GLOB)
         self.assertEqual(pattern, '/Users/*/projects/**/*.py')
 
     def test_parse_pattern_with_whitespace(self):
-        """Test that leading/trailing whitespace is stripped."""
+        """
+        Given a [regex] pattern with leading and trailing whitespace
+        When parse_pattern parses it
+        Then the type is REGEX and surrounding whitespace is stripped from the body
+        """
         pattern_type, pattern = parse_pattern('  [regex]test.*  ')
         self.assertEqual(pattern_type, PatternType.REGEX)
         self.assertEqual(pattern, 'test.*')
@@ -55,24 +71,40 @@ class TestPatternMatching(unittest.TestCase):
     """Test pattern matching with different types."""
 
     def test_match_regex_pattern(self):
-        """Test regex pattern matching."""
+        """
+        Given a REGEX pattern with an alternation (e.g. ^git (status|log))
+        When matched against commands inside and outside the alternation
+        Then matching commands match and non-matching ones do not
+        """
         self.assertTrue(match_pattern(PatternType.REGEX, r'^git (status|log)', 'git status'))
         self.assertTrue(match_pattern(PatternType.REGEX, r'^git (status|log)', 'git log'))
         self.assertFalse(match_pattern(PatternType.REGEX, r'^git (status|log)', 'git push'))
 
     def test_match_regex_anywhere(self):
-        """Test that regex patterns match anywhere in command."""
+        """
+        Given an unanchored REGEX pattern (e.g. \\.env)
+        When matched against commands where the pattern appears anywhere
+        Then it matches regardless of position in the command
+        """
         self.assertTrue(match_pattern(PatternType.REGEX, r'\.env', 'cat /path/.env'))
         self.assertTrue(match_pattern(PatternType.REGEX, r'\.env', 'cat .env'))
 
     def test_match_glob_pattern(self):
-        """Test glob pattern matching."""
+        """
+        Given a GLOB pattern with a trailing wildcard (e.g. 'git *')
+        When matched against commands starting with that prefix versus others
+        Then prefixed commands match and unrelated commands do not
+        """
         self.assertTrue(match_pattern(PatternType.GLOB, 'git *', 'git status'))
         self.assertTrue(match_pattern(PatternType.GLOB, 'git *', 'git log'))
         self.assertFalse(match_pattern(PatternType.GLOB, 'git *', 'cat file'))
 
     def test_match_invalid_regex(self):
-        """Test that invalid regex patterns don't crash."""
+        """
+        Given a malformed REGEX pattern
+        When match_pattern attempts to match a command against it
+        Then it returns False instead of raising
+        """
         self.assertFalse(match_pattern(PatternType.REGEX, '[invalid(regex', 'test'))
 
 
@@ -80,7 +112,11 @@ class TestConfigDiscovery(unittest.TestCase):
     """Test config file discovery in hierarchy."""
 
     def test_discover_with_project_configs(self):
-        """Test discovery when project configs exist."""
+        """
+        Given a project with .claude/settings.local.json and toolguard_hook.json present
+        When discover_config_files runs with the project root resolved
+        Then both project config files appear in the discovered config paths
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a project structure
             project_dir = Path(tmpdir) / 'project'
@@ -103,7 +139,11 @@ class TestConfigDiscovery(unittest.TestCase):
             self.assertIn(str(claude_dir / 'toolguard_hook.json'), config_paths)
 
     def test_discover_without_project_root(self):
-        """Test discovery when no project root is found."""
+        """
+        Given find_project_root raises RuntimeError (no project found)
+        When discover_config_files runs
+        Then it does not crash and returns a list (only user-level configs, if any)
+        """
         with patch('toolguard.config.find_project_root', side_effect=RuntimeError('No project')):
             configs = discover_config_files()
             # Should only find user-level configs (if they exist)
@@ -112,7 +152,11 @@ class TestConfigDiscovery(unittest.TestCase):
             self.assertIsInstance(configs, list)
 
     def test_discover_prioritizes_local_over_regular(self):
-        """Test that .local files come before regular files."""
+        """
+        Given a project with both settings.local.json and settings.json
+        When discover_config_files runs
+        Then settings.local.json appears before settings.json in the ordering
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -138,7 +182,11 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
     """Test loading permissions from a single file."""
 
     def test_load_empty_file(self):
-        """Test loading from file with no permissions."""
+        """
+        Given a JSON config file containing an empty object
+        When load_permissions_from_file reads it with format 'claude'
+        Then both allow and deny lists are empty
+        """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             json.dump({}, f)
             f.flush()
@@ -152,7 +200,11 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath.unlink()
 
     def test_load_with_bash_permissions(self):
-        """Test loading Bash permissions from file."""
+        """
+        Given a config file with Bash() allow and deny permissions
+        When load_permissions_from_file reads it with format 'claude'
+        Then the Bash patterns are returned with the Bash() wrapper stripped
+        """
         config = {'permissions': {'allow': ['Bash(git *)', 'Bash(ls *)'], 'deny': ['Bash(rm *)']}}
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -168,7 +220,11 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath.unlink()
 
     def test_load_ignores_non_bash_permissions(self):
-        """Test that non-Bash permissions are ignored."""
+        """
+        Given a config file mixing Bash() entries with Read()/Write()/Edit() entries
+        When load_permissions_from_file reads it with format 'claude'
+        Then only the Bash patterns are returned and the rest are ignored
+        """
         config = {'permissions': {'allow': ['Bash(git *)', 'Read(*)', 'Write(*)'], 'deny': ['Bash(rm *)', 'Edit(*)']}}
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -184,7 +240,11 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath.unlink()
 
     def test_load_invalid_json_returns_empty(self):
-        """Test that invalid JSON returns empty lists with warning."""
+        """
+        Given a config file containing invalid JSON
+        When load_permissions_from_file reads it
+        Then it returns empty allow and deny lists instead of raising
+        """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             f.write('invalid json{]')
             f.flush()
@@ -202,26 +262,42 @@ class TestMergePermissions(unittest.TestCase):
     """Test merging permissions from multiple sources."""
 
     def test_merge_empty_lists(self):
-        """Test merging when all lists are empty."""
+        """
+        Given an empty list of permission sources
+        When merge_permissions is called
+        Then it returns a pair of empty allow and deny lists
+        """
         result = merge_permissions([])
         self.assertEqual(result, ([], []))
 
     def test_merge_single_source(self):
-        """Test merging from a single source."""
+        """
+        Given a single (allow, deny) permission source
+        When merge_permissions is called
+        Then its allow and deny lists are returned unchanged
+        """
         perms = [(['git *', 'ls *'], ['rm *'])]
         allow, deny = merge_permissions(perms)
         self.assertEqual(allow, ['git *', 'ls *'])
         self.assertEqual(deny, ['rm *'])
 
     def test_merge_multiple_sources(self):
-        """Test merging from multiple sources."""
+        """
+        Given several (allow, deny) permission sources with distinct patterns
+        When merge_permissions is called
+        Then the allow and deny lists contain the union of all source patterns
+        """
         perms = [(['git *'], ['rm *']), (['ls *'], ['mv *']), (['cat *'], [])]
         allow, deny = merge_permissions(perms)
         self.assertEqual(set(allow), {'git *', 'ls *', 'cat *'})
         self.assertEqual(set(deny), {'rm *', 'mv *'})
 
     def test_merge_removes_duplicates(self):
-        """Test that duplicates are removed."""
+        """
+        Given permission sources sharing some identical allow and deny patterns
+        When merge_permissions is called
+        Then duplicate patterns are collapsed so each appears only once
+        """
         perms = [
             (['git *', 'ls *'], ['rm *']),
             (['git *', 'cat *'], ['rm *', 'mv *']),
@@ -232,7 +308,11 @@ class TestMergePermissions(unittest.TestCase):
         self.assertEqual(len(deny), 2)  # rm, mv
 
     def test_merge_preserves_order(self):
-        """Test that first occurrence order is preserved."""
+        """
+        Given permission sources where a later source repeats an earlier allow pattern
+        When merge_permissions is called
+        Then patterns keep their first-occurrence order in the merged allow list
+        """
         perms = [
             (['a', 'b', 'c'], []),
             (['b', 'd'], []),  # 'b' is duplicate
@@ -249,7 +329,11 @@ class TestLoadPermissions(unittest.TestCase):
     """Test the main load_permissions function."""
 
     def test_load_with_claude_settings_path_env(self):
-        """Test that CLAUDE_SETTINGS_PATH takes precedence."""
+        """
+        Given CLAUDE_SETTINGS_PATH pointing at a config file with a Bash allow pattern
+        When load_permissions is called
+        Then permissions are read from that file, taking precedence over the hierarchy
+        """
         config = {'permissions': {'allow': ['Bash(git *)'], 'deny': []}}
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -266,7 +350,11 @@ class TestLoadPermissions(unittest.TestCase):
             Path(filepath).unlink()
 
     def test_load_without_env_uses_hierarchy(self):
-        """Test that hierarchy is used when env var not set."""
+        """
+        Given no CLAUDE_SETTINGS_PATH set and a project config file in the hierarchy
+        When load_permissions is called
+        Then permissions are discovered from the project hierarchy config
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -287,7 +375,11 @@ class TestLoadPermissions(unittest.TestCase):
                     self.assertEqual(allow, ['git *'])
 
     def test_load_with_no_configs_returns_empty(self):
-        """Test that no configs returns empty lists."""
+        """
+        Given no CLAUDE_SETTINGS_PATH, no discoverable project, and no existing config files
+        When load_permissions is called
+        Then it returns empty allow and deny lists
+        """
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop('CLAUDE_SETTINGS_PATH', None)
             with patch('toolguard.config.find_project_root', side_effect=RuntimeError('No project')):
@@ -301,7 +393,11 @@ class TestLoadGovernedTools(unittest.TestCase):
     """Test loading governed tools configuration."""
 
     def test_load_governed_tools_default(self):
-        """Test that default is ['Bash'] when not configured."""
+        """
+        Given no config files and no project root
+        When load_governed_tools is called
+        Then it returns the default governed tools list ['Bash']
+        """
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop('CLAUDE_SETTINGS_PATH', None)
             with patch('toolguard.config.find_project_root', side_effect=RuntimeError('No project')):
@@ -310,7 +406,11 @@ class TestLoadGovernedTools(unittest.TestCase):
                     self.assertEqual(tools, ['Bash'])
 
     def test_load_governed_tools_from_config(self):
-        """Test loading governed tools from toolguard_hook.json."""
+        """
+        Given a toolguard_hook.json declaring a governed_tools list
+        When load_governed_tools is called with the project root resolved
+        Then the configured governed tools are returned
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -330,7 +430,11 @@ class TestLoadGovernedTools(unittest.TestCase):
                     self.assertEqual(tools, ['Bash', 'mcp__jetbrains__execute_terminal_command'])
 
     def test_load_governed_tools_merges_sources(self):
-        """Test that governed_tools from multiple files are merged (union)."""
+        """
+        Given two hook files declaring overlapping governed_tools lists
+        When load_governed_tools is called
+        Then the result is the de-duplicated union of all declared tools
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -362,7 +466,11 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
     """Test loading governed tools from a single file."""
 
     def test_load_from_valid_file(self):
-        """Test loading from a file with governed_tools."""
+        """
+        Given a file declaring a governed_tools list
+        When load_governed_tools_from_file reads it
+        Then the declared tools are returned in order
+        """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             config = {'governed_tools': ['Bash', 'OtherTool']}
             json.dump(config, f)
@@ -376,12 +484,20 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
             filepath.unlink()
 
     def test_load_from_missing_file(self):
-        """Test that missing file returns empty list."""
+        """
+        Given a path to a nonexistent file
+        When load_governed_tools_from_file is called
+        Then it returns an empty list
+        """
         tools = load_governed_tools_from_file(Path('/nonexistent/file.json'))
         self.assertEqual(tools, [])
 
     def test_load_from_file_without_governed_tools(self):
-        """Test that file without governed_tools returns empty list."""
+        """
+        Given a config file that has no governed_tools key
+        When load_governed_tools_from_file reads it
+        Then it returns an empty list
+        """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             config = {'other_key': 'value'}
             json.dump(config, f)
@@ -395,7 +511,11 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
             filepath.unlink()
 
     def test_load_ignores_non_string_values(self):
-        """Test that non-string values in governed_tools are filtered out."""
+        """
+        Given a governed_tools list mixing strings with non-string values (int, None)
+        When load_governed_tools_from_file reads it
+        Then only the string entries are returned
+        """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             config = {'governed_tools': ['Bash', 123, None, 'OtherTool']}
             json.dump(config, f)
@@ -413,24 +533,40 @@ class TestMergeGovernedTools(unittest.TestCase):
     """Test merging governed tools from multiple sources."""
 
     def test_merge_single_list(self):
-        """Test merging a single list."""
+        """
+        Given a single governed-tools list
+        When merge_governed_tools is called
+        Then the list is returned unchanged
+        """
         result = merge_governed_tools([['Bash', 'Tool1']])
         self.assertEqual(result, ['Bash', 'Tool1'])
 
     def test_merge_multiple_lists(self):
-        """Test merging multiple lists."""
+        """
+        Given several governed-tools lists with no overlap
+        When merge_governed_tools is called
+        Then all tools are concatenated in order
+        """
         result = merge_governed_tools([['Bash'], ['Tool1', 'Tool2'], ['Tool3']])
         self.assertEqual(result, ['Bash', 'Tool1', 'Tool2', 'Tool3'])
 
     def test_merge_removes_duplicates(self):
-        """Test that duplicates are removed."""
+        """
+        Given governed-tools lists that share a common tool
+        When merge_governed_tools is called
+        Then the shared tool appears only once in the result
+        """
         result = merge_governed_tools([['Bash', 'Tool1'], ['Bash', 'Tool2']])
         self.assertEqual(result, ['Bash', 'Tool1', 'Tool2'])
         # Verify no duplicates
         self.assertEqual(len(result), len(set(result)))
 
     def test_merge_preserves_order(self):
-        """Test that first occurrence order is preserved."""
+        """
+        Given governed-tools lists where a later list repeats an earlier tool
+        When merge_governed_tools is called
+        Then tools keep their first-occurrence order in the merged result
+        """
         result = merge_governed_tools([['A', 'B'], ['C'], ['B', 'D']])
         # 'B' appears first in first list, so it should come before 'C'
         self.assertEqual(result.index('A'), 0)
@@ -439,7 +575,11 @@ class TestMergeGovernedTools(unittest.TestCase):
         self.assertEqual(result.index('D'), 3)
 
     def test_merge_empty_lists(self):
-        """Test merging empty lists."""
+        """
+        Given an empty collection of governed-tools lists
+        When merge_governed_tools is called
+        Then it returns an empty list
+        """
         result = merge_governed_tools([])
         self.assertEqual(result, [])
 

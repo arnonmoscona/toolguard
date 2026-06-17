@@ -23,7 +23,11 @@ class TestGetMarkerFilePath(unittest.TestCase):
     """Test marker file path generation."""
 
     def test_generates_correct_path(self):
-        """Test that marker file path uses correct format."""
+        """
+        Given a logs directory and a specific date
+        When get_marker_file_path builds the path
+        Then it is logs_dir/.toolguard-warned-YYYY-MM-DD for that date
+        """
         logs_dir = Path('/tmp/logs')
         test_date = date(2025, 1, 15)
 
@@ -33,7 +37,11 @@ class TestGetMarkerFilePath(unittest.TestCase):
         self.assertEqual(result, expected)
 
     def test_uses_iso_date_format(self):
-        """Test that date format is YYYY-MM-DD."""
+        """
+        Given a logs directory and a date
+        When get_marker_file_path builds the path
+        Then the marker name ends with the ISO date (YYYY-MM-DD)
+        """
         logs_dir = Path('/var/log')
         test_date = date(2024, 12, 31)
 
@@ -42,7 +50,11 @@ class TestGetMarkerFilePath(unittest.TestCase):
         self.assertTrue(result.name.endswith('2024-12-31'))
 
     def test_includes_leading_dot(self):
-        """Test that marker file name starts with dot (hidden file)."""
+        """
+        Given a logs directory and today's date
+        When get_marker_file_path builds the path
+        Then the marker name starts with '.toolguard-warned-', making it a hidden file
+        """
         logs_dir = Path('/logs')
         test_date = date.today()
 
@@ -55,7 +67,11 @@ class TestMarkerExistsForToday(unittest.TestCase):
     """Test marker file existence checking."""
 
     def test_returns_true_when_marker_exists(self):
-        """Test detection of existing marker file."""
+        """
+        Given a marker file for today exists in the logs directory
+        When marker_exists_for_today is checked
+        Then it returns True
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
             today_marker = get_marker_file_path(logs_dir, date.today())
@@ -66,7 +82,11 @@ class TestMarkerExistsForToday(unittest.TestCase):
             self.assertTrue(result)
 
     def test_returns_false_when_marker_missing(self):
-        """Test detection of missing marker file."""
+        """
+        Given an empty logs directory with no marker for today
+        When marker_exists_for_today is checked
+        Then it returns False
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -75,7 +95,11 @@ class TestMarkerExistsForToday(unittest.TestCase):
             self.assertFalse(result)
 
     def test_returns_false_when_directory_missing(self):
-        """Test handling of non-existent log directory."""
+        """
+        Given a logs directory path that does not exist
+        When marker_exists_for_today is checked
+        Then it returns False without error
+        """
         logs_dir = Path('/nonexistent/directory')
 
         result = marker_exists_for_today(logs_dir)
@@ -83,7 +107,11 @@ class TestMarkerExistsForToday(unittest.TestCase):
         self.assertFalse(result)
 
     def test_ignores_old_markers(self):
-        """Test that old marker files don't affect today's check."""
+        """
+        Given only a marker for yesterday exists
+        When marker_exists_for_today is checked
+        Then it returns False because only today's marker counts
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -101,7 +129,11 @@ class TestCreateMarkerFile(unittest.TestCase):
     """Test marker file creation."""
 
     def test_creates_marker_file(self):
-        """Test that marker file is created."""
+        """
+        Given an existing logs directory
+        When create_marker_file runs
+        Then today's marker file exists
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -111,7 +143,11 @@ class TestCreateMarkerFile(unittest.TestCase):
             self.assertTrue(today_marker.exists())
 
     def test_creates_directory_if_missing(self):
-        """Test that log directory is created if it doesn't exist."""
+        """
+        Given a logs directory that does not yet exist
+        When create_marker_file runs
+        Then the directory is created and today's marker exists inside it
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir) / 'new_logs'
             self.assertFalse(logs_dir.exists())
@@ -123,7 +159,11 @@ class TestCreateMarkerFile(unittest.TestCase):
             self.assertTrue(today_marker.exists())
 
     def test_idempotent_creation(self):
-        """Test that creating marker twice doesn't cause errors."""
+        """
+        Given a logs directory
+        When create_marker_file is called twice
+        Then no error occurs and today's marker exists
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -138,7 +178,11 @@ class TestCleanupOldMarkers(unittest.TestCase):
     """Test marker file cleanup."""
 
     def test_removes_old_markers(self):
-        """Test that markers older than threshold are removed."""
+        """
+        Given markers for 10 days ago, 3 days ago, and today
+        When cleanup_old_markers runs with a 7-day threshold
+        Then the 10-day-old marker is removed while the recent and today markers remain
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -165,7 +209,11 @@ class TestCleanupOldMarkers(unittest.TestCase):
             self.assertTrue(today_marker.exists())
 
     def test_keeps_markers_within_threshold(self):
-        """Test that markers within threshold are kept."""
+        """
+        Given markers for each of the last 5 days
+        When cleanup_old_markers runs with a 7-day threshold
+        Then all five markers are kept
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -185,14 +233,22 @@ class TestCleanupOldMarkers(unittest.TestCase):
                 self.assertTrue(marker.exists())
 
     def test_handles_missing_directory(self):
-        """Test that cleanup handles non-existent directory gracefully."""
+        """
+        Given a logs directory that does not exist
+        When cleanup_old_markers runs
+        Then it completes without raising an exception
+        """
         logs_dir = Path('/nonexistent/directory')
 
         # Should not raise exception
         cleanup_old_markers(logs_dir, days=7)
 
     def test_ignores_non_marker_files(self):
-        """Test that cleanup doesn't touch non-marker files."""
+        """
+        Given non-marker files and an old marker in the logs directory
+        When cleanup_old_markers runs with a 7-day threshold
+        Then the non-marker files survive and only the old marker is removed
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -216,7 +272,11 @@ class TestCleanupOldMarkers(unittest.TestCase):
             self.assertFalse(old_marker.exists())
 
     def test_handles_malformed_marker_names(self):
-        """Test that cleanup handles marker files with invalid date formats."""
+        """
+        Given a marker file whose date portion is not a valid date
+        When cleanup_old_markers runs
+        Then it does not raise and the malformed file is left in place
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -235,7 +295,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
     """Test warning issuance with deduplication."""
 
     def test_writes_to_stdout(self):
-        """Test that warning is written to stdout."""
+        """
+        Given to_stdout=True and to_error_log=False
+        When issue_takeover_warning runs
+        Then the warning is written to stderr
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -246,7 +310,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 mock_stderr.write.assert_called()
 
     def test_writes_to_error_log_first_time(self):
-        """Test that warning is written to error log on first call."""
+        """
+        Given no marker exists yet and to_error_log=True
+        When issue_takeover_warning runs for the first time
+        Then log_warning is called once with a 'Takeover mode is active' message
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -259,7 +327,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 self.assertIn('Takeover mode is active', args[0])
 
     def test_skips_error_log_on_duplicate(self):
-        """Test that error log is skipped if marker exists."""
+        """
+        Given today's marker already exists and to_error_log=True
+        When issue_takeover_warning runs
+        Then log_warning is not called (the error log is deduplicated)
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -273,7 +345,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 mock_log.assert_not_called()
 
     def test_stdout_always_written(self):
-        """Test that stdout is written even when marker exists."""
+        """
+        Given today's marker already exists, with to_stdout=True and to_error_log=True
+        When issue_takeover_warning runs
+        Then the warning is still written to stderr despite the existing marker
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -287,7 +363,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 mock_stderr.write.assert_called()
 
     def test_creates_marker_after_logging(self):
-        """Test that marker is created after logging to prevent duplicates."""
+        """
+        Given no marker exists and to_error_log=True
+        When issue_takeover_warning logs the warning
+        Then today's marker is created to prevent duplicate logging
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -299,7 +379,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 self.assertTrue(today_marker.exists())
 
     def test_cleanup_called_when_specified(self):
-        """Test that cleanup is called when cleanup_days is specified."""
+        """
+        Given an old marker exists and cleanup_days=7 is passed
+        When issue_takeover_warning runs
+        Then the old marker is cleaned up
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -315,7 +399,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 self.assertFalse(old_marker.exists())
 
     def test_cleanup_skipped_when_none(self):
-        """Test that cleanup is skipped when cleanup_days is None."""
+        """
+        Given an old marker exists and cleanup_days=None is passed
+        When issue_takeover_warning runs
+        Then the old marker is left in place (cleanup is skipped)
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -331,7 +419,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 self.assertTrue(old_marker.exists())
 
     def test_warning_message_content(self):
-        """Test that warning message contains expected content."""
+        """
+        Given to_error_log=True and no existing marker
+        When issue_takeover_warning logs the warning
+        Then the message contains the expected takeover-mode phrases
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
@@ -348,7 +440,11 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 self.assertIn('sole authority', message)
 
     def test_handles_marker_creation_failure(self):
-        """Test that warning still logs even if marker creation fails."""
+        """
+        Given create_marker_file raises an OSError
+        When issue_takeover_warning runs with to_error_log=True
+        Then the warning is still logged and no exception propagates
+        """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 

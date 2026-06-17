@@ -19,7 +19,11 @@ class TestTakeoverModeConfig(unittest.TestCase):
     """Test loading takeover_mode configuration."""
 
     def test_default_config_when_no_files(self):
-        """Test default configuration when no config files exist."""
+        """
+        Given a project with no toolguard config files
+        When load_takeover_mode_config runs
+        Then takeover is disabled, the default blanket ignored patterns are present, and no_match_fallback is 'deny'
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -38,7 +42,11 @@ class TestTakeoverModeConfig(unittest.TestCase):
             self.assertEqual(config['no_match_fallback'], 'deny')
 
     def test_load_takeover_mode_from_toml(self):
-        """Test loading takeover_mode from TOML config."""
+        """
+        Given a toolguard_hook.toml with a takeover_mode section
+        When load_takeover_mode_config runs
+        Then the enabled flag, ignored and additional patterns, and no_match_fallback are read from the TOML
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -65,7 +73,11 @@ no_match_fallback = "warn_deny"
             self.assertEqual(config['no_match_fallback'], 'warn_deny')
 
     def test_load_takeover_mode_from_json(self):
-        """Test loading takeover_mode from JSON config."""
+        """
+        Given a toolguard_hook.json with a takeover_mode section
+        When load_takeover_mode_config runs
+        Then the enabled flag and ignored_allow_patterns are read from the JSON
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -91,7 +103,11 @@ no_match_fallback = "warn_deny"
             self.assertIn('Read(*)', config['ignored_allow_patterns'])
 
     def test_merge_takeover_mode_from_multiple_files(self):
-        """Test merging takeover_mode from multiple config files."""
+        """
+        Given project-level and user-level toolguard_hook.toml files with takeover settings
+        When load_takeover_mode_config runs
+        Then the patterns from both files are merged into the resulting config
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -134,7 +150,11 @@ additional_ignored_patterns = ["Write(*)"]
                     user_toml_path.unlink()
 
     def test_takeover_mode_not_loaded_from_claude_settings(self):
-        """Test that takeover_mode is NOT loaded from Claude settings files."""
+        """
+        Given takeover_mode defined only in settings.local.json
+        When load_takeover_mode_config runs
+        Then the setting is ignored and takeover remains disabled (defaults)
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -161,7 +181,11 @@ class TestTakeoverModePermissionFiltering(unittest.TestCase):
 
     @patch.dict('os.environ', {}, clear=True)
     def test_filters_native_patterns_when_enabled(self):
-        """Test that native Claude config patterns are filtered when takeover enabled."""
+        """
+        Given takeover enabled with ignored Bash(*) and Bash(ls:*), plus native blanket allows
+        When load_permissions runs
+        Then only the toolguard_hook 'git status' allow remains and the blanket native patterns are filtered
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -194,7 +218,11 @@ allow = ["Bash(git status)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_does_not_filter_when_disabled(self):
-        """Test that patterns are NOT filtered when takeover mode disabled."""
+        """
+        Given takeover disabled even though an ignored pattern is configured, with a native blanket allow
+        When load_permissions runs
+        Then both the toolguard_hook 'git status' and the native '*' patterns are present (no filtering)
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -226,7 +254,11 @@ allow = ["Bash(git status)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_never_filters_toolguard_hook_patterns(self):
-        """Test that toolguard_hook patterns are NEVER filtered."""
+        """
+        Given takeover enabled, ignoring '*', with the toolguard_hook itself allowing Bash(*)
+        When load_permissions runs
+        Then the hook's '*' remains because toolguard_hook patterns are never filtered
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -253,7 +285,11 @@ allow = ["Bash(*)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_exact_string_matching(self):
-        """Test that pattern matching is exact string comparison, not pattern matching."""
+        """
+        Given takeover ignoring the exact pattern 'git *' and native git patterns
+        When load_permissions runs
+        Then only the exact 'git *' is filtered while 'git status' and 'git log' remain
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -283,7 +319,11 @@ ignored_allow_patterns = ["git *"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_additional_ignored_patterns(self):
-        """Test that additional_ignored_patterns are also filtered."""
+        """
+        Given takeover with both ignored_allow_patterns and additional_ignored_patterns
+        When load_permissions runs
+        Then patterns from both lists are filtered while unlisted ones remain
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -312,7 +352,11 @@ additional_ignored_patterns = ["cat:*"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_deny_patterns_not_filtered(self):
-        """Test that deny patterns are NOT filtered by takeover mode."""
+        """
+        Given takeover ignoring 'rm -rf:*' which appears as a native deny pattern
+        When load_permissions runs
+        Then the deny pattern remains because takeover only filters allow patterns
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -341,7 +385,11 @@ class TestNoMatchFallback(unittest.TestCase):
     """Test no_match_fallback behavior."""
 
     def test_deny_fallback_silent(self):
-        """Test that 'deny' fallback denies silently."""
+        """
+        Given a toolguard_hook configuring no_match_fallback = "deny"
+        When load_takeover_mode_config runs
+        Then the resolved config reports no_match_fallback as 'deny'
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -365,7 +413,11 @@ allow = ["Bash(git status)"]
             self.assertEqual(config['no_match_fallback'], 'deny')
 
     def test_warn_deny_fallback(self):
-        """Test that 'warn_deny' fallback is configured correctly."""
+        """
+        Given a toolguard_hook configuring no_match_fallback = "warn_deny"
+        When load_takeover_mode_config runs
+        Then the resolved config reports no_match_fallback as 'warn_deny'
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -393,7 +445,11 @@ class TestBackwardCompatibility(unittest.TestCase):
     """Test backward compatibility when takeover_mode not configured."""
 
     def test_no_takeover_mode_section_uses_defaults(self):
-        """Test that missing takeover_mode section uses default values."""
+        """
+        Given a toolguard_hook with no takeover_mode section
+        When load_takeover_mode_config runs
+        Then takeover is disabled and no_match_fallback defaults to 'deny'
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -417,7 +473,11 @@ allow = ["Bash(git status)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_behavior_unchanged_when_disabled(self):
-        """Test that behavior is unchanged when takeover mode disabled."""
+        """
+        Given no takeover_mode section and a native blanket Bash(*) allow
+        When load_permissions runs
+        Then both the hook 'git status' and native '*' patterns are present (default behavior)
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -447,7 +507,11 @@ class TestTakeoverModeWithDefaultIgnoredPatterns(unittest.TestCase):
 
     @patch.dict('os.environ', {}, clear=True)
     def test_default_ignored_patterns_filter_blanket_bash(self):
-        """Test that default ignored patterns filter Bash(*) from native Claude config."""
+        """
+        Given takeover enabled with no explicit ignored patterns and native blanket allows
+        When load_permissions runs
+        Then the default ignored patterns filter Bash(*) while the hook's git allows remain
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -483,7 +547,11 @@ allow = ["Bash(git status)", "Bash(git log)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_wrapper_format_normalization(self):
-        """Test that Bash(*) wrapper format is properly normalized to * for filtering."""
+        """
+        Given ignored patterns written in Bash(*) wrapper form and native patterns
+        When load_permissions runs
+        Then the wrapped patterns normalize to bare form so '*' and 'ls:*' are filtered while others remain
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -524,7 +592,11 @@ class TestFilePathToolTakeoverFiltering(unittest.TestCase):
 
     @patch.dict('os.environ', {}, clear=True)
     def test_filters_blanket_read_pattern(self):
-        """Test that Read(*) blanket pattern from native config is filtered."""
+        """
+        Given takeover enabled with native Read(*) and a specific hook Read pattern
+        When load_file_path_patterns('Read') runs
+        Then the blanket '*' is filtered and only the hook's '~/projects/**' remains
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -558,7 +630,11 @@ allow = ["Read(~/projects/**)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_filters_blanket_write_pattern(self):
-        """Test that Write(*) blanket pattern from native config is filtered."""
+        """
+        Given takeover enabled with native Write(*) and a specific hook Write pattern
+        When load_file_path_patterns('Write') runs
+        Then the blanket '*' is filtered and only the hook's '~/projects/**' remains
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -590,7 +666,11 @@ allow = ["Write(~/projects/**)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_does_not_filter_file_patterns_when_disabled(self):
-        """Test that file path patterns are NOT filtered when takeover mode disabled."""
+        """
+        Given takeover disabled with native Read(*) and a hook Read pattern
+        When load_file_path_patterns('Read') runs
+        Then both '*' and '~/projects/**' are present (no filtering)
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -623,7 +703,11 @@ allow = ["Read(~/projects/**)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_never_filters_toolguard_hook_file_patterns(self):
-        """Test that file path patterns from toolguard_hook are NEVER filtered."""
+        """
+        Given takeover enabled with the toolguard_hook itself allowing Read(*)
+        When load_file_path_patterns('Read') runs
+        Then the hook's '*' remains because toolguard_hook file patterns are never filtered
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -649,7 +733,11 @@ allow = ["Read(*)"]
 
     @patch.dict('os.environ', {}, clear=True)
     def test_file_deny_patterns_not_filtered(self):
-        """Test that file path deny patterns are NOT filtered by takeover mode."""
+        """
+        Given takeover enabled with native Read allow '*' and a native Read deny pattern
+        When load_file_path_patterns('Read') runs
+        Then the deny pattern remains while the blanket allow '*' is filtered
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()

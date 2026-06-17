@@ -27,7 +27,11 @@ class TestBackupCreation(unittest.TestCase):
     """Test backup file creation with correct naming."""
 
     def test_backup_with_extension(self):
-        """Test backup naming for files with extensions."""
+        """
+        Given a source file with an extension (settings.local.json)
+        When create_backup copies it into a backup directory
+        Then a timestamped backup is created in that directory, keeping the extension and content
+        """
         with TemporaryDirectory() as tmpdir:
             # Create source file
             source_file = Path(tmpdir) / 'settings.local.json'
@@ -51,7 +55,11 @@ class TestBackupCreation(unittest.TestCase):
             self.assertEqual(backup_path.parent, backup_dir)
 
     def test_backup_without_extension(self):
-        """Test backup naming for files without extensions."""
+        """
+        Given a source file with no extension (configfile)
+        When create_backup copies it into a backup directory
+        Then a timestamped backup named 'configfile.<timestamp>' is created with the same content
+        """
         with TemporaryDirectory() as tmpdir:
             # Create source file
             source_file = Path(tmpdir) / 'configfile'
@@ -71,7 +79,11 @@ class TestBackupCreation(unittest.TestCase):
             self.assertEqual(backup_path.read_text(), 'test content')
 
     def test_backup_creates_directory(self):
-        """Test that backup directory is created if it doesn't exist."""
+        """
+        Given a backup directory path with nested parents that do not yet exist
+        When create_backup runs
+        Then the full backup directory tree is created
+        """
         with TemporaryDirectory() as tmpdir:
             source_file = Path(tmpdir) / 'test.json'
             source_file.write_text('{}')
@@ -84,7 +96,11 @@ class TestBackupCreation(unittest.TestCase):
             self.assertTrue(backup_dir.exists())
 
     def test_backup_nonexistent_file_raises_error(self):
-        """Test that backing up nonexistent file raises error."""
+        """
+        Given a source file path that does not exist
+        When create_backup is called on it
+        Then FileNotFoundError is raised
+        """
         with TemporaryDirectory() as tmpdir:
             source_file = Path(tmpdir) / 'nonexistent.json'
             backup_dir = Path(tmpdir) / 'backups'
@@ -97,32 +113,56 @@ class TestPatternKeyExtraction(unittest.TestCase):
     """Test pattern key extraction for similarity detection."""
 
     def test_bash_command_with_args(self):
-        """Test extracting key from Bash command with arguments."""
+        """
+        Given a Bash pattern with command arguments (e.g. 'Bash(git push:*)')
+        When extract_pattern_key parses it
+        Then the key is the tool plus the leading command word ('Bash', 'git')
+        """
         key = extract_pattern_key('Bash(git push:*)')
         self.assertEqual(key, ('Bash', 'git'))
 
     def test_bash_command_simple(self):
-        """Test extracting key from simple Bash command."""
+        """
+        Given a simple Bash pattern (e.g. 'Bash(git:*)')
+        When extract_pattern_key parses it
+        Then the key is ('Bash', 'git')
+        """
         key = extract_pattern_key('Bash(git:*)')
         self.assertEqual(key, ('Bash', 'git'))
 
     def test_read_path_with_subdirs(self):
-        """Test extracting key from Read pattern with subdirectories."""
+        """
+        Given a Read pattern with subdirectories (e.g. 'Read(/tmp/foo/*)')
+        When extract_pattern_key parses it
+        Then the key is the tool plus the leading path segment ('Read', '/tmp/')
+        """
         key = extract_pattern_key('Read(/tmp/foo/*)')
         self.assertEqual(key, ('Read', '/tmp/'))
 
     def test_read_path_simple(self):
-        """Test extracting key from simple Read pattern."""
+        """
+        Given a simple Read path pattern (e.g. 'Read(/tmp/*)')
+        When extract_pattern_key parses it
+        Then the key is ('Read', '/tmp/')
+        """
         key = extract_pattern_key('Read(/tmp/*)')
         self.assertEqual(key, ('Read', '/tmp/'))
 
     def test_wildcard_only(self):
-        """Test extracting key from wildcard-only pattern."""
+        """
+        Given a wildcard-only pattern (e.g. 'Write(*)')
+        When extract_pattern_key parses it
+        Then the key is the tool plus '*' ('Write', '*')
+        """
         key = extract_pattern_key('Write(*)')
         self.assertEqual(key, ('Write', '*'))
 
     def test_no_delimiters(self):
-        """Test extracting key when no delimiters present."""
+        """
+        Given a pattern with no colon or path delimiters (e.g. 'Bash(ls)')
+        When extract_pattern_key parses it
+        Then the key is the tool plus the whole inner token ('Bash', 'ls')
+        """
         key = extract_pattern_key('Bash(ls)')
         self.assertEqual(key, ('Bash', 'ls'))
 
@@ -131,7 +171,11 @@ class TestSimilarPatternDetection(unittest.TestCase):
     """Test detection of similar patterns (legacy tests updated for new return format)."""
 
     def test_detect_similar_git_commands(self):
-        """Test detecting similar git commands with different arguments."""
+        """
+        Given existing git and ls patterns and a new 'git push --force' pattern
+        When detect_similar_patterns runs
+        Then the related git pattern is flagged as similar and the unrelated ls pattern is not
+        """
         existing = ['Bash(git push:*)', 'Bash(ls:*)']
         new_pattern = 'Bash(git push --force:*)'
 
@@ -143,7 +187,11 @@ class TestSimilarPatternDetection(unittest.TestCase):
         self.assertNotIn('Bash(ls:*)', similar_patterns)
 
     def test_detect_similar_paths(self):
-        """Test detecting similar path patterns."""
+        """
+        Given existing Read path patterns and a new 'Read(/tmp/foo/*)' pattern
+        When detect_similar_patterns runs
+        Then the matching '/tmp/' path pattern is flagged as similar and unrelated paths are not
+        """
         existing = ['Read(/tmp/*)', 'Read(/var/*)', 'Read(/home/*)']
         new_pattern = 'Read(/tmp/foo/*)'
 
@@ -155,7 +203,11 @@ class TestSimilarPatternDetection(unittest.TestCase):
         self.assertNotIn('Read(/var/*)', similar_patterns)
 
     def test_identical_pattern_not_similar(self):
-        """Test that identical patterns are not considered similar."""
+        """
+        Given an existing pattern and a new pattern identical to it
+        When detect_similar_patterns runs
+        Then it does not crash and returns a list (duplicates are handled gracefully elsewhere)
+        """
         existing = ['Bash(git:*)', 'Bash(ls:*)']
         new_pattern = 'Bash(git:*)'
 
@@ -168,7 +220,11 @@ class TestSimilarPatternDetection(unittest.TestCase):
         self.assertIsInstance(similar, list)
 
     def test_no_similar_patterns(self):
-        """Test when no similar patterns exist."""
+        """
+        Given existing patterns that are all very different from the new pattern
+        When detect_similar_patterns runs
+        Then no similar patterns are returned (empty result)
+        """
         # Use very different patterns that won't match even with difflib
         existing = ['Read(/var/log/*)', 'Write(/home/user/docs/*)', 'Edit(/etc/config)']
         new_pattern = 'Bash(git:*)'
@@ -178,7 +234,11 @@ class TestSimilarPatternDetection(unittest.TestCase):
         self.assertEqual(len(similar), 0)
 
     def test_broader_pattern_is_similar(self):
-        """Test that broader pattern (git:*) is similar to specific (git push:*)."""
+        """
+        Given an existing broad pattern 'Bash(git:*)' and a new specific 'Bash(git push:*)'
+        When detect_similar_patterns runs
+        Then the broader existing pattern is flagged as similar to the specific one
+        """
         existing = ['Bash(git:*)']
         new_pattern = 'Bash(git push:*)'
 
@@ -193,7 +253,11 @@ class TestPatternSorting(unittest.TestCase):
     """Test pattern sorting behavior."""
 
     def test_sort_by_tool_priority(self):
-        """Test that patterns are sorted by tool priority."""
+        """
+        Given an unordered list of patterns across several tool types
+        When sort_patterns sorts them
+        Then they are ordered by tool priority: Bash, Read, Write, Edit, then others
+        """
         patterns = [
             'Edit(/tmp/*)',
             'Write(/tmp/*)',
@@ -213,7 +277,11 @@ class TestPatternSorting(unittest.TestCase):
         self.assertEqual(tools[4], 'Grep')
 
     def test_sort_alphabetically_within_tool(self):
-        """Test alphabetical sorting within same tool type."""
+        """
+        Given several Bash patterns in arbitrary order
+        When sort_patterns sorts them
+        Then patterns of the same tool are ordered alphabetically by command
+        """
         patterns = [
             'Bash(rm:*)',
             'Bash(git:*)',
@@ -234,7 +302,11 @@ class TestPatternSorting(unittest.TestCase):
         )
 
     def test_sort_case_insensitive(self):
-        """Test that sorting is case-insensitive."""
+        """
+        Given Bash patterns with mixed-case commands
+        When sort_patterns sorts them
+        Then ordering uses case-insensitive comparison (abc, def, XYZ, Zsh)
+        """
         patterns = [
             'Bash(Zsh:*)',
             'Bash(abc:*)',
@@ -250,7 +322,11 @@ class TestPatternSorting(unittest.TestCase):
         self.assertEqual(actual_order, expected_order)
 
     def test_get_tool_priority(self):
-        """Test tool priority assignment."""
+        """
+        Given patterns for Bash, Read, Write, Edit, and another tool
+        When get_tool_priority is called on each
+        Then it returns the priority index (0-4) paired with the lowercased pattern as sort key
+        """
         self.assertEqual(get_tool_priority('Bash(ls:*)'), (0, 'bash(ls:*)'))
         self.assertEqual(get_tool_priority('Read(/tmp/*)'), (1, 'read(/tmp/*)'))
         self.assertEqual(get_tool_priority('Write(/tmp/*)'), (2, 'write(/tmp/*)'))
@@ -262,7 +338,11 @@ class TestTOMLConfigWriting(unittest.TestCase):
     """Test writing TOML configuration files."""
 
     def test_write_toml_with_sorting(self):
-        """Test writing TOML config with auto-sorting."""
+        """
+        Given unsorted allow permissions and auto_sort enabled
+        When write_toml_config writes the TOML file
+        Then the rules appear sorted by tool priority (Bash before Read before Write)
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -286,7 +366,11 @@ class TestTOMLConfigWriting(unittest.TestCase):
             self.assertLess(read_pos, write_pos)
 
     def test_write_toml_without_sorting(self):
-        """Test writing TOML config without sorting."""
+        """
+        Given allow permissions in a given order and auto_sort disabled
+        When write_toml_config writes the TOML file
+        Then the original input order is preserved (Write before Bash)
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -306,7 +390,11 @@ class TestTOMLConfigWriting(unittest.TestCase):
             self.assertLess(write_pos, bash_pos)
 
     def test_toml_escapes_special_chars(self):
-        """Test that special characters are escaped in TOML."""
+        """
+        Given a permission pattern containing double quotes
+        When write_toml_config writes the TOML file
+        Then the embedded quotes are escaped in the output
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -328,7 +416,11 @@ class TestJSONConfigWriting(unittest.TestCase):
     """Test writing JSON configuration files."""
 
     def test_write_json_with_sorting(self):
-        """Test writing JSON config with auto-sorting."""
+        """
+        Given unsorted allow permissions and auto_sort enabled
+        When write_json_config writes the JSON file
+        Then the allow list is stored sorted by tool priority (Bash, Read, Write)
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.json'
 
@@ -352,7 +444,11 @@ class TestJSONConfigWriting(unittest.TestCase):
             self.assertEqual(allow_patterns[2], 'Write(/tmp/*)')
 
     def test_write_json_preserves_other_config(self):
-        """Test that writing JSON preserves other configuration keys."""
+        """
+        Given an existing JSON config with unrelated keys (governed_tools, other_setting)
+        When write_json_config writes new permissions into it
+        Then the unrelated keys are preserved and the permissions are updated
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.json'
 
@@ -382,7 +478,11 @@ class TestSettingsFileUpdate(unittest.TestCase):
     """Test updating settings.local.json after migration."""
 
     def test_remove_migrated_patterns(self):
-        """Test removing migrated patterns from settings file."""
+        """
+        Given a settings file and a set of migrated patterns that overlap some of its entries
+        When update_settings_file runs
+        Then the migrated patterns are removed from the settings, leaving only non-migrated ones
+        """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / 'settings.local.json'
 
@@ -415,7 +515,11 @@ class TestSettingsFileUpdate(unittest.TestCase):
             self.assertEqual(updated['permissions']['deny'], [])
 
     def test_keep_empty_permissions_structure(self):
-        """Test that empty permissions structure is maintained."""
+        """
+        Given a settings file whose only pattern is migrated away
+        When update_settings_file runs
+        Then the permissions structure remains with empty allow, deny, and ask lists
+        """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / 'settings.local.json'
 
@@ -454,7 +558,11 @@ class TestMigration(unittest.TestCase):
     """Test full migration process."""
 
     def test_dry_run_mode(self):
-        """Test that dry-run mode makes no changes."""
+        """
+        Given a project with a settings.local.json containing patterns
+        When migrate runs with dry_run=True
+        Then no files are changed, no TOML config is created, and it exits 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()
@@ -489,7 +597,12 @@ class TestMigration(unittest.TestCase):
             self.assertEqual(exit_code, 0)
 
     def test_migration_creates_new_toml_config(self):
-        """Test migration creates new TOML config when none exists."""
+        """
+        Given a project with settings.local.json patterns and no existing toolguard_hook.toml
+        When migrate runs
+        Then a new toolguard_hook.toml is created with the patterns, the settings allow list is
+        emptied, and it exits 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()
@@ -532,7 +645,12 @@ class TestMigration(unittest.TestCase):
             self.assertEqual(exit_code, 0)
 
     def test_migration_adds_to_existing_toml(self):
-        """Test migration adds patterns to existing TOML config."""
+        """
+        Given an existing toolguard_hook.toml and settings.local.json with extra patterns
+        When migrate runs
+        Then the new patterns are added to the TOML and all settings patterns (migrated or
+        redundant) are removed, exiting 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()
@@ -585,7 +703,11 @@ deny = []
             self.assertEqual(exit_code, 0)
 
     def test_migration_skips_identical_patterns(self):
-        """Test that identical patterns are not duplicated."""
+        """
+        Given a toolguard_hook.toml and settings.local.json that share an identical pattern
+        When migrate runs
+        Then the shared pattern appears only once in the TOML (no duplication), exiting 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()
@@ -630,7 +752,11 @@ deny = []
             self.assertEqual(exit_code, 0)
 
     def test_no_migration_when_no_new_patterns(self):
-        """Test that migration reports success when nothing to migrate."""
+        """
+        Given a toolguard_hook.toml and settings.local.json with the same single pattern
+        When migrate runs with nothing new to migrate
+        Then it reports success and exits 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()
@@ -670,7 +796,11 @@ deny = []
             self.assertEqual(exit_code, 0)
 
     def test_migration_creates_backups(self):
-        """Test that migration creates timestamped backups."""
+        """
+        Given a project with settings.local.json and a configured backup directory
+        When migrate runs with that backup_dir
+        Then a single timestamped settings.local.*.json backup is created and it exits 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()
@@ -716,28 +846,48 @@ class TestSupersetDetection(unittest.TestCase):
     """Test superset detection for :*) patterns."""
 
     def test_superset_with_colon_star_pattern(self):
-        """Test that broader pattern is detected as superset."""
+        """
+        Given two :*) patterns where one's command is a prefix of the other's
+        When is_superset compares the broader pattern against the narrower one
+        Then it reports True (the broader pattern is a superset)
+        """
         # Bash(uv run ruff:*) is superset of Bash(uv run ruff format:*)
         self.assertTrue(is_superset('Bash(uv run ruff:*)', 'Bash(uv run ruff format:*)'))
         self.assertTrue(is_superset('Bash(git:*)', 'Bash(git push:*)'))
 
     def test_not_superset_when_no_prefix_match(self):
-        """Test that non-prefix patterns are not detected as superset."""
+        """
+        Given two :*) patterns where neither command is a true word-prefix of the other
+        When is_superset compares them
+        Then it reports False
+        """
         self.assertFalse(is_superset('Bash(ruff:*)', 'Bash(ruffle:*)'))
         self.assertFalse(is_superset('Bash(git:*)', 'Bash(ls:*)'))
 
     def test_not_superset_for_identical_patterns(self):
-        """Test that identical patterns are not considered superset."""
+        """
+        Given two identical patterns
+        When is_superset compares them
+        Then it reports False (a pattern is not a superset of itself)
+        """
         self.assertFalse(is_superset('Bash(git:*)', 'Bash(git:*)'))
 
     def test_extended_syntax_not_detected_as_superset(self):
-        """Test that extended syntax patterns are skipped."""
+        """
+        Given patterns using extended syntax prefixes ([regex], [glob], [native])
+        When is_superset is called with one of them involved
+        Then it reports False because extended-syntax patterns are skipped
+        """
         self.assertFalse(is_superset('[regex]^git', 'Bash(git push:*)'))
         self.assertFalse(is_superset('Bash(git:*)', '[glob]git:*'))
         self.assertFalse(is_superset('[native]git *', 'Bash(git push:*)'))
 
     def test_non_colon_star_patterns_not_superset(self):
-        """Test that patterns without :*) postfix are not handled."""
+        """
+        Given patterns that lack the :*) postfix (plain or trailing-* forms)
+        When is_superset compares them
+        Then it reports False because only :*) patterns are handled
+        """
         self.assertFalse(is_superset('Bash(git)', 'Bash(git push)'))
         self.assertFalse(is_superset('Bash(git*)', 'Bash(git push*)'))
 
@@ -746,7 +896,11 @@ class TestRedundantPatternDetection(unittest.TestCase):
     """Test detection of redundant patterns."""
 
     def test_find_exact_duplicates(self):
-        """Test that exact matches are identified as redundant."""
+        """
+        Given native permissions that exactly duplicate some toolguard permissions
+        When find_redundant_patterns compares them
+        Then the exact duplicates are reported as redundant and unique patterns are not
+        """
         native_perms = {
             'allow': ['Bash(git:*)', 'Bash(ls:*)', 'Bash(uv run pytest:*)'],
             'deny': [],
@@ -765,7 +919,11 @@ class TestRedundantPatternDetection(unittest.TestCase):
         self.assertNotIn('Bash(ls:*)', redundant['allow'])
 
     def test_find_subsets_covered_by_supersets(self):
-        """Test that subsets are identified as redundant."""
+        """
+        Given native permissions that are narrower subsets of broader toolguard permissions
+        When find_redundant_patterns compares them
+        Then the subset patterns are reported as redundant (covered by the supersets)
+        """
         native_perms = {
             'allow': ['Bash(uv run ruff format:*)', 'Bash(git push:*)'],
             'deny': [],
@@ -783,7 +941,11 @@ class TestRedundantPatternDetection(unittest.TestCase):
         self.assertIn('Bash(git push:*)', redundant['allow'])
 
     def test_no_redundant_patterns(self):
-        """Test when no patterns are redundant."""
+        """
+        Given native permissions that neither duplicate nor are subsets of toolguard permissions
+        When find_redundant_patterns compares them
+        Then no patterns are reported as redundant (empty allow result)
+        """
         native_perms = {
             'allow': ['Bash(ls:*)', 'Bash(cat:*)'],
             'deny': [],
@@ -804,7 +966,11 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
     """Test improved similarity detection with difflib."""
 
     def test_similarity_uses_difflib(self):
-        """Test that similarity detection uses difflib ranking."""
+        """
+        Given an existing pattern that differs from the new one only by a single space
+        When detect_similar_patterns runs
+        Then it finds that close match with a high similarity score (> 0.9)
+        """
         existing = [
             'Bash(~/bin/open_note_by_title.sh :*)',
             'Bash(git:*)',
@@ -821,7 +987,11 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
         self.assertGreater(score, 0.9)  # Very similar, just missing space
 
     def test_similarity_returns_ranked_results(self):
-        """Test that results are ranked by similarity score."""
+        """
+        Given several existing patterns of varying closeness to the new pattern
+        When detect_similar_patterns runs
+        Then the most similar pattern is first and scores descend across the results
+        """
         existing = [
             'Bash(uv run ruff:*)',
             'Bash(uv run pytest:*)',
@@ -841,7 +1011,11 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
                 self.assertGreaterEqual(similar[i][1], similar[i + 1][1])
 
     def test_similarity_identifies_supersets(self):
-        """Test that superset relationships are flagged."""
+        """
+        Given an existing broad pattern that is a superset of the new specific pattern
+        When detect_similar_patterns runs
+        Then the match is returned with its superset flag set True
+        """
         existing = ['Bash(uv run ruff:*)']
         new_pattern = 'Bash(uv run ruff format:*)'
 
@@ -853,7 +1027,11 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
         self.assertTrue(is_superset_match)
 
     def test_max_similar_matches_limit(self):
-        """Test that max_matches is respected."""
+        """
+        Given more candidate similar patterns than the max_matches limit
+        When detect_similar_patterns runs with max_matches=2
+        Then at most 2 matches are returned
+        """
         existing = [
             'Bash(uv run pytest:*)',
             'Bash(uv run mypy:*)',
@@ -869,7 +1047,11 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
         self.assertLessEqual(len(similar), 2)
 
     def test_common_prefix_not_flagged_as_similar(self):
-        """Test that many patterns with same prefix are filtered out."""
+        """
+        Given many existing patterns that all share the same long prefix
+        When detect_similar_patterns runs against a new same-prefix pattern
+        Then no matches are returned because the shared prefix is not discriminating
+        """
         # Create many patterns with same prefix
         existing = [f'Bash(uv run tool{i}:*)' for i in range(20)]
         new_pattern = 'Bash(uv run tool99:*)'
@@ -884,7 +1066,11 @@ class TestTOMLSectionPreservation(unittest.TestCase):
     """Test that write_toml_config preserves other sections (Bug 1)."""
 
     def test_preserves_takeover_mode_section(self):
-        """Test that [takeover_mode] section is preserved."""
+        """
+        Given a TOML config with [takeover_mode] and [config_sync] sections plus permissions
+        When write_toml_config writes new permissions
+        Then the other sections and their values are preserved and permissions are updated
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -922,7 +1108,11 @@ deny = []
             self.assertIn('Read(/tmp/*)', new_content)
 
     def test_preserves_top_level_keys(self):
-        """Test that top-level keys like governed_tools are preserved."""
+        """
+        Given a TOML config with top-level keys (governed_tools, additional_supported_tools)
+        When write_toml_config writes new permissions
+        Then those top-level keys are preserved and the permissions are updated
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -959,7 +1149,11 @@ deny = []
             self.assertIn('Bash(ls:*)', new_content)
 
     def test_creates_permissions_section_when_missing(self):
-        """Test that [permissions] section is created if it doesn't exist."""
+        """
+        Given a TOML config with other sections but no [permissions] section
+        When write_toml_config writes permissions
+        Then a [permissions] section is added while the existing sections are preserved
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -988,7 +1182,11 @@ auto_migrate = false
             self.assertIn('Bash(git:*)', new_content)
 
     def test_preserves_section_order(self):
-        """Test that section order is maintained."""
+        """
+        Given a TOML config with sections ordered takeover_mode, permissions, config_sync
+        When write_toml_config rewrites the permissions
+        Then the original section ordering is maintained
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1023,7 +1221,11 @@ class TestCommentPreservation(unittest.TestCase):
     """Test that comments are preserved when rewriting TOML (Bug 2)."""
 
     def test_preserves_inline_comments(self):
-        """Test that inline comments on same line as rule are preserved."""
+        """
+        Given a TOML config with inline comments on the same line as rules
+        When write_toml_config rewrites the permissions adding a new rule
+        Then the inline comments are preserved in the output
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1047,7 +1249,11 @@ deny = []
             self.assertIn('# Git commands', new_content)
 
     def test_preserves_comment_blocks_above_rules(self):
-        """Test that comment blocks above rules are preserved and move with rules."""
+        """
+        Given a TOML config with comment blocks above individual rules
+        When write_toml_config rewrites the permissions with sorting enabled
+        Then those comment blocks are preserved
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1074,7 +1280,11 @@ deny = []
             self.assertIn('# Allow file listing', new_content)
 
     def test_preserves_top_of_section_comments(self):
-        """Test that comments at top of section stay at top."""
+        """
+        Given a TOML config with explanatory comments at the top of the permissions section
+        When write_toml_config rewrites the permissions
+        Then those comments are preserved and remain before the first rule
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1106,7 +1316,11 @@ deny = []
             self.assertLess(comment_pos, first_rule_pos)
 
     def test_preserves_bottom_of_section_comments(self):
-        """Test that comments at bottom of section stay at bottom."""
+        """
+        Given a TOML config with trailing comments after the last rule in the allow list
+        When write_toml_config rewrites the permissions adding a new rule
+        Then those comments are preserved and remain after the last rule
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1137,7 +1351,11 @@ deny = []
             self.assertGreater(comment_pos, last_rule_pos)
 
     def test_preserves_blank_lines_in_comment_blocks(self):
-        """Test that blank lines within comment blocks are preserved."""
+        """
+        Given a TOML config with comment blocks separated by blank lines above a rule
+        When write_toml_config rewrites the permissions
+        Then the comment lines are preserved
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1163,7 +1381,11 @@ deny = []
             self.assertIn('# Allow all git operations', new_content)
 
     def test_comments_move_with_sorted_rules(self):
-        """Test that comments move with their rules when sorting."""
+        """
+        Given a TOML config where each rule has its own comment block and sorting reorders them
+        When write_toml_config rewrites with auto_sort enabled
+        Then each comment moves together with its associated rule into the new order
+        """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'toolguard_hook.toml'
 
@@ -1205,7 +1427,11 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
     """Test that blanket patterns are not flagged as similar (Bug 3)."""
 
     def test_blanket_bash_pattern_not_similar(self):
-        """Test Bash(*) is not flagged as similar to Bash(wc:*)."""
+        """
+        Given an existing blanket Bash(*) pattern and a new specific Bash(wc:*) pattern
+        When detect_similar_patterns runs
+        Then no matches are returned because the blanket pattern has no meaningful prefix
+        """
         existing = ['Bash(*)', 'Read(*)', 'Write(*)']
         new_pattern = 'Bash(wc:*)'
 
@@ -1215,7 +1441,11 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertEqual(len(similar), 0)
 
     def test_blanket_read_pattern_not_similar(self):
-        """Test Read(*) is not flagged as similar to Read(/tmp/*)."""
+        """
+        Given an existing blanket Read(*) pattern and a new specific Read(/tmp/*) pattern
+        When detect_similar_patterns runs
+        Then no matches are returned
+        """
         existing = ['Read(*)', 'Bash(*)']
         new_pattern = 'Read(/tmp/*)'
 
@@ -1224,7 +1454,11 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertEqual(len(similar), 0)
 
     def test_new_blanket_pattern_not_similar(self):
-        """Test new blanket pattern is not flagged as similar to anything."""
+        """
+        Given existing specific Bash patterns and a new blanket Bash(*) pattern
+        When detect_similar_patterns runs
+        Then no matches are returned because the new blanket pattern is not compared
+        """
         existing = ['Bash(git:*)', 'Bash(ls:*)', 'Bash(find:*)']
         new_pattern = 'Bash(*)'
 
@@ -1234,7 +1468,11 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertEqual(len(similar), 0)
 
     def test_meaningful_prefix_extraction_blanket(self):
-        """Test extract_meaningful_prefix returns empty for blanket patterns."""
+        """
+        Given blanket patterns of the form Tool(*)
+        When extract_meaningful_prefix is called on each
+        Then it returns an empty string (no meaningful prefix)
+        """
         from toolguard.scripts.migrate_permissions import extract_meaningful_prefix
 
         self.assertEqual(extract_meaningful_prefix('Bash(*)'), '')
@@ -1243,7 +1481,11 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertEqual(extract_meaningful_prefix('Edit(*)'), '')
 
     def test_meaningful_prefix_extraction_with_content(self):
-        """Test extract_meaningful_prefix returns prefix for patterns with content."""
+        """
+        Given patterns whose inner content carries a real command or path prefix
+        When extract_meaningful_prefix is called on each
+        Then it returns that command or path prefix string
+        """
         from toolguard.scripts.migrate_permissions import extract_meaningful_prefix
 
         self.assertEqual(extract_meaningful_prefix('Bash(uv run ruff format:*)'), 'uv run ruff format')
@@ -1252,7 +1494,11 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertEqual(extract_meaningful_prefix('Bash(git push:*)'), 'git push')
 
     def test_similarity_respects_max_matches_per_pattern(self):
-        """Test max_matches limit is applied per new pattern."""
+        """
+        Given more candidate patterns than the max_matches limit for a single new pattern
+        When detect_similar_patterns runs with max_matches=2
+        Then at most 2 matches are returned for that pattern
+        """
         existing = [
             'Bash(uv run pytest:*)',
             'Bash(uv run mypy:*)',
@@ -1272,7 +1518,13 @@ class TestMigrationWithRedundantPatterns(unittest.TestCase):
     """Test full migration flow with redundant pattern removal."""
 
     def test_migration_removes_redundant_patterns(self):
-        """Test that redundant patterns are removed from settings.local.json."""
+        """
+        Given a toolguard config and settings.local.json containing duplicates, subsets, and one
+        genuinely new pattern
+        When migrate runs the full flow
+        Then all redundant and migrated patterns are removed from settings, the new pattern is
+        added to the toolguard config, and it exits 0
+        """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             (project_root / '.git').mkdir()

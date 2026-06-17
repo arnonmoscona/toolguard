@@ -24,7 +24,11 @@ class TestTomlConfigLoader(unittest.TestCase):
     """Test TOML configuration loading."""
 
     def test_load_valid_toml_config(self):
-        """Test loading a valid TOML config file."""
+        """
+        Given a valid TOML config with governed_tools and allow/deny/ask permissions
+        When load_toml_config reads it
+        Then the parsed dict exposes the governed tools and each permission list
+        """
         toml_content = b"""
 governed_tools = ["Bash", "Read"]
 
@@ -48,7 +52,11 @@ ask = ["Bash(alembic:*)"]
             filepath.unlink()
 
     def test_load_toml_with_missing_optional_sections(self):
-        """Test loading TOML with only governed_tools (no permissions)."""
+        """
+        Given a TOML config that defines only governed_tools
+        When load_toml_config reads it
+        Then governed_tools is parsed and no permissions key is present
+        """
         toml_content = b"""
 governed_tools = ["Bash"]
 """
@@ -65,7 +73,11 @@ governed_tools = ["Bash"]
             filepath.unlink()
 
     def test_load_toml_with_additional_supported_tools(self):
-        """Test loading TOML with additional_supported_tools."""
+        """
+        Given a TOML config declaring additional_supported_tools
+        When load_toml_config reads it
+        Then that list is exposed in the parsed config
+        """
         toml_content = b"""
 governed_tools = ["Bash", "mcp__custom__tool"]
 additional_supported_tools = ["mcp__custom__tool"]
@@ -85,7 +97,11 @@ allow = ["Bash(ls:*)", "mcp__custom__tool(*)"]
             filepath.unlink()
 
     def test_load_invalid_toml_raises_error(self):
-        """Test that invalid TOML raises an error."""
+        """
+        Given a file containing malformed TOML
+        When load_toml_config reads it
+        Then an exception (TOML decode error) is raised
+        """
         toml_content = b"""
 invalid toml [
 """
@@ -101,7 +117,11 @@ invalid toml [
             filepath.unlink()
 
     def test_load_nonexistent_file_raises_error(self):
-        """Test that loading nonexistent file raises FileNotFoundError."""
+        """
+        Given a path to a TOML file that does not exist
+        When load_toml_config reads it
+        Then a FileNotFoundError is raised
+        """
         with self.assertRaises(FileNotFoundError):
             load_toml_config(Path('/nonexistent/file.toml'))
 
@@ -110,7 +130,11 @@ class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):
     """Test that TOML files take precedence over JSON."""
 
     def test_toml_takes_precedence_over_json(self):
-        """Test that when both TOML and JSON exist, TOML is used."""
+        """
+        Given a project with both toolguard_hook.toml and toolguard_hook.json
+        When discover_config_files runs
+        Then the TOML hook file is included and the JSON one is excluded
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -136,7 +160,11 @@ class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):
             self.assertNotIn(str(claude_dir / 'toolguard_hook.json'), hook_paths)
 
     def test_json_used_when_no_toml(self):
-        """Test that JSON is used when no TOML exists."""
+        """
+        Given a project with only a toolguard_hook.json (no TOML)
+        When discover_config_files runs
+        Then the JSON hook file is included
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / 'project'
             project_dir.mkdir()
@@ -161,25 +189,45 @@ class TestExtractToolName(unittest.TestCase):
     """Test extraction of tool names from permission strings."""
 
     def test_extract_bash_tool(self):
-        """Test extracting 'Bash' from Bash permission."""
+        """
+        Given Bash permission strings with parenthesized arguments
+        When extract_tool_name parses them
+        Then it returns 'Bash'
+        """
         self.assertEqual(extract_tool_name('Bash(ls:*)'), 'Bash')
         self.assertEqual(extract_tool_name('Bash(git status)'), 'Bash')
 
     def test_extract_read_tool(self):
-        """Test extracting 'Read' from Read permission."""
+        """
+        Given a Read permission string with a path argument
+        When extract_tool_name parses it
+        Then it returns 'Read'
+        """
         self.assertEqual(extract_tool_name('Read(/tmp/**)'), 'Read')
 
     def test_extract_write_tool(self):
-        """Test extracting 'Write' from Write permission."""
+        """
+        Given a Write permission string with a path argument
+        When extract_tool_name parses it
+        Then it returns 'Write'
+        """
         self.assertEqual(extract_tool_name('Write(~/projects/**)'), 'Write')
 
     def test_extract_tool_without_parens(self):
-        """Test extracting tool name when no parentheses."""
+        """
+        Given permission strings with no parentheses
+        When extract_tool_name parses them
+        Then the whole string is returned as the tool name
+        """
         self.assertEqual(extract_tool_name('WebSearch'), 'WebSearch')
         self.assertEqual(extract_tool_name('mcp__basic-memory__write_note'), 'mcp__basic-memory__write_note')
 
     def test_extract_mcp_tool(self):
-        """Test extracting MCP tool names."""
+        """
+        Given an MCP tool permission string with no parentheses
+        When extract_tool_name parses it
+        Then the full MCP tool name is returned
+        """
         self.assertEqual(
             extract_tool_name('mcp__jetbrains__execute_terminal_command'), 'mcp__jetbrains__execute_terminal_command'
         )
@@ -189,7 +237,11 @@ class TestValidatePermissions(unittest.TestCase):
     """Test permission validation."""
 
     def test_validate_no_warnings_for_valid_config(self):
-        """Test that valid config produces no warnings."""
+        """
+        Given a config whose permissions reference only governed, supported tools
+        When validate_permissions runs
+        Then it produces no warnings
+        """
         config = {
             'governed_tools': ['Bash', 'Read'],
             'permissions': {
@@ -201,7 +253,11 @@ class TestValidatePermissions(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_warning_for_unsupported_tool(self):
-        """Test warning when unsupported tool in permissions."""
+        """
+        Given permissions that reference unsupported tools (WebSearch, WebFetch)
+        When validate_permissions runs
+        Then warnings are produced naming each unsupported tool
+        """
         config = {
             'governed_tools': ['Bash'],
             'permissions': {
@@ -216,7 +272,11 @@ class TestValidatePermissions(unittest.TestCase):
         self.assertTrue(any('WebFetch' in msg for msg in warning_messages))
 
     def test_warning_for_ungoverned_tool(self):
-        """Test warning when tool in permissions but not in governed_tools."""
+        """
+        Given a permission for Read while only Bash is in governed_tools
+        When validate_permissions runs
+        Then a warning notes that Read is not in governed_tools
+        """
         config = {
             'governed_tools': ['Bash'],  # Read is not governed
             'permissions': {
@@ -230,7 +290,11 @@ class TestValidatePermissions(unittest.TestCase):
         self.assertTrue(any('Read' in msg and 'governed_tools' in msg for msg in warning_messages))
 
     def test_additional_supported_tools_no_warning(self):
-        """Test that additional_supported_tools prevents unsupported warning."""
+        """
+        Given a custom tool declared in additional_supported_tools and governed
+        When validate_permissions runs on permissions using it
+        Then no warnings are produced
+        """
         config = {
             'governed_tools': ['Bash', 'mcp__custom__tool'],
             'additional_supported_tools': ['mcp__custom__tool'],
@@ -244,7 +308,11 @@ class TestValidatePermissions(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_warnings_include_corrective_steps(self):
-        """Test that warnings include corrective steps."""
+        """
+        Given a config that produces at least one warning
+        When validate_permissions runs
+        Then every warning includes a non-empty corrective_steps field
+        """
         config = {
             'governed_tools': ['Bash'],
             'permissions': {
@@ -259,13 +327,21 @@ class TestValidatePermissions(unittest.TestCase):
             self.assertTrue(len(warning['corrective_steps']) > 0)
 
     def test_empty_config_no_warnings(self):
-        """Test that empty config produces no warnings."""
+        """
+        Given an empty config dict
+        When validate_permissions runs
+        Then it produces no warnings
+        """
         config = {}
         warnings = validate_permissions(config)
         self.assertEqual(warnings, [])
 
     def test_known_supported_tools_constant(self):
-        """Test that KNOWN_SUPPORTED_TOOLS contains expected tools."""
+        """
+        Given the KNOWN_SUPPORTED_TOOLS constant
+        When its membership is inspected
+        Then it contains Bash, Read, Write, Edit, and the JetBrains terminal tool
+        """
         self.assertIn('Bash', KNOWN_SUPPORTED_TOOLS)
         self.assertIn('Read', KNOWN_SUPPORTED_TOOLS)
         self.assertIn('Write', KNOWN_SUPPORTED_TOOLS)
@@ -279,7 +355,11 @@ class TestErrorLog(unittest.TestCase):
     """Test error logging functionality."""
 
     def test_error_log_file_created(self):
-        """Test that error log file is created with correct name."""
+        """
+        Given a log directory
+        When log_warning writes a warning
+        Then exactly one toolguard-error-*.md file is created
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
@@ -293,7 +373,11 @@ class TestErrorLog(unittest.TestCase):
             self.assertTrue(log_files[0].name.endswith('.md'))
 
     def test_error_log_format(self):
-        """Test that error log entries have correct format."""
+        """
+        Given a log directory
+        When log_warning writes a message and corrective steps
+        Then the entry contains the WARNING label, the message, the steps, and the Message/Corrective Steps fields
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
@@ -310,7 +394,11 @@ class TestErrorLog(unittest.TestCase):
             self.assertIn('**Corrective Steps**:', content)
 
     def test_error_log_includes_timestamp(self):
-        """Test that error log entries include timestamps."""
+        """
+        Given a log directory
+        When log_error writes an entry
+        Then the entry includes a YYYY-MM-DD HH:MM:SS timestamp
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
@@ -326,7 +414,11 @@ class TestErrorLog(unittest.TestCase):
             self.assertTrue(re.search(timestamp_pattern, content))
 
     def test_multiple_log_entries_appended(self):
-        """Test that multiple log entries are appended to same file."""
+        """
+        Given a log directory
+        When a warning and then an error are logged
+        Then both entries appear in the same single error file with WARNING and ERROR labels
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
