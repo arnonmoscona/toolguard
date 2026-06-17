@@ -11,7 +11,7 @@ import json
 import unittest
 from unittest.mock import patch, mock_open
 
-from toolguard.config import load_permissions
+from toolguard.config import _load_permissions
 from toolguard.permissions import (
     normalize_path_in_command,
     contains_path_component,
@@ -330,7 +330,7 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_permissions_success(self, mock_file):
         """
         Given CLAUDE_SETTINGS_PATH set and a settings file with Bash allow/deny entries
-        When load_permissions reads it
+        When _load_permissions reads it
         Then the Bash patterns are returned with the Bash() wrapper stripped
         """
         settings_data = {
@@ -341,7 +341,7 @@ class TestLoadPermissions(unittest.TestCase):
         }
         mock_file.return_value.read.return_value = json.dumps(settings_data)
 
-        allow_patterns, deny_patterns = load_permissions()
+        allow_patterns, deny_patterns = _load_permissions()
 
         self.assertEqual(allow_patterns, ['git *', 'ls:*'])
         self.assertEqual(deny_patterns, ['rm -rf:*', '**/.env/**'])
@@ -350,7 +350,7 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_permissions_no_env_var(self):
         """
         Given no CLAUDE_SETTINGS_PATH, no discoverable project, and no existing config files
-        When load_permissions falls back to the config hierarchy
+        When _load_permissions falls back to the config hierarchy
         Then it returns empty allow and deny lists
         """
         # Mock find_project_root to raise RuntimeError (no project found)
@@ -359,7 +359,7 @@ class TestLoadPermissions(unittest.TestCase):
             with patch('pathlib.Path.exists', return_value=False):
                 stderr_capture = io.StringIO()
                 with contextlib.redirect_stderr(stderr_capture):
-                    allow, deny = load_permissions()
+                    allow, deny = _load_permissions()
                     # Should return empty lists when no configs found
                     self.assertEqual(allow, [])
                     self.assertEqual(deny, [])
@@ -369,13 +369,13 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_permissions_file_not_found(self, mock_file):
         """
         Given CLAUDE_SETTINGS_PATH pointing at a file that cannot be opened
-        When load_permissions tries to read it
+        When _load_permissions tries to read it
         Then it exits with code 1 and writes a 'Settings file not found' message to stderr
         """
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
             with self.assertRaises(SystemExit) as cm:
-                load_permissions()
+                _load_permissions()
             self.assertEqual(cm.exception.code, 1)
 
         # Verify error message in stderr
@@ -387,7 +387,7 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_permissions_invalid_json(self, mock_file):
         """
         Given CLAUDE_SETTINGS_PATH pointing at a file containing invalid JSON
-        When load_permissions tries to parse it
+        When _load_permissions tries to parse it
         Then it exits with code 1 and writes an 'Invalid JSON in settings file' message to stderr
         """
         mock_file.return_value.read.return_value = 'invalid json {'
@@ -395,7 +395,7 @@ class TestLoadPermissions(unittest.TestCase):
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
             with self.assertRaises(SystemExit) as cm:
-                load_permissions()
+                _load_permissions()
             self.assertEqual(cm.exception.code, 1)
 
         # Verify error message in stderr
@@ -407,7 +407,7 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_permissions_ignores_non_bash_patterns(self, mock_file):
         """
         Given a settings file mixing Bash entries with Read/Write/Execute entries
-        When load_permissions reads it
+        When _load_permissions reads it
         Then only the Bash patterns are returned in allow and deny
         """
         settings_data = {
@@ -418,7 +418,7 @@ class TestLoadPermissions(unittest.TestCase):
         }
         mock_file.return_value.read.return_value = json.dumps(settings_data)
 
-        allow_patterns, deny_patterns = load_permissions()
+        allow_patterns, deny_patterns = _load_permissions()
 
         self.assertEqual(allow_patterns, ['git *'])
         self.assertEqual(deny_patterns, ['rm *'])
@@ -428,13 +428,13 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_permissions_empty_lists(self, mock_file):
         """
         Given a settings file with empty allow and deny permission lists
-        When load_permissions reads it
+        When _load_permissions reads it
         Then both returned lists are empty
         """
         settings_data = {'permissions': {'allow': [], 'deny': []}}
         mock_file.return_value.read.return_value = json.dumps(settings_data)
 
-        allow_patterns, deny_patterns = load_permissions()
+        allow_patterns, deny_patterns = _load_permissions()
 
         self.assertEqual(allow_patterns, [])
         self.assertEqual(deny_patterns, [])

@@ -3,7 +3,7 @@ Unit tests for the TOO-8 Phase 1 public config abstraction.
 
 These tests exercise :func:`toolguard.config.load_configuration` and the
 :class:`Configuration` public API, plus the internal delegating helpers
-(``toolguard_permissions_from_sources``, ``config_sync_settings_from_sources``)
+(``_toolguard_permissions_from_sources``, ``config_sync_settings_from_sources``)
 that ``config_divergence`` and ``auto_migrate`` use.
 
 Run with:
@@ -27,7 +27,7 @@ from toolguard.config import (
     ToolPatternLayer,
     config_sync_settings_from_sources,
     load_configuration,
-    toolguard_permissions_from_sources,
+    _toolguard_permissions_from_sources,
 )
 
 
@@ -511,7 +511,7 @@ class TestInternalHelpers(unittest.TestCase):
     def test_toolguard_permissions_from_sources(self):
         """
         Given a claude source and a toolguard_hook source with duplicate allow entries
-        When toolguard_permissions_from_sources parses them
+        When _toolguard_permissions_from_sources parses them
         Then only the de-duplicated hook permissions are returned and the claude source is skipped
         """
         with tempfile.TemporaryDirectory() as tmp:
@@ -523,7 +523,7 @@ class TestInternalHelpers(unittest.TestCase):
                 (settings, 'claude', 'json'),
                 (hook, 'toolguard_hook', 'json'),
             ]
-            result = toolguard_permissions_from_sources(config_files)
+            result = _toolguard_permissions_from_sources(config_files)
             self.assertEqual(result['allow'], ['Bash(git *)'])
             self.assertEqual(result['deny'], [])
 
@@ -562,7 +562,7 @@ class TestInternalHelpers(unittest.TestCase):
     def test_toolguard_permissions_skips_unparseable_and_non_dict(self):
         """
         Given hook sources where one is unparseable, one has non-dict permissions, and one is valid
-        When toolguard_permissions_from_sources runs
+        When _toolguard_permissions_from_sources runs
         Then the bad sources are skipped and only the valid file's allow patterns are returned
         """
         with tempfile.TemporaryDirectory() as tmp:
@@ -577,7 +577,7 @@ class TestInternalHelpers(unittest.TestCase):
                 (weird, 'toolguard_hook', 'json'),
                 (good, 'toolguard_hook', 'toml'),
             ]
-            result = toolguard_permissions_from_sources(config_files)
+            result = _toolguard_permissions_from_sources(config_files)
             self.assertEqual(result['allow'], ['Bash(git *)'])
 
     def test_config_sync_skips_unparseable_and_empty(self):
@@ -606,11 +606,11 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
 
     def test_governed_tools_default(self):
         """
-        Given load_governed_tools is stubbed to return ['Bash', 'Read']
+        Given _load_governed_tools is stubbed to return ['Bash', 'Read']
         When Configuration.governed_tools() delegates to it
         Then it returns the governed tools as a tuple
         """
-        with patch('toolguard.config.load_governed_tools', return_value=['Bash', 'Read']):
+        with patch('toolguard.config._load_governed_tools', return_value=['Bash', 'Read']):
             config = Configuration(layers=())
             self.assertEqual(config.governed_tools(), ('Bash', 'Read'))
 
@@ -666,15 +666,15 @@ class TestProvenanceAndIntrospection(unittest.TestCase):
 
 
 class TestBashPermissionsDelegation(unittest.TestCase):
-    """bash_permissions() delegates to legacy load_permissions."""
+    """bash_permissions() delegates to legacy _load_permissions."""
 
     def test_bash_permissions_tuple(self):
         """
-        Given load_permissions is stubbed to return allow and deny lists
+        Given _load_permissions is stubbed to return allow and deny lists
         When Configuration.bash_permissions() delegates to it
         Then the allow and deny patterns are returned as tuples
         """
-        with patch('toolguard.config.load_permissions', return_value=(['git *'], ['rm *'])):
+        with patch('toolguard.config._load_permissions', return_value=(['git *'], ['rm *'])):
             config = Configuration(layers=())
             allow, deny = config.bash_permissions()
         self.assertEqual(allow, ('git *',))

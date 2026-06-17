@@ -14,17 +14,18 @@ The public entry point is :func:`load_configuration`, which returns an immutable
 No code outside this module should open a config file, parse JSON/TOML, or branch on
 file format/location. Clients ask the :class:`Configuration` semantic questions instead.
 
-The lower-level functions (``discover_config_files``, ``load_permissions``,
-``load_governed_tools``, ``load_takeover_mode_config``, ``merge_permissions``, ...) remain
-as internal implementation that the public abstraction is built on. They are not
-deprecated: in Phase 1 the :class:`Configuration` accessors ``governed_tools``,
-``takeover_mode`` and ``bash_permissions`` deliberately delegate to these legacy loaders
-so that ``CLAUDE_SETTINGS_PATH`` handling and stderr diagnostics stay byte-for-byte
-identical. New clients should still prefer :func:`load_configuration` as the entry point.
+The lower-level loaders are internal implementation behind this abstraction; new clients
+should always prefer :func:`load_configuration`. A few remain public only because
+not-yet-migrated non-test callers still use them -- ``find_project_root``,
+``discover_config_files`` and ``load_takeover_mode_config`` (used by ``log_writer`` and
+``scripts/migrate_permissions``), and ``config_sync_settings_from_sources`` (used by
+``auto_migrate``). That is transitional and tracked as a TOO-8 follow-up; everything else
+internal is underscore-prefixed.
 """
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,12 @@ from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from toolguard.config_validation import validate_permissions
+
+# Structural matcher for a ``Tool(inner)`` permission wrapper. An identifier made
+# of word characters followed by a parenthesised body. ``.*`` (greedy, DOTALL via
+# the trailing ``\)``) lets the inner body itself contain parentheses, e.g.
+# ``Bash(foo(bar))`` -> ``foo(bar)``. This needs no known-tool list.
+_TOOL_WRAPPER_RE = re.compile(r'[A-Za-z0-9_]+\((.*)\)', re.DOTALL)
 
 
 def find_project_root(start_dir: Path = None) -> Path:
@@ -153,7 +160,156 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
     return config_files
 
 
-def load_permissions_from_file(
+# Within-level candidates, highest-to-lowest priority. Each entry is
+# (base_name, source_type, prefer_toml). Mirrors the ordering used by the legacy
+# two-level discover_config_files so within-level behaviour (incl. TOML-over-JSON)
+# is identical at every level of the hierarchy.
+_LEVEL_CANDIDATES: Tuple[Tuple[str, str, bool], ...] = (
+    ('toolguard_hook.local', 'toolguard_hook', True),
+    ('settings.local', 'claude', False),
+    ('toolguard_hook', 'toolguard_hook', True),
+    ('settings', 'claude', False),
+)
+
+
+def _discover_in_dir(claude_dir: Path) -> List[Tuple[Path, str, str]]:
+    """
+    Discover config files within a single ``.claude`` directory.
+
+    Applies the within-level priority ordering (``.local`` first, toolguard_hook
+    before native settings) and TOML-over-JSON preference, exactly as the legacy
+    two-level discovery did per level.
+
+    Args:
+        claude_dir: A ``.claude`` directory to scan.
+
+    Returns:
+        List of (path, source_type, format) triples for files that exist,
+        highest-priority first.
+    """
+    found: List[Tuple[Path, str, str]] = []
+    for base_name, source_type, prefer_toml in _LEVEL_CANDIDATES:
+        toml_path = claude_dir / f'{base_name}.toml'
+        json_path = claude_dir / f'{base_name}.json'
+        toml_exists = toml_path.exists()
+        json_exists = json_path.exists()
+
+        if prefer_toml and toml_exists:
+            found.append((toml_path, source_type, 'toml'))
+            if json_exists:
+                print(
+                    f'Warning: Both {toml_path.name} and {json_path.name} exist. Using TOML ({toml_path.name})',
+                    file=sys.stderr,
+                )
+        elif json_exists:
+            found.append((json_path, source_type, 'json'))
+    return found
+
+
+def _hierarchical_toggle(project_claude_dir: Optional[Path]) -> bool:
+    """
+    Read the ``hierarchical_configuration`` toggle from the project level only.
+
+    Per the fixed-bootstrap rule, the toggle is read ONLY from the most-specific
+    (project) ``toolguard_hook`` config so that ancestors cannot vote on whether
+    ancestors are traversed. Defaults to ``True`` when unset or unreadable.
+
+    Args:
+        project_claude_dir: The project's ``.claude`` directory, or None when no
+            project root could be found.
+
+    Returns:
+        True to walk the full hierarchy, False to use only project + user levels.
+    """
+    if project_claude_dir is None:
+        return True
+    # Only toolguard_hook sources carry this toggle (not native settings).
+    for path, source_type, file_format in _discover_in_dir(project_claude_dir):
+        if source_type != 'toolguard_hook':
+            continue
+        content = _parse_source(path, file_format)
+        if content is None:
+            continue
+        if 'hierarchical_configuration' in content:
+            return bool(content['hierarchical_configuration'])
+        # First (highest-priority) toolguard_hook source wins; stop after it so a
+        # less-specific project-level file cannot override the toggle decision.
+        break
+    return True
+
+
+def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]:
+    """
+    Discover config files across the directory hierarchy, most-specific first.
+
+    Walks from the project root (see :func:`find_project_root`) UP TO and
+    including the user's home directory, collecting config files from every
+    ancestor that has a ``.claude`` subdirectory. The user-level ``~/.claude`` is
+    ALWAYS included as the least-specific level, even when the project is not
+    located under ``~`` (preserving "user config always applies"). The walk never
+    ascends above ``~``.
+
+    Each level is assigned a ``specificity`` index: 0 = project (most specific),
+    increasing with distance, and the user level last (least specific). When the
+    ``hierarchical_configuration`` toggle (read from the project level only) is
+    False, only the project and user levels are collected -- today's behaviour.
+
+    Args:
+        start_dir: Directory to start project-root discovery from. Defaults to cwd.
+
+    Returns:
+        List of (path, source_type, format, specificity) tuples, ordered
+        most-specific first then by within-level priority.
+    """
+    home = Path.home()
+    user_claude_dir = home / '.claude'
+
+    try:
+        project_root = find_project_root(start_dir)
+        project_claude_dir = project_root / '.claude'
+    except RuntimeError:
+        project_root = None
+        project_claude_dir = None
+
+    hierarchical = _hierarchical_toggle(project_claude_dir)
+
+    # Build the ordered list of .claude directories (most specific first),
+    # de-duplicated, with the user level always present and always last.
+    level_dirs: List[Path] = []
+
+    def _add(claude_dir: Path) -> None:
+        resolved = claude_dir.resolve()
+        for existing in level_dirs:
+            if existing.resolve() == resolved:
+                return
+        level_dirs.append(claude_dir)
+
+    if project_root is not None:
+        if hierarchical:
+            current = project_root
+            while True:
+                _add(current / '.claude')
+                if current == home or current == current.parent:
+                    break
+                current = current.parent
+        else:
+            _add(project_root / '.claude')
+
+    # User level always applies and is always least specific (appended last,
+    # unless it was already reached by the upward walk -- in which case it keeps
+    # its natural, least-specific position at the tail).
+    _add(user_claude_dir)
+
+    results: List[Tuple[Path, str, str, int]] = []
+    for specificity, claude_dir in enumerate(level_dirs):
+        if not claude_dir.exists():
+            continue
+        for path, source_type, file_format in _discover_in_dir(claude_dir):
+            results.append((path, source_type, file_format, specificity))
+    return results
+
+
+def _load_permissions_from_file(
     file_path: Path, source_type: str, file_format: str = 'json', strict: bool = False
 ) -> Tuple[List[str], List[str]]:
     """
@@ -210,7 +366,7 @@ def load_permissions_from_file(
     return allow_patterns, deny_patterns
 
 
-def merge_permissions(permissions_list: List[Tuple[List[str], List[str]]]) -> Tuple[List[str], List[str]]:
+def _merge_permissions(permissions_list: List[Tuple[List[str], List[str]]]) -> Tuple[List[str], List[str]]:
     """
     Merge permissions from multiple sources using simple union.
 
@@ -245,7 +401,7 @@ def merge_permissions(permissions_list: List[Tuple[List[str], List[str]]]) -> Tu
     return unique_allow, unique_deny
 
 
-def load_governed_tools_from_file(file_path: Path, file_format: str = 'json') -> List[str]:
+def _load_governed_tools_from_file(file_path: Path, file_format: str = 'json') -> List[str]:
     """
     Load governed tools list from a single config file (JSON or TOML).
 
@@ -279,7 +435,7 @@ def load_governed_tools_from_file(file_path: Path, file_format: str = 'json') ->
     return [tool for tool in governed_tools if isinstance(tool, str)]
 
 
-def merge_governed_tools(tools_lists: List[List[str]]) -> List[str]:
+def _merge_governed_tools(tools_lists: List[List[str]]) -> List[str]:
     """
     Merge governed tools from multiple sources using union.
 
@@ -389,7 +545,7 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
     return merged_config
 
 
-def load_governed_tools(start_dir: Path = None) -> List[str]:
+def _load_governed_tools(start_dir: Path = None) -> List[str]:
     """
     Load list of tools to govern from config files.
 
@@ -411,7 +567,7 @@ def load_governed_tools(start_dir: Path = None) -> List[str]:
         settings_dir = Path(settings_path).parent
         hook_file = settings_dir / 'toolguard_hook.json'
         if hook_file.exists():
-            tools = load_governed_tools_from_file(hook_file, 'json')
+            tools = _load_governed_tools_from_file(hook_file, 'json')
             if tools:
                 return tools
 
@@ -431,7 +587,7 @@ def load_governed_tools(start_dir: Path = None) -> List[str]:
     # Load governed tools from all hook files
     tools_lists = []
     for path, fmt in hook_files:
-        tools = load_governed_tools_from_file(path, fmt)
+        tools = _load_governed_tools_from_file(path, fmt)
         if tools:
             tools_lists.append(tools)
 
@@ -440,10 +596,10 @@ def load_governed_tools(start_dir: Path = None) -> List[str]:
         return ['Bash']
 
     # Merge all governed tools
-    return merge_governed_tools(tools_lists)
+    return _merge_governed_tools(tools_lists)
 
 
-def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
+def _load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     """
     Load and parse permissions from Claude Code settings files.
 
@@ -474,19 +630,9 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     ignored_patterns = set(takeover_config['ignored_allow_patterns'] + takeover_config['additional_ignored_patterns'])
 
     # Normalize ignored patterns: strip tool wrappers to match the extracted format
-    # that load_permissions_from_file() produces (e.g. "Bash(*)" -> "*", "Read(/tmp/**)" -> "/tmp/**")
-    _tool_prefixes = ['Bash(', 'Read(', 'Write(', 'Edit(', 'mcp__jetbrains__execute_terminal_command(']
-    normalized_ignored = set()
-    for p in ignored_patterns:
-        stripped = False
-        for prefix in _tool_prefixes:
-            if p.startswith(prefix) and p.endswith(')'):
-                normalized_ignored.add(p[len(prefix):-1])
-                stripped = True
-                break
-        if not stripped:
-            normalized_ignored.add(p)  # Already in extracted format
-    ignored_patterns = normalized_ignored
+    # that _load_permissions_from_file() produces (e.g. "Bash(*)" -> "*", "Read(/tmp/**)" -> "/tmp/**").
+    # _strip_tool_wrapper is the single structural strip shared across the module.
+    ignored_patterns = {_strip_tool_wrapper(p) for p in ignored_patterns}
 
     settings_path = os.environ.get('CLAUDE_SETTINGS_PATH')
 
@@ -497,7 +643,7 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
 
         # Load from the settings file
         try:
-            allow_perms, deny_perms = load_permissions_from_file(Path(settings_path), 'claude', 'json', strict=True)
+            allow_perms, deny_perms = _load_permissions_from_file(Path(settings_path), 'claude', 'json', strict=True)
 
             # Apply takeover mode filtering for native Claude config
             if takeover_enabled:
@@ -520,18 +666,18 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
 
         if hook_toml.exists():
             try:
-                perms = load_permissions_from_file(hook_toml, 'toolguard_hook', 'toml')
+                perms = _load_permissions_from_file(hook_toml, 'toolguard_hook', 'toml')
                 permissions_list.append(perms)  # Never filter toolguard_hook patterns
             except Exception as e:
                 print(f'Warning: Failed to load {hook_toml}: {e}', file=sys.stderr)
         elif hook_json.exists():
             try:
-                perms = load_permissions_from_file(hook_json, 'toolguard_hook', 'json')
+                perms = _load_permissions_from_file(hook_json, 'toolguard_hook', 'json')
                 permissions_list.append(perms)  # Never filter toolguard_hook patterns
             except Exception as e:
                 print(f'Warning: Failed to load {hook_json}: {e}', file=sys.stderr)
 
-        return merge_permissions(permissions_list)
+        return _merge_permissions(permissions_list)
 
     # Discover config files in hierarchy
     config_files = discover_config_files(start_dir)
@@ -558,7 +704,7 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
     permissions_list = []
     for path, source_type, fmt in config_files:
         try:
-            allow_perms, deny_perms = load_permissions_from_file(path, source_type, fmt)
+            allow_perms, deny_perms = _load_permissions_from_file(path, source_type, fmt)
 
             # Apply takeover mode filtering for native Claude config files
             if takeover_enabled and source_type == 'claude':
@@ -575,7 +721,7 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
             continue
 
     # Merge all permissions
-    allow_patterns, deny_patterns = merge_permissions(permissions_list)
+    allow_patterns, deny_patterns = _merge_permissions(permissions_list)
 
     print(f'Loaded {len(allow_patterns)} allow patterns, {len(deny_patterns)} deny patterns', file=sys.stderr)
 
@@ -591,48 +737,48 @@ def load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
 # Clients should use load_configuration() and the Configuration methods rather
 # than touching files, formats, or discovery order directly.
 
-# Tool wrapper prefixes recognized when normalising takeover-mode "ignored" patterns.
-#
-# Permission patterns are authored wrapped as ``Tool(inner)`` (e.g. ``Bash(git *)``),
-# but the loaders store only the unwrapped inner pattern (``git *``). Takeover mode's
-# ``ignored_allow_patterns`` are written in the wrapped form, so before they can be
-# string-compared against loader output their wrapper must be stripped too
-# (``_strip_tool_wrapper``): ``Bash(*)`` -> ``*``.
-#
-# These five entries are NOT an exhaustive tool list -- they deliberately mirror the
-# default ``ignored_allow_patterns`` in ``load_takeover_mode_config``. Keep the two in sync.
-#
-# FIXME(TOO-8 Phase 2): this list is hand-maintained in three drifted places
-# (here, the legacy ``load_permissions`` copy, and ``config_divergence`` -- which omits
-# the jetbrains entry). Phase 2 collapses them to a single structural strip
-# (``identifier(...)``), which needs no known-tool list at all.
-_TOOL_PREFIXES: Tuple[str, ...] = (
-    'Bash(',
-    'Read(',
-    'Write(',
-    'Edit(',
-    'mcp__jetbrains__execute_terminal_command(',
-)
-
-
 def _strip_tool_wrapper(pattern: str) -> str:
     """
-    Strip a recognised ``Tool(...)`` wrapper from a pattern, if present.
+    Strip a ``Tool(...)`` wrapper from a permission pattern, if present.
 
-    Returns the inner pattern when the string is wrapped by a known tool prefix
-    (e.g. ``'Bash(*)' -> '*'``); otherwise returns the pattern unchanged
-    (already in extracted form).
+    Permission patterns are authored wrapped as ``Tool(inner)`` (e.g.
+    ``Bash(git *)``) but the loaders compare against the unwrapped inner pattern
+    (``git *``). This is the single source of truth for that unwrapping. It is
+    purely STRUCTURAL: any ``identifier(...)`` shape is stripped, so no
+    hand-maintained tool list is needed and new tools require no change. The
+    inner body may itself contain parentheses (``Bash(foo(bar))`` -> ``foo(bar)``).
+
+    Returns the inner pattern when wrapped (e.g. ``'Bash(*)' -> '*'``); otherwise
+    returns the pattern unchanged (already in extracted form).
 
     Args:
         pattern: A permission pattern, possibly wrapped in ``Tool(...)``.
 
     Returns:
-        The pattern with any recognised tool wrapper removed.
+        The pattern with any tool wrapper removed.
     """
-    for prefix in _TOOL_PREFIXES:
-        if pattern.startswith(prefix) and pattern.endswith(')'):
-            return pattern[len(prefix) : -1]
+    match = _TOOL_WRAPPER_RE.fullmatch(pattern)
+    if match:
+        return match.group(1)
     return pattern
+
+
+def is_tool_wrapper(pattern: str) -> bool:
+    """
+    Report whether a permission pattern is a ``Tool(...)`` wrapper.
+
+    Shares the single structural recogniser (``_TOOL_WRAPPER_RE``) with
+    :func:`_strip_tool_wrapper`, so the wrapper shape lives in exactly one place.
+    Used by clients (e.g. ``config_divergence``) that need to recognise
+    tool-scoped native permission strings without re-deriving the regex.
+
+    Args:
+        pattern: A candidate permission string.
+
+    Returns:
+        True if the whole string is an ``identifier(...)`` tool wrapper.
+    """
+    return isinstance(pattern, str) and _TOOL_WRAPPER_RE.fullmatch(pattern) is not None
 
 
 @dataclass(frozen=True)
@@ -650,12 +796,17 @@ class Provenance:
         source_type: Either 'claude' (native settings) or 'toolguard_hook'.
         file_format: Either 'json' or 'toml'.
         path: Absolute path to the source file (display only).
+        specificity: Hierarchy distance from the project root. 0 = most specific
+            (project level); larger values are less specific; the user level is
+            largest. Used by the more-specific-wins resolver. Sources at the same
+            specificity belong to the same hierarchy level.
     """
 
     level: str
     source_type: str
     file_format: str
     path: Path
+    specificity: int = 0
 
     def describe(self) -> str:
         """Return a short human-readable description of this source."""
@@ -689,6 +840,11 @@ class ConfigLayer:
     def is_native(self) -> bool:
         """True when this layer is a native Claude settings file."""
         return self.provenance.source_type == 'claude'
+
+    @property
+    def specificity(self) -> int:
+        """Hierarchy specificity of this layer (0 = most specific)."""
+        return self.provenance.specificity
 
 
 @dataclass(frozen=True)
@@ -783,6 +939,55 @@ class Configuration:
     layers: Tuple[ConfigLayer, ...]
     start_dir: Optional[Path] = None
 
+    # -- project root ------------------------------------------------------
+
+    @property
+    def project_root(self) -> Optional[Path]:
+        """
+        Return the resolved project root, or None when none can be found.
+
+        The project root is the anchor for ALL relative paths declared anywhere
+        in the configuration (see :meth:`resolve_config_path`). Resolved via
+        :func:`find_project_root` from :attr:`start_dir`. None is returned when
+        no project marker (``pyproject.toml``/``.git``) is found up to ``~``.
+        """
+        try:
+            return find_project_root(self.start_dir)
+        except RuntimeError:
+            return None
+
+    def resolve_config_path(self, raw_path: str) -> str:
+        """
+        Resolve a path declared in configuration against the PROJECT ROOT.
+
+        Any relative path appearing anywhere in configuration -- regardless of
+        which level/directory declared it -- resolves against the project root,
+        NOT against the ancestor directory that holds the declaring file and NOT
+        against the current working directory. This is the single anchor point
+        for that rule.
+
+        Absolute paths and ``~``-paths are returned unchanged here (``~`` is
+        expanded by downstream matching/normalisation, not by this method).
+
+        Args:
+            raw_path: A path string from configuration (e.g. a ``backup_dir`` or
+                a relative file-path permission pattern, already stripped of any
+                extended-syntax prefix and tool wrapper).
+
+        Returns:
+            For a relative path: ``<project_root>/<raw_path>`` as a string (or
+            the original when no project root is known). Absolute and ``~`` paths
+            are returned unchanged.
+        """
+        if not raw_path:
+            return raw_path
+        if raw_path.startswith('/') or raw_path.startswith('~'):
+            return raw_path
+        root = self.project_root
+        if root is None:
+            return raw_path
+        return str(root / raw_path)
+
     # -- governed tools ----------------------------------------------------
 
     def governed_tools(self) -> Tuple[str, ...]:
@@ -791,9 +996,9 @@ class Configuration:
 
         Union across all toolguard_hook layers, preserving first-occurrence
         order. Defaults to ``('Bash',)`` when nothing is configured. Mirrors
-        the legacy ``load_governed_tools`` behaviour exactly.
+        the legacy ``_load_governed_tools`` behaviour exactly.
         """
-        return tuple(load_governed_tools(self.start_dir))
+        return tuple(_load_governed_tools(self.start_dir))
 
     # -- takeover mode -----------------------------------------------------
 
@@ -813,6 +1018,60 @@ class Configuration:
         )
 
     # -- permissions -------------------------------------------------------
+
+    def hard_deny(self, tool_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+        """
+        Return the pooled hard-deny (deny, allow) patterns for a tool.
+
+        ``[hard_deny]`` is a toolguard EXTENSION read ONLY from ``toolguard_hook``
+        layers -- never from native Claude settings, which have no such concept.
+        Unlike the normal more-specific-wins cascade, hard_deny is COLLECTED FROM
+        ALL LEVELS INTO ONE POOL (union across the whole hierarchy, de-duplicated,
+        order-preserving most-specific first). It is evaluated FIRST, before the
+        cascade, and cannot be overridden by any level's normal allow.
+
+        Semantics of the returned lists:
+
+        - ``deny``: a command/path matching any of these is hard-denied UNLESS it
+          also matches an ``allow`` carve-out.
+        - ``allow``: an EXCEPTION to ``deny`` only (e.g. hard-deny all ``curl``
+          EXCEPT ``curl localhost``). It is NOT a forced/normal allow and does
+          NOT affect the normal cascade.
+
+        Patterns are returned in extracted form (the ``Tool(...)`` wrapper is
+        stripped, exactly like :meth:`permission_layers`), tool-scoped to
+        ``tool_name``, and carry the same extended syntax (``[regex]``/``[glob]``/
+        ``[native]``) the normal matchers understand. Relative file-path patterns
+        are NOT anchored here; anchoring to the project root happens at match time
+        in the hook (reusing the Phase 2 anchoring), mirroring normal patterns.
+
+        Args:
+            tool_name: Tool to extract hard-deny patterns for (e.g. 'Bash',
+                'Read', 'Write', 'Edit').
+
+        Returns:
+            Tuple of (deny_patterns, allow_patterns) as immutable, de-duplicated
+            tuples pooled across all toolguard_hook layers.
+        """
+        prefix = f'{tool_name}('
+        seen_deny: Dict[str, None] = {}
+        seen_allow: Dict[str, None] = {}
+
+        for layer in self.layers:
+            # hard_deny is a toolguard extension; ignore native Claude settings.
+            if layer.is_native:
+                continue
+            section = layer.content.get('hard_deny', {})
+            if not isinstance(section, dict):
+                continue
+            for perm in section.get('deny', []):
+                if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(')'):
+                    seen_deny.setdefault(perm[len(prefix) : -1], None)
+            for perm in section.get('allow', []):
+                if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(')'):
+                    seen_allow.setdefault(perm[len(prefix) : -1], None)
+
+        return tuple(seen_deny.keys()), tuple(seen_allow.keys())
 
     def permission_layers(self, tool_name: str) -> Tuple[ToolPatternLayer, ...]:
         """
@@ -862,6 +1121,62 @@ class Configuration:
 
         return tuple(result)
 
+    def permission_levels(self, tool_name: str) -> Tuple[Tuple[Tuple[str, ...], Tuple[str, ...]], ...]:
+        """
+        Group per-layer patterns for a tool into per-LEVEL (allow, deny) pairs.
+
+        Layers sharing a specificity (e.g. a ``.local`` and a regular file in the
+        same ``.claude`` directory) are collapsed into a single level, preserving
+        within-level priority order. Levels are returned most-specific first --
+        the order the more-specific-wins resolver consumes.
+
+        Args:
+            tool_name: Tool to resolve patterns for (e.g. 'Bash', 'Read').
+
+        Returns:
+            Tuple of (allow_patterns, deny_patterns) pairs, one per hierarchy
+            level, ordered most-specific first.
+        """
+        grouped: Dict[int, Tuple[List[str], List[str]]] = {}
+        order: List[int] = []
+        for layer in self.permission_layers(tool_name):
+            spec = layer.provenance.specificity
+            if spec not in grouped:
+                grouped[spec] = ([], [])
+                order.append(spec)
+            allow_acc, deny_acc = grouped[spec]
+            allow_acc.extend(layer.allow)
+            deny_acc.extend(layer.deny)
+        return tuple((tuple(grouped[s][0]), tuple(grouped[s][1])) for s in order)
+
+    def resolve_permission(self, tool_name: str, decide) -> Tuple[str, str]:
+        """
+        Resolve a permission decision using more-specific-wins across levels.
+
+        Evaluates hierarchy levels MOST-SPECIFIC -> LEAST-SPECIFIC. ``decide`` is
+        called per level with that level's (allow, deny) pattern tuples and must
+        return a ``(decision, reason)`` pair when the level produces ANY match
+        (deny or allow), or ``None`` when the level matches nothing. The FIRST
+        level that returns a non-None result decides; the cascade stops there.
+        When no level matches anything, the result is a fail-closed DENY.
+
+        Pattern MATCHING lives entirely in ``decide`` (supplied by
+        permissions.py / compound.py); this method owns only the level cascade.
+
+        Args:
+            tool_name: Tool whose levels to evaluate.
+            decide: Callable ``(allow, deny) -> (decision, reason) | None``.
+
+        Returns:
+            The winning ``(decision, reason)``, or a default deny when nothing
+            matched at any level.
+        """
+        for allow, deny in self.permission_levels(tool_name):
+            result = decide(allow, deny)
+            if result is not None:
+                return result
+        return 'deny', 'Command does not match any allow patterns'
+
     def allow_deny_for(self, tool_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
         """
         Return flattened, de-duplicated (allow, deny) patterns for a tool.
@@ -869,7 +1184,7 @@ class Configuration:
         This is the Phase 1 (behaviour-preserving) flattening of
         :meth:`permission_layers`: union across layers in discovery order with
         duplicates removed, mirroring the legacy ``load_file_path_patterns`` and
-        Bash ``load_permissions`` results. Global deny-first matching is applied
+        Bash ``_load_permissions`` results. Global deny-first matching is applied
         downstream by the matching code, not here.
 
         Args:
@@ -891,7 +1206,7 @@ class Configuration:
         """
         Return resolved (allow, deny) Bash command patterns.
 
-        Behaviour-preserving wrapper around the legacy ``load_permissions``
+        Behaviour-preserving wrapper around the legacy ``_load_permissions``
         path (which also handles the ``CLAUDE_SETTINGS_PATH`` single-file mode
         and emits the discovery diagnostics on stderr). Kept as the command-tool
         entry point so the hook never opens files itself.
@@ -899,7 +1214,7 @@ class Configuration:
         Returns:
             Tuple of (allow_patterns, deny_patterns) as immutable tuples.
         """
-        allow, deny = load_permissions(self.start_dir)
+        allow, deny = _load_permissions(self.start_dir)
         return tuple(allow), tuple(deny)
 
     # -- scalars -----------------------------------------------------------
@@ -1132,7 +1447,7 @@ def _level_for_path(path: Path) -> str:
         return 'project'
 
 
-def load_configuration(start_dir: Path = None) -> Configuration:
+def load_configuration(start_dir: Path = None, ignore_env_override: bool = False) -> Configuration:
     """
     Load the toolguard configuration as an immutable :class:`Configuration`.
 
@@ -1140,11 +1455,19 @@ def load_configuration(start_dir: Path = None) -> Configuration:
     parsing internally and returns a file/format-agnostic view. When
     ``CLAUDE_SETTINGS_PATH`` is set, a single explicit source (plus any adjacent
     ``toolguard_hook`` file) is used, bypassing the hierarchy -- matching the
-    legacy behaviour.
+    legacy behaviour. The runtime hook relies on this single-file behaviour, so
+    it is the default.
 
     Args:
         start_dir: Directory to start project-root discovery from. Defaults to
             the current working directory.
+        ignore_env_override: When True, ignore ``CLAUDE_SETTINGS_PATH`` and
+            always discover the hierarchy rooted at the project. This exists for
+            the migration/divergence tooling, whose write-target selection is
+            already project-based; forcing the read path to be project-based too
+            keeps that tooling internally consistent and unaffected by a stale
+            ``CLAUDE_SETTINGS_PATH`` pointing at an unrelated project. The
+            runtime hook never sets this.
 
     Returns:
         An immutable :class:`Configuration`. Note that command-permission
@@ -1154,7 +1477,7 @@ def load_configuration(start_dir: Path = None) -> Configuration:
     """
     layers: List[ConfigLayer] = []
 
-    settings_path = os.environ.get('CLAUDE_SETTINGS_PATH')
+    settings_path = None if ignore_env_override else os.environ.get('CLAUDE_SETTINGS_PATH')
     if settings_path:
         explicit = Path(settings_path)
         content = _parse_source(explicit, 'json')
@@ -1188,14 +1511,14 @@ def load_configuration(start_dir: Path = None) -> Configuration:
                 )
         return Configuration(layers=tuple(layers), start_dir=start_dir)
 
-    for path, source_type, file_format in discover_config_files(start_dir):
+    for path, source_type, file_format, specificity in _discover_levels(start_dir):
         content = _parse_source(path, file_format)
         if content is None:
             continue
         level = _level_for_path(path)
         layers.append(
             ConfigLayer(
-                provenance=Provenance(level, source_type, file_format, path),
+                provenance=Provenance(level, source_type, file_format, path, specificity),
                 content=MappingProxyType(content),
             )
         )
@@ -1213,7 +1536,7 @@ def load_configuration(start_dir: Path = None) -> Configuration:
 # parsing/format-branching lives here, not in those clients.
 
 
-def toolguard_permissions_from_sources(config_files: List[Tuple[Path, str, str]]) -> Dict[str, List[str]]:
+def _toolguard_permissions_from_sources(config_files: List[Tuple[Path, str, str]]) -> Dict[str, List[str]]:
     """
     Extract raw allow/deny/ask permissions from toolguard_hook sources.
 

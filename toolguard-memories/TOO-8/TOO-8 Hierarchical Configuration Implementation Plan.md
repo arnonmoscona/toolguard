@@ -10,8 +10,12 @@ tags:
 
 # TOO-8 Hierarchical Configuration -- Implementation Plan (v2)
 
-Status: Phase 1 IMPLEMENTED + code-reviewed + green (2026-06-16), UNCOMMITTED.
-Next: revisit Phases 2+ against the real abstraction. See "Phase 1 outcome" at end.
+Status: Phases 2 AND 3 IMPLEMENTED + code-reviewed + green (654 tests, with AND without
+CLAUDE_SETTINGS_PATH), UNCOMMITTED as of 2026-06-17 (Phase 2+3 await Arnon's combined
+review). Phase 1 was committed earlier.
+Next phases: 4 (logging streams + conflict logging), 5 (non-permission cross-level incl.
+takeover special-case + scalar more-specific-wins), 6 (SessionStart conflict hook),
+7 (docs restructure). See "Phase 2 outcome" and "Phase 3 outcome" at end.
 
 ## Objective
 
@@ -220,3 +224,129 @@ Implementation reports: basic-memory `implementation/coder-latest-implementation
 Changed files: `toolguard/config.py`, `toolguard/hook.py`, `toolguard/config_divergence.py`,
 `toolguard/auto_migrate.py`, `test/unit/test_hook.py`, `test/unit/test_configuration.py` (new).
 Nothing committed -- Arnon performs all git writes.
+
+## Phase 2 outcome (2026-06-17) -- UNCOMMITTED, pending Arnon's review
+
+Implemented + code-reviewed (code-reviewer: no production correctness bugs) + green:
+634 tests pass WITH and WITHOUT CLAUDE_SETTINGS_PATH set; ruff clean; ~100% coverage on
+changed lines.
+
+Delivered:
+- Hierarchical discovery: `_discover_levels` walks project root -> ~, each `.claude/` level
+  with a specificity index (0 = project, most specific); `~/.claude` always included; stop
+  at ~. `hierarchical_configuration` toggle read only from project level, default true;
+  false => project+user only.
+- More-specific-wins resolution: `Configuration.permission_levels` + `resolve_permission`
+  cascade most-specific->least, deny-first within a level, first matching level decides,
+  fail-closed if none. Applied to Bash, each compound sub-command independently, and
+  Read/Write/Edit. Single resolution path (no legacy/dual path).
+- NEW requirement: relative config paths always resolve against the PROJECT ROOT regardless
+  of declaring level (`Configuration.resolve_config_path` / `_anchor_file_pattern`);
+  absolute and ~ paths unaffected; `[regex]` not rewritten. Covered by tests at project /
+  intermediate / user levels (backup_dir + Read patterns). Documented in technical-notes.md.
+- Cleanup: unified `is_tool_wrapper`/`_strip_tool_wrapper` structural matcher (3 drifted
+  lists collapsed); config_divergence migrated to Configuration; tool-prefix FIXME removed.
+- CLAUDE_SETTINGS_PATH policy: runtime hook keeps single-file mode; the migration/divergence
+  tooling now passes `load_configuration(..., ignore_env_override=True)` so it is
+  project-scoped end-to-end (decision made on Arnon's behalf; flag if you disagree).
+- Tests isolate CLAUDE_SETTINGS_PATH via `_IsolatedEnvTestCase` in test_hierarchical.py.
+
+Changed files: config.py, permissions.py, compound.py, hook.py, config_divergence.py,
+auto_migrate.py, scripts/migrate_permissions.py, technical-notes.md, .gitignore; tests
+test_hierarchical.py (new), test_hook.py, test_config_divergence.py, test_migration.py.
+
+P3 underscore-privatisation: DONE (2026-06-17, Arnon authorised editing formal tests).
+Privatised 7 functions: `_load_permissions`, `_load_permissions_from_file`,
+`_merge_permissions`, `_load_governed_tools`, `_load_governed_tools_from_file`,
+`_merge_governed_tools`, `_toolguard_permissions_from_sources`. ~55 references + 2
+`patch('toolguard.config.X')` string targets updated across 4 test modules. Suite green
+both ways; config.py coverage 95%.
+Left public (genuine production callers): `find_project_root`, `discover_config_files`,
+`load_takeover_mode_config` (all used by log_writer.py / scripts/migrate_permissions.py),
+and `config_sync_settings_from_sources` (only caller `auto_migrate.load_config_sync_settings`,
+whose 8 committed tests pass arbitrary config_files lists -- migrating would change test
+intent). FOLLOW-UP: migrate the large `scripts/migrate_permissions.py` onto the
+Configuration API; that unblocks privatising the remaining four.
+- Git housekeeping (Arnon's domain): `coder-test/test_configuration_abstraction.py` is a
+  staged-add living only in the index (absent from worktree); unstage it
+  (`git rm --cached coder-test/test_configuration_abstraction.py`).
+
+Reports: basic-memory `implementation/coder-latest-implementation-report.md` (+ addendum),
+review `implementation/latest-code-review-report.md`. Nothing committed; Arnon does git.
+
+## Phase 3 outcome (2026-06-17) -- UNCOMMITTED, pending Arnon's review
+
+Implemented the `[hard_deny]` unoverridable safety valve. Code-reviewed (no Critical/Major
+findings). 654 tests green WITH and WITHOUT CLAUDE_SETTINGS_PATH; ruff clean; coverage
+config.py 95.6%, permissions.py 90.4%, hook.py 83.8%.
+
+Semantics (DEFINED ON ARNON'S BEHALF -- confirm on review): `[hard_deny]` is a toolguard
+extension (toolguard_hook files only, never native settings) with `deny` and `allow` lists,
+pooled as a union across ALL levels, checked FIRST before the Phase 2 cascade. Match a
+`deny` AND no `allow` carve-out => unoverridable DENY; else fall through unchanged. `allow`
+is ONLY an exception to hard_deny `deny` (e.g. hard-deny all curl except curl localhost),
+NOT a forced allow. Same extended syntax/wrappers/matchers; relative file-path patterns
+anchored to project root (reuses Phase 2). Applies to Bash, each compound sub-command
+(compound denied if any sub is), and Read/Write/Edit.
+
+Changed: config.py (`Configuration.hard_deny(tool)`), permissions.py (`check_hard_deny`),
+hook.py (file-path + Bash resolve check hard_deny first), technical-notes.md (new section),
+test/unit/test_hard_deny.py (NEW, 20 tests), test/unit/test_hook.py (added no-op
+`hard_deny` to the `_FakeConfig` test double -- API-sync only, no intent change).
+
+Minor review follow-ups (NOT blocking; deferred):
+- M1: the "both .toml and .json exist" warning exists twice -- a stderr print in
+  `_discover_in_dir` (the one that fires) and an Issue-based copy in `validation_issues()`
+  that can't fire via load_configuration. Consolidate -- naturally folds into Phase 4
+  (logging streams / Issue routing).
+- M2: stale docstrings -- `bash_permissions()` / module docstring still call it "the
+  command-tool entry point," but post-Phase-2 the hook resolves Bash via
+  `resolve_permission`+`allow_deny_for`; `bash_permissions()` has no production caller
+  (tests only), so the legacy `_load_permissions` stderr discovery diagnostics no longer
+  fire at runtime. Update docstrings; decide in Phase 4 whether to re-emit those diagnostics
+  through the new logging.
+
+Reports: basic-memory `implementation/coder-latest-implementation-report.md`; review
+`implementation/latest-code-review-report.md`. Nothing committed; Arnon does git.
+
+## Docs debt to fold into Phase 7 (deferred 2026-06-17, agreed with Arnon)
+
+User-facing docs are current enough to use now (README got the hierarchy/resolution model,
+project-root-relative paths, and a `[hard_deny]` config-reference section + notes bullet;
+technical-notes.md has full Phase 2/3 sections). Deferred minor polish for the Phase 7
+consolidated docs pass (README restructure + technical-notes):
+- technical-notes.md describes the compound cascade behaviorally and names
+  `resolve_permission`, but does NOT name `resolve_compound_permission`, nor note that the
+  legacy `check_compound_permission` is retained but OFF the live path. Add both.
+- Same "legacy retained but off live path" note for `bash_permissions` and the
+  `_load_permissions` stderr discovery diagnostics (code-review M2) -- and decide whether
+  to re-emit those discovery diagnostics through the Phase 4 logging.
+- Code-review M1: consolidate the duplicated "both .toml and .json exist" warning
+  (stderr print in `_discover_in_dir` vs the unreachable Issue-based copy) -- naturally a
+  Phase 4 logging-streams item.
+- Full README audience-split restructure (beginner quick-start + agent-oriented few-shot
+  guides) remains the core Phase 7 deliverable; README is still partly stale elsewhere.
+
+## Phase 4 enhancement: matched-rule PROVENANCE in the resolution log (raised by Arnon 2026-06-17)
+
+Confirmed gap: `resolve_permission` (config.py) consumes `permission_levels()`, which STRIPS
+provenance (collapses layers to bare `(allow, deny)` tuples). The `decide` callables
+(`decide_command_at_level`, etc.) return reasons containing only the matched PATTERN
+(e.g. "Command matches allow pattern: git *"), never its origin. So the resolution log does
+NOT tell a reader which file/level the effective rule came from -- a real loss under the
+hierarchy (same pattern can exist at multiple levels).
+
+Fold into Phase 4: thread provenance so a decision's reason/log cites the winning rule's
+origin, e.g. "matches allow pattern: git *  [project: .claude/toolguard_hook.toml]". For
+exact-file precision, have the decider report which pattern matched and map it back to its
+`ToolPatternLayer` (which carries `provenance`). Pairs with conflict logging (a conflict
+entry should cite BOTH sides' provenance). Likely needs a provenance-carrying variant of
+`permission_levels` (specificity -> representative/again per-layer provenance).
+
+## Comment cleanup decided (config.py module docstring)
+The "Privatisation notes" enumeration (config.py:25-42) + the `bash_permissions`
+"byte-for-byte identical / stderr diagnostics" rationale (lines ~19-22) are drift-prone and
+the latter is already STALE (bash_permissions is off the live path post-Phase 2). Plan:
+keep the durable "Public abstraction" paragraph; replace the rest with one sentence noting a
+few loaders stay public only for not-yet-migrated non-test callers (transitional; tracker
+holds specifics). Pending Arnon's go-ahead.

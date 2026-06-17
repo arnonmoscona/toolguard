@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple
 from toolguard.config import (
     discover_config_files,
     find_project_root,
+    load_configuration,
     load_takeover_mode_config,
 )
 from toolguard.config_divergence import (
@@ -861,9 +862,16 @@ def migrate(
 
     native_perms = get_native_permissions(settings_path)
 
-    # Load toolguard permissions
+    # Load toolguard permissions via the config abstraction (no direct file I/O).
+    # ignore_env_override=True: the migration tool selects its WRITE target via
+    # project-based discovery (see discover_config_files below), so the READ path
+    # must be project-based too. Honouring CLAUDE_SETTINGS_PATH here would analyse
+    # an unrelated project's config while writing to this project's files.
+    toolguard_perms = get_toolguard_permissions(load_configuration(project_root, ignore_env_override=True))
+
+    # The migration target-file selection still needs the discovered file paths
+    # (it writes to an existing toolguard_hook file or creates one).
     config_files = discover_config_files(project_root)
-    toolguard_perms = get_toolguard_permissions(config_files)
 
     # Load takeover mode config for ignored patterns
     takeover_config = load_takeover_mode_config(project_root)

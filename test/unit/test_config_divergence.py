@@ -7,7 +7,9 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 
+from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.config_divergence import (
     check_and_warn_divergence,
     cleanup_old_markers,
@@ -182,93 +184,80 @@ class TestGetNativePermissions(unittest.TestCase):
             self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
 
 
+def _config_from_layers(*layers):
+    """
+    Build a Configuration from explicit (source_type, content) layer specs.
+
+    Each spec is a ``(source_type, content_dict)`` pair; layers are ordered
+    most-specific first. Lets divergence tests exercise get_toolguard_permissions
+    against the public Configuration surface without touching files.
+    """
+    built = []
+    for i, (source_type, content) in enumerate(layers):
+        prov = Provenance('project', source_type, 'json', Path(f'/fake/{i}.json'), i)
+        built.append(ConfigLayer(provenance=prov, content=MappingProxyType(content)))
+    return Configuration(layers=tuple(built))
+
+
 class TestGetToolguardPermissions(unittest.TestCase):
-    """Test extracting permissions from toolguard_hook files."""
+    """Test extracting permissions from the resolved toolguard configuration."""
 
     def test_extract_from_json(self):
         """
-        Given a toolguard_hook.json with allow and deny permissions
-        When get_toolguard_permissions reads it
+        Given a toolguard_hook layer with allow and deny permissions
+        When get_toolguard_permissions reads the resolved Configuration
         Then the allow and deny patterns are returned and ask is empty
         """
-        with TemporaryDirectory() as tmpdir:
-            hook_path = Path(tmpdir) / 'toolguard_hook.json'
+        config = _config_from_layers(
+            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)', 'Read(/tmp/**)'], 'deny': ['Bash(rm -rf:*)']}})
+        )
+        result = get_toolguard_permissions(config)
 
-            config = {'permissions': {'allow': ['Bash(git status:*)', 'Read(/tmp/**)'], 'deny': ['Bash(rm -rf:*)']}}
-
-            hook_path.write_text(json.dumps(config))
-
-            config_files = [(hook_path, 'toolguard_hook', 'json')]
-            result = get_toolguard_permissions(config_files)
-
-            self.assertEqual(result['allow'], ['Bash(git status:*)', 'Read(/tmp/**)'])
-            self.assertEqual(result['deny'], ['Bash(rm -rf:*)'])
-            self.assertEqual(result['ask'], [])
+        self.assertEqual(result['allow'], ['Bash(git status:*)', 'Read(/tmp/**)'])
+        self.assertEqual(result['deny'], ['Bash(rm -rf:*)'])
+        self.assertEqual(result['ask'], [])
 
     def test_ignore_claude_settings(self):
         """
-        Given a config source typed as 'claude'
-        When get_toolguard_permissions reads it
-        Then it returns empty permissions because claude files are ignored
+        Given a native ('claude') layer with permissions
+        When get_toolguard_permissions reads the resolved Configuration
+        Then it returns empty permissions because native layers are ignored
         """
-        with TemporaryDirectory() as tmpdir:
-            settings_path = Path(tmpdir) / 'settings.local.json'
+        config = _config_from_layers(('claude', {'permissions': {'allow': ['Bash(git push:*)']}}))
+        result = get_toolguard_permissions(config)
 
-            config = {'permissions': {'allow': ['Bash(git push:*)']}}
-
-            settings_path.write_text(json.dumps(config))
-
-            config_files = [(settings_path, 'claude', 'json')]
-            result = get_toolguard_permissions(config_files)
-
-            # Should be empty since we ignore claude settings
-            self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
+        # Should be empty since we ignore claude settings
+        self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
 
     def test_merge_multiple_files(self):
         """
-        Given two toolguard_hook files each with a distinct allow pattern
+        Given two toolguard_hook layers each with a distinct allow pattern
         When get_toolguard_permissions merges them
         Then both patterns appear in the merged allow list
         """
-        with TemporaryDirectory() as tmpdir:
-            hook1 = Path(tmpdir) / 'toolguard_hook.json'
-            hook2 = Path(tmpdir) / 'toolguard_hook.local.json'
+        config = _config_from_layers(
+            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)']}}),
+            ('toolguard_hook', {'permissions': {'allow': ['Bash(ls:*)']}}),
+        )
+        result = get_toolguard_permissions(config)
 
-            config1 = {'permissions': {'allow': ['Bash(git status:*)']}}
-            config2 = {'permissions': {'allow': ['Bash(ls:*)']}}
-
-            hook1.write_text(json.dumps(config1))
-            hook2.write_text(json.dumps(config2))
-
-            config_files = [(hook1, 'toolguard_hook', 'json'), (hook2, 'toolguard_hook', 'json')]
-
-            result = get_toolguard_permissions(config_files)
-
-            self.assertIn('Bash(git status:*)', result['allow'])
-            self.assertIn('Bash(ls:*)', result['allow'])
+        self.assertIn('Bash(git status:*)', result['allow'])
+        self.assertIn('Bash(ls:*)', result['allow'])
 
     def test_deduplicate_patterns(self):
         """
-        Given two toolguard_hook files with the same allow pattern
+        Given two toolguard_hook layers with the same allow pattern
         When get_toolguard_permissions merges them
         Then the shared pattern appears only once
         """
-        with TemporaryDirectory() as tmpdir:
-            hook1 = Path(tmpdir) / 'toolguard_hook.json'
-            hook2 = Path(tmpdir) / 'toolguard_hook.local.json'
+        config = _config_from_layers(
+            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)']}}),
+            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)']}}),
+        )
+        result = get_toolguard_permissions(config)
 
-            config1 = {'permissions': {'allow': ['Bash(git status:*)']}}
-            config2 = {'permissions': {'allow': ['Bash(git status:*)']}}
-
-            hook1.write_text(json.dumps(config1))
-            hook2.write_text(json.dumps(config2))
-
-            config_files = [(hook1, 'toolguard_hook', 'json'), (hook2, 'toolguard_hook', 'json')]
-
-            result = get_toolguard_permissions(config_files)
-
-            # Should only appear once
-            self.assertEqual(result['allow'].count('Bash(git status:*)'), 1)
+        # Should only appear once
+        self.assertEqual(result['allow'].count('Bash(git status:*)'), 1)
 
 
 class TestFindDivergentPatterns(unittest.TestCase):

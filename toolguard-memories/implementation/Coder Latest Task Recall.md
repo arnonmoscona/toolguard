@@ -3,85 +3,69 @@ title: Coder Latest Task Recall
 type: note
 permalink: toolguard/implementation/coder-latest-task-recall
 tags:
-- implementation
+- coder-task-recall
 - TOO-8
-- coder-recall
+- hard_deny
 ---
 
-# Coder Latest Task Recall -- TOO-8 Phase 1
+# Coder Task Recall -- TOO-8 Phase 3 (hard_deny)
 
-## Ticket / Task
-TOO-8 Hierarchical Configuration. Implement **Phase 1 ONLY** (behavior-preserving
-config-abstraction refactor). Plan note:
-`toolguard/too-8/too-8-hierarchical-configuration-implementation-plan`.
+Date: 2026-06-17. Acting as feature-coder. Project: toolguard. NO git writes.
 
-## Phase 1 scope
-Behavior-preserving refactor that fixes broken abstraction in config module. NO runtime
-behavior change. Build a public `Configuration` abstraction; no code outside config module
-may open config files, parse JSON/TOML, or branch on file format/location.
+## Objective
+Implement `[hard_deny]` safety valve: an unoverridable hard-deny. A (typically less-specific)
+config declares rules that NO more-specific config can override.
 
-### Public API (names refinable)
-- `load_configuration(start_dir=None) -> Configuration`
-- `Configuration.governed_tools() -> tuple[str,...]` (union; default ('Bash',))
-- `Configuration.takeover_mode() -> TakeoverConfig` (resolved as TODAY: enabled=OR,
-  pattern lists=union, no_match_fallback=priority/last). NO Phase 5 special-case.
-- `Configuration.permission_layers(tool_name) -> tuple[ConfigLayer,...]` per-layer
-  allow/deny WITH provenance, most-specific first. Phase 1 callers flatten+union.
-- `Configuration.validation_issues() -> tuple[Issue,...]` replaces hand-rolled walk.
-- `Configuration.scalar(name, default)` resolved scalars (config-sync, backup_dir).
-- Keep `CLAUDE_SETTINGS_PATH` single-file behavior, internal to module.
+## Semantics (this phase; document + flag for Arnon)
+- `[hard_deny]` = section with two optional pattern lists: `deny` and `allow`. toolguard
+  extension -- read ONLY from toolguard_hook config (TOML/JSON), NOT native settings*.json.
+- Collected from ALL levels into ONE pool (union across hierarchy) per decision #3. Not
+  per-level propagation.
+- Checked FIRST, before more-specific-wins cascade:
+  - If matches any hard_deny.deny AND does NOT match any hard_deny.allow -> DENY (hard-deny
+    reason). Cannot be overridden by any level's normal allow.
+  - Otherwise fall through to Phase 2 cascade unchanged.
+- hard_deny.allow is ONLY a carve-out exception to hard_deny.deny. NOT a forced allow; does
+  NOT affect normal cascade.
+- Patterns support extended syntax ([regex]/[glob]/[native]) + tool wrappers (Bash(...),
+  Read(...), etc.), same matchers as normal perms.
+- Apply to: Bash commands, EACH sub-command of compound (compound hard-denied if any
+  sub-command is), and file-path tools (Read/Write/Edit, tool-scoped like normal patterns).
 
-### Separation of concerns (hard)
-- Sourcing/parsing only inside config module. Pattern matching stays in
-  permissions.py/compound.py. Config has NO logging side effects: returns Issue/Conflict
-  objects; hook logs. Config may READ files, not WRITE logs.
-- Provenance: each layer carries display-only origin (level + path/format). No mutation.
+## Implementation
+- Parse `[hard_deny]` in config layer model; expose via `Configuration.hard_deny(tool_name)`
+  returning pooled (deny, allow) tool-scoped patterns, relative paths anchored to project
+  root (reuse Phase 2 anchoring `_anchor_file_pattern`).
+- Integrate into resolver: hard_deny evaluated before cascade for bash/compound/file-path
+  uniformly. Matching stays in permissions.py/compound.py.
+- Single resolution path. No behavior change when no `[hard_deny]` configured.
 
-### Immutability
-tuples not lists; MappingProxyType / frozen dataclasses for Configuration / ConfigLayer /
-TakeoverConfig / Issue. No deep recursive wrappers.
+## Tooling rules (CRITICAL)
+- Green BOTH: `uv run python -m unittest discover -s test -t .` AND
+  `env -u CLAUDE_SETTINGS_PATH uv run python -m unittest discover -s test -t .`
+- Do NOT `ruff format` (corrupts repo). Use `ruff check`. Coverage:
+  `uv run python tools/coverage_stdlib.py`. Don't hand-edit parser/bash_parser.py.
+- Tests are unittest (NOT pytest). Every test fn needs Given/When/Then docstring.
 
-### Behavior-preserving constraints (critical)
-- TWO levels only (project .claude + user ~/.claude). NO traversal.
-- Today's resolution: union + global deny-first. NO more-specific-wins.
-- ALL existing tests under test/ MUST pass UNCHANGED. If a requirement contradicts an
-  existing test, STOP and report. Do not edit main test dir.
-- Migrate all external clients: hook.py (main, _run_startup_validation,
-  load_file_path_patterns, divergence/auto-migrate wiring) + anything else outside config
-  consuming discover_config_files/load_permissions/load_governed_tools/
-  load_takeover_mode_config/load_toml_config.
+## Tests required (BDD docstrings)
+- hard_deny.deny denies even when MORE-SPECIFIC level allows (unoverridable)
+- hard_deny.allow carve-out exempts matching command
+- hard_deny at ancestor/user level blocks project-level allow
+- compound: one hard-denied sub-command denies whole compound
+- file-path (Read/Write/Edit) hard_deny
+- no [hard_deny] => Phase 2 unchanged (regression)
+- hard_deny pooled across multiple levels
+- relative path in hard_deny pattern anchors to project root
 
-## Environment findings
-- Project uses **unittest**, NOT pytest. pytest + pytest-cov NOT installed; `python -m
-  pytest` fails. Run tests: `uv run python -m unittest discover -s test -p "test_*.py"`.
-- Baseline: 563 tests, OK (clean).
-- `coverage` not in venv but `uvx coverage` works (v7.14.1).
-- Python >=3.14, zero runtime deps (stdlib only). Must stay stdlib-only.
-- test/unit/test_config.py imports these from toolguard.config and locks their behavior:
-  discover_config_files, load_governed_tools, load_governed_tools_from_file,
-  load_permissions, load_permissions_from_file, merge_governed_tools, merge_permissions.
-  => Must KEEP these importable with same behavior (internal shims OK).
+## DoD
+1. hard_deny: checked first, unoverridable, single resolution path
+2. Suite green both ways; ruff check clean; files compile
+3. New tests w/ G/W/T; coverage >90% on changed code (report numbers)
+4. technical-notes.md documents hard_deny briefly
+5. Report to implementation/coder-latest-implementation-report.md
 
-## External clients to migrate
-- hook.py: imports discover_config_files, find_project_root, load_governed_tools,
-  load_permissions, load_takeover_mode_config; uses load_toml_config; _run_startup_validation
-  walk; load_file_path_patterns.
-- config_divergence.py get_toolguard_permissions(config_files) + check_and_warn_divergence
-  (does local import of discover_config_files).
-- auto_migrate.py load_config_sync_settings(config_files); run_auto_migration local-imports
-  discover_config_files.
-- scripts/migrate_permissions.py is a CLI tool (not hook runtime). Uses discover_config_files,
-  load_takeover_mode_config. Lower priority; evaluate.
-- log_writer.py / env_config.py use find_project_root only (path discovery, not config
-  parsing) -- acceptable to keep.
+## Out of scope
+Phases 4-7 (logging, non-perm cross-level, SessionStart, docs restructure).
 
-## Success criteria
-1. New config abstraction with separation of concerns.
-2. All external clients migrated; zero file/format/location decisions outside config module.
-3. Existing tests pass unchanged; ruff format + check clean.
-4. New unit tests for public API + migrated paths; coverage target >90% new/changed.
-5. Report to implementation/coder-latest-implementation-report.md.
-
-## Stop-and-ask triggers
-Abstraction ambiguity, requirement vs existing test conflict, new dependency, scope creep
-beyond Phase 1. No git writes.
+Stop+report if design contradiction, ambiguous allow-exception vs existing test, or scope
+exceeds Phase 3.

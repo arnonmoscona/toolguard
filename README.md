@@ -1090,6 +1090,29 @@ ask = [
     "Bash(uv run alembic:*)",
     "Write(~/projects/production-db/**)"
 ]
+
+# ============================================================================
+# HARD DENY - Unoverridable denials no more-specific config can override
+# ============================================================================
+# A toolguard extension (toolguard_hook files only; ignored in native
+# settings.json). Pooled across ALL hierarchy levels and checked BEFORE normal
+# allow/deny resolution. Use it for rules that must always hold -- typically
+# declared at the user level so no project can weaken them.
+[hard_deny]
+# deny: if a command/path matches one of these (and no `allow` carve-out below),
+# it is DENIED, and that decision cannot be overridden by an allow at any level.
+deny = [
+    "Bash([regex]rm\\s+-rf\\s+/)",
+    "Bash(curl:*)",
+    "Read(**/.ssh/**)"
+]
+# allow: carve-out EXCEPTIONS to hard_deny.deny (NOT forced allows). A command
+# matching one of these is exempted from the hard deny above; everything else
+# still falls through to normal resolution.
+allow = [
+    "Bash(curl http://localhost:*)",
+    "Bash(curl http://127.0.0.1:*)"
+]
 ```
 
 **Configuration notes**:
@@ -1097,6 +1120,7 @@ ask = [
 - **Pattern order**: Patterns within each section (allow/deny/ask) are checked in order
 - **Deny precedence**: Deny patterns always take precedence over allow patterns
 - **Extended syntax**: Only supported in `toolguard_hook.toml`, not in `settings.local.json`
+- **Hard deny**: `[hard_deny]` rules are evaluated before everything else and **cannot** be overridden by an `allow` at any level (including a more-specific one); its `allow` list is only a carve-out exception to its own `deny`, not a forced allow. `[hard_deny]` is a toolguard extension (read from `toolguard_hook` files only) and is pooled across all levels of the configuration hierarchy.
 
 ### Security Best Practices
 
@@ -1368,18 +1392,25 @@ toolguard/                   # Project root
 
 ### Configuration Hierarchy
 
-Toolguard follows Claude Code's configuration hierarchy:
+Toolguard discovers configuration across a directory hierarchy: it walks from the project
+root up to your home directory, collecting `.claude/` configs at each level. The
+`~/.claude/` (user) level is always included as the least-specific level.
 
-1. **`CLAUDE_SETTINGS_PATH`** environment variable (if set, takes priority)
-2. Otherwise, merges from multiple sources in order:
-   - Project local: `.claude/toolguard_hook.local.toml` (or `.json`)
-   - Project local: `.claude/settings.local.json`
-   - Project: `.claude/toolguard_hook.toml` (or `.json`)
-   - Project: `.claude/settings.json`
-   - User local: `~/.claude/toolguard_hook.local.toml` (or `.json`)
-   - User local: `~/.claude/settings.local.json`
-   - User: `~/.claude/toolguard_hook.toml` (or `.json`)
-   - User: `~/.claude/settings.json`
+Conflicts resolve by **more-specific level wins**: the project level overrides an ancestor
+directory, which overrides the user level. Within a single level, `deny` takes precedence
+over `allow`. Set `hierarchical_configuration = false` in the project's `toolguard_hook.toml`
+to limit discovery to the project and user levels only.
+
+Within each level, sources are consulted highest-priority first:
+
+- `.claude/toolguard_hook.local.toml` (or `.json`)
+- `.claude/settings.local.json`
+- `.claude/toolguard_hook.toml` (or `.json`)
+- `.claude/settings.json`
+
+Relative paths in configuration (for example a relative `backup_dir` or a relative
+`Read`/`Write`/`Edit` path pattern) always resolve against the **project root**, regardless
+of which level declared them.
 
 **TOML precedence**: When both `.toml` and `.json` files exist at the same level (e.g., both `toolguard_hook.toml` and `toolguard_hook.json`), the TOML file takes precedence and a warning is logged.
 

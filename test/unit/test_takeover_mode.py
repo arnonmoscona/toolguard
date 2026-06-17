@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.config import load_takeover_mode_config, load_permissions
+from toolguard.config import load_takeover_mode_config, _load_permissions
 from toolguard.hook import load_file_path_patterns
 
 
@@ -183,7 +183,7 @@ class TestTakeoverModePermissionFiltering(unittest.TestCase):
     def test_filters_native_patterns_when_enabled(self):
         """
         Given takeover enabled with ignored Bash(*) and Bash(ls:*), plus native blanket allows
-        When load_permissions runs
+        When _load_permissions runs
         Then only the toolguard_hook 'git status' allow remains and the blanket native patterns are filtered
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -209,7 +209,7 @@ allow = ["Bash(git status)"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Should only include git status from toolguard_hook, not blanket allows
             self.assertIn('git status', allow_patterns)
@@ -220,7 +220,7 @@ allow = ["Bash(git status)"]
     def test_does_not_filter_when_disabled(self):
         """
         Given takeover disabled even though an ignored pattern is configured, with a native blanket allow
-        When load_permissions runs
+        When _load_permissions runs
         Then both the toolguard_hook 'git status' and the native '*' patterns are present (no filtering)
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -246,7 +246,7 @@ allow = ["Bash(git status)"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Should include both patterns (no filtering)
             self.assertIn('git status', allow_patterns)
@@ -256,7 +256,7 @@ allow = ["Bash(git status)"]
     def test_never_filters_toolguard_hook_patterns(self):
         """
         Given takeover enabled, ignoring '*', with the toolguard_hook itself allowing Bash(*)
-        When load_permissions runs
+        When _load_permissions runs
         Then the hook's '*' remains because toolguard_hook patterns are never filtered
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,7 +278,7 @@ allow = ["Bash(*)"]
             (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Should include * from toolguard_hook (never filtered)
             self.assertIn('*', allow_patterns)
@@ -287,7 +287,7 @@ allow = ["Bash(*)"]
     def test_exact_string_matching(self):
         """
         Given takeover ignoring the exact pattern 'git *' and native git patterns
-        When load_permissions runs
+        When _load_permissions runs
         Then only the exact 'git *' is filtered while 'git status' and 'git log' remain
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -310,7 +310,7 @@ ignored_allow_patterns = ["git *"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Only exact match "git *" should be filtered
             self.assertNotIn('git *', allow_patterns)
@@ -321,7 +321,7 @@ ignored_allow_patterns = ["git *"]
     def test_additional_ignored_patterns(self):
         """
         Given takeover with both ignored_allow_patterns and additional_ignored_patterns
-        When load_permissions runs
+        When _load_permissions runs
         Then patterns from both lists are filtered while unlisted ones remain
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -343,7 +343,7 @@ additional_ignored_patterns = ["cat:*"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Both ignored and additional patterns should be filtered
             self.assertNotIn('ls:*', allow_patterns)
@@ -354,7 +354,7 @@ additional_ignored_patterns = ["cat:*"]
     def test_deny_patterns_not_filtered(self):
         """
         Given takeover ignoring 'rm -rf:*' which appears as a native deny pattern
-        When load_permissions runs
+        When _load_permissions runs
         Then the deny pattern remains because takeover only filters allow patterns
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -375,7 +375,7 @@ ignored_allow_patterns = ["rm -rf:*"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Deny pattern should remain (not filtered)
             self.assertIn('rm -rf:*', deny_patterns)
@@ -475,7 +475,7 @@ allow = ["Bash(git status)"]
     def test_behavior_unchanged_when_disabled(self):
         """
         Given no takeover_mode section and a native blanket Bash(*) allow
-        When load_permissions runs
+        When _load_permissions runs
         Then both the hook 'git status' and native '*' patterns are present (default behavior)
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -495,7 +495,7 @@ allow = ["Bash(git status)"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, _ = load_permissions()
+                allow_patterns, _ = _load_permissions()
 
             # Should include patterns from both files (default behavior)
             self.assertIn('git status', allow_patterns)
@@ -509,7 +509,7 @@ class TestTakeoverModeWithDefaultIgnoredPatterns(unittest.TestCase):
     def test_default_ignored_patterns_filter_blanket_bash(self):
         """
         Given takeover enabled with no explicit ignored patterns and native blanket allows
-        When load_permissions runs
+        When _load_permissions runs
         Then the default ignored patterns filter Bash(*) while the hook's git allows remain
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -538,7 +538,7 @@ allow = ["Bash(git status)", "Bash(git log)"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Blanket Bash(*) should be filtered - only toolguard_hook rules remain
             self.assertNotIn('*', allow_patterns)
@@ -549,7 +549,7 @@ allow = ["Bash(git status)", "Bash(git log)"]
     def test_wrapper_format_normalization(self):
         """
         Given ignored patterns written in Bash(*) wrapper form and native patterns
-        When load_permissions runs
+        When _load_permissions runs
         Then the wrapped patterns normalize to bare form so '*' and 'ls:*' are filtered while others remain
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -578,7 +578,7 @@ allow = ["Bash(git diff)"]
             (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
 
             with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_permissions()
+                allow_patterns, deny_patterns = _load_permissions()
 
             # Blanket * and ls:* filtered; echo hello and git diff remain
             self.assertNotIn('*', allow_patterns)

@@ -3,98 +3,83 @@ title: latest-code-review-report.md
 type: note
 permalink: toolguard/implementation/latest-code-review-report.md
 tags:
-- code-review
 - TOO-8
+- code-review
 ---
 
-# Code Review Report — TOO-8 Phase 1 Config Abstraction
+# Code Review Report -- TOO-8 Phase 2/3 (hierarchical config + more-specific-wins + hard_deny)
 
-Date: 2026-06-16
-Scope: `changed` (working-tree diff vs HEAD)
-Reviewer context: TOO-8 Phase 1 "config abstraction refactor (behavior-preserving)"
-
-Files reviewed:
-- `toolguard/config.py` (new public `Configuration` abstraction)
-- `toolguard/config_divergence.py` (delegate to config module)
-- `toolguard/auto_migrate.py` (delegate to config module)
-- `toolguard/hook.py` (consume the new abstraction)
-- `test/unit/test_configuration.py` (new test module)
+Date: 2026-06-17
+Scope: changed (working-tree) source files for TOO-8.
+Files reviewed: toolguard/config.py, permissions.py, compound.py, hook.py,
+config_divergence.py, auto_migrate.py, scripts/migrate_permissions.py, plus new tests
+test/unit/test_hierarchical.py and test/unit/test_hard_deny.py.
 
 ## Summary
 
-High-quality, well-documented refactor that cleanly pulls file/format/discovery
-concerns behind a single immutable `Configuration` facade, exactly per the Phase 1
-plan. Full suite (600 tests) passes. One genuine behavior divergence breaks the
-"behavior-preserving" contract for config_sync scalar resolution, plus a few minor
-cleanups.
+High-quality, well-documented refactor. The hierarchical discovery, more-specific-wins
+cascade, project-root path anchoring, hard_deny pool, and tool-wrapper consolidation are
+correct and well-tested. Full suite 654 tests pass WITH and WITHOUT CLAUDE_SETTINGS_PATH
+set; ruff clean; coverage on changed modules is good (config.py 95.6%, permissions.py
+90.4%, hook.py 83.8%). No critical or major correctness bugs found. Findings are minor /
+maintainability only.
 
-## Findings
+## Critical
+None.
 
-### Major
+## Major
+None.
 
-**M1. config_sync scalar resolution direction changed (project-wins vs user-wins).**
-`toolguard/config.py:447` `scalar()` iterates `reversed(self.layers)` with last-wins,
-so the **most-specific (project) layer wins**. The legacy resolution used by
-`hook.main` previously went through `auto_migrate.load_config_sync_settings` ->
-`config_sync_settings_from_sources` (`config.py:770`), which iterates `config_files`
-in discovery order (project first, user last) with last-wins, so the
-**least-specific (user) layer wins**.
+## Minor
 
-Result: in `hook.py:330` (`config.config_sync_settings()`), a project+user conflict on
-`auto_migrate` / `backup_dir` / `auto_sort_on_migrate` now resolves to the project
-value, whereas before it resolved to the user value. This is a behavior change in a
-phase explicitly documented as behavior-preserving, and the two code paths now
-disagree with each other (the still-present `config_sync_settings_from_sources` keeps
-user-wins; `Configuration.scalar` uses project-wins).
+### M1. Duplicate TOML/JSON warning logic is split and the Issue variant is unreachable in production
+- config.py `Configuration.validation_issues()` (config.py:1363-1383) detects a "Both
+  X.toml and X.json exist" warning by scanning for two layers sharing (parent, base_name)
+  with different formats. But the real discovery path `_discover_in_dir` (config.py:210-225)
+  picks TOML over JSON per base and NEVER emits both layers; it emits the duplicate warning
+  itself via a stderr `print`. So via `load_configuration` the Issue branch can never fire
+  -- it is only exercised by a hand-built Configuration in
+  test_configuration.py:test_duplicate_toml_json_issue.
+- Net effect: the duplicate-file warning exists in two forms with different delivery
+  (stderr print in discovery vs. logged Issue), and the logged-Issue form is dead in the
+  real flow. Not user-facing-incorrect, but confusing and a maintenance trap.
+- Recommended fix: make discovery surface the duplicate as an Issue (so it is logged via
+  the hook like other validation issues) and drop the stderr print, OR document explicitly
+  that the Issue branch covers only externally-constructed Configurations. Pick one source
+  of truth.
 
-Note the new direction (project/most-specific wins) is what TOO-8 decision #4 wants as
-the *eventual* Phase 2+ semantic — so the logic is the right end state, just landed a
-phase early and inconsistent with its sibling helper. Recommend either: (a) make
-`scalar()` match legacy user-wins for Phase 1 and defer the flip to Phase 2, or
-(b) consciously accept the change, note it in the task memory / README, and align
-`config_sync_settings_from_sources` to project-wins so the two paths agree. Add a test
-pinning the chosen direction (current tests only cover single-level or same-direction
-cases, so this divergence is untested).
+### M2. Stale docstring: bash_permissions() described as the command-tool entry point
+- config.py module docstring (lines 20-23) and `bash_permissions` docstring (config.py:1224-1237)
+  state it is "the command-tool entry point so the hook never opens files itself." After
+  Phase 2 the hook resolves Bash via `resolve_permission('Bash', ...)` + `allow_deny_for('Bash')`
+  and no longer calls `bash_permissions()` (confirmed: no production caller; only tests
+  reference it). The legacy `_load_permissions` stderr diagnostics ("Discovered config
+  files...", "Loaded N allow patterns") therefore no longer fire at runtime.
+- Recommended fix: update the docstrings to note `bash_permissions()`/`_load_permissions`
+  are retained for the CLAUDE_SETTINGS_PATH-parity tests and legacy single-file diagnostics
+  but are not on the runtime decision path. Consider whether the lost stderr discovery
+  diagnostics matter for debugging; if so, route equivalent output through the new path.
 
-### Minor
+## Suggestions
 
-**m1. `_level_for_path` ignores its `start_dir` parameter.** `config.py:616`. The
-parameter is unused; level is derived purely from whether the path is under
-`~/.claude`. Harmless today (project paths are never under `~/.claude`), but the unused
-arg is misleading. Drop the parameter or document why it is reserved.
+### S1. Compound match-detail format coupling
+compound.py:resolve_compound_permission (lines 152-162) reconstructs matched patterns by
+splitting the reason on ": " and re-emits "cmd -> pattern", which hook._COMPOUND_MATCH_PATTERN
+later re-parses. The coupling is already called out in an in-code comment and degrades only
+cosmetically (falls back to '?'). Acceptable; a small structured return (list of
+(cmd, pattern)) would remove the round-trip if this is touched again.
 
-**m2. Stale module docstring claims.** `config.py:17-20` says the legacy loaders "are
-retained for backward compatibility but new clients should prefer `load_configuration`."
-In practice `Configuration.governed_tools/takeover_mode/bash_permissions` still delegate
-straight to the legacy `load_governed_tools` / `load_takeover_mode_config` /
-`load_permissions`, so those remain the real implementation, not deprecated. Wording is
-slightly aspirational vs reality; fine for Phase 1 but worth revisiting in Phase 2.
+### S2. Recall-note vs. actual diff drift (housekeeping, not code)
+The Phase 2 recall note lists test_migration.py as a changed file, but git shows it
+unchanged. coder-test/test_configuration_abstraction.py is a staged-add with no worktree
+file (recall note already flags unstaging it). No action for the code; just confirming the
+notes slightly overstate the change set.
 
-**m3. Now-unused imports / dead branches in delegating clients.**
-`config_divergence.py` still imports `json` and uses `sys` only for unrelated warnings;
-the delegated `get_toolguard_permissions` no longer parses files. Confirm `json` is
-still used elsewhere in the module (it is, in `get_native_permissions`), so no removal
-needed — but `auto_migrate.py` should be checked for a now-orphaned `sys`/`json`/
-`tomllib` import after the body was deleted. Quick `ruff check` will catch any.
-
-### Suggestions
-
-**s1. Broad `except Exception` with `# noqa: BLE001`.** `config.py:611` (`_parse_source`)
-mirrors legacy tolerance, which is appropriate for "skip unreadable source," but it will
-also swallow programming errors (e.g. a bad `file_format`). Consider catching
-`(OSError, json.JSONDecodeError, tomllib.TOMLDecodeError)` for tighter intent. Low
-priority — preserves legacy behavior as-is.
-
-**s2. `governed_tools()`/`takeover_mode()` re-discover config.** Each call re-invokes the
-legacy loaders, which re-run discovery and re-parse files, even though the
-`Configuration` already holds parsed `layers`. `permission_layers()` calls
-`takeover_mode()` per invocation too. In `hook.main` this means several redundant
-discovery passes per hook call. Acceptable for Phase 1 (correctness over speed; plan
-defers perf), but a natural Phase 2 cleanup is to resolve these from `self.layers`.
-
-## Verification
-
-- `uv run python -m unittest discover -s test -t .` -> Ran 600 tests, OK.
-- New `test_configuration.py` covers layering, takeover filtering, scalar single-level,
-  validation issues, immutability, and the delegating helpers. Gap: no test for the
-  project-vs-user scalar conflict direction (see M1).
+## Verification performed
+- `uv run python -m unittest discover -s test -t .` => Ran 654 tests, OK.
+- Same with `CLAUDE_SETTINGS_PATH` set => Ran 654 tests, OK.
+- `uv run ruff check toolguard/` => All checks passed.
+- Spot-checked `_strip_tool_wrapper`/`is_tool_wrapper` on edge cases (blanket, MCP double-
+  underscore names, nested parens, extended-syntax bodies, bare patterns) -- all correct.
+- Verified `_hierarchical_toggle` .local-over-regular precedence and break logic via an
+  ad-hoc temp hierarchy -- correct.

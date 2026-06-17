@@ -3,135 +3,108 @@ title: Coder Latest Implementation Report
 type: note
 permalink: toolguard/implementation/coder-latest-implementation-report
 tags:
-- implementation
-- TOO-8
 - coder-report
+- TOO-8
+- hard_deny
 ---
 
-# Coder Implementation Report -- TOO-8 Phase 1 (Config Abstraction) -- COMPLETE
+# Coder Implementation Report -- TOO-8 Phase 3 (hard_deny)
 
-Status: COMPLETE. hook.py migrated to the config abstraction; formal tests updated
-(intent preserved); 34 abstraction tests promoted into test/. Tree GREEN: 600 tests OK.
+Date: 2026-06-17. Acting as feature-coder. Project: toolguard. Nothing committed (Arnon
+does all git writes).
 
 ## Summary
-Finished the remaining Phase 1 work now that test/ edits were authorized. The hook is
-fully decoupled from files/formats/locations: it obtains a Configuration once via
-`load_configuration(cwd)` and uses only semantic accessors. All discovery/parsing lives
-in the config module.
+Implemented the `[hard_deny]` unoverridable safety valve. A (typically less-specific)
+toolguard_hook config can declare deny/allow pattern lists that NO more-specific config can
+override. Checked FIRST, before the Phase 2 more-specific-wins cascade. Applies uniformly to
+Bash, each compound sub-command (compound denied if any sub-command hard-denied), and
+Read/Write/Edit file paths. Single resolution path; no behaviour change when unconfigured.
 
-## Files changed (this session)
-- `toolguard/hook.py` (heavily reworked; ~225 lines changed vs HEAD):
-  - Imports: dropped `discover_config_files`, `load_permissions`, `load_governed_tools`,
-    `load_takeover_mode_config`, `load_toml_config`, `validate_permissions`,
-    `load_config_sync_settings`. Now imports `load_configuration`, `find_project_root`
-    (still used only for log_dir fallback + divergence project_root) and `run_auto_migration`.
-  - `_run_startup_validation(env_config, start_dir, config=None)`: replaced the hand-rolled
-    file walk + path.stem inspection + TOML/JSON dual-warn + per-file load/merge with a loop
-    over `config.validation_issues()`, logging each Issue. New optional `config` param lets
-    `main` pass the already-loaded Configuration; falls back to `load_configuration` if None.
-  - `load_file_path_patterns(tool_name, start_dir, config=None)`: now a trivial adapter over
-    `Configuration.allow_deny_for(tool_name)` (returns lists). No file opening, no format
-    branching, no takeover-filter code (filtering happens in permission_layers).
-  - `main`: loads `config = load_configuration(cwd)` once; uses `config.takeover_mode()`
-    (TakeoverConfig dataclass; attribute access replaces dict keys), `config.config_sync_settings()`,
-    `config.governed_tools()`, `config.bash_permissions()`, and `load_file_path_patterns(..., config)`.
-    Builds a `takeover_dict` from the TakeoverConfig to feed the still-dict-based
-    `check_and_warn_divergence` / `run_auto_migration` (those clients unchanged).
-- `test/unit/test_hook.py` (updated, intent preserved): added `_fake_config()` helper that
-  exposes the Configuration accessors `main` consumes. Re-pointed:
-  - TestHookToolGovernance (3): patch `load_configuration` -> fake with governed/bash; assert
-    same allow/deny + "Not a governed tool" outcomes.
-  - TestLoadFilePathPatterns (2): build a real one-layer Configuration and pass via `config=`;
-    assert only the requested tool's patterns are returned (no Write/Bash leakage). Same intent.
-  - TestFilePathToolsInMain (5): patch `load_configuration` (governed Read/Write/Edit) + keep
-    patching `load_file_path_patterns` for the pattern outcomes; assert same allow/deny/missing.
-  - TestStartupValidation: builds a real Configuration (native + hook layers), calls
-    `_run_startup_validation(env, dir, config)`; asserts native tools (WebSearch/WebFetch/
-    mcp__unknown__tool) never appear in the log -- same OUTCOME as before.
-  - Added 3 coverage tests: validation logs Issues from config; validation auto-loads config
-    when None; load_file_path_patterns auto-loads config when None.
-- `test/unit/test_configuration.py` (NEW): the 34 abstraction tests promoted from coder-test,
-  docstring updated for the formal run command. coder-test copy left in place.
+## Semantics implemented (per decision #3; flagged for Arnon's review)
+- `[hard_deny]` = section with optional `deny` and `allow` wrapped-pattern lists.
+- Read ONLY from toolguard_hook files (TOML/JSON), never native settings*.json.
+- POOLED across ALL levels into one union (not per-level propagation).
+- Checked FIRST: match any `deny` AND no `allow` carve-out => DENY (unoverridable). Else
+  fall through to Phase 2 cascade unchanged.
+- `allow` is ONLY a carve-out exception to `deny`; NOT a forced/normal allow; does not
+  affect the cascade.
+- Same extended syntax ([regex]/[glob]/[native]) + tool wrappers + matchers as normal perms.
+- Relative file-path hard_deny patterns anchored to project root (reuses Phase 2
+  `_anchor_file_pattern`).
 
-## Definition of done -- all met
-1. hook.py migrated; grep confirms NO `open(`, no config `json.load`/`tomllib`, no `.toml`/
-   `.json`/`path.stem`/format branching (only `json.loads` on stdin + a user-facing message
-   mentioning toolguard_hook.toml + a docstring). "NO LEAKS".
-2. test/unit/test_hook.py updated (intent preserved); 34 abstraction tests promoted into
-   test/unit/test_configuration.py.
-3. `uv run python -m unittest discover -s test -t .` => 600 tests OK. `ruff check` clean.
-   Changed files compile.
-4. Coverage: config.py 93% (all misses pre-existing legacy loader lines 59-572; new
-   abstraction fully covered). hook.py 78%; new wiring + new `_run_startup_validation` /
-   adapter branches covered. Remaining hook misses (327-329 takeover-warning w/ log_dir;
-   352-363 auto-migration sub-branch; 430-498 command/file deny + error paths) are
-   integration-only branches that were untested at HEAD too -- not a regression.
+## Files changed
+- `toolguard/config.py`: added `Configuration.hard_deny(tool_name) -> (deny, allow)` pooled
+  tool-scoped accessor (toolguard_hook layers only, wrapper-stripped, de-duped, most-specific
+  first). Defensive guard ignores a malformed non-dict `hard_deny` value.
+- `toolguard/permissions.py`: added `check_hard_deny(command, deny, allow, extended_syntax)`
+  reusing `match_command`; returns ('deny', reason) or None (fall-through). Reason cites
+  "hard_deny pattern: ... (cannot be overridden)".
+- `toolguard/hook.py`: import `check_hard_deny`; added `_check_file_path_hard_deny` (anchors
+  relative patterns, deny-first, carve-out exemption); `resolve_file_path_permission` now
+  checks hard_deny FIRST; Bash `_resolve_one` closure in `main()` checks hard_deny per
+  sub-command FIRST (so compound is hard-denied if any sub-command is).
+- `technical-notes.md`: new "Hard-deny safety valve (TOO-8 Phase 3)" section with shape,
+  semantics, integration points, and a review-flag note.
+- `test/unit/test_hook.py`: added `hard_deny` method to the `_FakeConfig` test double so it
+  stays in sync with the Configuration surface the hook now consumes (returns empty pools).
+  See "Test-double change" note below.
+- `test/unit/test_hard_deny.py` (NEW): 20 tests, all with Given/When/Then docstrings.
 
-## Key decisions
-- Kept `_run_startup_validation` and `load_file_path_patterns` signatures backward-compatible
-  by adding an optional `config=None` param (auto-loads if absent). This preserves the
-  function-level contract while letting `main` load once.
-- Built a `takeover_dict` adapter in `main` rather than changing `config_divergence` /
-  `auto_migrate` signatures (those expect dicts; out of Phase 1 hook scope).
-- TestLoadFilePathPatterns now passes a real Configuration instead of mocking open(); this
-  better matches the new abstraction and still pins per-tool extraction intent.
+## hard_deny test list (test/unit/test_hard_deny.py, 20 tests)
+TestHardDenyAccessor:
+- test_hard_deny_pooled_across_multiple_levels (pooled union across levels)
+- test_hard_deny_is_tool_scoped
+- test_hard_deny_ignored_in_native_claude_layers (extension; native ignored)
+- test_hard_deny_empty_when_unconfigured
+- test_hard_deny_malformed_section_ignored (defensive guard)
+TestHardDenyCommand:
+- test_hard_deny_overrides_more_specific_allow (unoverridable vs more-specific allow)
+- test_hard_deny_allow_carveout_exempts_command
+- test_hard_deny_allow_carveout_does_not_exempt_other_commands
+- test_hard_deny_at_ancestor_blocks_project_allow (ancestor blocks project allow)
+- test_compound_hard_denied_if_any_subcommand_hard_denied
+- test_no_hard_deny_leaves_cascade_unchanged (regression)
+TestCheckHardDenyUnit (direct unit of check_hard_deny):
+- test_returns_none_when_no_deny_patterns / _no_deny_match
+- test_denies_on_deny_match_without_carveout
+- test_carveout_returns_none
+TestHardDenyFilePath:
+- test_read_hard_deny_overrides_project_allow
+- test_write_hard_deny_allow_carveout
+- test_edit_hard_deny_relative_pattern_anchors_to_project_root (relative anchoring + outside
+  project not hard-denied)
+- test_no_hard_deny_leaves_file_path_cascade_unchanged (regression)
+TestHardDenyThroughMain:
+- test_main_bash_hard_deny_denies_despite_project_allow (end-to-end via hook main())
 
-## Anti-pattern scan: clean
-No async/await, no threading, no local imports added (a couple of `import toolguard.hook as`
-inside test methods are pre-existing test-local style, left as-is). Docstrings present on all
-new/changed functions.
+## Verification
+- Full suite GREEN both ways: `unittest discover` = 654 OK; `env -u CLAUDE_SETTINGS_PATH`
+  = 654 OK (was 634 baseline; +20 new).
+- `ruff check toolguard/ test/` clean.
+- py_compile clean on changed files.
+- Coverage (tools/coverage_stdlib.py): every executable line of the new code runs
+  (config.hard_deny body, permissions.check_hard_deny body, hook._check_file_path_hard_deny
+  body, hook resolve wiring incl. the Bash `return hard` short-circuit, and the malformed
+  guard `continue`). The only `>>>>>>` markers on new code are multi-line function-SIGNATURE
+  continuation lines -- a known stdlib `trace` artifact affecting all multi-line defs, not
+  logic. Effective coverage on changed lines ~100%, well above the >90% bar.
+- Anti-pattern scan: no async/await/threading; no local imports in production additions
+  (local imports only inside test functions, matching existing test style).
 
-## Not done (correctly out of Phase 1 scope)
-- config_divergence.check_and_warn_divergence still calls discover_config_files for its own
-  sourcing (local import). That client was "already migrated" only for get_toolguard_permissions;
-  full divergence sourcing migration is not in the hook-focused Phase 1 DoD. Flag for Phase 2.
-- No traversal, no more-specific-wins (Phase 2). Behavior preserved: 2 levels, union, global
-  deny-first.
+## Test-double change (flagged)
+`test/unit/test_hook.py::_FakeConfig` is a test double standing in for the real
+`Configuration`. The hook now calls `config.hard_deny(...)`, so the double needed the method
+or 5 main()-path tests error. I added a no-op `hard_deny` returning empty pools -- a pure
+sync-with-production-API completion, NOT a change of any test's intent or assertions. The
+Phase 2 outcome note records Arnon previously authorised editing formal tests for TOO-8; I
+applied that precedent narrowly here. Flag if you'd rather this be reverted/owned by you.
 
-## Tooling notes
-- unittest only (no pytest). Ran `uv run python -m unittest discover -s test -t .`.
-- Did NOT run `ruff format` (known to churn quotes + corrupt except-clauses here). `ruff check`
-  only, clean.
+## Out of scope (untouched): Phases 4-7.
 
-
-## Addendum: TOO-8 Phase 1 surgical fix (config_sync M1 + minor cleanups)
-
-### HEAD behaviour found (config_sync conflict direction)
-Verified empirically and by reading source. At HEAD the legacy resolver
-`auto_migrate.load_config_sync_settings` filters `discover_config_files()` output
-(ordered project-first, user-last) and iterates forward with last-occurrence-wins.
-Because the user file is LAST, **HEAD resolves config_sync conflicts USER-wins**.
-(The current refactor delegates this to `config.config_sync_settings_from_sources`,
-which preserves the same forward-iteration / user-wins semantics.)
-
-The uncommitted Phase-1 `Configuration.scalar()` iterated `reversed(self.layers)` with
-last-wins, which made PROJECT win -- a behaviour divergence (project-wins). Confirmed
-with a side-by-side harness: scalar()=PROJECT_DIR vs legacy=USER_DIR before the fix;
-both USER_DIR after.
-
-### Fix
-`Configuration.scalar()` (toolguard/config.py) now iterates `self.layers` in forward
-(discovery) order so the user (least-specific, last) layer wins -- matching HEAD. Added
-a `# FIXME(TOO-8 Phase 2, decision #4)` noting Phase 2 will intentionally flip
-config_sync + other scalars to more-specific-wins (project-wins), made test-visible.
-
-### Tests
-- Added `test_config_sync_conflict_is_user_wins_phase1` in `test/unit/test_configuration.py`
-  pinning the user-wins direction for both `scalar()` and `config_sync_settings()`, with a
-  Phase-2 FIXME.
-- IMPORTANT (flagged to caller): the pre-existing new test `test_scalar_dotted_last_wins`
-  in the SAME uncommitted Phase-1 changeset asserted project-wins (the buggy direction).
-  Since it is untracked (part of the work under review, not a prior committed test) and
-  encoded the very divergence being fixed, its assertion was corrected to user-wins.
-
-### Minor cleanups
-- Removed unused `start_dir` parameter from `_level_for_path` and updated the single caller.
-- Reworded the `config.py` module docstring: legacy loaders are internal implementation
-  retained for Phase 1 (governed_tools/takeover_mode/bash_permissions delegate to them),
-  not "deprecated".
-
-### Verification
-- `uv run python -m unittest discover -s test -t .`: 601 passed (was 600 + new pin), OK.
-- `uv run ruff check` on changed files: clean. py_compile: clean.
-- Coverage: config.py 93%; all changed regions (scalar loop ~930-960, _level_for_path
-  ~1095-1115) fully covered.
+## Self-review notes
+- "Checked first" is semantically honoured per sub-command/path. Edge case: in `main()`, the
+  file-path and Bash branches each short-circuit to a fail-closed DENY when NO normal allow
+  exists at any level, BEFORE reaching the resolver that checks hard_deny. Outcome is
+  identical (deny); only the reason text differs (and only in the no-allow-anywhere case,
+  which is not a Phase 3 scenario). Documented here for transparency; did not reorder to
+  avoid touching the well-tested fail-closed gating.

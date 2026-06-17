@@ -5,3 +5,6 @@ logs
 .idea/
 tmp/
 
+# Coverage artifacts (tools/coverage_stdlib.py)
+.coverage
+cover/

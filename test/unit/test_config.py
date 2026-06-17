@@ -13,12 +13,12 @@ from unittest.mock import patch
 
 from toolguard.config import (
     discover_config_files,
-    load_governed_tools,
-    load_governed_tools_from_file,
-    load_permissions,
-    load_permissions_from_file,
-    merge_governed_tools,
-    merge_permissions,
+    _load_governed_tools,
+    _load_governed_tools_from_file,
+    _load_permissions,
+    _load_permissions_from_file,
+    _merge_governed_tools,
+    _merge_permissions,
 )
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 
@@ -184,7 +184,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
     def test_load_empty_file(self):
         """
         Given a JSON config file containing an empty object
-        When load_permissions_from_file reads it with format 'claude'
+        When _load_permissions_from_file reads it with format 'claude'
         Then both allow and deny lists are empty
         """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -193,7 +193,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            allow, deny = load_permissions_from_file(filepath, 'claude')
+            allow, deny = _load_permissions_from_file(filepath, 'claude')
             self.assertEqual(allow, [])
             self.assertEqual(deny, [])
         finally:
@@ -202,7 +202,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
     def test_load_with_bash_permissions(self):
         """
         Given a config file with Bash() allow and deny permissions
-        When load_permissions_from_file reads it with format 'claude'
+        When _load_permissions_from_file reads it with format 'claude'
         Then the Bash patterns are returned with the Bash() wrapper stripped
         """
         config = {'permissions': {'allow': ['Bash(git *)', 'Bash(ls *)'], 'deny': ['Bash(rm *)']}}
@@ -213,7 +213,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            allow, deny = load_permissions_from_file(filepath, 'claude')
+            allow, deny = _load_permissions_from_file(filepath, 'claude')
             self.assertEqual(allow, ['git *', 'ls *'])
             self.assertEqual(deny, ['rm *'])
         finally:
@@ -222,7 +222,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
     def test_load_ignores_non_bash_permissions(self):
         """
         Given a config file mixing Bash() entries with Read()/Write()/Edit() entries
-        When load_permissions_from_file reads it with format 'claude'
+        When _load_permissions_from_file reads it with format 'claude'
         Then only the Bash patterns are returned and the rest are ignored
         """
         config = {'permissions': {'allow': ['Bash(git *)', 'Read(*)', 'Write(*)'], 'deny': ['Bash(rm *)', 'Edit(*)']}}
@@ -233,7 +233,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            allow, deny = load_permissions_from_file(filepath, 'claude')
+            allow, deny = _load_permissions_from_file(filepath, 'claude')
             self.assertEqual(allow, ['git *'])
             self.assertEqual(deny, ['rm *'])
         finally:
@@ -242,7 +242,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
     def test_load_invalid_json_returns_empty(self):
         """
         Given a config file containing invalid JSON
-        When load_permissions_from_file reads it
+        When _load_permissions_from_file reads it
         Then it returns empty allow and deny lists instead of raising
         """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -251,7 +251,7 @@ class TestLoadPermissionsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            allow, deny = load_permissions_from_file(filepath, 'claude')
+            allow, deny = _load_permissions_from_file(filepath, 'claude')
             self.assertEqual(allow, [])
             self.assertEqual(deny, [])
         finally:
@@ -264,45 +264,45 @@ class TestMergePermissions(unittest.TestCase):
     def test_merge_empty_lists(self):
         """
         Given an empty list of permission sources
-        When merge_permissions is called
+        When _merge_permissions is called
         Then it returns a pair of empty allow and deny lists
         """
-        result = merge_permissions([])
+        result = _merge_permissions([])
         self.assertEqual(result, ([], []))
 
     def test_merge_single_source(self):
         """
         Given a single (allow, deny) permission source
-        When merge_permissions is called
+        When _merge_permissions is called
         Then its allow and deny lists are returned unchanged
         """
         perms = [(['git *', 'ls *'], ['rm *'])]
-        allow, deny = merge_permissions(perms)
+        allow, deny = _merge_permissions(perms)
         self.assertEqual(allow, ['git *', 'ls *'])
         self.assertEqual(deny, ['rm *'])
 
     def test_merge_multiple_sources(self):
         """
         Given several (allow, deny) permission sources with distinct patterns
-        When merge_permissions is called
+        When _merge_permissions is called
         Then the allow and deny lists contain the union of all source patterns
         """
         perms = [(['git *'], ['rm *']), (['ls *'], ['mv *']), (['cat *'], [])]
-        allow, deny = merge_permissions(perms)
+        allow, deny = _merge_permissions(perms)
         self.assertEqual(set(allow), {'git *', 'ls *', 'cat *'})
         self.assertEqual(set(deny), {'rm *', 'mv *'})
 
     def test_merge_removes_duplicates(self):
         """
         Given permission sources sharing some identical allow and deny patterns
-        When merge_permissions is called
+        When _merge_permissions is called
         Then duplicate patterns are collapsed so each appears only once
         """
         perms = [
             (['git *', 'ls *'], ['rm *']),
             (['git *', 'cat *'], ['rm *', 'mv *']),
         ]
-        allow, deny = merge_permissions(perms)
+        allow, deny = _merge_permissions(perms)
         # Should have unique patterns
         self.assertEqual(len(allow), 3)  # git, ls, cat
         self.assertEqual(len(deny), 2)  # rm, mv
@@ -310,14 +310,14 @@ class TestMergePermissions(unittest.TestCase):
     def test_merge_preserves_order(self):
         """
         Given permission sources where a later source repeats an earlier allow pattern
-        When merge_permissions is called
+        When _merge_permissions is called
         Then patterns keep their first-occurrence order in the merged allow list
         """
         perms = [
             (['a', 'b', 'c'], []),
             (['b', 'd'], []),  # 'b' is duplicate
         ]
-        allow, deny = merge_permissions(perms)
+        allow, deny = _merge_permissions(perms)
         # 'a' should come before 'd' since 'a' was first
         self.assertEqual(allow.index('a'), 0)
         self.assertEqual(allow.index('b'), 1)
@@ -326,12 +326,12 @@ class TestMergePermissions(unittest.TestCase):
 
 
 class TestLoadPermissions(unittest.TestCase):
-    """Test the main load_permissions function."""
+    """Test the main _load_permissions function."""
 
     def test_load_with_claude_settings_path_env(self):
         """
         Given CLAUDE_SETTINGS_PATH pointing at a config file with a Bash allow pattern
-        When load_permissions is called
+        When _load_permissions is called
         Then permissions are read from that file, taking precedence over the hierarchy
         """
         config = {'permissions': {'allow': ['Bash(git *)'], 'deny': []}}
@@ -343,7 +343,7 @@ class TestLoadPermissions(unittest.TestCase):
 
         try:
             with patch.dict(os.environ, {'CLAUDE_SETTINGS_PATH': filepath}):
-                allow, deny = load_permissions()
+                allow, deny = _load_permissions()
                 self.assertEqual(allow, ['git *'])
                 self.assertEqual(deny, [])
         finally:
@@ -352,7 +352,7 @@ class TestLoadPermissions(unittest.TestCase):
     def test_load_without_env_uses_hierarchy(self):
         """
         Given no CLAUDE_SETTINGS_PATH set and a project config file in the hierarchy
-        When load_permissions is called
+        When _load_permissions is called
         Then permissions are discovered from the project hierarchy config
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -371,20 +371,20 @@ class TestLoadPermissions(unittest.TestCase):
                 # Remove CLAUDE_SETTINGS_PATH if it exists
                 os.environ.pop('CLAUDE_SETTINGS_PATH', None)
                 with patch('toolguard.config.find_project_root', return_value=project_dir):
-                    allow, deny = load_permissions()
+                    allow, deny = _load_permissions()
                     self.assertEqual(allow, ['git *'])
 
     def test_load_with_no_configs_returns_empty(self):
         """
         Given no CLAUDE_SETTINGS_PATH, no discoverable project, and no existing config files
-        When load_permissions is called
+        When _load_permissions is called
         Then it returns empty allow and deny lists
         """
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop('CLAUDE_SETTINGS_PATH', None)
             with patch('toolguard.config.find_project_root', side_effect=RuntimeError('No project')):
                 with patch('pathlib.Path.exists', return_value=False):
-                    allow, deny = load_permissions()
+                    allow, deny = _load_permissions()
                     self.assertEqual(allow, [])
                     self.assertEqual(deny, [])
 
@@ -395,20 +395,20 @@ class TestLoadGovernedTools(unittest.TestCase):
     def test_load_governed_tools_default(self):
         """
         Given no config files and no project root
-        When load_governed_tools is called
+        When _load_governed_tools is called
         Then it returns the default governed tools list ['Bash']
         """
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop('CLAUDE_SETTINGS_PATH', None)
             with patch('toolguard.config.find_project_root', side_effect=RuntimeError('No project')):
                 with patch('pathlib.Path.exists', return_value=False):
-                    tools = load_governed_tools()
+                    tools = _load_governed_tools()
                     self.assertEqual(tools, ['Bash'])
 
     def test_load_governed_tools_from_config(self):
         """
         Given a toolguard_hook.json declaring a governed_tools list
-        When load_governed_tools is called with the project root resolved
+        When _load_governed_tools is called with the project root resolved
         Then the configured governed tools are returned
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -426,13 +426,13 @@ class TestLoadGovernedTools(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 os.environ.pop('CLAUDE_SETTINGS_PATH', None)
                 with patch('toolguard.config.find_project_root', return_value=project_dir):
-                    tools = load_governed_tools()
+                    tools = _load_governed_tools()
                     self.assertEqual(tools, ['Bash', 'mcp__jetbrains__execute_terminal_command'])
 
     def test_load_governed_tools_merges_sources(self):
         """
         Given two hook files declaring overlapping governed_tools lists
-        When load_governed_tools is called
+        When _load_governed_tools is called
         Then the result is the de-duplicated union of all declared tools
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -455,7 +455,7 @@ class TestLoadGovernedTools(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 os.environ.pop('CLAUDE_SETTINGS_PATH', None)
                 with patch('toolguard.config.find_project_root', return_value=project_dir):
-                    tools = load_governed_tools()
+                    tools = _load_governed_tools()
                     # Should have all three unique tools
                     self.assertEqual(set(tools), {'Bash', 'Tool1', 'Tool2'})
                     # Should not have duplicates
@@ -468,7 +468,7 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
     def test_load_from_valid_file(self):
         """
         Given a file declaring a governed_tools list
-        When load_governed_tools_from_file reads it
+        When _load_governed_tools_from_file reads it
         Then the declared tools are returned in order
         """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -478,7 +478,7 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            tools = load_governed_tools_from_file(filepath)
+            tools = _load_governed_tools_from_file(filepath)
             self.assertEqual(tools, ['Bash', 'OtherTool'])
         finally:
             filepath.unlink()
@@ -486,16 +486,16 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
     def test_load_from_missing_file(self):
         """
         Given a path to a nonexistent file
-        When load_governed_tools_from_file is called
+        When _load_governed_tools_from_file is called
         Then it returns an empty list
         """
-        tools = load_governed_tools_from_file(Path('/nonexistent/file.json'))
+        tools = _load_governed_tools_from_file(Path('/nonexistent/file.json'))
         self.assertEqual(tools, [])
 
     def test_load_from_file_without_governed_tools(self):
         """
         Given a config file that has no governed_tools key
-        When load_governed_tools_from_file reads it
+        When _load_governed_tools_from_file reads it
         Then it returns an empty list
         """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -505,7 +505,7 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            tools = load_governed_tools_from_file(filepath)
+            tools = _load_governed_tools_from_file(filepath)
             self.assertEqual(tools, [])
         finally:
             filepath.unlink()
@@ -513,7 +513,7 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
     def test_load_ignores_non_string_values(self):
         """
         Given a governed_tools list mixing strings with non-string values (int, None)
-        When load_governed_tools_from_file reads it
+        When _load_governed_tools_from_file reads it
         Then only the string entries are returned
         """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -523,7 +523,7 @@ class TestLoadGovernedToolsFromFile(unittest.TestCase):
             filepath = Path(f.name)
 
         try:
-            tools = load_governed_tools_from_file(filepath)
+            tools = _load_governed_tools_from_file(filepath)
             self.assertEqual(tools, ['Bash', 'OtherTool'])
         finally:
             filepath.unlink()
@@ -535,28 +535,28 @@ class TestMergeGovernedTools(unittest.TestCase):
     def test_merge_single_list(self):
         """
         Given a single governed-tools list
-        When merge_governed_tools is called
+        When _merge_governed_tools is called
         Then the list is returned unchanged
         """
-        result = merge_governed_tools([['Bash', 'Tool1']])
+        result = _merge_governed_tools([['Bash', 'Tool1']])
         self.assertEqual(result, ['Bash', 'Tool1'])
 
     def test_merge_multiple_lists(self):
         """
         Given several governed-tools lists with no overlap
-        When merge_governed_tools is called
+        When _merge_governed_tools is called
         Then all tools are concatenated in order
         """
-        result = merge_governed_tools([['Bash'], ['Tool1', 'Tool2'], ['Tool3']])
+        result = _merge_governed_tools([['Bash'], ['Tool1', 'Tool2'], ['Tool3']])
         self.assertEqual(result, ['Bash', 'Tool1', 'Tool2', 'Tool3'])
 
     def test_merge_removes_duplicates(self):
         """
         Given governed-tools lists that share a common tool
-        When merge_governed_tools is called
+        When _merge_governed_tools is called
         Then the shared tool appears only once in the result
         """
-        result = merge_governed_tools([['Bash', 'Tool1'], ['Bash', 'Tool2']])
+        result = _merge_governed_tools([['Bash', 'Tool1'], ['Bash', 'Tool2']])
         self.assertEqual(result, ['Bash', 'Tool1', 'Tool2'])
         # Verify no duplicates
         self.assertEqual(len(result), len(set(result)))
@@ -564,10 +564,10 @@ class TestMergeGovernedTools(unittest.TestCase):
     def test_merge_preserves_order(self):
         """
         Given governed-tools lists where a later list repeats an earlier tool
-        When merge_governed_tools is called
+        When _merge_governed_tools is called
         Then tools keep their first-occurrence order in the merged result
         """
-        result = merge_governed_tools([['A', 'B'], ['C'], ['B', 'D']])
+        result = _merge_governed_tools([['A', 'B'], ['C'], ['B', 'D']])
         # 'B' appears first in first list, so it should come before 'C'
         self.assertEqual(result.index('A'), 0)
         self.assertEqual(result.index('B'), 1)
@@ -577,10 +577,10 @@ class TestMergeGovernedTools(unittest.TestCase):
     def test_merge_empty_lists(self):
         """
         Given an empty collection of governed-tools lists
-        When merge_governed_tools is called
+        When _merge_governed_tools is called
         Then it returns an empty list
         """
-        result = merge_governed_tools([])
+        result = _merge_governed_tools([])
         self.assertEqual(result, [])
 
 

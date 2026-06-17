@@ -10,7 +10,7 @@ Replicates the exact matching logic from checked_bash.py including:
 """
 
 import fnmatch
-from typing import List, Tuple, Optional
+from typing import Callable, List, Optional, Tuple
 
 from .patterns import parse_pattern, match_pattern, PatternType
 from .normalization import normalize_command, normalize_path
@@ -195,6 +195,45 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
     return False, None
 
 
+def check_hard_deny(
+    command: str, deny_patterns: List[str], allow_patterns: List[str], extended_syntax: bool = True
+) -> Optional[Tuple[str, str]]:
+    """
+    Apply the unoverridable hard-deny rule to a single command.
+
+    The command is HARD-DENIED when it matches any ``deny_patterns`` entry AND
+    does NOT match any ``allow_patterns`` carve-out. The ``allow_patterns`` here
+    are EXCEPTIONS to the hard deny only -- they are not a forced/normal allow.
+
+    This is intended to be evaluated FIRST, before the normal more-specific-wins
+    cascade. A hard deny cannot be overridden by any level's normal allow.
+
+    Args:
+        command: The command (sub-command) to evaluate.
+        deny_patterns: Pooled hard-deny deny patterns (wrapper-free).
+        allow_patterns: Pooled hard-deny allow (carve-out) patterns (wrapper-free).
+        extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
+
+    Returns:
+        ``('deny', reason)`` when the command is hard-denied, otherwise ``None``
+        (no hard-deny match, so the caller falls through to the normal cascade).
+    """
+    if not deny_patterns:
+        return None
+
+    matched, pattern = match_command(command, deny_patterns, extended_syntax)
+    if not matched:
+        return None
+
+    # A deny matched. An allow carve-out exempts the command from the hard deny.
+    if allow_patterns:
+        exempt, exempt_pattern = match_command(command, allow_patterns, extended_syntax)
+        if exempt:
+            return None
+
+    return 'deny', f'Command matches hard_deny pattern: {pattern} (cannot be overridden)'
+
+
 def check_permission(
     command: str, allow_patterns: List[str], deny_patterns: List[str], extended_syntax: bool = True
 ) -> Tuple[str, str]:
@@ -229,3 +268,58 @@ def check_permission(
 
     # Default: deny (not explicitly allowed)
     return 'deny', 'Command does not match any allow patterns'
+
+
+def decide_command_at_level(
+    command: str, allow_patterns: List[str], deny_patterns: List[str], extended_syntax: bool = True
+) -> Optional[Tuple[str, str]]:
+    """
+    Decide a command's outcome against ONE hierarchy level's patterns.
+
+    Deny-first within the level: a deny match yields ``('deny', reason)``; else an
+    allow match yields ``('allow', reason)``. When the level matches NOTHING,
+    returns ``None`` so the more-specific-wins cascade can fall through to the
+    next (less-specific) level. This is the per-level ``decide`` callable consumed
+    by :meth:`toolguard.config.Configuration.resolve_permission`.
+
+    Args:
+        command: The bash command (sub-command) to evaluate.
+        allow_patterns: This level's allow patterns (wrapper-free).
+        deny_patterns: This level's deny patterns (wrapper-free).
+        extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
+
+    Returns:
+        ``(decision, reason)`` when this level matches, else ``None``.
+    """
+    if deny_patterns:
+        matched, pattern = match_command(command, deny_patterns, extended_syntax)
+        if matched:
+            return 'deny', f'Command matches deny pattern: {pattern}'
+
+    matched, pattern = match_command(command, allow_patterns, extended_syntax)
+    if matched:
+        return 'allow', f'Command matches allow pattern: {pattern}'
+
+    return None
+
+
+def make_command_level_decider(command: str, extended_syntax: bool = True) -> Callable:
+    """
+    Build a per-level ``decide`` callable bound to a single command.
+
+    Convenience adapter for :meth:`Configuration.resolve_permission`, which calls
+    ``decide(allow, deny)`` once per level. This binds the command and extended
+    syntax flag so only the level's pattern tuples vary.
+
+    Args:
+        command: The command (sub-command) to evaluate at each level.
+        extended_syntax: If False, skip parsing extended prefixes.
+
+    Returns:
+        A callable ``(allow, deny) -> (decision, reason) | None``.
+    """
+
+    def _decide(allow_patterns, deny_patterns):
+        return decide_command_at_level(command, list(allow_patterns), list(deny_patterns), extended_syntax)
+
+    return _decide

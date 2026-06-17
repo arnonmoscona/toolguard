@@ -116,3 +116,136 @@ If Claude Code adds native subagent identification to the hook input (e.g., an `
 
 - GitHub Issue #7881: session_id shared between main and subagents
 - GitHub Issue #10052: Feature request for native subagent identification in hooks
+
+## Hierarchical Configuration and Resolution (TOO-8 Phase 2)
+
+### Discovery hierarchy
+
+Toolguard discovers configuration across a hierarchy of directories rather than
+just the project and the user level. Starting from the project root (the nearest
+ancestor with `pyproject.toml` or `.git`), it walks UP TO and INCLUDING the
+user's home directory `~`, collecting configs from every ancestor that has a
+`.claude/` subdirectory. The walk never ascends above `~`.
+
+Within each `.claude/` directory the same within-level priority applies as
+before: `toolguard_hook.local.{toml,json}`, `settings.local.json`,
+`toolguard_hook.{toml,json}`, `settings.json` (TOML preferred over JSON, with a
+warning when both exist).
+
+Each level carries a **specificity** index: 0 = project (most specific),
+increasing with distance up the tree; the user level `~/.claude` is always the
+least specific. `~/.claude` is ALWAYS included as a level even when the project
+is not located under `~`, preserving "user config always applies".
+
+**Toggle:** `hierarchical_configuration` (a top-level key in a `toolguard_hook`
+file) is read ONLY from the project-level config; it defaults to `true`. When
+`false`, only the project and user levels are used (the pre-Phase-2 behaviour).
+The fixed-bootstrap rule -- read the project level first to learn the toggle,
+then decide traversal -- avoids the circularity of letting an ancestor vote on
+whether ancestors are read.
+
+`CLAUDE_SETTINGS_PATH` still forces single-file mode and bypasses the hierarchy.
+
+### More-specific-wins permission resolution
+
+Permission decisions use **more-specific-wins** instead of a flattened global
+deny-first. Levels are evaluated MOST-SPECIFIC -> LEAST-SPECIFIC. Within a level,
+deny-first applies (a deny match denies; otherwise an allow match allows). The
+FIRST level that produces ANY match decides, and the cascade stops there. If no
+level matches anything, the result is a fail-closed DENY.
+
+This applies uniformly to:
+- Bash command tools.
+- Each sub-command of a compound Bash command, resolved independently through
+  the full level cascade; the compound is allowed iff every sub-command is.
+- File-path tools (Read/Write/Edit).
+
+The level cascade is orchestrated by `Configuration.resolve_permission` (fed by
+`Configuration.permission_levels(tool)`). Pattern MATCHING stays in
+`permissions.py`/`compound.py` (and the file-path matcher in `hook.py`); those
+provide a per-level `decide(allow, deny) -> (decision, reason) | None` callable.
+A single-level config behaves identically to the old deny-first model, so there
+is one resolution path with no legacy/dual code.
+
+### Project-root-relative paths
+
+**Any relative path that appears anywhere in configuration resolves against the
+PROJECT ROOT** -- regardless of which level/directory declared it. It is NOT
+relative to the ancestor directory that holds the declaring file, and NOT
+relative to the current working directory. This is enforced centrally by
+`Configuration.resolve_config_path`.
+
+It applies to:
+- Scalar path settings such as `config_sync.backup_dir`.
+- Relative file-path permission patterns for Read/Write/Edit (a pattern not
+  starting with `/` or `~`, after any extended-syntax prefix such as
+  `[glob]`/`[regex]` is removed). `[regex]` patterns are never path-joined.
+
+Absolute paths and `~`-paths are unaffected; `~` still expands to the home
+directory downstream. `[regex]`-prefixed patterns are also left untouched (a
+regex is not a path). The config module knows the project root (via
+`Configuration.project_root`), so it is the single anchor point for the rule.
+
+Behaviour-change note: because relative file-path patterns are now rewritten to
+`<project_root>/<body>`, a relative pattern such as `Read(src/**)` matches ONLY
+paths inside the project root. A same-named path in an ancestor (e.g.
+`<ancestor>/src/x.py`) no longer matches. Previously a relative pattern was
+matched as authored. This is intentional under the more-specific-wins hierarchy
+(a shared ancestor config should not silently grant access to unrelated sibling
+trees) and is covered by a negative regression test in `test_hierarchical.py`.
+
+### Hard-deny safety valve (TOO-8 Phase 3)
+
+`[hard_deny]` is an **unoverridable** hard-deny mechanism: a (typically
+less-specific) config can declare rules that NO more-specific config can
+override. It is a toolguard extension read ONLY from `toolguard_hook` files
+(TOML/JSON), never from native Claude `settings*.json` (Claude has no such
+concept).
+
+Shape (within a `toolguard_hook` file):
+
+```toml
+[hard_deny]
+deny  = ["Bash(curl *)", "Read(**/.env)"]   # hard-denied (unoverridable)
+allow = ["Bash(curl localhost*)"]            # carve-out EXCEPTION to the deny
+```
+
+Semantics:
+
+- **Pooled across ALL levels** into one union (not per-level inward
+  propagation). `Configuration.hard_deny(tool)` returns the tool-scoped,
+  de-duplicated `(deny, allow)` pools across every `toolguard_hook` layer.
+- **Checked FIRST**, before the normal more-specific-wins cascade. A
+  command/path that matches any hard-deny `deny` pattern AND does NOT match a
+  hard-deny `allow` carve-out is **DENIED**, and that decision cannot be
+  overridden by any level's normal allow. Otherwise resolution falls through to
+  the Phase 2 cascade unchanged.
+- `allow` is ONLY an exception to `deny` (e.g. hard-deny all `curl` EXCEPT
+  `curl localhost`). It is NOT a forced/normal allow and does NOT affect the
+  normal cascade.
+- Patterns use the same extended syntax (`[regex]`/`[glob]`/`[native]`), tool
+  wrappers, and matchers as normal permissions. Relative file-path hard-deny
+  patterns anchor to the project root exactly like normal file-path patterns.
+
+Applies uniformly to: Bash commands, EACH sub-command of a compound command
+(the compound is hard-denied if any sub-command is), and file-path tools
+(Read/Write/Edit, tool-scoped). Command matching uses
+`permissions.check_hard_deny`; the file-path equivalent is
+`hook._check_file_path_hard_deny`. There is no behaviour change when no
+`[hard_deny]` is configured. Single resolution path (no dual/legacy code).
+
+> Note (flagged for review): these exact `[hard_deny]` semantics -- the
+> deny/allow carve-out shape and the all-levels pool -- were defined for Phase 3
+> per decision #3 in the implementation plan and are pending Arnon's
+> confirmation.
+
+### Single source of truth for tool-wrapper stripping
+
+Permission patterns are authored wrapped as `Tool(inner)` (e.g. `Bash(git *)`)
+but matched on the unwrapped inner pattern. `config._strip_tool_wrapper` is the
+single, purely STRUCTURAL strip (`re.fullmatch(r'[A-Za-z0-9_]+\((.*)\)')`): it
+needs no hand-maintained tool list and handles inner parentheses
+(`Bash(foo(bar))` -> `foo(bar)`). Divergence detection recognises tool-scoped
+native permissions via the shared `config.is_tool_wrapper` predicate, which uses
+the same `_TOOL_WRAPPER_RE` -- there is no duplicated regex in
+`config_divergence.py`. New governed tools require no change to any prefix list.

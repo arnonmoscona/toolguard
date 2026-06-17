@@ -5,7 +5,7 @@ This module provides permission checking for compound bash commands,
 validating each sub-command and returning the strictest permission decision.
 """
 
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 from toolguard.parser.command_extractor import extract_commands
 from toolguard.permissions import check_permission
@@ -95,6 +95,68 @@ def check_compound_permission(
     match_details = []
     for cmd, reason in allowed_commands:
         # Extract pattern from reason like "Command matches allow pattern: git *"
+        pattern = reason.split(': ', 1)[1] if ': ' in reason else '?'
+        match_details.append(f'{cmd} -> {pattern}')
+    return 'allow', f'All {len(commands)} sub-commands allowed: [{", ".join(match_details)}]'
+
+
+def resolve_compound_permission(command: str, resolve_one: Callable[[str], Tuple[str, str]]) -> Tuple[str, str]:
+    """
+    Resolve a compound command where each sub-command cascades independently.
+
+    Each extracted sub-command is resolved through ``resolve_one`` -- typically a
+    closure over :meth:`toolguard.config.Configuration.resolve_permission`, so
+    every sub-command independently runs the full more-specific-wins level
+    cascade. The compound is allowed iff ALL sub-commands resolve to allow;
+    otherwise the strictest outcome wins (any deny -> deny, then any ask -> ask),
+    mirroring :func:`check_compound_permission`.
+
+    Args:
+        command: The bash command line (may be compound).
+        resolve_one: Callable mapping a single sub-command string to its resolved
+            ``(decision, reason)`` (already cascaded across levels).
+
+    Returns:
+        Tuple of (decision, reason). For an all-allowed compound the reason lists
+        per-sub-command matched rules, matching the legacy format the hook logs.
+    """
+    commands = extract_commands(command)
+
+    if not commands:
+        return 'deny', 'No valid commands found in command line'
+
+    if len(commands) == 1:
+        return resolve_one(commands[0])
+
+    denied_commands = []
+    ask_commands = []
+    allowed_commands = []
+
+    for cmd in commands:
+        decision, reason = resolve_one(cmd)
+        if decision == 'deny':
+            denied_commands.append((cmd, reason))
+        elif decision == 'ask':
+            ask_commands.append((cmd, reason))
+        else:
+            allowed_commands.append((cmd, reason))
+
+    if denied_commands:
+        cmd, reason = denied_commands[0]
+        return 'deny', f'Compound command contains denied sub-command: {cmd} ({reason})'
+
+    if ask_commands:
+        cmd, reason = ask_commands[0]
+        return 'ask', f'Compound command contains sub-command requiring approval: {cmd} ({reason})'
+
+    match_details = []
+    for cmd, reason in allowed_commands:
+        # Recover the matched pattern from the allow reason for display only.
+        # IMPLICIT COUPLING: this assumes the ``...: <pattern>`` reason shape
+        # emitted by permissions.decide_command_at_level (e.g. "Command matches
+        # allow pattern: git *"); if that reason format changes, update here (and
+        # hook._COMPOUND_MATCH_PATTERN). Falls back to '?' so a format drift only
+        # degrades the cosmetic detail, never the decision.
         pattern = reason.split(': ', 1)[1] if ': ' in reason else '?'
         match_details.append(f'{cmd} -> {pattern}')
     return 'allow', f'All {len(commands)} sub-commands allowed: [{", ".join(match_details)}]'

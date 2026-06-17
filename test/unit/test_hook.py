@@ -53,7 +53,14 @@ def _fake_config(
     """
     file_patterns = file_patterns or {}
 
+    def _patterns_for(tool_name):
+        if tool_name == 'Bash':
+            return bash
+        return file_patterns.get(tool_name, ((), ()))
+
     class _FakeConfig:
+        project_root = None
+
         def governed_tools(self_inner):
             return tuple(governed)
 
@@ -61,7 +68,33 @@ def _fake_config(
             return bash
 
         def allow_deny_for(self_inner, tool_name):
-            return file_patterns.get(tool_name, ((), ()))
+            return _patterns_for(tool_name)
+
+        def hard_deny(self_inner, tool_name):
+            # The fake configures no [hard_deny] pool, so hard-deny never fires
+            # here; this keeps the double in sync with the Configuration surface
+            # the hook now consumes (TOO-8 Phase 3).
+            return (), ()
+
+        def resolve_config_path(self_inner, raw_path):
+            # No project root in the fake: relative paths returned unchanged.
+            return raw_path
+
+        def permission_levels(self_inner, tool_name):
+            # The fake models a single hierarchy level per tool.
+            allow, deny = _patterns_for(tool_name)
+            if not allow and not deny:
+                return ()
+            return ((tuple(allow), tuple(deny)),)
+
+        def resolve_permission(self_inner, tool_name, decide):
+            # Mirror Configuration.resolve_permission: first matching level wins,
+            # else fail-closed deny.
+            for allow, deny in self_inner.permission_levels(tool_name):
+                result = decide(allow, deny)
+                if result is not None:
+                    return result
+            return 'deny', 'Command does not match any allow patterns'
 
         def takeover_mode(self_inner):
             return takeover
@@ -564,20 +597,21 @@ class TestFilePathToolsInMain(unittest.TestCase):
             'hook_event_name': 'PreToolUse',
         }
 
-        config = _fake_config(governed=['Read', 'Write', 'Edit'])
+        config = _fake_config(
+            governed=['Read', 'Write', 'Edit'], file_patterns={'Read': (['/tmp/**'], [])}
+        )
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
                 with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.load_file_path_patterns', return_value=(['/tmp/**'], [])):
-                        with patch('toolguard.hook.log_command'):
-                            with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
-                                try:
-                                    main()
-                                except SystemExit:
-                                    pass
+                    with patch('toolguard.hook.log_command'):
+                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
 
-                                output = json.loads(mock_stdout.getvalue())
-                                self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
 
     def test_write_tool_denied(self):
         """
@@ -591,20 +625,21 @@ class TestFilePathToolsInMain(unittest.TestCase):
             'hook_event_name': 'PreToolUse',
         }
 
-        config = _fake_config(governed=['Read', 'Write', 'Edit'])
+        config = _fake_config(
+            governed=['Read', 'Write', 'Edit'], file_patterns={'Write': (['/tmp/**'], [])}
+        )
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
                 with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.load_file_path_patterns', return_value=(['/tmp/**'], [])):
-                        with patch('toolguard.hook.log_command'):
-                            with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
-                                try:
-                                    main()
-                                except SystemExit:
-                                    pass
+                    with patch('toolguard.hook.log_command'):
+                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
 
-                                output = json.loads(mock_stdout.getvalue())
-                                self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
 
     def test_edit_tool_with_deny_pattern(self):
         """
@@ -618,23 +653,23 @@ class TestFilePathToolsInMain(unittest.TestCase):
             'hook_event_name': 'PreToolUse',
         }
 
-        config = _fake_config(governed=['Read', 'Write', 'Edit'])
+        config = _fake_config(
+            governed=['Read', 'Write', 'Edit'],
+            file_patterns={'Edit': (['/tmp/**'], ['/tmp/secret/**'])},
+        )
         with patch('sys.stdin', StringIO(json.dumps(hook_input))):
             with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
                 with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch(
-                        'toolguard.hook.load_file_path_patterns', return_value=(['/tmp/**'], ['/tmp/secret/**'])
-                    ):
-                        with patch('toolguard.hook.log_command'):
-                            with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
-                                try:
-                                    main()
-                                except SystemExit:
-                                    pass
+                    with patch('toolguard.hook.log_command'):
+                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
 
-                                output = json.loads(mock_stdout.getvalue())
-                                self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
-                                self.assertIn('deny pattern', output['hookSpecificOutput']['permissionDecisionReason'])
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
+                            self.assertIn('deny pattern', output['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_read_no_file_path_denied(self):
         """
@@ -747,13 +782,12 @@ class TestStartupValidation(unittest.TestCase):
 
                 env_config = {'log_dir': logs_dir}
 
-                with patch('toolguard.hook.find_project_root', return_value=project_dir):
-                    # Reset flag again before calling
-                    hook_module._validation_done = False
+                # Reset flag again before calling
+                hook_module._validation_done = False
 
-                    from toolguard.hook import _run_startup_validation
+                from toolguard.hook import _run_startup_validation
 
-                    _run_startup_validation(env_config, str(project_dir), config)
+                _run_startup_validation(env_config, str(project_dir), config)
 
                 # Check log file - should NOT have warnings for WebSearch, WebFetch
                 # because those are in settings.local.json which is ignored

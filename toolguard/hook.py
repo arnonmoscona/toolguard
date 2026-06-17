@@ -20,9 +20,10 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 from toolguard.auto_migrate import run_auto_migration
-from toolguard.compound import check_compound_permission
+from toolguard.compound import resolve_compound_permission
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
-from toolguard.config import find_project_root, load_configuration
+from toolguard.permissions import check_hard_deny, make_command_level_decider
+from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_warning
@@ -66,16 +67,16 @@ def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None, c
         return
     _validation_done = True
 
+    if config is None:
+        config = load_configuration(start_dir)
+
     # Get log directory from env config
     log_dir = env_config.get('log_dir')
     if not log_dir:
-        try:
-            log_dir = find_project_root(start_dir) / 'logs'
-        except RuntimeError:
+        project_root = config.project_root
+        if project_root is None:
             return  # Can't log without log dir
-
-    if config is None:
-        config = load_configuration(start_dir)
+        log_dir = project_root / 'logs'
 
     # The config module detects content-level issues and returns them; the hook
     # only decides where to log. No files are opened or parsed here.
@@ -172,6 +173,41 @@ def load_file_path_patterns(tool_name: str, start_dir: str = None, config=None) 
     return list(allow), list(deny)
 
 
+def _anchor_file_pattern(pattern: str, config, extended_syntax: bool) -> str:
+    """
+    Anchor a relative file-path permission pattern to the PROJECT ROOT.
+
+    Per the project-root-relative-path rule, a relative file-path pattern (one not
+    starting with ``/`` or ``~`` after any extended-syntax prefix) resolves against
+    the project root regardless of which config level declared it. Absolute and
+    ``~`` patterns are returned unchanged.
+
+    Any extended-syntax prefix (``[glob]``/``[regex]``/``[native]``) is preserved:
+    only the path body after the prefix is anchored. ``[regex]`` patterns are left
+    untouched (a regex is not a path and must not be path-joined).
+
+    Args:
+        pattern: A file-path permission pattern (wrapper already stripped).
+        config: The resolved :class:`~toolguard.config.Configuration`.
+        extended_syntax: Whether extended prefixes are honoured.
+
+    Returns:
+        The pattern with its path body anchored to the project root when relative.
+    """
+    prefix = ''
+    body = pattern
+    if extended_syntax:
+        for known in ('[glob]', '[regex]', '[native]'):
+            if pattern.startswith(known):
+                prefix = known
+                body = pattern[len(known):]
+                break
+    # A regex pattern is not a filesystem path; never path-join it.
+    if prefix == '[regex]':
+        return pattern
+    return prefix + config.resolve_config_path(body)
+
+
 def _match_file_path_pattern(pattern: str, expanded_path: str, extended_syntax: bool) -> bool:
     """
     Match a file path against a single pattern, respecting extended syntax prefixes.
@@ -231,6 +267,123 @@ def check_file_path_permission(
 
     # Default: deny (not explicitly allowed)
     return 'deny', 'Path does not match any allow patterns'
+
+
+def _decide_file_path_at_level(file_path, allow_patterns, deny_patterns, config, extended_syntax):
+    """
+    Decide a file path's outcome against ONE hierarchy level's patterns.
+
+    Deny-first within the level. Relative patterns are anchored to the project
+    root (see :func:`_anchor_file_pattern`) before matching. Returns ``None`` when
+    neither list matches at this level, so the more-specific-wins cascade falls
+    through to the next level.
+
+    Args:
+        file_path: The file path under evaluation.
+        allow_patterns: This level's allow patterns (wrapper-free).
+        deny_patterns: This level's deny patterns (wrapper-free).
+        config: The resolved Configuration (provides project-root anchoring).
+        extended_syntax: Whether extended prefixes are honoured.
+
+    Returns:
+        ``(decision, reason)`` when this level matches, else ``None``.
+    """
+    expanded_path = expand_tilde(file_path)
+
+    for pattern in deny_patterns:
+        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
+        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+            return 'deny', f'Path matches deny pattern: {pattern}'
+
+    for pattern in allow_patterns:
+        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
+        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+            return 'allow', f'Path matches allow pattern: {pattern}'
+
+    return None
+
+
+def _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax):
+    """
+    Apply the unoverridable hard-deny rule to a file path, checked FIRST.
+
+    The pooled ``[hard_deny]`` (deny, allow) patterns for ``tool_name`` are
+    collected across ALL levels (see
+    :meth:`~toolguard.config.Configuration.hard_deny`). The path is hard-denied
+    when it matches any hard-deny ``deny`` pattern AND does NOT match a hard-deny
+    ``allow`` carve-out. Relative patterns are anchored to the project root, the
+    same as normal file-path patterns.
+
+    Args:
+        tool_name: 'Read', 'Write', or 'Edit'.
+        file_path: The file path under evaluation.
+        config: The resolved Configuration (provides hard_deny pool + anchoring).
+        extended_syntax: Whether extended prefixes are honoured.
+
+    Returns:
+        ``('deny', reason)`` when the path is hard-denied, otherwise ``None`` so
+        the caller falls through to the normal more-specific-wins cascade.
+    """
+    deny_patterns, allow_patterns = config.hard_deny(tool_name)
+    if not deny_patterns:
+        return None
+
+    expanded_path = expand_tilde(file_path)
+
+    matched_deny = None
+    for pattern in deny_patterns:
+        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
+        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+            matched_deny = pattern
+            break
+
+    if matched_deny is None:
+        return None
+
+    # A hard-deny matched. An allow carve-out exempts the path from the hard deny.
+    for pattern in allow_patterns:
+        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
+        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+            return None
+
+    return 'deny', f'Path matches hard_deny pattern: {matched_deny} (cannot be overridden)'
+
+
+def resolve_file_path_permission(tool_name, file_path, config, extended_syntax=True):
+    """
+    Resolve a file-path tool decision using more-specific-wins across levels.
+
+    The unoverridable ``[hard_deny]`` pool is checked FIRST (see
+    :func:`_check_file_path_hard_deny`); a hard-deny match denies immediately and
+    cannot be overridden by any level's normal allow. Otherwise this drives the
+    level cascade via :meth:`~toolguard.config.Configuration.resolve_permission`,
+    applying deny-first within each level and project-root anchoring to relative
+    patterns. The first level that matches anything decides; no match at any level
+    => fail-closed deny.
+
+    Args:
+        tool_name: 'Read', 'Write', or 'Edit'.
+        file_path: The file path under evaluation.
+        config: The resolved Configuration.
+        extended_syntax: Whether extended prefixes are honoured.
+
+    Returns:
+        Tuple of (decision, reason).
+    """
+    hard = _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
+    if hard is not None:
+        return hard
+
+    def _decide(allow_patterns, deny_patterns):
+        return _decide_file_path_at_level(
+            file_path, list(allow_patterns), list(deny_patterns), config, extended_syntax
+        )
+
+    decision, reason = config.resolve_permission(tool_name, _decide)
+    if decision == 'deny' and reason == 'Command does not match any allow patterns':
+        # Normalise the default-deny reason to file-path phrasing.
+        reason = 'Path does not match any allow patterns'
+    return decision, reason
 
 
 _COMPOUND_MATCH_PATTERN = re.compile(r'All \d+ sub-commands allowed: \[(.+)\]')
@@ -343,8 +496,8 @@ def main() -> None:
             _divergence_check_done = True
             log_dir = env_config.get('log_dir')
             if log_dir:
-                try:
-                    project_root = find_project_root(cwd)
+                project_root = config.project_root
+                if project_root is not None:
                     divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_dict)
 
                     # Auto-migration: consolidate permissions if configured
@@ -354,13 +507,7 @@ def main() -> None:
                         if config_sync['auto_migrate']:
                             # Auto-migration enabled - run it
                             run_auto_migration(project_root, log_dir, dict(config_sync), takeover_dict)
-                        else:
-                            # Auto-migration disabled - warning already shown by check_and_warn_divergence
-                            pass
-
-                except RuntimeError:
-                    # No project root found - skip divergence check
-                    pass
+                        # else: warning already shown by check_and_warn_divergence
 
         # Resolve the list of governed tools via the config abstraction
         governed_tools = list(config.governed_tools())
@@ -388,11 +535,12 @@ def main() -> None:
                 print(json.dumps(output))
                 sys.exit(0)
 
-            # Load patterns for this specific tool (reusing the loaded config)
-            allow_patterns, deny_patterns = load_file_path_patterns(tool_name, cwd, config)
+            # Determine whether ANY level configures allow patterns for this tool
+            # (fail-closed when nothing is configured anywhere).
+            all_allow, _all_deny = config.allow_deny_for(tool_name)
 
-            if not allow_patterns:
-                # No allow patterns - deny (fail closed)
+            if not all_allow:
+                # No allow patterns at any level - deny (fail closed)
                 reason = f'No {tool_name} permissions found in settings - all operations blocked'
                 output = create_hook_output('deny', reason)
                 log_command(
@@ -405,10 +553,10 @@ def main() -> None:
                 print(json.dumps(output))
                 sys.exit(0)
 
-            # Check file path permission using GLOB matching (with optional extended syntax)
+            # Resolve file path permission via more-specific-wins level cascade.
             extended_syntax = env_config.get('extended_syntax', True)
-            decision, reason = check_file_path_permission(
-                file_path, allow_patterns, deny_patterns, extended_syntax
+            decision, reason = resolve_file_path_permission(
+                tool_name, file_path, config, extended_syntax
             )
 
             # Log the decision
@@ -432,23 +580,33 @@ def main() -> None:
             print(json.dumps(output))
             sys.exit(0)
 
-        # Resolve Bash command permissions via the config abstraction
-        allow_patterns, deny_patterns = config.bash_permissions()
+        # Command tools (Bash, MCP terminals) all resolve against the Bash
+        # permission patterns. Fail-closed when no allow pattern is configured at
+        # any level.
+        all_allow, _all_deny = config.allow_deny_for('Bash')
 
-        # Use takeover mode configuration resolved earlier
-        # (takeover already resolved at startup for the warning check)
-
-        if not allow_patterns:
-            # No allow patterns - deny everything (fail closed)
+        if not all_allow:
+            # No allow patterns at any level - deny everything (fail closed)
             reason = 'No Bash permissions found in settings - all commands blocked'
             output = create_hook_output('deny', reason)
             log_command(command, 'refused', ['no allow patterns configured'], extra_info=agent_info, config=env_config)
             print(json.dumps(output))
             sys.exit(0)
 
-        # Check permission (handles both simple and compound commands)
+        # Resolve via more-specific-wins: each sub-command of a compound command
+        # cascades independently through the levels; compound allowed iff all are.
+        # The unoverridable [hard_deny] pool is checked FIRST per sub-command, so a
+        # compound is hard-denied if ANY sub-command is hard-denied.
         extended_syntax = env_config.get('extended_syntax', True)
-        decision, reason = check_compound_permission(command, allow_patterns, deny_patterns, [], extended_syntax)
+        hd_deny, hd_allow = config.hard_deny('Bash')
+
+        def _resolve_one(sub_command, _ext=extended_syntax, _hd_deny=hd_deny, _hd_allow=hd_allow):
+            hard = check_hard_deny(sub_command, list(_hd_deny), list(_hd_allow), _ext)
+            if hard is not None:
+                return hard
+            return config.resolve_permission('Bash', make_command_level_decider(sub_command, _ext))
+
+        decision, reason = resolve_compound_permission(command, _resolve_one)
 
         # Apply takeover mode no_match_fallback if enabled and command was denied for not matching
         if takeover.enabled and decision == 'deny' and 'does not match any allow patterns' in reason.lower():

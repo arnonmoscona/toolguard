@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List
 
-from toolguard.config import config_sync_settings_from_sources
+from toolguard.config import config_sync_settings_from_sources, load_configuration
 from toolguard.config_divergence import (
     find_divergent_patterns,
     get_native_permissions,
@@ -164,19 +164,22 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
         - Creates marker file
         - Prints status messages to stderr
     """
-    from toolguard.config import discover_config_files
     from toolguard.scripts.migrate_permissions import migrate
 
     # Check if we've already migrated today
     if not should_run_migration(logs_dir):
         return False
 
-    # Determine backup directory
+    # ignore_env_override=True: migration is project-scoped end-to-end (it writes
+    # to this project's files), so it must read this project's hierarchy rather
+    # than whatever CLAUDE_SETTINGS_PATH happens to point at.
+    config = load_configuration(project_root, ignore_env_override=True)
+
+    # Determine backup directory. A relative backup_dir is anchored to the PROJECT
+    # ROOT via the config module's single anchoring rule (regardless of which
+    # level declared it); absolute and ~ paths are honoured as written.
     backup_dir_str = config_sync.get('backup_dir', 'logs/config-backups')
-    if Path(backup_dir_str).is_absolute():
-        backup_dir = Path(backup_dir_str)
-    else:
-        backup_dir = project_root / backup_dir_str
+    backup_dir = Path(config.resolve_config_path(backup_dir_str)).expanduser()
 
     # Determine auto_sort setting
     auto_sort = config_sync.get('auto_sort_on_migrate', True)
@@ -187,8 +190,7 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
         return False
 
     native_perms = get_native_permissions(settings_path)
-    config_files = discover_config_files(project_root)
-    toolguard_perms = get_toolguard_permissions(config_files)
+    toolguard_perms = get_toolguard_permissions(config)
 
     # Get ignored patterns from takeover config
     ignored_patterns = []

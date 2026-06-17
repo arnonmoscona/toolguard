@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List
 
-from toolguard.config import toolguard_permissions_from_sources
+from toolguard.config import is_tool_wrapper, load_configuration
 from toolguard.error_log import log_warning
 
 
@@ -127,37 +127,35 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
 
     result = {'allow': [], 'deny': [], 'ask': []}
 
-    # Extract patterns for governed tools
-    governed_tool_prefixes = ['Bash(', 'Read(', 'Write(', 'Edit(']
-
+    # Keep only tool-scoped permission strings (``Tool(...)``). Recognised
+    # structurally via the shared config.is_tool_wrapper helper -- no
+    # hand-maintained tool list and no duplicated regex (single source of truth
+    # lives in config.py), so newly governed tools need no change here.
     for perm_type in ['allow', 'deny', 'ask']:
         for perm in permissions.get(perm_type, []):
-            if isinstance(perm, str):
-                # Check if this is a governed tool pattern
-                for prefix in governed_tool_prefixes:
-                    if perm.startswith(prefix) and perm.endswith(')'):
-                        result[perm_type].append(perm)
-                        break
+            if is_tool_wrapper(perm):
+                result[perm_type].append(perm)
 
     return result
 
 
-def get_toolguard_permissions(config_files: List[tuple]) -> Dict[str, List[str]]:
+def get_toolguard_permissions(config) -> Dict[str, List[str]]:
     """
-    Extract permissions from toolguard_hook config files.
+    Extract raw permissions from the resolved toolguard configuration.
 
-    Only processes toolguard_hook files (not Claude settings files).
-    Merges permissions from multiple files.
+    Only processes toolguard_hook layers (not native Claude settings), merged
+    across all hierarchy levels with tool wrappers intact. Delegates entirely to
+    the :class:`~toolguard.config.Configuration` abstraction, so this client never
+    opens files, parses formats, or branches on discovery order.
 
     Args:
-        config_files: List of (path, source_type, format) tuples from discover_config_files()
+        config: A resolved :class:`~toolguard.config.Configuration`.
 
     Returns:
-        Dictionary with keys 'allow', 'deny', 'ask', each containing list of patterns
+        Dictionary with keys 'allow', 'deny', 'ask', each a list of patterns.
     """
-    # Delegate parsing/format handling to the config module so this client never
-    # opens files or branches on file format.
-    return toolguard_permissions_from_sources(config_files)
+    perms = config.toolguard_permissions()
+    return {key: list(perms[key]) for key in ('allow', 'deny', 'ask')}
 
 
 def find_divergent_patterns(
@@ -220,11 +218,13 @@ def check_and_warn_divergence(project_root: Path, logs_dir: Path, takeover_confi
     settings_path = project_root / '.claude' / 'settings.local.json'
     native_perms = get_native_permissions(settings_path)
 
-    # Load toolguard permissions from config files
-    from toolguard.config import discover_config_files
-
-    config_files = discover_config_files(project_root)
-    toolguard_perms = get_toolguard_permissions(config_files)
+    # Load toolguard permissions via the config abstraction (no direct file I/O).
+    # ignore_env_override=True: divergence analysis is project-scoped (it compares
+    # this project's settings.local.json against this project's toolguard config),
+    # so it must ignore CLAUDE_SETTINGS_PATH and discover the project hierarchy,
+    # consistent with the migration tool's project-based behaviour.
+    config = load_configuration(project_root, ignore_env_override=True)
+    toolguard_perms = get_toolguard_permissions(config)
 
     # Find divergent patterns
     ignored_patterns = takeover_config.get('ignored_allow_patterns', [])
