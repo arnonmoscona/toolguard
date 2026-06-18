@@ -3,92 +3,51 @@ title: Coder Latest Task Recall
 type: note
 permalink: toolguard/implementation/coder-latest-task-recall
 tags:
-- coder-task-recall
 - TOO-8
-- hard_deny
+- task-memory
+- phase-5-review-fixes
 ---
 
-# Coder Task Recall -- TOO-8 Phase 3 (hard_deny)
+# Phase 5 Review Fixes - Task Recall
 
-Date: 2026-06-17. Acting as feature-coder. Project: toolguard. NO git writes.
+## Task
+Fix pass on three MINOR code-review findings from TOO-8 Phase 5 (hierarchical configuration).
+Do NOT expand scope beyond these three items.
 
-## Objective
-Implement `[hard_deny]` safety valve: an unoverridable hard-deny. A (typically less-specific)
-config declares rules that NO more-specific config can override.
+## Finding 1: Remove test-only dead code
+- `Configuration.bash_permissions()` in `toolguard/config.py` (around line 1594) delegates to legacy 2-level `_load_permissions()`. Runtime Bash path now resolves hierarchically via `resolve_permission_detailed('Bash', ...)` / `allow_deny_for('Bash')`, so `bash_permissions()` has NO production caller (only its own unit test).
+- Action: CONFIRM there is no non-test caller, then REMOVE `bash_permissions()` and its unit test.
+- Same situation for `_load_governed_tools()` -- CONFIRM, then REMOVE it and its test.
+- If `_load_permissions()` becomes unused after these removals, check and REMOVE it too.
 
-## Semantics (this phase; document + flag for Arnon)
-- `[hard_deny]` = section with two optional pattern lists: `deny` and `allow`. toolguard
-  extension -- read ONLY from toolguard_hook config (TOML/JSON), NOT native settings*.json.
-- Collected from ALL levels into ONE pool (union across hierarchy) per decision #3. Not
-  per-level propagation.
-- Checked FIRST, before more-specific-wins cascade:
-  - If matches any hard_deny.deny AND does NOT match any hard_deny.allow -> DENY (hard-deny
-    reason). Cannot be overridden by any level's normal allow.
-  - Otherwise fall through to Phase 2 cascade unchanged.
-- hard_deny.allow is ONLY a carve-out exception to hard_deny.deny. NOT a forced allow; does
-  NOT affect normal cascade.
-- Patterns support extended syntax ([regex]/[glob]/[native]) + tool wrappers (Bash(...),
-  Read(...), etc.), same matchers as normal perms.
-- Apply to: Bash commands, EACH sub-command of compound (compound hard-denied if any
-  sub-command is), and file-path tools (Read/Write/Edit, tool-scoped like normal patterns).
+## Finding 2: Fail-loud on non-bool `enabled`
+- Around `toolguard/config.py:1269`, `takeover_mode.enabled` is parsed via `bool(section['enabled'])`, which silently coerces non-bool (e.g. string "false" becomes True).
+- Since `enabled` is a fail-safe SECURITY toggle, non-bool should NOT be coerced.
+- Fix: when `enabled` is present but not a real bool, treat that level as NOT explicitly setting enabled (so it does not participate as a True/False vote) AND emit a validation Issue.
+- Follow existing validation-Issue pattern in the file.
+- Do not change behavior for valid bool values.
 
-## Implementation
-- Parse `[hard_deny]` in config layer model; expose via `Configuration.hard_deny(tool_name)`
-  returning pooled (deny, allow) tool-scoped patterns, relative paths anchored to project
-  root (reuse Phase 2 anchoring `_anchor_file_pattern`).
-- Integrate into resolver: hard_deny evaluated before cascade for bash/compound/file-path
-  uniformly. Matching stays in permissions.py/compound.py.
-- Single resolution path. No behavior change when no `[hard_deny]` configured.
+## Finding 3: DRY -- centralize config_sync defaults
+- `config_sync` default values are duplicated in three places: `config_sync_settings()`, `config_sync_settings_from_sources()`, and a test fake.
+- Centralize them into a module-level `_CONFIG_SYNC_DEFAULTS` dict.
+- Mirror how `_DEFAULT_IGNORED_ALLOW_PATTERNS` / `_DEFAULT_NO_MATCH_FALLBACK` were centralized.
+- All three sites should reference it. Keep resolved values identical to today.
 
-## Tooling rules (CRITICAL)
-- Green BOTH: `uv run python -m unittest discover -s test -t .` AND
-  `env -u CLAUDE_SETTINGS_PATH uv run python -m unittest discover -s test -t .`
-- Do NOT `ruff format` (corrupts repo). Use `ruff check`. Coverage:
-  `uv run python tools/coverage_stdlib.py`. Don't hand-edit parser/bash_parser.py.
-- Tests are unittest (NOT pytest). Every test fn needs Given/When/Then docstring.
+## Constraints
+- Tests use stdlib unittest NOT pytest. Run: `uv run python -m unittest discover -s test -t .`
+- Suite MUST pass both with env and with `env -u CLAUDE_SETTINGS_PATH uv run python -m unittest discover -s test -t .`
+- Every unit test function must carry BDD (Given/When/Then) docstring
+- Always run `uv run ruff check .` (must be clean). Do NOT run `ruff format`.
+- No git operations.
+- Generate doc comments for new/changed functions.
+- No async/await, no threading, no imports inside function bodies.
 
-## Tests required (BDD docstrings)
-- hard_deny.deny denies even when MORE-SPECIFIC level allows (unoverridable)
-- hard_deny.allow carve-out exempts matching command
-- hard_deny at ancestor/user level blocks project-level allow
-- compound: one hard-denied sub-command denies whole compound
-- file-path (Read/Write/Edit) hard_deny
-- no [hard_deny] => Phase 2 unchanged (regression)
-- hard_deny pooled across multiple levels
-- relative path in hard_deny pattern anchors to project root
+## After Implementing
+1. `uv run ruff check .` (clean)
+2. Run suite both ways (with env, and without CLAUDE_SETTINGS_PATH). Both must be green.
+3. Verify coverage if practical.
+4. Write implementation report to basic-memory project='toolguard', under `implementation/` folder, tagged `TOO-8`.
 
-## DoD
-1. hard_deny: checked first, unoverridable, single resolution path
-2. Suite green both ways; ruff check clean; files compile
-3. New tests w/ G/W/T; coverage >90% on changed code (report numbers)
-4. technical-notes.md documents hard_deny briefly
-5. Report to implementation/coder-latest-implementation-report.md
-
-## Out of scope
-Phases 4-7 (logging, non-perm cross-level, SessionStart, docs restructure).
-
-Stop+report if design contradiction, ambiguous allow-exception vs existing test, or scope
-exceeds Phase 3.
-
-
----
-
-# TOO-8 Phase 4 -- Dead-code removal + config-loader consolidation [task recall 2026-06-18]
-
-Folds into uncommitted Phase 4 changeset. No behavior change except de-dup + memoization.
-
-## Part A -- remove confirmed dead code (all re-confirmed: zero non-test prod caller)
-1. Delete toolguard/validation.py (byte-for-byte dup of config_validation.py; zero importers).
-2. Remove Configuration._toolguard_permissions_from_sources (config.py:1737); test refs in test_configuration.py (2 sites + import).
-3. Remove check_file_path_permission (hook.py:239); ~30 sites in test_hook.py -> re-point to resolve_file_path_permission_detailed, preserve intent.
-
-## Part B -- consolidate config-file loading
-- ONE memoized loader keyed on (path, st_mtime_ns). Inner @functools.lru_cache _parse(path, mtime_ns); public computes mtime. cache_clear() for tests.
-- Adopt at config.py format-dispatch sites: 329 (_load_permissions_from_file, strict toggle), 414 (_load_governed_tools_from_file, silent []), 507 (takeover, silent continue), 1616 (_parse_source, warn+None). PRESERVE each site's error semantics (loader raises; wrappers keep their except).
-- Supersede load_toml_config / toml_config.py -> delete once unreferenced; re-point test_toml_config.py TestTomlConfigLoader to new loader.
-- Anti-pattern guard: loader must have prod callers (it will).
-
-## Tooling
-- Suite green BOTH: `uv run python -m unittest discover -s test -t .` AND `env -u CLAUDE_SETTINGS_PATH ...`. Baseline = 672 OK both.
-- NO ruff format. `uv run ruff check`. coverage: tools/coverage_stdlib.py. Don't touch bash_parser.py. NO git ops.
-- Python 3.14; tomllib always available -> hoist to top-level import.
+## Files to modify
+- `toolguard/config.py` - main changes
+- `test/unit/test_configuration.py` - remove unit tests for dead code

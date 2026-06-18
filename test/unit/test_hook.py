@@ -12,7 +12,14 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
-from toolguard.config import ConfigLayer, Configuration, Provenance, ResolvedDecision, TakeoverConfig
+from toolguard.config import (
+    ConfigLayer,
+    Configuration,
+    Provenance,
+    ResolvedDecision,
+    TakeoverConfig,
+    TakeoverEnabledConflict,
+)
 from toolguard.hook import (
     FILE_PATH_TOOLS,
     _decide_file_path_at_level_detailed,
@@ -217,6 +224,117 @@ class TestHookToolGovernance(unittest.TestCase):
                     self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
                     # Reason should mention it's not governed
                     self.assertIn('Not a governed tool', output['hookSpecificOutput']['permissionDecisionReason'])
+
+
+class TestTakeoverEnabledConflictWiring(unittest.TestCase):
+    """End-to-end hook wiring for a cross-level takeover_mode.enabled conflict (TOO-8 Phase 5)."""
+
+    def setUp(self):
+        """Reset the once-per-session takeover-conflict flag before each test."""
+        import toolguard.hook as hook_module
+
+        hook_module._takeover_conflict_logged = False
+
+    def test_enabled_conflict_logs_and_warns_failsafe_off(self):
+        """
+        Given a config whose takeover_mode() reports an enabled conflict (fail-safe OFF)
+        When main() processes a governed Bash command
+        Then a conflict-log entry is written, a once-per-session takeover warning is issued,
+             and the command is still evaluated on the safe path (native prompts active)
+        """
+        conflict = TakeoverEnabledConflict(
+            sources=(
+                (True, Provenance('project', 'toolguard_hook', 'toml', Path('/p/.claude/toolguard_hook.toml'), 0)),
+                (False, Provenance('user', 'toolguard_hook', 'toml', Path('/u/.claude/toolguard_hook.toml'), 1)),
+            )
+        )
+        takeover = TakeoverConfig(False, (), (), 'deny', conflict=conflict)
+        config = _fake_config(governed=['Bash'], bash=(['git *'], []), takeover=takeover)
+
+        hook_input = {
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git status'},
+            'hook_event_name': 'PreToolUse',
+        }
+
+        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
+            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
+                with patch('toolguard.hook.load_configuration', return_value=config):
+                    with patch('toolguard.hook.get_env_config', return_value={'log_dir': Path('/fake/logs')}):
+                        with patch('toolguard.hook.log_command'):
+                            with patch('toolguard.hook.log_conflict') as mock_conflict:
+                                with patch('toolguard.hook.issue_takeover_warning') as mock_warn:
+                                    try:
+                                        main()
+                                    except SystemExit:
+                                        pass
+
+        # A conflict-log entry was written citing the disagreement and fail-safe OFF.
+        mock_conflict.assert_called_once()
+        conflict_message = mock_conflict.call_args[0][0]
+        self.assertIn('conflicting values', conflict_message)
+        self.assertIn('DISABLED', conflict_message)
+        # A once-per-session takeover/config warning was issued.
+        mock_warn.assert_called_once()
+        # Fail-safe path: the command is still evaluated normally (allowed by 'git *').
+        output = json.loads(mock_stdout.getvalue())
+        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+
+    def test_enabled_conflict_logged_once_per_session(self):
+        """
+        Given the takeover enabled-conflict path has already fired this session
+        When main() processes another governed command in the same session
+        Then no additional conflict-log entry or takeover warning is emitted (once-per-session)
+        """
+        import toolguard.hook as hook_module
+
+        hook_module._takeover_conflict_logged = True
+
+        conflict = TakeoverEnabledConflict(
+            sources=(
+                (True, Provenance('project', 'toolguard_hook', 'toml', Path('/p/.claude/toolguard_hook.toml'), 0)),
+                (False, Provenance('user', 'toolguard_hook', 'toml', Path('/u/.claude/toolguard_hook.toml'), 1)),
+            )
+        )
+        takeover = TakeoverConfig(False, (), (), 'deny', conflict=conflict)
+        config = _fake_config(governed=['Bash'], bash=(['git *'], []), takeover=takeover)
+
+        hook_input = {
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git status'},
+            'hook_event_name': 'PreToolUse',
+        }
+
+        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
+            with patch('sys.stdout', new_callable=StringIO):
+                with patch('toolguard.hook.load_configuration', return_value=config):
+                    with patch('toolguard.hook.get_env_config', return_value={'log_dir': Path('/fake/logs')}):
+                        with patch('toolguard.hook.log_command'):
+                            with patch('toolguard.hook.log_conflict') as mock_conflict:
+                                with patch('toolguard.hook.issue_takeover_warning') as mock_warn:
+                                    try:
+                                        main()
+                                    except SystemExit:
+                                        pass
+
+        mock_conflict.assert_not_called()
+        mock_warn.assert_not_called()
+
+    def test_log_takeover_conflict_is_noop_without_conflict_or_log_dir(self):
+        """
+        Given a None conflict or a missing log_dir
+        When _log_takeover_enabled_conflict is called
+        Then it writes nothing (no-op guard) and does not raise
+        """
+        from toolguard.hook import _log_takeover_enabled_conflict
+
+        conflict = TakeoverEnabledConflict(
+            sources=((True, Provenance('project', 'toolguard_hook', 'toml', Path('/p/x.toml'), 0)),)
+        )
+        with patch('toolguard.hook.log_conflict') as mock_conflict:
+            _log_takeover_enabled_conflict(None, Path('/fake/logs'))
+            _log_takeover_enabled_conflict(conflict, None)
+        mock_conflict.assert_not_called()
 
 
 class TestHookInputParsing(unittest.TestCase):

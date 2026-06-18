@@ -42,6 +42,29 @@ from toolguard.config_validation import validate_permissions
 # ``Bash(foo(bar))`` -> ``foo(bar)``. This needs no known-tool list.
 _TOOL_WRAPPER_RE = re.compile(r'[A-Za-z0-9_]+\((.*)\)', re.DOTALL)
 
+# Default blanket ignored-allow patterns for takeover mode. These seed the
+# union of ``ignored_allow_patterns`` so that, when takeover is enabled, the
+# usual native blanket allows are suppressed even if no level lists them
+# explicitly. Shared between the legacy ``load_takeover_mode_config`` and the
+# hierarchical ``Configuration.takeover_mode`` resolver so both stay in sync.
+_DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
+    'Bash(*)',
+    'Read(*)',
+    'Write(*)',
+    'Edit(*)',
+    'mcp__jetbrains__execute_terminal_command(*)',
+)
+_DEFAULT_NO_MATCH_FALLBACK = 'deny'
+
+# Documented defaults for the ``config_sync`` section. Single source of truth
+# shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
+# the legacy ``config_sync_settings_from_sources`` path so the two never drift.
+_CONFIG_SYNC_DEFAULTS: Dict[str, object] = {
+    'auto_migrate': False,
+    'backup_dir': 'logs/config-backups',
+    'auto_sort_on_migrate': True,
+}
+
 
 def _parse_config_file(path_str: str, file_format: str) -> dict:
     """
@@ -396,144 +419,6 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
     return results
 
 
-def _load_permissions_from_file(
-    file_path: Path, source_type: str, file_format: str = 'json', strict: bool = False
-) -> Tuple[List[str], List[str]]:
-    """
-    Load permissions from a single config file (JSON or TOML).
-
-    Args:
-        file_path: Path to the config file
-        source_type: Either 'claude' or 'toolguard_hook'
-        file_format: Either 'json' or 'toml'
-        strict: If True, raise exceptions instead of returning empty lists
-
-    Returns:
-        Tuple of (allow_patterns, deny_patterns)
-
-    Raises:
-        FileNotFoundError: If file doesn't exist (only if strict=True)
-        json.JSONDecodeError: If file contains invalid JSON (only if strict=True)
-        tomllib.TOMLDecodeError: If file contains invalid TOML (only if strict=True)
-    """
-    try:
-        config = load_config_file(file_path, file_format)
-    except (json.JSONDecodeError, Exception) as e:
-        if strict:
-            raise
-        print(f'Warning: Invalid {file_format.upper()} in {file_path}: {e}', file=sys.stderr)
-        return [], []
-
-    permissions = config.get('permissions', {})
-
-    allow_patterns = []
-    deny_patterns = []
-
-    # Extract patterns from allow list
-    for perm in permissions.get('allow', []):
-        if isinstance(perm, str) and perm.startswith('Bash(') and perm.endswith(')'):
-            # Extract the pattern between "Bash(" and ")"
-            pattern = perm[5:-1]  # Remove "Bash(" and ")"
-            allow_patterns.append(pattern)
-
-    # Extract patterns from deny list
-    for perm in permissions.get('deny', []):
-        if isinstance(perm, str) and perm.startswith('Bash(') and perm.endswith(')'):
-            # Extract the pattern between "Bash(" and ")"
-            pattern = perm[5:-1]  # Remove "Bash(" and ")"
-            deny_patterns.append(pattern)
-
-    return allow_patterns, deny_patterns
-
-
-def _merge_permissions(permissions_list: List[Tuple[List[str], List[str]]]) -> Tuple[List[str], List[str]]:
-    """
-    Merge permissions from multiple sources using simple union.
-
-    Args:
-        permissions_list: List of (allow_patterns, deny_patterns) tuples
-
-    Returns:
-        Tuple of (merged_allow_patterns, merged_deny_patterns)
-    """
-    all_allow = []
-    all_deny = []
-
-    for allow_patterns, deny_patterns in permissions_list:
-        all_allow.extend(allow_patterns)
-        all_deny.extend(deny_patterns)
-
-    # Remove duplicates while preserving order
-    seen_allow = set()
-    unique_allow = []
-    for pattern in all_allow:
-        if pattern not in seen_allow:
-            seen_allow.add(pattern)
-            unique_allow.append(pattern)
-
-    seen_deny = set()
-    unique_deny = []
-    for pattern in all_deny:
-        if pattern not in seen_deny:
-            seen_deny.add(pattern)
-            unique_deny.append(pattern)
-
-    return unique_allow, unique_deny
-
-
-def _load_governed_tools_from_file(file_path: Path, file_format: str = 'json') -> List[str]:
-    """
-    Load governed tools list from a single config file (JSON or TOML).
-
-    Only reads from toolguard_hook files (not Claude settings files).
-
-    Args:
-        file_path: Path to the config file
-        file_format: Either 'json' or 'toml'
-
-    Returns:
-        List of tool names to govern, or empty list if not found/invalid
-    """
-    try:
-        config = load_config_file(file_path, file_format)
-    except (FileNotFoundError, json.JSONDecodeError, Exception):
-        return []
-
-    governed_tools = config.get('governed_tools', [])
-
-    # Validate it's a list of strings
-    if not isinstance(governed_tools, list):
-        return []
-
-    return [tool for tool in governed_tools if isinstance(tool, str)]
-
-
-def _merge_governed_tools(tools_lists: List[List[str]]) -> List[str]:
-    """
-    Merge governed tools from multiple sources using union.
-
-    Args:
-        tools_lists: List of tool name lists from different sources
-
-    Returns:
-        List of unique tool names (order preserved from first occurrence)
-    """
-    all_tools = []
-
-    for tools in tools_lists:
-        all_tools.extend(tools)
-
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_tools = []
-    for tool in all_tools:
-        if tool not in seen:
-            seen.add(tool)
-            unique_tools.append(tool)
-
-    return unique_tools
-
-
 def load_takeover_mode_config(start_dir: Path = None) -> dict:
     """
     Load takeover_mode configuration from toolguard_hook files.
@@ -553,6 +438,11 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
             'no_match_fallback': str  # 'deny' or 'warn_deny'
         }
         Returns default config if no takeover_mode found in any file.
+
+    Note:
+        Legacy two-level loader retained only because ``scripts/migrate_permissions``
+        still calls it. New code uses :meth:`Configuration.takeover_mode`. Tracked as
+        a TOO-8 follow-up to migrate the remaining caller and remove this.
     """
     default_config = {
         'enabled': False,
@@ -609,189 +499,6 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
             continue
 
     return merged_config
-
-
-def _load_governed_tools(start_dir: Path = None) -> List[str]:
-    """
-    Load list of tools to govern from config files.
-
-    Searches for 'governed_tools' key in toolguard_hook files (TOML or JSON).
-    Not in Claude settings files. Merges from multiple sources using union.
-
-    If no configuration found, returns default: ["Bash"]
-
-    Args:
-        start_dir: Directory to start searching for project root from. Defaults to cwd.
-
-    Returns:
-        List of tool names to govern (default: ["Bash"])
-    """
-    # Check if CLAUDE_SETTINGS_PATH is set (backward compatible)
-    settings_path = os.environ.get('CLAUDE_SETTINGS_PATH')
-    if settings_path:
-        # When using CLAUDE_SETTINGS_PATH, only look for adjacent toolguard_hook.json
-        settings_dir = Path(settings_path).parent
-        hook_file = settings_dir / 'toolguard_hook.json'
-        if hook_file.exists():
-            tools = _load_governed_tools_from_file(hook_file, 'json')
-            if tools:
-                return tools
-
-        # No toolguard_hook.json found - use default
-        return ['Bash']
-
-    # Discover config files in hierarchy
-    config_files = discover_config_files(start_dir)
-
-    # Filter to only toolguard_hook files
-    hook_files = [(path, fmt) for path, source_type, fmt in config_files if source_type == 'toolguard_hook']
-
-    if not hook_files:
-        # No hook files found - use default
-        return ['Bash']
-
-    # Load governed tools from all hook files
-    tools_lists = []
-    for path, fmt in hook_files:
-        tools = _load_governed_tools_from_file(path, fmt)
-        if tools:
-            tools_lists.append(tools)
-
-    # If no governed_tools found in any file, use default
-    if not tools_lists:
-        return ['Bash']
-
-    # Merge all governed tools
-    return _merge_governed_tools(tools_lists)
-
-
-def _load_permissions(start_dir: Path = None) -> Tuple[List[str], List[str]]:
-    """
-    Load and parse permissions from Claude Code settings files.
-
-    If CLAUDE_SETTINGS_PATH is set, uses ONLY that file (backward compatible).
-    Otherwise, discovers and merges permissions from config file hierarchy:
-    1. Project .claude/settings.local.json + .claude/toolguard_hook.local.json
-    2. Project .claude/settings.json + .claude/toolguard_hook.json
-    3. User ~/.claude/settings.local.json + ~/.claude/toolguard_hook.local.json
-    4. User ~/.claude/settings.json + ~/.claude/toolguard_hook.json
-
-    Respects takeover_mode configuration:
-    - When takeover_mode.enabled is True, filters out patterns from native Claude config
-      that match ignored_allow_patterns or additional_ignored_patterns
-    - Patterns from toolguard_hook files are NEVER filtered
-
-    Args:
-        start_dir: Directory to start searching for project root from. Defaults to cwd.
-
-    Returns:
-        Tuple of (allow_patterns, deny_patterns) where each is a list of strings
-
-    Raises:
-        SystemExit: If CLAUDE_SETTINGS_PATH is set but file cannot be loaded
-    """
-    # Load takeover mode configuration
-    takeover_config = load_takeover_mode_config(start_dir)
-    takeover_enabled = takeover_config['enabled']
-    ignored_patterns = set(takeover_config['ignored_allow_patterns'] + takeover_config['additional_ignored_patterns'])
-
-    # Normalize ignored patterns: strip tool wrappers to match the extracted format
-    # that _load_permissions_from_file() produces (e.g. "Bash(*)" -> "*", "Read(/tmp/**)" -> "/tmp/**").
-    # _strip_tool_wrapper is the single structural strip shared across the module.
-    ignored_patterns = {_strip_tool_wrapper(p) for p in ignored_patterns}
-
-    settings_path = os.environ.get('CLAUDE_SETTINGS_PATH')
-
-    # If CLAUDE_SETTINGS_PATH is set, load from that file AND adjacent toolguard_hook files
-    if settings_path:
-        print(f'Using config from CLAUDE_SETTINGS_PATH: {settings_path}', file=sys.stderr)
-        permissions_list = []
-
-        # Load from the settings file
-        try:
-            allow_perms, deny_perms = _load_permissions_from_file(Path(settings_path), 'claude', 'json', strict=True)
-
-            # Apply takeover mode filtering for native Claude config
-            if takeover_enabled:
-                filtered_allow = [p for p in allow_perms if p not in ignored_patterns]
-                permissions_list.append((filtered_allow, deny_perms))
-            else:
-                permissions_list.append((allow_perms, deny_perms))
-
-        except FileNotFoundError:
-            print(f'Error: Settings file not found: {settings_path}', file=sys.stderr)
-            sys.exit(1)
-        except json.JSONDecodeError as e:
-            print(f'Error: Invalid JSON in settings file: {e}', file=sys.stderr)
-            sys.exit(1)
-
-        # Also check for adjacent toolguard_hook files (TOML takes precedence)
-        settings_dir = Path(settings_path).parent
-        hook_toml = settings_dir / 'toolguard_hook.toml'
-        hook_json = settings_dir / 'toolguard_hook.json'
-
-        if hook_toml.exists():
-            try:
-                perms = _load_permissions_from_file(hook_toml, 'toolguard_hook', 'toml')
-                permissions_list.append(perms)  # Never filter toolguard_hook patterns
-            except Exception as e:
-                print(f'Warning: Failed to load {hook_toml}: {e}', file=sys.stderr)
-        elif hook_json.exists():
-            try:
-                perms = _load_permissions_from_file(hook_json, 'toolguard_hook', 'json')
-                permissions_list.append(perms)  # Never filter toolguard_hook patterns
-            except Exception as e:
-                print(f'Warning: Failed to load {hook_json}: {e}', file=sys.stderr)
-
-        return _merge_permissions(permissions_list)
-
-    # Discover config files in hierarchy
-    config_files = discover_config_files(start_dir)
-
-    if not config_files:
-        print('Warning: No config files found in hierarchy', file=sys.stderr)
-        print('Searched for:', file=sys.stderr)
-        print('  - .claude/settings.local.json (project)', file=sys.stderr)
-        print('  - .claude/settings.json (project)', file=sys.stderr)
-        print('  - ~/.claude/settings.local.json (user)', file=sys.stderr)
-        print('  - ~/.claude/settings.json (user)', file=sys.stderr)
-        print('  - .claude/toolguard_hook.local.json (project)', file=sys.stderr)
-        print('  - .claude/toolguard_hook.json (project)', file=sys.stderr)
-        print('  - ~/.claude/toolguard_hook.local.json (user)', file=sys.stderr)
-        print('  - ~/.claude/toolguard_hook.json (user)', file=sys.stderr)
-        return [], []
-
-    # Log discovered files
-    print('Discovered config files (in priority order):', file=sys.stderr)
-    for path, source_type, fmt in config_files:
-        print(f'  - {path} [{source_type}, {fmt}]', file=sys.stderr)
-
-    # Load permissions from all discovered files
-    permissions_list = []
-    for path, source_type, fmt in config_files:
-        try:
-            allow_perms, deny_perms = _load_permissions_from_file(path, source_type, fmt)
-
-            # Apply takeover mode filtering for native Claude config files
-            if takeover_enabled and source_type == 'claude':
-                # Filter out patterns that match ignored patterns (exact string match)
-                filtered_allow = [p for p in allow_perms if p not in ignored_patterns]
-                filtered_deny = deny_perms  # Don't filter deny patterns
-                permissions_list.append((filtered_allow, filtered_deny))
-            else:
-                # No filtering for toolguard_hook files or when takeover mode disabled
-                permissions_list.append((allow_perms, deny_perms))
-
-        except Exception as e:
-            print(f'Warning: Failed to load {path}: {e}', file=sys.stderr)
-            continue
-
-    # Merge all permissions
-    allow_patterns, deny_patterns = _merge_permissions(permissions_list)
-
-    print(f'Loaded {len(allow_patterns)} allow patterns, {len(deny_patterns)} deny patterns', file=sys.stderr)
-
-    return allow_patterns, deny_patterns
 
 
 # ---------------------------------------------------------------------------
@@ -971,25 +678,61 @@ class ToolPatternLayer:
 
 
 @dataclass(frozen=True)
-class TakeoverConfig:
+class TakeoverEnabledConflict:
     """
-    Resolved takeover-mode configuration.
+    A cross-level disagreement on ``takeover_mode.enabled`` (TOO-8 Phase 5).
 
-    Resolution matches current behaviour: ``enabled`` is OR across sources,
-    pattern lists are unioned, and ``no_match_fallback`` takes the last value
-    seen in discovery (priority) order. NO Phase 5 conflict special-case.
+    takeover_mode is a single-owner policy; different levels setting ``enabled``
+    to DIFFERING values is a misconfiguration. When detected, the resolver
+    fail-safes ``enabled`` to ``False`` (native Claude prompts stay active --
+    nothing is silently bypassed) and carries this record so the hook can log a
+    conflict entry and warn once per session.
 
     Attributes:
-        enabled: Whether takeover mode is active.
+        sources: Tuple of ``(value, provenance)`` pairs, one per layer that
+            EXPLICITLY set ``enabled``, in most-specific-first order. ``value`` is
+            the boolean each layer set; ``provenance`` is that layer's origin.
+    """
+
+    sources: Tuple[Tuple[bool, 'Provenance'], ...]
+
+    def describe(self) -> str:
+        """
+        Return a human-readable summary citing each disagreeing source.
+
+        Lists every level that set ``enabled`` with its value and provenance,
+        most-specific first, for the conflict log entry.
+        """
+        parts = [f'{value} [{prov.describe_brief()}]' for value, prov in self.sources]
+        return 'takeover_mode.enabled set to conflicting values: ' + '; '.join(parts)
+
+
+@dataclass(frozen=True)
+class TakeoverConfig:
+    """
+    Resolved takeover-mode configuration (TOO-8 Phase 5).
+
+    ``enabled`` is resolved as a SINGLE-OWNER policy with fail-safe-on-conflict:
+    levels that explicitly set it must agree; if they disagree, ``enabled`` is
+    forced to ``False`` and :attr:`conflict` records the disagreement. Pattern
+    lists (``ignored_allow_patterns``/``additional_ignored_patterns``) remain a
+    UNION across all levels, and ``no_match_fallback`` resolves
+    more-specific-wins.
+
+    Attributes:
+        enabled: Whether takeover mode is active (fail-safe ``False`` on conflict).
         ignored_allow_patterns: Blanket allow patterns suppressed from native config.
         additional_ignored_patterns: Extra user-supplied ignored patterns.
         no_match_fallback: 'deny' or 'warn_deny'.
+        conflict: A :class:`TakeoverEnabledConflict` when levels disagree on
+            ``enabled``, otherwise None.
     """
 
     enabled: bool
     ignored_allow_patterns: Tuple[str, ...]
     additional_ignored_patterns: Tuple[str, ...]
     no_match_fallback: str
+    conflict: Optional['TakeoverEnabledConflict'] = None
 
     def normalized_ignored_patterns(self) -> frozenset:
         """
@@ -1148,28 +891,128 @@ class Configuration:
         """
         Return the resolved list of governed tools.
 
-        Union across all toolguard_hook layers, preserving first-occurrence
-        order. Defaults to ``('Bash',)`` when nothing is configured. Mirrors
-        the legacy ``_load_governed_tools`` behaviour exactly.
+        UNION across all toolguard_hook layers in the hierarchy (TOO-8 Phase 5):
+        every level's ``governed_tools`` list is pooled, de-duplicated, and kept
+        in first-occurrence (most-specific-first) order. Native Claude settings
+        layers are ignored (``governed_tools`` is a toolguard extension).
+        Defaults to ``('Bash',)`` when no level configures any governed tool.
+
+        Resolving over ``self.layers`` keeps governed-tools consistent with the
+        hierarchical, more-specific-aware resolution used for permissions and
+        takeover mode, and applies under ``CLAUDE_SETTINGS_PATH`` mode too (the
+        explicit source becomes the only layer).
         """
-        return tuple(_load_governed_tools(self.start_dir))
+        seen: Dict[str, None] = {}
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            tools = layer.content.get('governed_tools', [])
+            if not isinstance(tools, list):
+                continue
+            for tool in tools:
+                if isinstance(tool, str):
+                    seen.setdefault(tool, None)
+        if not seen:
+            return ('Bash',)
+        return tuple(seen.keys())
 
     # -- takeover mode -----------------------------------------------------
 
     def takeover_mode(self) -> TakeoverConfig:
         """
-        Return the resolved takeover-mode configuration.
+        Return the resolved takeover-mode configuration (TOO-8 Phase 5).
 
-        Resolved exactly as today (enabled=OR, pattern lists=union,
-        no_match_fallback=last-wins). No Phase 5 conflict handling.
+        Resolved hierarchically over ``self.layers`` (most-specific first),
+        reading only ``toolguard_hook`` layers:
+
+        - ``enabled`` is a SINGLE-OWNER policy with fail-safe-on-conflict. Only
+          layers that EXPLICITLY set ``takeover_mode.enabled`` (key present)
+          participate. If none set it, the result is ``False`` (default OFF). If
+          one or more set it and they all AGREE, that shared value is used. If
+          they DISAGREE (some true, some false), it is a misconfiguration: the
+          result is forced to ``False`` (fail-safe OFF -- native Claude prompts
+          stay active, nothing is silently bypassed) and a
+          :class:`TakeoverEnabledConflict` is attached describing each disagreeing
+          source with its provenance.
+        - ``ignored_allow_patterns`` and ``additional_ignored_patterns`` are a
+          UNION across all levels (de-duplicated, order-preserving most-specific
+          first). The blanket defaults seed ``ignored_allow_patterns``.
+        - ``no_match_fallback`` resolves MORE-SPECIFIC-WINS (first level that sets
+          it wins); defaults to ``'deny'``.
+
+        Returns:
+            The resolved :class:`TakeoverConfig`.
         """
-        raw = load_takeover_mode_config(self.start_dir)
+        ignored_allow: List[str] = list(_DEFAULT_IGNORED_ALLOW_PATTERNS)
+        additional_ignored: List[str] = []
+        no_match_fallback: Optional[str] = None
+        explicit_enabled: List[Tuple[bool, Provenance]] = []
+
+        for layer in self.layers:
+            # takeover_mode is a toolguard extension; ignore native settings.
+            if layer.is_native:
+                continue
+            section = layer.content.get('takeover_mode', {})
+            if not isinstance(section, dict) or not section:
+                continue
+
+            # Record an EXPLICIT enabled setting (key present) with provenance.
+            # ``enabled`` is a fail-safe SECURITY toggle, so a non-bool value is
+            # NOT coerced (``bool('false')`` would be True): such a level does not
+            # vote, and validation_issues() reports the malformed value.
+            if 'enabled' in section and isinstance(section['enabled'], bool):
+                explicit_enabled.append((section['enabled'], layer.provenance))
+
+            # Union pattern lists (most-specific first; de-dup preserves order).
+            for pattern in section.get('ignored_allow_patterns', []):
+                if pattern not in ignored_allow:
+                    ignored_allow.append(pattern)
+            for pattern in section.get('additional_ignored_patterns', []):
+                if pattern not in additional_ignored:
+                    additional_ignored.append(pattern)
+
+            # no_match_fallback: more-specific-wins (first definition wins).
+            if no_match_fallback is None and 'no_match_fallback' in section:
+                no_match_fallback = section['no_match_fallback']
+
+        enabled, conflict = self._resolve_takeover_enabled(explicit_enabled)
+
         return TakeoverConfig(
-            enabled=bool(raw['enabled']),
-            ignored_allow_patterns=tuple(raw['ignored_allow_patterns']),
-            additional_ignored_patterns=tuple(raw['additional_ignored_patterns']),
-            no_match_fallback=raw['no_match_fallback'],
+            enabled=enabled,
+            ignored_allow_patterns=tuple(ignored_allow),
+            additional_ignored_patterns=tuple(additional_ignored),
+            no_match_fallback=no_match_fallback if no_match_fallback is not None else _DEFAULT_NO_MATCH_FALLBACK,
+            conflict=conflict,
         )
+
+    @staticmethod
+    def _resolve_takeover_enabled(
+        explicit: List[Tuple[bool, 'Provenance']],
+    ) -> Tuple[bool, Optional['TakeoverEnabledConflict']]:
+        """
+        Resolve ``takeover_mode.enabled`` from the explicit per-level settings.
+
+        Implements the single-owner / fail-safe-on-conflict policy:
+
+        - No level set it => ``(False, None)`` (default OFF).
+        - One or more levels set it, all to the SAME value => ``(value, None)``.
+        - Levels disagree (both ``True`` and ``False`` present) => CONFLICT:
+          ``(False, TakeoverEnabledConflict(...))`` -- fail-safe OFF.
+
+        Args:
+            explicit: ``(value, provenance)`` pairs for every layer that
+                explicitly set ``enabled``, most-specific first.
+
+        Returns:
+            Tuple of ``(enabled, conflict_or_None)``.
+        """
+        if not explicit:
+            return False, None
+        values = {value for value, _prov in explicit}
+        if len(values) == 1:
+            return next(iter(values)), None
+        # Disagreement => fail-safe OFF with a conflict record.
+        return False, TakeoverEnabledConflict(sources=tuple(explicit))
 
     # -- permissions -------------------------------------------------------
 
@@ -1424,9 +1267,8 @@ class Configuration:
 
         This is the Phase 1 (behaviour-preserving) flattening of
         :meth:`permission_layers`: union across layers in discovery order with
-        duplicates removed, mirroring the legacy ``load_file_path_patterns`` and
-        Bash ``_load_permissions`` results. Global deny-first matching is applied
-        downstream by the matching code, not here.
+        duplicates removed. Global deny-first matching is applied downstream by
+        the matching code, not here.
 
         Args:
             tool_name: Tool to resolve patterns for.
@@ -1443,21 +1285,6 @@ class Configuration:
                 seen_deny.setdefault(p, None)
         return tuple(seen_allow.keys()), tuple(seen_deny.keys())
 
-    def bash_permissions(self) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
-        """
-        Return resolved (allow, deny) Bash command patterns.
-
-        Behaviour-preserving wrapper around the legacy ``_load_permissions``
-        path (which also handles the ``CLAUDE_SETTINGS_PATH`` single-file mode
-        and emits the discovery diagnostics on stderr). Kept as the command-tool
-        entry point so the hook never opens files itself.
-
-        Returns:
-            Tuple of (allow_patterns, deny_patterns) as immutable tuples.
-        """
-        allow, deny = _load_permissions(self.start_dir)
-        return tuple(allow), tuple(deny)
-
     # -- scalars -----------------------------------------------------------
 
     def scalar(self, name: str, default=None):
@@ -1465,24 +1292,17 @@ class Configuration:
         Resolve a top-level scalar setting from a named config section.
 
         Supports dotted names of the form ``'section.key'`` (e.g.
-        ``'config_sync.backup_dir'``). Reads only from toolguard_hook layers,
-        last-occurrence wins across discovery order -- matching the legacy
-        ``load_config_sync_settings`` resolution. A bare ``name`` resolves a
-        top-level key directly.
+        ``'config_sync.backup_dir'``). Reads only from toolguard_hook layers.
 
-        Phase 1 is behaviour-preserving. Layers are ordered most-specific first
-        (project before user). The legacy ``load_config_sync_settings`` resolver
-        iterates discovery order (project first, user last) with last-occurrence
-        wins, which means the *user* (least-specific) value wins on conflict. To
-        preserve that exact behaviour we iterate ``self.layers`` in forward
-        (discovery) order here, so the last layer seen -- the user layer -- wins.
+        Resolution is MORE-SPECIFIC-WINS (TOO-8 Phase 5, decision #4): the value
+        comes from the most-specific level that defines it -- project beats
+        ancestor beats user. Layers are already ordered most-specific first, so
+        the FIRST layer that defines the key wins and iteration stops. A bare
+        ``name`` resolves a top-level key directly.
 
-        # FIXME(TOO-8 Phase 2, decision #4): Phase 2 will intentionally switch
-        # config_sync (and other scalars) to more-specific-wins (project-wins).
-        # That is a conscious behaviour change and must be made test-visible by
-        # flipping the pinning test in test/unit/test_configuration.py
-        # (test_config_sync_conflict_is_user_wins_phase1). Do NOT change this
-        # resolution direction without updating that test.
+        This replaces the Phase-1 user-wins (last-occurrence) behaviour; it is a
+        conscious, test-visible flip (see
+        ``test/unit/test_configuration.py::...config_sync_conflict_is_project_wins``).
 
         Args:
             name: Scalar name, optionally ``'section.key'``.
@@ -1497,10 +1317,8 @@ class Configuration:
         else:
             section, key = None, name
 
-        value = default
-        # Iterate discovery order (most-specific first, least-specific last) so
-        # the last layer seen -- the user layer -- wins on conflict. This matches
-        # the legacy last-occurrence-wins resolution exactly (USER-wins).
+        # Iterate most-specific first; the FIRST layer that defines the key wins
+        # (more-specific-wins). Stop as soon as a defining layer is found.
         for layer in self.layers:
             if layer.is_native:
                 continue
@@ -1508,18 +1326,19 @@ class Configuration:
             if section is not None:
                 sect = content.get(section, {})
                 if isinstance(sect, dict) and key in sect:
-                    value = sect[key]
+                    return sect[key]
             else:
                 if key in content:
-                    value = content[key]
-        return value
+                    return content[key]
+        return default
 
     def config_sync_settings(self) -> Mapping:
         """
         Return resolved config_sync settings as a read-only mapping.
 
-        Behaviour-preserving wrapper that resolves the same defaults and
-        last-wins semantics as the legacy ``load_config_sync_settings``.
+        Each value resolves more-specific-wins via :meth:`scalar` (TOO-8 Phase 5):
+        the most-specific level that defines a key wins (project beats ancestor
+        beats user). Missing keys fall back to the documented defaults.
 
         Returns:
             Read-only mapping with keys ``auto_migrate``, ``backup_dir``,
@@ -1527,9 +1346,8 @@ class Configuration:
         """
         return MappingProxyType(
             {
-                'auto_migrate': self.scalar('config_sync.auto_migrate', False),
-                'backup_dir': self.scalar('config_sync.backup_dir', 'logs/config-backups'),
-                'auto_sort_on_migrate': self.scalar('config_sync.auto_sort_on_migrate', True),
+                key: self.scalar(f'config_sync.{key}', default)
+                for key, default in _CONFIG_SYNC_DEFAULTS.items()
             }
         )
 
@@ -1618,7 +1436,32 @@ class Configuration:
                     )
                 )
 
-        # 2) Permission validation over the merged toolguard_hook content only.
+        # 2) takeover_mode.enabled is a fail-safe security toggle: a non-bool
+        #    value is not coerced (see takeover_mode); flag it as an error so the
+        #    misconfiguration is visible rather than silently ignored.
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            section = layer.content.get('takeover_mode', {})
+            if not isinstance(section, dict) or 'enabled' not in section:
+                continue
+            if not isinstance(section['enabled'], bool):
+                issues.append(
+                    Issue(
+                        level='error',
+                        message=(
+                            f'takeover_mode.enabled in {layer.provenance.describe()} is '
+                            f'{type(section["enabled"]).__name__}, not a boolean; it is ignored'
+                        ),
+                        corrective_steps=(
+                            'Set takeover_mode.enabled to a boolean (true/false). '
+                            'Non-boolean values are not coerced and the level does not '
+                            'participate in resolving takeover mode.'
+                        ),
+                    )
+                )
+
+        # 3) Permission validation over the merged toolguard_hook content only.
         merged_config: Dict = {
             'governed_tools': [],
             'additional_supported_tools': [],
@@ -1812,11 +1655,7 @@ def config_sync_settings_from_sources(config_files: List[Tuple[Path, str, str]])
     Returns:
         Dict with keys 'auto_migrate', 'backup_dir', 'auto_sort_on_migrate'.
     """
-    resolved: Dict = {
-        'auto_migrate': False,
-        'backup_dir': 'logs/config-backups',
-        'auto_sort_on_migrate': True,
-    }
+    resolved: Dict = dict(_CONFIG_SYNC_DEFAULTS)
     for path, source_type, file_format in config_files:
         if source_type != 'toolguard_hook':
             continue
@@ -1826,7 +1665,7 @@ def config_sync_settings_from_sources(config_files: List[Tuple[Path, str, str]])
         config_sync = content.get('config_sync', {})
         if not isinstance(config_sync, dict) or not config_sync:
             continue
-        for key in ('auto_migrate', 'backup_dir', 'auto_sort_on_migrate'):
+        for key in _CONFIG_SYNC_DEFAULTS:
             if key in config_sync:
                 resolved[key] = config_sync[key]
     return resolved

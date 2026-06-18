@@ -7,100 +7,83 @@ tags:
 - TOO-8
 ---
 
-## Code Review Report -- TOO-8 Phase 4 (log streams, conflict logging, provenance)
+# Code Review Report
 
-Review date: 2026-06-17
-Scope: changed (working tree) -- Python source + tests for TOO-8 Phase 4.
+Date: 2026-06-18
+Scope: changed (working-tree diff vs HEAD), ticket TOO-8 (Phase 5 -- hierarchical
+non-permission cross-level resolution).
 
 Files reviewed:
-- /home/arnon/projects/toolguard/toolguard/config.py
-- /home/arnon/projects/toolguard/toolguard/hook.py
-- /home/arnon/projects/toolguard/toolguard/permissions.py
-- /home/arnon/projects/toolguard/toolguard/log_writer.py
-- /home/arnon/projects/toolguard/toolguard/error_log.py
-- /home/arnon/projects/toolguard/toolguard/session_warnings.py
-- /home/arnon/projects/toolguard/test/unit/test_logging_streams.py (new)
-- test_hook.py, test_session_warnings.py, test_toml_config.py (test updates)
-- technical-notes.md (doc)
+- toolguard/config.py
+- toolguard/hook.py
+- test/unit/test_configuration.py
+- test/unit/test_hook.py
+- technical-notes.md
 
-(Memory/task-artifact .md files under toolguard-memories/ were excluded from review.)
+## Summary
 
-### Summary
+High-quality, well-documented change. Phase 5 introduces single-owner / fail-safe
+takeover_mode.enabled resolution, more-specific-wins for scalars/config_sync, and
+hierarchical union for governed_tools and takeover pattern lists. All 682 unit tests
+pass. Docstrings, BDD test descriptions, and technical-notes are consistent with the
+code. No correctness bugs found. Findings are minor: one dead-code consistency trap and
+a couple of low-priority robustness/clarity notes.
 
-Solid, well-documented implementation. The provenance-aware resolver, conflict
-(allow-over-deny) detection, and per-concern log-stream separation are cleanly
-designed and well tested (105 tests pass; ruff clean). The decision algorithm
-(more-specific-wins, deny-first within level, hard-deny-first) is preserved and
-the new `resolve_*_detailed` functions correctly thread matched-pattern -> provenance.
-A few correctness/consistency gaps remain, none critical.
+## Findings
 
-### Findings
-
-#### Critical
+### Critical
 None.
 
-#### Major
+### Major
 None.
 
-#### Minor
+### Minor
 
-1. **Validation issues ignore `Issue.level` -- error-level issues misrouted to the
-   warning stream.**
-   File: hook.py:84-85 (`_run_startup_validation`).
-   The loop calls `log_warning(...)` for every issue regardless of `issue.level`.
-   `Issue.level` can be `'error'` (config.py:1628 -- `warning.get('level','warning')`),
-   so an error-level validation issue would land in the WARNING stream, defeating the
-   Phase 4 stream separation. Currently LATENT: `validate_permissions`
-   (validation.py / config_validation.py) only emits `'warning'` today, so no error
-   issue is produced. Still a robustness gap given the field exists specifically to
-   distinguish.
-   Fix: branch on `issue.level` -- `log_error(...)` when `issue.level == 'error'`,
-   else `log_warning(...)`.
+1. config.py:1594 `Configuration.bash_permissions()` -- stale resolution path / dead code.
+   `bash_permissions()` still delegates to the legacy 2-level `_load_permissions()`
+   (union + global deny-first over project+user only), while the actual runtime Bash path
+   in `hook.main` resolves through the hierarchical, more-specific-wins cascade
+   (`config.resolve_permission_detailed('Bash', ...)`) and the hierarchical
+   `allow_deny_for('Bash')` fail-closed check. `bash_permissions()` now has NO runtime
+   caller (only its own definition and `test_configuration.py::TestBashPermissionsDelegation`
+   exercise it). It is a latent trap: a future caller would silently get non-hierarchical,
+   non-more-specific-wins results inconsistent with every other resolver.
+   Recommended fix: either remove `bash_permissions()` (and its test) or reimplement it
+   over `self.layers` via `allow_deny_for('Bash')` so it matches the runtime path. If kept
+   transitionally, add a `# FIXME(TOO-8)` noting it is the only non-hierarchical resolver
+   left and is unused at runtime. (The module docstring already flags `_load_permissions`
+   et al. as transitional, but does not call out that `bash_permissions` itself is now
+   unused.)
 
-2. **Duplicate, un-migrated "both .toml and .json" stderr print in legacy discovery.**
-   File: config.py:151-155 (`discover_config_files`).
-   The diff removed the equivalent print from `_discover_in_dir` (the hierarchical
-   path) and routed the warning to the WARNING stream via `validation_issues()`,
-   claiming a "single source of truth." But `discover_config_files` -- still used by
-   config.py:497/577/682 and the migration script -- retains the old
-   `print(... 'Using TOML ...', file=sys.stderr)`. It fires during the test run
-   (visible in unittest output). Not a bug in the new path, but contradicts the
-   stated single-source-of-truth goal and can double-surface the warning for callers
-   that go through both paths.
-   Fix: remove the legacy print too, or add a comment noting it is intentionally
-   retained for the legacy/non-hierarchical code path.
+2. config.py:1269 `takeover_mode()` -- `bool(section['enabled'])` coerces non-bool values.
+   A TOML/JSON `enabled = "false"` (string) coerces to `True`, and `enabled = 0` to
+   `False`, silently. Given enabled is a fail-safe security-relevant policy, consider
+   treating a non-bool `enabled` as a validation Issue (surfaced via `validation_issues()`)
+   rather than coercing. Low priority -- TOML authors will normally use real booleans, and
+   the conflict machinery already fail-safes on disagreement.
 
-#### Suggestions
+### Suggestions
 
-3. **Doc mismatch in `log_discovery`.**
-   File: log_writer.py docstring for `log_discovery`. The Args note says
-   `source_descriptions` is "the output of `Configuration.describe_sources()`", but
-   the actual caller (hook.py:612) passes `config.describe_levels()` (the brief
-   `level: path` form). Update the docstring to reference `describe_levels()`.
+3. config.py:1656 `config_sync_settings()` duplicates the default values
+   (`False`, `'logs/config-backups'`, `True`) that also appear in
+   `config_sync_settings_from_sources()` (config.py:1955) and in the hook fake
+   (test_hook.py:134). Three copies of the same defaults can drift. Consider a single
+   module-level `_CONFIG_SYNC_DEFAULTS` mapping referenced by both production resolvers
+   (mirroring how `_DEFAULT_IGNORED_ALLOW_PATTERNS` / `_DEFAULT_NO_MATCH_FALLBACK` were
+   already centralized in this same change -- a good pattern to extend).
 
-4. **`to_stdout` parameter now misnamed.**
-   File: session_warnings.py `issue_takeover_warning`. The parameter `to_stdout`
-   now gates writing to STDERR (the print goes to `sys.stderr`). The name is
-   misleading; the docstring already clarifies, but consider renaming to
-   `to_stderr` (or `echo`) in a follow-up. Low priority -- it is a public-ish kwarg
-   and renaming touches callers/tests.
+4. hook.py:595-606 The enabled-conflict branch reuses `issue_takeover_warning(...)`, the
+   same warning surface as the takeover-active notice. This is intentional per
+   technical-notes (shared once-per-session marker), but the warning text is generic; a
+   reader of the warning stream cannot distinguish "takeover active" from "takeover
+   conflict, failed safe OFF". The conflict log entry carries the detail, so this is
+   acceptable; worth a one-line note in the warning copy if/when that function is touched.
 
-5. **`_format_conflict_message` / `_detect_override` provenance lookup relies on
-   string identity of patterns.**
-   `_provenance_for_pattern` matches by `pattern in candidates` against the same
-   layer lists passed to `match_command`, and `match_command` returns the exact
-   list element it iterated. Verified consistent (the returned `matched_pattern` is
-   an element of the level's allow/deny list, prefixes and all), so this is correct.
-   Noted only because it is a subtle coupling: if a future change makes
-   `match_command` return a normalized/wrapper-stripped pattern instead of the raw
-   list element, provenance lookup would silently return None. A short comment at
-   the `match_command` return site would harden this.
+## Verification
 
-### Positives
-- Backward-compatible reason suffix design (`reason  [level: path]`) preserves
-  existing `reason.split(': ', 1)` and substring assertions -- good.
-- Deny-first / hard-deny-first ordering preserved; hard_deny correctly excluded
-  from conflict logging (verified by test).
-- New test file has strong branch coverage (override skip-empty-middle-level,
-  no-provenance default deny, hard_deny -> resolution-not-conflict, M1 single warning).
-- All diagnostic/log writes are wrapped so logging never fails the hook.
+- Test suite: `uv run python -m unittest discover -s test -t .` -> Ran 682 tests, OK.
+- Anti-pattern scan of changed source (config.py, hook.py): no async/await, no threading,
+  no function-body imports (test-only `import toolguard.hook as hook_module` is acceptable).
+- Toggle interaction confirmed: when `hierarchical_configuration = false`,
+  `_discover_levels` limits `self.layers` to project+user, so the new over-`self.layers`
+  resolvers (scalar/governed_tools/takeover) correctly operate on the reduced set.

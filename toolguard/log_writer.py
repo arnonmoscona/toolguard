@@ -144,7 +144,7 @@ def log_discovery(source_descriptions: List[str], log_dir: Path) -> None:
 
     Records which configuration levels were discovered and from where, e.g.
     ``discovered 3 config levels: project: /p/.claude/toolguard_hook.toml, ...``.
-    This replaces the discovery diagnostics that the legacy ``_load_permissions``
+    This replaces the discovery diagnostics that the legacy permission loader
     used to print to stderr (TOO-8 Phase 4, M2). The entry goes to the high-volume
     resolution log (``logs/toolguard-YYYY-MM-DD.md``), NOT to a warning/error/
     conflict stream. The caller is responsible for the once-per-session guard.

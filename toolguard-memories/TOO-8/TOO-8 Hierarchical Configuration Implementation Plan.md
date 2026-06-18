@@ -131,72 +131,18 @@ existing test suite is the safety net. Traversal and more-specific-wins both mov
 Phase 2.
 
 ## Phased plan
+Standing exit criterion for every phase: unit tests with >90% coverage for the phase's
+changes; existing tests still pass WITH and WITHOUT `CLAUDE_SETTINGS_PATH` set. Full design
+and results for completed phases live in the "Phase N outcome" sections below.
 
-Standing exit criterion for every phase: full unit tests with >90% coverage for the
-phase's changes; existing tests still pass.
-
-- **Phase 0 -- Finalize spec (no code).** Sub-decisions resolved; Phase 1 design sign-off
-  outstanding. Update auto-memory.
-- **Phase 1 -- Config abstraction refactor (behavior-preserving).** Implement the model +
-  internal sourcing/parsing; migrate ALL clients (hook, validation, file-path patterns,
-  governed_tools, takeover, divergence, auto-migrate) to the public API. Keep 2 levels and
-  current resolution. Success: existing tests pass unchanged; no client outside config
-  touches files/formats. THEN revisit Phases 2+ against the real abstraction.
-- **Phase 2 -- Traversal + more-specific-wins.** Sourcing walks project_root -> ~ collecting
-  `.claude/toolguard_hook{,.local}.{toml,json}` + `settings{,.local}.json` per dir (toggle-
-  gated). Level-aware resolver: most-specific first, first matching level decides, deny-first
-  within level. Wire command + file-path paths. Should be simpler given Phase 1.
-  Phase 2 also includes this cleanup (do AFTER external callers are migrated so nothing
-  imported elsewhere gets renamed out from under it):
-  - Migrate `config_divergence.py` (`check_and_warn_divergence`) and `auto_migrate.py`
-    off `discover_config_files`/direct file opens onto the `Configuration` abstraction
-    (the Phase 1 deferral).
-  - **Eliminate the tool-prefix duplication.** Today the `Tool(...)` wrapper-strip list is
-    hand-maintained in THREE places that have already drifted: `config.py:478`
-    `_tool_prefixes` (legacy shim), `config.py:597` `_TOOL_PREFIXES`, and
-    `config_divergence.py:131` `governed_tool_prefixes` (only 4 entries -- omits the
-    jetbrains tool). Collapse to one: prefer a STRUCTURAL strip
-    (`re.fullmatch(r'[A-Za-z0-9_]+\((.*)\)', pattern)`, which needs no known-tool list and
-    still handles inner parens like `Bash(foo(bar))`), or a single source of truth derived
-    from the governed/known tool set. Route all call sites through `_strip_tool_wrapper`.
-  - **Underscore-prefix strictly-internal config.py functions** once they have no
-    out-of-module callers, e.g. `find_project_root` -> `_find_project_root`,
-    `discover_config_files` -> `_discover_config_files`, and the legacy loaders
-    (`load_permissions*`, `merge_*`, `load_governed_tools*`, `load_takeover_mode_config`,
-    `config_sync_settings_from_sources`). Keep only `load_configuration` + the public
-    dataclasses unprefixed. Update any test imports/patches accordingly.
-- **Phase 3 -- hard_deny.** `[hard_deny]` per level; collected across all; checked first;
-  unoverridable.
-- **Phase 4 -- Logging streams + conflict logging.** DESIGN DECIDED 2026-06-17:
-  - FOUR log streams (one file per concern):
-    - `logs/toolguard-YYYY-MM-DD.md` -- resolution log (existing, high volume). Add matched-rule
-      PROVENANCE to entries; record hard_deny denials here (with provenance); add a pointer
-      line when an allow-over-deny override occurred; emit a once-per-session
-      "discovered N config levels: <paths>" diagnostic (replaces the lost _load_permissions
-      stderr discovery output, M2).
-    - `logs/toolguard-error-YYYY-MM-DD.md` -- REAL errors only (log_error).
-    - `logs/toolguard-warning-YYYY-MM-DD.md` -- actionable warnings (log_warning moves here):
-      both-.toml-and-.json (M1, single source of truth), unsupported/ungoverned tools, etc.
-    - `logs/toolguard-conflict-YYYY-MM-DD.md` -- config conflicts, ON by default,
-      human/LLM-readable: ONLY the allow-over-deny override case (a more-specific level's allow
-      overriding a less-specific level's deny), citing BOTH sides' provenance + the command.
-  - Takeover "active" notice: REMOVE from logs entirely -> stderr + once-per-session marker only.
-  - Conflict scope: overrides only. hard_deny denials are NOT conflicts (resolution log instead).
-  - Provenance: thread through resolve_permission (provenance-carrying level view + decider
-    reports matched pattern -> map to ToolPatternLayer). Detection of override: when the winning
-    decision is an allow at level k, scan less-specific levels for a deny match; if found, log a
-    conflict (decision stays the more-specific allow per more-specific-wins).
-  - Reason-string compatibility: append provenance as a bracketed suffix so existing
-    "matches allow pattern: X" / reason.split(': ',1) assertions still hold where feasible.
-  - OUT of scope: session-start "last run had conflicts" alert (Phase 6); takeover cross-level
-    conflict logic (Phase 5).
-- **Phase 5 -- Non-permission config cross-level.** Apply decision 4 semantics on the model;
-  implement takeover special-case (fail-safe OFF + loud conflict). Smaller after Phase 1.
-- **Phase 6 -- SessionStart conflict-alert hook.** New hook surfacing prior-session conflicts
-  at startup.
-- **Phase 7 -- Docs restructure.** Split oversized README into: thin index README; beginner
-  opinionated quick-start; agent-oriented token-efficient few-shot guide (likely split by
-  topic: initial setup / Claude->toolguard migration / maintaining config / hierarchy setup).
+- **Phase 0 -- Finalize spec.** DONE.
+- **Phase 1 -- Config abstraction refactor (behavior-preserving).** DONE + COMMITTED.
+- **Phase 2 -- Traversal + more-specific-wins (+ caller migration / dedup cleanup).** DONE + COMMITTED.
+- **Phase 3 -- hard_deny safety valve.** DONE + COMMITTED.
+- **Phase 4 -- Logging streams + conflict logging + rule provenance.** DONE (committed with folded-in dead-code cleanup + config-loader consolidation).
+- **Phase 5 -- Non-permission config cross-level.** NEXT. Scalars (config_sync, backup_dir, auto_sort_on_migrate) + no_match_fallback resolve more-specific-wins -- flip config_sync from the Phase-1 user-wins pin and clear its FIXME. governed_tools and takeover pattern lists stay union. takeover_mode.enabled special-cased on cross-level conflict (see "takeover_mode conflict handling" decision).
+- **Phase 6 -- SessionStart conflict-alert hook.** Surface "last run had conflicts" at startup.
+- **Phase 7 -- Docs restructure + doc-debt.** Split the oversized README (thin index + beginner quick-start + agent-oriented few-shot guides); fold in deferred doc-debt (resolve_compound_permission naming, TOO-16 distribution model + run_hook.sh retirement).
 
 ## Risks (per Arnon)
 - Existing 2-level users: not a concern; address in a topic README.

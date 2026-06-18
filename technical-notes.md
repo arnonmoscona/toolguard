@@ -327,3 +327,64 @@ needs no hand-maintained tool list and handles inner parentheses
 native permissions via the shared `config.is_tool_wrapper` predicate, which uses
 the same `_TOOL_WRAPPER_RE` -- there is no duplicated regex in
 `config_divergence.py`. New governed tools require no change to any prefix list.
+
+## Non-permission cross-level resolution (TOO-8 Phase 5)
+
+Phase 5 resolves the *non-permission* settings across the hierarchy. Permission
+and `[hard_deny]` resolution are unchanged.
+
+### Scalars and `no_match_fallback` -- more-specific-wins
+
+`Configuration.scalar(name, default)` resolves MORE-SPECIFIC-WINS: layers are
+ordered most-specific first (project beats ancestor beats user), so the FIRST
+toolguard_hook layer that defines the key wins and iteration stops. This flips
+the Phase-1 user-wins (last-occurrence) behaviour. Native (`claude`) layers are
+ignored -- these settings are toolguard extensions.
+
+As a consequence, `Configuration.config_sync_settings()` (`auto_migrate`,
+`backup_dir`, `auto_sort_on_migrate`) resolves more-specific-wins. The takeover
+`no_match_fallback` likewise resolves more-specific-wins (first level that sets
+it wins; default `deny`).
+
+Single-level configs are unaffected: with one defining level, more-specific-wins
+and the old behaviour coincide.
+
+### `governed_tools` and takeover pattern lists -- UNION across all levels
+
+`Configuration.governed_tools()` is a UNION across all toolguard_hook layers in
+the hierarchy (de-duplicated, first-occurrence/most-specific-first order),
+defaulting to `('Bash',)` when nothing is configured. It now resolves over the
+hierarchical `self.layers` (not the legacy 2-level `_load_governed_tools`), so it
+is consistent with permission and takeover resolution and applies under
+`CLAUDE_SETTINGS_PATH` mode (the explicit source is the only layer).
+
+The takeover pattern lists (`ignored_allow_patterns`,
+`additional_ignored_patterns`) remain a UNION across all levels.
+`ignored_allow_patterns` is seeded with the blanket defaults
+(`Bash(*)`, `Read(*)`, `Write(*)`, `Edit(*)`,
+`mcp__jetbrains__execute_terminal_command(*)`).
+
+### `takeover_mode.enabled` -- single-owner with fail-safe-on-conflict
+
+takeover_mode is a single-owner policy; cross-level disagreement on `enabled` is
+a misconfiguration, not something to merge. `Configuration.takeover_mode()`
+inspects which levels EXPLICITLY set `takeover_mode.enabled` (key present in that
+layer's parsed content):
+
+- 0 levels set it => default OFF (`False`).
+- One or more set it, all to the SAME value => that value (no conflict).
+- Levels disagree (some `true`, some `false`) => CONFLICT: `enabled` is forced to
+  `False` (fail-safe OFF -- native Claude prompts stay active, nothing is
+  silently bypassed), and a `TakeoverEnabledConflict` is attached to the
+  `TakeoverConfig` recording each disagreeing source with its value and
+  provenance.
+
+This replaces the old OR-based `enabled` merge.
+
+When the hook (`hook.main`) sees an enabled-conflict, it writes a once-per-session
+entry to the **conflict log** (`error_log.log_conflict`, citing the disagreeing
+levels' values + provenance and that fail-safe OFF was applied) and issues a
+once-per-session takeover/config warning (the same session-marker mechanism as
+the takeover "active" notice). Because `enabled` is already OFF, the downstream
+path is the safe one. (Surfacing prior-session conflicts at session START is
+deferred to Phase 6.)

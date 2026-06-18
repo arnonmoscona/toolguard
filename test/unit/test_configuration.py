@@ -23,6 +23,7 @@ from toolguard.config import (
     Issue,
     Provenance,
     TakeoverConfig,
+    TakeoverEnabledConflict,
     ToolPatternLayer,
     config_sync_settings_from_sources,
     load_configuration,
@@ -272,38 +273,33 @@ class TestScalarsAndConfigSync(unittest.TestCase):
             MappingProxyType(content),
         )
 
-    def test_scalar_dotted_last_wins(self):
+    def test_scalar_dotted_more_specific_wins(self):
         """
         Given project and user hook layers each defining config_sync.backup_dir
         When scalar('config_sync.backup_dir') resolves the value
-        Then the user (least-specific) value wins, preserving Phase 1 last-occurrence-wins behaviour
+        Then the project (more-specific) value wins (TOO-8 Phase 5 more-specific-wins)
 
-        Phase 1 is behaviour-preserving: the legacy resolver iterates discovery
-        order (project first, user last) with last-occurrence-wins. See
-        test_config_sync_conflict_is_user_wins_phase1 for the explicit pin and
-        the Phase 2 flip note.
+        Phase 5 flips the Phase-1 user-wins (last-occurrence) resolution to
+        more-specific-wins: layers are ordered most-specific first, so the first
+        layer that defines the key wins. See
+        test_config_sync_conflict_is_project_wins for the explicit pin.
         """
         layers = (
             self._hook_layer('project', {'config_sync': {'backup_dir': 'proj/backups'}}),
             self._hook_layer('user', {'config_sync': {'backup_dir': 'user/backups'}}),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'user/backups')
+        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'proj/backups')
 
-    def test_config_sync_conflict_is_user_wins_phase1(self):
+    def test_config_sync_conflict_is_project_wins(self):
         """
         Given project and user hook layers with conflicting config_sync values
-        When scalar() and config_sync_settings() resolve them in Phase 1
-        Then the USER value wins on every conflict, pinning the conflict direction (HEAD behaviour)
+        When scalar() and config_sync_settings() resolve them under Phase 5
+        Then the PROJECT (more-specific) value wins on every conflict
 
-        This pins the conflict DIRECTION so the Phase 2 change to
-        more-specific-wins (project-wins) is a conscious, test-visible flip.
-
-        # FIXME(TOO-8 Phase 2, decision #4): Phase 2 will intentionally switch
-        # config_sync (and other scalars) to more-specific-wins (project-wins).
-        # When that lands, flip the expected values in this test (and in
-        # test_scalar_dotted_last_wins) to assert project-wins, so the behaviour
-        # change is explicit and reviewed.
+        This pins the conflict DIRECTION after the TOO-8 Phase 5 flip from
+        user-wins to more-specific-wins (decision #4). Layers are most-specific
+        first, so the first defining layer (project) wins.
         """
         layers = (
             self._hook_layer('project', {'config_sync': {'auto_migrate': True, 'backup_dir': 'proj/backups'}}),
@@ -311,15 +307,15 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         )
         config = Configuration(layers=layers)
 
-        # scalar() resolves user-wins on conflict.
-        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'user/backups')
-        self.assertIs(config.scalar('config_sync.auto_migrate', None), False)
+        # scalar() resolves project-wins (more-specific-wins) on conflict.
+        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'proj/backups')
+        self.assertIs(config.scalar('config_sync.auto_migrate', None), True)
 
         # config_sync_settings() (the public accessor used by the hook) reflects
-        # the same user-wins resolution.
+        # the same more-specific-wins resolution.
         cs = config.config_sync_settings()
-        self.assertEqual(cs['backup_dir'], 'user/backups')
-        self.assertIs(cs['auto_migrate'], False)
+        self.assertEqual(cs['backup_dir'], 'proj/backups')
+        self.assertIs(cs['auto_migrate'], True)
 
     def test_scalar_default_when_absent(self):
         """
@@ -460,6 +456,40 @@ class TestValidationIssues(unittest.TestCase):
         config = Configuration(layers=layers)
         self.assertEqual(config.validation_issues(), ())
 
+    def test_non_bool_takeover_enabled_reported_as_error(self):
+        """
+        Given a hook layer whose takeover_mode.enabled is the string "false" (not a bool)
+        When validation_issues() runs
+        Then it reports an error Issue naming takeover_mode.enabled and the bad type
+        """
+        layers = (
+            ConfigLayer(
+                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
+                MappingProxyType({'takeover_mode': {'enabled': 'false'}}),
+            ),
+        )
+        config = Configuration(layers=layers)
+        issues = config.validation_issues()
+        matching = [i for i in issues if 'takeover_mode.enabled' in i.message]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].level, 'error')
+        self.assertIn('str', matching[0].message)
+
+    def test_bool_takeover_enabled_not_reported(self):
+        """
+        Given a hook layer whose takeover_mode.enabled is a real boolean
+        When validation_issues() runs
+        Then no takeover_mode.enabled issue is reported (valid values are not flagged)
+        """
+        layers = (
+            ConfigLayer(
+                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
+                MappingProxyType({'takeover_mode': {'enabled': False}}),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertFalse(any('takeover_mode.enabled' in i.message for i in config.validation_issues()))
+
 
 class TestTakeoverConfig(unittest.TestCase):
     """TakeoverConfig normalization helper."""
@@ -560,35 +590,221 @@ class TestInternalHelpers(unittest.TestCase):
 
 
 class TestGovernedAndTakeoverDelegation(unittest.TestCase):
-    """governed_tools() and takeover_mode() delegate to legacy resolution."""
+    """governed_tools() delegation and takeover_mode() hierarchical resolution."""
 
-    def test_governed_tools_default(self):
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(level, 'toolguard_hook', 'toml', Path(f'/{level}/toolguard_hook.toml'), specificity),
+            MappingProxyType(content),
+        )
+
+    def test_governed_tools_default_when_unconfigured(self):
         """
-        Given _load_governed_tools is stubbed to return ['Bash', 'Read']
-        When Configuration.governed_tools() delegates to it
-        Then it returns the governed tools as a tuple
+        Given a Configuration with no layers
+        When Configuration.governed_tools() resolves
+        Then it returns the default ('Bash',)
         """
-        with patch('toolguard.config._load_governed_tools', return_value=['Bash', 'Read']):
-            config = Configuration(layers=())
-            self.assertEqual(config.governed_tools(), ('Bash', 'Read'))
+        config = Configuration(layers=())
+        self.assertEqual(config.governed_tools(), ('Bash',))
+
+    def test_governed_tools_union_across_three_levels(self):
+        """
+        Given three hook levels each adding a distinct governed tool (one duplicated)
+        When Configuration.governed_tools() resolves the union
+        Then all distinct tools appear once, in most-specific-first order
+        """
+        layers = (
+            self._hook_layer('project', {'governed_tools': ['Bash', 'Read']}, 0),
+            self._hook_layer('project', {'governed_tools': ['Write']}, 1),
+            self._hook_layer('user', {'governed_tools': ['Read', 'Edit']}, 2),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.governed_tools(), ('Bash', 'Read', 'Write', 'Edit'))
+
+    def test_governed_tools_tolerates_non_list_value(self):
+        """
+        Given a hook layer whose governed_tools value is a string rather than a list
+        When Configuration.governed_tools() resolves
+        Then the malformed entry is skipped and the default ('Bash',) is returned
+        """
+        layers = (self._hook_layer('project', {'governed_tools': 'not-a-list'}, 0),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.governed_tools(), ('Bash',))
+
+    def test_governed_tools_ignores_native_layers(self):
+        """
+        Given a native ('claude') layer declaring governed_tools and no hook layer doing so
+        When Configuration.governed_tools() resolves
+        Then the native list is ignored and the default ('Bash',) is returned
+        """
+        layers = (
+            ConfigLayer(
+                Provenance('project', 'claude', 'json', Path('/p/settings.json'), 0),
+                MappingProxyType({'governed_tools': ['Read', 'Write']}),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.governed_tools(), ('Bash',))
 
     def test_takeover_mode_shape(self):
         """
-        Given load_takeover_mode_config returns a raw takeover dict
-        When Configuration.takeover_mode() builds the TakeoverConfig
-        Then the resulting object reflects enabled, ignored_allow_patterns, and no_match_fallback
+        Given a single toolguard_hook layer with a takeover_mode section
+        When Configuration.takeover_mode() resolves it over self.layers
+        Then enabled, ignored_allow_patterns (defaults + extras), and no_match_fallback are reflected
         """
-        raw = {
-            'enabled': True,
-            'ignored_allow_patterns': ['Bash(*)'],
-            'additional_ignored_patterns': ['Read(/x/**)'],
-            'no_match_fallback': 'warn_deny',
-        }
-        with patch('toolguard.config.load_takeover_mode_config', return_value=raw):
-            config = Configuration(layers=())
-            tc = config.takeover_mode()
+        layers = (
+            self._hook_layer(
+                'project',
+                {
+                    'takeover_mode': {
+                        'enabled': True,
+                        'ignored_allow_patterns': ['Bash(*)'],
+                        'additional_ignored_patterns': ['Read(/x/**)'],
+                        'no_match_fallback': 'warn_deny',
+                    }
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        tc = config.takeover_mode()
         self.assertTrue(tc.enabled)
-        self.assertEqual(tc.ignored_allow_patterns, ('Bash(*)',))
+        self.assertIn('Bash(*)', tc.ignored_allow_patterns)
+        self.assertEqual(tc.additional_ignored_patterns, ('Read(/x/**)',))
+        self.assertEqual(tc.no_match_fallback, 'warn_deny')
+        self.assertIsNone(tc.conflict)
+
+
+class TestTakeoverEnabledResolution(unittest.TestCase):
+    """takeover_mode.enabled single-owner + fail-safe-on-conflict (TOO-8 Phase 5)."""
+
+    @staticmethod
+    def _hook_layer(level, content, specificity):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(level, 'toolguard_hook', 'toml', Path(f'/{level}/toolguard_hook.toml'), specificity),
+            MappingProxyType(content),
+        )
+
+    def test_enabled_off_when_no_level_sets_it(self):
+        """
+        Given hook layers that never set takeover_mode.enabled
+        When takeover_mode() resolves enabled
+        Then enabled is False (default OFF) and there is no conflict
+        """
+        layers = (
+            self._hook_layer('project', {'takeover_mode': {'no_match_fallback': 'deny'}}, 0),
+            self._hook_layer('user', {}, 1),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
+        self.assertFalse(tc.enabled)
+        self.assertIsNone(tc.conflict)
+
+    def test_enabled_on_when_one_level_sets_true(self):
+        """
+        Given exactly one hook layer setting takeover_mode.enabled = true
+        When takeover_mode() resolves enabled
+        Then enabled is True and there is no conflict
+        """
+        layers = (
+            self._hook_layer('project', {}, 0),
+            self._hook_layer('user', {'takeover_mode': {'enabled': True}}, 1),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
+        self.assertTrue(tc.enabled)
+        self.assertIsNone(tc.conflict)
+
+    def test_enabled_agreement_across_two_levels_no_conflict(self):
+        """
+        Given two hook layers both setting takeover_mode.enabled = true
+        When takeover_mode() resolves enabled
+        Then enabled is True and there is no conflict (agreement, not disagreement)
+        """
+        layers = (
+            self._hook_layer('project', {'takeover_mode': {'enabled': True}}, 0),
+            self._hook_layer('user', {'takeover_mode': {'enabled': True}}, 1),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
+        self.assertTrue(tc.enabled)
+        self.assertIsNone(tc.conflict)
+
+    def test_enabled_conflict_fails_safe_off_and_reports(self):
+        """
+        Given two hook levels that DISAGREE on takeover_mode.enabled (true vs false)
+        When takeover_mode() resolves enabled
+        Then enabled is fail-safe False and a TakeoverEnabledConflict cites both sources with provenance
+        """
+        layers = (
+            self._hook_layer('project', {'takeover_mode': {'enabled': True}}, 0),
+            self._hook_layer('user', {'takeover_mode': {'enabled': False}}, 1),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
+        self.assertFalse(tc.enabled)
+        self.assertIsInstance(tc.conflict, TakeoverEnabledConflict)
+        # Both disagreeing sources are recorded, most-specific first.
+        values = [v for v, _prov in tc.conflict.sources]
+        self.assertEqual(values, [True, False])
+        levels = [prov.level for _v, prov in tc.conflict.sources]
+        self.assertEqual(levels, ['project', 'user'])
+        self.assertIn('conflicting values', tc.conflict.describe())
+
+    def test_non_bool_enabled_does_not_vote(self):
+        """
+        Given one level setting enabled = true and another setting enabled = "false" (a string)
+        When takeover_mode() resolves enabled
+        Then the non-bool level is ignored (not coerced to a vote), so the single real
+        vote wins with no conflict
+        """
+        layers = (
+            self._hook_layer('project', {'takeover_mode': {'enabled': True}}, 0),
+            self._hook_layer('user', {'takeover_mode': {'enabled': 'false'}}, 1),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
+        self.assertTrue(tc.enabled)
+        self.assertIsNone(tc.conflict)
+
+    def test_pattern_lists_union_across_three_levels(self):
+        """
+        Given three hook levels each adding distinct takeover ignored/additional patterns
+        When takeover_mode() resolves the pattern lists
+        Then ignored_allow_patterns and additional_ignored_patterns union across all three levels
+        """
+        layers = (
+            self._hook_layer(
+                'project',
+                {'takeover_mode': {'ignored_allow_patterns': ['Foo(*)'], 'additional_ignored_patterns': ['Read(/a/**)']}},
+                0,
+            ),
+            self._hook_layer(
+                'project',
+                {'takeover_mode': {'additional_ignored_patterns': ['Read(/b/**)']}},
+                1,
+            ),
+            self._hook_layer(
+                'user',
+                {'takeover_mode': {'additional_ignored_patterns': ['Read(/c/**)']}},
+                2,
+            ),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
+        # Default blanket allows plus the project's extra are all present.
+        self.assertIn('Bash(*)', tc.ignored_allow_patterns)
+        self.assertIn('Foo(*)', tc.ignored_allow_patterns)
+        # additional_ignored_patterns unions across all three levels.
+        self.assertEqual(tc.additional_ignored_patterns, ('Read(/a/**)', 'Read(/b/**)', 'Read(/c/**)'))
+
+    def test_no_match_fallback_more_specific_wins(self):
+        """
+        Given project and user hook levels with conflicting no_match_fallback values
+        When takeover_mode() resolves no_match_fallback
+        Then the project (more-specific) value wins
+        """
+        layers = (
+            self._hook_layer('project', {'takeover_mode': {'no_match_fallback': 'warn_deny'}}, 0),
+            self._hook_layer('user', {'takeover_mode': {'no_match_fallback': 'deny'}}, 1),
+        )
+        tc = Configuration(layers=layers).takeover_mode()
         self.assertEqual(tc.no_match_fallback, 'warn_deny')
 
 
@@ -621,22 +837,6 @@ class TestProvenanceAndIntrospection(unittest.TestCase):
         descs = config.describe_sources()
         self.assertEqual(len(descs), 1)
         self.assertIn('settings.json', descs[0])
-
-
-class TestBashPermissionsDelegation(unittest.TestCase):
-    """bash_permissions() delegates to legacy _load_permissions."""
-
-    def test_bash_permissions_tuple(self):
-        """
-        Given _load_permissions is stubbed to return allow and deny lists
-        When Configuration.bash_permissions() delegates to it
-        Then the allow and deny patterns are returned as tuples
-        """
-        with patch('toolguard.config._load_permissions', return_value=(['git *'], ['rm *'])):
-            config = Configuration(layers=())
-            allow, deny = config.bash_permissions()
-        self.assertEqual(allow, ('git *',))
-        self.assertEqual(deny, ('rm *',))
 
 
 class TestToolguardPermissionsEdgeCases(unittest.TestCase):

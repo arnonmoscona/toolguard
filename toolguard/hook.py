@@ -42,6 +42,7 @@ COMMAND_TOOLS = {'Bash', 'mcp__jetbrains__execute_terminal_command', 'mcp__local
 _validation_done = False
 _divergence_check_done = False
 _discovery_diagnostic_done = False
+_takeover_conflict_logged = False
 
 
 def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None, config=None) -> None:
@@ -318,6 +319,33 @@ def _log_conflict_override(target, override, log_dir) -> None:
     log_conflict(_format_conflict_message(target, override), corrective, log_dir)
 
 
+def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
+    """
+    Record a cross-level ``takeover_mode.enabled`` disagreement (TOO-8 Phase 5).
+
+    Writes a conflict-log entry citing every disagreeing level's value and
+    provenance and noting that fail-safe OFF was applied (so native Claude
+    prompts stay active). No-op when there is no conflict or no log dir.
+
+    Args:
+        conflict: The :class:`~toolguard.config.TakeoverEnabledConflict`, or None.
+        log_dir: Directory for the conflict log, or None (no-op).
+    """
+    if conflict is None or not log_dir:
+        return
+    message = (
+        f'{conflict.describe()}. Fail-safe applied: takeover mode is treated as '
+        'DISABLED (OFF), so Claude native permission prompts stay active and '
+        'nothing is silently bypassed.'
+    )
+    corrective = (
+        'takeover_mode is a single-owner policy. Set takeover_mode.enabled at '
+        'exactly ONE level (typically the user level) and remove or align the '
+        'conflicting settings at the other levels so they no longer disagree.'
+    )
+    log_conflict(message, corrective, log_dir)
+
+
 def _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax):
     """
     Apply the unoverridable hard-deny rule to a file path, checked FIRST.
@@ -564,6 +592,18 @@ def main() -> None:
             log_dir = env_config.get('log_dir')
             if log_dir:
                 issue_takeover_warning(log_dir, to_stdout=True)
+        elif takeover.conflict is not None:
+            # Cross-level disagreement on takeover_mode.enabled (TOO-8 Phase 5):
+            # enabled is already fail-safe OFF. Record the conflict to the
+            # conflict log and surface a once-per-session warning. The downstream
+            # path is already the safe one (native prompts active).
+            log_dir = env_config.get('log_dir')
+            if log_dir:
+                global _takeover_conflict_logged
+                if not _takeover_conflict_logged:
+                    _takeover_conflict_logged = True
+                    _log_takeover_enabled_conflict(takeover.conflict, log_dir)
+                    issue_takeover_warning(log_dir, to_stdout=True)
 
         # Divergence/auto-migration tooling still consumes a plain dict; build it
         # from the resolved TakeoverConfig so those clients stay unchanged.
