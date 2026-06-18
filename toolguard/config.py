@@ -23,10 +23,12 @@ not-yet-migrated non-test callers still use them -- ``find_project_root``,
 internal is underscore-prefixed.
 """
 
+import functools
 import json
 import os
 import re
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -39,6 +41,94 @@ from toolguard.config_validation import validate_permissions
 # the trailing ``\)``) lets the inner body itself contain parentheses, e.g.
 # ``Bash(foo(bar))`` -> ``foo(bar)``. This needs no known-tool list.
 _TOOL_WRAPPER_RE = re.compile(r'[A-Za-z0-9_]+\((.*)\)', re.DOTALL)
+
+
+def _parse_config_file(path_str: str, file_format: str) -> dict:
+    """
+    Parse a single config file by format, with no caching.
+
+    Args:
+        path_str: Filesystem path to the config file, as a string.
+        file_format: Either ``'toml'`` or ``'json'``.
+
+    Returns:
+        The parsed config dictionary.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        tomllib.TOMLDecodeError: If a TOML file is malformed.
+        json.JSONDecodeError: If a JSON file is malformed.
+    """
+    if file_format == 'toml':
+        with open(path_str, 'rb') as f:
+            return tomllib.load(f)
+    with open(path_str, 'r') as f:
+        return json.load(f)
+
+
+@functools.lru_cache(maxsize=None)
+def _parse_config_file_cached(path_str: str, file_format: str, mtime_ns: int) -> dict:
+    """
+    Parse a single config file, memoized on (path, format, mtime).
+
+    This is the cache layer behind :func:`load_config_file`. ``mtime_ns`` is part of
+    the cache key so that rewriting a file (which changes its modification time)
+    transparently invalidates the cached parse -- caching on path alone would return
+    stale content. ``path_str`` is a string (not :class:`Path`) so the key is hashable
+    and stable.
+
+    Args:
+        path_str: Filesystem path to the config file, as a string.
+        file_format: Either ``'toml'`` or ``'json'``.
+        mtime_ns: The file's ``st_mtime_ns`` at the time of the call (cache key only).
+
+    Returns:
+        The parsed config dictionary.
+    """
+    return _parse_config_file(path_str, file_format)
+
+
+def load_config_file(path: Path, file_format: str = 'json') -> dict:
+    """
+    Load and parse a single config file, dispatching on format.
+
+    This is the single internal config-file loader: it replaces the per-site
+    ``if file_format == 'toml': tomllib.load(...) else: json.load(...)`` branches and
+    memoizes parsing keyed on ``(path, st_mtime_ns)`` so that the same file discovered
+    by multiple entry points in one invocation is parsed at most once, while a rewrite
+    of the file is still picked up (the mtime changes).
+
+    When the path cannot be ``stat``-ed (e.g. it does not exist), the cache is bypassed
+    and the parse is attempted directly so that ``open``'s own ``FileNotFoundError``
+    surfaces unchanged -- preserving the exact error boundary callers (and their tests)
+    relied on before this consolidation. Nonexistent files are never worth caching.
+
+    Tests that rewrite the SAME path within one process can reset the memo with
+    ``_parse_config_file_cached.cache_clear()`` if ever needed (no current caller needs
+    it because the mtime component of the key already invalidates rewritten files).
+
+    This loader RAISES on any failure (missing file, malformed content). Callers are
+    responsible for their own error-handling policy (strict vs. lenient) by wrapping the
+    call -- mirroring the differing semantics of the original call sites.
+
+    Args:
+        path: Path to the config file.
+        file_format: Either ``'toml'`` or ``'json'`` (defaults to ``'json'``).
+
+    Returns:
+        The parsed config dictionary.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        tomllib.TOMLDecodeError: If a TOML file is malformed.
+        json.JSONDecodeError: If a JSON file is malformed.
+    """
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        # Unstattable (typically missing): skip the cache and let open() raise.
+        return _parse_config_file(str(path), file_format)
+    return _parse_config_file_cached(str(path), file_format, mtime_ns)
 
 
 def find_project_root(start_dir: Path = None) -> Path:
@@ -146,13 +236,11 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
         if prefer_toml and toml_exists:
             # TOML file found - use it
             config_files.append((toml_path, source_type, 'toml'))
-
-            # Warn if both exist
-            if json_exists:
-                print(
-                    f'Warning: Both {toml_path.name} and {json_path.name} exist. Using TOML ({toml_path.name})',
-                    file=sys.stderr,
-                )
+            # NOTE: the "both .toml and .json exist" warning is intentionally NOT
+            # emitted here. Detection/emission of the both-formats condition is
+            # the SOLE responsibility of Configuration.validation_issues(), which
+            # routes it to the warning log stream (TOO-8 Phase 4 single source of
+            # truth). Printing it here too would double-surface the warning.
         elif json_exists:
             # JSON file found (or only JSON exists)
             config_files.append((json_path, source_type, 'json'))
@@ -196,11 +284,10 @@ def _discover_in_dir(claude_dir: Path) -> List[Tuple[Path, str, str]]:
 
         if prefer_toml and toml_exists:
             found.append((toml_path, source_type, 'toml'))
-            if json_exists:
-                print(
-                    f'Warning: Both {toml_path.name} and {json_path.name} exist. Using TOML ({toml_path.name})',
-                    file=sys.stderr,
-                )
+            # NOTE: the "both .toml and .json exist" warning is intentionally NOT
+            # emitted here. It is detected and routed to the WARNING log stream by
+            # Configuration.validation_issues() (TOO-8 Phase 4, M1 -- single source
+            # of truth). Discovery stays side-effect-free.
         elif json_exists:
             found.append((json_path, source_type, 'json'))
     return found
@@ -330,14 +417,7 @@ def _load_permissions_from_file(
         tomllib.TOMLDecodeError: If file contains invalid TOML (only if strict=True)
     """
     try:
-        if file_format == 'toml':
-            import tomllib
-
-            with open(file_path, 'rb') as f:
-                config = tomllib.load(f)
-        else:
-            with open(file_path, 'r') as f:
-                config = json.load(f)
+        config = load_config_file(file_path, file_format)
     except (json.JSONDecodeError, Exception) as e:
         if strict:
             raise
@@ -415,14 +495,7 @@ def _load_governed_tools_from_file(file_path: Path, file_format: str = 'json') -
         List of tool names to govern, or empty list if not found/invalid
     """
     try:
-        if file_format == 'toml':
-            import tomllib
-
-            with open(file_path, 'rb') as f:
-                config = tomllib.load(f)
-        else:
-            with open(file_path, 'r') as f:
-                config = json.load(f)
+        config = load_config_file(file_path, file_format)
     except (FileNotFoundError, json.JSONDecodeError, Exception):
         return []
 
@@ -508,14 +581,7 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
 
     for path, fmt in hook_files:
         try:
-            if fmt == 'toml':
-                import tomllib
-
-                with open(path, 'rb') as f:
-                    config = tomllib.load(f)
-            else:
-                with open(path, 'r') as f:
-                    config = json.load(f)
+            config = load_config_file(path, fmt)
 
             takeover_mode = config.get('takeover_mode', {})
             if not takeover_mode:
@@ -781,6 +847,32 @@ def is_tool_wrapper(pattern: str) -> bool:
     return isinstance(pattern, str) and _TOOL_WRAPPER_RE.fullmatch(pattern) is not None
 
 
+def _append_provenance(reason: str, provenance) -> str:
+    """
+    Append matched-rule provenance to a reason as a bracketed suffix.
+
+    Keeps backward compatibility with existing reason consumers: the suffix is
+    appended AFTER the original reason so ``reason.split(': ', 1)`` and
+    "matches allow pattern: X" substring assertions still hold. Two spaces
+    separate the original reason from the suffix, e.g.::
+
+        Command matches allow pattern: git *  [project: /p/.claude/toolguard_hook.toml]
+
+    When ``provenance`` is None (no rule matched / mapping unavailable), the
+    reason is returned unchanged.
+
+    Args:
+        reason: The base reason string from the matcher.
+        provenance: A :class:`Provenance`, or None.
+
+    Returns:
+        The reason with a ``  [<level: path>]`` suffix, or unchanged.
+    """
+    if provenance is None:
+        return reason
+    return f'{reason}  [{provenance.describe_brief()}]'
+
+
 @dataclass(frozen=True)
 class Provenance:
     """
@@ -811,6 +903,16 @@ class Provenance:
     def describe(self) -> str:
         """Return a short human-readable description of this source."""
         return f'{self.level}: {self.path} [{self.source_type}, {self.file_format}]'
+
+    def describe_brief(self) -> str:
+        """
+        Return a compact ``level: path`` label for reason-string suffixes.
+
+        Used to append matched-rule provenance to a decision reason as a
+        bracketed suffix, e.g. ``[project: /home/me/proj/.claude/toolguard_hook.toml]``.
+        Kept terse so it does not bloat the resolution log.
+        """
+        return f'{self.level}: {self.path}'
 
 
 @dataclass(frozen=True)
@@ -919,6 +1021,58 @@ class Issue:
     level: str
     message: str
     corrective_steps: str
+
+
+@dataclass(frozen=True)
+class ConflictOverride:
+    """
+    A more-specific ``allow`` overriding a less-specific ``deny`` (Phase 4).
+
+    Records BOTH sides of an allow-over-deny override so the conflict log can
+    cite the winning allow and the overridden deny by provenance. The decision
+    itself is unchanged (more-specific-wins keeps the allow); this is purely a
+    record of the override for human/LLM review.
+
+    The command/path that triggered the override is known by the caller (the
+    hook), so it is NOT stored here; the hook composes the conflict-log message
+    from this record plus the command it already holds.
+
+    Attributes:
+        winning_pattern: The more-specific ``allow`` pattern that won.
+        winning_provenance: Provenance of the winning allow.
+        overridden_pattern: The less-specific ``deny`` pattern that was overridden.
+        overridden_provenance: Provenance of the overridden deny.
+    """
+
+    winning_pattern: str
+    winning_provenance: Optional['Provenance']
+    overridden_pattern: str
+    overridden_provenance: Optional['Provenance']
+
+
+@dataclass(frozen=True)
+class ResolvedDecision:
+    """
+    Rich result of a more-specific-wins resolution (TOO-8 Phase 4).
+
+    Carries everything the hook needs to log a decision with provenance and to
+    surface an allow-over-deny conflict, without the hook re-deriving any of it.
+
+    Attributes:
+        decision: 'allow' or 'deny'.
+        reason: Human-readable reason, with provenance appended as a bracketed
+            suffix when a rule matched (e.g.
+            "Command matches allow pattern: git *  [project: .claude/...]").
+        provenance: Provenance of the winning rule, or None for a fail-closed
+            default deny (no rule matched at any level).
+        override: A :class:`ConflictOverride` when the winning allow overrode a
+            less-specific deny, otherwise None.
+    """
+
+    decision: str
+    reason: str
+    provenance: Optional['Provenance']
+    override: Optional[ConflictOverride] = None
 
 
 @dataclass(frozen=True)
@@ -1121,61 +1275,148 @@ class Configuration:
 
         return tuple(result)
 
-    def permission_levels(self, tool_name: str) -> Tuple[Tuple[Tuple[str, ...], Tuple[str, ...]], ...]:
+    def permission_levels_with_provenance(
+        self, tool_name: str
+    ) -> Tuple[Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[ToolPatternLayer, ...]], ...]:
         """
-        Group per-layer patterns for a tool into per-LEVEL (allow, deny) pairs.
+        Group per-layer patterns for a tool into per-LEVEL pairs, retaining
+        each level's contributing layers.
 
         Layers sharing a specificity (e.g. a ``.local`` and a regular file in the
         same ``.claude`` directory) are collapsed into a single level, preserving
         within-level priority order. Levels are returned most-specific first --
         the order the more-specific-wins resolver consumes.
 
+        Returns, per hierarchy level (most-specific first), the collapsed
+        ``(allow, deny)`` pattern tuples PLUS the contributing
+        :class:`ToolPatternLayer` objects so a matched pattern can be mapped back
+        to its exact source file/level via :attr:`ToolPatternLayer.provenance`.
+
         Args:
             tool_name: Tool to resolve patterns for (e.g. 'Bash', 'Read').
 
         Returns:
-            Tuple of (allow_patterns, deny_patterns) pairs, one per hierarchy
-            level, ordered most-specific first.
+            Tuple of (allow_patterns, deny_patterns, layers) triples, one per
+            hierarchy level, ordered most-specific first.
         """
-        grouped: Dict[int, Tuple[List[str], List[str]]] = {}
+        grouped: Dict[int, Tuple[List[str], List[str], List[ToolPatternLayer]]] = {}
         order: List[int] = []
         for layer in self.permission_layers(tool_name):
             spec = layer.provenance.specificity
             if spec not in grouped:
-                grouped[spec] = ([], [])
+                grouped[spec] = ([], [], [])
                 order.append(spec)
-            allow_acc, deny_acc = grouped[spec]
+            allow_acc, deny_acc, layers_acc = grouped[spec]
             allow_acc.extend(layer.allow)
             deny_acc.extend(layer.deny)
-        return tuple((tuple(grouped[s][0]), tuple(grouped[s][1])) for s in order)
+            layers_acc.append(layer)
+        return tuple(
+            (tuple(grouped[s][0]), tuple(grouped[s][1]), tuple(grouped[s][2])) for s in order
+        )
 
-    def resolve_permission(self, tool_name: str, decide) -> Tuple[str, str]:
+    @staticmethod
+    def _provenance_for_pattern(
+        layers: Tuple[ToolPatternLayer, ...], pattern: str, kind: str
+    ) -> Optional['Provenance']:
         """
-        Resolve a permission decision using more-specific-wins across levels.
+        Find the provenance of the layer that contributed a matched pattern.
 
-        Evaluates hierarchy levels MOST-SPECIFIC -> LEAST-SPECIFIC. ``decide`` is
-        called per level with that level's (allow, deny) pattern tuples and must
-        return a ``(decision, reason)`` pair when the level produces ANY match
-        (deny or allow), or ``None`` when the level matches nothing. The FIRST
-        level that returns a non-None result decides; the cascade stops there.
-        When no level matches anything, the result is a fail-closed DENY.
+        Args:
+            layers: The contributing layers for one level (most-specific first).
+            pattern: The exact (wrapper-free) pattern string that matched.
+            kind: 'allow' or 'deny' -- which side of the layer to search.
 
-        Pattern MATCHING lives entirely in ``decide`` (supplied by
-        permissions.py / compound.py); this method owns only the level cascade.
+        Returns:
+            The provenance of the first layer whose ``kind`` list contains the
+            pattern, or None when not found (e.g. format drift).
+        """
+        for layer in layers:
+            candidates = layer.allow if kind == 'allow' else layer.deny
+            if pattern in candidates:
+                return layer.provenance
+        return None
+
+    def resolve_permission_detailed(self, tool_name: str, decide_detailed) -> ResolvedDecision:
+        """
+        Resolve a decision with provenance and allow-over-deny conflict detection.
+
+        Drives a most-specific-wins cascade over the hierarchy levels (evaluated
+        MOST-SPECIFIC -> LEAST-SPECIFIC, first level that matches anything wins;
+        no match at any level => fail-closed deny). ``decide_detailed`` must
+        return ``(decision, reason, matched_pattern)``
+        (or None) so the matched rule can be mapped to its source provenance. The
+        returned :class:`ResolvedDecision` carries the winning rule's provenance
+        (with provenance appended to the reason as a bracketed suffix) and, when
+        the winning decision is an ``allow`` that overrides a ``deny`` in a
+        LESS-specific level, a :class:`ConflictOverride` describing both sides.
+
+        Conflict detection (Phase 4): only allow-over-deny overrides are
+        conflicts. ``hard_deny`` denials are handled by the caller BEFORE this
+        runs and are NOT conflicts.
 
         Args:
             tool_name: Tool whose levels to evaluate.
-            decide: Callable ``(allow, deny) -> (decision, reason) | None``.
+            decide_detailed: Callable
+                ``(allow, deny) -> (decision, reason, matched_pattern) | None``.
 
         Returns:
-            The winning ``(decision, reason)``, or a default deny when nothing
-            matched at any level.
+            A :class:`ResolvedDecision`.
         """
-        for allow, deny in self.permission_levels(tool_name):
-            result = decide(allow, deny)
-            if result is not None:
-                return result
-        return 'deny', 'Command does not match any allow patterns'
+        levels = self.permission_levels_with_provenance(tool_name)
+        for index, (allow, deny, layers) in enumerate(levels):
+            result = decide_detailed(allow, deny)
+            if result is None:
+                continue
+            decision, reason, matched_pattern = result
+            kind = 'allow' if decision == 'allow' else 'deny'
+            prov = self._provenance_for_pattern(layers, matched_pattern, kind)
+            reason_with_prov = _append_provenance(reason, prov)
+
+            override = None
+            if decision == 'allow':
+                override = self._detect_override(
+                    levels, index, matched_pattern, prov, decide_detailed
+                )
+            return ResolvedDecision(decision, reason_with_prov, prov, override)
+
+        return ResolvedDecision('deny', 'Command does not match any allow patterns', None, None)
+
+    @staticmethod
+    def _detect_override(levels, winning_index, winning_pattern, winning_prov, decide_detailed):
+        """
+        Scan LESS-specific levels for a deny overridden by the winning allow.
+
+        Args:
+            levels: All levels (most-specific first) as returned by
+                :meth:`permission_levels_with_provenance`.
+            winning_index: Index of the level whose allow won.
+            winning_pattern: The winning allow pattern.
+            winning_prov: Provenance of the winning allow.
+            decide_detailed: The same per-level decider (used to test less-specific
+                levels for a deny match on the same command).
+
+        Returns:
+            A :class:`ConflictOverride` for the first less-specific deny match, or
+            None when no less-specific level denies the command.
+        """
+        for allow, deny, layers in levels[winning_index + 1 :]:
+            if not deny:
+                continue
+            result = decide_detailed(allow, deny)
+            # We only care about a DENY at this less-specific level. ``decide``
+            # is deny-first, so a deny here surfaces as decision == 'deny'.
+            if result is not None and result[0] == 'deny':
+                _decision, _reason, overridden_pattern = result
+                overridden_prov = Configuration._provenance_for_pattern(
+                    layers, overridden_pattern, 'deny'
+                )
+                return ConflictOverride(
+                    winning_pattern=winning_pattern,
+                    winning_provenance=winning_prov,
+                    overridden_pattern=overridden_pattern,
+                    overridden_provenance=overridden_prov,
+                )
+        return None
 
     def allow_deny_for(self, tool_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
         """
@@ -1341,27 +1582,41 @@ class Configuration:
         """
         issues: List[Issue] = []
 
-        # 1) Both TOML and JSON at the same (directory, base) -> warn.
-        seen_bases: Dict[Tuple[str, str], str] = {}
+        # 1) Both a TOML and a JSON config file present for the same base in the
+        #    same directory -> warn (the tool is using TOML). This is the SINGLE
+        #    source of truth for the warning (TOO-8 Phase 4, M1): discovery itself
+        #    is side-effect-free (it no longer prints) and the hook routes these
+        #    Issues to the WARNING stream. A duplicate is recognised either by two
+        #    discovered layers of differing format at the same base, OR -- since
+        #    real discovery keeps only the TOML -- by both files existing on disk.
+        seen_formats: Dict[Tuple[str, str], set] = {}
+        order: List[Tuple[str, str]] = []
         for layer in self.layers:
             path = layer.provenance.path
             base_name = path.stem
-            parent = str(path.parent)
-            key = (parent, base_name)
-            fmt = layer.provenance.file_format
-            if key in seen_bases:
-                if seen_bases[key] != fmt:
-                    issues.append(
-                        Issue(
-                            level='warning',
-                            message=f'Both {base_name}.toml and {base_name}.json exist in {parent}',
-                            corrective_steps=(
-                                f'Remove one of the files to avoid confusion. TOML ({base_name}.toml) is being used.'
-                            ),
-                        )
+            parent = path.parent
+            key = (str(parent), base_name)
+            if key not in seen_formats:
+                seen_formats[key] = set()
+                order.append(key)
+                # Augment with on-disk presence so the warning fires in real
+                # usage (where discovery dropped the JSON sibling).
+                for fmt, suffix in (('toml', '.toml'), ('json', '.json')):
+                    if (parent / f'{base_name}{suffix}').exists():
+                        seen_formats[key].add(fmt)
+            seen_formats[key].add(layer.provenance.file_format)
+
+        for parent_str, base_name in order:
+            if len(seen_formats[(parent_str, base_name)]) > 1:
+                issues.append(
+                    Issue(
+                        level='warning',
+                        message=f'Both {base_name}.toml and {base_name}.json exist in {parent_str}',
+                        corrective_steps=(
+                            f'Remove one of the files to avoid confusion. TOML ({base_name}.toml) is being used.'
+                        ),
                     )
-            else:
-                seen_bases[key] = fmt
+                )
 
         # 2) Permission validation over the merged toolguard_hook content only.
         merged_config: Dict = {
@@ -1403,6 +1658,18 @@ class Configuration:
         """Return human-readable descriptions of all discovered sources."""
         return tuple(layer.provenance.describe() for layer in self.layers)
 
+    def describe_levels(self) -> Tuple[str, ...]:
+        """
+        Return concise ``level: path`` descriptions, one per discovered source.
+
+        Used by the once-per-session discovery diagnostic in the resolution log
+        (TOO-8 Phase 4, M2). Ordered most-specific first, mirroring layer order.
+
+        Returns:
+            Tuple of ``"<level>: <path>"`` strings.
+        """
+        return tuple(layer.provenance.describe_brief() for layer in self.layers)
+
 
 def _parse_source(path: Path, file_format: str) -> Optional[dict]:
     """
@@ -1416,13 +1683,7 @@ def _parse_source(path: Path, file_format: str) -> Optional[dict]:
         Parsed dict, or None if the file cannot be read/parsed.
     """
     try:
-        if file_format == 'toml':
-            import tomllib
-
-            with open(path, 'rb') as f:
-                return tomllib.load(f)
-        with open(path, 'r') as f:
-            return json.load(f)
+        return load_config_file(path, file_format)
     except Exception as e:  # noqa: BLE001 - tolerate any unreadable source
         print(f'Warning: Failed to load {path}: {e}', file=sys.stderr)
         return None
@@ -1534,39 +1795,6 @@ def load_configuration(start_dir: Path = None, ignore_env_override: bool = False
 # legacy (config_files) signatures that divergence/migration code and their tests
 # rely on. Callers pass the discovered (path, source_type, format) triples; the
 # parsing/format-branching lives here, not in those clients.
-
-
-def _toolguard_permissions_from_sources(config_files: List[Tuple[Path, str, str]]) -> Dict[str, List[str]]:
-    """
-    Extract raw allow/deny/ask permissions from toolguard_hook sources.
-
-    Parses each toolguard_hook source (JSON or TOML), aggregating permission
-    strings (with tool wrappers intact), de-duplicated and order-preserving.
-    Native ('claude') sources are skipped. All file/format handling is internal
-    to the config module.
-
-    Args:
-        config_files: List of (path, source_type, format) triples as produced
-            by :func:`discover_config_files`.
-
-    Returns:
-        Dict with keys 'allow', 'deny', 'ask', each a list of permission strings.
-    """
-    result: Dict[str, List[str]] = {'allow': [], 'deny': [], 'ask': []}
-    for path, source_type, file_format in config_files:
-        if source_type != 'toolguard_hook':
-            continue
-        content = _parse_source(path, file_format)
-        if content is None:
-            continue
-        permissions = content.get('permissions', {})
-        if not isinstance(permissions, dict):
-            continue
-        for perm_type in ('allow', 'deny', 'ask'):
-            for perm in permissions.get(perm_type, []):
-                if isinstance(perm, str) and perm not in result[perm_type]:
-                    result[perm_type].append(perm)
-    return result
 
 
 def config_sync_settings_from_sources(config_files: List[Tuple[Path, str, str]]) -> Dict:

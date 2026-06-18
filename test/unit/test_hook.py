@@ -12,12 +12,12 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
-from toolguard.config import ConfigLayer, Configuration, Provenance, TakeoverConfig
+from toolguard.config import ConfigLayer, Configuration, Provenance, ResolvedDecision, TakeoverConfig
 from toolguard.hook import (
     FILE_PATH_TOOLS,
+    _decide_file_path_at_level_detailed,
     _log_allowed_command,
     _parse_compound_match_details,
-    check_file_path_permission,
     create_hook_output,
     load_file_path_patterns,
     main,
@@ -25,6 +25,28 @@ from toolguard.hook import (
 )
 
 _NO_TAKEOVER = TakeoverConfig(False, (), (), 'deny')
+
+
+def check_file_path_permission(file_path, allow_patterns, deny_patterns, extended_syntax=True):
+    """
+    Evaluate a file path against flat allow/deny pattern lists, returning (decision, reason).
+
+    Thin test adapter over the live single-level resolver
+    :func:`toolguard.hook._decide_file_path_at_level_detailed`. It preserves the
+    decision semantics the removed ``check_file_path_permission`` had (deny-first,
+    glob/regex/native prefixes, tilde expansion, default-deny when nothing matches)
+    so the existing file-path test intents carry over unchanged. An empty
+    ``Configuration`` is supplied because every pattern these tests use is absolute
+    or ``~``-anchored, so project-root anchoring is a no-op.
+    """
+    config = Configuration(layers=())
+    result = _decide_file_path_at_level_detailed(
+        file_path, allow_patterns, deny_patterns, config, extended_syntax
+    )
+    if result is None:
+        return 'deny', 'Path does not match any allow patterns'
+    decision, reason, _matched = result
+    return decision, reason
 
 
 def _fake_config(
@@ -80,21 +102,22 @@ def _fake_config(
             # No project root in the fake: relative paths returned unchanged.
             return raw_path
 
-        def permission_levels(self_inner, tool_name):
-            # The fake models a single hierarchy level per tool.
+        def resolve_permission_detailed(self_inner, tool_name, decide_detailed):
+            # API-sync with Configuration.resolve_permission_detailed (TOO-8
+            # Phase 4) -- the sole cascade entry point the hook now calls. The
+            # fake models a single hierarchy level per tool with no provenance,
+            # so no override (conflict) is ever produced here.
             allow, deny = _patterns_for(tool_name)
-            if not allow and not deny:
-                return ()
-            return ((tuple(allow), tuple(deny)),)
-
-        def resolve_permission(self_inner, tool_name, decide):
-            # Mirror Configuration.resolve_permission: first matching level wins,
-            # else fail-closed deny.
-            for allow, deny in self_inner.permission_levels(tool_name):
-                result = decide(allow, deny)
+            if allow or deny:
+                result = decide_detailed(tuple(allow), tuple(deny))
                 if result is not None:
-                    return result
-            return 'deny', 'Command does not match any allow patterns'
+                    decision, reason, _matched = result
+                    return ResolvedDecision(decision, reason, None, None)
+            return ResolvedDecision('deny', 'Command does not match any allow patterns', None, None)
+
+        def describe_levels(self_inner):
+            # API-sync: the fake exposes no real sources.
+            return ()
 
         def takeover_mode(self_inner):
             return takeover

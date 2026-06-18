@@ -160,10 +160,11 @@ This applies uniformly to:
   the full level cascade; the compound is allowed iff every sub-command is.
 - File-path tools (Read/Write/Edit).
 
-The level cascade is orchestrated by `Configuration.resolve_permission` (fed by
-`Configuration.permission_levels(tool)`). Pattern MATCHING stays in
-`permissions.py`/`compound.py` (and the file-path matcher in `hook.py`); those
-provide a per-level `decide(allow, deny) -> (decision, reason) | None` callable.
+The level cascade is orchestrated by `Configuration.resolve_permission_detailed`
+(fed by `Configuration.permission_levels_with_provenance(tool)`). Pattern
+MATCHING stays in `permissions.py`/`compound.py` (and the file-path matcher in
+`hook.py`); those provide a per-level
+`decide(allow, deny) -> (decision, reason, matched_pattern) | None` callable.
 A single-level config behaves identically to the old deny-first model, so there
 is one resolution path with no legacy/dual code.
 
@@ -238,6 +239,83 @@ Applies uniformly to: Bash commands, EACH sub-command of a compound command
 > deny/allow carve-out shape and the all-levels pool -- were defined for Phase 3
 > per decision #3 in the implementation plan and are pending Arnon's
 > confirmation.
+
+## Logging streams, conflict logging, and provenance (TOO-8 Phase 4)
+
+### Four separate log streams (one file per concern)
+
+Each logging concern writes to its OWN date-stamped file so the streams stay
+separable:
+
+| File                                  | Writer                         | Contents |
+| ------------------------------------- | ------------------------------ | -------- |
+| `logs/toolguard-YYYY-MM-DD.md`        | `log_writer.log_command`       | Resolution log (high volume): allowed/refused decisions, matched-rule provenance. Also `log_writer.log_discovery` (once-per-session discovery diagnostic) and `hard_deny` denials. |
+| `logs/toolguard-error-YYYY-MM-DD.md`  | `error_log.log_error`          | REAL errors only. |
+| `logs/toolguard-warning-YYYY-MM-DD.md`| `error_log.log_warning`        | Actionable warnings: both-`.toml`-and-`.json` present, unsupported/ungoverned tools. |
+| `logs/toolguard-conflict-YYYY-MM-DD.md`| `error_log.log_conflict`      | Config conflicts (allow-over-deny overrides), human/LLM-readable, ON by default. |
+
+`error_log._log_entry(level, stream, ...)` is the single shared writer; the
+`stream` argument selects the `toolguard-<stream>-...` filename. All three share
+the same Markdown entry format and echo a concise line to stderr.
+
+The **takeover "active" notice** (`session_warnings.issue_takeover_warning`) is
+informational, NOT actionable, so it is **no longer persisted to any log**: it is
+stderr + a once-per-session marker file only.
+
+### Conflict logging -- allow-over-deny overrides only
+
+A **conflict** is a MORE-specific level's `allow` overriding a LESS-specific
+level's `deny` for the same command/path. The decision is unchanged
+(more-specific-wins keeps the allow); a conflict entry is written to the conflict
+log citing BOTH sides' provenance (winning allow's file/level + the overridden
+deny's file/level) and the command. `hard_deny` denials are **not** conflicts --
+they are recorded in the resolution log (with provenance), never the conflict log.
+
+Detection lives in `Configuration.resolve_permission_detailed` /
+`Configuration._detect_override`: when the winning decision is an `allow` at level
+*k*, the LESS-specific levels are scanned for a `deny` match on the same command;
+the first match becomes a `ConflictOverride`. The hook
+(`_log_conflict_override` / `_format_conflict_message`) routes it to the conflict
+stream.
+
+### Provenance threaded into resolution reasons
+
+`Configuration.permission_levels_with_provenance` is the provenance-carrying level
+view (per level: `(allow, deny, ToolPatternLayer[])`). The detailed deciders
+(`permissions.decide_command_at_level_detailed`,
+`hook._decide_file_path_at_level_detailed`) report the matched pattern, which
+`Configuration._provenance_for_pattern` maps back to the owning
+`ToolPatternLayer.provenance` for exact file/level precision.
+`resolve_permission_detailed` returns a `ResolvedDecision`
+(decision, reason, provenance, optional override). For **backward compatibility**,
+provenance is appended to the reason as a bracketed suffix
+(`_append_provenance` -> `Provenance.describe_brief`), e.g.
+`Command matches allow pattern: git *  [project: /p/.claude/toolguard_hook.toml]`,
+so existing `reason.split(': ', 1)` and "matches allow pattern: X" substring
+consumers still work. Applied to Bash, each compound sub-command independently,
+and Read/Write/Edit.
+
+There is a single cascade implementation: the hook drives
+`resolve_permission_detailed` / `resolve_file_path_permission_detailed` /
+`hook.resolve_bash_permission_detailed`. (The earlier 2-tuple variants
+`resolve_permission` / `resolve_file_path_permission` and their per-level helpers
+`decide_command_at_level` / `make_command_level_decider` were removed once the
+detailed path superseded them; no separate legacy cascade remains.)
+
+### Once-per-session discovery diagnostic (M2)
+
+`hook` emits, once per session (guarded by `_discovery_diagnostic_done`), a
+`discovered N config levels: <level: path>, ...` entry to the RESOLUTION log via
+`log_writer.log_discovery` (fed by `Configuration.describe_levels`). This replaces
+the discovery diagnostics that the legacy `_load_permissions` printed to stderr.
+
+### Single source of truth for the both-formats warning (M1)
+
+The "both `.toml` and `.json` exist" warning is detected ONLY in
+`Configuration.validation_issues()` and routed by the hook to the WARNING stream.
+Discovery (`_discover_in_dir`) is side-effect-free (no stderr print). The Issue
+fires in real usage by checking on-disk presence of the sibling file (discovery
+keeps only the TOML), and also when two differing-format layers share a base.
 
 ### Single source of truth for tool-wrapper stripping
 

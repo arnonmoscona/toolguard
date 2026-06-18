@@ -105,7 +105,7 @@ def resolve_compound_permission(command: str, resolve_one: Callable[[str], Tuple
     Resolve a compound command where each sub-command cascades independently.
 
     Each extracted sub-command is resolved through ``resolve_one`` -- typically a
-    closure over :meth:`toolguard.config.Configuration.resolve_permission`, so
+    closure over :meth:`toolguard.config.Configuration.resolve_permission_detailed`, so
     every sub-command independently runs the full more-specific-wins level
     cascade. The compound is allowed iff ALL sub-commands resolve to allow;
     otherwise the strictest outcome wins (any deny -> deny, then any ask -> ask),
@@ -153,7 +153,7 @@ def resolve_compound_permission(command: str, resolve_one: Callable[[str], Tuple
     for cmd, reason in allowed_commands:
         # Recover the matched pattern from the allow reason for display only.
         # IMPLICIT COUPLING: this assumes the ``...: <pattern>`` reason shape
-        # emitted by permissions.decide_command_at_level (e.g. "Command matches
+        # emitted by permissions.decide_command_at_level_detailed (e.g. "Command matches
         # allow pattern: git *"); if that reason format changes, update here (and
         # hook._COMPOUND_MATCH_PATTERN). Falls back to '?' so a format drift only
         # degrades the cosmetic detail, never the decision.

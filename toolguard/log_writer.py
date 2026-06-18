@@ -136,3 +136,36 @@ def log_command(
     except Exception as e:
         # Other logging errors - print warning but don't fail
         print(f'Warning: Failed to write log: {e}', file=sys.stderr)
+
+
+def log_discovery(source_descriptions: List[str], log_dir: Path) -> None:
+    """
+    Write a once-per-session config-discovery diagnostic to the resolution log.
+
+    Records which configuration levels were discovered and from where, e.g.
+    ``discovered 3 config levels: project: /p/.claude/toolguard_hook.toml, ...``.
+    This replaces the discovery diagnostics that the legacy ``_load_permissions``
+    used to print to stderr (TOO-8 Phase 4, M2). The entry goes to the high-volume
+    resolution log (``logs/toolguard-YYYY-MM-DD.md``), NOT to a warning/error/
+    conflict stream. The caller is responsible for the once-per-session guard.
+
+    Args:
+        source_descriptions: Human-readable per-source descriptions, e.g. the
+            output of ``Configuration.describe_levels()`` (the brief
+            ``level: path`` form passed by the hook caller).
+        log_dir: Directory where the resolution log file is written.
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+        log_file = log_dir / log_filename
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        count = len(source_descriptions)
+        joined = ', '.join(source_descriptions) if source_descriptions else '(none)'
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f'## {timestamp}\n\n')
+            f.write(f'- **Discovery**: discovered {count} config levels: {joined}\n\n')
+    except Exception as e:
+        # Diagnostic logging must never fail the hook.
+        print(f'Warning: Failed to write discovery diagnostic: {e}', file=sys.stderr)

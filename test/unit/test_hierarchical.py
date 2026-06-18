@@ -6,9 +6,9 @@ These tests exercise the new behavior introduced in Phase 2:
 
 - ``_discover_levels`` walks from the project root up to (and including) ``~``,
   assigning a specificity index per level (0 = most specific).
-- ``Configuration.resolve_permission`` evaluates levels most-specific first;
-  the first level that matches anything decides (deny-first within a level);
-  no match anywhere => fail-closed deny.
+- ``Configuration.resolve_permission_detailed`` evaluates levels most-specific
+  first; the first level that matches anything decides (deny-first within a
+  level); no match anywhere => fail-closed deny.
 - Relative config paths always resolve against the project root.
 
 Tests use the standard-library ``unittest`` framework. Every test carries a
@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import _discover_levels, load_configuration
-from toolguard.permissions import make_command_level_decider
+from toolguard.permissions import decide_command_at_level_detailed
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -229,8 +229,8 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
 
     def _config(self, *level_specs):
         """
-        Build a Configuration whose permission_levels('Bash') returns the given
-        per-level (allow, deny) tuples, most-specific first. Each spec is an
+        Build a Configuration whose Bash levels are the given per-level
+        (allow, deny) tuples, most-specific first. Each spec is an
         (allow_list, deny_list) pair. Avoids any file I/O.
         """
         from toolguard.config import ConfigLayer, Configuration, Provenance
@@ -248,9 +248,32 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
             layers.append(ConfigLayer(provenance=prov, content=MappingProxyType(content)))
         return Configuration(layers=tuple(layers))
 
+    @staticmethod
+    def _detailed_decider(command):
+        """
+        Build a per-level ``decide_detailed`` closure bound to one command.
+
+        Mirrors the inline closure the production hook builds over
+        ``decide_command_at_level_detailed`` so the test exercises the same
+        per-level decision logic the cascade consumes.
+        """
+
+        def _decide(allow_patterns, deny_patterns):
+            return decide_command_at_level_detailed(
+                command, list(allow_patterns), list(deny_patterns)
+            )
+
+        return _decide
+
     def _resolve(self, config, command):
-        """Resolve a single command through the Bash level cascade."""
-        return config.resolve_permission('Bash', make_command_level_decider(command))
+        """
+        Resolve a single command through the Bash level cascade.
+
+        Returns ``(decision, reason)`` extracted from the ``ResolvedDecision``
+        so existing Given/When/Then assertions remain unchanged.
+        """
+        resolved = config.resolve_permission_detailed('Bash', self._detailed_decider(command))
+        return resolved.decision, resolved.reason
 
     def test_child_allow_overrides_parent_deny(self):
         """
@@ -332,7 +355,8 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
         config = self._config((['git *'], []), ([], ['rm *']))
 
         def _resolve_one(sub):
-            return config.resolve_permission('Bash', make_command_level_decider(sub))
+            resolved = config.resolve_permission_detailed('Bash', self._detailed_decider(sub))
+            return resolved.decision, resolved.reason
 
         decision, _reason = resolve_compound_permission('git status && rm -rf /', _resolve_one)
         self.assertEqual(decision, 'deny')
@@ -346,7 +370,8 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
         config = self._config((['git *', 'ls *'], []),)
 
         def _resolve_one(sub):
-            return config.resolve_permission('Bash', make_command_level_decider(sub))
+            resolved = config.resolve_permission_detailed('Bash', self._detailed_decider(sub))
+            return resolved.decision, resolved.reason
 
         decision, _reason = resolve_compound_permission('git status && ls -l', _resolve_one)
         self.assertEqual(decision, 'allow')
@@ -452,7 +477,7 @@ class TestRelativeFilePathPatterns(_IsolatedEnvTestCase):
         level, then resolve a Read of <project_root>/src/x.py through the
         more-specific-wins file-path cascade. Returns the decision.
         """
-        from toolguard.hook import resolve_file_path_permission
+        from toolguard.hook import resolve_file_path_permission_detailed
 
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -477,7 +502,9 @@ class TestRelativeFilePathPatterns(_IsolatedEnvTestCase):
             with patch('toolguard.config.find_project_root', return_value=project):
                 with patch('toolguard.config.Path.home', return_value=home):
                     config = load_configuration(project)
-                    decision, _reason = resolve_file_path_permission('Read', target_file, config)
+                    decision, _reason, _override = resolve_file_path_permission_detailed(
+                        'Read', target_file, config
+                    )
             return decision
 
     def test_relative_read_pattern_at_project_level(self):
@@ -585,7 +612,7 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         Then it is DENIED -- the anchored pattern only matches inside the project,
             pinning that relative patterns are no longer matched as authored
         """
-        from toolguard.hook import resolve_file_path_permission
+        from toolguard.hook import resolve_file_path_permission_detailed
 
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -603,7 +630,9 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
             with patch('toolguard.config.find_project_root', return_value=project):
                 with patch('toolguard.config.Path.home', return_value=home):
                     config = load_configuration(project)
-                    decision, _reason = resolve_file_path_permission('Read', outside_file, config)
+                    decision, _reason, _override = resolve_file_path_permission_detailed(
+                        'Read', outside_file, config
+                    )
             self.assertEqual(decision, 'deny')
 
 

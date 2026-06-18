@@ -27,8 +27,8 @@ from unittest.mock import patch
 
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
-from toolguard.hook import resolve_file_path_permission
-from toolguard.permissions import check_hard_deny, make_command_level_decider
+from toolguard.hook import resolve_file_path_permission_detailed
+from toolguard.permissions import check_hard_deny, decide_command_at_level_detailed
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -157,7 +157,14 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
             hard = check_hard_deny(sub, list(hd_deny), list(hd_allow))
             if hard is not None:
                 return hard
-            return config.resolve_permission('Bash', make_command_level_decider(sub))
+
+            def _decide(allow_patterns, deny_patterns):
+                return decide_command_at_level_detailed(
+                    sub, list(allow_patterns), list(deny_patterns)
+                )
+
+            resolved = config.resolve_permission_detailed('Bash', _decide)
+            return resolved.decision, resolved.reason
 
         return resolve_compound_permission(command, _resolve_one)
 
@@ -352,7 +359,9 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
             with patch('toolguard.config.find_project_root', return_value=project):
                 with patch('toolguard.config.Path.home', return_value=home):
                     config = load_configuration(project)
-                    decision, reason = resolve_file_path_permission('Read', target_file, config)
+                    decision, reason, _override = resolve_file_path_permission_detailed(
+                        'Read', target_file, config
+                    )
             self.assertEqual(decision, 'deny')
             self.assertIn('hard_deny', reason)
 
@@ -381,8 +390,8 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
             with patch('toolguard.config.find_project_root', return_value=project):
                 with patch('toolguard.config.Path.home', return_value=home):
                     config = load_configuration(project)
-                    allow_decision, _ = resolve_file_path_permission('Write', allowed_file, config)
-                    deny_decision, _ = resolve_file_path_permission('Write', denied_file, config)
+                    allow_decision, _, _ = resolve_file_path_permission_detailed('Write', allowed_file, config)
+                    deny_decision, _, _ = resolve_file_path_permission_detailed('Write', denied_file, config)
             self.assertEqual(allow_decision, 'allow')
             self.assertEqual(deny_decision, 'deny')
 
@@ -416,11 +425,13 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
             with patch('toolguard.config.find_project_root', return_value=project):
                 with patch('toolguard.config.Path.home', return_value=home):
                     config = load_configuration(project)
-                    inside_decision, _ = resolve_file_path_permission('Edit', inside, config)
+                    inside_decision, _, _ = resolve_file_path_permission_detailed('Edit', inside, config)
                     # Outside the project root the anchored hard_deny must NOT match;
                     # with no allow match either, it is a normal fail-closed deny --
                     # but crucially not via the hard_deny path.
-                    outside_decision, outside_reason = resolve_file_path_permission('Edit', outside, config)
+                    outside_decision, outside_reason, _ = resolve_file_path_permission_detailed(
+                        'Edit', outside, config
+                    )
             self.assertEqual(inside_decision, 'deny')
             self.assertEqual(outside_decision, 'deny')
             self.assertNotIn('hard_deny', outside_reason)
@@ -445,7 +456,7 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
             with patch('toolguard.config.find_project_root', return_value=project):
                 with patch('toolguard.config.Path.home', return_value=home):
                     config = load_configuration(project)
-                    decision, _ = resolve_file_path_permission('Read', target_file, config)
+                    decision, _, _ = resolve_file_path_permission_detailed('Read', target_file, config)
             self.assertEqual(decision, 'allow')
 
 

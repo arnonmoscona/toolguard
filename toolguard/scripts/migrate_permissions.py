@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple
 from toolguard.config import (
     discover_config_files,
     find_project_root,
+    load_config_file,
     load_configuration,
     load_takeover_mode_config,
 )
@@ -1012,14 +1013,7 @@ def migrate(
         # Load existing toolguard config permissions (full structure)
         merged_perms = {'allow': [], 'deny': [], 'ask': []}
         if target_config_path.exists():
-            if target_format == 'toml':
-                import tomllib
-
-                with open(target_config_path, 'rb') as f:
-                    existing_config = tomllib.load(f)
-            else:
-                with open(target_config_path, 'r') as f:
-                    existing_config = json.load(f)
+            existing_config = load_config_file(target_config_path, target_format)
 
             existing_perms = existing_config.get('permissions', {})
             for perm_type in ['allow', 'deny', 'ask']:

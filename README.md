@@ -181,6 +181,15 @@ Also, check your MCP tool list. **Any tool that can execute bash commands should
 
 **Note on Subagents**: Subagents use the same tools as the main agent. If a subagent is configured to use a specific tool (e.g., an MCP bash tool), that tool must be in both the hook matchers AND the governed_tools list, or commands will bypass toolguard entirely.
 
+> **Known limitation -- subagent identification is currently broken (until further notice).**
+> Toolguard attempts to attribute each command to the issuing agent (main vs. a specific
+> subagent) for **logging** purposes, by parsing the Claude Code transcript. This was always
+> a best-effort workaround (Claude Code exposes no reliable way to identify subagent
+> identity), and recent Claude Code versions changed the transcript format and broke it. The
+> impact is **logging only** -- the agent attribution shown in logs may be wrong or absent.
+> It does **not** affect permission decisions: allow/deny/hard_deny resolution never depends
+> on subagent identity. This will be revisited in a future release.
+
 #### Step 3: Configure Permission Patterns
 
 Permission patterns can be configured in two places:

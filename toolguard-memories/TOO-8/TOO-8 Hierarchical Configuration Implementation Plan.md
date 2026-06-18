@@ -10,12 +10,13 @@ tags:
 
 # TOO-8 Hierarchical Configuration -- Implementation Plan (v2)
 
-Status: Phases 2 AND 3 IMPLEMENTED + code-reviewed + green (654 tests, with AND without
-CLAUDE_SETTINGS_PATH), UNCOMMITTED as of 2026-06-17 (Phase 2+3 await Arnon's combined
-review). Phase 1 was committed earlier.
-Next phases: 4 (logging streams + conflict logging), 5 (non-permission cross-level incl.
-takeover special-case + scalar more-specific-wins), 6 (SessionStart conflict hook),
-7 (docs restructure). See "Phase 2 outcome" and "Phase 3 outcome" at end.
+Status: Phases 1-3 COMMITTED. Phase 4 (logging streams + conflict logging + rule
+provenance) IMPLEMENTED + code-reviewed + green (672 tests, with AND without
+CLAUDE_SETTINGS_PATH), UNCOMMITTED as of 2026-06-17. The provenance-in-logs enhancement was
+delivered as part of Phase 4.
+Next phases: 5 (non-permission cross-level: scalar more-specific-wins + takeover
+special-case), 6 (SessionStart "last run had conflicts" alert), 7 (docs restructure).
+See "Phase 4 outcome" at end.
 
 ## Objective
 
@@ -166,10 +167,29 @@ phase's changes; existing tests still pass.
     dataclasses unprefixed. Update any test imports/patches accordingly.
 - **Phase 3 -- hard_deny.** `[hard_deny]` per level; collected across all; checked first;
   unoverridable.
-- **Phase 4 -- Logging streams + conflict logging.** Separate error / warning / conflict /
-  resolution logs. Error log = real errors only. Reclassify takeover "informational" message
-  out of warnings (it is a notice). Resolution log emits a warning pointing to conflict log
-  when a conflict occurs. (Non-error-noise cleanup is independent; may be pulled earlier.)
+- **Phase 4 -- Logging streams + conflict logging.** DESIGN DECIDED 2026-06-17:
+  - FOUR log streams (one file per concern):
+    - `logs/toolguard-YYYY-MM-DD.md` -- resolution log (existing, high volume). Add matched-rule
+      PROVENANCE to entries; record hard_deny denials here (with provenance); add a pointer
+      line when an allow-over-deny override occurred; emit a once-per-session
+      "discovered N config levels: <paths>" diagnostic (replaces the lost _load_permissions
+      stderr discovery output, M2).
+    - `logs/toolguard-error-YYYY-MM-DD.md` -- REAL errors only (log_error).
+    - `logs/toolguard-warning-YYYY-MM-DD.md` -- actionable warnings (log_warning moves here):
+      both-.toml-and-.json (M1, single source of truth), unsupported/ungoverned tools, etc.
+    - `logs/toolguard-conflict-YYYY-MM-DD.md` -- config conflicts, ON by default,
+      human/LLM-readable: ONLY the allow-over-deny override case (a more-specific level's allow
+      overriding a less-specific level's deny), citing BOTH sides' provenance + the command.
+  - Takeover "active" notice: REMOVE from logs entirely -> stderr + once-per-session marker only.
+  - Conflict scope: overrides only. hard_deny denials are NOT conflicts (resolution log instead).
+  - Provenance: thread through resolve_permission (provenance-carrying level view + decider
+    reports matched pattern -> map to ToolPatternLayer). Detection of override: when the winning
+    decision is an allow at level k, scan less-specific levels for a deny match; if found, log a
+    conflict (decision stays the more-specific allow per more-specific-wins).
+  - Reason-string compatibility: append provenance as a bracketed suffix so existing
+    "matches allow pattern: X" / reason.split(': ',1) assertions still hold where feasible.
+  - OUT of scope: session-start "last run had conflicts" alert (Phase 6); takeover cross-level
+    conflict logic (Phase 5).
 - **Phase 5 -- Non-permission config cross-level.** Apply decision 4 semantics on the model;
   implement takeover special-case (fail-safe OFF + loud conflict). Smaller after Phase 1.
 - **Phase 6 -- SessionStart conflict-alert hook.** New hook surfacing prior-session conflicts
@@ -350,3 +370,35 @@ the latter is already STALE (bash_permissions is off the live path post-Phase 2)
 keep the durable "Public abstraction" paragraph; replace the rest with one sentence noting a
 few loaders stay public only for not-yet-migrated non-test callers (transitional; tracker
 holds specifics). Pending Arnon's go-ahead.
+
+## Phase 4 outcome (2026-06-17) -- UNCOMMITTED, ready for review
+
+Implemented + code-reviewed (no critical/major) + green: 672 tests with AND without
+CLAUDE_SETTINGS_PATH; ruff clean; >90% on changed code.
+
+Delivered (per the decided design):
+- Four log streams: resolution (`toolguard-*`), errors-only (`toolguard-error-*`),
+  warnings (`toolguard-warning-*`), conflicts (`toolguard-conflict-*`). `error_log.py`
+  routes each via `log_error`/`log_warning`/new `log_conflict`.
+- Takeover notice removed from logs (stderr + once-per-session marker only).
+- Conflict logging (allow-over-deny overrides only): `resolve_permission_detailed` +
+  `_detect_override`; decision stays the more-specific allow; conflict entry cites both
+  provenances + command. hard_deny denials stay in the resolution log (not conflicts).
+- Rule provenance in reasons: `permission_levels_with_provenance` + `_provenance_for_pattern`,
+  appended as bracketed `[level: path]` suffix (preserves existing reason-substring
+  assertions). Bash + compound + Read/Write/Edit.
+- Once-per-session discovery diagnostic (`log_writer.log_discovery`) in the resolution log.
+- M1: single source for the both-`.toml`/`.json` warning (`validation_issues` -> warning
+  stream); legacy stderr print removed from `discover_config_files`.
+- Fix pass: validation Issues route by `issue.level` (error->error stream, else->warning);
+  docstring/comment nits (log_discovery, match_command coupling note); `issue_takeover_warning`
+  `to_stdout` kept (12 test call sites) with a clarified docstring (writes stderr).
+
+Coder choices accepted: kept `resolve_permission`/`resolve_file_path_permission` as 2-tuples
+(cascade tests pin them) and added `*_detailed` variants the hook drives; removed dead
+`_decide_file_path_at_level`.
+
+Changed: error_log.py, session_warnings.py, log_writer.py, permissions.py, config.py,
+hook.py, technical-notes.md; tests test_logging_streams.py (NEW), test_session_warnings.py,
+test_toml_config.py, test_hook.py. Reports in basic-memory `implementation/`. Nothing
+committed; Arnon does git.

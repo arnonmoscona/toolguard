@@ -69,3 +69,26 @@ Phases 4-7 (logging, non-perm cross-level, SessionStart, docs restructure).
 
 Stop+report if design contradiction, ambiguous allow-exception vs existing test, or scope
 exceeds Phase 3.
+
+
+---
+
+# TOO-8 Phase 4 -- Dead-code removal + config-loader consolidation [task recall 2026-06-18]
+
+Folds into uncommitted Phase 4 changeset. No behavior change except de-dup + memoization.
+
+## Part A -- remove confirmed dead code (all re-confirmed: zero non-test prod caller)
+1. Delete toolguard/validation.py (byte-for-byte dup of config_validation.py; zero importers).
+2. Remove Configuration._toolguard_permissions_from_sources (config.py:1737); test refs in test_configuration.py (2 sites + import).
+3. Remove check_file_path_permission (hook.py:239); ~30 sites in test_hook.py -> re-point to resolve_file_path_permission_detailed, preserve intent.
+
+## Part B -- consolidate config-file loading
+- ONE memoized loader keyed on (path, st_mtime_ns). Inner @functools.lru_cache _parse(path, mtime_ns); public computes mtime. cache_clear() for tests.
+- Adopt at config.py format-dispatch sites: 329 (_load_permissions_from_file, strict toggle), 414 (_load_governed_tools_from_file, silent []), 507 (takeover, silent continue), 1616 (_parse_source, warn+None). PRESERVE each site's error semantics (loader raises; wrappers keep their except).
+- Supersede load_toml_config / toml_config.py -> delete once unreferenced; re-point test_toml_config.py TestTomlConfigLoader to new loader.
+- Anti-pattern guard: loader must have prod callers (it will).
+
+## Tooling
+- Suite green BOTH: `uv run python -m unittest discover -s test -t .` AND `env -u CLAUDE_SETTINGS_PATH ...`. Baseline = 672 OK both.
+- NO ruff format. `uv run ruff check`. coverage: tools/coverage_stdlib.py. Don't touch bash_parser.py. NO git ops.
+- Python 3.14; tomllib always available -> hoist to top-level import.

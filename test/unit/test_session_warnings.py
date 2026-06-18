@@ -292,63 +292,64 @@ class TestCleanupOldMarkers(unittest.TestCase):
 
 
 class TestIssueTakeoverWarning(unittest.TestCase):
-    """Test warning issuance with deduplication."""
+    """Test the takeover-active notice (stderr + once-per-session marker only).
+
+    TOO-8 Phase 4: the takeover notice is informational, NOT actionable, so it is
+    no longer persisted to any toolguard log stream. These tests pin the new
+    contract: stderr echo every time, a once-per-session marker, and NO log file
+    write whatsoever.
+    """
 
     def test_writes_to_stdout(self):
         """
-        Given to_stdout=True and to_error_log=False
+        Given to_stdout=True
         When issue_takeover_warning runs
-        Then the warning is written to stderr
+        Then the notice is written to stderr
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
             with patch('sys.stderr') as mock_stderr:
-                issue_takeover_warning(logs_dir, to_stdout=True, to_error_log=False)
+                issue_takeover_warning(logs_dir, to_stdout=True)
 
-                # Should have printed warning
+                # Should have printed notice
                 mock_stderr.write.assert_called()
 
-    def test_writes_to_error_log_first_time(self):
+    def test_does_not_write_any_log_file(self):
         """
-        Given no marker exists yet and to_error_log=True
-        When issue_takeover_warning runs for the first time
-        Then log_warning is called once with a 'Takeover mode is active' message
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            with patch('toolguard.error_log.log_warning') as mock_log:
-                issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True)
-
-                # Should have logged warning
-                mock_log.assert_called_once()
-                args = mock_log.call_args[0]
-                self.assertIn('Takeover mode is active', args[0])
-
-    def test_skips_error_log_on_duplicate(self):
-        """
-        Given today's marker already exists and to_error_log=True
+        Given no marker exists yet
         When issue_takeover_warning runs
-        Then log_warning is not called (the error log is deduplicated)
+        Then NO toolguard log file (error/warning/conflict) is created -- the
+             notice is stderr + marker only
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            # Create marker to simulate previous warning
-            create_marker_file(logs_dir)
+            issue_takeover_warning(logs_dir, to_stdout=False)
+
+            # No persisted log stream should be written by the notice.
+            log_files = [p.name for p in logs_dir.glob('toolguard-*.md')]
+            self.assertEqual(log_files, [])
+
+    def test_does_not_call_log_warning(self):
+        """
+        Given no marker exists yet
+        When issue_takeover_warning runs
+        Then log_warning is never called (the notice no longer logs)
+        """
+        with TemporaryDirectory() as tmpdir:
+            logs_dir = Path(tmpdir)
 
             with patch('toolguard.error_log.log_warning') as mock_log:
-                issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True)
+                issue_takeover_warning(logs_dir, to_stdout=False)
 
-                # Should NOT have logged warning
                 mock_log.assert_not_called()
 
-    def test_stdout_always_written(self):
+    def test_stdout_always_written_even_with_marker(self):
         """
-        Given today's marker already exists, with to_stdout=True and to_error_log=True
+        Given today's marker already exists, with to_stdout=True
         When issue_takeover_warning runs
-        Then the warning is still written to stderr despite the existing marker
+        Then the notice is still written to stderr despite the existing marker
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
@@ -357,26 +358,25 @@ class TestIssueTakeoverWarning(unittest.TestCase):
             create_marker_file(logs_dir)
 
             with patch('sys.stderr') as mock_stderr:
-                issue_takeover_warning(logs_dir, to_stdout=True, to_error_log=True)
+                issue_takeover_warning(logs_dir, to_stdout=True)
 
-                # Should still print to stdout even though marker exists
+                # Should still print to stderr even though marker exists
                 mock_stderr.write.assert_called()
 
-    def test_creates_marker_after_logging(self):
+    def test_creates_marker(self):
         """
-        Given no marker exists and to_error_log=True
-        When issue_takeover_warning logs the warning
-        Then today's marker is created to prevent duplicate logging
+        Given no marker exists
+        When issue_takeover_warning runs
+        Then today's marker is created (once-per-session guard)
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('toolguard.error_log.log_warning'):
-                issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True)
+            issue_takeover_warning(logs_dir, to_stdout=False)
 
-                # Marker should be created
-                today_marker = get_marker_file_path(logs_dir, date.today())
-                self.assertTrue(today_marker.exists())
+            # Marker should be created
+            today_marker = get_marker_file_path(logs_dir, date.today())
+            self.assertTrue(today_marker.exists())
 
     def test_cleanup_called_when_specified(self):
         """
@@ -392,11 +392,10 @@ class TestIssueTakeoverWarning(unittest.TestCase):
             old_marker = get_marker_file_path(logs_dir, old_date)
             old_marker.touch()
 
-            with patch('toolguard.error_log.log_warning'):
-                issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True, cleanup_days=7)
+            issue_takeover_warning(logs_dir, to_stdout=False, cleanup_days=7)
 
-                # Old marker should be cleaned up
-                self.assertFalse(old_marker.exists())
+            # Old marker should be cleaned up
+            self.assertFalse(old_marker.exists())
 
     def test_cleanup_skipped_when_none(self):
         """
@@ -412,49 +411,43 @@ class TestIssueTakeoverWarning(unittest.TestCase):
             old_marker = get_marker_file_path(logs_dir, old_date)
             old_marker.touch()
 
-            with patch('toolguard.error_log.log_warning'):
-                issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True, cleanup_days=None)
+            issue_takeover_warning(logs_dir, to_stdout=False, cleanup_days=None)
 
-                # Old marker should NOT be cleaned up
-                self.assertTrue(old_marker.exists())
+            # Old marker should NOT be cleaned up
+            self.assertTrue(old_marker.exists())
 
-    def test_warning_message_content(self):
+    def test_notice_message_content(self):
         """
-        Given to_error_log=True and no existing marker
-        When issue_takeover_warning logs the warning
+        Given no existing marker
+        When issue_takeover_warning emits the notice to stderr
         Then the message contains the expected takeover-mode phrases
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('toolguard.error_log.log_warning') as mock_log:
-                issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True)
+            with patch('builtins.print') as mock_print:
+                issue_takeover_warning(logs_dir, to_stdout=True)
 
-                args = mock_log.call_args[0]
-                message = args[0]
+                printed = ' '.join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
 
                 # Check key phrases in message
-                self.assertIn('TOOLGUARD WARNING', message)
-                self.assertIn('Takeover mode is active', message)
-                self.assertIn('native permission prompts are bypassed', message)
-                self.assertIn('sole authority', message)
+                self.assertIn('TOOLGUARD WARNING', printed)
+                self.assertIn('Takeover mode is active', printed)
+                self.assertIn('native permission prompts are bypassed', printed)
+                self.assertIn('sole authority', printed)
 
     def test_handles_marker_creation_failure(self):
         """
         Given create_marker_file raises an OSError
-        When issue_takeover_warning runs with to_error_log=True
-        Then the warning is still logged and no exception propagates
+        When issue_takeover_warning runs
+        Then no exception propagates (the notice is best-effort)
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('toolguard.error_log.log_warning') as mock_log:
-                with patch('toolguard.session_warnings.create_marker_file', side_effect=OSError('Permission denied')):
-                    # Should not raise exception
-                    issue_takeover_warning(logs_dir, to_stdout=False, to_error_log=True)
-
-                    # Warning should still have been logged
-                    mock_log.assert_called_once()
+            with patch('toolguard.session_warnings.create_marker_file', side_effect=OSError('Permission denied')):
+                # Should not raise exception
+                issue_takeover_warning(logs_dir, to_stdout=False)
 
 
 if __name__ == '__main__':

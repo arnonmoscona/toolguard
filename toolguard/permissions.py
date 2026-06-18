@@ -10,7 +10,7 @@ Replicates the exact matching logic from checked_bash.py including:
 """
 
 import fnmatch
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from .patterns import parse_pattern, match_pattern, PatternType
 from .normalization import normalize_command, normalize_path
@@ -117,7 +117,15 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes
 
     Returns:
-        Tuple of (matched: bool, matched_pattern: str or None)
+        Tuple of (matched: bool, matched_pattern: str or None).
+
+        COUPLING: ``matched_pattern`` is the RAW, un-normalized list element from
+        ``patterns`` (prefixes such as ``[regex]``/``[glob]`` included), not the
+        parsed/stripped form. Provenance lookup in hook.py
+        (``_provenance_for_pattern``) relies on this identity -- it does
+        ``pattern in candidates`` against the very layer lists passed in here. If
+        this is ever changed to return a normalized/wrapper-stripped pattern,
+        provenance lookup will silently return None.
     """
     # Try matching with both original and normalized command
     command_variants = [command_str, normalize_path_in_command(command_str)]
@@ -270,17 +278,19 @@ def check_permission(
     return 'deny', 'Command does not match any allow patterns'
 
 
-def decide_command_at_level(
+def decide_command_at_level_detailed(
     command: str, allow_patterns: List[str], deny_patterns: List[str], extended_syntax: bool = True
-) -> Optional[Tuple[str, str]]:
+) -> Optional[Tuple[str, str, str]]:
     """
     Decide a command's outcome against ONE hierarchy level's patterns.
 
-    Deny-first within the level: a deny match yields ``('deny', reason)``; else an
-    allow match yields ``('allow', reason)``. When the level matches NOTHING,
-    returns ``None`` so the more-specific-wins cascade can fall through to the
-    next (less-specific) level. This is the per-level ``decide`` callable consumed
-    by :meth:`toolguard.config.Configuration.resolve_permission`.
+    Deny-first within the level: a deny match yields ``('deny', reason, pattern)``;
+    else an allow match yields ``('allow', reason, pattern)``. When the level
+    matches NOTHING, returns ``None`` so the more-specific-wins cascade can fall
+    through to the next (less-specific) level. The matched pattern is reported so
+    the provenance-aware resolver can map it back to the
+    :class:`~toolguard.config.ToolPatternLayer` (and thus the source file/level)
+    that contributed it.
 
     Args:
         command: The bash command (sub-command) to evaluate.
@@ -289,37 +299,17 @@ def decide_command_at_level(
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
 
     Returns:
-        ``(decision, reason)`` when this level matches, else ``None``.
+        ``(decision, reason, matched_pattern)`` when this level matches, else
+        ``None`` so the cascade falls through to the next level.
     """
     if deny_patterns:
         matched, pattern = match_command(command, deny_patterns, extended_syntax)
         if matched:
-            return 'deny', f'Command matches deny pattern: {pattern}'
+            return 'deny', f'Command matches deny pattern: {pattern}', pattern
 
     matched, pattern = match_command(command, allow_patterns, extended_syntax)
     if matched:
-        return 'allow', f'Command matches allow pattern: {pattern}'
+        return 'allow', f'Command matches allow pattern: {pattern}', pattern
 
     return None
 
-
-def make_command_level_decider(command: str, extended_syntax: bool = True) -> Callable:
-    """
-    Build a per-level ``decide`` callable bound to a single command.
-
-    Convenience adapter for :meth:`Configuration.resolve_permission`, which calls
-    ``decide(allow, deny)`` once per level. This binds the command and extended
-    syntax flag so only the level's pattern tuples vary.
-
-    Args:
-        command: The command (sub-command) to evaluate at each level.
-        extended_syntax: If False, skip parsing extended prefixes.
-
-    Returns:
-        A callable ``(allow, deny) -> (decision, reason) | None``.
-    """
-
-    def _decide(allow_patterns, deny_patterns):
-        return decide_command_at_level(command, list(allow_patterns), list(deny_patterns), extended_syntax)
-
-    return _decide

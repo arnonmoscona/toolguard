@@ -10,14 +10,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.toml_config import load_toml_config
 from toolguard.config_validation import (
     KNOWN_SUPPORTED_TOOLS,
     extract_tool_name,
     validate_permissions,
 )
 from toolguard.error_log import log_warning, log_error
-from toolguard.config import discover_config_files
+from toolguard.config import discover_config_files, load_config_file
 
 
 class TestTomlConfigLoader(unittest.TestCase):
@@ -26,7 +25,7 @@ class TestTomlConfigLoader(unittest.TestCase):
     def test_load_valid_toml_config(self):
         """
         Given a valid TOML config with governed_tools and allow/deny/ask permissions
-        When load_toml_config reads it
+        When load_config_file reads it as TOML
         Then the parsed dict exposes the governed tools and each permission list
         """
         toml_content = b"""
@@ -43,7 +42,7 @@ ask = ["Bash(alembic:*)"]
             filepath = Path(f.name)
 
         try:
-            config = load_toml_config(filepath)
+            config = load_config_file(filepath, 'toml')
             self.assertEqual(config['governed_tools'], ['Bash', 'Read'])
             self.assertEqual(config['permissions']['allow'], ['Bash(ls:*)', 'Read(/tmp/**)'])
             self.assertEqual(config['permissions']['deny'], ['Bash(rm -rf:*)'])
@@ -54,7 +53,7 @@ ask = ["Bash(alembic:*)"]
     def test_load_toml_with_missing_optional_sections(self):
         """
         Given a TOML config that defines only governed_tools
-        When load_toml_config reads it
+        When load_config_file reads it as TOML
         Then governed_tools is parsed and no permissions key is present
         """
         toml_content = b"""
@@ -66,7 +65,7 @@ governed_tools = ["Bash"]
             filepath = Path(f.name)
 
         try:
-            config = load_toml_config(filepath)
+            config = load_config_file(filepath, 'toml')
             self.assertEqual(config['governed_tools'], ['Bash'])
             self.assertNotIn('permissions', config)
         finally:
@@ -75,7 +74,7 @@ governed_tools = ["Bash"]
     def test_load_toml_with_additional_supported_tools(self):
         """
         Given a TOML config declaring additional_supported_tools
-        When load_toml_config reads it
+        When load_config_file reads it as TOML
         Then that list is exposed in the parsed config
         """
         toml_content = b"""
@@ -91,7 +90,7 @@ allow = ["Bash(ls:*)", "mcp__custom__tool(*)"]
             filepath = Path(f.name)
 
         try:
-            config = load_toml_config(filepath)
+            config = load_config_file(filepath, 'toml')
             self.assertEqual(config['additional_supported_tools'], ['mcp__custom__tool'])
         finally:
             filepath.unlink()
@@ -99,7 +98,7 @@ allow = ["Bash(ls:*)", "mcp__custom__tool(*)"]
     def test_load_invalid_toml_raises_error(self):
         """
         Given a file containing malformed TOML
-        When load_toml_config reads it
+        When load_config_file reads it as TOML
         Then an exception (TOML decode error) is raised
         """
         toml_content = b"""
@@ -112,18 +111,18 @@ invalid toml [
 
         try:
             with self.assertRaises(Exception):  # tomllib.TOMLDecodeError
-                load_toml_config(filepath)
+                load_config_file(filepath, 'toml')
         finally:
             filepath.unlink()
 
     def test_load_nonexistent_file_raises_error(self):
         """
         Given a path to a TOML file that does not exist
-        When load_toml_config reads it
+        When load_config_file reads it as TOML
         Then a FileNotFoundError is raised
         """
         with self.assertRaises(FileNotFoundError):
-            load_toml_config(Path('/nonexistent/file.toml'))
+            load_config_file(Path('/nonexistent/file.toml'), 'toml')
 
 
 class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):
@@ -352,13 +351,18 @@ class TestValidatePermissions(unittest.TestCase):
 
 
 class TestErrorLog(unittest.TestCase):
-    """Test error logging functionality."""
+    """Test error/warning logging functionality.
 
-    def test_error_log_file_created(self):
+    TOO-8 Phase 4: warnings and errors are now routed to SEPARATE per-concern
+    streams (``toolguard-warning-*.md`` vs ``toolguard-error-*.md``) instead of a
+    single shared error file.
+    """
+
+    def test_warning_log_file_created(self):
         """
         Given a log directory
         When log_warning writes a warning
-        Then exactly one toolguard-error-*.md file is created
+        Then exactly one toolguard-warning-*.md file is created (and no error file)
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
@@ -366,13 +370,16 @@ class TestErrorLog(unittest.TestCase):
             # Log a warning
             log_warning('Test warning', 'Fix by doing X', log_dir)
 
-            # Check that log file was created
-            log_files = list(log_dir.glob('toolguard-error-*.md'))
-            self.assertEqual(len(log_files), 1)
-            self.assertTrue(log_files[0].name.startswith('toolguard-error-'))
-            self.assertTrue(log_files[0].name.endswith('.md'))
+            # Warning goes to its own stream.
+            warning_files = list(log_dir.glob('toolguard-warning-*.md'))
+            self.assertEqual(len(warning_files), 1)
+            self.assertTrue(warning_files[0].name.startswith('toolguard-warning-'))
+            self.assertTrue(warning_files[0].name.endswith('.md'))
 
-    def test_error_log_format(self):
+            # The error stream must NOT receive the warning.
+            self.assertEqual(list(log_dir.glob('toolguard-error-*.md')), [])
+
+    def test_warning_log_format(self):
         """
         Given a log directory
         When log_warning writes a message and corrective steps
@@ -383,7 +390,7 @@ class TestErrorLog(unittest.TestCase):
 
             log_warning('Test warning message', 'Do this to fix', log_dir)
 
-            log_files = list(log_dir.glob('toolguard-error-*.md'))
+            log_files = list(log_dir.glob('toolguard-warning-*.md'))
             content = log_files[0].read_text()
 
             # Check format
@@ -397,7 +404,7 @@ class TestErrorLog(unittest.TestCase):
         """
         Given a log directory
         When log_error writes an entry
-        Then the entry includes a YYYY-MM-DD HH:MM:SS timestamp
+        Then a toolguard-error-*.md entry is created with a YYYY-MM-DD HH:MM:SS timestamp
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
@@ -405,6 +412,7 @@ class TestErrorLog(unittest.TestCase):
             log_error('Test error', 'Fix it', log_dir)
 
             log_files = list(log_dir.glob('toolguard-error-*.md'))
+            self.assertEqual(len(log_files), 1)
             content = log_files[0].read_text()
 
             # Timestamp format: YYYY-MM-DD HH:MM:SS
@@ -413,11 +421,12 @@ class TestErrorLog(unittest.TestCase):
             timestamp_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
             self.assertTrue(re.search(timestamp_pattern, content))
 
-    def test_multiple_log_entries_appended(self):
+    def test_warning_and_error_go_to_separate_files(self):
         """
         Given a log directory
         When a warning and then an error are logged
-        Then both entries appear in the same single error file with WARNING and ERROR labels
+        Then each appears in its OWN per-concern stream file (warning vs error),
+             never sharing a single file
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
@@ -425,14 +434,23 @@ class TestErrorLog(unittest.TestCase):
             log_warning('First warning', 'Step 1', log_dir)
             log_error('Second error', 'Step 2', log_dir)
 
-            log_files = list(log_dir.glob('toolguard-error-*.md'))
-            self.assertEqual(len(log_files), 1)
+            warning_files = list(log_dir.glob('toolguard-warning-*.md'))
+            error_files = list(log_dir.glob('toolguard-error-*.md'))
+            self.assertEqual(len(warning_files), 1)
+            self.assertEqual(len(error_files), 1)
 
-            content = log_files[0].read_text()
-            self.assertIn('First warning', content)
-            self.assertIn('Second error', content)
-            self.assertIn('WARNING', content)
-            self.assertIn('ERROR', content)
+            warning_content = warning_files[0].read_text()
+            error_content = error_files[0].read_text()
+
+            # Warning stream has only the warning.
+            self.assertIn('First warning', warning_content)
+            self.assertIn('WARNING', warning_content)
+            self.assertNotIn('Second error', warning_content)
+
+            # Error stream has only the error.
+            self.assertIn('Second error', error_content)
+            self.assertIn('ERROR', error_content)
+            self.assertNotIn('First warning', error_content)
 
 
 if __name__ == '__main__':

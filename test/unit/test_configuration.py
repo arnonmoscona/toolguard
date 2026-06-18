@@ -2,9 +2,8 @@
 Unit tests for the TOO-8 Phase 1 public config abstraction.
 
 These tests exercise :func:`toolguard.config.load_configuration` and the
-:class:`Configuration` public API, plus the internal delegating helpers
-(``_toolguard_permissions_from_sources``, ``config_sync_settings_from_sources``)
-that ``config_divergence`` and ``auto_migrate`` use.
+:class:`Configuration` public API, plus the internal delegating helper
+``config_sync_settings_from_sources`` that ``auto_migrate`` uses.
 
 Run with:
     uv run python -m unittest discover -s test -t .
@@ -27,7 +26,6 @@ from toolguard.config import (
     ToolPatternLayer,
     config_sync_settings_from_sources,
     load_configuration,
-    _toolguard_permissions_from_sources,
 )
 
 
@@ -508,25 +506,6 @@ class TestImmutability(unittest.TestCase):
 class TestInternalHelpers(unittest.TestCase):
     """Delegating helpers used by config_divergence / auto_migrate."""
 
-    def test_toolguard_permissions_from_sources(self):
-        """
-        Given a claude source and a toolguard_hook source with duplicate allow entries
-        When _toolguard_permissions_from_sources parses them
-        Then only the de-duplicated hook permissions are returned and the claude source is skipped
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            hook = Path(tmp) / 'toolguard_hook.json'
-            hook.write_text(json.dumps({'permissions': {'allow': ['Bash(git *)', 'Bash(git *)'], 'deny': []}}))
-            settings = Path(tmp) / 'settings.json'
-            settings.write_text(json.dumps({'permissions': {'allow': ['Bash(skip)']}}))
-            config_files = [
-                (settings, 'claude', 'json'),
-                (hook, 'toolguard_hook', 'json'),
-            ]
-            result = _toolguard_permissions_from_sources(config_files)
-            self.assertEqual(result['allow'], ['Bash(git *)'])
-            self.assertEqual(result['deny'], [])
-
     def test_config_sync_settings_from_sources_last_wins(self):
         """
         Given two toolguard_hook sources with overlapping config_sync keys
@@ -558,27 +537,6 @@ class TestInternalHelpers(unittest.TestCase):
             result,
             {'auto_migrate': False, 'backup_dir': 'logs/config-backups', 'auto_sort_on_migrate': True},
         )
-
-    def test_toolguard_permissions_skips_unparseable_and_non_dict(self):
-        """
-        Given hook sources where one is unparseable, one has non-dict permissions, and one is valid
-        When _toolguard_permissions_from_sources runs
-        Then the bad sources are skipped and only the valid file's allow patterns are returned
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            bad = Path(tmp) / 'toolguard_hook.json'
-            bad.write_text('not json{')
-            weird = Path(tmp) / 'toolguard_hook.local.json'
-            weird.write_text(json.dumps({'permissions': 'not-a-dict'}))
-            good = Path(tmp) / 'toolguard_hook.toml'
-            good.write_text('[permissions]\nallow = ["Bash(git *)"]\n')
-            config_files = [
-                (bad, 'toolguard_hook', 'json'),
-                (weird, 'toolguard_hook', 'json'),
-                (good, 'toolguard_hook', 'toml'),
-            ]
-            result = _toolguard_permissions_from_sources(config_files)
-            self.assertEqual(result['allow'], ['Bash(git *)'])
 
     def test_config_sync_skips_unparseable_and_empty(self):
         """

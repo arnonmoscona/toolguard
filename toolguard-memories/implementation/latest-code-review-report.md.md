@@ -1,85 +1,106 @@
 ---
 title: latest-code-review-report.md
-type: note
+type: report
 permalink: toolguard/implementation/latest-code-review-report.md
 tags:
-- TOO-8
 - code-review
+- TOO-8
 ---
 
-# Code Review Report -- TOO-8 Phase 2/3 (hierarchical config + more-specific-wins + hard_deny)
+## Code Review Report -- TOO-8 Phase 4 (log streams, conflict logging, provenance)
 
-Date: 2026-06-17
-Scope: changed (working-tree) source files for TOO-8.
-Files reviewed: toolguard/config.py, permissions.py, compound.py, hook.py,
-config_divergence.py, auto_migrate.py, scripts/migrate_permissions.py, plus new tests
-test/unit/test_hierarchical.py and test/unit/test_hard_deny.py.
+Review date: 2026-06-17
+Scope: changed (working tree) -- Python source + tests for TOO-8 Phase 4.
 
-## Summary
+Files reviewed:
+- /home/arnon/projects/toolguard/toolguard/config.py
+- /home/arnon/projects/toolguard/toolguard/hook.py
+- /home/arnon/projects/toolguard/toolguard/permissions.py
+- /home/arnon/projects/toolguard/toolguard/log_writer.py
+- /home/arnon/projects/toolguard/toolguard/error_log.py
+- /home/arnon/projects/toolguard/toolguard/session_warnings.py
+- /home/arnon/projects/toolguard/test/unit/test_logging_streams.py (new)
+- test_hook.py, test_session_warnings.py, test_toml_config.py (test updates)
+- technical-notes.md (doc)
 
-High-quality, well-documented refactor. The hierarchical discovery, more-specific-wins
-cascade, project-root path anchoring, hard_deny pool, and tool-wrapper consolidation are
-correct and well-tested. Full suite 654 tests pass WITH and WITHOUT CLAUDE_SETTINGS_PATH
-set; ruff clean; coverage on changed modules is good (config.py 95.6%, permissions.py
-90.4%, hook.py 83.8%). No critical or major correctness bugs found. Findings are minor /
-maintainability only.
+(Memory/task-artifact .md files under toolguard-memories/ were excluded from review.)
 
-## Critical
+### Summary
+
+Solid, well-documented implementation. The provenance-aware resolver, conflict
+(allow-over-deny) detection, and per-concern log-stream separation are cleanly
+designed and well tested (105 tests pass; ruff clean). The decision algorithm
+(more-specific-wins, deny-first within level, hard-deny-first) is preserved and
+the new `resolve_*_detailed` functions correctly thread matched-pattern -> provenance.
+A few correctness/consistency gaps remain, none critical.
+
+### Findings
+
+#### Critical
 None.
 
-## Major
+#### Major
 None.
 
-## Minor
+#### Minor
 
-### M1. Duplicate TOML/JSON warning logic is split and the Issue variant is unreachable in production
-- config.py `Configuration.validation_issues()` (config.py:1363-1383) detects a "Both
-  X.toml and X.json exist" warning by scanning for two layers sharing (parent, base_name)
-  with different formats. But the real discovery path `_discover_in_dir` (config.py:210-225)
-  picks TOML over JSON per base and NEVER emits both layers; it emits the duplicate warning
-  itself via a stderr `print`. So via `load_configuration` the Issue branch can never fire
-  -- it is only exercised by a hand-built Configuration in
-  test_configuration.py:test_duplicate_toml_json_issue.
-- Net effect: the duplicate-file warning exists in two forms with different delivery
-  (stderr print in discovery vs. logged Issue), and the logged-Issue form is dead in the
-  real flow. Not user-facing-incorrect, but confusing and a maintenance trap.
-- Recommended fix: make discovery surface the duplicate as an Issue (so it is logged via
-  the hook like other validation issues) and drop the stderr print, OR document explicitly
-  that the Issue branch covers only externally-constructed Configurations. Pick one source
-  of truth.
+1. **Validation issues ignore `Issue.level` -- error-level issues misrouted to the
+   warning stream.**
+   File: hook.py:84-85 (`_run_startup_validation`).
+   The loop calls `log_warning(...)` for every issue regardless of `issue.level`.
+   `Issue.level` can be `'error'` (config.py:1628 -- `warning.get('level','warning')`),
+   so an error-level validation issue would land in the WARNING stream, defeating the
+   Phase 4 stream separation. Currently LATENT: `validate_permissions`
+   (validation.py / config_validation.py) only emits `'warning'` today, so no error
+   issue is produced. Still a robustness gap given the field exists specifically to
+   distinguish.
+   Fix: branch on `issue.level` -- `log_error(...)` when `issue.level == 'error'`,
+   else `log_warning(...)`.
 
-### M2. Stale docstring: bash_permissions() described as the command-tool entry point
-- config.py module docstring (lines 20-23) and `bash_permissions` docstring (config.py:1224-1237)
-  state it is "the command-tool entry point so the hook never opens files itself." After
-  Phase 2 the hook resolves Bash via `resolve_permission('Bash', ...)` + `allow_deny_for('Bash')`
-  and no longer calls `bash_permissions()` (confirmed: no production caller; only tests
-  reference it). The legacy `_load_permissions` stderr diagnostics ("Discovered config
-  files...", "Loaded N allow patterns") therefore no longer fire at runtime.
-- Recommended fix: update the docstrings to note `bash_permissions()`/`_load_permissions`
-  are retained for the CLAUDE_SETTINGS_PATH-parity tests and legacy single-file diagnostics
-  but are not on the runtime decision path. Consider whether the lost stderr discovery
-  diagnostics matter for debugging; if so, route equivalent output through the new path.
+2. **Duplicate, un-migrated "both .toml and .json" stderr print in legacy discovery.**
+   File: config.py:151-155 (`discover_config_files`).
+   The diff removed the equivalent print from `_discover_in_dir` (the hierarchical
+   path) and routed the warning to the WARNING stream via `validation_issues()`,
+   claiming a "single source of truth." But `discover_config_files` -- still used by
+   config.py:497/577/682 and the migration script -- retains the old
+   `print(... 'Using TOML ...', file=sys.stderr)`. It fires during the test run
+   (visible in unittest output). Not a bug in the new path, but contradicts the
+   stated single-source-of-truth goal and can double-surface the warning for callers
+   that go through both paths.
+   Fix: remove the legacy print too, or add a comment noting it is intentionally
+   retained for the legacy/non-hierarchical code path.
 
-## Suggestions
+#### Suggestions
 
-### S1. Compound match-detail format coupling
-compound.py:resolve_compound_permission (lines 152-162) reconstructs matched patterns by
-splitting the reason on ": " and re-emits "cmd -> pattern", which hook._COMPOUND_MATCH_PATTERN
-later re-parses. The coupling is already called out in an in-code comment and degrades only
-cosmetically (falls back to '?'). Acceptable; a small structured return (list of
-(cmd, pattern)) would remove the round-trip if this is touched again.
+3. **Doc mismatch in `log_discovery`.**
+   File: log_writer.py docstring for `log_discovery`. The Args note says
+   `source_descriptions` is "the output of `Configuration.describe_sources()`", but
+   the actual caller (hook.py:612) passes `config.describe_levels()` (the brief
+   `level: path` form). Update the docstring to reference `describe_levels()`.
 
-### S2. Recall-note vs. actual diff drift (housekeeping, not code)
-The Phase 2 recall note lists test_migration.py as a changed file, but git shows it
-unchanged. coder-test/test_configuration_abstraction.py is a staged-add with no worktree
-file (recall note already flags unstaging it). No action for the code; just confirming the
-notes slightly overstate the change set.
+4. **`to_stdout` parameter now misnamed.**
+   File: session_warnings.py `issue_takeover_warning`. The parameter `to_stdout`
+   now gates writing to STDERR (the print goes to `sys.stderr`). The name is
+   misleading; the docstring already clarifies, but consider renaming to
+   `to_stderr` (or `echo`) in a follow-up. Low priority -- it is a public-ish kwarg
+   and renaming touches callers/tests.
 
-## Verification performed
-- `uv run python -m unittest discover -s test -t .` => Ran 654 tests, OK.
-- Same with `CLAUDE_SETTINGS_PATH` set => Ran 654 tests, OK.
-- `uv run ruff check toolguard/` => All checks passed.
-- Spot-checked `_strip_tool_wrapper`/`is_tool_wrapper` on edge cases (blanket, MCP double-
-  underscore names, nested parens, extended-syntax bodies, bare patterns) -- all correct.
-- Verified `_hierarchical_toggle` .local-over-regular precedence and break logic via an
-  ad-hoc temp hierarchy -- correct.
+5. **`_format_conflict_message` / `_detect_override` provenance lookup relies on
+   string identity of patterns.**
+   `_provenance_for_pattern` matches by `pattern in candidates` against the same
+   layer lists passed to `match_command`, and `match_command` returns the exact
+   list element it iterated. Verified consistent (the returned `matched_pattern` is
+   an element of the level's allow/deny list, prefixes and all), so this is correct.
+   Noted only because it is a subtle coupling: if a future change makes
+   `match_command` return a normalized/wrapper-stripped pattern instead of the raw
+   list element, provenance lookup would silently return None. A short comment at
+   the `match_command` return site would harden this.
+
+### Positives
+- Backward-compatible reason suffix design (`reason  [level: path]`) preserves
+  existing `reason.split(': ', 1)` and substring assertions -- good.
+- Deny-first / hard-deny-first ordering preserved; hard_deny correctly excluded
+  from conflict logging (verified by test).
+- New test file has strong branch coverage (override skip-empty-middle-level,
+  no-provenance default deny, hard_deny -> resolution-not-conflict, M1 single warning).
+- All diagnostic/log writes are wrapped so logging never fails the hook.

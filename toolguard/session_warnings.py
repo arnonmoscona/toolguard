@@ -102,24 +102,32 @@ def cleanup_old_markers(logs_dir: Path, days: int = 7) -> None:
 
 
 def issue_takeover_warning(
-    logs_dir: Path, to_stdout: bool = True, to_error_log: bool = True, cleanup_days: Optional[int] = 7
+    logs_dir: Path, to_stdout: bool = True, cleanup_days: Optional[int] = 7
 ) -> None:
     """
-    Issue a warning that takeover mode is active.
+    Issue an informational notice that takeover mode is active.
 
-    Warning is always written to stdout for visibility. Writing to error log
-    is deduplicated using marker files (once per day).
+    This notice is INFORMATIONAL, not actionable, so as of TOO-8 Phase 4 it is
+    NO LONGER persisted to any toolguard log stream. It is emitted to stderr for
+    visibility and recorded once per session via a date-stamped marker file so
+    repeated invocations within a day stay quiet. The marker continues to gate
+    the once-per-session behaviour even though nothing is written to a log file.
 
-    Warning message:
+    Notice message:
     [TOOLGUARD WARNING] Takeover mode is active. Claude's native permission prompts are
     bypassed. Toolguard is the sole authority for permission decisions. If toolguard
     fails or is misconfigured, blanket allows in native config will be exposed.
 
     Args:
-        logs_dir: Directory where logs and marker files are stored
-        to_stdout: If True, write warning to stdout (default: True)
-        to_error_log: If True, write warning to error log (deduplicated) (default: True)
-        cleanup_days: Number of days of marker files to keep (None = no cleanup, default: 7)
+        logs_dir: Directory where marker files are stored.
+        to_stdout: NOTE -- despite the name, this gates writing to STDERR, not
+            stdout (the notice goes to ``sys.stderr``). The name is retained for
+            backward compatibility with existing callers/tests; treat it as
+            "emit the stderr echo". If True (default), write the notice to
+            stderr. The stderr echo always fires (it is not deduplicated) so the
+            notice stays visible every invocation.
+        cleanup_days: Number of days of marker files to keep (None = no cleanup,
+            default: 7).
     """
     warning_message = (
         "[TOOLGUARD WARNING] Takeover mode is active. Claude's native permission prompts are "
@@ -127,34 +135,20 @@ def issue_takeover_warning(
         'fails or is misconfigured, blanket allows in native config will be exposed.'
     )
 
-    corrective_steps = (
-        'This is informational. Ensure toolguard_hook.toml is properly configured with '
-        'appropriate allow/deny patterns for your use case.'
-    )
-
-    # Always write to stdout for visibility
+    # Always write to stderr for visibility (every invocation; not deduplicated).
     if to_stdout:
         print(warning_message, file=sys.stderr)
 
-    # Write to error log with deduplication
-    if to_error_log:
-        # Check if we've already warned today
-        if marker_exists_for_today(logs_dir):
-            # Already warned today - skip error log
-            return
+    # Maintain the once-per-session marker (no log file is written anymore).
+    if marker_exists_for_today(logs_dir):
+        return
 
-        # Issue warning to error log
-        from toolguard.error_log import log_warning
+    try:
+        create_marker_file(logs_dir)
 
-        log_warning(warning_message, corrective_steps, logs_dir)
-
-        # Create marker file to track that we warned today
-        try:
-            create_marker_file(logs_dir)
-
-            # Cleanup old markers if requested
-            if cleanup_days is not None:
-                cleanup_old_markers(logs_dir, cleanup_days)
-        except OSError:
-            # If we can't create marker, continue (warning was still logged)
-            pass
+        # Cleanup old markers if requested
+        if cleanup_days is not None:
+            cleanup_old_markers(logs_dir, cleanup_days)
+    except OSError:
+        # If we can't create marker, continue (notice was still emitted).
+        pass
