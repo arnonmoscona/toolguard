@@ -388,6 +388,199 @@ Detection sources at startup: STATIC takeover conflict recomputed live from
 by reading the `toolguard-conflict-*.md` log (dynamic allow-over-deny can't be recomputed
 statically). Delegated to feature-coder.
 
+### Phase 7 -- IN PROGRESS (scope decided with Arnon 2026-06-19)
+Docs restructure + doc-debt. Decisions:
+- **Docs split into `docs/` files** (thin README index + topic files): README.md (index),
+  docs/quickstart.md, docs/configuration.md, docs/patterns.md, docs/takeover-mode.md,
+  docs/config-sync.md, docs/security.md, docs/agent-guides.md (NEW few-shot agent guides),
+  docs/architecture.md. technical-notes.md stays as dev/TOO-8 internals.
+- **run_hook.sh: DOCUMENT-ONLY, do NOT retire** (retirement = TOO-16 per distribution-model
+  memory). Phase 7 only adds a forward-looking note to the future uv-tool-install model.
+- **Docs-only phase**: the "confirm hierarchical Bash takeover-filtering coverage" check is
+  tracked as a SEPARATE follow-up, NOT done here.
+- Execution: main agent inline (Arnon's choice).
+- STALE doc-debt items (overtaken by Phases 4/5, do NOT action): `bash_permissions`
+  "legacy off live path" note (removed in P5), `_load_permissions` stderr diagnostics
+  (removed in P5), code-review M1 both-formats warning consolidation (done in P4),
+  config.py module-docstring "Privatisation notes" cleanup (already trimmed).
+- STILL-VALID doc-debt: name `resolve_compound_permission` + note `check_compound_permission`
+  retained but OFF the live path (technical-notes.md + docs/architecture.md).
+
+### Phase 7 outcome (2026-06-19) -- UNCOMMITTED, pending Arnon's review
+Docs restructure done by main agent inline. README (was 1570 lines) is now a thin index
+(description, motivation/goals, doc nav table, requirements/install/testing). Content split
+into docs/: quickstart.md, configuration.md (config ref + env vars + hierarchy), patterns.md,
+takeover-mode.md, config-sync.md (+ session warnings), security.md, agent-guides.md (NEW
+few-shot agent recipes), architecture.md. technical-notes.md kept as dev internals + new
+paragraph naming `resolve_compound_permission` (live) and `check_compound_permission`
+(retained, OFF live path). Doc-debt folded: TOO-16 distribution/`toolguard` entry-point note
+added document-only (run_hook.sh NOT retired). Stale items confirmed obsolete and skipped
+(bash_permissions/_load_permissions removed in P5, M1 done in P4, docstring already trimmed).
+Fixed stale facts while migrating: Python >=3.14 (pyproject), 683 tests, 4 log streams
+(warnings now toolguard-warning-*.md), package/test file lists, removed nonexistent
+toml_config.py/validation.py from structure. All internal doc links/anchors verified.
+No .py changes; suite still 683 OK. Nothing committed; Arnon does git.
+
+Follow-up (Arnon, same day): pulled the uv-tool-install/entry-point hook docs forward from
+the "document-only" stance into concrete instructions (Arnon's explicit request). README
+Installation now leads with `uv tool install` (-> `~/.local/bin/toolguard` +
+`~/.local/bin/toolguard-session-start`, bin dir confirmed via `uv tool dir --bin`) and
+stresses that installing != working (hooks must be registered). quickstart.md gained a
+"0. Install" step + a "Register the hooks" step covering BOTH PreToolUse (`toolguard`) and
+the recommended SessionStart (`toolguard-session-start`), with a wrapper-based alternative
+(run_hook.sh for PreToolUse; `.venv/bin/python -m toolguard.session_start` for SessionStart).
+configuration.md Step 1 note de-staled (dropped the "future TOO-16" framing). run_hook.sh
+still NOT retired. NOTE vs distribution-model memory: the uv-tool hook-wiring docs that were
+slated for TOO-16 are now partly in TOO-8 Phase 7 docs; TOO-16 still owns packaging/testing
+and actual run_hook.sh retirement.
+
+Follow-up 2 (Arnon, same day): grounded setup docs in real config
+(/home/arnon/projects/flowers/featherhill/.claude/). Changes: quickstart Step 1 now registers
+PreToolUse hooks for ALL governable tools (Bash, mcp__jetbrains__execute_terminal_command,
+mcp__local-tools__checked_bash, Read, Write, Edit) not just Bash; Step 2 now shows full
+governed_tools + additional_supported_tools (with the "custom MCP tools need it / built-ins
+don't" explanation). agent-guides.md gained a leading "install and register from scratch"
+recipe (same full multi-tool setup). README: added prominent "AI agents start here" callout
+pointing to docs/agent-guides.md (was just a table row -- insufficient). Agent-entry
+convention (Arnon chose BOTH): created root llms.txt (llmstxt.org doc map) + AGENTS.md (broad
+coding-agent auto-pickup), both routing agents to docs/agent-guides.md first; AGENTS.md also
+splits "configuring toolguard for a user" (-> agent-guides) vs "modifying the repo"
+(-> CLAUDE.md). All links verified. Still docs-only; nothing committed.
+
+Follow-up 3 (Arnon, same day): (a) Added GLOBAL/user-level setup option throughout. quickstart
+Step 1 gained "One project, or all projects" (hooks in project `.claude/settings.local.json`
+vs global `~/.claude/settings.json`); Step 2 gained per-project vs `~/.claude/toolguard_hook.toml`
+baseline (least-specific level, projects layer on top). agent-guides setup recipe steps 2 & 3
+updated likewise. (b) README Installation section SLIMMED to a 3-step map (base install / hook
+config / governed-tools config) that links into quickstart anchors -- removed all the
+duplicated uv-tool/editable verbiage to kill drift; quickstart Step 0 is now the canonical
+install reference (absorbed the editable-install alternative + upgrade note). All links/anchors
+re-validated via python. Still docs-only; nothing committed.
+
+Follow-up 4 (Arnon, same day): replaced the defunct/personal `mcp__local-tools__checked_bash`
+example everywhere (quickstart, agent-guides, configuration). Web research finding: there is
+NO canonical stable equivalent to `mcp__jetbrains__execute_terminal_command` -- JetBrains
+ships an official MCP server with that fixed tool name; VS Code command tools come from
+varied third-party MCP servers, and Cursor's `run_terminal_cmd` is a built-in (not an MCP
+tool Claude Code sees). So docs now keep Bash + jetbrains as the two CONCRETE command-tool
+examples and represent "other editors' tools" generically: naming convention
+`mcp__<server>__<tool>`, name VS Code/Cursor terminal MCP servers as the category, and tell
+the reader to run `/mcp` for the real name. TOML examples use a commented-out
+`# "mcp__your_terminal_server__run_command"` placeholder in both additional_supported_tools
+and governed_tools (no fabricated tool string). JSON blocks re-validated. Still docs-only.
+
+Follow-up 5 (Arnon, same day): SHIFT from earlier "keep run_hook.sh as editable alt" --
+Arnon now wants the `toolguard`/`toolguard-session-start` ENTRY POINTS as the single best
+practice everywhere; scrub run_hook.sh + `python -m toolguard.hook/session_start` from all
+USAGE docs. New uniform rule: uv-tool install -> `~/.local/bin/toolguard[-session-start]`;
+editable install -> `<checkout>/.venv/bin/toolguard[-session-start]` (console scripts exist
+in the venv too -- no wrapper, no `python -m`). Edited: configuration.md (JSON x5 + Important
+note), takeover-mode.md (JSON x4), quickstart.md (Step 0 editable note + Step 1 section
+renamed "Alternative: editable install", anchor now #alternative-editable-install, JSON uses
+.venv/bin entry points), agent-guides.md (editable rule). architecture.md: hook-flow diagram
+node run_hook.sh->`toolguard`/`toolguard.hook:main`; package-structure run_hook.sh line KEPT
+but recomment'd as "Legacy hook wrapper" (file still exists; not retired -- retirement is
+TOO-16). Only surviving run_hook.sh mention = that legacy listing line. `python -m
+toolguard.scripts.migrate_permissions` refs are the migration CLI (correct, untouched). JSON
++ links + anchors all validate. Still docs-only; nothing committed.
+
+Follow-up 6 (Arnon, same day): (a) quickstart Step 2 now links to the recognition-vs-governance
+distinction (configuration.md#declaring-additional-supported-tools), softened "must"->"should".
+(b) Documented `ignored_allow_patterns` properly wherever takeover/bypass mode is covered,
+VERIFIED against code first. Verified facts: 5 built-in defaults (Bash(*)/Read(*)/Write(*)/
+Edit(*)/mcp__jetbrains__execute_terminal_command(*)) ALWAYS seeded when takeover enabled
+(_DEFAULT_IGNORED_ALLOW_PATTERNS config.py:50); both ignored_allow_patterns +
+additional_ignored_patterns are ADDITIVE unions over defaults (cannot remove a default;
+config.py:946,967-972); filtering applies ONLY to NATIVE settings.json/.local.json allow
+entries (layer.is_native, config.py:1108), NOT toolguard_hook files; allow-only (not deny);
+EXACT match after wrapper strip; only when takeover.enabled. Edits: takeover-mode.md (precise
+"how it works" filter sentence + new "### Ignored allow patterns" subsection + corrected the
+misleading "default list shown"/"beyond defaults" comments); configuration.md reference block
+takeover comments corrected likewise. All TOML/JSON/links/anchors validate. Docs-only.
+
+Follow-up 7 (Arnon, same day): explained WHY divergence is natural/unavoidable. Mechanism:
+Claude Code hits an "ask", user picks "Yes, don't ask again", Claude writes a new allow into
+its own settings.local.json -- it knows nothing about toolguard, so it diverges from
+toolguard_hook.toml. Cannot be turned off (how Claude's prompts work); goal is to MANAGE not
+prevent (tooling now, more automation later, or manual). Added "### Divergence is normal --
+you cannot prevent it" subsection to config-sync.md, and a matching "Expect this -- it is
+unavoidable" note to the agent-guides clean-up recipe (user wanted users AND agents to know).
+Docs-only; links/anchors validate.
+
+Follow-up 8 (Arnon, same day): renamed docs/patterns.md -> docs/permission-patterns.md
+(clearer in a bare dir listing; "patterns" too generic). Chose permission-patterns over
+command-matching-patterns because the file ALSO covers file-path patterns + normalization +
+compound commands (command-only name would under-scope). Updated H1 "Pattern Reference" ->
+"Permission Patterns" and all 6 referring links (README, llms.txt, agent-guides, quickstart,
+configuration x2) + their link text. NOTE: docs/ is now git-TRACKED (Arnon committed it some
+point), so the rename was a plain `mv` (filesystem) -- Arnon stages/commits the rename
+(git will detect it); I did NOT run git mv. Links/anchors validate.
+
+Follow-up 9 (Arnon, same day): expanded security.md with two new sections. (a) "Ongoing
+security review" -- routine of reviewing resolution/error/warning/conflict logs + divergence,
+as a cadence table mapping each review task to its supporting facility (log streams + matched-
+rule provenance, session warnings, SessionStart conflict-alert hook, migrate_permissions
+--dry-run), plus an automated-vs-on-you split and a quick-pass command block. (b) "Maintaining
+your toolguard configuration" -- best practices: keep rules sorted (auto_sort_on_migrate),
+consolidate similar rules into fewer regex/glob (with a critical-thinking caution: consolidate
+scope not breadth -- don't collapse to Bash(git:*)), manage divergence, promote shared rules
+up to user level + keep project level lean, use Claude to review rules ("report, don't edit";
+human owns final call), and watch for stray rules from hasty "always allow" answers. All
+links/anchors validate. Docs-only. NOTE: security.md multi-line guarantee is still TOO-17's
+to add (not done here).
+Follow-up 10 (Arnon, same day): added 4 more maintenance best practices to security.md
+(now 10 bullets): comment rules to record intent; version-control config + review diffs
+(settings.local.json gitignored, never commit secrets/~/.claude); defense-in-depth explicit
+denies/hard_deny (don't rely on absence-of-allow); use the `ask` tier for impactful-but-
+reversible ops. (Candidates 5 prune-obsolete, 6 test-denies-fire/re-verify-after-upgrade,
+7 single-owner-for-takeover/hard_deny were offered but NOT added -- available if wanted.)
+Links/anchors validate.
+
+Follow-up 11 (Arnon, same day): removed the "Alpha" designation from takeover mode (it has
+been in real use and works). Edits: takeover-mode.md H1 (-> "# Takeover Mode") + intro callout
+(dropped "alpha", kept the read-security-warnings/test-first caution); README doc-nav row
+("alpha" removed). Only remaining "alpha" = config-sync.md "alphabetically" (unrelated).
+Done via the JetBrains MCP replace_text_in_file (new workflow: edit IDE-open docs through the
+IDE so changes show immediately; recorded as auto-memory feedback edit-via-ide-mcp).
+
+### !! SECURITY FINDING (2026-06-19) -> TICKET TOO-17 (show-stopper)
+TOO-17 created by Arnon for the multi-line Bash fail-open bypass below. Folded into the
+current effort: it BLOCKS publishing the updated TOO-8 docs and will be done before release.
+Expected to be LARGE -- non-trivial parser change (PEG grammar + extractor) plus extensive
+unit tests. When starting TOO-17 implementation, use the feature-coder subagent (non-trivial).
+The multi-line DOC discussion (permission-patterns.md compound section + security.md) is part
+of TOO-17 scope, NOT this docs pass. Ticket draft source: /tmp/too-multiline-bash-bypass-ticket.md.
+
+#### Original finding -- multi-line Bash fail-OPEN bypass
+Discovered while documenting compound commands. VERIFIED end-to-end:
+- Grammar parses only a SINGLE logical line: `spacing=[ \t]*` (no newline), no newline
+  control_op. Newline-separated command => parse FAILS => command_extractor safety net
+  returns the WHOLE blob as ONE command (logs "Parse failed"); NOT split.
+- fnmatch is DOTALL, so DEFAULT allow `git status:*`(->`git status*`) matches across the
+  newline; DEFAULT/glob/native deny is start-anchored so it misses later lines.
+- NET: with allow `Bash(git status:*)` + deny `Bash(rm -rf:*)`, input "git status\nrm -rf /"
+  => ALLOW (rm -rf runs). Single-line "git status && rm -rf /" correctly => DENY. FAIL-OPEN.
+- Backslash continuation parses but stays one undecomposed command (same one-unit effect).
+- Mitigation that works TODAY: `[regex]` deny (re.search scans whole string incl. newlines)
+  e.g. `Bash([regex]rm\s+-rf)` => denies the blob. Start-anchored deny does not.
+Files: toolguard/parser/bash_parser.peg (spacing/control_op), parser/command_extractor.py
+(fallback returns [whole]), permissions.py match_command (fnmatch DOTALL).
+STATUS (2026-06-19): Arnon's call -> draft ticket as a SHOW-STOPPER; he files it. Ticket
+markdown drafted + copied to clipboard (source /tmp/too-multiline-bash-bypass-ticket.md):
+title "Multi-line Bash commands bypass permission checks (fail-open)", with repro, root
+cause (3 factors), fix options (A decompose-by-line recommended + C no-DOTALL backstop + B
+fail-closed fallback), acceptance criteria w/ tests, and DOCS-update requirements folded IN.
+DECISION: fix this BEFORE publishing the updated TOO-8 docs. The multi-line doc discussion
+(permission-patterns.md compound section + security.md) is DEFERRED to that new ticket -- do
+NOT document multi-line in this docs pass. This is a security item: do NOT drop/compact it.
+
+### !! PRE-COMMIT REMINDER (Arnon, 2026-06-19)
+Arnon is still REVIEWING the Phase 7 docs. He asked to be REMINDED, before any commit of
+this work, to decide whether to pick up the two open follow-ups below first
+(migrate_permissions off load_takeover_mode_config; hierarchical-Bash takeover-filtering
+coverage check). => When Arnon signals he is about to commit / ready to commit, surface
+these open items BEFORE he commits.
+
 ### Follow-ups still open
 - Migrate `scripts/migrate_permissions.py` off `load_takeover_mode_config` onto
   `Configuration.takeover_mode`, then drop the last legacy loader (TOO-8 follow-up).

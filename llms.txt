@@ -1,0 +1,46 @@
+# Toolguard
+
+> A Claude Code PreToolUse hook that replaces the native permission system for Bash, Read,
+> Write, and Edit with regex/glob/native pattern matching, compound-command parsing, a
+> hierarchical multi-level configuration model, an unoverridable hard-deny safety valve, and
+> detailed logging.
+
+Agents: read [docs/agent-guides.md](docs/agent-guides.md) first. It is the terse,
+task-oriented version of the documentation (install, register hooks, write rules, diagnose
+denials) and is usually sufficient on its own. Open the other guides only when a task needs
+the detail -- they are verbose and human-oriented.
+
+## Agent docs (read first)
+
+- [Agent guides](docs/agent-guides.md): few-shot recipes for setting up and configuring
+  toolguard on a user's behalf -- installation, registering hooks for every governed tool,
+  governed_tools / additional_supported_tools, writing rules, and diagnosing denials.
+
+## Core docs
+
+- [Quick start](docs/quickstart.md): install, register hooks for all governed tools, declare
+  governed_tools, add a few patterns, verify.
+- [Configuration](docs/configuration.md): full reference -- hook matchers, governed_tools,
+  additional_supported_tools, environment variables, the hierarchy/resolution model, and the
+  annotated config template.
+- [Permission patterns](docs/permission-patterns.md): DEFAULT/REGEX/GLOB/NATIVE patterns, file-path
+  patterns, path normalization, compound commands.
+- [Takeover mode](docs/takeover-mode.md): blanket-allow + toolguard-enforces mode, its
+  risks, and a complete example.
+- [Config sync & migration](docs/config-sync.md): divergence detection, migrating patterns,
+  backups, and session warnings.
+- [Security best practices](docs/security.md): blanket-allow risks, recommended deny
+  patterns, and verifying toolguard is actually running.
+
+## Reference
+
+- [README](README.md): project overview, requirements, installation, testing.
+- [Technical architecture](docs/architecture.md): package structure, hook flow, pattern
+  matching, logging streams.
+- [Technical notes](technical-notes.md): deep design internals (hierarchy/resolution,
+  hard-deny semantics, logging streams, subagent identification).
+
+## Optional
+
+- [Contributor guide (CLAUDE.md)](CLAUDE.md): conventions for agents modifying the toolguard
+  repo itself -- not needed for configuring toolguard as a user.

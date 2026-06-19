@@ -168,6 +168,16 @@ MATCHING stays in `permissions.py`/`compound.py` (and the file-path matcher in
 A single-level config behaves identically to the old deny-first model, so there
 is one resolution path with no legacy/dual code.
 
+Compound commands on the live path are resolved by
+`compound.resolve_compound_permission`: the hook splits the command into
+sub-commands and passes each through the level cascade, combining the results
+(any sub-command denied => whole command denied; else any "ask" => ask; else
+allow). The older `compound.check_compound_permission` is **retained but OFF the
+live path** -- it evaluates a compound command against a single flat
+`(allow, deny)` pattern pair and predates the hierarchical resolver. It is kept
+for its tests and for any caller that only needs flat allow/deny semantics; the
+runtime hook no longer calls it.
+
 ### Project-root-relative paths
 
 **Any relative path that appears anywhere in configuration resolves against the
