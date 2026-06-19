@@ -348,3 +348,50 @@ Changed: error_log.py, session_warnings.py, log_writer.py, permissions.py, confi
 hook.py, technical-notes.md; tests test_logging_streams.py (NEW), test_session_warnings.py,
 test_toml_config.py, test_hook.py. Reports in basic-memory `implementation/`. Nothing
 committed; Arnon does git.
+
+
+## STATUS UPDATE (2026-06-18) -- supersedes the stale header
+
+Phases 1-5 are COMMITTED. (The top-of-note "Status:" block is stale -- it predates the
+Phase 4/5 commits.) Phase 6 is IN PROGRESS.
+
+### Phase 5 outcome (2026-06-18) -- COMMITTED
+Non-permission cross-level resolution + folded-in code-review fixes + an approved legacy
+dead-code sweep. Delivered:
+- `Configuration.scalar()` -> MORE-SPECIFIC-WINS (first defining layer wins); config_sync
+  + no_match_fallback follow. Pin test renamed to `test_config_sync_conflict_is_project_wins`;
+  Phase-2 FIXMEs cleared.
+- `governed_tools()` + takeover pattern lists stay UNION across all layers.
+- `takeover_mode.enabled` -> single-owner + fail-safe-on-conflict: 0 set => OFF; all agree
+  => that value; disagree => fail-safe OFF + `TakeoverEnabledConflict` (values+provenance).
+  Hook logs the conflict once/session (`log_conflict`) + session warning.
+- Non-bool `takeover_mode.enabled` no longer coerced (fail-safe security toggle): it does
+  not vote, and `validation_issues()` reports it as an error.
+- DRY: `_CONFIG_SYNC_DEFAULTS` centralizes config_sync defaults.
+- Legacy dead-code REMOVED (no production callers, confirmed with grep -rn incl.
+  toolguard/scripts/): `Configuration.bash_permissions()`, the `_load_governed_tools`
+  cluster, and the `_load_permissions`/`_load_permissions_from_file`/`_merge_permissions`
+  cluster + all their tests. `load_takeover_mode_config()` was KEPT (scripts/migrate_permissions.py
+  still calls it) and documented as transitional. (Near-miss: an `ag` sweep returned empty
+  for load_takeover_mode_config; not reproducible / not an ag ignore behavior; `grep -rn`
+  caught the caller. Lesson: confirm negative "no callers" results with grep before deleting.)
+- 645 tests green WITH and WITHOUT CLAUDE_SETTINGS_PATH; ruff clean.
+- Reports: basic-memory `implementation/phase-5-review-fixes-implementation-report`.
+
+### Phase 6 -- IN PROGRESS (design decided with Arnon 2026-06-18)
+SessionStart conflict-alert hook. Decisions: SEPARATE entry point
+`toolguard-session-start = "toolguard.session_start:main"`; ALL conflict detection at
+SessionStart (NO tool-use-time markers); nag every session while conflicts remain
+("until resolved"); brief summary emitted to STDOUT so Claude ingests it as context.
+Detection sources at startup: STATIC takeover conflict recomputed live from
+`takeover_mode().conflict` (self-clears when fixed) + DYNAMIC/recorded conflicts surfaced
+by reading the `toolguard-conflict-*.md` log (dynamic allow-over-deny can't be recomputed
+statically). Delegated to feature-coder.
+
+### Follow-ups still open
+- Migrate `scripts/migrate_permissions.py` off `load_takeover_mode_config` onto
+  `Configuration.takeover_mode`, then drop the last legacy loader (TOO-8 follow-up).
+- Confirm the live hierarchical Bash takeover-filtering path is covered by newer tests
+  (the removed legacy tests exercised it via `_load_permissions`) -- Phase 7 / coverage pass.
+- Phase 7: README restructure + doc-debt (resolve_compound_permission naming, TOO-16
+  distribution model, run_hook.sh retirement).

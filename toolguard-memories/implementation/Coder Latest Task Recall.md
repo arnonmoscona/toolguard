@@ -5,49 +5,86 @@ permalink: toolguard/implementation/coder-latest-task-recall
 tags:
 - TOO-8
 - task-memory
-- phase-5-review-fixes
+- session-start
 ---
 
-# Phase 5 Review Fixes - Task Recall
+# TOO-8 Phase 6: SessionStart Hook Implementation
 
-## Task
-Fix pass on three MINOR code-review findings from TOO-8 Phase 5 (hierarchical configuration).
-Do NOT expand scope beyond these three items.
+## Task Summary
 
-## Finding 1: Remove test-only dead code
-- `Configuration.bash_permissions()` in `toolguard/config.py` (around line 1594) delegates to legacy 2-level `_load_permissions()`. Runtime Bash path now resolves hierarchically via `resolve_permission_detailed('Bash', ...)` / `allow_deny_for('Bash')`, so `bash_permissions()` has NO production caller (only its own unit test).
-- Action: CONFIRM there is no non-test caller, then REMOVE `bash_permissions()` and its unit test.
-- Same situation for `_load_governed_tools()` -- CONFIRM, then REMOVE it and its test.
-- If `_load_permissions()` becomes unused after these removals, check and REMOVE it too.
+Implement a `SessionStart` hook that surfaces toolguard configuration conflicts at the
+start of each Claude Code session.
 
-## Finding 2: Fail-loud on non-bool `enabled`
-- Around `toolguard/config.py:1269`, `takeover_mode.enabled` is parsed via `bool(section['enabled'])`, which silently coerces non-bool (e.g. string "false" becomes True).
-- Since `enabled` is a fail-safe SECURITY toggle, non-bool should NOT be coerced.
-- Fix: when `enabled` is present but not a real bool, treat that level as NOT explicitly setting enabled (so it does not participate as a True/False vote) AND emit a validation Issue.
-- Follow existing validation-Issue pattern in the file.
-- Do not change behavior for valid bool values.
+## Key Requirements
 
-## Finding 3: DRY -- centralize config_sync defaults
-- `config_sync` default values are duplicated in three places: `config_sync_settings()`, `config_sync_settings_from_sources()`, and a test fake.
-- Centralize them into a module-level `_CONFIG_SYNC_DEFAULTS` dict.
-- Mirror how `_DEFAULT_IGNORED_ALLOW_PATTERNS` / `_DEFAULT_NO_MATCH_FALLBACK` were centralized.
-- All three sites should reference it. Keep resolved values identical to today.
+### Entry Point
+- Add `toolguard-session-start = "toolguard.session_start:main"` to `pyproject.toml [project.scripts]`
+- Leave `toolguard = "toolguard.hook:main"` unchanged
 
-## Constraints
-- Tests use stdlib unittest NOT pytest. Run: `uv run python -m unittest discover -s test -t .`
-- Suite MUST pass both with env and with `env -u CLAUDE_SETTINGS_PATH uv run python -m unittest discover -s test -t .`
-- Every unit test function must carry BDD (Given/When/Then) docstring
-- Always run `uv run ruff check .` (must be clean). Do NOT run `ruff format`.
-- No git operations.
-- Generate doc comments for new/changed functions.
-- No async/await, no threading, no imports inside function bodies.
+### New Module
+- `toolguard/session_start.py` with `def main() -> None`
 
-## After Implementing
-1. `uv run ruff check .` (clean)
-2. Run suite both ways (with env, and without CLAUDE_SETTINGS_PATH). Both must be green.
-3. Verify coverage if practical.
-4. Write implementation report to basic-memory project='toolguard', under `implementation/` folder, tagged `TOO-8`.
+### Input
+- SessionStart JSON payload from stdin
+- `hook_event_name == "SessionStart"`, has `cwd` and `session_id`, NO `tool_name`/`tool_input`
+- Be tolerant: fall back to `os.getcwd()` if `cwd` absent
+- NEVER raise to user; wrap body so any error => silent exit 0 (optional one-line stderr)
 
-## Files to modify
-- `toolguard/config.py` - main changes
-- `test/unit/test_configuration.py` - remove unit tests for dead code
+### Config Loading
+- `config = load_configuration(cwd)` -- same as PreToolUse hook
+- `log_dir = config.project_root / 'logs'` (handle project_root is None => no log dir => only static check)
+
+### Two Detection Sources
+
+1. **STATIC (recomputed live, self-clears when config fixed)**:
+   - `config.takeover_mode().conflict` -- a `TakeoverEnabledConflict` or None
+   - If present: levels disagree on `takeover_mode.enabled`, failed safe to OFF
+   - Use `.describe()` / sources for message
+
+2. **DYNAMIC (previously recorded, read from log files)**:
+   - Read conflict log file(s) in `log_dir` named `toolguard-conflict-*.md`
+   - Report the MOST RECENT such file that has recorded entries
+   - Count entry headers (look at how `error_log.log_conflict` writes entries)
+   - Each entry starts with `## YYYY-MM-DD HH:MM:SS - CONFLICT`
+
+### Output
+- If any conflicts found: print BRIEF human-readable summary to STDOUT
+  (Claude Code injects SessionStart stdout into session context)
+- If NO conflicts: print nothing and exit 0
+- Exit 0 ALWAYS
+
+### Output Format (example)
+```
+toolguard: configuration conflicts detected --
+- takeover_mode.enabled disagrees across levels; failed safe to OFF (<provenance>)
+- conflict log logs/toolguard-conflict-YYYY-MM-DD.md has N recorded entr(y/ies)
+Review and resolve; see the conflict log for details.
+```
+
+### Behavior
+- Nag every session while conflicts remain (no dedup marker)
+- A SessionStart hook must never block or break a session
+
+## Tests Required
+
+File: `test/unit/test_session_start.py`
+
+1. Static takeover conflict present -> summary mentions it
+2. Conflict log with entries -> summary reports count + path
+3. No conflicts -> no stdout
+4. Malformed/empty stdin -> graceful exit 0 no traceback
+5. Missing project_root/log_dir -> still handles static check
+6. >90% coverage on new module
+
+## Other Changes
+
+- Add "Phase 6" section to `technical-notes.md`
+- Update `pyproject.toml`
+
+## Conflict Log Format (from error_log.py)
+
+Each entry in `toolguard-conflict-YYYY-MM-DD.md` starts with:
+```
+## YYYY-MM-DD HH:MM:SS - CONFLICT
+```
+Count lines starting with `## ` and containing `- CONFLICT` to count entries.

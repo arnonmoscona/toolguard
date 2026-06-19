@@ -9,6 +9,7 @@ dependencies = []
 [project.scripts]
 
 toolguard = "toolguard.hook:main"
+toolguard-session-start = "toolguard.session_start:main"
 
 [dependency-groups]
 dev = [

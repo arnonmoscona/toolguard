@@ -387,4 +387,86 @@ levels' values + provenance and that fail-safe OFF was applied) and issues a
 once-per-session takeover/config warning (the same session-marker mechanism as
 the takeover "active" notice). Because `enabled` is already OFF, the downstream
 path is the safe one. (Surfacing prior-session conflicts at session START is
-deferred to Phase 6.)
+handled by Phase 6.)
+
+## SessionStart conflict alerting (TOO-8 Phase 6)
+
+### Separate entry point
+
+The SessionStart hook is exposed as a dedicated script entry point in
+`pyproject.toml`:
+
+```toml
+toolguard-session-start = "toolguard.session_start:main"
+```
+
+This is **completely independent** of the PreToolUse `toolguard` hook and
+runs under the `SessionStart` hook event, not `PreToolUse`. The two entry
+points share configuration loading (`load_configuration`) but nothing else.
+
+### Two detection sources
+
+The hook detects conflicts from two complementary sources:
+
+**1. Static conflicts (recomputed live)**
+
+`config.takeover_mode().conflict` returns a `TakeoverEnabledConflict` when
+levels disagree on `takeover_mode.enabled`. This is recomputed fresh every
+session from the current configuration files, so it **self-clears** the
+moment the configuration is corrected. No stale state is involved.
+
+**2. Dynamic conflicts (from the conflict log)**
+
+Allow-over-deny overrides (where a more-specific level's `allow` overrides a
+less-specific level's `deny`) can only be detected at tool-use time -- when
+an actual command is evaluated. These are recorded to
+`logs/toolguard-conflict-YYYY-MM-DD.md` by `error_log.log_conflict`.
+
+The SessionStart hook reads the most recent conflict log file that contains
+at least one entry and reports its path and entry count. Entry counting is
+simple: each entry starts with a Markdown heading of the form
+`## YYYY-MM-DD HH:MM:SS - CONFLICT`, so counting such lines gives the count
+without a full parse.
+
+### Why dynamic conflicts come from the log
+
+Dynamic conflicts require an actual command to evaluate, so they cannot be
+recomputed statically from the configuration alone. The log is the only
+durable record of overrides that occurred during previous sessions. This is
+why the hook reports "conflict log X has N entries" rather than listing the
+individual overrides.
+
+### Nag-every-session semantics
+
+There is **no deduplication marker** for the SessionStart alert. The hook
+prints a summary every session while conflicts remain, stopping only when the
+conflicts are genuinely resolved. This is intentional: persistent nagging
+encourages resolution. This contrasts with the PreToolUse takeover notice,
+which uses a once-per-day marker to avoid repetition.
+
+### Stdout as session context
+
+Claude Code injects SessionStart hook stdout directly into the session
+context. This means the agent itself sees and can act on the conflict summary
+immediately at the start of a session, without requiring the user to inspect
+log files manually.
+
+### Output format
+
+When conflicts are detected, the hook prints a few lines to stdout and exits 0:
+
+```
+toolguard: configuration conflicts detected --
+  - takeover_mode.enabled disagrees across levels; failed safe to OFF (...)
+  - conflict log logs/toolguard-conflict-YYYY-MM-DD.md has N recorded entries
+Review and resolve; see the conflict log for details.
+```
+
+When no conflicts are present, nothing is printed and the hook exits 0 silently.
+
+### Resilience
+
+The entire hook body is wrapped in a `try/except Exception` that degrades to a
+one-line stderr message and exits 0. A SessionStart hook must **never** block
+or break the session. Input is parsed leniently: missing `cwd` falls back to
+`os.getcwd()`; missing or malformed stdin returns an empty payload.
