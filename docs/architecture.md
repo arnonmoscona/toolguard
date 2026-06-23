@@ -9,8 +9,8 @@ behind the hierarchy, resolution, hard-deny, and logging work, see
 
 ```
 toolguard/                      # Project root
-|-- pyproject.toml              # Package metadata (hatchling build backend)
-|-- run_hook.sh                 # Legacy hook wrapper (the toolguard entry point is current best practice)
+|-- pyproject.toml              # Package metadata (hatchling build backend); defines the
+|                               # toolguard / toolguard-session-start entry points
 |-- toolguard/                  # Python package
 |   |-- __init__.py
 |   |-- hook.py                 # PreToolUse hook entry point (reads stdin, writes stdout)

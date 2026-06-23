@@ -36,6 +36,9 @@ matter (not just `Bash`).
    This yields `~/.local/bin/toolguard` (PreToolUse hook) and
    `~/.local/bin/toolguard-session-start` (SessionStart hook). Confirm the dir with
    `uv tool dir --bin`; if `~` is not expanded in hook commands, use the absolute path.
+   Verify the hook runs by piping a sample event (it expects a JSON PreToolUse event on
+   stdin, not a bare command) and checking for a JSON `permissionDecision`:
+   `printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"hook_event_name":"PreToolUse"}' | ~/.local/bin/toolguard`
 
 2. **Register hooks** -- one PreToolUse matcher per governed tool, plus the SessionStart
    alert. Choose the scope first: for **one project** put the block in that project's

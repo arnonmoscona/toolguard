@@ -29,6 +29,19 @@ confirm with `uv tool dir --bin`):
   conflicts (cross-level allow-over-deny overrides, or disagreeing `takeover_mode.enabled`
   values) so they do not go unnoticed. It nags every session until the conflict is fixed.
 
+**Verify the install.** The hook reads a JSON PreToolUse event on stdin (not a bare command),
+writes its decision to stdout, and sends any warnings to stderr. Pipe a sample event through
+it -- you should get a JSON `permissionDecision` back (which value depends on your config; any
+decision means the hook is installed and running):
+
+```bash
+printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"hook_event_name":"PreToolUse"}' \
+  | ~/.local/bin/toolguard
+```
+
+(Feeding a bare command such as `echo ls | toolguard` is *not* a valid test -- it is not a
+hook event, so toolguard fail-closes with a `deny` and a JSON-parse reason.)
+
 Upgrade later with `uv tool upgrade toolguard` (or `uv tool install --force ...` from a local
 checkout).
 
