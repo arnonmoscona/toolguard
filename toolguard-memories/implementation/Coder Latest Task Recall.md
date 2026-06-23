@@ -3,79 +3,86 @@ title: Coder Latest Task Recall
 type: note
 permalink: toolguard/implementation/coder-latest-task-recall
 tags:
-- TOO-17
+- TOO-8
 - task-memory
-- refactor
+- coder-task
 ---
 
-# Coder Latest Task Recall
+# TOO-8 Follow-up: Loader Deletion and Takeover Coverage
 
-## Task
-TOO-17 Stage 1: Readability Refactor of `command_extractor.py`
+## Task Summary
+Two code follow-ups to finish TOO-8 (hierarchical config) in toolguard.
 
-## Context
-The file `toolguard/parser/command_extractor.py` became hard to reason about after 
-TOO-17 added multi-line Bash handling. This is a TDD refactor step - behavior must
-be perfectly preserved.
+## Task 1: Migrate migrate_permissions.py off legacy loader, then delete it
 
-## Root Problems Being Fixed
-1. TWO parallel raw-canopy-tree walkers:
-   - `_extract_compound_into` (~158 lines)
-   - `_extract_from_tree` (~140 lines, nested closures)
-   Both duplicate TreeNodeN/`hasattr` navigation.
+### Current state
+- `toolguard/scripts/migrate_permissions.py` line 906 calls `load_takeover_mode_config(project_root)`
+- This is the ONLY production caller of the legacy loader
+- The script already builds a `Configuration` two lines above (lines 897-899)
+- `load_configuration(project_root, ignore_env_override=True)` is already called
 
-2. `_extract_compound_into` is a god-function mixing:
-   - raw-tree navigation
-   - node-kind classification
-   - business policy (control-structure decompose, proc-subst->undecidable, bash-`-c` recursion, foreign-inline ask_floor, heredoc-sentinel ask_floor)
-   - dedup
+### What to do
+1. Rework migrate_permissions.py to reuse a SINGLE Configuration object
+2. Read takeover via `.takeover_mode()` on the existing config object
+3. `ignored_patterns` = union of `ignored_allow_patterns + additional_ignored_patterns` when enabled
+4. Remove `load_takeover_mode_config` import from migrate_permissions.py line 22ish
+5. Keep `discover_config_files` import (still needed for write-target selection at line 903)
+6. DELETE `load_takeover_mode_config` from `toolguard/config.py` entirely
+7. Clean up stale comment in config.py docstring (line ~20) referencing it
+8. Reword comment at line ~48 ("Shared between the legacy load_takeover_mode_config...") 
+9. Keep `_DEFAULT_IGNORED_ALLOW_PATTERNS` constant (still used by hierarchical resolver)
+10. Verify with `grep -rn load_takeover_mode_config` that no references remain
 
-## Scope
-ONLY `command_extractor.py` (+ a new `command_model.py`). 
-Do NOT touch: `compound.py`, grammar `.peg`, `bash_parser.py`, `multiline.py`.
+### Key insight on ignored_patterns behavior
+- Old code: `ignored_patterns = ignored_allow_patterns + additional_ignored_patterns` when enabled
+- New `TakeoverConfig`: has `.ignored_allow_patterns` and `.additional_ignored_patterns` as tuples
+- Preserved behavior: only populated when takeover enabled
 
-## What To Do
-1. New `toolguard/parser/command_model.py`: small dataclasses for Abstract Command Model:
-   - `Sequence`, `Pipeline`, `SimpleCommand(text, substitutions)`, 
-   - `ControlStructure(kind, is_complex, condition, body)`, `ProcSubst`/`Undecidable`
-   - SINGLE builder that walks the canopy parse tree ONCE into the IR
-   - This builder is the ONLY code allowed to touch raw canopy nodes (TreeNodeN / `hasattr` / element lists)
-   - Dispatch via single `node_kind(node)` classifier that collapses the ~12 `_is_*` predicates
+## Task 2: Rework test/unit/test_takeover_mode.py
 
-2. In `command_extractor.py`, reimplement structured extraction + classification as 
-   SIMPLE RECURSION over IR - NOT the raw tree. Centralize dedup in one place.
+### Tests currently in test_takeover_mode.py (16 references to load_takeover_mode_config):
+- `TestTakeoverModeConfig`:
+  - `test_default_config_when_no_files` - defaults when no files
+  - `test_load_takeover_mode_from_toml` - reads TOML
+  - `test_load_takeover_mode_from_json` - reads JSON
+  - `test_merge_takeover_mode_from_multiple_files` - merges from project + user level
+  - `test_takeover_mode_not_loaded_from_claude_settings` - ignores settings.json
+- `TestNoMatchFallback`:
+  - `test_deny_fallback_silent` - deny fallback
+  - `test_warn_deny_fallback` - warn_deny fallback
+- `TestBackwardCompatibility`:
+  - `test_no_takeover_mode_section_uses_defaults` - no section uses defaults
+- `TestFilePathToolTakeoverFiltering`: (uses `load_file_path_patterns` from hook - KEEP these)
+  - `test_filters_blanket_read_pattern`
+  - `test_filters_blanket_write_pattern`
+  - `test_does_not_filter_file_patterns_when_disabled`
+  - `test_never_filters_toolguard_hook_file_patterns`
+  - `test_file_deny_patterns_not_filtered`
 
-3. DELETE the legacy `_extract_from_tree` walker; make `extract_commands(command_line) -> List[str]`
-   a trivial projection of the IR (flatten leaves). `parse_command_line` stays thin wrapper.
+### Strategy for porting:
+- Re-point tests at `load_configuration(project_dir, ignore_env_override=True).takeover_mode()`
+- Where a scenario is ALREADY covered equivalently by test_hierarchical.py or test_configuration.py, DROP it
+- Do not weaken any assertion
+- Keep `TestFilePathToolTakeoverFiltering` tests as-is (use hook, not legacy loader)
 
-## Hard Constraints
-- NO behavior change. All 724 tests green (both with and without env var)
-- Do NOT modify any file under test/
-- Preserve all public import paths:
-  - `toolguard.parser.multiline.extract_structured`
-  - `toolguard.parser.multiline.LeafCommand`
-  - `toolguard.parser.multiline.UndecidableSegment`
-  - `toolguard.parser.command_extractor.extract_commands`
-  - `toolguard.parser.command_extractor.parse_command_line`
-- NO hand-rolled / regex structural bash parsing
-- Runtime stdlib-only
-- `ruff format . && ruff check .` clean
+### What's covered in other test files:
+- test_configuration.py:783 covers `takeover_mode_shape` (TakeoverConfig fields)
+- test_configuration.py:233 covers takeover filtering native layer (Read)
+- Various tests in test_configuration.py cover enabled/conflict/default resolution
 
-## Report Back
-- IR module + types introduced
-- Confirm ALL raw-canopy-tree access is in single builder
-- Legacy `_extract_from_tree` is gone
-- `extract_commands` is IR projection
-- Both-env test counts (expect 724) + ruff
-- ZERO test files changed
-- Append "Stage 1 readability refactor" section to `toolguard-memories/implementation/TOO-17 Implementation Report.md`
+## Task 3: Confirm live Bash takeover filtering coverage
 
-## Current State
-- 724 tests pass before refactoring
+### Key question
+With takeover enabled and a NATIVE settings allow of Bash(*), does a test prove that:
+1. The native blanket allow is suppressed at the live resolve path
+2. A toolguard deny still fires
+3. toolguard_hook allow entries are NOT filtered
 
-## Key Insight About `extract_commands` vs `_extract_from_tree`
-The legacy `_extract_from_tree` has DIFFERENT semantics from `_extract_compound_into`:
-- It includes subshell/brace group WRAPPER text as well as inner commands
-- This means `extract_commands` cannot just call `extract_structured_from_grammar` without
-  potentially breaking the tests.
-- Need to understand what behavior `extract_commands` produces vs `extract_structured_from_grammar`.
+### Live path
+config.py:1131: `if takeover.enabled and layer.is_native and pattern in ignored:`
+
+## Success criteria
+1. `uv run python -m unittest discover -s test -t .` fully green
+2. `uv run ruff check .` clean
+3. `grep -rn load_takeover_mode_config .` shows zero references in code/comments/tests
+4. No git operations

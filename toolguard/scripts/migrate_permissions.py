@@ -19,7 +19,6 @@ from toolguard.config import (
     find_project_root,
     load_config_file,
     load_configuration,
-    load_takeover_mode_config,
 )
 from toolguard.config_divergence import (
     find_divergent_patterns,
@@ -889,26 +888,27 @@ def migrate(
 
     native_perms = get_native_permissions(settings_path)
 
-    # Load toolguard permissions via the config abstraction (no direct file I/O).
+    # Load configuration once and reuse for both permissions and takeover mode.
     # ignore_env_override=True: the migration tool selects its WRITE target via
     # project-based discovery (see discover_config_files below), so the READ path
     # must be project-based too. Honouring CLAUDE_SETTINGS_PATH here would analyse
     # an unrelated project's config while writing to this project's files.
-    toolguard_perms = get_toolguard_permissions(
-        load_configuration(project_root, ignore_env_override=True)
-    )
+    configuration = load_configuration(project_root, ignore_env_override=True)
+    toolguard_perms = get_toolguard_permissions(configuration)
 
     # The migration target-file selection still needs the discovered file paths
     # (it writes to an existing toolguard_hook file or creates one).
     config_files = discover_config_files(project_root)
 
-    # Load takeover mode config for ignored patterns
-    takeover_config = load_takeover_mode_config(project_root)
+    # Build the list of ignored patterns from the hierarchical takeover config.
+    # Only populated when takeover mode is enabled, preserving the prior behaviour
+    # where ignored_patterns remained empty when takeover was off.
+    takeover = configuration.takeover_mode()
     ignored_patterns = []
-    if takeover_config.get("enabled", False):
-        ignored_patterns = takeover_config.get(
-            "ignored_allow_patterns", []
-        ) + takeover_config.get("additional_ignored_patterns", [])
+    if takeover.enabled:
+        ignored_patterns = list(takeover.ignored_allow_patterns) + list(
+            takeover.additional_ignored_patterns
+        )
 
     # Find divergent patterns (patterns in native but not in toolguard)
     divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)

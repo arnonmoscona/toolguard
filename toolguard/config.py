@@ -17,8 +17,7 @@ file format/location. Clients ask the :class:`Configuration` semantic questions 
 The lower-level loaders are internal implementation behind this abstraction; new clients
 should always prefer :func:`load_configuration`. A few remain public only because
 not-yet-migrated non-test callers still use them -- ``find_project_root``,
-``discover_config_files`` and ``load_takeover_mode_config`` (used by ``log_writer`` and
-``scripts/migrate_permissions``), and ``config_sync_settings_from_sources`` (used by
+``discover_config_files``, and ``config_sync_settings_from_sources`` (used by
 ``auto_migrate``). That is transitional and tracked as a TOO-8 follow-up; everything else
 internal is underscore-prefixed.
 """
@@ -45,8 +44,7 @@ _TOOL_WRAPPER_RE = re.compile(r"[A-Za-z0-9_]+\((.*)\)", re.DOTALL)
 # Default blanket ignored-allow patterns for takeover mode. These seed the
 # union of ``ignored_allow_patterns`` so that, when takeover is enabled, the
 # usual native blanket allows are suppressed even if no level lists them
-# explicitly. Shared between the legacy ``load_takeover_mode_config`` and the
-# hierarchical ``Configuration.takeover_mode`` resolver so both stay in sync.
+# explicitly. Used by the ``Configuration.takeover_mode`` resolver.
 _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "Bash(*)",
     "Read(*)",
@@ -417,92 +415,6 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
         for path, source_type, file_format in _discover_in_dir(claude_dir):
             results.append((path, source_type, file_format, specificity))
     return results
-
-
-def load_takeover_mode_config(start_dir: Path = None) -> dict:
-    """
-    Load takeover_mode configuration from toolguard_hook files.
-
-    Only reads from toolguard_hook files (NOT from Claude settings files).
-    Merges configuration from multiple sources.
-
-    Args:
-        start_dir: Directory to start searching for project root from. Defaults to cwd.
-
-    Returns:
-        Dictionary with takeover_mode configuration:
-        {
-            'enabled': bool,
-            'ignored_allow_patterns': List[str],
-            'additional_ignored_patterns': List[str],
-            'no_match_fallback': str  # 'deny' or 'warn_deny'
-        }
-        Returns default config if no takeover_mode found in any file.
-
-    Note:
-        Legacy two-level loader retained only because ``scripts/migrate_permissions``
-        still calls it. New code uses :meth:`Configuration.takeover_mode`. Tracked as
-        a TOO-8 follow-up to migrate the remaining caller and remove this.
-    """
-    default_config = {
-        "enabled": False,
-        "ignored_allow_patterns": [
-            "Bash(*)",
-            "Read(*)",
-            "Write(*)",
-            "Edit(*)",
-            "mcp__jetbrains__execute_terminal_command(*)",
-        ],
-        "additional_ignored_patterns": [],
-        "no_match_fallback": "deny",
-    }
-
-    # Discover config files in hierarchy
-    config_files = discover_config_files(start_dir)
-
-    # Filter to only toolguard_hook files (NOT Claude settings files)
-    hook_files = [
-        (path, fmt)
-        for path, source_type, fmt in config_files
-        if source_type == "toolguard_hook"
-    ]
-
-    if not hook_files:
-        return default_config
-
-    # Load takeover_mode from all hook files and merge
-    merged_config = default_config.copy()
-
-    for path, fmt in hook_files:
-        try:
-            config = load_config_file(path, fmt)
-
-            takeover_mode = config.get("takeover_mode", {})
-            if not takeover_mode:
-                continue
-
-            # Merge enabled (OR logic - any file can enable it)
-            if takeover_mode.get("enabled", False):
-                merged_config["enabled"] = True
-
-            # Merge ignored_allow_patterns (union)
-            for pattern in takeover_mode.get("ignored_allow_patterns", []):
-                if pattern not in merged_config["ignored_allow_patterns"]:
-                    merged_config["ignored_allow_patterns"].append(pattern)
-
-            # Merge additional_ignored_patterns (union)
-            for pattern in takeover_mode.get("additional_ignored_patterns", []):
-                if pattern not in merged_config["additional_ignored_patterns"]:
-                    merged_config["additional_ignored_patterns"].append(pattern)
-
-            # Use last no_match_fallback found (priority order)
-            if "no_match_fallback" in takeover_mode:
-                merged_config["no_match_fallback"] = takeover_mode["no_match_fallback"]
-
-        except Exception:
-            continue
-
-    return merged_config
 
 
 # ---------------------------------------------------------------------------
