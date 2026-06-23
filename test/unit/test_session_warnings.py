@@ -28,12 +28,12 @@ class TestGetMarkerFilePath(unittest.TestCase):
         When get_marker_file_path builds the path
         Then it is logs_dir/.toolguard-warned-YYYY-MM-DD for that date
         """
-        logs_dir = Path('/tmp/logs')
+        logs_dir = Path("/tmp/logs")
         test_date = date(2025, 1, 15)
 
         result = get_marker_file_path(logs_dir, test_date)
 
-        expected = logs_dir / '.toolguard-warned-2025-01-15'
+        expected = logs_dir / ".toolguard-warned-2025-01-15"
         self.assertEqual(result, expected)
 
     def test_uses_iso_date_format(self):
@@ -42,12 +42,12 @@ class TestGetMarkerFilePath(unittest.TestCase):
         When get_marker_file_path builds the path
         Then the marker name ends with the ISO date (YYYY-MM-DD)
         """
-        logs_dir = Path('/var/log')
+        logs_dir = Path("/var/log")
         test_date = date(2024, 12, 31)
 
         result = get_marker_file_path(logs_dir, test_date)
 
-        self.assertTrue(result.name.endswith('2024-12-31'))
+        self.assertTrue(result.name.endswith("2024-12-31"))
 
     def test_includes_leading_dot(self):
         """
@@ -55,12 +55,12 @@ class TestGetMarkerFilePath(unittest.TestCase):
         When get_marker_file_path builds the path
         Then the marker name starts with '.toolguard-warned-', making it a hidden file
         """
-        logs_dir = Path('/logs')
+        logs_dir = Path("/logs")
         test_date = date.today()
 
         result = get_marker_file_path(logs_dir, test_date)
 
-        self.assertTrue(result.name.startswith('.toolguard-warned-'))
+        self.assertTrue(result.name.startswith(".toolguard-warned-"))
 
 
 class TestMarkerExistsForToday(unittest.TestCase):
@@ -100,7 +100,7 @@ class TestMarkerExistsForToday(unittest.TestCase):
         When marker_exists_for_today is checked
         Then it returns False without error
         """
-        logs_dir = Path('/nonexistent/directory')
+        logs_dir = Path("/nonexistent/directory")
 
         result = marker_exists_for_today(logs_dir)
 
@@ -149,7 +149,7 @@ class TestCreateMarkerFile(unittest.TestCase):
         Then the directory is created and today's marker exists inside it
         """
         with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / 'new_logs'
+            logs_dir = Path(tmpdir) / "new_logs"
             self.assertFalse(logs_dir.exists())
 
             create_marker_file(logs_dir)
@@ -238,7 +238,7 @@ class TestCleanupOldMarkers(unittest.TestCase):
         When cleanup_old_markers runs
         Then it completes without raising an exception
         """
-        logs_dir = Path('/nonexistent/directory')
+        logs_dir = Path("/nonexistent/directory")
 
         # Should not raise exception
         cleanup_old_markers(logs_dir, days=7)
@@ -253,8 +253,8 @@ class TestCleanupOldMarkers(unittest.TestCase):
             logs_dir = Path(tmpdir)
 
             # Create some non-marker files
-            (logs_dir / 'some_log.txt').touch()
-            (logs_dir / '.other_hidden_file').touch()
+            (logs_dir / "some_log.txt").touch()
+            (logs_dir / ".other_hidden_file").touch()
 
             # Create old marker
             old_date = date.today() - timedelta(days=10)
@@ -265,8 +265,8 @@ class TestCleanupOldMarkers(unittest.TestCase):
             cleanup_old_markers(logs_dir, days=7)
 
             # Non-marker files should still exist
-            self.assertTrue((logs_dir / 'some_log.txt').exists())
-            self.assertTrue((logs_dir / '.other_hidden_file').exists())
+            self.assertTrue((logs_dir / "some_log.txt").exists())
+            self.assertTrue((logs_dir / ".other_hidden_file").exists())
 
             # Old marker should be removed
             self.assertFalse(old_marker.exists())
@@ -281,7 +281,7 @@ class TestCleanupOldMarkers(unittest.TestCase):
             logs_dir = Path(tmpdir)
 
             # Create marker with malformed date
-            malformed = logs_dir / '.toolguard-warned-invalid-date'
+            malformed = logs_dir / ".toolguard-warned-invalid-date"
             malformed.touch()
 
             # Should not raise exception
@@ -309,7 +309,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('sys.stderr') as mock_stderr:
+            with patch("sys.stderr") as mock_stderr:
                 issue_takeover_warning(logs_dir, to_stdout=True)
 
                 # Should have printed notice
@@ -328,7 +328,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
             issue_takeover_warning(logs_dir, to_stdout=False)
 
             # No persisted log stream should be written by the notice.
-            log_files = [p.name for p in logs_dir.glob('toolguard-*.md')]
+            log_files = [p.name for p in logs_dir.glob("toolguard-*.md")]
             self.assertEqual(log_files, [])
 
     def test_does_not_call_log_warning(self):
@@ -340,7 +340,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('toolguard.error_log.log_warning') as mock_log:
+            with patch("toolguard.error_log.log_warning") as mock_log:
                 issue_takeover_warning(logs_dir, to_stdout=False)
 
                 mock_log.assert_not_called()
@@ -357,7 +357,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
             # Create marker
             create_marker_file(logs_dir)
 
-            with patch('sys.stderr') as mock_stderr:
+            with patch("sys.stderr") as mock_stderr:
                 issue_takeover_warning(logs_dir, to_stdout=True)
 
                 # Should still print to stderr even though marker exists
@@ -425,16 +425,18 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('builtins.print') as mock_print:
+            with patch("builtins.print") as mock_print:
                 issue_takeover_warning(logs_dir, to_stdout=True)
 
-                printed = ' '.join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+                printed = " ".join(
+                    str(c.args[0]) for c in mock_print.call_args_list if c.args
+                )
 
                 # Check key phrases in message
-                self.assertIn('TOOLGUARD WARNING', printed)
-                self.assertIn('Takeover mode is active', printed)
-                self.assertIn('native permission prompts are bypassed', printed)
-                self.assertIn('sole authority', printed)
+                self.assertIn("TOOLGUARD WARNING", printed)
+                self.assertIn("Takeover mode is active", printed)
+                self.assertIn("native permission prompts are bypassed", printed)
+                self.assertIn("sole authority", printed)
 
     def test_handles_marker_creation_failure(self):
         """
@@ -445,10 +447,13 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
 
-            with patch('toolguard.session_warnings.create_marker_file', side_effect=OSError('Permission denied')):
+            with patch(
+                "toolguard.session_warnings.create_marker_file",
+                side_effect=OSError("Permission denied"),
+            ):
                 # Should not raise exception
                 issue_takeover_warning(logs_dir, to_stdout=False)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

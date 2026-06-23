@@ -31,7 +31,7 @@ def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
     Returns:
         Path to the marker file
     """
-    filename = f'.toolguard-migration-{marker_date.strftime("%Y-%m-%d")}'
+    filename = f".toolguard-migration-{marker_date.strftime('%Y-%m-%d')}"
     return logs_dir / filename
 
 
@@ -66,7 +66,10 @@ def create_marker_file(logs_dir: Path) -> None:
     try:
         today_marker.touch()
     except OSError as e:
-        print(f'Warning: Failed to create migration marker file {today_marker}: {e}', file=sys.stderr)
+        print(
+            f"Warning: Failed to create migration marker file {today_marker}: {e}",
+            file=sys.stderr,
+        )
         raise
 
 
@@ -86,15 +89,15 @@ def cleanup_old_markers(logs_dir: Path, days: int = 7) -> None:
     cutoff_date = date.today() - timedelta(days=days)
 
     try:
-        for marker_file in logs_dir.glob('.toolguard-migration-*'):
+        for marker_file in logs_dir.glob(".toolguard-migration-*"):
             try:
                 # Format: .toolguard-migration-YYYY-MM-DD
-                date_str = marker_file.name.replace('.toolguard-migration-', '')
+                date_str = marker_file.name.replace(".toolguard-migration-", "")
                 file_date = date.fromisoformat(date_str)
 
                 if file_date < cutoff_date:
                     marker_file.unlink()
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 # Skip files that don't match expected format or can't be deleted
                 continue
     except OSError:
@@ -142,7 +145,9 @@ def should_run_migration(logs_dir: Path) -> bool:
     return not marker_exists_for_today(logs_dir)
 
 
-def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, takeover_config: Dict) -> bool:
+def run_auto_migration(
+    project_root: Path, logs_dir: Path, config_sync: Dict, takeover_config: Dict
+) -> bool:
     """
     Run automatic migration of permissions from settings.local.json to toolguard config.
 
@@ -178,14 +183,14 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
     # Determine backup directory. A relative backup_dir is anchored to the PROJECT
     # ROOT via the config module's single anchoring rule (regardless of which
     # level declared it); absolute and ~ paths are honoured as written.
-    backup_dir_str = config_sync.get('backup_dir', 'logs/config-backups')
+    backup_dir_str = config_sync.get("backup_dir", "logs/config-backups")
     backup_dir = Path(config.resolve_config_path(backup_dir_str)).expanduser()
 
     # Determine auto_sort setting
-    auto_sort = config_sync.get('auto_sort_on_migrate', True)
+    auto_sort = config_sync.get("auto_sort_on_migrate", True)
 
     # Check if there's anything to migrate
-    settings_path = project_root / '.claude' / 'settings.local.json'
+    settings_path = project_root / ".claude" / "settings.local.json"
     if not settings_path.exists():
         return False
 
@@ -194,10 +199,10 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
 
     # Get ignored patterns from takeover config
     ignored_patterns = []
-    if takeover_config.get('enabled', False):
-        ignored_patterns = takeover_config.get('ignored_allow_patterns', []) + takeover_config.get(
-            'additional_ignored_patterns', []
-        )
+    if takeover_config.get("enabled", False):
+        ignored_patterns = takeover_config.get(
+            "ignored_allow_patterns", []
+        ) + takeover_config.get("additional_ignored_patterns", [])
 
     # Find divergent patterns
     divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)
@@ -207,7 +212,7 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
         return False
 
     # Run migration
-    print('[TOOLGUARD AUTO-MIGRATION] Running automatic migration...', file=sys.stderr)
+    print("[TOOLGUARD AUTO-MIGRATION] Running automatic migration...", file=sys.stderr)
     try:
         exit_code = migrate(
             project_root=project_root,
@@ -217,7 +222,10 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
         )
 
         if exit_code == 0:
-            print(f'[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)', file=sys.stderr)
+            print(
+                f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)",
+                file=sys.stderr,
+            )
 
             # Create marker file
             try:
@@ -229,9 +237,9 @@ def run_auto_migration(project_root: Path, logs_dir: Path, config_sync: Dict, ta
 
             return True
         else:
-            print('[TOOLGUARD AUTO-MIGRATION] Migration failed', file=sys.stderr)
+            print("[TOOLGUARD AUTO-MIGRATION] Migration failed", file=sys.stderr)
             return False
 
     except Exception as e:
-        print(f'[TOOLGUARD AUTO-MIGRATION] Migration error: {e}', file=sys.stderr)
+        print(f"[TOOLGUARD AUTO-MIGRATION] Migration error: {e}", file=sys.stderr)
         return False

@@ -29,10 +29,10 @@ def read_transcript_tail(transcript_path: str, max_lines: int = 100) -> List[str
         # Read file and get last N lines
         # For very large files, we could optimize with seeking from end
         # but for now, simple approach is sufficient
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
             return lines[-max_lines:] if len(lines) > max_lines else lines
-    except (IOError, OSError):
+    except IOError, OSError:
         return []
 
 
@@ -76,11 +76,11 @@ def find_task_tool_uses(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     for idx, entry in enumerate(entries):
         # Look for assistant messages with tool_use
-        if entry.get('type') != 'assistant':
+        if entry.get("type") != "assistant":
             continue
 
-        message = entry.get('message', {})
-        content = message.get('content', [])
+        message = entry.get("message", {})
+        content = message.get("content", [])
 
         # Handle content as list or string (different transcript formats)
         if isinstance(content, str):
@@ -89,14 +89,14 @@ def find_task_tool_uses(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
 
         for item in content:
-            if item.get('type') == 'tool_use' and item.get('name') == 'Task':
-                tool_input = item.get('input', {})
+            if item.get("type") == "tool_use" and item.get("name") == "Task":
+                tool_input = item.get("input", {})
                 task_uses.append(
                     {
-                        'tool_use_id': item.get('id'),
-                        'subagent_type': tool_input.get('subagent_type', 'unknown'),
-                        'description': tool_input.get('description', ''),
-                        'entry_index': idx,
+                        "tool_use_id": item.get("id"),
+                        "subagent_type": tool_input.get("subagent_type", "unknown"),
+                        "description": tool_input.get("description", ""),
+                        "entry_index": idx,
                     }
                 )
 
@@ -117,11 +117,11 @@ def find_tool_results(entries: List[Dict[str, Any]]) -> Dict[str, int]:
 
     for idx, entry in enumerate(entries):
         # Look for user messages with tool_result
-        if entry.get('type') != 'user':
+        if entry.get("type") != "user":
             continue
 
-        message = entry.get('message', {})
-        content = message.get('content', [])
+        message = entry.get("message", {})
+        content = message.get("content", [])
 
         # Handle content as list or string (different transcript formats)
         if isinstance(content, str):
@@ -130,8 +130,8 @@ def find_tool_results(entries: List[Dict[str, Any]]) -> Dict[str, int]:
             continue
 
         for item in content:
-            if item.get('type') == 'tool_result':
-                tool_use_id = item.get('tool_use_id')
+            if item.get("type") == "tool_result":
+                tool_use_id = item.get("tool_use_id")
                 if tool_use_id:
                     results[tool_use_id] = idx
 
@@ -157,10 +157,10 @@ def identify_current_agent(transcript_path: str) -> Dict[str, Any]:
     """
     # Default result - main agent
     result = {
-        'agent_type': 'main',
-        'subagent_name': None,
-        'subagent_description': None,
-        'tool_use_id': None,
+        "agent_type": "main",
+        "subagent_name": None,
+        "subagent_description": None,
+        "tool_use_id": None,
     }
 
     if not transcript_path:
@@ -183,8 +183,8 @@ def identify_current_agent(transcript_path: str) -> Dict[str, Any]:
     # Find the most recent Task that hasn't completed
     # Work backwards through Task uses
     for task in reversed(task_uses):
-        tool_use_id = task['tool_use_id']
-        task_index = task['entry_index']
+        tool_use_id = task["tool_use_id"]
+        task_index = task["entry_index"]
 
         # Check if there's a result for this Task
         if tool_use_id in tool_results:
@@ -196,10 +196,10 @@ def identify_current_agent(transcript_path: str) -> Dict[str, Any]:
 
         # Found an open Task - we're in this subagent
         result = {
-            'agent_type': 'subagent',
-            'subagent_name': task['subagent_type'],
-            'subagent_description': task['description'],
-            'tool_use_id': tool_use_id,
+            "agent_type": "subagent",
+            "subagent_name": task["subagent_type"],
+            "subagent_description": task["description"],
+            "tool_use_id": tool_use_id,
         }
         break
 

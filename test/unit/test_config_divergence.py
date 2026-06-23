@@ -31,11 +31,13 @@ class TestMarkerFiles(unittest.TestCase):
         When get_marker_file_path builds the path
         Then it is logs_dir/.toolguard-divergence-warned-YYYY-MM-DD for that date
         """
-        logs_dir = Path('/tmp/logs')
+        logs_dir = Path("/tmp/logs")
         test_date = date(2025, 2, 5)
         marker_path = get_marker_file_path(logs_dir, test_date)
 
-        self.assertEqual(marker_path, Path('/tmp/logs/.toolguard-divergence-warned-2025-02-05'))
+        self.assertEqual(
+            marker_path, Path("/tmp/logs/.toolguard-divergence-warned-2025-02-05")
+        )
 
     def test_marker_exists_for_today(self):
         """
@@ -63,7 +65,7 @@ class TestMarkerFiles(unittest.TestCase):
         Then the directory is created and today's divergence marker exists
         """
         with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / 'logs'
+            logs_dir = Path(tmpdir) / "logs"
 
             # Directory doesn't exist yet
             self.assertFalse(logs_dir.exists())
@@ -116,18 +118,18 @@ class TestGetNativePermissions(unittest.TestCase):
         Then only the governed Bash patterns are returned in each permission list
         """
         with TemporaryDirectory() as tmpdir:
-            settings_path = Path(tmpdir) / 'settings.local.json'
+            settings_path = Path(tmpdir) / "settings.local.json"
 
             config = {
-                'permissions': {
-                    'allow': [
-                        'Bash(git status:*)',
-                        'Bash(ls:*)',
-                        'mcp__basic-memory__read_note',  # Not a governed tool
-                        'WebSearch',  # Not a governed tool
+                "permissions": {
+                    "allow": [
+                        "Bash(git status:*)",
+                        "Bash(ls:*)",
+                        "mcp__basic-memory__read_note",  # Not a governed tool
+                        "WebSearch",  # Not a governed tool
                     ],
-                    'deny': ['Bash(rm -rf:*)'],
-                    'ask': ['Bash(git push:*)'],
+                    "deny": ["Bash(rm -rf:*)"],
+                    "ask": ["Bash(git push:*)"],
                 }
             }
 
@@ -135,9 +137,9 @@ class TestGetNativePermissions(unittest.TestCase):
 
             result = get_native_permissions(settings_path)
 
-            self.assertEqual(result['allow'], ['Bash(git status:*)', 'Bash(ls:*)'])
-            self.assertEqual(result['deny'], ['Bash(rm -rf:*)'])
-            self.assertEqual(result['ask'], ['Bash(git push:*)'])
+            self.assertEqual(result["allow"], ["Bash(git status:*)", "Bash(ls:*)"])
+            self.assertEqual(result["deny"], ["Bash(rm -rf:*)"])
+            self.assertEqual(result["ask"], ["Bash(git push:*)"])
 
     def test_extract_file_tool_patterns(self):
         """
@@ -146,18 +148,27 @@ class TestGetNativePermissions(unittest.TestCase):
         Then all four governed file-tool and Bash patterns are present in allow
         """
         with TemporaryDirectory() as tmpdir:
-            settings_path = Path(tmpdir) / 'settings.local.json'
+            settings_path = Path(tmpdir) / "settings.local.json"
 
-            config = {'permissions': {'allow': ['Read(/tmp/**)', 'Write(/tmp/**)', 'Edit(/tmp/**)', 'Bash(ls:*)']}}
+            config = {
+                "permissions": {
+                    "allow": [
+                        "Read(/tmp/**)",
+                        "Write(/tmp/**)",
+                        "Edit(/tmp/**)",
+                        "Bash(ls:*)",
+                    ]
+                }
+            }
 
             settings_path.write_text(json.dumps(config))
 
             result = get_native_permissions(settings_path)
 
-            self.assertIn('Read(/tmp/**)', result['allow'])
-            self.assertIn('Write(/tmp/**)', result['allow'])
-            self.assertIn('Edit(/tmp/**)', result['allow'])
-            self.assertIn('Bash(ls:*)', result['allow'])
+            self.assertIn("Read(/tmp/**)", result["allow"])
+            self.assertIn("Write(/tmp/**)", result["allow"])
+            self.assertIn("Edit(/tmp/**)", result["allow"])
+            self.assertIn("Bash(ls:*)", result["allow"])
 
     def test_missing_file(self):
         """
@@ -165,9 +176,9 @@ class TestGetNativePermissions(unittest.TestCase):
         When get_native_permissions reads it
         Then it returns empty allow, deny, and ask lists
         """
-        result = get_native_permissions(Path('/nonexistent/settings.local.json'))
+        result = get_native_permissions(Path("/nonexistent/settings.local.json"))
 
-        self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
+        self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
 
     def test_invalid_json(self):
         """
@@ -176,12 +187,12 @@ class TestGetNativePermissions(unittest.TestCase):
         Then it returns empty allow, deny, and ask lists without raising
         """
         with TemporaryDirectory() as tmpdir:
-            settings_path = Path(tmpdir) / 'settings.local.json'
-            settings_path.write_text('{ invalid json }')
+            settings_path = Path(tmpdir) / "settings.local.json"
+            settings_path.write_text("{ invalid json }")
 
             result = get_native_permissions(settings_path)
 
-            self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
+            self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
 
 
 def _config_from_layers(*layers):
@@ -194,7 +205,7 @@ def _config_from_layers(*layers):
     """
     built = []
     for i, (source_type, content) in enumerate(layers):
-        prov = Provenance('project', source_type, 'json', Path(f'/fake/{i}.json'), i)
+        prov = Provenance("project", source_type, "json", Path(f"/fake/{i}.json"), i)
         built.append(ConfigLayer(provenance=prov, content=MappingProxyType(content)))
     return Configuration(layers=tuple(built))
 
@@ -209,13 +220,21 @@ class TestGetToolguardPermissions(unittest.TestCase):
         Then the allow and deny patterns are returned and ask is empty
         """
         config = _config_from_layers(
-            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)', 'Read(/tmp/**)'], 'deny': ['Bash(rm -rf:*)']}})
+            (
+                "toolguard_hook",
+                {
+                    "permissions": {
+                        "allow": ["Bash(git status:*)", "Read(/tmp/**)"],
+                        "deny": ["Bash(rm -rf:*)"],
+                    }
+                },
+            )
         )
         result = get_toolguard_permissions(config)
 
-        self.assertEqual(result['allow'], ['Bash(git status:*)', 'Read(/tmp/**)'])
-        self.assertEqual(result['deny'], ['Bash(rm -rf:*)'])
-        self.assertEqual(result['ask'], [])
+        self.assertEqual(result["allow"], ["Bash(git status:*)", "Read(/tmp/**)"])
+        self.assertEqual(result["deny"], ["Bash(rm -rf:*)"])
+        self.assertEqual(result["ask"], [])
 
     def test_ignore_claude_settings(self):
         """
@@ -223,11 +242,13 @@ class TestGetToolguardPermissions(unittest.TestCase):
         When get_toolguard_permissions reads the resolved Configuration
         Then it returns empty permissions because native layers are ignored
         """
-        config = _config_from_layers(('claude', {'permissions': {'allow': ['Bash(git push:*)']}}))
+        config = _config_from_layers(
+            ("claude", {"permissions": {"allow": ["Bash(git push:*)"]}})
+        )
         result = get_toolguard_permissions(config)
 
         # Should be empty since we ignore claude settings
-        self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
+        self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
 
     def test_merge_multiple_files(self):
         """
@@ -236,13 +257,13 @@ class TestGetToolguardPermissions(unittest.TestCase):
         Then both patterns appear in the merged allow list
         """
         config = _config_from_layers(
-            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)']}}),
-            ('toolguard_hook', {'permissions': {'allow': ['Bash(ls:*)']}}),
+            ("toolguard_hook", {"permissions": {"allow": ["Bash(git status:*)"]}}),
+            ("toolguard_hook", {"permissions": {"allow": ["Bash(ls:*)"]}}),
         )
         result = get_toolguard_permissions(config)
 
-        self.assertIn('Bash(git status:*)', result['allow'])
-        self.assertIn('Bash(ls:*)', result['allow'])
+        self.assertIn("Bash(git status:*)", result["allow"])
+        self.assertIn("Bash(ls:*)", result["allow"])
 
     def test_deduplicate_patterns(self):
         """
@@ -251,13 +272,13 @@ class TestGetToolguardPermissions(unittest.TestCase):
         Then the shared pattern appears only once
         """
         config = _config_from_layers(
-            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)']}}),
-            ('toolguard_hook', {'permissions': {'allow': ['Bash(git status:*)']}}),
+            ("toolguard_hook", {"permissions": {"allow": ["Bash(git status:*)"]}}),
+            ("toolguard_hook", {"permissions": {"allow": ["Bash(git status:*)"]}}),
         )
         result = get_toolguard_permissions(config)
 
         # Should only appear once
-        self.assertEqual(result['allow'].count('Bash(git status:*)'), 1)
+        self.assertEqual(result["allow"].count("Bash(git status:*)"), 1)
 
 
 class TestFindDivergentPatterns(unittest.TestCase):
@@ -269,15 +290,19 @@ class TestFindDivergentPatterns(unittest.TestCase):
         When find_divergent_patterns compares them
         Then only the native-only pattern is reported as divergent
         """
-        native = {'allow': ['Bash(git status:*)', 'Bash(git push:*)'], 'deny': [], 'ask': []}
+        native = {
+            "allow": ["Bash(git status:*)", "Bash(git push:*)"],
+            "deny": [],
+            "ask": [],
+        }
 
-        toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
+        toolguard = {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
 
         result = find_divergent_patterns(native, toolguard, [])
 
-        self.assertEqual(result['allow'], ['Bash(git push:*)'])
-        self.assertEqual(result['deny'], [])
-        self.assertEqual(result['ask'], [])
+        self.assertEqual(result["allow"], ["Bash(git push:*)"])
+        self.assertEqual(result["deny"], [])
+        self.assertEqual(result["ask"], [])
 
     def test_ignore_patterns_in_takeover_mode(self):
         """
@@ -285,16 +310,20 @@ class TestFindDivergentPatterns(unittest.TestCase):
         When find_divergent_patterns is given that ignored list
         Then no divergent allow patterns are reported
         """
-        native = {'allow': ['Bash(git status:*)', 'Bash(uv run pytest:*)', 'Bash(open:*)'], 'deny': [], 'ask': []}
+        native = {
+            "allow": ["Bash(git status:*)", "Bash(uv run pytest:*)", "Bash(open:*)"],
+            "deny": [],
+            "ask": [],
+        }
 
-        toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
+        toolguard = {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
 
-        ignored = ['Bash(uv run pytest:*)', 'Bash(open:*)']
+        ignored = ["Bash(uv run pytest:*)", "Bash(open:*)"]
 
         result = find_divergent_patterns(native, toolguard, ignored)
 
         # Should not include ignored patterns
-        self.assertEqual(result['allow'], [])
+        self.assertEqual(result["allow"], [])
 
     def test_exact_string_matching(self):
         """
@@ -303,17 +332,17 @@ class TestFindDivergentPatterns(unittest.TestCase):
         Then the whitespace-different pattern is reported as divergent (matching is exact)
         """
         native = {
-            'allow': ['Bash(git status:*)', 'Bash(git status:*)  '],  # Trailing space
-            'deny': [],
-            'ask': [],
+            "allow": ["Bash(git status:*)", "Bash(git status:*)  "],  # Trailing space
+            "deny": [],
+            "ask": [],
         }
 
-        toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
+        toolguard = {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
 
         result = find_divergent_patterns(native, toolguard, [])
 
         # Trailing space makes it different
-        self.assertIn('Bash(git status:*)  ', result['allow'])
+        self.assertIn("Bash(git status:*)  ", result["allow"])
 
     def test_all_permission_types(self):
         """
@@ -321,15 +350,19 @@ class TestFindDivergentPatterns(unittest.TestCase):
         When find_divergent_patterns compares them
         Then divergences are reported for all three permission types
         """
-        native = {'allow': ['Bash(ls:*)'], 'deny': ['Bash(rm:*)'], 'ask': ['Bash(git push:*)']}
+        native = {
+            "allow": ["Bash(ls:*)"],
+            "deny": ["Bash(rm:*)"],
+            "ask": ["Bash(git push:*)"],
+        }
 
-        toolguard = {'allow': [], 'deny': [], 'ask': []}
+        toolguard = {"allow": [], "deny": [], "ask": []}
 
         result = find_divergent_patterns(native, toolguard, [])
 
-        self.assertEqual(result['allow'], ['Bash(ls:*)'])
-        self.assertEqual(result['deny'], ['Bash(rm:*)'])
-        self.assertEqual(result['ask'], ['Bash(git push:*)'])
+        self.assertEqual(result["allow"], ["Bash(ls:*)"])
+        self.assertEqual(result["deny"], ["Bash(rm:*)"])
+        self.assertEqual(result["ask"], ["Bash(git push:*)"])
 
     def test_no_divergence(self):
         """
@@ -337,13 +370,13 @@ class TestFindDivergentPatterns(unittest.TestCase):
         When find_divergent_patterns compares them
         Then no divergences are reported in any permission type
         """
-        native = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
+        native = {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
 
-        toolguard = {'allow': ['Bash(git status:*)'], 'deny': [], 'ask': []}
+        toolguard = {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
 
         result = find_divergent_patterns(native, toolguard, [])
 
-        self.assertEqual(result, {'allow': [], 'deny': [], 'ask': []})
+        self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
 
 
 class TestCheckAndWarnDivergence(unittest.TestCase):
@@ -357,25 +390,25 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
-            (project_root / 'pyproject.toml').touch()
+            (project_root / "pyproject.toml").touch()
 
             # Create matching configs
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
 
-            config = {'permissions': {'allow': ['Bash(git status:*)']}}
+            config = {"permissions": {"allow": ["Bash(git status:*)"]}}
 
             settings_path.write_text(json.dumps(config))
 
-            hook_path = project_root / '.claude' / 'toolguard_hook.json'
-            hook_config = {'permissions': {'allow': ['Bash(git status:*)']}}
+            hook_path = project_root / ".claude" / "toolguard_hook.json"
+            hook_config = {"permissions": {"allow": ["Bash(git status:*)"]}}
 
             hook_path.write_text(json.dumps(hook_config))
 
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': []}
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
             result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
 
@@ -390,29 +423,31 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
-            (project_root / 'pyproject.toml').touch()
+            (project_root / "pyproject.toml").touch()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
 
-            config = {'permissions': {'allow': ['Bash(git status:*)', 'Bash(git push:*)']}}
+            config = {
+                "permissions": {"allow": ["Bash(git status:*)", "Bash(git push:*)"]}
+            }
 
             settings_path.write_text(json.dumps(config))
 
-            hook_path = project_root / '.claude' / 'toolguard_hook.json'
-            hook_config = {'permissions': {'allow': ['Bash(git status:*)']}}
+            hook_path = project_root / ".claude" / "toolguard_hook.json"
+            hook_config = {"permissions": {"allow": ["Bash(git status:*)"]}}
 
             hook_path.write_text(json.dumps(hook_config))
 
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': []}
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
             result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
 
             # Should find divergence
-            self.assertIn('Bash(git push:*)', result)
+            self.assertIn("Bash(git push:*)", result)
 
     def test_deduplication(self):
         """
@@ -422,23 +457,23 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
-            (project_root / 'pyproject.toml').touch()
+            (project_root / "pyproject.toml").touch()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
 
-            config = {'permissions': {'allow': ['Bash(git push:*)']}}
+            config = {"permissions": {"allow": ["Bash(git push:*)"]}}
 
             settings_path.write_text(json.dumps(config))
 
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': []}
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
             # First call should find divergence
             result1 = check_and_warn_divergence(project_root, logs_dir, takeover_config)
-            self.assertIn('Bash(git push:*)', result1)
+            self.assertIn("Bash(git push:*)", result1)
 
             # Second call should be deduplicated
             result2 = check_and_warn_divergence(project_root, logs_dir, takeover_config)
@@ -452,30 +487,32 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
-            (project_root / 'pyproject.toml').touch()
+            (project_root / "pyproject.toml").touch()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
 
-            config = {'permissions': {'allow': ['Bash(uv run pytest:*)', 'Bash(git push:*)']}}
+            config = {
+                "permissions": {"allow": ["Bash(uv run pytest:*)", "Bash(git push:*)"]}
+            }
 
             settings_path.write_text(json.dumps(config))
 
             takeover_config = {
-                'enabled': True,
-                'ignored_allow_patterns': ['Bash(uv run pytest:*)'],
-                'additional_ignored_patterns': [],
+                "enabled": True,
+                "ignored_allow_patterns": ["Bash(uv run pytest:*)"],
+                "additional_ignored_patterns": [],
             }
 
             result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
 
             # Should only find git push, not pytest
-            self.assertIn('Bash(git push:*)', result)
-            self.assertNotIn('Bash(uv run pytest:*)', result)
+            self.assertIn("Bash(git push:*)", result)
+            self.assertNotIn("Bash(uv run pytest:*)", result)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

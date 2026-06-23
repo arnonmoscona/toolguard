@@ -53,8 +53,8 @@ def normalize_path_in_command(command_str: str) -> str:
     if len(parts) == 2:
         cmd, args = parts
         # If args don't start with . or / or - or ~, add ./ prefix
-        if args and not args.startswith(('.', '/', '-', '~')):
-            result = f'{cmd} ./{args}'
+        if args and not args.startswith((".", "/", "-", "~")):
+            result = f"{cmd} ./{args}"
 
     return result
 
@@ -88,14 +88,16 @@ def contains_path_component(command_str: str, component: str) -> bool:
     # Split args by spaces to handle multiple arguments
     for arg in args.split():
         # Split by path separators
-        path_parts = arg.replace('\\', '/').split('/')
+        path_parts = arg.replace("\\", "/").split("/")
         if component in path_parts:
             return True
 
     return False
 
 
-def match_command(command_str: str, patterns: List[str], extended_syntax: bool = True) -> Tuple[bool, Optional[str]]:
+def match_command(
+    command_str: str, patterns: List[str], extended_syntax: bool = True
+) -> Tuple[bool, Optional[str]]:
     """
     Check if the command matches any of the patterns.
 
@@ -110,6 +112,12 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
     Wildcards:
     - * matches any characters within a path component
     - ** matches any characters including path separators (treated as * for fnmatch)
+
+    TOO-17 defence-in-depth: DEFAULT and GLOB patterns must not span newlines.
+    A leaf command that still contains a newline (should not normally happen
+    after the multi-line pre-pass) is rejected from DEFAULT/GLOB matching so
+    that a prefix allow can never silently match a multi-statement blob.
+    REGEX patterns are exempt (their authors control DOTALL explicitly).
 
     Args:
         command_str: The command string to match
@@ -127,6 +135,11 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
         this is ever changed to return a normalized/wrapper-stripped pattern,
         provenance lookup will silently return None.
     """
+    # TOO-17: If the command contains a newline, skip DEFAULT/GLOB matching
+    # (defense-in-depth: after the pre-pass leaves should be newline-free, but
+    # guard here so a future regression cannot re-open the fail-open path).
+    command_has_newline = "\n" in command_str or "\r" in command_str
+
     # Try matching with both original and normalized command
     command_variants = [command_str, normalize_path_in_command(command_str)]
 
@@ -141,10 +154,16 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
                 return True, pattern
             continue
 
+        # TOO-17 defence-in-depth: DEFAULT patterns must not span newlines.
+        # If the command contains a newline, skip DEFAULT matching to prevent
+        # a prefix allow from matching a multi-statement blob.
+        if command_has_newline:
+            continue
+
         # DEFAULT pattern type - use existing logic
         # Special handling for path component patterns like "**/.env/**"
         # These are patterns that want to match a specific path component anywhere
-        if actual_pattern.startswith('**/') and actual_pattern.endswith('/**'):
+        if actual_pattern.startswith("**/") and actual_pattern.endswith("/**"):
             # Extract the component between **/ and /**
             component = actual_pattern[3:-3]
             if contains_path_component(command_str, component):
@@ -152,12 +171,12 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
             continue
 
         # Normalize ** to * for fnmatch (fnmatch doesn't distinguish them)
-        pattern_normalized = actual_pattern.replace('**', '*')
+        pattern_normalized = actual_pattern.replace("**", "*")
 
-        if ':' in pattern_normalized:
+        if ":" in pattern_normalized:
             # Pattern like "git log:*" or "cat ./*:*"
             # Split into command pattern and args pattern
-            cmd_pattern, args_pattern = pattern_normalized.split(':', 1)
+            cmd_pattern, args_pattern = pattern_normalized.split(":", 1)
             cmd_pattern = cmd_pattern.strip()
             args_pattern = args_pattern.strip()
 
@@ -169,29 +188,29 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
             # so e.g. `bin/x:*` and `./bin/x:*` both canonicalize to `./bin/x` —
             # matching a command `bin/x` whose own first token normalizes the same way.
             base_cmd_variants = [base_cmd]
-            if '/' in base_cmd:
+            if "/" in base_cmd:
                 normalized_base = normalize_path(base_cmd)
                 if normalized_base != base_cmd:
                     base_cmd_variants.append(normalized_base)
 
             for cmd_var in command_variants:
                 # If args pattern is * or empty, just match the command prefix
-                if args_pattern in ('*', '**', ''):
+                if args_pattern in ("*", "**", ""):
                     # Match command prefix more flexibly
                     matched_base = any(
-                        cmd_var.startswith(bc + ' ') or cmd_var == bc
+                        cmd_var.startswith(bc + " ") or cmd_var == bc
                         for bc in base_cmd_variants
                     )
                     if matched_base:
                         # Now check if the full command matches the pattern
                         # Try each base_cmd variant as the pattern prefix
                         for bc in base_cmd_variants:
-                            full_cmd_pattern = bc + cmd_pattern[len(base_cmd):] + '*'
+                            full_cmd_pattern = bc + cmd_pattern[len(base_cmd) :] + "*"
                             if fnmatch.fnmatch(cmd_var, full_cmd_pattern):
                                 return True, pattern
                 else:
                     # More specific args pattern - match the full command
-                    full_pattern = cmd_pattern + ' ' + args_pattern
+                    full_pattern = cmd_pattern + " " + args_pattern
                     if fnmatch.fnmatch(cmd_var, full_pattern):
                         return True, pattern
         else:
@@ -204,7 +223,10 @@ def match_command(command_str: str, patterns: List[str], extended_syntax: bool =
 
 
 def check_hard_deny(
-    command: str, deny_patterns: List[str], allow_patterns: List[str], extended_syntax: bool = True
+    command: str,
+    deny_patterns: List[str],
+    allow_patterns: List[str],
+    extended_syntax: bool = True,
 ) -> Optional[Tuple[str, str]]:
     """
     Apply the unoverridable hard-deny rule to a single command.
@@ -239,11 +261,17 @@ def check_hard_deny(
         if exempt:
             return None
 
-    return 'deny', f'Command matches hard_deny pattern: {pattern} (cannot be overridden)'
+    return (
+        "deny",
+        f"Command matches hard_deny pattern: {pattern} (cannot be overridden)",
+    )
 
 
 def check_permission(
-    command: str, allow_patterns: List[str], deny_patterns: List[str], extended_syntax: bool = True
+    command: str,
+    allow_patterns: List[str],
+    deny_patterns: List[str],
+    extended_syntax: bool = True,
 ) -> Tuple[str, str]:
     """
     Check if a command is permitted based on allow and deny patterns.
@@ -267,19 +295,22 @@ def check_permission(
     if deny_patterns:
         matched, pattern = match_command(command, deny_patterns, extended_syntax)
         if matched:
-            return 'deny', f'Command matches deny pattern: {pattern}'
+            return "deny", f"Command matches deny pattern: {pattern}"
 
     # Check if command is allowed
     matched, pattern = match_command(command, allow_patterns, extended_syntax)
     if matched:
-        return 'allow', f'Command matches allow pattern: {pattern}'
+        return "allow", f"Command matches allow pattern: {pattern}"
 
     # Default: deny (not explicitly allowed)
-    return 'deny', 'Command does not match any allow patterns'
+    return "deny", "Command does not match any allow patterns"
 
 
 def decide_command_at_level_detailed(
-    command: str, allow_patterns: List[str], deny_patterns: List[str], extended_syntax: bool = True
+    command: str,
+    allow_patterns: List[str],
+    deny_patterns: List[str],
+    extended_syntax: bool = True,
 ) -> Optional[Tuple[str, str, str]]:
     """
     Decide a command's outcome against ONE hierarchy level's patterns.
@@ -305,11 +336,10 @@ def decide_command_at_level_detailed(
     if deny_patterns:
         matched, pattern = match_command(command, deny_patterns, extended_syntax)
         if matched:
-            return 'deny', f'Command matches deny pattern: {pattern}', pattern
+            return "deny", f"Command matches deny pattern: {pattern}", pattern
 
     matched, pattern = match_command(command, allow_patterns, extended_syntax)
     if matched:
-        return 'allow', f'Command matches allow pattern: {pattern}', pattern
+        return "allow", f"Command matches allow pattern: {pattern}", pattern
 
     return None
-

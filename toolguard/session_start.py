@@ -72,7 +72,7 @@ def _recent_conflict_logs(log_dir: Path) -> list:
     """
     if not log_dir.exists():
         return []
-    return sorted(log_dir.glob('toolguard-conflict-*.md'), reverse=True)
+    return sorted(log_dir.glob("toolguard-conflict-*.md"), reverse=True)
 
 
 def _count_conflict_entries(log_file: Path) -> int:
@@ -90,8 +90,10 @@ def _count_conflict_entries(log_file: Path) -> int:
         Number of entries found, or 0 if the file cannot be read.
     """
     try:
-        with open(log_file, 'r', encoding='utf-8') as f:
-            return sum(1 for line in f if line.startswith('## ') and '- CONFLICT' in line)
+        with open(log_file, "r", encoding="utf-8") as f:
+            return sum(
+                1 for line in f if line.startswith("## ") and "- CONFLICT" in line
+            )
     except Exception:
         return 0
 
@@ -148,28 +150,28 @@ def _format_summary(static_conflict, dynamic_conflict) -> str:
     Returns:
         A multi-line string suitable for printing to stdout.
     """
-    lines = ['toolguard: configuration conflicts detected --']
+    lines = ["toolguard: configuration conflicts detected --"]
 
     if static_conflict is not None:
         # Build a compact provenance string: cite the first disagreeing source
         # so the human knows where to look, without flooding the session context.
         provenance_parts = [
-            f'{value} [{prov.describe_brief()}]'
+            f"{value} [{prov.describe_brief()}]"
             for value, prov in static_conflict.sources
         ]
-        provenance_summary = '; '.join(provenance_parts)
+        provenance_summary = "; ".join(provenance_parts)
         lines.append(
-            f'  - takeover_mode.enabled disagrees across levels; '
-            f'failed safe to OFF ({provenance_summary})'
+            f"  - takeover_mode.enabled disagrees across levels; "
+            f"failed safe to OFF ({provenance_summary})"
         )
 
     if dynamic_conflict is not None:
         path_str, count = dynamic_conflict
-        noun = 'entry' if count == 1 else 'entries'
-        lines.append(f'  - conflict log {path_str} has {count} recorded {noun}')
+        noun = "entry" if count == 1 else "entries"
+        lines.append(f"  - conflict log {path_str} has {count} recorded {noun}")
 
-    lines.append('Review and resolve; see the conflict log for details.')
-    return '\n'.join(lines)
+    lines.append("Review and resolve; see the conflict log for details.")
+    return "\n".join(lines)
 
 
 def _detect_conflicts(cwd: Optional[str]):
@@ -191,7 +193,7 @@ def _detect_conflicts(cwd: Optional[str]):
 
     # Determine log directory from project root (same logic as the PreToolUse hook).
     project_root = config.project_root
-    log_dir = project_root / 'logs' if project_root is not None else None
+    log_dir = project_root / "logs" if project_root is not None else None
 
     # 1. Static conflict: cross-level disagreement on takeover_mode.enabled.
     takeover = config.takeover_mode()
@@ -218,7 +220,7 @@ def main() -> None:
     """
     try:
         payload = _parse_session_start_input()
-        cwd = payload.get('cwd') or os.getcwd()
+        cwd = payload.get("cwd") or os.getcwd()
 
         static_conflict, dynamic_conflict = _detect_conflicts(cwd)
 
@@ -226,10 +228,10 @@ def main() -> None:
             print(_format_summary(static_conflict, dynamic_conflict))
 
     except Exception as exc:  # noqa: BLE001 - SessionStart must never raise
-        print(f'toolguard session-start: unexpected error ({exc})', file=sys.stderr)
+        print(f"toolguard session-start: unexpected error ({exc})", file=sys.stderr)
 
     sys.exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

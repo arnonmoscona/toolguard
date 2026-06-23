@@ -28,7 +28,7 @@ def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
     Returns:
         Path to the marker file
     """
-    filename = f'.toolguard-divergence-warned-{marker_date.strftime("%Y-%m-%d")}'
+    filename = f".toolguard-divergence-warned-{marker_date.strftime('%Y-%m-%d')}"
     return logs_dir / filename
 
 
@@ -63,7 +63,10 @@ def create_marker_file(logs_dir: Path) -> None:
     try:
         today_marker.touch()
     except OSError as e:
-        print(f'Warning: Failed to create divergence marker file {today_marker}: {e}', file=sys.stderr)
+        print(
+            f"Warning: Failed to create divergence marker file {today_marker}: {e}",
+            file=sys.stderr,
+        )
         raise
 
 
@@ -83,15 +86,15 @@ def cleanup_old_markers(logs_dir: Path, days: int = 7) -> None:
     cutoff_date = date.today() - timedelta(days=days)
 
     try:
-        for marker_file in logs_dir.glob('.toolguard-divergence-warned-*'):
+        for marker_file in logs_dir.glob(".toolguard-divergence-warned-*"):
             try:
                 # Format: .toolguard-divergence-warned-YYYY-MM-DD
-                date_str = marker_file.name.replace('.toolguard-divergence-warned-', '')
+                date_str = marker_file.name.replace(".toolguard-divergence-warned-", "")
                 file_date = date.fromisoformat(date_str)
 
                 if file_date < cutoff_date:
                     marker_file.unlink()
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 # Skip files that don't match expected format or can't be deleted
                 continue
     except OSError:
@@ -114,24 +117,24 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
         Returns empty dict if file doesn't exist or can't be parsed.
     """
     if not settings_path.exists():
-        return {'allow': [], 'deny': [], 'ask': []}
+        return {"allow": [], "deny": [], "ask": []}
 
     try:
-        with open(settings_path, 'r') as f:
+        with open(settings_path, "r") as f:
             config = json.load(f)
     except (json.JSONDecodeError, IOError, Exception) as e:
-        print(f'Warning: Failed to load {settings_path}: {e}', file=sys.stderr)
-        return {'allow': [], 'deny': [], 'ask': []}
+        print(f"Warning: Failed to load {settings_path}: {e}", file=sys.stderr)
+        return {"allow": [], "deny": [], "ask": []}
 
-    permissions = config.get('permissions', {})
+    permissions = config.get("permissions", {})
 
-    result = {'allow': [], 'deny': [], 'ask': []}
+    result = {"allow": [], "deny": [], "ask": []}
 
     # Keep only tool-scoped permission strings (``Tool(...)``). Recognised
     # structurally via the shared config.is_tool_wrapper helper -- no
     # hand-maintained tool list and no duplicated regex (single source of truth
     # lives in config.py), so newly governed tools need no change here.
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         for perm in permissions.get(perm_type, []):
             if is_tool_wrapper(perm):
                 result[perm_type].append(perm)
@@ -155,11 +158,13 @@ def get_toolguard_permissions(config) -> Dict[str, List[str]]:
         Dictionary with keys 'allow', 'deny', 'ask', each a list of patterns.
     """
     perms = config.toolguard_permissions()
-    return {key: list(perms[key]) for key in ('allow', 'deny', 'ask')}
+    return {key: list(perms[key]) for key in ("allow", "deny", "ask")}
 
 
 def find_divergent_patterns(
-    native: Dict[str, List[str]], toolguard: Dict[str, List[str]], ignored_patterns: List[str]
+    native: Dict[str, List[str]],
+    toolguard: Dict[str, List[str]],
+    ignored_patterns: List[str],
 ) -> Dict[str, List[str]]:
     """
     Find patterns in native config that are not in toolguard config.
@@ -177,9 +182,9 @@ def find_divergent_patterns(
     """
     ignored_set = set(ignored_patterns)
 
-    result = {'allow': [], 'deny': [], 'ask': []}
+    result = {"allow": [], "deny": [], "ask": []}
 
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         native_patterns = set(native.get(perm_type, []))
         toolguard_patterns = set(toolguard.get(perm_type, []))
 
@@ -187,7 +192,7 @@ def find_divergent_patterns(
         divergent = native_patterns - toolguard_patterns
 
         # Filter out ignored patterns (only for 'allow' type in takeover mode)
-        if perm_type == 'allow':
+        if perm_type == "allow":
             divergent = divergent - ignored_set
 
         result[perm_type] = sorted(list(divergent))
@@ -195,7 +200,9 @@ def find_divergent_patterns(
     return result
 
 
-def check_and_warn_divergence(project_root: Path, logs_dir: Path, takeover_config: Dict) -> List[str]:
+def check_and_warn_divergence(
+    project_root: Path, logs_dir: Path, takeover_config: Dict
+) -> List[str]:
     """
     Check for config divergence and issue warning if found.
 
@@ -215,7 +222,7 @@ def check_and_warn_divergence(project_root: Path, logs_dir: Path, takeover_confi
         return []
 
     # Load native permissions from settings.local.json
-    settings_path = project_root / '.claude' / 'settings.local.json'
+    settings_path = project_root / ".claude" / "settings.local.json"
     native_perms = get_native_permissions(settings_path)
 
     # Load toolguard permissions via the config abstraction (no direct file I/O).
@@ -227,33 +234,35 @@ def check_and_warn_divergence(project_root: Path, logs_dir: Path, takeover_confi
     toolguard_perms = get_toolguard_permissions(config)
 
     # Find divergent patterns
-    ignored_patterns = takeover_config.get('ignored_allow_patterns', [])
-    if takeover_config.get('enabled', False):
+    ignored_patterns = takeover_config.get("ignored_allow_patterns", [])
+    if takeover_config.get("enabled", False):
         # In takeover mode, also include additional_ignored_patterns
-        ignored_patterns = ignored_patterns + takeover_config.get('additional_ignored_patterns', [])
+        ignored_patterns = ignored_patterns + takeover_config.get(
+            "additional_ignored_patterns", []
+        )
 
     divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)
 
     # Collect all divergent patterns
     all_divergent = []
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         all_divergent.extend(divergent[perm_type])
 
     if not all_divergent:
         return []
 
     # Format warning message
-    warning_lines = ['[TOOLGUARD WARNING] New permission(s) found in settings.local.json but not in toolguard config:']
+    warning_lines = [
+        "[TOOLGUARD WARNING] New permission(s) found in settings.local.json but not in toolguard config:"
+    ]
     for pattern in all_divergent[:10]:  # Limit to first 10 for readability
-        warning_lines.append(f'  - {pattern}')
+        warning_lines.append(f"  - {pattern}")
 
     if len(all_divergent) > 10:
-        warning_lines.append(f'  ... and {len(all_divergent) - 10} more')
+        warning_lines.append(f"  ... and {len(all_divergent) - 10} more")
 
-    warning_message = '\n'.join(warning_lines)
-    corrective_steps = (
-        'Consider migrating to toolguard config. Run: uv run python -m toolguard.scripts.migrate_permissions'
-    )
+    warning_message = "\n".join(warning_lines)
+    corrective_steps = "Consider migrating to toolguard config. Run: uv run python -m toolguard.scripts.migrate_permissions"
 
     # Write to stdout
     print(warning_message, file=sys.stderr)

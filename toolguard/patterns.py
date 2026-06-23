@@ -20,13 +20,15 @@ from .normalization import expand_tilde
 class PatternType(Enum):
     """Type of pattern for command matching."""
 
-    DEFAULT = 'default'  # Standard fnmatch with special path component handling
-    REGEX = 'regex'  # Regular expression pattern
-    GLOB = 'glob'  # True glob pattern with globstar support
-    NATIVE = 'native'  # Word-level wildcard matching (Claude Code 2.10 style)
+    DEFAULT = "default"  # Standard fnmatch with special path component handling
+    REGEX = "regex"  # Regular expression pattern
+    GLOB = "glob"  # True glob pattern with globstar support
+    NATIVE = "native"  # Word-level wildcard matching (Claude Code 2.10 style)
 
 
-def parse_pattern(pattern_str: str, extended_syntax: bool = True) -> Tuple[PatternType, str]:
+def parse_pattern(
+    pattern_str: str, extended_syntax: bool = True
+) -> Tuple[PatternType, str]:
     """
     Parse a pattern string to determine its type and extract the actual pattern.
 
@@ -49,11 +51,11 @@ def parse_pattern(pattern_str: str, extended_syntax: bool = True) -> Tuple[Patte
         # Extended syntax disabled - treat everything as DEFAULT
         return PatternType.DEFAULT, pattern_str
 
-    if pattern_str.startswith('[regex]'):
+    if pattern_str.startswith("[regex]"):
         return PatternType.REGEX, pattern_str[7:].strip()
-    elif pattern_str.startswith('[glob]'):
+    elif pattern_str.startswith("[glob]"):
         return PatternType.GLOB, pattern_str[6:].strip()
-    elif pattern_str.startswith('[native]'):
+    elif pattern_str.startswith("[native]"):
         return PatternType.NATIVE, pattern_str[8:].strip()
     else:
         return PatternType.DEFAULT, pattern_str
@@ -89,7 +91,7 @@ def match_pattern(pattern_type: PatternType, pattern: str, command: str) -> bool
             # - * matches any characters EXCEPT path separator /
             # - ** matches any characters INCLUDING path separators (recursive)
             return PurePath(expanded_command).full_match(expanded_pattern)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             # Invalid pattern or command - treat as non-matching
             return False
 
@@ -97,12 +99,12 @@ def match_pattern(pattern_type: PatternType, pattern: str, command: str) -> bool
         # Word-level wildcard matching (Claude Code 2.10 style)
         # * matches any sequence of non-whitespace characters
         # Pattern segments must appear in order in the command
-        if '*' not in pattern:
+        if "*" not in pattern:
             # No wildcards - must match exactly
             return pattern == command
 
         # Split pattern by * to get literal segments
-        segments = pattern.split('*')
+        segments = pattern.split("*")
 
         # Start searching from the beginning of the command
         pos = 0
@@ -118,7 +120,7 @@ def match_pattern(pattern_type: PatternType, pattern: str, command: str) -> bool
                 return False
 
             # For first segment, check if it should be at the start
-            if i == 0 and not pattern.startswith('*'):
+            if i == 0 and not pattern.startswith("*"):
                 # Pattern doesn't start with *, so first segment must be at start
                 if idx != 0:
                     return False
@@ -127,7 +129,7 @@ def match_pattern(pattern_type: PatternType, pattern: str, command: str) -> bool
             pos = idx + len(segment)
 
         # For last segment, check if it should be at the end
-        if segments and segments[-1] and not pattern.endswith('*'):
+        if segments and segments[-1] and not pattern.endswith("*"):
             # Pattern doesn't end with *, so last segment must be at end
             if pos != len(command):
                 return False

@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments namespace
     """
     parser = argparse.ArgumentParser(
-        description='Migrate permissions from settings.local.json to toolguard config',
+        description="Migrate permissions from settings.local.json to toolguard config",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -54,19 +54,21 @@ Examples:
         """,
     )
 
-    parser.add_argument('--dry-run', action='store_true', help='Preview changes without modifying files')
-
     parser.add_argument(
-        '--no-sort',
-        action='store_true',
-        help='Do not sort patterns after migration (default: auto-sort)',
+        "--dry-run", action="store_true", help="Preview changes without modifying files"
     )
 
     parser.add_argument(
-        '--backup-dir',
+        "--no-sort",
+        action="store_true",
+        help="Do not sort patterns after migration (default: auto-sort)",
+    )
+
+    parser.add_argument(
+        "--backup-dir",
         type=Path,
         default=None,
-        help='Directory for backup files (default: logs/config-backups/)',
+        help="Directory for backup files (default: logs/config-backups/)",
     )
 
     return parser.parse_args()
@@ -90,23 +92,23 @@ def create_backup(file_path: Path, backup_dir: Path) -> Path:
         OSError: If backup directory cannot be created or file cannot be copied
     """
     if not file_path.exists():
-        raise FileNotFoundError(f'Cannot backup non-existent file: {file_path}')
+        raise FileNotFoundError(f"Cannot backup non-existent file: {file_path}")
 
     # Create backup directory if needed
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate timestamp
-    timestamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
     # Split filename into parts
     if file_path.suffix:
         # Has extension: name.ext -> name.TIMESTAMP.ext
         stem = file_path.stem
         suffix = file_path.suffix
-        backup_name = f'{stem}.{timestamp}{suffix}'
+        backup_name = f"{stem}.{timestamp}{suffix}"
     else:
         # No extension: name -> name.TIMESTAMP
-        backup_name = f'{file_path.name}.{timestamp}'
+        backup_name = f"{file_path.name}.{timestamp}"
 
     backup_path = backup_dir / backup_name
 
@@ -137,39 +139,39 @@ def extract_pattern_key(pattern: str) -> Tuple[str, str]:
         Tuple of (tool_name, command_prefix)
     """
     # Extract tool name
-    if '(' not in pattern:
-        return (pattern, '')
+    if "(" not in pattern:
+        return (pattern, "")
 
-    tool_name = pattern[: pattern.index('(')]
-    arg_part = pattern[pattern.index('(') + 1 : pattern.rindex(')')]
+    tool_name = pattern[: pattern.index("(")]
+    arg_part = pattern[pattern.index("(") + 1 : pattern.rindex(")")]
 
     # Handle wildcard-only patterns
-    if arg_part == '*':
-        return (tool_name, '*')
+    if arg_part == "*":
+        return (tool_name, "*")
 
     # For paths, extract up to first directory separator after root
     # Example: /tmp/foo/* -> /tmp/
-    if arg_part.startswith('/'):
+    if arg_part.startswith("/"):
         # Find first / after root
-        parts = arg_part.split('/')
+        parts = arg_part.split("/")
         if len(parts) >= 3:  # ['', 'tmp', 'foo', ...]
             # Return up to and including second segment
-            prefix = '/' + parts[1] + '/'
+            prefix = "/" + parts[1] + "/"
             return (tool_name, prefix)
         else:
             # Just root or one level: /tmp/* -> /tmp/
-            return (tool_name, arg_part.split('*')[0] if '*' in arg_part else arg_part)
+            return (tool_name, arg_part.split("*")[0] if "*" in arg_part else arg_part)
 
     # Extract first word/command component
     # Split on space or colon
-    for delimiter in [' ', ':']:
+    for delimiter in [" ", ":"]:
         if delimiter in arg_part:
             prefix = arg_part[: arg_part.index(delimiter)]
             return (tool_name, prefix)
 
     # No delimiter found - use arg up to wildcard or whole arg
-    if '*' in arg_part:
-        prefix = arg_part[: arg_part.index('*')]
+    if "*" in arg_part:
+        prefix = arg_part[: arg_part.index("*")]
         return (tool_name, prefix)
 
     return (tool_name, arg_part)
@@ -190,13 +192,13 @@ def is_superset(existing: str, new: str) -> bool:
         True if existing is a superset of new, False otherwise
     """
     # Skip extended syntax patterns
-    if existing.startswith(('[regex]', '[glob]', '[native]')):
+    if existing.startswith(("[regex]", "[glob]", "[native]")):
         return False
-    if new.startswith(('[regex]', '[glob]', '[native]')):
+    if new.startswith(("[regex]", "[glob]", "[native]")):
         return False
 
     # Only handle :*) postfix patterns
-    if not existing.endswith(':*)') or not new.endswith(':*)'):
+    if not existing.endswith(":*)") or not new.endswith(":*)"):
         return False
 
     # Extract command part before :*)
@@ -213,7 +215,7 @@ def is_superset(existing: str, new: str) -> bool:
         if next_char_idx < len(new_cmd):
             next_char = new_cmd[next_char_idx]
             # Space indicates word boundary (e.g., "uv run ruff" -> "uv run ruff format")
-            return next_char == ' '
+            return next_char == " "
     return False
 
 
@@ -235,9 +237,9 @@ def find_redundant_patterns(
     Returns:
         Dictionary with same structure as permissions, containing redundant patterns
     """
-    redundant = {'allow': [], 'deny': [], 'ask': []}
+    redundant = {"allow": [], "deny": [], "ask": []}
 
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         native_patterns = native_perms.get(perm_type, [])
         toolguard_patterns = toolguard_perms.get(perm_type, [])
 
@@ -276,28 +278,28 @@ def extract_meaningful_prefix(pattern: str) -> str:
     Returns:
         Meaningful prefix or empty string if none exists
     """
-    if '(' not in pattern:
-        return ''
+    if "(" not in pattern:
+        return ""
 
-    arg_part = pattern[pattern.index('(') + 1 : pattern.rindex(')')]
+    arg_part = pattern[pattern.index("(") + 1 : pattern.rindex(")")]
 
     # Blanket pattern - no meaningful prefix
-    if arg_part == '*':
-        return ''
+    if arg_part == "*":
+        return ""
 
     # For paths, meaningful prefix is path up to wildcard
-    if arg_part.startswith('/'):
-        if '*' in arg_part:
-            prefix = arg_part[: arg_part.index('*')]
+    if arg_part.startswith("/"):
+        if "*" in arg_part:
+            prefix = arg_part[: arg_part.index("*")]
             # Ensure we have at least one directory component
-            if prefix.count('/') >= 2:  # At least /dir/
+            if prefix.count("/") >= 2:  # At least /dir/
                 return prefix
-            elif prefix and prefix != '/':
+            elif prefix and prefix != "/":
                 return prefix
         return arg_part
 
     # Extract content before first :, *, or ) delimiter
-    for delimiter in [':', '*', ')']:
+    for delimiter in [":", "*", ")"]:
         if delimiter in arg_part:
             prefix = arg_part[: arg_part.index(delimiter)].strip()
             if prefix:  # Non-empty prefix
@@ -340,7 +342,9 @@ def detect_similar_patterns(
     # Use difflib to find close matches with ranking
     # cutoff=0.7 balances between false positives and false negatives
     # n must be > 0, so use max(1, len(existing_patterns))
-    close_matches = get_close_matches(new_pattern, existing_patterns, n=max(1, len(existing_patterns)), cutoff=0.7)
+    close_matches = get_close_matches(
+        new_pattern, existing_patterns, n=max(1, len(existing_patterns)), cutoff=0.7
+    )
 
     # Calculate similarity scores and check for superset relationships
     # Only include patterns with meaningful prefix match
@@ -383,7 +387,9 @@ def detect_similar_patterns(
     if len(close_matches) > max_matches * 2:
         # Check if many patterns share the same tool and first word
         new_key = extract_pattern_key(new_pattern)
-        prefix_count = sum(1 for p in existing_patterns if extract_pattern_key(p) == new_key)
+        prefix_count = sum(
+            1 for p in existing_patterns if extract_pattern_key(p) == new_key
+        )
         if prefix_count > max_matches * 2:
             # Too many with same prefix - not useful similarity
             return []
@@ -404,10 +410,10 @@ def get_tool_priority(pattern: str) -> Tuple[int, str]:
     Returns:
         Tuple of (priority, lowercase_pattern) for sorting
     """
-    tool_priorities = {'Bash': 0, 'Read': 1, 'Write': 2, 'Edit': 3}
+    tool_priorities = {"Bash": 0, "Read": 1, "Write": 2, "Edit": 3}
 
     # Extract tool name
-    tool_name = pattern.split('(')[0] if '(' in pattern else pattern
+    tool_name = pattern.split("(")[0] if "(" in pattern else pattern
     priority = tool_priorities.get(tool_name, 4)
 
     return (priority, pattern.lower())
@@ -448,7 +454,7 @@ def find_section_boundaries(text: str, section_name: str) -> Tuple[int, int]:
         - end_pos: Position of next section header or EOF
         Returns (-1, -1) if section not found
     """
-    section_header = f'[{section_name}]'
+    section_header = f"[{section_name}]"
     start_pos = text.find(section_header)
 
     if start_pos == -1:
@@ -460,9 +466,9 @@ def find_section_boundaries(text: str, section_name: str) -> Tuple[int, int]:
     search_from = start_pos + len(section_header)
 
     for i in range(search_from, len(text)):
-        if text[i] == '\n':
+        if text[i] == "\n":
             # Check if next line starts with '['
-            if i + 1 < len(text) and text[i + 1] == '[':
+            if i + 1 < len(text) and text[i + 1] == "[":
                 end_pos = i + 1  # End just before next section
                 break
 
@@ -490,8 +496,8 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
     """
     import re
 
-    result = {'allow': [], 'deny': [], 'ask': []}
-    lines = section_text.split('\n')
+    result = {"allow": [], "deny": [], "ask": []}
+    lines = section_text.split("\n")
 
     current_subsection = None
     comment_buffer = []
@@ -500,44 +506,50 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
         stripped = line.strip()
 
         # Skip [permissions] header itself
-        if stripped == '[permissions]':
+        if stripped == "[permissions]":
             continue
 
         # Detect subsection headers like [permissions.allow]
-        subsection_match = re.match(r'\[permissions\.(allow|deny|ask)\]', stripped)
+        subsection_match = re.match(r"\[permissions\.(allow|deny|ask)\]", stripped)
         if subsection_match:
             current_subsection = subsection_match.group(1)
             # Flush any pending comments as top-of-section
             if comment_buffer:
-                result[current_subsection].append(('comment_block', '\n'.join(comment_buffer), None))
+                result[current_subsection].append(
+                    ("comment_block", "\n".join(comment_buffer), None)
+                )
                 comment_buffer = []
             continue
 
         # Detect simple subsection assignments like "allow = ["
-        assign_match = re.match(r'(allow|deny|ask)\s*=\s*\[', stripped)
+        assign_match = re.match(r"(allow|deny|ask)\s*=\s*\[", stripped)
         if assign_match:
             current_subsection = assign_match.group(1)
             # Flush any pending comments as top-of-section
             if comment_buffer:
-                result[current_subsection].append(('comment_block', '\n'.join(comment_buffer), None))
+                result[current_subsection].append(
+                    ("comment_block", "\n".join(comment_buffer), None)
+                )
                 comment_buffer = []
             continue
 
         # Check if this is a comment line
-        if stripped.startswith('#'):
+        if stripped.startswith("#"):
             comment_buffer.append(line)
             continue
 
         # Keep blank lines in comment buffer (they're part of comment blocks)
-        if stripped == '':
+        if stripped == "":
             if current_subsection and comment_buffer:
                 comment_buffer.append(line)
             continue
 
         # Handle closing bracket - flush any pending comments as bottom-of-section
-        if stripped == ']':
+        if stripped == "]":
             if current_subsection and comment_buffer:
-                result[current_subsection].append(('comment_block', '\n'.join(comment_buffer), None))
+                result[current_subsection].append(
+                    ("comment_block", "\n".join(comment_buffer), None)
+                )
                 comment_buffer = []
             continue
 
@@ -548,20 +560,24 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
             if pattern_match:
                 pattern_value = pattern_match.group(1)
                 # Unescape the pattern
-                pattern_value = pattern_value.replace('\\"', '"').replace('\\\\', '\\')
+                pattern_value = pattern_value.replace('\\"', '"').replace("\\\\", "\\")
 
                 # Attach any pending comments to this rule
                 if comment_buffer:
-                    result[current_subsection].append(('comment_block', '\n'.join(comment_buffer), None))
+                    result[current_subsection].append(
+                        ("comment_block", "\n".join(comment_buffer), None)
+                    )
                     comment_buffer = []
 
                 # Add the rule with its original line text (preserves inline comments)
-                result[current_subsection].append(('rule', line, pattern_value))
+                result[current_subsection].append(("rule", line, pattern_value))
                 continue
 
     # Flush any remaining comments as bottom-of-section
     if current_subsection and comment_buffer:
-        result[current_subsection].append(('comment_block', '\n'.join(comment_buffer), None))
+        result[current_subsection].append(
+            ("comment_block", "\n".join(comment_buffer), None)
+        )
 
     return result
 
@@ -582,9 +598,9 @@ def reassemble_permissions_section(
     Returns:
         Complete [permissions] section text with comments preserved
     """
-    lines = ['[permissions]']
+    lines = ["[permissions]"]
 
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         patterns = new_permissions.get(perm_type, [])
         if not patterns:
             continue
@@ -602,14 +618,14 @@ def reassemble_permissions_section(
         seen_first_rule = False
 
         for item_type, content, value in parsed_items:
-            if item_type == 'comment_block':
+            if item_type == "comment_block":
                 if not seen_first_rule:
                     # Comments before first rule go to top
                     top_comments.append(content)
                 else:
                     # Comments after a rule might belong to next rule or bottom
                     current_comment_block = content
-            elif item_type == 'rule':
+            elif item_type == "rule":
                 seen_first_rule = True
                 # Save original line text (preserves inline comments)
                 rule_lines[value] = content
@@ -626,7 +642,7 @@ def reassemble_permissions_section(
         sorted_patterns = sort_patterns(patterns) if auto_sort else patterns
 
         # Reassemble the subsection
-        lines.append(f'{perm_type} = [')
+        lines.append(f"{perm_type} = [")
 
         # Add top comments
         for comment_block in top_comments:
@@ -643,20 +659,22 @@ def reassemble_permissions_section(
                 lines.append(rule_lines[pattern])
             else:
                 # New pattern - generate line
-                escaped = pattern.replace('\\', '\\\\').replace('"', '\\"')
+                escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
                 lines.append(f'  "{escaped}",')
 
         # Add bottom comments
         for comment_block in bottom_comments:
             lines.append(comment_block)
 
-        lines.append(']')
-        lines.append('')
+        lines.append("]")
+        lines.append("")
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
-def generate_permissions_section(permissions: Dict[str, List[str]], auto_sort: bool = True) -> str:
+def generate_permissions_section(
+    permissions: Dict[str, List[str]], auto_sort: bool = True
+) -> str:
     """
     Generate the [permissions] section content.
 
@@ -669,23 +687,25 @@ def generate_permissions_section(permissions: Dict[str, List[str]], auto_sort: b
     """
     # Sort if requested
     if auto_sort:
-        permissions = {key: sort_patterns(patterns) for key, patterns in permissions.items()}
+        permissions = {
+            key: sort_patterns(patterns) for key, patterns in permissions.items()
+        }
 
     # Generate TOML content
-    lines = ['[permissions]']
+    lines = ["[permissions]"]
 
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         patterns = permissions.get(perm_type, [])
         if patterns:
-            lines.append(f'{perm_type} = [')
+            lines.append(f"{perm_type} = [")
             for pattern in patterns:
                 # Escape quotes in pattern
-                escaped = pattern.replace('\\', '\\\\').replace('"', '\\"')
+                escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
                 lines.append(f'  "{escaped}",')
-            lines.append(']')
-            lines.append('')
+            lines.append("]")
+            lines.append("")
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def write_toml_config(
@@ -711,39 +731,43 @@ def write_toml_config(
     if not config_path.exists():
         # Create new file with just permissions section (no comments to preserve)
         new_permissions_section = generate_permissions_section(permissions, auto_sort)
-        config_path.write_text(new_permissions_section + '\n')
+        config_path.write_text(new_permissions_section + "\n")
         return
 
     # Read existing file
     original_text = config_path.read_text()
 
     # Find [permissions] section boundaries
-    start_pos, end_pos = find_section_boundaries(original_text, 'permissions')
+    start_pos, end_pos = find_section_boundaries(original_text, "permissions")
 
     if start_pos == -1:
         # No [permissions] section exists - append at end (no comments to preserve)
         new_permissions_section = generate_permissions_section(permissions, auto_sort)
         # Add blank line before if file doesn't end with newline
-        if original_text and not original_text.endswith('\n'):
-            new_content = original_text + '\n\n' + new_permissions_section + '\n'
+        if original_text and not original_text.endswith("\n"):
+            new_content = original_text + "\n\n" + new_permissions_section + "\n"
         else:
-            new_content = original_text + '\n' + new_permissions_section + '\n'
+            new_content = original_text + "\n" + new_permissions_section + "\n"
     else:
         # Extract existing [permissions] section
         existing_section_text = original_text[start_pos:end_pos]
 
         # Parse the existing section to preserve comments
-        parsed_structure = parse_permissions_section_with_comments(existing_section_text)
+        parsed_structure = parse_permissions_section_with_comments(
+            existing_section_text
+        )
 
         # Reassemble with new permissions, preserving comments
-        new_permissions_section = reassemble_permissions_section(parsed_structure, permissions, auto_sort)
+        new_permissions_section = reassemble_permissions_section(
+            parsed_structure, permissions, auto_sort
+        )
 
         # Replace existing [permissions] section
         before = original_text[:start_pos]
         after = original_text[end_pos:]
 
         # Ensure proper spacing
-        new_content = before + new_permissions_section + '\n' + after
+        new_content = before + new_permissions_section + "\n" + after
 
     config_path.write_text(new_content)
 
@@ -766,24 +790,26 @@ def write_json_config(
     """
     # Sort if requested
     if auto_sort:
-        permissions = {key: sort_patterns(patterns) for key, patterns in permissions.items()}
+        permissions = {
+            key: sort_patterns(patterns) for key, patterns in permissions.items()
+        }
 
     # Read existing config if it exists
     config = {}
     if config_path.exists():
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path, "r") as f:
                 config = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             pass
 
     # Update permissions
-    config['permissions'] = permissions
+    config["permissions"] = permissions
 
     # Write config
-    with open(config_path, 'w') as f:
+    with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
-        f.write('\n')
+        f.write("\n")
 
 
 def update_settings_file(
@@ -806,16 +832,16 @@ def update_settings_file(
         json.JSONDecodeError: If file contains invalid JSON
     """
     if redundant_patterns is None:
-        redundant_patterns = {'allow': [], 'deny': [], 'ask': []}
+        redundant_patterns = {"allow": [], "deny": [], "ask": []}
 
     # Load current config
-    with open(settings_path, 'r') as f:
+    with open(settings_path, "r") as f:
         config = json.load(f)
 
-    permissions = config.get('permissions', {})
+    permissions = config.get("permissions", {})
 
     # Remove migrated and redundant patterns
-    for perm_type in ['allow', 'deny', 'ask']:
+    for perm_type in ["allow", "deny", "ask"]:
         if perm_type in permissions:
             current = permissions[perm_type]
             migrated = set(migrated_patterns.get(perm_type, []))
@@ -824,12 +850,12 @@ def update_settings_file(
             # Keep only patterns that were not migrated or redundant
             permissions[perm_type] = [p for p in current if p not in to_remove]
 
-    config['permissions'] = permissions
+    config["permissions"] = permissions
 
     # Write updated config
-    with open(settings_path, 'w') as f:
+    with open(settings_path, "w") as f:
         json.dump(config, f, indent=2)
-        f.write('\n')
+        f.write("\n")
 
 
 def migrate(
@@ -852,13 +878,13 @@ def migrate(
     """
     # Set default backup directory
     if backup_dir is None:
-        backup_dir = project_root / 'logs' / 'config-backups'
+        backup_dir = project_root / "logs" / "config-backups"
 
     # Load settings.local.json permissions
-    settings_path = project_root / '.claude' / 'settings.local.json'
+    settings_path = project_root / ".claude" / "settings.local.json"
     if not settings_path.exists():
-        print(f'No settings.local.json found at {settings_path}')
-        print('Nothing to migrate.')
+        print(f"No settings.local.json found at {settings_path}")
+        print("Nothing to migrate.")
         return 0
 
     native_perms = get_native_permissions(settings_path)
@@ -868,7 +894,9 @@ def migrate(
     # project-based discovery (see discover_config_files below), so the READ path
     # must be project-based too. Honouring CLAUDE_SETTINGS_PATH here would analyse
     # an unrelated project's config while writing to this project's files.
-    toolguard_perms = get_toolguard_permissions(load_configuration(project_root, ignore_env_override=True))
+    toolguard_perms = get_toolguard_permissions(
+        load_configuration(project_root, ignore_env_override=True)
+    )
 
     # The migration target-file selection still needs the discovered file paths
     # (it writes to an existing toolguard_hook file or creates one).
@@ -877,10 +905,10 @@ def migrate(
     # Load takeover mode config for ignored patterns
     takeover_config = load_takeover_mode_config(project_root)
     ignored_patterns = []
-    if takeover_config.get('enabled', False):
-        ignored_patterns = takeover_config.get('ignored_allow_patterns', []) + takeover_config.get(
-            'additional_ignored_patterns', []
-        )
+    if takeover_config.get("enabled", False):
+        ignored_patterns = takeover_config.get(
+            "ignored_allow_patterns", []
+        ) + takeover_config.get("additional_ignored_patterns", [])
 
     # Find divergent patterns (patterns in native but not in toolguard)
     divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)
@@ -893,18 +921,18 @@ def migrate(
     total_redundant = sum(len(patterns) for patterns in redundant.values())
 
     if total_divergent == 0 and total_redundant == 0:
-        print('No new patterns found to migrate.')
-        print('All patterns in settings.local.json are already in toolguard config.')
+        print("No new patterns found to migrate.")
+        print("All patterns in settings.local.json are already in toolguard config.")
         return 0
 
     # Report what will be migrated
     if total_divergent > 0:
-        print(f'Found {total_divergent} pattern(s) to migrate:')
+        print(f"Found {total_divergent} pattern(s) to migrate:")
         print()
-        for perm_type in ['allow', 'deny', 'ask']:
+        for perm_type in ["allow", "deny", "ask"]:
             patterns = divergent[perm_type]
             if patterns:
-                print(f'  {perm_type.upper()}:')
+                print(f"  {perm_type.upper()}:")
                 for pattern in patterns:
                     # Check if covered by a superset
                     superset_match = None
@@ -913,21 +941,23 @@ def migrate(
                             superset_match = existing
                             break
                     if superset_match:
-                        print(f'    - {pattern}  ← COVERED BY: {superset_match}')
+                        print(f"    - {pattern}  ← COVERED BY: {superset_match}")
                     else:
-                        print(f'    - {pattern}')
+                        print(f"    - {pattern}")
                 print()
 
     # Report redundant patterns
     if total_redundant > 0:
-        print(f'Found {total_redundant} redundant pattern(s) to remove (already in toolguard config):')
+        print(
+            f"Found {total_redundant} redundant pattern(s) to remove (already in toolguard config):"
+        )
         print()
-        for perm_type in ['allow', 'deny', 'ask']:
+        for perm_type in ["allow", "deny", "ask"]:
             patterns = redundant[perm_type]
             if patterns:
-                print(f'  {perm_type.upper()}:')
+                print(f"  {perm_type.upper()}:")
                 for pattern in patterns:
-                    print(f'    - {pattern}')
+                    print(f"    - {pattern}")
                 print()
 
     # Find target config file (prefer TOML, create if none exists)
@@ -936,92 +966,96 @@ def migrate(
 
     # Check for existing toolguard config files
     for file_path, source_type, file_format in config_files:
-        if source_type == 'toolguard_hook':
+        if source_type == "toolguard_hook":
             target_config_path = file_path
             target_format = file_format
             break
 
     # If no toolguard config exists, create .claude/toolguard_hook.toml
     if target_config_path is None:
-        target_config_path = project_root / '.claude' / 'toolguard_hook.toml'
-        target_format = 'toml'
-        print(f'No toolguard config found. Will create: {target_config_path}')
+        target_config_path = project_root / ".claude" / "toolguard_hook.toml"
+        target_format = "toml"
+        print(f"No toolguard config found. Will create: {target_config_path}")
     else:
-        print(f'Will add patterns to: {target_config_path}')
+        print(f"Will add patterns to: {target_config_path}")
 
     # Check for similar patterns (only for patterns being migrated)
     if total_divergent > 0:
         print()
-        print('Checking for similar patterns...')
+        print("Checking for similar patterns...")
         similar_found = False
-        for perm_type in ['allow', 'deny', 'ask']:
+        for perm_type in ["allow", "deny", "ask"]:
             existing_patterns = toolguard_perms.get(perm_type, [])
             for new_pattern in divergent[perm_type]:
-                similar = detect_similar_patterns(new_pattern, existing_patterns, max_matches=3)
+                similar = detect_similar_patterns(
+                    new_pattern, existing_patterns, max_matches=3
+                )
                 if similar:
                     if not similar_found:
-                        print('Similar patterns (top 3 by similarity):')
+                        print("Similar patterns (top 3 by similarity):")
                         similar_found = True
                     for sim_pattern, score, is_superset_match in similar:
-                        superset_note = ' [SUPERSET]' if is_superset_match else ''
-                        print(f"  '{new_pattern}' similar to '{sim_pattern}' ({score:.2f}){superset_note}")
+                        superset_note = " [SUPERSET]" if is_superset_match else ""
+                        print(
+                            f"  '{new_pattern}' similar to '{sim_pattern}' ({score:.2f}){superset_note}"
+                        )
 
         if not similar_found:
-            print('  No similar patterns found.')
+            print("  No similar patterns found.")
         print()
 
     if dry_run:
-        print('DRY RUN: No changes will be made.')
+        print("DRY RUN: No changes will be made.")
         print()
-        print('Would perform these actions:')
-        print(f'  1. Create backup of {settings_path} in {backup_dir}')
+        print("Would perform these actions:")
+        print(f"  1. Create backup of {settings_path} in {backup_dir}")
         if target_config_path.exists():
-            print(f'  2. Create backup of {target_config_path} in {backup_dir}')
+            print(f"  2. Create backup of {target_config_path} in {backup_dir}")
             if total_divergent > 0:
-                print(f'  3. Add {total_divergent} pattern(s) to {target_config_path}')
+                print(f"  3. Add {total_divergent} pattern(s) to {target_config_path}")
         else:
             if total_divergent > 0:
-                print(f'  2. Create new config file {target_config_path}')
-                print(f'  3. Add {total_divergent} pattern(s) to new config')
+                print(f"  2. Create new config file {target_config_path}")
+                print(f"  3. Add {total_divergent} pattern(s) to new config")
         total_to_remove = total_divergent + total_redundant
         if total_to_remove > 0:
-            print(f'  4. Remove {total_to_remove} pattern(s) from {settings_path}')
-            print(f'      ({total_divergent} migrated, {total_redundant} redundant)')
+            print(f"  4. Remove {total_to_remove} pattern(s) from {settings_path}")
+            print(f"      ({total_divergent} migrated, {total_redundant} redundant)")
         if auto_sort:
-            print('  5. Sort all patterns in target config')
+            print("  5. Sort all patterns in target config")
         return 0
 
     # Perform migration
-    print('Starting migration...')
+    print("Starting migration...")
     print()
 
     try:
         # 1. Backup settings.local.json
-        print(f'Creating backup of {settings_path.name}...')
+        print(f"Creating backup of {settings_path.name}...")
         settings_backup = create_backup(settings_path, backup_dir)
-        print(f'  Backup created: {settings_backup}')
+        print(f"  Backup created: {settings_backup}")
 
         # 2. Backup target config if it exists
         if target_config_path.exists():
-            print(f'Creating backup of {target_config_path.name}...')
+            print(f"Creating backup of {target_config_path.name}...")
             config_backup = create_backup(target_config_path, backup_dir)
-            print(f'  Backup created: {config_backup}')
+            print(f"  Backup created: {config_backup}")
 
         # 3. Merge divergent patterns into toolguard config
-        print(f'Adding patterns to {target_config_path.name}...')
+        print(f"Adding patterns to {target_config_path.name}...")
 
         # Load existing toolguard config permissions (full structure)
-        merged_perms = {'allow': [], 'deny': [], 'ask': []}
+        merged_perms = {"allow": [], "deny": [], "ask": []}
         if target_config_path.exists():
             existing_config = load_config_file(target_config_path, target_format)
 
-            existing_perms = existing_config.get('permissions', {})
-            for perm_type in ['allow', 'deny', 'ask']:
+            existing_perms = existing_config.get("permissions", {})
+            for perm_type in ["allow", "deny", "ask"]:
                 merged_perms[perm_type] = existing_perms.get(perm_type, [])
 
         # Add divergent patterns (if any)
         if total_divergent > 0:
-            for perm_type in ['allow', 'deny', 'ask']:
+            for perm_type in ["allow", "deny", "ask"]:
                 for pattern in divergent[perm_type]:
                     if pattern not in merged_perms[perm_type]:
                         merged_perms[perm_type].append(pattern)
@@ -1030,33 +1064,35 @@ def migrate(
             target_config_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Write to target config
-            if target_format == 'toml':
+            if target_format == "toml":
                 write_toml_config(target_config_path, merged_perms, auto_sort)
             else:
                 write_json_config(target_config_path, merged_perms, auto_sort)
 
-            print(f'  Added {total_divergent} pattern(s)')
+            print(f"  Added {total_divergent} pattern(s)")
 
         # 4. Remove migrated and redundant patterns from settings.local.json
         total_to_remove = total_divergent + total_redundant
         if total_to_remove > 0:
-            print(f'Removing patterns from {settings_path.name}...')
+            print(f"Removing patterns from {settings_path.name}...")
             update_settings_file(settings_path, divergent, redundant)
-            print(f'  Removed {total_to_remove} pattern(s) ({total_divergent} migrated, {total_redundant} redundant)')
+            print(
+                f"  Removed {total_to_remove} pattern(s) ({total_divergent} migrated, {total_redundant} redundant)"
+            )
 
         print()
-        print('Migration completed successfully!')
+        print("Migration completed successfully!")
         print()
-        print('Backups created in:', backup_dir)
+        print("Backups created in:", backup_dir)
 
         return 0
 
     except Exception as e:
         print()
-        print(f'ERROR: Migration failed: {e}', file=sys.stderr)
+        print(f"ERROR: Migration failed: {e}", file=sys.stderr)
         print()
-        print('Backups (if created) are available in:', backup_dir)
-        print('You can manually restore from backups if needed.')
+        print("Backups (if created) are available in:", backup_dir)
+        print("You can manually restore from backups if needed.")
         return 1
 
 
@@ -1072,7 +1108,7 @@ def main() -> int:
     try:
         project_root = find_project_root()
     except RuntimeError as e:
-        print(f'ERROR: {e}', file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     return migrate(
@@ -1083,5 +1119,5 @@ def main() -> int:
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

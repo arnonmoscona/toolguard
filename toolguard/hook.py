@@ -33,10 +33,14 @@ from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 
 # Tools that operate on file paths (use GLOB matching)
-FILE_PATH_TOOLS = {'Read', 'Write', 'Edit'}
+FILE_PATH_TOOLS = {"Read", "Write", "Edit"}
 
 # Tools that execute commands (use compound command parsing)
-COMMAND_TOOLS = {'Bash', 'mcp__jetbrains__execute_terminal_command', 'mcp__local-tools__checked_bash'}
+COMMAND_TOOLS = {
+    "Bash",
+    "mcp__jetbrains__execute_terminal_command",
+    "mcp__local-tools__checked_bash",
+}
 
 # Module-level flags to ensure checks run only once per session
 _validation_done = False
@@ -45,7 +49,9 @@ _discovery_diagnostic_done = False
 _takeover_conflict_logged = False
 
 
-def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None, config=None) -> None:
+def _run_startup_validation(
+    env_config: Dict[str, Any], start_dir: str = None, config=None
+) -> None:
     """
     Run configuration validation once at startup.
 
@@ -73,12 +79,12 @@ def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None, c
         config = load_configuration(start_dir)
 
     # Get log directory from env config
-    log_dir = env_config.get('log_dir')
+    log_dir = env_config.get("log_dir")
     if not log_dir:
         project_root = config.project_root
         if project_root is None:
             return  # Can't log without log dir
-        log_dir = project_root / 'logs'
+        log_dir = project_root / "logs"
 
     # The config module detects content-level issues and returns them; the hook
     # only decides where to log. No files are opened or parsed here. Route each
@@ -86,7 +92,7 @@ def _run_startup_validation(env_config: Dict[str, Any], start_dir: str = None, c
     # holds: 'error'-level issues to the error stream, everything else (today
     # only 'warning') to the warning stream.
     for issue in config.validation_issues():
-        if issue.level == 'error':
+        if issue.level == "error":
             log_error(issue.message, issue.corrective_steps, log_dir)
         else:
             log_warning(issue.message, issue.corrective_steps, log_dir)
@@ -120,20 +126,20 @@ def parse_hook_input() -> Dict[str, Any]:
     try:
         input_data = sys.stdin.read()
         if not input_data.strip():
-            raise ValueError('Empty input from stdin')
+            raise ValueError("Empty input from stdin")
 
         data = json.loads(input_data)
 
         # Validate required fields
-        required_fields = ['tool_name', 'tool_input', 'hook_event_name']
+        required_fields = ["tool_name", "tool_input", "hook_event_name"]
         for field in required_fields:
             if field not in data:
-                raise ValueError(f'Missing required field: {field}')
+                raise ValueError(f"Missing required field: {field}")
 
         return data
 
     except json.JSONDecodeError as e:
-        raise json.JSONDecodeError(f'Invalid JSON from stdin: {e.msg}', e.doc, e.pos)
+        raise json.JSONDecodeError(f"Invalid JSON from stdin: {e.msg}", e.doc, e.pos)
 
 
 def create_hook_output(decision: str, reason: str) -> Dict[str, Any]:
@@ -148,15 +154,17 @@ def create_hook_output(decision: str, reason: str) -> Dict[str, Any]:
         Dictionary formatted for JSON output to Claude Code
     """
     return {
-        'hookSpecificOutput': {
-            'hookEventName': 'PreToolUse',
-            'permissionDecision': decision,
-            'permissionDecisionReason': reason,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
         }
     }
 
 
-def load_file_path_patterns(tool_name: str, start_dir: str = None, config=None) -> Tuple[List[str], List[str]]:
+def load_file_path_patterns(
+    tool_name: str, start_dir: str = None, config=None
+) -> Tuple[List[str], List[str]]:
     """
     Load allow/deny patterns for file path tools (Read, Write, Edit).
 
@@ -202,21 +210,23 @@ def _anchor_file_pattern(pattern: str, config, extended_syntax: bool) -> str:
     Returns:
         The pattern with its path body anchored to the project root when relative.
     """
-    prefix = ''
+    prefix = ""
     body = pattern
     if extended_syntax:
-        for known in ('[glob]', '[regex]', '[native]'):
+        for known in ("[glob]", "[regex]", "[native]"):
             if pattern.startswith(known):
                 prefix = known
-                body = pattern[len(known):]
+                body = pattern[len(known) :]
                 break
     # A regex pattern is not a filesystem path; never path-join it.
-    if prefix == '[regex]':
+    if prefix == "[regex]":
         return pattern
     return prefix + config.resolve_config_path(body)
 
 
-def _match_file_path_pattern(pattern: str, expanded_path: str, extended_syntax: bool) -> bool:
+def _match_file_path_pattern(
+    pattern: str, expanded_path: str, extended_syntax: bool
+) -> bool:
     """
     Match a file path against a single pattern, respecting extended syntax prefixes.
 
@@ -233,11 +243,13 @@ def _match_file_path_pattern(pattern: str, expanded_path: str, extended_syntax: 
 
     try:
         return match_pattern(pattern_type, actual_pattern, expanded_path)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
 
 
-def _decide_file_path_at_level_detailed(file_path, allow_patterns, deny_patterns, config, extended_syntax):
+def _decide_file_path_at_level_detailed(
+    file_path, allow_patterns, deny_patterns, config, extended_syntax
+):
     """
     Decide a file path's outcome at ONE level, reporting the matched pattern.
 
@@ -262,12 +274,12 @@ def _decide_file_path_at_level_detailed(file_path, allow_patterns, deny_patterns
     for pattern in deny_patterns:
         anchored = _anchor_file_pattern(pattern, config, extended_syntax)
         if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return 'deny', f'Path matches deny pattern: {pattern}', pattern
+            return "deny", f"Path matches deny pattern: {pattern}", pattern
 
     for pattern in allow_patterns:
         anchored = _anchor_file_pattern(pattern, config, extended_syntax)
         if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return 'allow', f'Path matches allow pattern: {pattern}', pattern
+            return "allow", f"Path matches allow pattern: {pattern}", pattern
 
     return None
 
@@ -288,15 +300,21 @@ def _format_conflict_message(target, override) -> str:
     Returns:
         A Markdown-friendly message string.
     """
-    win_origin = override.winning_provenance.describe_brief() if override.winning_provenance else 'unknown'
+    win_origin = (
+        override.winning_provenance.describe_brief()
+        if override.winning_provenance
+        else "unknown"
+    )
     overridden_origin = (
-        override.overridden_provenance.describe_brief() if override.overridden_provenance else 'unknown'
+        override.overridden_provenance.describe_brief()
+        if override.overridden_provenance
+        else "unknown"
     )
     return (
-        f'allow-over-deny override for: {target}. '
-        f'More-specific allow pattern `{override.winning_pattern}` [{win_origin}] '
-        f'overrode less-specific deny pattern `{override.overridden_pattern}` [{overridden_origin}]. '
-        f'Decision: allow (more-specific-wins).'
+        f"allow-over-deny override for: {target}. "
+        f"More-specific allow pattern `{override.winning_pattern}` [{win_origin}] "
+        f"overrode less-specific deny pattern `{override.overridden_pattern}` [{overridden_origin}]. "
+        f"Decision: allow (more-specific-wins)."
     )
 
 
@@ -312,9 +330,9 @@ def _log_conflict_override(target, override, log_dir) -> None:
     if override is None or not log_dir:
         return
     corrective = (
-        'Review whether the more-specific allow is intended to override the '
-        'less-specific deny. If not, remove or narrow the allow, or promote the '
-        'deny to [hard_deny] so it cannot be overridden.'
+        "Review whether the more-specific allow is intended to override the "
+        "less-specific deny. If not, remove or narrow the allow, or promote the "
+        "deny to [hard_deny] so it cannot be overridden."
     )
     log_conflict(_format_conflict_message(target, override), corrective, log_dir)
 
@@ -334,14 +352,14 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     if conflict is None or not log_dir:
         return
     message = (
-        f'{conflict.describe()}. Fail-safe applied: takeover mode is treated as '
-        'DISABLED (OFF), so Claude native permission prompts stay active and '
-        'nothing is silently bypassed.'
+        f"{conflict.describe()}. Fail-safe applied: takeover mode is treated as "
+        "DISABLED (OFF), so Claude native permission prompts stay active and "
+        "nothing is silently bypassed."
     )
     corrective = (
-        'takeover_mode is a single-owner policy. Set takeover_mode.enabled at '
-        'exactly ONE level (typically the user level) and remove or align the '
-        'conflicting settings at the other levels so they no longer disagree.'
+        "takeover_mode is a single-owner policy. Set takeover_mode.enabled at "
+        "exactly ONE level (typically the user level) and remove or align the "
+        "conflicting settings at the other levels so they no longer disagree."
     )
     log_conflict(message, corrective, log_dir)
 
@@ -389,10 +407,15 @@ def _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax):
         if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
             return None
 
-    return 'deny', f'Path matches hard_deny pattern: {matched_deny} (cannot be overridden)'
+    return (
+        "deny",
+        f"Path matches hard_deny pattern: {matched_deny} (cannot be overridden)",
+    )
 
 
-def resolve_file_path_permission_detailed(tool_name, file_path, config, extended_syntax=True):
+def resolve_file_path_permission_detailed(
+    tool_name, file_path, config, extended_syntax=True
+):
     """
     Resolve a file-path tool decision using more-specific-wins across levels.
 
@@ -425,18 +448,25 @@ def resolve_file_path_permission_detailed(tool_name, file_path, config, extended
 
     def _decide_detailed(allow_patterns, deny_patterns):
         return _decide_file_path_at_level_detailed(
-            file_path, list(allow_patterns), list(deny_patterns), config, extended_syntax
+            file_path,
+            list(allow_patterns),
+            list(deny_patterns),
+            config,
+            extended_syntax,
         )
 
     resolved = config.resolve_permission_detailed(tool_name, _decide_detailed)
     reason = resolved.reason
-    if resolved.decision == 'deny' and reason == 'Command does not match any allow patterns':
+    if (
+        resolved.decision == "deny"
+        and reason == "Command does not match any allow patterns"
+    ):
         # Normalise the default-deny reason to file-path phrasing.
-        reason = 'Path does not match any allow patterns'
+        reason = "Path does not match any allow patterns"
     return resolved.decision, reason, resolved.override
 
 
-_COMPOUND_MATCH_PATTERN = re.compile(r'All \d+ sub-commands allowed: \[(.+)\]')
+_COMPOUND_MATCH_PATTERN = re.compile(r"All \d+ sub-commands allowed: \[(.+)\]")
 
 
 def _parse_compound_match_details(reason: str):
@@ -455,14 +485,16 @@ def _parse_compound_match_details(reason: str):
         return None
 
     details = []
-    for part in m.group(1).split(', '):
-        if ' -> ' in part:
-            cmd, rule = part.rsplit(' -> ', 1)
+    for part in m.group(1).split(", "):
+        if " -> " in part:
+            cmd, rule = part.rsplit(" -> ", 1)
             details.append((cmd.strip(), rule.strip()))
     return details if details else None
 
 
-def _log_allowed_command(command: str, reason: str, agent_info: str, env_config: dict) -> None:
+def _log_allowed_command(
+    command: str, reason: str, agent_info: str, env_config: dict
+) -> None:
     """
     Log an allowed command, handling compound commands by logging each sub-command separately.
 
@@ -480,14 +512,28 @@ def _log_allowed_command(command: str, reason: str, agent_info: str, env_config:
     if compound_details:
         # Compound command: log each sub-command separately
         for sub_cmd, matched_rule in compound_details:
-            log_command(sub_cmd, 'executed', matched_rule=matched_rule, extra_info=agent_info, config=env_config)
+            log_command(
+                sub_cmd,
+                "executed",
+                matched_rule=matched_rule,
+                extra_info=agent_info,
+                config=env_config,
+            )
     else:
         # Simple command: extract matched rule from reason
-        matched_rule = reason.split(': ', 1)[1] if ': ' in reason else None
-        log_command(command, 'executed', matched_rule=matched_rule, extra_info=agent_info, config=env_config)
+        matched_rule = reason.split(": ", 1)[1] if ": " in reason else None
+        log_command(
+            command,
+            "executed",
+            matched_rule=matched_rule,
+            extra_info=agent_info,
+            config=env_config,
+        )
 
 
-def resolve_bash_permission_detailed(command, config, extended_syntax, hard_deny_deny, hard_deny_allow):
+def resolve_bash_permission_detailed(
+    command, config, extended_syntax, hard_deny_deny, hard_deny_allow
+):
     """
     Resolve a (possibly compound) Bash command with provenance and conflicts.
 
@@ -517,7 +563,9 @@ def resolve_bash_permission_detailed(command, config, extended_syntax, hard_deny
     overrides: List[Tuple[str, Any]] = []
 
     def _resolve_one(sub_command):
-        hard = check_hard_deny(sub_command, list(hard_deny_deny), list(hard_deny_allow), extended_syntax)
+        hard = check_hard_deny(
+            sub_command, list(hard_deny_deny), list(hard_deny_allow), extended_syntax
+        )
         if hard is not None:
             return hard
 
@@ -526,8 +574,8 @@ def resolve_bash_permission_detailed(command, config, extended_syntax, hard_deny
                 sub_command, list(allow_patterns), list(deny_patterns), extended_syntax
             )
 
-        resolved = config.resolve_permission_detailed('Bash', _decide_detailed)
-        if resolved.decision == 'allow' and resolved.override is not None:
+        resolved = config.resolve_permission_detailed("Bash", _decide_detailed)
+        if resolved.decision == "allow" and resolved.override is not None:
             overrides.append((sub_command, resolved.override))
         return resolved.decision, resolved.reason
 
@@ -535,7 +583,7 @@ def resolve_bash_permission_detailed(command, config, extended_syntax, hard_deny
 
     # Only allow-over-deny overrides on an ALLOWED command are conflicts; if the
     # overall decision is a deny, the recorded overrides are irrelevant.
-    if decision != 'allow':
+    if decision != "allow":
         overrides = []
     return decision, reason, overrides
 
@@ -565,9 +613,9 @@ def main() -> None:
         # Parse hook input first to get cwd
         hook_data = parse_hook_input()
 
-        tool_name = hook_data['tool_name']
-        tool_input = hook_data['tool_input']
-        cwd = hook_data.get('cwd', None)
+        tool_name = hook_data["tool_name"]
+        tool_input = hook_data["tool_input"]
+        cwd = hook_data.get("cwd", None)
 
         # Obtain the resolved configuration once via the public abstraction.
         # All file discovery, parsing, and format/location decisions live in the
@@ -579,7 +627,7 @@ def main() -> None:
         global _discovery_diagnostic_done
         if not _discovery_diagnostic_done:
             _discovery_diagnostic_done = True
-            disco_log_dir = env_config.get('log_dir')
+            disco_log_dir = env_config.get("log_dir")
             if disco_log_dir:
                 log_discovery(list(config.describe_levels()), disco_log_dir)
 
@@ -589,7 +637,7 @@ def main() -> None:
         # Resolve takeover mode configuration and issue warning if enabled
         takeover = config.takeover_mode()
         if takeover.enabled:
-            log_dir = env_config.get('log_dir')
+            log_dir = env_config.get("log_dir")
             if log_dir:
                 issue_takeover_warning(log_dir, to_stdout=True)
         elif takeover.conflict is not None:
@@ -597,7 +645,7 @@ def main() -> None:
             # enabled is already fail-safe OFF. Record the conflict to the
             # conflict log and surface a once-per-session warning. The downstream
             # path is already the safe one (native prompts active).
-            log_dir = env_config.get('log_dir')
+            log_dir = env_config.get("log_dir")
             if log_dir:
                 global _takeover_conflict_logged
                 if not _takeover_conflict_logged:
@@ -608,29 +656,33 @@ def main() -> None:
         # Divergence/auto-migration tooling still consumes a plain dict; build it
         # from the resolved TakeoverConfig so those clients stay unchanged.
         takeover_dict = {
-            'enabled': takeover.enabled,
-            'ignored_allow_patterns': list(takeover.ignored_allow_patterns),
-            'additional_ignored_patterns': list(takeover.additional_ignored_patterns),
-            'no_match_fallback': takeover.no_match_fallback,
+            "enabled": takeover.enabled,
+            "ignored_allow_patterns": list(takeover.ignored_allow_patterns),
+            "additional_ignored_patterns": list(takeover.additional_ignored_patterns),
+            "no_match_fallback": takeover.no_match_fallback,
         }
 
         # Check for config divergence (once per session)
         global _divergence_check_done
         if not _divergence_check_done:
             _divergence_check_done = True
-            log_dir = env_config.get('log_dir')
+            log_dir = env_config.get("log_dir")
             if log_dir:
                 project_root = config.project_root
                 if project_root is not None:
-                    divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_dict)
+                    divergent_patterns = check_and_warn_divergence(
+                        project_root, log_dir, takeover_dict
+                    )
 
                     # Auto-migration: consolidate permissions if configured
                     if divergent_patterns:
                         config_sync = config.config_sync_settings()
 
-                        if config_sync['auto_migrate']:
+                        if config_sync["auto_migrate"]:
                             # Auto-migration enabled - run it
-                            run_auto_migration(project_root, log_dir, dict(config_sync), takeover_dict)
+                            run_auto_migration(
+                                project_root, log_dir, dict(config_sync), takeover_dict
+                            )
                         # else: warning already shown by check_and_warn_divergence
 
         # Resolve the list of governed tools via the config abstraction
@@ -639,22 +691,34 @@ def main() -> None:
         # Only handle tools in the governed list
         if tool_name not in governed_tools:
             # Not a governed tool - allow (other hooks handle other tools)
-            output = create_hook_output('allow', f'Not a governed tool (governed: {", ".join(governed_tools)})')
+            output = create_hook_output(
+                "allow", f"Not a governed tool (governed: {', '.join(governed_tools)})"
+            )
             print(json.dumps(output))
             sys.exit(0)
 
         # Identify current agent context (used for logging)
-        transcript_path = hook_data.get('transcript_path', '')
+        transcript_path = hook_data.get("transcript_path", "")
         agent_context = identify_current_agent(transcript_path)
-        agent_info = agent_context['subagent_name'] if agent_context['agent_type'] == 'subagent' else 'main'
+        agent_info = (
+            agent_context["subagent_name"]
+            if agent_context["agent_type"] == "subagent"
+            else "main"
+        )
 
         # Handle file path tools (Read, Write, Edit)
         if tool_name in FILE_PATH_TOOLS:
-            file_path = tool_input.get('file_path', '')
+            file_path = tool_input.get("file_path", "")
             if not file_path:
-                output = create_hook_output('deny', 'No file_path provided in tool input')
+                output = create_hook_output(
+                    "deny", "No file_path provided in tool input"
+                )
                 log_command(
-                    f'{tool_name}()', 'refused', ['no file_path provided'], extra_info=agent_info, config=env_config
+                    f"{tool_name}()",
+                    "refused",
+                    ["no file_path provided"],
+                    extra_info=agent_info,
+                    config=env_config,
                 )
                 print(json.dumps(output))
                 sys.exit(0)
@@ -665,12 +729,12 @@ def main() -> None:
 
             if not all_allow:
                 # No allow patterns at any level - deny (fail closed)
-                reason = f'No {tool_name} permissions found in settings - all operations blocked'
-                output = create_hook_output('deny', reason)
+                reason = f"No {tool_name} permissions found in settings - all operations blocked"
+                output = create_hook_output("deny", reason)
                 log_command(
-                    f'{tool_name}({file_path})',
-                    'refused',
-                    ['no allow patterns configured'],
+                    f"{tool_name}({file_path})",
+                    "refused",
+                    ["no allow patterns configured"],
                     extra_info=agent_info,
                     config=env_config,
                 )
@@ -678,44 +742,70 @@ def main() -> None:
                 sys.exit(0)
 
             # Resolve file path permission via more-specific-wins level cascade.
-            extended_syntax = env_config.get('extended_syntax', True)
+            extended_syntax = env_config.get("extended_syntax", True)
             decision, reason, override = resolve_file_path_permission_detailed(
                 tool_name, file_path, config, extended_syntax
             )
 
             # Log the decision
-            log_target = f'{tool_name}({file_path})'
-            if decision == 'allow':
+            log_target = f"{tool_name}({file_path})"
+            if decision == "allow":
                 # Conflict: a more-specific allow overrode a less-specific deny.
-                _log_conflict_override(log_target, override, env_config.get('log_dir'))
-                matched_rule = reason.split(': ', 1)[1] if ': ' in reason else None
-                log_command(log_target, 'executed', matched_rule=matched_rule, extra_info=agent_info, config=env_config)
+                _log_conflict_override(log_target, override, env_config.get("log_dir"))
+                matched_rule = reason.split(": ", 1)[1] if ": " in reason else None
+                log_command(
+                    log_target,
+                    "executed",
+                    matched_rule=matched_rule,
+                    extra_info=agent_info,
+                    config=env_config,
+                )
             else:
-                violated_rules = [reason.split(': ', 1)[1] if ': ' in reason else reason]
-                log_command(log_target, 'refused', violated_rules, extra_info=agent_info, config=env_config)
+                violated_rules = [
+                    reason.split(": ", 1)[1] if ": " in reason else reason
+                ]
+                log_command(
+                    log_target,
+                    "refused",
+                    violated_rules,
+                    extra_info=agent_info,
+                    config=env_config,
+                )
 
             output = create_hook_output(decision, reason)
             print(json.dumps(output))
             sys.exit(0)
 
         # Handle command tools (Bash, MCP terminals)
-        command = tool_input.get('command', '')
+        command = tool_input.get("command", "")
         if not command:
-            output = create_hook_output('deny', 'No command provided in tool input')
-            log_command(command, 'refused', ['no command provided'], extra_info=agent_info, config=env_config)
+            output = create_hook_output("deny", "No command provided in tool input")
+            log_command(
+                command,
+                "refused",
+                ["no command provided"],
+                extra_info=agent_info,
+                config=env_config,
+            )
             print(json.dumps(output))
             sys.exit(0)
 
         # Command tools (Bash, MCP terminals) all resolve against the Bash
         # permission patterns. Fail-closed when no allow pattern is configured at
         # any level.
-        all_allow, _all_deny = config.allow_deny_for('Bash')
+        all_allow, _all_deny = config.allow_deny_for("Bash")
 
         if not all_allow:
             # No allow patterns at any level - deny everything (fail closed)
-            reason = 'No Bash permissions found in settings - all commands blocked'
-            output = create_hook_output('deny', reason)
-            log_command(command, 'refused', ['no allow patterns configured'], extra_info=agent_info, config=env_config)
+            reason = "No Bash permissions found in settings - all commands blocked"
+            output = create_hook_output("deny", reason)
+            log_command(
+                command,
+                "refused",
+                ["no allow patterns configured"],
+                extra_info=agent_info,
+                config=env_config,
+            )
             print(json.dumps(output))
             sys.exit(0)
 
@@ -723,33 +813,43 @@ def main() -> None:
         # cascades independently through the levels; compound allowed iff all are.
         # The unoverridable [hard_deny] pool is checked FIRST per sub-command, so a
         # compound is hard-denied if ANY sub-command is hard-denied.
-        extended_syntax = env_config.get('extended_syntax', True)
-        hd_deny, hd_allow = config.hard_deny('Bash')
+        extended_syntax = env_config.get("extended_syntax", True)
+        hd_deny, hd_allow = config.hard_deny("Bash")
 
         decision, reason, bash_overrides = resolve_bash_permission_detailed(
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
         # Apply takeover mode no_match_fallback if enabled and command was denied for not matching
-        if takeover.enabled and decision == 'deny' and 'does not match any allow patterns' in reason.lower():
-            if takeover.no_match_fallback == 'warn_deny':
+        if (
+            takeover.enabled
+            and decision == "deny"
+            and "does not match any allow patterns" in reason.lower()
+        ):
+            if takeover.no_match_fallback == "warn_deny":
                 reason = (
-                    'Command does not match any allow patterns. '
-                    'Consider adding a rule to toolguard_hook.toml to explicitly allow or deny this command.'
+                    "Command does not match any allow patterns. "
+                    "Consider adding a rule to toolguard_hook.toml to explicitly allow or deny this command."
                 )
 
         # Log the decision with agent identification
-        if decision == 'allow':
+        if decision == "allow":
             # Conflict logging: any sub-command whose more-specific allow overrode
             # a less-specific deny is recorded to the conflict stream.
-            conflict_log_dir = env_config.get('log_dir')
+            conflict_log_dir = env_config.get("log_dir")
             for sub_command, override in bash_overrides:
                 _log_conflict_override(sub_command, override, conflict_log_dir)
             _log_allowed_command(command, reason, agent_info, env_config)
         else:
             # Extract violated rule from reason for logging
-            violated_rules = [reason.split(': ', 1)[1] if ': ' in reason else reason]
-            log_command(command, 'refused', violated_rules, extra_info=agent_info, config=env_config)
+            violated_rules = [reason.split(": ", 1)[1] if ": " in reason else reason]
+            log_command(
+                command,
+                "refused",
+                violated_rules,
+                extra_info=agent_info,
+                config=env_config,
+            )
 
         # Create and output decision
         output = create_hook_output(decision, reason)
@@ -758,26 +858,26 @@ def main() -> None:
 
     except json.JSONDecodeError as e:
         # JSON parsing error - deny with error message
-        error_reason = f'Failed to parse hook input: {str(e)}'
-        output = create_hook_output('deny', error_reason)
+        error_reason = f"Failed to parse hook input: {str(e)}"
+        output = create_hook_output("deny", error_reason)
         print(json.dumps(output), file=sys.stderr)
         sys.exit(0)
 
     except ValueError as e:
         # Validation error - deny with error message
-        error_reason = f'Invalid hook input: {str(e)}'
-        output = create_hook_output('deny', error_reason)
+        error_reason = f"Invalid hook input: {str(e)}"
+        output = create_hook_output("deny", error_reason)
         print(json.dumps(output), file=sys.stderr)
         sys.exit(0)
 
     except Exception as e:
         # Unexpected error - deny and log
-        error_reason = f'Unexpected error in hook: {str(e)}'
-        output = create_hook_output('deny', error_reason)
+        error_reason = f"Unexpected error in hook: {str(e)}"
+        output = create_hook_output("deny", error_reason)
         print(json.dumps(output), file=sys.stderr)
-        print(f'Error: {error_reason}', file=sys.stderr)
+        print(f"Error: {error_reason}", file=sys.stderr)
         sys.exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

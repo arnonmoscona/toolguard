@@ -3,88 +3,79 @@ title: Coder Latest Task Recall
 type: note
 permalink: toolguard/implementation/coder-latest-task-recall
 tags:
-- TOO-8
+- TOO-17
 - task-memory
-- session-start
+- refactor
 ---
 
-# TOO-8 Phase 6: SessionStart Hook Implementation
+# Coder Latest Task Recall
 
-## Task Summary
+## Task
+TOO-17 Stage 1: Readability Refactor of `command_extractor.py`
 
-Implement a `SessionStart` hook that surfaces toolguard configuration conflicts at the
-start of each Claude Code session.
+## Context
+The file `toolguard/parser/command_extractor.py` became hard to reason about after 
+TOO-17 added multi-line Bash handling. This is a TDD refactor step - behavior must
+be perfectly preserved.
 
-## Key Requirements
+## Root Problems Being Fixed
+1. TWO parallel raw-canopy-tree walkers:
+   - `_extract_compound_into` (~158 lines)
+   - `_extract_from_tree` (~140 lines, nested closures)
+   Both duplicate TreeNodeN/`hasattr` navigation.
 
-### Entry Point
-- Add `toolguard-session-start = "toolguard.session_start:main"` to `pyproject.toml [project.scripts]`
-- Leave `toolguard = "toolguard.hook:main"` unchanged
+2. `_extract_compound_into` is a god-function mixing:
+   - raw-tree navigation
+   - node-kind classification
+   - business policy (control-structure decompose, proc-subst->undecidable, bash-`-c` recursion, foreign-inline ask_floor, heredoc-sentinel ask_floor)
+   - dedup
 
-### New Module
-- `toolguard/session_start.py` with `def main() -> None`
+## Scope
+ONLY `command_extractor.py` (+ a new `command_model.py`). 
+Do NOT touch: `compound.py`, grammar `.peg`, `bash_parser.py`, `multiline.py`.
 
-### Input
-- SessionStart JSON payload from stdin
-- `hook_event_name == "SessionStart"`, has `cwd` and `session_id`, NO `tool_name`/`tool_input`
-- Be tolerant: fall back to `os.getcwd()` if `cwd` absent
-- NEVER raise to user; wrap body so any error => silent exit 0 (optional one-line stderr)
+## What To Do
+1. New `toolguard/parser/command_model.py`: small dataclasses for Abstract Command Model:
+   - `Sequence`, `Pipeline`, `SimpleCommand(text, substitutions)`, 
+   - `ControlStructure(kind, is_complex, condition, body)`, `ProcSubst`/`Undecidable`
+   - SINGLE builder that walks the canopy parse tree ONCE into the IR
+   - This builder is the ONLY code allowed to touch raw canopy nodes (TreeNodeN / `hasattr` / element lists)
+   - Dispatch via single `node_kind(node)` classifier that collapses the ~12 `_is_*` predicates
 
-### Config Loading
-- `config = load_configuration(cwd)` -- same as PreToolUse hook
-- `log_dir = config.project_root / 'logs'` (handle project_root is None => no log dir => only static check)
+2. In `command_extractor.py`, reimplement structured extraction + classification as 
+   SIMPLE RECURSION over IR - NOT the raw tree. Centralize dedup in one place.
 
-### Two Detection Sources
+3. DELETE the legacy `_extract_from_tree` walker; make `extract_commands(command_line) -> List[str]`
+   a trivial projection of the IR (flatten leaves). `parse_command_line` stays thin wrapper.
 
-1. **STATIC (recomputed live, self-clears when config fixed)**:
-   - `config.takeover_mode().conflict` -- a `TakeoverEnabledConflict` or None
-   - If present: levels disagree on `takeover_mode.enabled`, failed safe to OFF
-   - Use `.describe()` / sources for message
+## Hard Constraints
+- NO behavior change. All 724 tests green (both with and without env var)
+- Do NOT modify any file under test/
+- Preserve all public import paths:
+  - `toolguard.parser.multiline.extract_structured`
+  - `toolguard.parser.multiline.LeafCommand`
+  - `toolguard.parser.multiline.UndecidableSegment`
+  - `toolguard.parser.command_extractor.extract_commands`
+  - `toolguard.parser.command_extractor.parse_command_line`
+- NO hand-rolled / regex structural bash parsing
+- Runtime stdlib-only
+- `ruff format . && ruff check .` clean
 
-2. **DYNAMIC (previously recorded, read from log files)**:
-   - Read conflict log file(s) in `log_dir` named `toolguard-conflict-*.md`
-   - Report the MOST RECENT such file that has recorded entries
-   - Count entry headers (look at how `error_log.log_conflict` writes entries)
-   - Each entry starts with `## YYYY-MM-DD HH:MM:SS - CONFLICT`
+## Report Back
+- IR module + types introduced
+- Confirm ALL raw-canopy-tree access is in single builder
+- Legacy `_extract_from_tree` is gone
+- `extract_commands` is IR projection
+- Both-env test counts (expect 724) + ruff
+- ZERO test files changed
+- Append "Stage 1 readability refactor" section to `toolguard-memories/implementation/TOO-17 Implementation Report.md`
 
-### Output
-- If any conflicts found: print BRIEF human-readable summary to STDOUT
-  (Claude Code injects SessionStart stdout into session context)
-- If NO conflicts: print nothing and exit 0
-- Exit 0 ALWAYS
+## Current State
+- 724 tests pass before refactoring
 
-### Output Format (example)
-```
-toolguard: configuration conflicts detected --
-- takeover_mode.enabled disagrees across levels; failed safe to OFF (<provenance>)
-- conflict log logs/toolguard-conflict-YYYY-MM-DD.md has N recorded entr(y/ies)
-Review and resolve; see the conflict log for details.
-```
-
-### Behavior
-- Nag every session while conflicts remain (no dedup marker)
-- A SessionStart hook must never block or break a session
-
-## Tests Required
-
-File: `test/unit/test_session_start.py`
-
-1. Static takeover conflict present -> summary mentions it
-2. Conflict log with entries -> summary reports count + path
-3. No conflicts -> no stdout
-4. Malformed/empty stdin -> graceful exit 0 no traceback
-5. Missing project_root/log_dir -> still handles static check
-6. >90% coverage on new module
-
-## Other Changes
-
-- Add "Phase 6" section to `technical-notes.md`
-- Update `pyproject.toml`
-
-## Conflict Log Format (from error_log.py)
-
-Each entry in `toolguard-conflict-YYYY-MM-DD.md` starts with:
-```
-## YYYY-MM-DD HH:MM:SS - CONFLICT
-```
-Count lines starting with `## ` and containing `- CONFLICT` to count entries.
+## Key Insight About `extract_commands` vs `_extract_from_tree`
+The legacy `_extract_from_tree` has DIFFERENT semantics from `_extract_compound_into`:
+- It includes subshell/brace group WRAPPER text as well as inner commands
+- This means `extract_commands` cannot just call `extract_structured_from_grammar` without
+  potentially breaking the tests.
+- Need to understand what behavior `extract_commands` produces vs `extract_structured_from_grammar`.

@@ -4,11 +4,11 @@ from typing import Dict, List
 
 # Known supported tools that toolguard can govern
 KNOWN_SUPPORTED_TOOLS = {
-    'Bash',
-    'Read',
-    'Write',
-    'Edit',
-    'mcp__jetbrains__execute_terminal_command',
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "mcp__jetbrains__execute_terminal_command",
 }
 
 
@@ -27,8 +27,8 @@ def extract_tool_name(permission: str) -> str:
     Returns:
         The tool name extracted from the permission string
     """
-    if '(' in permission:
-        return permission.split('(', 1)[0]
+    if "(" in permission:
+        return permission.split("(", 1)[0]
     return permission
 
 
@@ -52,12 +52,12 @@ def validate_permissions(config: dict) -> List[Dict[str, str]]:
     warnings = []
 
     # Get governed_tools from config (defaults to ['Bash'])
-    governed_tools = config.get('governed_tools', ['Bash'])
+    governed_tools = config.get("governed_tools", ["Bash"])
     if not isinstance(governed_tools, list):
-        governed_tools = ['Bash']
+        governed_tools = ["Bash"]
 
     # Get additional_supported_tools from config (defaults to empty list)
-    additional_supported_tools = config.get('additional_supported_tools', [])
+    additional_supported_tools = config.get("additional_supported_tools", [])
     if not isinstance(additional_supported_tools, list):
         additional_supported_tools = []
 
@@ -65,13 +65,13 @@ def validate_permissions(config: dict) -> List[Dict[str, str]]:
     all_supported_tools = KNOWN_SUPPORTED_TOOLS | set(additional_supported_tools)
 
     # Get permissions section
-    permissions = config.get('permissions', {})
+    permissions = config.get("permissions", {})
     if not isinstance(permissions, dict):
         return warnings
 
     # Collect all tools mentioned in permissions
     tools_in_permissions = set()
-    for permission_list in ['allow', 'deny', 'ask']:
+    for permission_list in ["allow", "deny", "ask"]:
         perms = permissions.get(permission_list, [])
         if isinstance(perms, list):
             for perm in perms:
@@ -84,12 +84,12 @@ def validate_permissions(config: dict) -> List[Dict[str, str]]:
         if tool not in all_supported_tools:
             warnings.append(
                 {
-                    'level': 'warning',
-                    'message': f'Tool "{tool}" is not a known supported tool',
-                    'corrective_steps': (
+                    "level": "warning",
+                    "message": f'Tool "{tool}" is not a known supported tool',
+                    "corrective_steps": (
                         f'If "{tool}" is a valid tool that should be governed, '
                         f'add it to "additional_supported_tools" in your config. '
-                        f'Otherwise, remove it from permissions or update the tool name.'
+                        f"Otherwise, remove it from permissions or update the tool name."
                     ),
                 }
             )
@@ -99,9 +99,9 @@ def validate_permissions(config: dict) -> List[Dict[str, str]]:
         if tool in all_supported_tools and tool not in governed_tools:
             warnings.append(
                 {
-                    'level': 'warning',
-                    'message': f'Tool "{tool}" appears in permissions but is not in governed_tools list',
-                    'corrective_steps': (
+                    "level": "warning",
+                    "message": f'Tool "{tool}" appears in permissions but is not in governed_tools list',
+                    "corrective_steps": (
                         f'Add "{tool}" to governed_tools if you want toolguard to enforce these permissions. '
                         f'Otherwise, remove "{tool}" permissions from the config.'
                     ),

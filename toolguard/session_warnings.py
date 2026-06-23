@@ -24,7 +24,7 @@ def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
     Returns:
         Path to the marker file
     """
-    filename = f'.toolguard-warned-{marker_date.strftime("%Y-%m-%d")}'
+    filename = f".toolguard-warned-{marker_date.strftime('%Y-%m-%d')}"
     return logs_dir / filename
 
 
@@ -62,7 +62,10 @@ def create_marker_file(logs_dir: Path) -> None:
     try:
         today_marker.touch()
     except OSError as e:
-        print(f'Warning: Failed to create marker file {today_marker}: {e}', file=sys.stderr)
+        print(
+            f"Warning: Failed to create marker file {today_marker}: {e}",
+            file=sys.stderr,
+        )
         raise
 
 
@@ -83,17 +86,17 @@ def cleanup_old_markers(logs_dir: Path, days: int = 7) -> None:
 
     # Find all marker files
     try:
-        for marker_file in logs_dir.glob('.toolguard-warned-*'):
+        for marker_file in logs_dir.glob(".toolguard-warned-*"):
             # Extract date from filename
             try:
                 # Format: .toolguard-warned-YYYY-MM-DD
-                date_str = marker_file.name.replace('.toolguard-warned-', '')
+                date_str = marker_file.name.replace(".toolguard-warned-", "")
                 file_date = date.fromisoformat(date_str)
 
                 # Delete if older than cutoff
                 if file_date < cutoff_date:
                     marker_file.unlink()
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 # Skip files that don't match expected format or can't be deleted
                 continue
     except OSError:
@@ -131,8 +134,8 @@ def issue_takeover_warning(
     """
     warning_message = (
         "[TOOLGUARD WARNING] Takeover mode is active. Claude's native permission prompts are "
-        'bypassed. Toolguard is the sole authority for permission decisions. If toolguard '
-        'fails or is misconfigured, blanket allows in native config will be exposed.'
+        "bypassed. Toolguard is the sole authority for permission decisions. If toolguard "
+        "fails or is misconfigured, blanket allows in native config will be exposed."
     )
 
     # Always write to stderr for visibility (every invocation; not deduplicated).

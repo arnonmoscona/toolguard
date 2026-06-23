@@ -40,7 +40,7 @@ from toolguard.config_validation import validate_permissions
 # of word characters followed by a parenthesised body. ``.*`` (greedy, DOTALL via
 # the trailing ``\)``) lets the inner body itself contain parentheses, e.g.
 # ``Bash(foo(bar))`` -> ``foo(bar)``. This needs no known-tool list.
-_TOOL_WRAPPER_RE = re.compile(r'[A-Za-z0-9_]+\((.*)\)', re.DOTALL)
+_TOOL_WRAPPER_RE = re.compile(r"[A-Za-z0-9_]+\((.*)\)", re.DOTALL)
 
 # Default blanket ignored-allow patterns for takeover mode. These seed the
 # union of ``ignored_allow_patterns`` so that, when takeover is enabled, the
@@ -48,21 +48,21 @@ _TOOL_WRAPPER_RE = re.compile(r'[A-Za-z0-9_]+\((.*)\)', re.DOTALL)
 # explicitly. Shared between the legacy ``load_takeover_mode_config`` and the
 # hierarchical ``Configuration.takeover_mode`` resolver so both stay in sync.
 _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
-    'Bash(*)',
-    'Read(*)',
-    'Write(*)',
-    'Edit(*)',
-    'mcp__jetbrains__execute_terminal_command(*)',
+    "Bash(*)",
+    "Read(*)",
+    "Write(*)",
+    "Edit(*)",
+    "mcp__jetbrains__execute_terminal_command(*)",
 )
-_DEFAULT_NO_MATCH_FALLBACK = 'deny'
+_DEFAULT_NO_MATCH_FALLBACK = "deny"
 
 # Documented defaults for the ``config_sync`` section. Single source of truth
 # shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
 # the legacy ``config_sync_settings_from_sources`` path so the two never drift.
 _CONFIG_SYNC_DEFAULTS: Dict[str, object] = {
-    'auto_migrate': False,
-    'backup_dir': 'logs/config-backups',
-    'auto_sort_on_migrate': True,
+    "auto_migrate": False,
+    "backup_dir": "logs/config-backups",
+    "auto_sort_on_migrate": True,
 }
 
 
@@ -82,10 +82,10 @@ def _parse_config_file(path_str: str, file_format: str) -> dict:
         tomllib.TOMLDecodeError: If a TOML file is malformed.
         json.JSONDecodeError: If a JSON file is malformed.
     """
-    if file_format == 'toml':
-        with open(path_str, 'rb') as f:
+    if file_format == "toml":
+        with open(path_str, "rb") as f:
             return tomllib.load(f)
-    with open(path_str, 'r') as f:
+    with open(path_str, "r") as f:
         return json.load(f)
 
 
@@ -111,7 +111,7 @@ def _parse_config_file_cached(path_str: str, file_format: str, mtime_ns: int) ->
     return _parse_config_file(path_str, file_format)
 
 
-def load_config_file(path: Path, file_format: str = 'json') -> dict:
+def load_config_file(path: Path, file_format: str = "json") -> dict:
     """
     Load and parse a single config file, dispatching on format.
 
@@ -175,14 +175,14 @@ def find_project_root(start_dir: Path = None) -> Path:
 
     while True:
         # Check for project markers
-        if (current / 'pyproject.toml').exists() or (current / '.git').exists():
+        if (current / "pyproject.toml").exists() or (current / ".git").exists():
             return current
 
         # Stop if we reach home or root
         if current == home or current == current.parent:
             raise RuntimeError(
-                'Project root not found. Searched for pyproject.toml or .git directory '
-                f'from {Path.cwd()} up to {current}. Something is badly wrong.'
+                "Project root not found. Searched for pyproject.toml or .git directory "
+                f"from {Path.cwd()} up to {current}. Something is badly wrong."
             )
 
         current = current.parent
@@ -217,7 +217,7 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
     # Try to find project root
     try:
         project_root = find_project_root(start_dir)
-        project_claude_dir = project_root / '.claude'
+        project_claude_dir = project_root / ".claude"
     except RuntimeError:
         # No project root found - skip project-level configs
         project_claude_dir = None
@@ -230,35 +230,35 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
     if project_claude_dir:
         candidates.extend(
             [
-                (project_claude_dir, 'toolguard_hook.local', 'toolguard_hook', True),
-                (project_claude_dir, 'settings.local', 'claude', False),
-                (project_claude_dir, 'toolguard_hook', 'toolguard_hook', True),
-                (project_claude_dir, 'settings', 'claude', False),
+                (project_claude_dir, "toolguard_hook.local", "toolguard_hook", True),
+                (project_claude_dir, "settings.local", "claude", False),
+                (project_claude_dir, "toolguard_hook", "toolguard_hook", True),
+                (project_claude_dir, "settings", "claude", False),
             ]
         )
 
     # User level
-    user_claude_dir = Path.home() / '.claude'
+    user_claude_dir = Path.home() / ".claude"
     candidates.extend(
         [
-            (user_claude_dir, 'toolguard_hook.local', 'toolguard_hook', True),
-            (user_claude_dir, 'settings.local', 'claude', False),
-            (user_claude_dir, 'toolguard_hook', 'toolguard_hook', True),
-            (user_claude_dir, 'settings', 'claude', False),
+            (user_claude_dir, "toolguard_hook.local", "toolguard_hook", True),
+            (user_claude_dir, "settings.local", "claude", False),
+            (user_claude_dir, "toolguard_hook", "toolguard_hook", True),
+            (user_claude_dir, "settings", "claude", False),
         ]
     )
 
     # Check for both TOML and JSON, with TOML taking precedence
     for directory, base_name, source_type, prefer_toml in candidates:
-        toml_path = directory / f'{base_name}.toml'
-        json_path = directory / f'{base_name}.json'
+        toml_path = directory / f"{base_name}.toml"
+        json_path = directory / f"{base_name}.json"
 
         toml_exists = toml_path.exists()
         json_exists = json_path.exists()
 
         if prefer_toml and toml_exists:
             # TOML file found - use it
-            config_files.append((toml_path, source_type, 'toml'))
+            config_files.append((toml_path, source_type, "toml"))
             # NOTE: the "both .toml and .json exist" warning is intentionally NOT
             # emitted here. Detection/emission of the both-formats condition is
             # the SOLE responsibility of Configuration.validation_issues(), which
@@ -266,7 +266,7 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
             # truth). Printing it here too would double-surface the warning.
         elif json_exists:
             # JSON file found (or only JSON exists)
-            config_files.append((json_path, source_type, 'json'))
+            config_files.append((json_path, source_type, "json"))
 
     return config_files
 
@@ -276,10 +276,10 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
 # two-level discover_config_files so within-level behaviour (incl. TOML-over-JSON)
 # is identical at every level of the hierarchy.
 _LEVEL_CANDIDATES: Tuple[Tuple[str, str, bool], ...] = (
-    ('toolguard_hook.local', 'toolguard_hook', True),
-    ('settings.local', 'claude', False),
-    ('toolguard_hook', 'toolguard_hook', True),
-    ('settings', 'claude', False),
+    ("toolguard_hook.local", "toolguard_hook", True),
+    ("settings.local", "claude", False),
+    ("toolguard_hook", "toolguard_hook", True),
+    ("settings", "claude", False),
 )
 
 
@@ -300,19 +300,19 @@ def _discover_in_dir(claude_dir: Path) -> List[Tuple[Path, str, str]]:
     """
     found: List[Tuple[Path, str, str]] = []
     for base_name, source_type, prefer_toml in _LEVEL_CANDIDATES:
-        toml_path = claude_dir / f'{base_name}.toml'
-        json_path = claude_dir / f'{base_name}.json'
+        toml_path = claude_dir / f"{base_name}.toml"
+        json_path = claude_dir / f"{base_name}.json"
         toml_exists = toml_path.exists()
         json_exists = json_path.exists()
 
         if prefer_toml and toml_exists:
-            found.append((toml_path, source_type, 'toml'))
+            found.append((toml_path, source_type, "toml"))
             # NOTE: the "both .toml and .json exist" warning is intentionally NOT
             # emitted here. It is detected and routed to the WARNING log stream by
             # Configuration.validation_issues() (TOO-8 Phase 4, M1 -- single source
             # of truth). Discovery stays side-effect-free.
         elif json_exists:
-            found.append((json_path, source_type, 'json'))
+            found.append((json_path, source_type, "json"))
     return found
 
 
@@ -335,13 +335,13 @@ def _hierarchical_toggle(project_claude_dir: Optional[Path]) -> bool:
         return True
     # Only toolguard_hook sources carry this toggle (not native settings).
     for path, source_type, file_format in _discover_in_dir(project_claude_dir):
-        if source_type != 'toolguard_hook':
+        if source_type != "toolguard_hook":
             continue
         content = _parse_source(path, file_format)
         if content is None:
             continue
-        if 'hierarchical_configuration' in content:
-            return bool(content['hierarchical_configuration'])
+        if "hierarchical_configuration" in content:
+            return bool(content["hierarchical_configuration"])
         # First (highest-priority) toolguard_hook source wins; stop after it so a
         # less-specific project-level file cannot override the toggle decision.
         break
@@ -372,11 +372,11 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
         most-specific first then by within-level priority.
     """
     home = Path.home()
-    user_claude_dir = home / '.claude'
+    user_claude_dir = home / ".claude"
 
     try:
         project_root = find_project_root(start_dir)
-        project_claude_dir = project_root / '.claude'
+        project_claude_dir = project_root / ".claude"
     except RuntimeError:
         project_root = None
         project_claude_dir = None
@@ -398,12 +398,12 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
         if hierarchical:
             current = project_root
             while True:
-                _add(current / '.claude')
+                _add(current / ".claude")
                 if current == home or current == current.parent:
                     break
                 current = current.parent
         else:
-            _add(project_root / '.claude')
+            _add(project_root / ".claude")
 
     # User level always applies and is always least specific (appended last,
     # unless it was already reached by the upward walk -- in which case it keeps
@@ -445,23 +445,27 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
         a TOO-8 follow-up to migrate the remaining caller and remove this.
     """
     default_config = {
-        'enabled': False,
-        'ignored_allow_patterns': [
-            'Bash(*)',
-            'Read(*)',
-            'Write(*)',
-            'Edit(*)',
-            'mcp__jetbrains__execute_terminal_command(*)',
+        "enabled": False,
+        "ignored_allow_patterns": [
+            "Bash(*)",
+            "Read(*)",
+            "Write(*)",
+            "Edit(*)",
+            "mcp__jetbrains__execute_terminal_command(*)",
         ],
-        'additional_ignored_patterns': [],
-        'no_match_fallback': 'deny',
+        "additional_ignored_patterns": [],
+        "no_match_fallback": "deny",
     }
 
     # Discover config files in hierarchy
     config_files = discover_config_files(start_dir)
 
     # Filter to only toolguard_hook files (NOT Claude settings files)
-    hook_files = [(path, fmt) for path, source_type, fmt in config_files if source_type == 'toolguard_hook']
+    hook_files = [
+        (path, fmt)
+        for path, source_type, fmt in config_files
+        if source_type == "toolguard_hook"
+    ]
 
     if not hook_files:
         return default_config
@@ -473,27 +477,27 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
         try:
             config = load_config_file(path, fmt)
 
-            takeover_mode = config.get('takeover_mode', {})
+            takeover_mode = config.get("takeover_mode", {})
             if not takeover_mode:
                 continue
 
             # Merge enabled (OR logic - any file can enable it)
-            if takeover_mode.get('enabled', False):
-                merged_config['enabled'] = True
+            if takeover_mode.get("enabled", False):
+                merged_config["enabled"] = True
 
             # Merge ignored_allow_patterns (union)
-            for pattern in takeover_mode.get('ignored_allow_patterns', []):
-                if pattern not in merged_config['ignored_allow_patterns']:
-                    merged_config['ignored_allow_patterns'].append(pattern)
+            for pattern in takeover_mode.get("ignored_allow_patterns", []):
+                if pattern not in merged_config["ignored_allow_patterns"]:
+                    merged_config["ignored_allow_patterns"].append(pattern)
 
             # Merge additional_ignored_patterns (union)
-            for pattern in takeover_mode.get('additional_ignored_patterns', []):
-                if pattern not in merged_config['additional_ignored_patterns']:
-                    merged_config['additional_ignored_patterns'].append(pattern)
+            for pattern in takeover_mode.get("additional_ignored_patterns", []):
+                if pattern not in merged_config["additional_ignored_patterns"]:
+                    merged_config["additional_ignored_patterns"].append(pattern)
 
             # Use last no_match_fallback found (priority order)
-            if 'no_match_fallback' in takeover_mode:
-                merged_config['no_match_fallback'] = takeover_mode['no_match_fallback']
+            if "no_match_fallback" in takeover_mode:
+                merged_config["no_match_fallback"] = takeover_mode["no_match_fallback"]
 
         except Exception:
             continue
@@ -509,6 +513,7 @@ def load_takeover_mode_config(start_dir: Path = None) -> dict:
 # toolguard configuration on top of the internal sourcing/parsing helpers above.
 # Clients should use load_configuration() and the Configuration methods rather
 # than touching files, formats, or discovery order directly.
+
 
 def _strip_tool_wrapper(pattern: str) -> str:
     """
@@ -577,7 +582,7 @@ def _append_provenance(reason: str, provenance) -> str:
     """
     if provenance is None:
         return reason
-    return f'{reason}  [{provenance.describe_brief()}]'
+    return f"{reason}  [{provenance.describe_brief()}]"
 
 
 @dataclass(frozen=True)
@@ -609,7 +614,7 @@ class Provenance:
 
     def describe(self) -> str:
         """Return a short human-readable description of this source."""
-        return f'{self.level}: {self.path} [{self.source_type}, {self.file_format}]'
+        return f"{self.level}: {self.path} [{self.source_type}, {self.file_format}]"
 
     def describe_brief(self) -> str:
         """
@@ -619,7 +624,7 @@ class Provenance:
         bracketed suffix, e.g. ``[project: /home/me/proj/.claude/toolguard_hook.toml]``.
         Kept terse so it does not bloat the resolution log.
         """
-        return f'{self.level}: {self.path}'
+        return f"{self.level}: {self.path}"
 
 
 @dataclass(frozen=True)
@@ -648,7 +653,7 @@ class ConfigLayer:
     @property
     def is_native(self) -> bool:
         """True when this layer is a native Claude settings file."""
-        return self.provenance.source_type == 'claude'
+        return self.provenance.source_type == "claude"
 
     @property
     def specificity(self) -> int:
@@ -694,7 +699,7 @@ class TakeoverEnabledConflict:
             the boolean each layer set; ``provenance`` is that layer's origin.
     """
 
-    sources: Tuple[Tuple[bool, 'Provenance'], ...]
+    sources: Tuple[Tuple[bool, "Provenance"], ...]
 
     def describe(self) -> str:
         """
@@ -703,8 +708,8 @@ class TakeoverEnabledConflict:
         Lists every level that set ``enabled`` with its value and provenance,
         most-specific first, for the conflict log entry.
         """
-        parts = [f'{value} [{prov.describe_brief()}]' for value, prov in self.sources]
-        return 'takeover_mode.enabled set to conflicting values: ' + '; '.join(parts)
+        parts = [f"{value} [{prov.describe_brief()}]" for value, prov in self.sources]
+        return "takeover_mode.enabled set to conflicting values: " + "; ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -732,7 +737,7 @@ class TakeoverConfig:
     ignored_allow_patterns: Tuple[str, ...]
     additional_ignored_patterns: Tuple[str, ...]
     no_match_fallback: str
-    conflict: Optional['TakeoverEnabledConflict'] = None
+    conflict: Optional["TakeoverEnabledConflict"] = None
 
     def normalized_ignored_patterns(self) -> frozenset:
         """
@@ -742,7 +747,9 @@ class TakeoverConfig:
         and strips any recognised tool wrapper so the values can be compared
         against extracted pattern lists.
         """
-        combined = tuple(self.ignored_allow_patterns) + tuple(self.additional_ignored_patterns)
+        combined = tuple(self.ignored_allow_patterns) + tuple(
+            self.additional_ignored_patterns
+        )
         return frozenset(_strip_tool_wrapper(p) for p in combined)
 
 
@@ -788,9 +795,9 @@ class ConflictOverride:
     """
 
     winning_pattern: str
-    winning_provenance: Optional['Provenance']
+    winning_provenance: Optional["Provenance"]
     overridden_pattern: str
-    overridden_provenance: Optional['Provenance']
+    overridden_provenance: Optional["Provenance"]
 
 
 @dataclass(frozen=True)
@@ -814,7 +821,7 @@ class ResolvedDecision:
 
     decision: str
     reason: str
-    provenance: Optional['Provenance']
+    provenance: Optional["Provenance"]
     override: Optional[ConflictOverride] = None
 
 
@@ -878,7 +885,7 @@ class Configuration:
         """
         if not raw_path:
             return raw_path
-        if raw_path.startswith('/') or raw_path.startswith('~'):
+        if raw_path.startswith("/") or raw_path.startswith("~"):
             return raw_path
         root = self.project_root
         if root is None:
@@ -906,14 +913,14 @@ class Configuration:
         for layer in self.layers:
             if layer.is_native:
                 continue
-            tools = layer.content.get('governed_tools', [])
+            tools = layer.content.get("governed_tools", [])
             if not isinstance(tools, list):
                 continue
             for tool in tools:
                 if isinstance(tool, str):
                     seen.setdefault(tool, None)
         if not seen:
-            return ('Bash',)
+            return ("Bash",)
         return tuple(seen.keys())
 
     # -- takeover mode -----------------------------------------------------
@@ -952,7 +959,7 @@ class Configuration:
             # takeover_mode is a toolguard extension; ignore native settings.
             if layer.is_native:
                 continue
-            section = layer.content.get('takeover_mode', {})
+            section = layer.content.get("takeover_mode", {})
             if not isinstance(section, dict) or not section:
                 continue
 
@@ -960,20 +967,20 @@ class Configuration:
             # ``enabled`` is a fail-safe SECURITY toggle, so a non-bool value is
             # NOT coerced (``bool('false')`` would be True): such a level does not
             # vote, and validation_issues() reports the malformed value.
-            if 'enabled' in section and isinstance(section['enabled'], bool):
-                explicit_enabled.append((section['enabled'], layer.provenance))
+            if "enabled" in section and isinstance(section["enabled"], bool):
+                explicit_enabled.append((section["enabled"], layer.provenance))
 
             # Union pattern lists (most-specific first; de-dup preserves order).
-            for pattern in section.get('ignored_allow_patterns', []):
+            for pattern in section.get("ignored_allow_patterns", []):
                 if pattern not in ignored_allow:
                     ignored_allow.append(pattern)
-            for pattern in section.get('additional_ignored_patterns', []):
+            for pattern in section.get("additional_ignored_patterns", []):
                 if pattern not in additional_ignored:
                     additional_ignored.append(pattern)
 
             # no_match_fallback: more-specific-wins (first definition wins).
-            if no_match_fallback is None and 'no_match_fallback' in section:
-                no_match_fallback = section['no_match_fallback']
+            if no_match_fallback is None and "no_match_fallback" in section:
+                no_match_fallback = section["no_match_fallback"]
 
         enabled, conflict = self._resolve_takeover_enabled(explicit_enabled)
 
@@ -981,14 +988,16 @@ class Configuration:
             enabled=enabled,
             ignored_allow_patterns=tuple(ignored_allow),
             additional_ignored_patterns=tuple(additional_ignored),
-            no_match_fallback=no_match_fallback if no_match_fallback is not None else _DEFAULT_NO_MATCH_FALLBACK,
+            no_match_fallback=no_match_fallback
+            if no_match_fallback is not None
+            else _DEFAULT_NO_MATCH_FALLBACK,
             conflict=conflict,
         )
 
     @staticmethod
     def _resolve_takeover_enabled(
-        explicit: List[Tuple[bool, 'Provenance']],
-    ) -> Tuple[bool, Optional['TakeoverEnabledConflict']]:
+        explicit: List[Tuple[bool, "Provenance"]],
+    ) -> Tuple[bool, Optional["TakeoverEnabledConflict"]]:
         """
         Resolve ``takeover_mode.enabled`` from the explicit per-level settings.
 
@@ -1050,7 +1059,7 @@ class Configuration:
             Tuple of (deny_patterns, allow_patterns) as immutable, de-duplicated
             tuples pooled across all toolguard_hook layers.
         """
-        prefix = f'{tool_name}('
+        prefix = f"{tool_name}("
         seen_deny: Dict[str, None] = {}
         seen_allow: Dict[str, None] = {}
 
@@ -1058,14 +1067,22 @@ class Configuration:
             # hard_deny is a toolguard extension; ignore native Claude settings.
             if layer.is_native:
                 continue
-            section = layer.content.get('hard_deny', {})
+            section = layer.content.get("hard_deny", {})
             if not isinstance(section, dict):
                 continue
-            for perm in section.get('deny', []):
-                if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(')'):
+            for perm in section.get("deny", []):
+                if (
+                    isinstance(perm, str)
+                    and perm.startswith(prefix)
+                    and perm.endswith(")")
+                ):
                     seen_deny.setdefault(perm[len(prefix) : -1], None)
-            for perm in section.get('allow', []):
-                if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(')'):
+            for perm in section.get("allow", []):
+                if (
+                    isinstance(perm, str)
+                    and perm.startswith(prefix)
+                    and perm.endswith(")")
+                ):
                     seen_allow.setdefault(perm[len(prefix) : -1], None)
 
         return tuple(seen_deny.keys()), tuple(seen_allow.keys())
@@ -1091,36 +1108,52 @@ class Configuration:
             Tuple of :class:`ToolPatternLayer`, ordered most-specific first.
         """
         takeover = self.takeover_mode()
-        ignored = takeover.normalized_ignored_patterns() if takeover.enabled else frozenset()
+        ignored = (
+            takeover.normalized_ignored_patterns() if takeover.enabled else frozenset()
+        )
 
-        prefix = f'{tool_name}('
+        prefix = f"{tool_name}("
         result = []
 
         for layer in self.layers:
-            permissions = layer.content.get('permissions', {})
+            permissions = layer.content.get("permissions", {})
             if not isinstance(permissions, dict):
                 permissions = {}
 
             allow = []
-            for perm in permissions.get('allow', []):
-                if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(')'):
+            for perm in permissions.get("allow", []):
+                if (
+                    isinstance(perm, str)
+                    and perm.startswith(prefix)
+                    and perm.endswith(")")
+                ):
                     pattern = perm[len(prefix) : -1]
                     if takeover.enabled and layer.is_native and pattern in ignored:
                         continue
                     allow.append(pattern)
 
             deny = []
-            for perm in permissions.get('deny', []):
-                if isinstance(perm, str) and perm.startswith(prefix) and perm.endswith(')'):
+            for perm in permissions.get("deny", []):
+                if (
+                    isinstance(perm, str)
+                    and perm.startswith(prefix)
+                    and perm.endswith(")")
+                ):
                     deny.append(perm[len(prefix) : -1])
 
-            result.append(ToolPatternLayer(provenance=layer.provenance, allow=tuple(allow), deny=tuple(deny)))
+            result.append(
+                ToolPatternLayer(
+                    provenance=layer.provenance, allow=tuple(allow), deny=tuple(deny)
+                )
+            )
 
         return tuple(result)
 
     def permission_levels_with_provenance(
         self, tool_name: str
-    ) -> Tuple[Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[ToolPatternLayer, ...]], ...]:
+    ) -> Tuple[
+        Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[ToolPatternLayer, ...]], ...
+    ]:
         """
         Group per-layer patterns for a tool into per-LEVEL pairs, retaining
         each level's contributing layers.
@@ -1154,13 +1187,14 @@ class Configuration:
             deny_acc.extend(layer.deny)
             layers_acc.append(layer)
         return tuple(
-            (tuple(grouped[s][0]), tuple(grouped[s][1]), tuple(grouped[s][2])) for s in order
+            (tuple(grouped[s][0]), tuple(grouped[s][1]), tuple(grouped[s][2]))
+            for s in order
         )
 
     @staticmethod
     def _provenance_for_pattern(
         layers: Tuple[ToolPatternLayer, ...], pattern: str, kind: str
-    ) -> Optional['Provenance']:
+    ) -> Optional["Provenance"]:
         """
         Find the provenance of the layer that contributed a matched pattern.
 
@@ -1174,12 +1208,14 @@ class Configuration:
             pattern, or None when not found (e.g. format drift).
         """
         for layer in layers:
-            candidates = layer.allow if kind == 'allow' else layer.deny
+            candidates = layer.allow if kind == "allow" else layer.deny
             if pattern in candidates:
                 return layer.provenance
         return None
 
-    def resolve_permission_detailed(self, tool_name: str, decide_detailed) -> ResolvedDecision:
+    def resolve_permission_detailed(
+        self, tool_name: str, decide_detailed
+    ) -> ResolvedDecision:
         """
         Resolve a decision with provenance and allow-over-deny conflict detection.
 
@@ -1211,21 +1247,25 @@ class Configuration:
             if result is None:
                 continue
             decision, reason, matched_pattern = result
-            kind = 'allow' if decision == 'allow' else 'deny'
+            kind = "allow" if decision == "allow" else "deny"
             prov = self._provenance_for_pattern(layers, matched_pattern, kind)
             reason_with_prov = _append_provenance(reason, prov)
 
             override = None
-            if decision == 'allow':
+            if decision == "allow":
                 override = self._detect_override(
                     levels, index, matched_pattern, prov, decide_detailed
                 )
             return ResolvedDecision(decision, reason_with_prov, prov, override)
 
-        return ResolvedDecision('deny', 'Command does not match any allow patterns', None, None)
+        return ResolvedDecision(
+            "deny", "Command does not match any allow patterns", None, None
+        )
 
     @staticmethod
-    def _detect_override(levels, winning_index, winning_pattern, winning_prov, decide_detailed):
+    def _detect_override(
+        levels, winning_index, winning_pattern, winning_prov, decide_detailed
+    ):
         """
         Scan LESS-specific levels for a deny overridden by the winning allow.
 
@@ -1248,10 +1288,10 @@ class Configuration:
             result = decide_detailed(allow, deny)
             # We only care about a DENY at this less-specific level. ``decide``
             # is deny-first, so a deny here surfaces as decision == 'deny'.
-            if result is not None and result[0] == 'deny':
+            if result is not None and result[0] == "deny":
                 _decision, _reason, overridden_pattern = result
                 overridden_prov = Configuration._provenance_for_pattern(
-                    layers, overridden_pattern, 'deny'
+                    layers, overridden_pattern, "deny"
                 )
                 return ConflictOverride(
                     winning_pattern=winning_pattern,
@@ -1312,8 +1352,8 @@ class Configuration:
             The resolved value, or ``default`` if not found.
         """
         section: Optional[str]
-        if '.' in name:
-            section, key = name.split('.', 1)
+        if "." in name:
+            section, key = name.split(".", 1)
         else:
             section, key = None, name
 
@@ -1346,7 +1386,7 @@ class Configuration:
         """
         return MappingProxyType(
             {
-                key: self.scalar(f'config_sync.{key}', default)
+                key: self.scalar(f"config_sync.{key}", default)
                 for key, default in _CONFIG_SYNC_DEFAULTS.items()
             }
         )
@@ -1366,14 +1406,14 @@ class Configuration:
             Read-only mapping with keys 'allow', 'deny', 'ask', each a tuple of
             permission strings.
         """
-        result = {'allow': [], 'deny': [], 'ask': []}
+        result = {"allow": [], "deny": [], "ask": []}
         for layer in self.layers:
             if layer.is_native:
                 continue
-            permissions = layer.content.get('permissions', {})
+            permissions = layer.content.get("permissions", {})
             if not isinstance(permissions, dict):
                 continue
-            for perm_type in ('allow', 'deny', 'ask'):
+            for perm_type in ("allow", "deny", "ask"):
                 for perm in permissions.get(perm_type, []):
                     if isinstance(perm, str) and perm not in result[perm_type]:
                         result[perm_type].append(perm)
@@ -1419,8 +1459,8 @@ class Configuration:
                 order.append(key)
                 # Augment with on-disk presence so the warning fires in real
                 # usage (where discovery dropped the JSON sibling).
-                for fmt, suffix in (('toml', '.toml'), ('json', '.json')):
-                    if (parent / f'{base_name}{suffix}').exists():
+                for fmt, suffix in (("toml", ".toml"), ("json", ".json")):
+                    if (parent / f"{base_name}{suffix}").exists():
                         seen_formats[key].add(fmt)
             seen_formats[key].add(layer.provenance.file_format)
 
@@ -1428,10 +1468,10 @@ class Configuration:
             if len(seen_formats[(parent_str, base_name)]) > 1:
                 issues.append(
                     Issue(
-                        level='warning',
-                        message=f'Both {base_name}.toml and {base_name}.json exist in {parent_str}',
+                        level="warning",
+                        message=f"Both {base_name}.toml and {base_name}.json exist in {parent_str}",
                         corrective_steps=(
-                            f'Remove one of the files to avoid confusion. TOML ({base_name}.toml) is being used.'
+                            f"Remove one of the files to avoid confusion. TOML ({base_name}.toml) is being used."
                         ),
                     )
                 )
@@ -1442,54 +1482,54 @@ class Configuration:
         for layer in self.layers:
             if layer.is_native:
                 continue
-            section = layer.content.get('takeover_mode', {})
-            if not isinstance(section, dict) or 'enabled' not in section:
+            section = layer.content.get("takeover_mode", {})
+            if not isinstance(section, dict) or "enabled" not in section:
                 continue
-            if not isinstance(section['enabled'], bool):
+            if not isinstance(section["enabled"], bool):
                 issues.append(
                     Issue(
-                        level='error',
+                        level="error",
                         message=(
-                            f'takeover_mode.enabled in {layer.provenance.describe()} is '
-                            f'{type(section["enabled"]).__name__}, not a boolean; it is ignored'
+                            f"takeover_mode.enabled in {layer.provenance.describe()} is "
+                            f"{type(section['enabled']).__name__}, not a boolean; it is ignored"
                         ),
                         corrective_steps=(
-                            'Set takeover_mode.enabled to a boolean (true/false). '
-                            'Non-boolean values are not coerced and the level does not '
-                            'participate in resolving takeover mode.'
+                            "Set takeover_mode.enabled to a boolean (true/false). "
+                            "Non-boolean values are not coerced and the level does not "
+                            "participate in resolving takeover mode."
                         ),
                     )
                 )
 
         # 3) Permission validation over the merged toolguard_hook content only.
         merged_config: Dict = {
-            'governed_tools': [],
-            'additional_supported_tools': [],
-            'permissions': {'allow': [], 'deny': [], 'ask': []},
+            "governed_tools": [],
+            "additional_supported_tools": [],
+            "permissions": {"allow": [], "deny": [], "ask": []},
         }
         for layer in self.layers:
             if layer.is_native:
                 continue
             content = layer.content
-            for tool in content.get('governed_tools', []):
-                if tool not in merged_config['governed_tools']:
-                    merged_config['governed_tools'].append(tool)
-            for tool in content.get('additional_supported_tools', []):
-                if tool not in merged_config['additional_supported_tools']:
-                    merged_config['additional_supported_tools'].append(tool)
-            permissions = content.get('permissions', {})
+            for tool in content.get("governed_tools", []):
+                if tool not in merged_config["governed_tools"]:
+                    merged_config["governed_tools"].append(tool)
+            for tool in content.get("additional_supported_tools", []):
+                if tool not in merged_config["additional_supported_tools"]:
+                    merged_config["additional_supported_tools"].append(tool)
+            permissions = content.get("permissions", {})
             if isinstance(permissions, dict):
-                for perm_type in ('allow', 'deny', 'ask'):
+                for perm_type in ("allow", "deny", "ask"):
                     for perm in permissions.get(perm_type, []):
-                        if perm not in merged_config['permissions'][perm_type]:
-                            merged_config['permissions'][perm_type].append(perm)
+                        if perm not in merged_config["permissions"][perm_type]:
+                            merged_config["permissions"][perm_type].append(perm)
 
         for warning in validate_permissions(merged_config):
             issues.append(
                 Issue(
-                    level=warning.get('level', 'warning'),
-                    message=warning['message'],
-                    corrective_steps=warning['corrective_steps'],
+                    level=warning.get("level", "warning"),
+                    message=warning["message"],
+                    corrective_steps=warning["corrective_steps"],
                 )
             )
 
@@ -1528,7 +1568,7 @@ def _parse_source(path: Path, file_format: str) -> Optional[dict]:
     try:
         return load_config_file(path, file_format)
     except Exception as e:  # noqa: BLE001 - tolerate any unreadable source
-        print(f'Warning: Failed to load {path}: {e}', file=sys.stderr)
+        print(f"Warning: Failed to load {path}: {e}", file=sys.stderr)
         return None
 
 
@@ -1543,15 +1583,17 @@ def _level_for_path(path: Path) -> str:
         'user' if the path is under the user's ~/.claude directory, otherwise
         'project'.
     """
-    user_claude = Path.home() / '.claude'
+    user_claude = Path.home() / ".claude"
     try:
         path.resolve().relative_to(user_claude.resolve())
-        return 'user'
+        return "user"
     except ValueError:
-        return 'project'
+        return "project"
 
 
-def load_configuration(start_dir: Path = None, ignore_env_override: bool = False) -> Configuration:
+def load_configuration(
+    start_dir: Path = None, ignore_env_override: bool = False
+) -> Configuration:
     """
     Load the toolguard configuration as an immutable :class:`Configuration`.
 
@@ -1581,35 +1623,41 @@ def load_configuration(start_dir: Path = None, ignore_env_override: bool = False
     """
     layers: List[ConfigLayer] = []
 
-    settings_path = None if ignore_env_override else os.environ.get('CLAUDE_SETTINGS_PATH')
+    settings_path = (
+        None if ignore_env_override else os.environ.get("CLAUDE_SETTINGS_PATH")
+    )
     if settings_path:
         explicit = Path(settings_path)
-        content = _parse_source(explicit, 'json')
+        content = _parse_source(explicit, "json")
         if content is not None:
             layers.append(
                 ConfigLayer(
-                    provenance=Provenance('explicit', 'claude', 'json', explicit),
+                    provenance=Provenance("explicit", "claude", "json", explicit),
                     content=MappingProxyType(content),
                 )
             )
         settings_dir = explicit.parent
-        hook_toml = settings_dir / 'toolguard_hook.toml'
-        hook_json = settings_dir / 'toolguard_hook.json'
+        hook_toml = settings_dir / "toolguard_hook.toml"
+        hook_json = settings_dir / "toolguard_hook.json"
         if hook_toml.exists():
-            content = _parse_source(hook_toml, 'toml')
+            content = _parse_source(hook_toml, "toml")
             if content is not None:
                 layers.append(
                     ConfigLayer(
-                        provenance=Provenance('explicit', 'toolguard_hook', 'toml', hook_toml),
+                        provenance=Provenance(
+                            "explicit", "toolguard_hook", "toml", hook_toml
+                        ),
                         content=MappingProxyType(content),
                     )
                 )
         elif hook_json.exists():
-            content = _parse_source(hook_json, 'json')
+            content = _parse_source(hook_json, "json")
             if content is not None:
                 layers.append(
                     ConfigLayer(
-                        provenance=Provenance('explicit', 'toolguard_hook', 'json', hook_json),
+                        provenance=Provenance(
+                            "explicit", "toolguard_hook", "json", hook_json
+                        ),
                         content=MappingProxyType(content),
                     )
                 )
@@ -1622,7 +1670,9 @@ def load_configuration(start_dir: Path = None, ignore_env_override: bool = False
         level = _level_for_path(path)
         layers.append(
             ConfigLayer(
-                provenance=Provenance(level, source_type, file_format, path, specificity),
+                provenance=Provenance(
+                    level, source_type, file_format, path, specificity
+                ),
                 content=MappingProxyType(content),
             )
         )
@@ -1640,7 +1690,9 @@ def load_configuration(start_dir: Path = None, ignore_env_override: bool = False
 # parsing/format-branching lives here, not in those clients.
 
 
-def config_sync_settings_from_sources(config_files: List[Tuple[Path, str, str]]) -> Dict:
+def config_sync_settings_from_sources(
+    config_files: List[Tuple[Path, str, str]],
+) -> Dict:
     """
     Resolve config_sync settings from toolguard_hook sources.
 
@@ -1657,12 +1709,12 @@ def config_sync_settings_from_sources(config_files: List[Tuple[Path, str, str]])
     """
     resolved: Dict = dict(_CONFIG_SYNC_DEFAULTS)
     for path, source_type, file_format in config_files:
-        if source_type != 'toolguard_hook':
+        if source_type != "toolguard_hook":
             continue
         content = _parse_source(path, file_format)
         if content is None:
             continue
-        config_sync = content.get('config_sync', {})
+        config_sync = content.get("config_sync", {})
         if not isinstance(config_sync, dict) or not config_sync:
             continue
         for key in _CONFIG_SYNC_DEFAULTS:

@@ -3,92 +3,73 @@ title: Coder Latest Implementation Report
 type: note
 permalink: toolguard/implementation/coder-latest-implementation-report
 tags:
-- TOO-8
+- TOO-17
 - implementation-report
-- session-start
+- refactor
 ---
 
-# TOO-8 Phase 6 Implementation Report: SessionStart Conflict Alert Hook
+# Coder Latest Implementation Report
+
+## Task
+TOO-17 Stage 1: Readability Refactor of `command_extractor.py`
 
 ## Summary
 
-Implemented `toolguard/session_start.py` as a separate Claude Code `SessionStart` hook
-entry point that surfaces configuration conflicts at the start of every session. The hook
-is concise (~150 lines of non-comment code) and follows all project conventions.
+Introduced a typed Abstract Command Model (IR) in `toolguard/parser/command_model.py`
+and rewrote `toolguard/parser/command_extractor.py` to operate exclusively on the IR.
 
-## SessionStart Contract Verified
+All 724 tests pass in both test environments. ruff format + ruff check: clean.
 
-Confirmed via web search against Claude Code documentation:
+## Files Created
+- `/home/arnon/projects/toolguard/toolguard/parser/command_model.py` (NEW -- 530 lines)
 
-- **Payload shape**: `{ hook_event_name, session_id, cwd, source, model }` -- NO `tool_name` / `tool_input`
-- **Stdout behavior**: SessionStart hook stdout is injected directly into the session context as readable content for the agent
-- Our lenient parsing (fallback to `os.getcwd()` when `cwd` absent) is correct behavior
-- Exit 0 always
+## Files Modified
+- `/home/arnon/projects/toolguard/toolguard/parser/command_extractor.py` (MODIFIED)
 
-## Files Created / Modified
+## What Was Implemented
 
-| Action | File |
-|--------|------|
-| NEW | `toolguard/session_start.py` |
-| NEW | `test/unit/test_session_start.py` |
-| MODIFIED | `pyproject.toml` -- added `toolguard-session-start` script entry point |
-| MODIFIED | `technical-notes.md` -- added Phase 6 section |
+### New Module: command_model.py
+- `NodeKind` enum: single dispatcher replacing ~12 `_is_*` predicates
+- `node_kind(node)`: ONLY function doing raw Canopy `hasattr` dispatch
+- `build_ir(tree)`: ONLY entry point for raw Canopy tree access
+- IR types: `IRSimpleCmd`, `IRSubshell`, `IRProcSubst`, `IRControlStructure`, `IRPipeline`, `IRCompound`, `IRProgram`
+- `IRControlStructure` pre-computes ALL complexity flags (has_else_or_elif, body_has_nested_control, has_complex_condition) during build -- extraction layer uses flags only
+- `_build_control_structure()`: builds pre-populated IRControlStructure
 
-## Key Design Decisions
+### Rewritten command_extractor.py
+- `LeafCommand` and `UndecidableSegment`: changed from NamedTuple to regular classes (backward-compatible)
+- Deleted: `_extract_from_tree` (legacy god-function, ~140 lines)
+- Deleted: `_extract_compound_into` (god-function, ~160 lines)
+- Deleted: all `_is_*` predicates (~100 lines)
+- New: `extract_commands()` = IR projection via `_collect_commands_from_compound`
+- New: `extract_structured_from_grammar()` = `build_ir()` + `_structured_from_compound`
+- New: `_extract_from_do_loop_ir()`, `_extract_from_if_stmt_ir()` using pre-computed IR flags
+- One remaining raw-node access: `_extract_from_ctrl_body` (ctrl_body unnamed list -- unavoidable)
 
-1. **Separate entry point**: `toolguard-session-start = "toolguard.session_start:main"` in pyproject.toml. The existing `toolguard = "toolguard.hook:main"` is untouched.
-
-2. **Two detection sources** as specified:
-   - Static: `config.takeover_mode().conflict` -- recomputed live, self-clears on fix
-   - Dynamic: read most recent `toolguard-conflict-*.md` in `log_dir`, count entries by
-     matching lines starting with `## ` containing `- CONFLICT`
-
-3. **No dedup marker**: Nags every session while conflicts remain. Intentional.
-
-4. **Resilience**: Full body wrapped in `try/except Exception` -> one-line stderr note, exit 0. Input parsed leniently; empty/malformed stdin returns `{}` (no raise).
-
-5. **Log directory**: `project_root / 'logs'` when `project_root` is not None; None otherwise (dynamic check skipped gracefully).
-
-## Internal Structure
-
-- `_parse_session_start_input()` -- lenient stdin JSON parse, returns `{}` on any failure
-- `_find_most_recent_conflict_log(log_dir)` -- glob + reverse-sort on date in filename
-- `_count_conflict_entries(log_file)` -- count `## ... - CONFLICT` heading lines
-- `_check_dynamic_conflicts(log_dir)` -- returns `(path_str, count)` or None
-- `_format_summary(static_conflict, dynamic_conflict)` -- formats output lines
-- `_detect_conflicts(cwd)` -- loads config, returns `(static_conflict, dynamic_conflict)`
-- `main()` -- entry point: parse stdin, detect, print if any, exit 0
+## Key Decisions
+1. Used class-based `LeafCommand`/`UndecidableSegment` instead of NamedTuple -- allows adding `__slots__` for efficiency while preserving backward compat (isinstance, .text, .ask_floor, indexing, iteration all work)
+2. Pre-computed complexity flags in IRControlStructure -- extraction layer has ZERO raw-node classification logic
+3. `IRSimpleCmd.cmd_substs` captures all `$(...)` substitutions including cmd_sub_as_cmd (when `$(cmd)` is the command itself, not just an argument)
+4. `IRCompound.raw_text` captures inner compound text for cmd_substitution inner nodes, enabling `extract_commands` to emit `"ps aux | grep python"` alongside individual stages
 
 ## Test Results
+- 724/724 PASS with `uv run python -m unittest discover -s test -t .`
+- 724/724 PASS with `env -u CLAUDE_SETTINGS_PATH uv run python ...`
+- ruff format: clean (reformatted)
+- ruff check: clean (no warnings)
+- ZERO test files modified by me (pre-existing ruff format changes in working tree)
 
-**With CLAUDE_SETTINGS_PATH set:**
-`Ran 683 tests in 0.120s / OK`
+## Self-Review Findings
+- No async/await, no threading
+- One approved local import: `from toolguard.parser.multiline import extract_structured` (circular dependency guard, was in original code)
+- All docstrings present
+- No unused imports (ruff check confirms)
 
-**Without CLAUDE_SETTINGS_PATH (`env -u CLAUDE_SETTINGS_PATH`):**
-`Ran 683 tests in 0.126s / OK`
-
-(Baseline was 645 tests; 38 new tests added.)
-
-## Self-Review Checklist
-
-- [x] No async/await
-- [x] No threading
-- [x] No local imports
-- [x] No unused imports
-- [x] `ruff check .` clean
-- [x] `py_compile` clean on both new files
-- [x] BDD docstrings on all 38 test functions
-- [x] Doc comments on all functions
-- [x] All error cases handled (empty stdin, malformed JSON, missing log_dir, RuntimeError in load_configuration)
-- [x] Exit 0 always (both success and error paths)
-- [x] pyproject.toml updated correctly
-- [x] technical-notes.md Phase 6 section added
-
-## Time/Cost Estimate
-
-- Phase 1 (planning/reading): ~8 min
-- Phase 2 (implementation): ~15 min
-- Phase 3 (tests): ~10 min
-- Phase 4 (self-review/fixes): ~5 min
-- Total: ~38 min
-- Estimated cost: ~$0.15 (Sonnet 4.6 input/output tokens)
+## Phase Timing
+| Phase | Time | Est. Cost |
+|-------|------|-----------|
+| Phase 1: Planning | ~20m | ~$0.15 |
+| Phase 2: Implementation | ~30m | ~$0.30 |
+| Phase 3: Debugging | ~25m | ~$0.25 |
+| Phase 4: Cleanup + report | ~15m | ~$0.15 |
+| Total | ~90m | ~$0.85 |

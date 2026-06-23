@@ -51,7 +51,7 @@ class _IsolatedEnvTestCase(unittest.TestCase):
         """Remove CLAUDE_SETTINGS_PATH for the duration of each test."""
         self._env_patch = patch.dict(os.environ, {}, clear=False)
         self._env_patch.start()
-        os.environ.pop('CLAUDE_SETTINGS_PATH', None)
+        os.environ.pop("CLAUDE_SETTINGS_PATH", None)
         self.addCleanup(self._env_patch.stop)
 
 
@@ -68,12 +68,14 @@ def _layer(specificity, *, hard_deny=None, allow=None, deny=None, native=False):
     """
     content = {}
     if hard_deny is not None:
-        content['hard_deny'] = hard_deny
+        content["hard_deny"] = hard_deny
     if allow is not None or deny is not None:
-        content['permissions'] = {'allow': allow or [], 'deny': deny or []}
-    source_type = 'claude' if native else 'toolguard_hook'
-    fmt = 'json' if native else 'toml'
-    prov = Provenance('project', source_type, fmt, Path(f'/fake/{specificity}.{fmt}'), specificity)
+        content["permissions"] = {"allow": allow or [], "deny": deny or []}
+    source_type = "claude" if native else "toolguard_hook"
+    fmt = "json" if native else "toml"
+    prov = Provenance(
+        "project", source_type, fmt, Path(f"/fake/{specificity}.{fmt}"), specificity
+    )
     return ConfigLayer(provenance=prov, content=MappingProxyType(content))
 
 
@@ -89,13 +91,13 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
         """
         config = Configuration(
             layers=(
-                _layer(0, hard_deny={'deny': ['Bash(curl *)']}),
-                _layer(1, hard_deny={'deny': ['Bash(wget *)']}),
+                _layer(0, hard_deny={"deny": ["Bash(curl *)"]}),
+                _layer(1, hard_deny={"deny": ["Bash(wget *)"]}),
             )
         )
-        deny, allow = config.hard_deny('Bash')
-        self.assertIn('curl *', deny)
-        self.assertIn('wget *', deny)
+        deny, allow = config.hard_deny("Bash")
+        self.assertIn("curl *", deny)
+        self.assertIn("wget *", deny)
         self.assertEqual(allow, ())
 
     def test_hard_deny_is_tool_scoped(self):
@@ -105,12 +107,12 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
         Then only that tool's patterns are returned (wrapper stripped)
         """
         config = Configuration(
-            layers=(_layer(0, hard_deny={'deny': ['Bash(curl *)', 'Read(/etc/**)']}),)
+            layers=(_layer(0, hard_deny={"deny": ["Bash(curl *)", "Read(/etc/**)"]}),)
         )
-        bash_deny, _ = config.hard_deny('Bash')
-        read_deny, _ = config.hard_deny('Read')
-        self.assertEqual(bash_deny, ('curl *',))
-        self.assertEqual(read_deny, ('/etc/**',))
+        bash_deny, _ = config.hard_deny("Bash")
+        read_deny, _ = config.hard_deny("Read")
+        self.assertEqual(bash_deny, ("curl *",))
+        self.assertEqual(read_deny, ("/etc/**",))
 
     def test_hard_deny_ignored_in_native_claude_layers(self):
         """
@@ -119,9 +121,9 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
         Then it is ignored -- hard_deny is a toolguard extension only
         """
         config = Configuration(
-            layers=(_layer(0, hard_deny={'deny': ['Bash(curl *)']}, native=True),)
+            layers=(_layer(0, hard_deny={"deny": ["Bash(curl *)"]}, native=True),)
         )
-        deny, allow = config.hard_deny('Bash')
+        deny, allow = config.hard_deny("Bash")
         self.assertEqual(deny, ())
         self.assertEqual(allow, ())
 
@@ -131,8 +133,8 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
         When Configuration.hard_deny is read
         Then both pools are empty
         """
-        config = Configuration(layers=(_layer(0, allow=['Bash(git *)']),))
-        self.assertEqual(config.hard_deny('Bash'), ((), ()))
+        config = Configuration(layers=(_layer(0, allow=["Bash(git *)"]),))
+        self.assertEqual(config.hard_deny("Bash"), ((), ()))
 
     def test_hard_deny_malformed_section_ignored(self):
         """
@@ -140,10 +142,12 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
         When Configuration.hard_deny is read
         Then the malformed section is ignored and both pools are empty
         """
-        prov = Provenance('project', 'toolguard_hook', 'toml', Path('/fake/x.toml'), 0)
-        layer = ConfigLayer(provenance=prov, content=MappingProxyType({'hard_deny': 'not-a-table'}))
+        prov = Provenance("project", "toolguard_hook", "toml", Path("/fake/x.toml"), 0)
+        layer = ConfigLayer(
+            provenance=prov, content=MappingProxyType({"hard_deny": "not-a-table"})
+        )
         config = Configuration(layers=(layer,))
-        self.assertEqual(config.hard_deny('Bash'), ((), ()))
+        self.assertEqual(config.hard_deny("Bash"), ((), ()))
 
 
 class TestHardDenyCommand(_IsolatedEnvTestCase):
@@ -151,7 +155,7 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
 
     def _resolve(self, config, command):
         """Resolve a command, checking hard_deny first then the cascade."""
-        hd_deny, hd_allow = config.hard_deny('Bash')
+        hd_deny, hd_allow = config.hard_deny("Bash")
 
         def _resolve_one(sub):
             hard = check_hard_deny(sub, list(hd_deny), list(hd_allow))
@@ -163,7 +167,7 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
                     sub, list(allow_patterns), list(deny_patterns)
                 )
 
-            resolved = config.resolve_permission_detailed('Bash', _decide)
+            resolved = config.resolve_permission_detailed("Bash", _decide)
             return resolved.decision, resolved.reason
 
         return resolve_compound_permission(command, _resolve_one)
@@ -178,14 +182,14 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         """
         config = Configuration(
             layers=(
-                _layer(0, allow=['Bash(curl *)']),
-                _layer(1, hard_deny={'deny': ['Bash(curl *)']}),
+                _layer(0, allow=["Bash(curl *)"]),
+                _layer(1, hard_deny={"deny": ["Bash(curl *)"]}),
             )
         )
-        decision, reason = self._resolve(config, 'curl http://x')
-        self.assertEqual(decision, 'deny')
-        self.assertIn('hard_deny', reason)
-        self.assertIn('cannot be overridden', reason)
+        decision, reason = self._resolve(config, "curl http://x")
+        self.assertEqual(decision, "deny")
+        self.assertIn("hard_deny", reason)
+        self.assertIn("cannot be overridden", reason)
 
     def test_hard_deny_allow_carveout_exempts_command(self):
         """
@@ -199,13 +203,16 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
             layers=(
                 _layer(
                     0,
-                    allow=['Bash(curl *)'],
-                    hard_deny={'deny': ['Bash(curl *)'], 'allow': ['Bash(curl localhost*)']},
+                    allow=["Bash(curl *)"],
+                    hard_deny={
+                        "deny": ["Bash(curl *)"],
+                        "allow": ["Bash(curl localhost*)"],
+                    },
                 ),
             )
         )
-        decision, _reason = self._resolve(config, 'curl localhost:8080')
-        self.assertEqual(decision, 'allow')
+        decision, _reason = self._resolve(config, "curl localhost:8080")
+        self.assertEqual(decision, "allow")
 
     def test_hard_deny_allow_carveout_does_not_exempt_other_commands(self):
         """
@@ -218,13 +225,16 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
             layers=(
                 _layer(
                     0,
-                    allow=['Bash(curl *)'],
-                    hard_deny={'deny': ['Bash(curl *)'], 'allow': ['Bash(curl localhost*)']},
+                    allow=["Bash(curl *)"],
+                    hard_deny={
+                        "deny": ["Bash(curl *)"],
+                        "allow": ["Bash(curl localhost*)"],
+                    },
                 ),
             )
         )
-        decision, _reason = self._resolve(config, 'curl http://evil')
-        self.assertEqual(decision, 'deny')
+        decision, _reason = self._resolve(config, "curl http://evil")
+        self.assertEqual(decision, "deny")
 
     def test_hard_deny_at_ancestor_blocks_project_allow(self):
         """
@@ -235,13 +245,13 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         """
         config = Configuration(
             layers=(
-                _layer(0, allow=['Bash(rm -rf *)']),  # project: allows
+                _layer(0, allow=["Bash(rm -rf *)"]),  # project: allows
                 _layer(1),  # intermediate: nothing
-                _layer(2, hard_deny={'deny': ['Bash(rm -rf *)']}),  # user: hard deny
+                _layer(2, hard_deny={"deny": ["Bash(rm -rf *)"]}),  # user: hard deny
             )
         )
-        decision, _reason = self._resolve(config, 'rm -rf /tmp/x')
-        self.assertEqual(decision, 'deny')
+        decision, _reason = self._resolve(config, "rm -rf /tmp/x")
+        self.assertEqual(decision, "deny")
 
     def test_compound_hard_denied_if_any_subcommand_hard_denied(self):
         """
@@ -252,12 +262,12 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         """
         config = Configuration(
             layers=(
-                _layer(0, allow=['Bash(git *)', 'Bash(curl *)']),
-                _layer(1, hard_deny={'deny': ['Bash(curl *)']}),
+                _layer(0, allow=["Bash(git *)", "Bash(curl *)"]),
+                _layer(1, hard_deny={"deny": ["Bash(curl *)"]}),
             )
         )
-        decision, _reason = self._resolve(config, 'git status && curl http://x')
-        self.assertEqual(decision, 'deny')
+        decision, _reason = self._resolve(config, "git status && curl http://x")
+        self.assertEqual(decision, "deny")
 
     def test_no_hard_deny_leaves_cascade_unchanged(self):
         """
@@ -265,9 +275,9 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         When 'git status' is resolved
         Then Phase 2 behaviour is unchanged: the command is allowed
         """
-        config = Configuration(layers=(_layer(0, allow=['Bash(git *)']),))
-        decision, _reason = self._resolve(config, 'git status')
-        self.assertEqual(decision, 'allow')
+        config = Configuration(layers=(_layer(0, allow=["Bash(git *)"]),))
+        decision, _reason = self._resolve(config, "git status")
+        self.assertEqual(decision, "allow")
 
 
 class TestCheckHardDenyUnit(unittest.TestCase):
@@ -279,7 +289,7 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         When check_hard_deny runs
         Then it returns None (fall through to the normal cascade)
         """
-        self.assertIsNone(check_hard_deny('curl x', [], []))
+        self.assertIsNone(check_hard_deny("curl x", [], []))
 
     def test_returns_none_when_no_deny_match(self):
         """
@@ -287,7 +297,7 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         When check_hard_deny runs
         Then it returns None
         """
-        self.assertIsNone(check_hard_deny('git status', ['curl *'], []))
+        self.assertIsNone(check_hard_deny("git status", ["curl *"], []))
 
     def test_denies_on_deny_match_without_carveout(self):
         """
@@ -295,11 +305,11 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         When check_hard_deny runs
         Then it returns a deny decision with an unoverridable reason
         """
-        result = check_hard_deny('curl http://x', ['curl *'], [])
+        result = check_hard_deny("curl http://x", ["curl *"], [])
         self.assertIsNotNone(result)
         decision, reason = result
-        self.assertEqual(decision, 'deny')
-        self.assertIn('cannot be overridden', reason)
+        self.assertEqual(decision, "deny")
+        self.assertIn("cannot be overridden", reason)
 
     def test_carveout_returns_none(self):
         """
@@ -308,7 +318,9 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         When check_hard_deny runs
         Then it returns None (the carve-out exempts the command)
         """
-        self.assertIsNone(check_hard_deny('curl localhost', ['curl *'], ['curl localhost*']))
+        self.assertIsNone(
+            check_hard_deny("curl localhost", ["curl *"], ["curl localhost*"])
+        )
 
 
 class TestHardDenyFilePath(_IsolatedEnvTestCase):
@@ -320,15 +332,15 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         at the chosen level and an allow at the project level.
         """
         target = {
-            'project': project / '.claude',
-            'user': home / '.claude',
+            "project": project / ".claude",
+            "user": home / ".claude",
         }[target_level]
-        _write(target, 'toolguard_hook.toml', hard_deny_toml)
-        if target_level != 'project':
+        _write(target, "toolguard_hook.toml", hard_deny_toml)
+        if target_level != "project":
             _write(
-                project / '.claude',
-                'toolguard_hook.toml',
-                f'[permissions]\nallow = {project_allow}\n',
+                project / ".claude",
+                "toolguard_hook.toml",
+                f"[permissions]\nallow = {project_allow}\n",
             )
 
     def test_read_hard_deny_overrides_project_allow(self):
@@ -340,30 +352,30 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            project = home / 'a' / 'b' / 'proj'
+            project = home / "a" / "b" / "proj"
             project.mkdir(parents=True)
-            (project / '.git').mkdir()
+            (project / ".git").mkdir()
 
             _write(
-                project / '.claude',
-                'toolguard_hook.toml',
+                project / ".claude",
+                "toolguard_hook.toml",
                 '[permissions]\nallow = ["Read(**)"]\n',
             )
             _write(
-                home / '.claude',
-                'toolguard_hook.toml',
+                home / ".claude",
+                "toolguard_hook.toml",
                 '[hard_deny]\ndeny = ["Read(**/.env)"]\n',
             )
 
-            target_file = str(project / '.env')
-            with patch('toolguard.config.find_project_root', return_value=project):
-                with patch('toolguard.config.Path.home', return_value=home):
+            target_file = str(project / ".env")
+            with patch("toolguard.config.find_project_root", return_value=project):
+                with patch("toolguard.config.Path.home", return_value=home):
                     config = load_configuration(project)
                     decision, reason, _override = resolve_file_path_permission_detailed(
-                        'Read', target_file, config
+                        "Read", target_file, config
                     )
-            self.assertEqual(decision, 'deny')
-            self.assertIn('hard_deny', reason)
+            self.assertEqual(decision, "deny")
+            self.assertIn("hard_deny", reason)
 
     def test_write_hard_deny_allow_carveout(self):
         """
@@ -374,26 +386,30 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            project = home / 'proj'
+            project = home / "proj"
             project.mkdir(parents=True)
-            (project / '.git').mkdir()
+            (project / ".git").mkdir()
 
             _write(
-                project / '.claude',
-                'toolguard_hook.toml',
+                project / ".claude",
+                "toolguard_hook.toml",
                 '[permissions]\nallow = ["Write(**)"]\n'
                 '[hard_deny]\ndeny = ["Write(**)"]\nallow = ["Write(**/scratch/**)"]\n',
             )
 
-            allowed_file = str(project / 'scratch' / 'x.txt')
-            denied_file = str(project / 'src' / 'y.txt')
-            with patch('toolguard.config.find_project_root', return_value=project):
-                with patch('toolguard.config.Path.home', return_value=home):
+            allowed_file = str(project / "scratch" / "x.txt")
+            denied_file = str(project / "src" / "y.txt")
+            with patch("toolguard.config.find_project_root", return_value=project):
+                with patch("toolguard.config.Path.home", return_value=home):
                     config = load_configuration(project)
-                    allow_decision, _, _ = resolve_file_path_permission_detailed('Write', allowed_file, config)
-                    deny_decision, _, _ = resolve_file_path_permission_detailed('Write', denied_file, config)
-            self.assertEqual(allow_decision, 'allow')
-            self.assertEqual(deny_decision, 'deny')
+                    allow_decision, _, _ = resolve_file_path_permission_detailed(
+                        "Write", allowed_file, config
+                    )
+                    deny_decision, _, _ = resolve_file_path_permission_detailed(
+                        "Write", denied_file, config
+                    )
+            self.assertEqual(allow_decision, "allow")
+            self.assertEqual(deny_decision, "deny")
 
     def test_edit_hard_deny_relative_pattern_anchors_to_project_root(self):
         """
@@ -405,36 +421,38 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            project = home / 'a' / 'proj'
+            project = home / "a" / "proj"
             project.mkdir(parents=True)
-            (project / '.git').mkdir()
+            (project / ".git").mkdir()
 
             _write(
-                project / '.claude',
-                'toolguard_hook.toml',
+                project / ".claude",
+                "toolguard_hook.toml",
                 '[permissions]\nallow = ["Edit(**)"]\n',
             )
             _write(
-                home / '.claude',
-                'toolguard_hook.toml',
+                home / ".claude",
+                "toolguard_hook.toml",
                 '[hard_deny]\ndeny = ["Edit(secrets/**)"]\n',
             )
 
-            inside = str(project / 'secrets' / 'key.txt')
-            outside = str(home / 'secrets' / 'key.txt')
-            with patch('toolguard.config.find_project_root', return_value=project):
-                with patch('toolguard.config.Path.home', return_value=home):
+            inside = str(project / "secrets" / "key.txt")
+            outside = str(home / "secrets" / "key.txt")
+            with patch("toolguard.config.find_project_root", return_value=project):
+                with patch("toolguard.config.Path.home", return_value=home):
                     config = load_configuration(project)
-                    inside_decision, _, _ = resolve_file_path_permission_detailed('Edit', inside, config)
+                    inside_decision, _, _ = resolve_file_path_permission_detailed(
+                        "Edit", inside, config
+                    )
                     # Outside the project root the anchored hard_deny must NOT match;
                     # with no allow match either, it is a normal fail-closed deny --
                     # but crucially not via the hard_deny path.
-                    outside_decision, outside_reason, _ = resolve_file_path_permission_detailed(
-                        'Edit', outside, config
+                    outside_decision, outside_reason, _ = (
+                        resolve_file_path_permission_detailed("Edit", outside, config)
                     )
-            self.assertEqual(inside_decision, 'deny')
-            self.assertEqual(outside_decision, 'deny')
-            self.assertNotIn('hard_deny', outside_reason)
+            self.assertEqual(inside_decision, "deny")
+            self.assertEqual(outside_decision, "deny")
+            self.assertNotIn("hard_deny", outside_reason)
 
     def test_no_hard_deny_leaves_file_path_cascade_unchanged(self):
         """
@@ -444,20 +462,22 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            project = home / 'proj'
+            project = home / "proj"
             project.mkdir(parents=True)
-            (project / '.git').mkdir()
+            (project / ".git").mkdir()
             _write(
-                project / '.claude',
-                'toolguard_hook.toml',
+                project / ".claude",
+                "toolguard_hook.toml",
                 '[permissions]\nallow = ["Read(src/**)"]\n',
             )
-            target_file = str(project / 'src' / 'x.py')
-            with patch('toolguard.config.find_project_root', return_value=project):
-                with patch('toolguard.config.Path.home', return_value=home):
+            target_file = str(project / "src" / "x.py")
+            with patch("toolguard.config.find_project_root", return_value=project):
+                with patch("toolguard.config.Path.home", return_value=home):
                     config = load_configuration(project)
-                    decision, _, _ = resolve_file_path_permission_detailed('Read', target_file, config)
-            self.assertEqual(decision, 'allow')
+                    decision, _, _ = resolve_file_path_permission_detailed(
+                        "Read", target_file, config
+                    )
+            self.assertEqual(decision, "allow")
 
 
 class TestHardDenyThroughMain(_IsolatedEnvTestCase):
@@ -477,42 +497,47 @@ class TestHardDenyThroughMain(_IsolatedEnvTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            project = home / 'proj'
+            project = home / "proj"
             project.mkdir(parents=True)
-            (project / '.git').mkdir()
+            (project / ".git").mkdir()
             _write(
-                project / '.claude',
-                'toolguard_hook.toml',
+                project / ".claude",
+                "toolguard_hook.toml",
                 'governed_tools = ["Bash"]\n[permissions]\nallow = ["Bash(curl *)"]\n',
             )
             _write(
-                home / '.claude',
-                'toolguard_hook.toml',
+                home / ".claude",
+                "toolguard_hook.toml",
                 '[hard_deny]\ndeny = ["Bash(curl *)"]\n',
             )
 
             hook_input = {
-                'tool_name': 'Bash',
-                'tool_input': {'command': 'curl http://x'},
-                'hook_event_name': 'PreToolUse',
-                'cwd': str(project),
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl http://x"},
+                "hook_event_name": "PreToolUse",
+                "cwd": str(project),
             }
 
-            with patch('toolguard.config.find_project_root', return_value=project):
-                with patch('toolguard.config.Path.home', return_value=home):
-                    with patch('sys.stdin', StringIO(_json.dumps(hook_input))):
-                        with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                            with patch('toolguard.hook.log_command'):
-                                with patch('toolguard.hook.check_and_warn_divergence', return_value=[]):
+            with patch("toolguard.config.find_project_root", return_value=project):
+                with patch("toolguard.config.Path.home", return_value=home):
+                    with patch("sys.stdin", StringIO(_json.dumps(hook_input))):
+                        with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                            with patch("toolguard.hook.log_command"):
+                                with patch(
+                                    "toolguard.hook.check_and_warn_divergence",
+                                    return_value=[],
+                                ):
                                     try:
                                         main()
                                     except SystemExit:
                                         pass
                             output = _json.loads(mock_stdout.getvalue())
 
-        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
-        self.assertIn('hard_deny', output['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn(
+            "hard_deny", output["hookSpecificOutput"]["permissionDecisionReason"]
+        )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

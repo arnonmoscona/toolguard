@@ -480,3 +480,116 @@ The entire hook body is wrapped in a `try/except Exception` that degrades to a
 one-line stderr message and exits 0. A SessionStart hook must **never** block
 or break the session. Input is parsed leniently: missing `cwd` falls back to
 `os.getcwd()`; missing or malformed stdin returns an empty payload.
+
+## Multi-line Bash decomposition (TOO-17)
+
+### The defect
+
+The parser handled only a single logical line. A multi-line Bash command (newline-separated
+statements, or a whole script in one tool call) was NOT split into sub-commands; combined with
+DOTALL `fnmatch`, a command whose FIRST line matched an allowed prefix was allowed in full --
+including dangerous later lines. A **fail-OPEN bypass** of the permission system. Real usage
+hit it constantly: in a ~7,800-command corpus of historical logs/transcripts, **~29% of
+commands in dev/analysis-heavy sessions were multi-line**, and ~94% of distinct multi-line
+commands fell through to the fail-open whole-blob path.
+
+### Governing principle: when in doubt, ASK
+
+The fix is **fail-safe, not fail-open**. Toolguard auto-decides only what it can decompose
+with confidence; anything else resolves to **ASK** -- never a silent allow of an undecomposed
+blob, and never a hard deny that would break a legitimate workflow. This "hidden" ASK applies
+even when no TOML pattern matches the construct.
+
+### Grammar-first, with a light AST -- no hand-rolled parsing
+
+All STRUCTURAL parsing is done by the formal PEG grammar
+(`toolguard/parser/bash_parser.peg`, regenerated to `bash_parser.py` with canopy). Bash
+quoting/escaping/heredoc edge cases are exactly where ad-hoc regex/state-machine parsers go
+wrong, so hand-rolled bash parsing is prohibited (an early attempt that did so was rejected).
+The processing pipeline is layered for separation of concerns:
+
+| Module | Responsibility |
+|--------|----------------|
+| `parser/multiline.py` | A narrow LEXICAL pre-pass only (see below). No structural parsing. |
+| `parser/command_model.py` | Builds a small typed IR ("light AST") from the raw Canopy parse tree. The ONLY code that touches raw tree nodes. |
+| `parser/command_extractor.py` | Walks the IR (not the raw tree) to produce leaves / undecidable segments. |
+| `compound.py` | Resolves each leaf through the level cascade and combines strictest-wins (one combinator). `resolve_compound_permission` now feeds through `multiline.extract_structured` + the IR. |
+
+Keeping raw-tree access isolated in one module is what makes the rest readable; the IR is the
+"early simplification / noise removal" boundary.
+
+### How deep we go -- and why not deeper
+
+Bash is Turing-complete; statically reasoning about arbitrary scripts would mean rebuilding
+~80% of bash plus semantic analysis. That is explicitly **out of scope**. We decompose only
+the simple, common constructs observed in real usage and ASK on the rest:
+
+- **Simple control structures** (non-nested `if`/`for`/`while`, no `else`/`elif`, linear body,
+  condition = a command or a POSIX `[ ... ]` test) are decomposed and their inner commands
+  validated. **Complex** ones (`else`/`elif`, nesting, `case`, `[[ ]]`/`(( ))`) -> ASK.
+- **Process substitution** `<(...)`/`>(...)` -> ASK (it was also a pre-existing fail-open).
+- Detection of these is done from the PARSE TREE, never a raw-text keyword scan -- comments,
+  quoted strings, heredoc bodies, and `-c` arguments routinely contain `if`/`for`/`|`/etc. as
+  non-structural text, so a lexical scan would mis-route huge numbers of benign commands.
+
+### Lexical pre-pass vs. grammar
+
+A few things genuinely cannot (or should not) live in the PEG grammar and are done as a
+deterministic, quote-aware lexical pre-pass in `multiline.py`: CRLF/CR -> LF; backslash-newline
+continuation join; heredoc body extraction/removal; `#` comment stripping; whitespace
+collapse. Everything else -- statement separation on newlines/`;`, operator continuation,
+pipes, quoting, control structures -- is the grammar's job. The heredoc step is the notable
+exception: a PEG cannot back-reference the captured heredoc delimiter, so the body is removed
+lexically before parsing.
+
+### Heredocs, the sink sentinel, and executor classification
+
+A heredoc body is data for whatever consumes it, not shell to parse. The pre-pass removes the
+body and replaces the `<<DELIM` redirection with an all-letters sentinel
+**`__HEREDOC_TO_<sink>__`** on the bearer command, where `<sink>` is the basename of the
+ultimate pipe consumer (the pre-pass follows the pipeline, so `cat <<EOF | bash` resolves to
+`bash`, not `cat`). The bearer keeps its other arguments so a dangerous bearer
+(`tee /etc/passwd <<EOF`) is still catchable. The sentinel is all `[A-Za-z0-9_]` deliberately,
+so regex rules stay clean.
+
+The sink's **executor class** then decides handling -- this is also why `-c`/`-e`/`-r` inline
+code is treated the same way:
+
+- **bash-family** (`bash`, `sh`, `dash`, `ksh`, `zsh`): the payload IS bash -> decompose and
+  validate. We only attempt this for bash-family syntax because that is the only language our
+  bash grammar can parse; trying to parse Python/Node/csh/fish would be unreliable, so those
+  are punted (ASK) rather than guessed.
+- **foreign** (non-bash shells + interpreters like `python`, `node`, `perl`, `ruby`, `php`,
+  `Rscript`, `uv`, `uvx`): opaque code -> **ASK floor**. Recognition is **dynamic for
+  versioned names**: `_is_foreign_executor` matches `python3.13`, `pypy3.11`, `node18`, etc.
+  by prefix, so `FOREIGN_EXECUTORS` lists only canonical names and never needs updating for
+  new releases (no year/version table to maintain). The list is NOT exhaustive, though -- an
+  unrecognized interpreter (`lua`, `deno`, ...) is not floored (a documented YAGNI; the
+  command is still validated and `deny` still works). The heredoc sink label is sanitized to
+  `[A-Za-z0-9_]` when building the sentinel (`python3.13` -> `__HEREDOC_TO_python3_13__`) so
+  the sentinel stays escape-free and the floor matcher still recognizes the versioned sink.
+- **non-executor** (`cat`, `tee`, `pbcopy`, unknown): body is data -> the sentinel leaf is
+  matched normally.
+
+**ASK floor + no-blanket-allow invariant.** Because the heredoc/inline-code leaf keeps the
+bearer (e.g. `cat __HEREDOC_TO_python__`), a broad receiver allow (`allow = cat:*`, or
+`uv run*`) would otherwise match and re-open the fail-open. So a foreign-executor heredoc /
+inline-code leaf has its verdict CLAMPED to at most ASK: a plain `allow` cannot downgrade it
+(`deny` still applies). This makes "allow data-sink heredocs, ask executor heredocs"
+authorable without cross-leaf context, while guaranteeing no fail-open.
+
+### Command substitution: validated, but no placeholder (yet)
+
+Inner commands of `$(...)`, `` `...` ``, subshells, and brace groups are extracted and
+validated (including nested). We considered presenting the OUTER command with a
+`__..._OUTPUT__` placeholder (like the heredoc sentinel) for cleaner rule authoring, but a
+corpus scan showed command substitution is **< 1.5% of distinct commands** (and most of those
+are false positives -- backticks inside strings/heredoc bodies -- or benign `$(date)`). Per
+"don't over-engineer for rare constructs," the placeholder is deferred; current behavior
+(inner validated, outer matched with the substitution text inline) is already safe.
+
+### Flagged defaults (open to revisit)
+
+- The foreign-executor **ASK floor** slightly constrains authoring (a plain `allow` cannot
+  permit foreign inline/heredoc code -- by design, to prevent fail-open).
+- Truly-unparseable input fails closed honoring `no_match_fallback` (default ASK).

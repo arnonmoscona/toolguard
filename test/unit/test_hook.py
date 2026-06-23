@@ -31,10 +31,12 @@ from toolguard.hook import (
     parse_hook_input,
 )
 
-_NO_TAKEOVER = TakeoverConfig(False, (), (), 'deny')
+_NO_TAKEOVER = TakeoverConfig(False, (), (), "deny")
 
 
-def check_file_path_permission(file_path, allow_patterns, deny_patterns, extended_syntax=True):
+def check_file_path_permission(
+    file_path, allow_patterns, deny_patterns, extended_syntax=True
+):
     """
     Evaluate a file path against flat allow/deny pattern lists, returning (decision, reason).
 
@@ -51,13 +53,13 @@ def check_file_path_permission(file_path, allow_patterns, deny_patterns, extende
         file_path, allow_patterns, deny_patterns, config, extended_syntax
     )
     if result is None:
-        return 'deny', 'Path does not match any allow patterns'
+        return "deny", "Path does not match any allow patterns"
     decision, reason, _matched = result
     return decision, reason
 
 
 def _fake_config(
-    governed=('Bash',),
+    governed=("Bash",),
     bash=((), ()),
     file_patterns=None,
     takeover=_NO_TAKEOVER,
@@ -83,7 +85,7 @@ def _fake_config(
     file_patterns = file_patterns or {}
 
     def _patterns_for(tool_name):
-        if tool_name == 'Bash':
+        if tool_name == "Bash":
             return bash
         return file_patterns.get(tool_name, ((), ()))
 
@@ -120,7 +122,9 @@ def _fake_config(
                 if result is not None:
                     decision, reason, _matched = result
                     return ResolvedDecision(decision, reason, None, None)
-            return ResolvedDecision('deny', 'Command does not match any allow patterns', None, None)
+            return ResolvedDecision(
+                "deny", "Command does not match any allow patterns", None, None
+            )
 
         def describe_levels(self_inner):
             # API-sync: the fake exposes no real sources.
@@ -131,7 +135,11 @@ def _fake_config(
 
         def config_sync_settings(self_inner):
             return MappingProxyType(
-                {'auto_migrate': False, 'backup_dir': 'logs/config-backups', 'auto_sort_on_migrate': True}
+                {
+                    "auto_migrate": False,
+                    "backup_dir": "logs/config-backups",
+                    "auto_sort_on_migrate": True,
+                }
             )
 
         def validation_issues(self_inner):
@@ -150,16 +158,16 @@ class TestHookToolGovernance(unittest.TestCase):
         Then the hook output decision is 'allow'
         """
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'git status'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
         }
 
-        config = _fake_config(governed=['Bash'], bash=(['git *'], []))
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.log_command'):
+        config = _fake_config(governed=["Bash"], bash=(["git *"], []))
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
                         try:
                             main()
                         except SystemExit:
@@ -167,7 +175,9 @@ class TestHookToolGovernance(unittest.TestCase):
 
                         output = json.loads(mock_stdout.getvalue())
                         # Should be allowed because 'git status' matches 'git *'
-                        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                        self.assertEqual(
+                            output["hookSpecificOutput"]["permissionDecision"], "allow"
+                        )
 
     def test_jetbrains_terminal_is_governed(self):
         """
@@ -176,19 +186,19 @@ class TestHookToolGovernance(unittest.TestCase):
         Then the hook output decision is 'allow'
         """
         hook_input = {
-            'tool_name': 'mcp__jetbrains__execute_terminal_command',
-            'tool_input': {'command': 'git status'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "mcp__jetbrains__execute_terminal_command",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
         }
 
         config = _fake_config(
-            governed=['Bash', 'mcp__jetbrains__execute_terminal_command'],
-            bash=(['git *'], []),
+            governed=["Bash", "mcp__jetbrains__execute_terminal_command"],
+            bash=(["git *"], []),
         )
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.log_command'):
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
                         try:
                             main()
                         except SystemExit:
@@ -196,7 +206,9 @@ class TestHookToolGovernance(unittest.TestCase):
 
                         output = json.loads(mock_stdout.getvalue())
                         # Should be allowed because tool is governed and command matches
-                        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                        self.assertEqual(
+                            output["hookSpecificOutput"]["permissionDecision"], "allow"
+                        )
 
     def test_ungoverned_tool_is_allowed(self):
         """
@@ -205,15 +217,15 @@ class TestHookToolGovernance(unittest.TestCase):
         Then the decision is 'allow' and the reason states it is not a governed tool
         """
         hook_input = {
-            'tool_name': 'SomeOtherTool',
-            'tool_input': {'command': 'dangerous command'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "SomeOtherTool",
+            "tool_input": {"command": "dangerous command"},
+            "hook_event_name": "PreToolUse",
         }
 
-        config = _fake_config(governed=['Bash'])
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
+        config = _fake_config(governed=["Bash"])
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
                     try:
                         main()
                     except SystemExit:
@@ -221,9 +233,14 @@ class TestHookToolGovernance(unittest.TestCase):
 
                     output = json.loads(mock_stdout.getvalue())
                     # Should be allowed because tool is not governed
-                    self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                    self.assertEqual(
+                        output["hookSpecificOutput"]["permissionDecision"], "allow"
+                    )
                     # Reason should mention it's not governed
-                    self.assertIn('Not a governed tool', output['hookSpecificOutput']['permissionDecisionReason'])
+                    self.assertIn(
+                        "Not a governed tool",
+                        output["hookSpecificOutput"]["permissionDecisionReason"],
+                    )
 
 
 class TestTakeoverEnabledConflictWiring(unittest.TestCase):
@@ -244,26 +261,51 @@ class TestTakeoverEnabledConflictWiring(unittest.TestCase):
         """
         conflict = TakeoverEnabledConflict(
             sources=(
-                (True, Provenance('project', 'toolguard_hook', 'toml', Path('/p/.claude/toolguard_hook.toml'), 0)),
-                (False, Provenance('user', 'toolguard_hook', 'toml', Path('/u/.claude/toolguard_hook.toml'), 1)),
+                (
+                    True,
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/p/.claude/toolguard_hook.toml"),
+                        0,
+                    ),
+                ),
+                (
+                    False,
+                    Provenance(
+                        "user",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/u/.claude/toolguard_hook.toml"),
+                        1,
+                    ),
+                ),
             )
         )
-        takeover = TakeoverConfig(False, (), (), 'deny', conflict=conflict)
-        config = _fake_config(governed=['Bash'], bash=(['git *'], []), takeover=takeover)
+        takeover = TakeoverConfig(False, (), (), "deny", conflict=conflict)
+        config = _fake_config(
+            governed=["Bash"], bash=(["git *"], []), takeover=takeover
+        )
 
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'git status'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
         }
 
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.get_env_config', return_value={'log_dir': Path('/fake/logs')}):
-                        with patch('toolguard.hook.log_command'):
-                            with patch('toolguard.hook.log_conflict') as mock_conflict:
-                                with patch('toolguard.hook.issue_takeover_warning') as mock_warn:
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch(
+                        "toolguard.hook.get_env_config",
+                        return_value={"log_dir": Path("/fake/logs")},
+                    ):
+                        with patch("toolguard.hook.log_command"):
+                            with patch("toolguard.hook.log_conflict") as mock_conflict:
+                                with patch(
+                                    "toolguard.hook.issue_takeover_warning"
+                                ) as mock_warn:
                                     try:
                                         main()
                                     except SystemExit:
@@ -272,13 +314,13 @@ class TestTakeoverEnabledConflictWiring(unittest.TestCase):
         # A conflict-log entry was written citing the disagreement and fail-safe OFF.
         mock_conflict.assert_called_once()
         conflict_message = mock_conflict.call_args[0][0]
-        self.assertIn('conflicting values', conflict_message)
-        self.assertIn('DISABLED', conflict_message)
+        self.assertIn("conflicting values", conflict_message)
+        self.assertIn("DISABLED", conflict_message)
         # A once-per-session takeover/config warning was issued.
         mock_warn.assert_called_once()
         # Fail-safe path: the command is still evaluated normally (allowed by 'git *').
         output = json.loads(mock_stdout.getvalue())
-        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_enabled_conflict_logged_once_per_session(self):
         """
@@ -292,26 +334,51 @@ class TestTakeoverEnabledConflictWiring(unittest.TestCase):
 
         conflict = TakeoverEnabledConflict(
             sources=(
-                (True, Provenance('project', 'toolguard_hook', 'toml', Path('/p/.claude/toolguard_hook.toml'), 0)),
-                (False, Provenance('user', 'toolguard_hook', 'toml', Path('/u/.claude/toolguard_hook.toml'), 1)),
+                (
+                    True,
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/p/.claude/toolguard_hook.toml"),
+                        0,
+                    ),
+                ),
+                (
+                    False,
+                    Provenance(
+                        "user",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/u/.claude/toolguard_hook.toml"),
+                        1,
+                    ),
+                ),
             )
         )
-        takeover = TakeoverConfig(False, (), (), 'deny', conflict=conflict)
-        config = _fake_config(governed=['Bash'], bash=(['git *'], []), takeover=takeover)
+        takeover = TakeoverConfig(False, (), (), "deny", conflict=conflict)
+        config = _fake_config(
+            governed=["Bash"], bash=(["git *"], []), takeover=takeover
+        )
 
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'git status'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
         }
 
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO):
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.get_env_config', return_value={'log_dir': Path('/fake/logs')}):
-                        with patch('toolguard.hook.log_command'):
-                            with patch('toolguard.hook.log_conflict') as mock_conflict:
-                                with patch('toolguard.hook.issue_takeover_warning') as mock_warn:
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO):
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch(
+                        "toolguard.hook.get_env_config",
+                        return_value={"log_dir": Path("/fake/logs")},
+                    ):
+                        with patch("toolguard.hook.log_command"):
+                            with patch("toolguard.hook.log_conflict") as mock_conflict:
+                                with patch(
+                                    "toolguard.hook.issue_takeover_warning"
+                                ) as mock_warn:
                                     try:
                                         main()
                                     except SystemExit:
@@ -329,10 +396,17 @@ class TestTakeoverEnabledConflictWiring(unittest.TestCase):
         from toolguard.hook import _log_takeover_enabled_conflict
 
         conflict = TakeoverEnabledConflict(
-            sources=((True, Provenance('project', 'toolguard_hook', 'toml', Path('/p/x.toml'), 0)),)
+            sources=(
+                (
+                    True,
+                    Provenance(
+                        "project", "toolguard_hook", "toml", Path("/p/x.toml"), 0
+                    ),
+                ),
+            )
         )
-        with patch('toolguard.hook.log_conflict') as mock_conflict:
-            _log_takeover_enabled_conflict(None, Path('/fake/logs'))
+        with patch("toolguard.hook.log_conflict") as mock_conflict:
+            _log_takeover_enabled_conflict(None, Path("/fake/logs"))
             _log_takeover_enabled_conflict(conflict, None)
         mock_conflict.assert_not_called()
 
@@ -347,15 +421,15 @@ class TestHookInputParsing(unittest.TestCase):
         Then the parsed dict exposes the tool_name and tool_input command
         """
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'git status'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
         }
 
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
             result = parse_hook_input()
-            self.assertEqual(result['tool_name'], 'Bash')
-            self.assertEqual(result['tool_input']['command'], 'git status')
+            self.assertEqual(result["tool_name"], "Bash")
+            self.assertEqual(result["tool_input"]["command"], "git status")
 
     def test_parse_missing_required_field(self):
         """
@@ -364,15 +438,15 @@ class TestHookInputParsing(unittest.TestCase):
         Then a ValueError mentioning tool_input is raised
         """
         hook_input = {
-            'tool_name': 'Bash',
+            "tool_name": "Bash",
             # Missing tool_input
-            'hook_event_name': 'PreToolUse',
+            "hook_event_name": "PreToolUse",
         }
 
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
             with self.assertRaises(ValueError) as ctx:
                 parse_hook_input()
-            self.assertIn('tool_input', str(ctx.exception))
+            self.assertIn("tool_input", str(ctx.exception))
 
     def test_parse_empty_input(self):
         """
@@ -380,10 +454,10 @@ class TestHookInputParsing(unittest.TestCase):
         When parse_hook_input() reads it
         Then a ValueError mentioning 'Empty input' is raised
         """
-        with patch('sys.stdin', StringIO('')):
+        with patch("sys.stdin", StringIO("")):
             with self.assertRaises(ValueError) as ctx:
                 parse_hook_input()
-            self.assertIn('Empty input', str(ctx.exception))
+            self.assertIn("Empty input", str(ctx.exception))
 
 
 class TestHookOutput(unittest.TestCase):
@@ -395,9 +469,12 @@ class TestHookOutput(unittest.TestCase):
         When create_hook_output() builds the response
         Then the hookSpecificOutput carries decision 'allow' and the given reason
         """
-        output = create_hook_output('allow', 'Command matches allow pattern')
-        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
-        self.assertEqual(output['hookSpecificOutput']['permissionDecisionReason'], 'Command matches allow pattern')
+        output = create_hook_output("allow", "Command matches allow pattern")
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecisionReason"],
+            "Command matches allow pattern",
+        )
 
     def test_create_deny_output(self):
         """
@@ -405,9 +482,12 @@ class TestHookOutput(unittest.TestCase):
         When create_hook_output() builds the response
         Then the hookSpecificOutput carries decision 'deny' and the given reason
         """
-        output = create_hook_output('deny', 'Command matches deny pattern')
-        self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
-        self.assertEqual(output['hookSpecificOutput']['permissionDecisionReason'], 'Command matches deny pattern')
+        output = create_hook_output("deny", "Command matches deny pattern")
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecisionReason"],
+            "Command matches deny pattern",
+        )
 
 
 class TestFilePathTools(unittest.TestCase):
@@ -419,9 +499,9 @@ class TestFilePathTools(unittest.TestCase):
         When its membership and size are inspected
         Then it contains exactly Read, Write, and Edit
         """
-        self.assertIn('Read', FILE_PATH_TOOLS)
-        self.assertIn('Write', FILE_PATH_TOOLS)
-        self.assertIn('Edit', FILE_PATH_TOOLS)
+        self.assertIn("Read", FILE_PATH_TOOLS)
+        self.assertIn("Write", FILE_PATH_TOOLS)
+        self.assertIn("Edit", FILE_PATH_TOOLS)
         self.assertEqual(len(FILE_PATH_TOOLS), 3)
 
 
@@ -434,11 +514,13 @@ class TestCheckFilePathPermission(unittest.TestCase):
         When check_file_path_permission evaluates '/tmp/test.txt'
         Then the decision is 'allow'
         """
-        allow_patterns = ['/tmp/*']
+        allow_patterns = ["/tmp/*"]
         deny_patterns = []
 
-        decision, reason = check_file_path_permission('/tmp/test.txt', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'allow')
+        decision, reason = check_file_path_permission(
+            "/tmp/test.txt", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "allow")
 
     def test_globstar_recursive_match(self):
         """
@@ -446,12 +528,14 @@ class TestCheckFilePathPermission(unittest.TestCase):
         When check_file_path_permission evaluates a deeply nested path under /tmp
         Then the decision is 'allow' because ** matches across separators
         """
-        allow_patterns = ['/tmp/**']
+        allow_patterns = ["/tmp/**"]
         deny_patterns = []
 
         # Should match nested path
-        decision, reason = check_file_path_permission('/tmp/subdir/deep/file.txt', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'allow')
+        decision, reason = check_file_path_permission(
+            "/tmp/subdir/deep/file.txt", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "allow")
 
     def test_single_star_does_not_match_nested(self):
         """
@@ -459,12 +543,14 @@ class TestCheckFilePathPermission(unittest.TestCase):
         When check_file_path_permission evaluates a nested path '/tmp/subdir/file.txt'
         Then the decision is 'deny' because a single * does not cross separators
         """
-        allow_patterns = ['/tmp/*']
+        allow_patterns = ["/tmp/*"]
         deny_patterns = []
 
         # Single * should NOT match nested path
-        decision, reason = check_file_path_permission('/tmp/subdir/file.txt', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'deny')
+        decision, reason = check_file_path_permission(
+            "/tmp/subdir/file.txt", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "deny")
 
     def test_deny_takes_precedence(self):
         """
@@ -472,12 +558,14 @@ class TestCheckFilePathPermission(unittest.TestCase):
         When check_file_path_permission evaluates the path
         Then the decision is 'deny' because deny is checked first
         """
-        allow_patterns = ['/tmp/**']
-        deny_patterns = ['/tmp/secret/**']
+        allow_patterns = ["/tmp/**"]
+        deny_patterns = ["/tmp/secret/**"]
 
         # Should be denied even though allow pattern matches
-        decision, reason = check_file_path_permission('/tmp/secret/password.txt', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'deny')
+        decision, reason = check_file_path_permission(
+            "/tmp/secret/password.txt", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "deny")
 
     def test_no_match_returns_deny(self):
         """
@@ -485,12 +573,14 @@ class TestCheckFilePathPermission(unittest.TestCase):
         When check_file_path_permission evaluates '/tmp/file.txt'
         Then the decision is 'deny' and the reason says it does not match
         """
-        allow_patterns = ['/home/**']
+        allow_patterns = ["/home/**"]
         deny_patterns = []
 
-        decision, reason = check_file_path_permission('/tmp/file.txt', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'deny')
-        self.assertIn('does not match', reason)
+        decision, reason = check_file_path_permission(
+            "/tmp/file.txt", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("does not match", reason)
 
     def test_tilde_expansion(self):
         """
@@ -500,13 +590,15 @@ class TestCheckFilePathPermission(unittest.TestCase):
         """
         import os
 
-        home = os.path.expanduser('~')
-        allow_patterns = ['~/projects/**']
+        home = os.path.expanduser("~")
+        allow_patterns = ["~/projects/**"]
         deny_patterns = []
 
         # Test with expanded path matching tilde pattern
-        decision, reason = check_file_path_permission(f'{home}/projects/test.py', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'allow')
+        decision, reason = check_file_path_permission(
+            f"{home}/projects/test.py", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "allow")
 
     def test_file_extension_pattern(self):
         """
@@ -514,16 +606,20 @@ class TestCheckFilePathPermission(unittest.TestCase):
         When check_file_path_permission evaluates a .txt path and a .py path
         Then the .txt path is allowed and the .py path is denied
         """
-        allow_patterns = ['/tmp/**/*.txt']
+        allow_patterns = ["/tmp/**/*.txt"]
         deny_patterns = []
 
         # Should match .txt files
-        decision, reason = check_file_path_permission('/tmp/docs/readme.txt', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'allow')
+        decision, reason = check_file_path_permission(
+            "/tmp/docs/readme.txt", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "allow")
 
         # Should not match .py files
-        decision, reason = check_file_path_permission('/tmp/src/main.py', allow_patterns, deny_patterns)
-        self.assertEqual(decision, 'deny')
+        decision, reason = check_file_path_permission(
+            "/tmp/src/main.py", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "deny")
 
 
 class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
@@ -540,14 +636,16 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a path matching that regex
         Then the decision is 'allow' and the reason notes the [regex] match
         """
-        allow_patterns = ['[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*']
+        allow_patterns = ["[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*"]
         deny_patterns = []
 
         decision, reason = check_file_path_permission(
-            '/Users/arnon/.claude/projects/proj/memory/note.md', allow_patterns, deny_patterns
+            "/Users/arnon/.claude/projects/proj/memory/note.md",
+            allow_patterns,
+            deny_patterns,
         )
-        self.assertEqual(decision, 'allow')
-        self.assertIn('[regex]', reason)
+        self.assertEqual(decision, "allow")
+        self.assertIn("[regex]", reason)
 
     def test_regex_prefix_does_not_match_other_paths(self):
         """
@@ -555,13 +653,13 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a path outside that regex
         Then the decision is 'deny'
         """
-        allow_patterns = ['[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*']
+        allow_patterns = ["[regex]^/Users/[^/]+/\\.claude/projects/.*/memory/.*"]
         deny_patterns = []
 
         decision, reason = check_file_path_permission(
-            '/Users/arnon/documents/secret.md', allow_patterns, deny_patterns
+            "/Users/arnon/documents/secret.md", allow_patterns, deny_patterns
         )
-        self.assertEqual(decision, 'deny')
+        self.assertEqual(decision, "deny")
 
     def test_glob_prefix_matches_file_path(self):
         """
@@ -569,14 +667,16 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a matching nested path
         Then the decision is 'allow' and the reason notes the [glob] match
         """
-        allow_patterns = ['[glob]/Users/*/projects/**/memory/**']
+        allow_patterns = ["[glob]/Users/*/projects/**/memory/**"]
         deny_patterns = []
 
         decision, reason = check_file_path_permission(
-            '/Users/arnon/projects/myproj/memory/sub/note.md', allow_patterns, deny_patterns
+            "/Users/arnon/projects/myproj/memory/sub/note.md",
+            allow_patterns,
+            deny_patterns,
         )
-        self.assertEqual(decision, 'allow')
-        self.assertIn('[glob]', reason)
+        self.assertEqual(decision, "allow")
+        self.assertIn("[glob]", reason)
 
     def test_glob_prefix_single_star_no_recursion(self):
         """
@@ -584,20 +684,20 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a nested path against each
         Then the single-star pattern denies but the globstar pattern allows
         """
-        allow_patterns = ['[glob]/tmp/*']
+        allow_patterns = ["[glob]/tmp/*"]
         deny_patterns = []
 
         # Single * should NOT match nested path
         decision, _ = check_file_path_permission(
-            '/tmp/sub/file.txt', allow_patterns, deny_patterns
+            "/tmp/sub/file.txt", allow_patterns, deny_patterns
         )
-        self.assertEqual(decision, 'deny')
+        self.assertEqual(decision, "deny")
 
         # Same path with ** should match
         decision, _ = check_file_path_permission(
-            '/tmp/sub/file.txt', ['[glob]/tmp/**'], deny_patterns
+            "/tmp/sub/file.txt", ["[glob]/tmp/**"], deny_patterns
         )
-        self.assertEqual(decision, 'allow')
+        self.assertEqual(decision, "allow")
 
     def test_regex_prefix_in_deny_list(self):
         """
@@ -605,14 +705,14 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a matching .env path
         Then the decision is 'deny' and the reason cites the deny pattern
         """
-        allow_patterns = ['[glob]/Users/*/**']
-        deny_patterns = ['[regex]\\.env(\\.|$)']
+        allow_patterns = ["[glob]/Users/*/**"]
+        deny_patterns = ["[regex]\\.env(\\.|$)"]
 
         decision, reason = check_file_path_permission(
-            '/Users/arnon/project/.env', allow_patterns, deny_patterns
+            "/Users/arnon/project/.env", allow_patterns, deny_patterns
         )
-        self.assertEqual(decision, 'deny')
-        self.assertIn('deny pattern', reason)
+        self.assertEqual(decision, "deny")
+        self.assertIn("deny pattern", reason)
 
     def test_default_pattern_still_works_like_glob(self):
         """
@@ -620,13 +720,13 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a nested path
         Then the decision is 'allow', preserving glob semantics for backwards compatibility
         """
-        allow_patterns = ['/tmp/**']
+        allow_patterns = ["/tmp/**"]
         deny_patterns = []
 
         decision, _ = check_file_path_permission(
-            '/tmp/a/b/c.txt', allow_patterns, deny_patterns
+            "/tmp/a/b/c.txt", allow_patterns, deny_patterns
         )
-        self.assertEqual(decision, 'allow')
+        self.assertEqual(decision, "allow")
 
     def test_extended_syntax_disabled_treats_prefix_as_literal(self):
         """
@@ -634,20 +734,20 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates '/tmp/file.txt' with extended_syntax on then off
         Then it is allowed with extended syntax but denied without, where the prefix is a literal glob
         """
-        allow_patterns = ['[regex]^/tmp/.*']
+        allow_patterns = ["[regex]^/tmp/.*"]
         deny_patterns = []
 
         # With extended syntax: regex matches
         decision, _ = check_file_path_permission(
-            '/tmp/file.txt', allow_patterns, deny_patterns, extended_syntax=True
+            "/tmp/file.txt", allow_patterns, deny_patterns, extended_syntax=True
         )
-        self.assertEqual(decision, 'allow')
+        self.assertEqual(decision, "allow")
 
         # Without extended syntax: [regex]... treated as glob literal, won't match
         decision, _ = check_file_path_permission(
-            '/tmp/file.txt', allow_patterns, deny_patterns, extended_syntax=False
+            "/tmp/file.txt", allow_patterns, deny_patterns, extended_syntax=False
         )
-        self.assertEqual(decision, 'deny')
+        self.assertEqual(decision, "deny")
 
     def test_native_prefix_matches_file_path(self):
         """
@@ -655,13 +755,13 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         When check_file_path_permission evaluates a path matching those segments
         Then the decision is 'allow'
         """
-        allow_patterns = ['[native]/Users/*/projects/*']
+        allow_patterns = ["[native]/Users/*/projects/*"]
         deny_patterns = []
 
         decision, _ = check_file_path_permission(
-            '/Users/arnon/projects/myproj', allow_patterns, deny_patterns
+            "/Users/arnon/projects/myproj", allow_patterns, deny_patterns
         )
-        self.assertEqual(decision, 'allow')
+        self.assertEqual(decision, "allow")
 
 
 class TestLoadFilePathPatterns(unittest.TestCase):
@@ -671,8 +771,10 @@ class TestLoadFilePathPatterns(unittest.TestCase):
     def _config_from_permissions(permissions):
         """Build a one-layer Configuration whose native layer holds permissions."""
         layer = ConfigLayer(
-            Provenance('project', 'claude', 'json', Path('/fake/.claude/settings.local.json')),
-            MappingProxyType({'permissions': permissions}),
+            Provenance(
+                "project", "claude", "json", Path("/fake/.claude/settings.local.json")
+            ),
+            MappingProxyType({"permissions": permissions}),
         )
         return Configuration(layers=(layer,))
 
@@ -684,23 +786,28 @@ class TestLoadFilePathPatterns(unittest.TestCase):
         """
         config = self._config_from_permissions(
             {
-                'allow': ['Read(/tmp/**)', 'Read(/home/**)', 'Write(/tmp/*)', 'Bash(git status:*)'],
-                'deny': ['Read(/tmp/secret/**)'],
+                "allow": [
+                    "Read(/tmp/**)",
+                    "Read(/home/**)",
+                    "Write(/tmp/*)",
+                    "Bash(git status:*)",
+                ],
+                "deny": ["Read(/tmp/secret/**)"],
             }
         )
 
         # Pass the config in directly so the adapter routes through the public
         # Configuration surface rather than opening files.
-        allow, deny = load_file_path_patterns('Read', config=config)
+        allow, deny = load_file_path_patterns("Read", config=config)
 
         # Should only get Read patterns, not Write or Bash
         self.assertEqual(len(allow), 2)
-        self.assertIn('/tmp/**', allow)
-        self.assertIn('/home/**', allow)
+        self.assertIn("/tmp/**", allow)
+        self.assertIn("/home/**", allow)
 
         # Should get deny patterns for Read
         self.assertEqual(len(deny), 1)
-        self.assertIn('/tmp/secret/**', deny)
+        self.assertIn("/tmp/secret/**", deny)
 
     def test_load_write_patterns(self):
         """
@@ -710,17 +817,17 @@ class TestLoadFilePathPatterns(unittest.TestCase):
         """
         config = self._config_from_permissions(
             {
-                'allow': ['Read(/tmp/**)', 'Write(/tmp/*)', 'Write(~/projects/**)'],
-                'deny': [],
+                "allow": ["Read(/tmp/**)", "Write(/tmp/*)", "Write(~/projects/**)"],
+                "deny": [],
             }
         )
 
-        allow, deny = load_file_path_patterns('Write', config=config)
+        allow, deny = load_file_path_patterns("Write", config=config)
 
         # Should only get Write patterns
         self.assertEqual(len(allow), 2)
-        self.assertIn('/tmp/*', allow)
-        self.assertIn('~/projects/**', allow)
+        self.assertIn("/tmp/*", allow)
+        self.assertIn("~/projects/**", allow)
 
 
 class TestFilePathToolsInMain(unittest.TestCase):
@@ -733,26 +840,33 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Then the decision is 'allow'
         """
         hook_input = {
-            'tool_name': 'Read',
-            'tool_input': {'file_path': '/tmp/test.txt'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/test.txt"},
+            "hook_event_name": "PreToolUse",
         }
 
         config = _fake_config(
-            governed=['Read', 'Write', 'Edit'], file_patterns={'Read': (['/tmp/**'], [])}
+            governed=["Read", "Write", "Edit"],
+            file_patterns={"Read": (["/tmp/**"], [])},
         )
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.log_command'):
-                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
                             try:
                                 main()
                             except SystemExit:
                                 pass
 
                             output = json.loads(mock_stdout.getvalue())
-                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "allow",
+                            )
 
     def test_write_tool_denied(self):
         """
@@ -761,26 +875,33 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Then the decision is 'deny'
         """
         hook_input = {
-            'tool_name': 'Write',
-            'tool_input': {'file_path': '/etc/passwd'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/etc/passwd"},
+            "hook_event_name": "PreToolUse",
         }
 
         config = _fake_config(
-            governed=['Read', 'Write', 'Edit'], file_patterns={'Write': (['/tmp/**'], [])}
+            governed=["Read", "Write", "Edit"],
+            file_patterns={"Write": (["/tmp/**"], [])},
         )
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.log_command'):
-                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
                             try:
                                 main()
                             except SystemExit:
                                 pass
 
                             output = json.loads(mock_stdout.getvalue())
-                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "deny",
+                            )
 
     def test_edit_tool_with_deny_pattern(self):
         """
@@ -789,28 +910,39 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Then the decision is 'deny' and the reason cites the deny pattern
         """
         hook_input = {
-            'tool_name': 'Edit',
-            'tool_input': {'file_path': '/tmp/secret/config.txt'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/secret/config.txt"},
+            "hook_event_name": "PreToolUse",
         }
 
         config = _fake_config(
-            governed=['Read', 'Write', 'Edit'],
-            file_patterns={'Edit': (['/tmp/**'], ['/tmp/secret/**'])},
+            governed=["Read", "Write", "Edit"],
+            file_patterns={"Edit": (["/tmp/**"], ["/tmp/secret/**"])},
         )
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.log_command'):
-                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
                             try:
                                 main()
                             except SystemExit:
                                 pass
 
                             output = json.loads(mock_stdout.getvalue())
-                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
-                            self.assertIn('deny pattern', output['hookSpecificOutput']['permissionDecisionReason'])
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "deny",
+                            )
+                            self.assertIn(
+                                "deny pattern",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
+                            )
 
     def test_read_no_file_path_denied(self):
         """
@@ -819,25 +951,36 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Then the decision is 'deny' and the reason mentions file_path
         """
         hook_input = {
-            'tool_name': 'Read',
-            'tool_input': {},  # Missing file_path
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Read",
+            "tool_input": {},  # Missing file_path
+            "hook_event_name": "PreToolUse",
         }
 
-        config = _fake_config(governed=['Read', 'Write', 'Edit'])
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.log_command'):
-                        with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+        config = _fake_config(governed=["Read", "Write", "Edit"])
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
                             try:
                                 main()
                             except SystemExit:
                                 pass
 
                             output = json.loads(mock_stdout.getvalue())
-                            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
-                            self.assertIn('file_path', output['hookSpecificOutput']['permissionDecisionReason'])
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "deny",
+                            )
+                            self.assertIn(
+                                "file_path",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
+                            )
 
     def test_read_no_allow_patterns_denied(self):
         """
@@ -846,27 +989,38 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Then the decision is 'deny' and the reason notes there are no Read permissions
         """
         hook_input = {
-            'tool_name': 'Read',
-            'tool_input': {'file_path': '/tmp/test.txt'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/test.txt"},
+            "hook_event_name": "PreToolUse",
         }
 
-        config = _fake_config(governed=['Read', 'Write', 'Edit'])
-        with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-            with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-                with patch('toolguard.hook.load_configuration', return_value=config):
-                    with patch('toolguard.hook.load_file_path_patterns', return_value=([], [])):  # No patterns
-                        with patch('toolguard.hook.log_command'):
-                            with patch('toolguard.hook.identify_current_agent', return_value={'agent_type': 'main'}):
+        config = _fake_config(governed=["Read", "Write", "Edit"])
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch(
+                        "toolguard.hook.load_file_path_patterns", return_value=([], [])
+                    ):  # No patterns
+                        with patch("toolguard.hook.log_command"):
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
                                 try:
                                     main()
                                 except SystemExit:
                                     pass
 
                                 output = json.loads(mock_stdout.getvalue())
-                                self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "deny",
+                                )
                                 self.assertIn(
-                                    'No Read permissions', output['hookSpecificOutput']['permissionDecisionReason']
+                                    "No Read permissions",
+                                    output["hookSpecificOutput"][
+                                        "permissionDecisionReason"
+                                    ],
                                 )
 
 
@@ -894,34 +1048,45 @@ class TestStartupValidation(unittest.TestCase):
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
-                project_dir = Path(tmpdir) / 'project'
+                project_dir = Path(tmpdir) / "project"
                 project_dir.mkdir()
-                (project_dir / '.git').mkdir()
-                claude_dir = project_dir / '.claude'
+                (project_dir / ".git").mkdir()
+                claude_dir = project_dir / ".claude"
                 claude_dir.mkdir()
-                logs_dir = project_dir / 'logs'
+                logs_dir = project_dir / "logs"
                 logs_dir.mkdir()
 
                 # Native settings.local.json with unsupported tools (should be IGNORED)
                 native_layer = ConfigLayer(
-                    Provenance('project', 'claude', 'json', claude_dir / 'settings.local.json'),
+                    Provenance(
+                        "project", "claude", "json", claude_dir / "settings.local.json"
+                    ),
                     MappingProxyType(
-                        {'permissions': {'allow': ['WebSearch', 'WebFetch', 'mcp__unknown__tool']}}
+                        {
+                            "permissions": {
+                                "allow": ["WebSearch", "WebFetch", "mcp__unknown__tool"]
+                            }
+                        }
                     ),
                 )
                 # toolguard_hook with valid config (should be validated, no issues)
                 hook_layer = ConfigLayer(
-                    Provenance('project', 'toolguard_hook', 'toml', claude_dir / 'toolguard_hook.toml'),
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        claude_dir / "toolguard_hook.toml",
+                    ),
                     MappingProxyType(
                         {
-                            'governed_tools': ['Bash', 'Read'],
-                            'permissions': {'allow': ['Bash(ls:*)', 'Read(/tmp/**)']},
+                            "governed_tools": ["Bash", "Read"],
+                            "permissions": {"allow": ["Bash(ls:*)", "Read(/tmp/**)"]},
                         }
                     ),
                 )
                 config = Configuration(layers=(native_layer, hook_layer))
 
-                env_config = {'log_dir': logs_dir}
+                env_config = {"log_dir": logs_dir}
 
                 # Reset flag again before calling
                 hook_module._validation_done = False
@@ -932,14 +1097,14 @@ class TestStartupValidation(unittest.TestCase):
 
                 # Check log file - should NOT have warnings for WebSearch, WebFetch
                 # because those are in settings.local.json which is ignored
-                log_files = list(logs_dir.glob('toolguard-error-*.md'))
+                log_files = list(logs_dir.glob("toolguard-error-*.md"))
 
                 if log_files:
                     content = log_files[0].read_text()
                     # These tools are in settings.local.json which should be ignored
-                    self.assertNotIn('WebSearch', content)
-                    self.assertNotIn('WebFetch', content)
-                    self.assertNotIn('mcp__unknown__tool', content)
+                    self.assertNotIn("WebSearch", content)
+                    self.assertNotIn("WebFetch", content)
+                    self.assertNotIn("mcp__unknown__tool", content)
                 # If no log file exists, that's also correct (no warnings generated)
 
         finally:
@@ -958,18 +1123,20 @@ class TestStartupValidation(unittest.TestCase):
         original_flag = hook_module._validation_done
         hook_module._validation_done = False
         try:
-            issue = Issue('warning', 'bad tool WebSearch', 'remove it')
+            issue = Issue("warning", "bad tool WebSearch", "remove it")
 
             class _IssueConfig:
                 def validation_issues(self_inner):
                     return (issue,)
 
-            env_config = {'log_dir': Path('/fake/logs')}
-            with patch('toolguard.hook.log_warning') as mock_log_warning:
+            env_config = {"log_dir": Path("/fake/logs")}
+            with patch("toolguard.hook.log_warning") as mock_log_warning:
                 from toolguard.hook import _run_startup_validation
 
-                _run_startup_validation(env_config, '/some/dir', _IssueConfig())
-                mock_log_warning.assert_called_once_with('bad tool WebSearch', 'remove it', Path('/fake/logs'))
+                _run_startup_validation(env_config, "/some/dir", _IssueConfig())
+                mock_log_warning.assert_called_once_with(
+                    "bad tool WebSearch", "remove it", Path("/fake/logs")
+                )
         finally:
             hook_module._validation_done = original_flag
 
@@ -984,17 +1151,20 @@ class TestStartupValidation(unittest.TestCase):
         original_flag = hook_module._validation_done
         hook_module._validation_done = False
         try:
+
             class _EmptyConfig:
                 def validation_issues(self_inner):
                     return ()
 
-            env_config = {'log_dir': Path('/fake/logs')}
-            with patch('toolguard.hook.load_configuration', return_value=_EmptyConfig()) as mock_load:
-                with patch('toolguard.hook.log_warning'):
+            env_config = {"log_dir": Path("/fake/logs")}
+            with patch(
+                "toolguard.hook.load_configuration", return_value=_EmptyConfig()
+            ) as mock_load:
+                with patch("toolguard.hook.log_warning"):
                     from toolguard.hook import _run_startup_validation
 
-                    _run_startup_validation(env_config, '/some/dir')
-                    mock_load.assert_called_once_with('/some/dir')
+                    _run_startup_validation(env_config, "/some/dir")
+                    mock_load.assert_called_once_with("/some/dir")
         finally:
             hook_module._validation_done = original_flag
 
@@ -1008,12 +1178,16 @@ class TestLoadFilePathPatternsAdapter(unittest.TestCase):
         When it is called for 'Read' with a directory
         Then it loads a configuration for that directory and returns its Read allow/deny patterns
         """
-        config = _fake_config(file_patterns={'Read': (('/tmp/**',), ('/tmp/secret/**',))})
-        with patch('toolguard.hook.load_configuration', return_value=config) as mock_load:
-            allow, deny = load_file_path_patterns('Read', '/some/dir')
-            mock_load.assert_called_once_with('/some/dir')
-            self.assertEqual(allow, ['/tmp/**'])
-            self.assertEqual(deny, ['/tmp/secret/**'])
+        config = _fake_config(
+            file_patterns={"Read": (("/tmp/**",), ("/tmp/secret/**",))}
+        )
+        with patch(
+            "toolguard.hook.load_configuration", return_value=config
+        ) as mock_load:
+            allow, deny = load_file_path_patterns("Read", "/some/dir")
+            mock_load.assert_called_once_with("/some/dir")
+            self.assertEqual(allow, ["/tmp/**"])
+            self.assertEqual(deny, ["/tmp/secret/**"])
 
 
 class TestParseCompoundMatchDetails(unittest.TestCase):
@@ -1025,9 +1199,9 @@ class TestParseCompoundMatchDetails(unittest.TestCase):
         When _parse_compound_match_details parses it
         Then it returns the two (command, rule) pairs in order
         """
-        reason = 'All 2 sub-commands allowed: [git status -> git *, git log -> git *]'
+        reason = "All 2 sub-commands allowed: [git status -> git *, git log -> git *]"
         result = _parse_compound_match_details(reason)
-        self.assertEqual(result, [('git status', 'git *'), ('git log', 'git *')])
+        self.assertEqual(result, [("git status", "git *"), ("git log", "git *")])
 
     def test_parse_three_subcommands(self):
         """
@@ -1035,12 +1209,12 @@ class TestParseCompoundMatchDetails(unittest.TestCase):
         When _parse_compound_match_details parses it
         Then it returns all three (command, rule) pairs in order
         """
-        reason = 'All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pattern -> grep *]'
+        reason = "All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pattern -> grep *]"
         result = _parse_compound_match_details(reason)
         self.assertEqual(len(result), 3)
-        self.assertEqual(result[0], ('git status', 'git *'))
-        self.assertEqual(result[1], ('cat file', 'cat *'))
-        self.assertEqual(result[2], ('grep pattern', 'grep *'))
+        self.assertEqual(result[0], ("git status", "git *"))
+        self.assertEqual(result[1], ("cat file", "cat *"))
+        self.assertEqual(result[2], ("grep pattern", "grep *"))
 
     def test_non_compound_reason_returns_none(self):
         """
@@ -1048,7 +1222,7 @@ class TestParseCompoundMatchDetails(unittest.TestCase):
         When _parse_compound_match_details parses it
         Then it returns None
         """
-        reason = 'Command matches allow pattern: git *'
+        reason = "Command matches allow pattern: git *"
         result = _parse_compound_match_details(reason)
         self.assertIsNone(result)
 
@@ -1058,7 +1232,7 @@ class TestParseCompoundMatchDetails(unittest.TestCase):
         When _parse_compound_match_details parses it
         Then it returns None
         """
-        reason = 'Path matches allow pattern: /tmp/**'
+        reason = "Path matches allow pattern: /tmp/**"
         result = _parse_compound_match_details(reason)
         self.assertIsNone(result)
 
@@ -1066,45 +1240,71 @@ class TestParseCompoundMatchDetails(unittest.TestCase):
 class TestLogAllowedCommand(unittest.TestCase):
     """Test the _log_allowed_command helper function."""
 
-    @patch('toolguard.hook.log_command')
+    @patch("toolguard.hook.log_command")
     def test_simple_command_logs_matched_rule(self, mock_log):
         """
         Given a simple allowed command and its single-rule allow reason
         When _log_allowed_command runs
         Then log_command is called once with status 'executed' and the matched rule
         """
-        _log_allowed_command('git status', 'Command matches allow pattern: git *', 'main', {})
+        _log_allowed_command(
+            "git status", "Command matches allow pattern: git *", "main", {}
+        )
         mock_log.assert_called_once_with(
-            'git status', 'executed', matched_rule='git *', extra_info='main', config={}
+            "git status", "executed", matched_rule="git *", extra_info="main", config={}
         )
 
-    @patch('toolguard.hook.log_command')
+    @patch("toolguard.hook.log_command")
     def test_compound_command_logs_per_subcommand(self, mock_log):
         """
         Given a compound allowed command with a two-sub-command allow reason
         When _log_allowed_command runs
         Then log_command is called once per sub-command with its own matched rule
         """
-        reason = 'All 2 sub-commands allowed: [git status -> git *, git log -> git *]'
-        _log_allowed_command('git status && git log', reason, 'main', {})
+        reason = "All 2 sub-commands allowed: [git status -> git *, git log -> git *]"
+        _log_allowed_command("git status && git log", reason, "main", {})
         self.assertEqual(mock_log.call_count, 2)
-        mock_log.assert_any_call('git status', 'executed', matched_rule='git *', extra_info='main', config={})
-        mock_log.assert_any_call('git log', 'executed', matched_rule='git *', extra_info='main', config={})
+        mock_log.assert_any_call(
+            "git status", "executed", matched_rule="git *", extra_info="main", config={}
+        )
+        mock_log.assert_any_call(
+            "git log", "executed", matched_rule="git *", extra_info="main", config={}
+        )
 
-    @patch('toolguard.hook.log_command')
+    @patch("toolguard.hook.log_command")
     def test_compound_three_commands(self, mock_log):
         """
         Given a compound allowed command with a three-sub-command allow reason
         When _log_allowed_command runs
         Then log_command is called three times, once per sub-command with its matched rule and agent
         """
-        reason = 'All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pat -> grep *]'
-        _log_allowed_command('git status && cat file | grep pat', reason, 'sub-agent', {})
+        reason = "All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pat -> grep *]"
+        _log_allowed_command(
+            "git status && cat file | grep pat", reason, "sub-agent", {}
+        )
         self.assertEqual(mock_log.call_count, 3)
-        mock_log.assert_any_call('git status', 'executed', matched_rule='git *', extra_info='sub-agent', config={})
-        mock_log.assert_any_call('cat file', 'executed', matched_rule='cat *', extra_info='sub-agent', config={})
-        mock_log.assert_any_call('grep pat', 'executed', matched_rule='grep *', extra_info='sub-agent', config={})
+        mock_log.assert_any_call(
+            "git status",
+            "executed",
+            matched_rule="git *",
+            extra_info="sub-agent",
+            config={},
+        )
+        mock_log.assert_any_call(
+            "cat file",
+            "executed",
+            matched_rule="cat *",
+            extra_info="sub-agent",
+            config={},
+        )
+        mock_log.assert_any_call(
+            "grep pat",
+            "executed",
+            matched_rule="grep *",
+            extra_info="sub-agent",
+            config={},
+        )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

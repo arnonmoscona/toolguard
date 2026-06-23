@@ -20,9 +20,9 @@ class TestBashParserAST(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced that exposes a compound_command node
         """
-        tree = bash_parser.parse('ls -la')
+        tree = bash_parser.parse("ls -la")
         self.assertIsNotNone(tree)
-        self.assertTrue(hasattr(tree, 'compound_command'))
+        self.assertTrue(hasattr(tree, "compound_command"))
         self.assertIsNotNone(tree.compound_command)
 
     def test_pipe_structure(self):
@@ -31,12 +31,12 @@ class TestBashParserAST(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then the tree's compound_command exposes a pipeline node
         """
-        tree = bash_parser.parse('cmd1 | cmd2')
+        tree = bash_parser.parse("cmd1 | cmd2")
         self.assertIsNotNone(tree)
-        self.assertTrue(hasattr(tree, 'compound_command'))
+        self.assertTrue(hasattr(tree, "compound_command"))
         # Pipeline should have multiple elements
         compound = tree.compound_command
-        self.assertTrue(hasattr(compound, 'pipeline'))
+        self.assertTrue(hasattr(compound, "pipeline"))
 
     def test_and_operator_structure(self):
         """
@@ -44,9 +44,9 @@ class TestBashParserAST(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree with a compound_command node is produced
         """
-        tree = bash_parser.parse('cmd1 && cmd2')
+        tree = bash_parser.parse("cmd1 && cmd2")
         self.assertIsNotNone(tree)
-        self.assertTrue(hasattr(tree, 'compound_command'))
+        self.assertTrue(hasattr(tree, "compound_command"))
 
     def test_or_operator_structure(self):
         """
@@ -54,9 +54,9 @@ class TestBashParserAST(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree with a compound_command node is produced
         """
-        tree = bash_parser.parse('cmd1 || cmd2')
+        tree = bash_parser.parse("cmd1 || cmd2")
         self.assertIsNotNone(tree)
-        self.assertTrue(hasattr(tree, 'compound_command'))
+        self.assertTrue(hasattr(tree, "compound_command"))
 
     def test_semicolon_structure(self):
         """
@@ -64,9 +64,9 @@ class TestBashParserAST(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree with a compound_command node is produced
         """
-        tree = bash_parser.parse('cmd1; cmd2')
+        tree = bash_parser.parse("cmd1; cmd2")
         self.assertIsNotNone(tree)
-        self.assertTrue(hasattr(tree, 'compound_command'))
+        self.assertTrue(hasattr(tree, "compound_command"))
 
 
 class TestSubshellParsing(unittest.TestCase):
@@ -78,25 +78,25 @@ class TestSubshellParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then the pipeline_element exposes a compound_command whose text contains 'ls'
         """
-        tree = bash_parser.parse('(ls -la)')
+        tree = bash_parser.parse("(ls -la)")
         self.assertIsNotNone(tree)
 
         # Should have pipeline with pipeline_element
         compound = tree.compound_command
-        self.assertTrue(hasattr(compound, 'pipeline'))
+        self.assertTrue(hasattr(compound, "pipeline"))
 
         pipeline = compound.pipeline
-        self.assertTrue(hasattr(pipeline, 'pipeline_element'))
+        self.assertTrue(hasattr(pipeline, "pipeline_element"))
 
         # pipeline_element should have compound_command (for subshells)
         elem = pipeline.pipeline_element
-        self.assertTrue(hasattr(elem, 'compound_command'))
+        self.assertTrue(hasattr(elem, "compound_command"))
         self.assertIsNotNone(elem.compound_command)
 
         # The inner compound_command should have the command
         inner = elem.compound_command
         self.assertIsNotNone(inner.text.strip())
-        self.assertIn('ls', inner.text)
+        self.assertIn("ls", inner.text)
 
     def test_subshell_with_and(self):
         """
@@ -104,16 +104,16 @@ class TestSubshellParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then the subshell's inner compound_command text contains the '&&' operator
         """
-        tree = bash_parser.parse('(cd /tmp && ls)')
+        tree = bash_parser.parse("(cd /tmp && ls)")
         self.assertIsNotNone(tree)
 
         # Get to the subshell's compound_command
         pipeline_elem = tree.compound_command.pipeline.pipeline_element
-        self.assertTrue(hasattr(pipeline_elem, 'compound_command'))
+        self.assertTrue(hasattr(pipeline_elem, "compound_command"))
 
         inner = pipeline_elem.compound_command
         self.assertIsNotNone(inner)
-        self.assertIn('&&', inner.text)
+        self.assertIn("&&", inner.text)
 
     def test_nested_subshell(self):
         """
@@ -121,12 +121,12 @@ class TestSubshellParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then the outer pipeline_element exposes a non-None inner compound_command
         """
-        tree = bash_parser.parse('((ls))')
+        tree = bash_parser.parse("((ls))")
         self.assertIsNotNone(tree)
 
         # Outer subshell
         outer_elem = tree.compound_command.pipeline.pipeline_element
-        self.assertTrue(hasattr(outer_elem, 'compound_command'))
+        self.assertTrue(hasattr(outer_elem, "compound_command"))
 
         # Inner compound should contain another subshell
         inner_compound = outer_elem.compound_command
@@ -138,7 +138,7 @@ class TestSubshellParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree with a non-None compound_command is produced
         """
-        tree = bash_parser.parse('(rm file) && echo done')
+        tree = bash_parser.parse("(rm file) && echo done")
         self.assertIsNotNone(tree)
 
         compound = tree.compound_command
@@ -155,17 +155,17 @@ class TestBraceGroupParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then the pipeline_element's inner compound_command text contains 'cmd1'
         """
-        tree = bash_parser.parse('{ cmd1; }')
+        tree = bash_parser.parse("{ cmd1; }")
         self.assertIsNotNone(tree)
 
         # Should have pipeline with pipeline_element
         pipeline_elem = tree.compound_command.pipeline.pipeline_element
-        self.assertTrue(hasattr(pipeline_elem, 'compound_command'))
+        self.assertTrue(hasattr(pipeline_elem, "compound_command"))
 
         # The inner compound_command should have the command
         inner = pipeline_elem.compound_command
         self.assertIsNotNone(inner.text.strip())
-        self.assertIn('cmd1', inner.text)
+        self.assertIn("cmd1", inner.text)
 
     def test_brace_group_with_multiple_commands(self):
         """
@@ -173,13 +173,13 @@ class TestBraceGroupParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then the inner compound_command text contains both 'cmd1' and 'cmd2'
         """
-        tree = bash_parser.parse('{ cmd1; cmd2; }')
+        tree = bash_parser.parse("{ cmd1; cmd2; }")
         self.assertIsNotNone(tree)
 
         pipeline_elem = tree.compound_command.pipeline.pipeline_element
         inner = pipeline_elem.compound_command
-        self.assertIn('cmd1', inner.text)
-        self.assertIn('cmd2', inner.text)
+        self.assertIn("cmd1", inner.text)
+        self.assertIn("cmd2", inner.text)
 
     def test_nested_brace_groups(self):
         """
@@ -187,7 +187,7 @@ class TestBraceGroupParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced
         """
-        tree = bash_parser.parse('{ { cmd1; }; }')
+        tree = bash_parser.parse("{ { cmd1; }; }")
         self.assertIsNotNone(tree)
 
 
@@ -200,10 +200,10 @@ class TestCommandSubstitutionParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced whose text contains '$('
         """
-        tree = bash_parser.parse('echo $(cat file)')
+        tree = bash_parser.parse("echo $(cat file)")
         self.assertIsNotNone(tree)
         # Basic parse should succeed
-        self.assertIn('$(', tree.text)
+        self.assertIn("$(", tree.text)
 
     def test_simple_backtick(self):
         """
@@ -211,9 +211,9 @@ class TestCommandSubstitutionParsing(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced whose text contains a backtick
         """
-        tree = bash_parser.parse('echo `ls`')
+        tree = bash_parser.parse("echo `ls`")
         self.assertIsNotNone(tree)
-        self.assertIn('`', tree.text)
+        self.assertIn("`", tree.text)
 
     def test_nested_substitution(self):
         """
@@ -223,12 +223,12 @@ class TestCommandSubstitutionParsing(unittest.TestCase):
             is raised, in which case the test is skipped as not-yet-supported
         """
         try:
-            tree = bash_parser.parse('echo $(cat $(find .))')
+            tree = bash_parser.parse("echo $(cat $(find .))")
             self.assertIsNotNone(tree)
             # If we get here, grammar was fixed!
         except bash_parser.ParseError:
             # Expected to fail with current grammar
-            self.skipTest('Nested substitution not yet supported by grammar')
+            self.skipTest("Nested substitution not yet supported by grammar")
 
 
 class TestMixedConstructs(unittest.TestCase):
@@ -240,7 +240,7 @@ class TestMixedConstructs(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced
         """
-        tree = bash_parser.parse('(cat file | grep pattern)')
+        tree = bash_parser.parse("(cat file | grep pattern)")
         self.assertIsNotNone(tree)
 
     def test_brace_with_and(self):
@@ -249,7 +249,7 @@ class TestMixedConstructs(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced
         """
-        tree = bash_parser.parse('{ cmd1 && cmd2; }')
+        tree = bash_parser.parse("{ cmd1 && cmd2; }")
         self.assertIsNotNone(tree)
 
     def test_substitution_in_subshell(self):
@@ -258,9 +258,9 @@ class TestMixedConstructs(unittest.TestCase):
         When it is parsed by the PEG bash parser
         Then a non-None tree is produced
         """
-        tree = bash_parser.parse('(echo $(cat file))')
+        tree = bash_parser.parse("(echo $(cat file))")
         self.assertIsNotNone(tree)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -28,9 +28,9 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied to it
         Then the home prefix is collapsed to '~/projects/file.txt'
         """
-        path = str(self.home / 'projects' / 'file.txt')
+        path = str(self.home / "projects" / "file.txt")
         result = normalize_path(path)
-        self.assertEqual(result, '~/projects/file.txt')
+        self.assertEqual(result, "~/projects/file.txt")
 
     def test_normalize_multiple_leading_slashes(self):
         """
@@ -38,9 +38,9 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied to each
         Then the leading slashes collapse to a single '/tmp/file'
         """
-        self.assertEqual(normalize_path('//tmp/file'), '/tmp/file')
-        self.assertEqual(normalize_path('///tmp/file'), '/tmp/file')
-        self.assertEqual(normalize_path('////tmp/file'), '/tmp/file')
+        self.assertEqual(normalize_path("//tmp/file"), "/tmp/file")
+        self.assertEqual(normalize_path("///tmp/file"), "/tmp/file")
+        self.assertEqual(normalize_path("////tmp/file"), "/tmp/file")
 
     def test_normalize_relative_path_without_project_root(self):
         """
@@ -48,8 +48,8 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the path receives a './' prefix ('./file.txt')
         """
-        result = normalize_path('file.txt')
-        self.assertEqual(result, './file.txt')
+        result = normalize_path("file.txt")
+        self.assertEqual(result, "./file.txt")
 
     def test_normalize_relative_path_with_project_root(self):
         """
@@ -58,11 +58,11 @@ class TestNormalizePath(unittest.TestCase):
         Then the path is normalized relative to the root as './test.txt'
         """
         # Create a file in temp dir
-        test_file = self.project_root / 'test.txt'
+        test_file = self.project_root / "test.txt"
         test_file.touch()
 
-        result = normalize_path('test.txt', self.project_root)
-        self.assertEqual(result, './test.txt')
+        result = normalize_path("test.txt", self.project_root)
+        self.assertEqual(result, "./test.txt")
 
     def test_normalize_absolute_path_outside_home(self):
         """
@@ -70,8 +70,8 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the path is returned unchanged
         """
-        result = normalize_path('/tmp/file.txt')
-        self.assertEqual(result, '/tmp/file.txt')
+        result = normalize_path("/tmp/file.txt")
+        self.assertEqual(result, "/tmp/file.txt")
 
     def test_normalize_already_normalized_relative(self):
         """
@@ -79,8 +79,8 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the path is returned unchanged ('./file.txt')
         """
-        result = normalize_path('./file.txt')
-        self.assertEqual(result, './file.txt')
+        result = normalize_path("./file.txt")
+        self.assertEqual(result, "./file.txt")
 
     def test_normalize_already_normalized_tilde(self):
         """
@@ -88,8 +88,8 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the path is returned unchanged ('~/projects/file.txt')
         """
-        result = normalize_path('~/projects/file.txt')
-        self.assertEqual(result, '~/projects/file.txt')
+        result = normalize_path("~/projects/file.txt")
+        self.assertEqual(result, "~/projects/file.txt")
 
     def test_normalize_empty_string(self):
         """
@@ -97,8 +97,8 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then an empty string is returned
         """
-        result = normalize_path('')
-        self.assertEqual(result, '')
+        result = normalize_path("")
+        self.assertEqual(result, "")
 
     def test_normalize_symlink(self):
         """
@@ -108,9 +108,9 @@ class TestNormalizePath(unittest.TestCase):
             or the test is skipped if symlinks are unsupported
         """
         # Create a file and a symlink to it
-        target_file = self.project_root / 'target.txt'
+        target_file = self.project_root / "target.txt"
         target_file.touch()
-        symlink_path = self.project_root / 'link.txt'
+        symlink_path = self.project_root / "link.txt"
 
         try:
             symlink_path.symlink_to(target_file)
@@ -120,10 +120,10 @@ class TestNormalizePath(unittest.TestCase):
 
             # The result should be the resolved target
             # (may be under home, so could be ~ prefixed)
-            self.assertIn('target.txt', result)
+            self.assertIn("target.txt", result)
         except OSError:
             # Symlink creation might fail on some systems
-            self.skipTest('Symlink creation not supported')
+            self.skipTest("Symlink creation not supported")
 
     def test_normalize_nonexistent_path(self):
         """
@@ -132,9 +132,9 @@ class TestNormalizePath(unittest.TestCase):
         Then the format is still normalized to '~/nonexistent/file.txt'
         """
         # Should still normalize format even if path doesn't exist
-        path = str(self.home / 'nonexistent' / 'file.txt')
+        path = str(self.home / "nonexistent" / "file.txt")
         result = normalize_path(path)
-        self.assertEqual(result, '~/nonexistent/file.txt')
+        self.assertEqual(result, "~/nonexistent/file.txt")
 
     def test_normalize_root_path(self):
         """
@@ -142,8 +142,8 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the root path is returned unchanged
         """
-        result = normalize_path('/')
-        self.assertEqual(result, '/')
+        result = normalize_path("/")
+        self.assertEqual(result, "/")
 
     def test_normalize_current_dir(self):
         """
@@ -151,9 +151,9 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the result begins with '.' (it stays a relative reference)
         """
-        result = normalize_path('.')
+        result = normalize_path(".")
         # Current directory should get ./ prefix if relative
-        self.assertTrue(result.startswith('.'))
+        self.assertTrue(result.startswith("."))
 
 
 class TestExpandTilde(unittest.TestCase):
@@ -165,7 +165,7 @@ class TestExpandTilde(unittest.TestCase):
         When expand_tilde is applied
         Then it is expanded to the absolute home directory path
         """
-        result = expand_tilde('~')
+        result = expand_tilde("~")
         self.assertEqual(result, str(Path.home()))
 
     def test_expand_tilde_with_path(self):
@@ -174,8 +174,8 @@ class TestExpandTilde(unittest.TestCase):
         When expand_tilde is applied
         Then the tilde expands to home and the suffix is preserved
         """
-        result = expand_tilde('~/projects/file.txt')
-        expected = str(Path.home()) + '/projects/file.txt'
+        result = expand_tilde("~/projects/file.txt")
+        expected = str(Path.home()) + "/projects/file.txt"
         self.assertEqual(result, expected)
 
     def test_expand_tilde_no_tilde(self):
@@ -184,8 +184,8 @@ class TestExpandTilde(unittest.TestCase):
         When expand_tilde is applied
         Then the path is returned unchanged
         """
-        result = expand_tilde('/tmp/file.txt')
-        self.assertEqual(result, '/tmp/file.txt')
+        result = expand_tilde("/tmp/file.txt")
+        self.assertEqual(result, "/tmp/file.txt")
 
     def test_expand_tilde_empty_string(self):
         """
@@ -193,8 +193,8 @@ class TestExpandTilde(unittest.TestCase):
         When expand_tilde is applied
         Then an empty string is returned
         """
-        result = expand_tilde('')
-        self.assertEqual(result, '')
+        result = expand_tilde("")
+        self.assertEqual(result, "")
 
     def test_expand_tilde_glob_pattern(self):
         """
@@ -202,8 +202,8 @@ class TestExpandTilde(unittest.TestCase):
         When expand_tilde is applied
         Then the tilde expands to home while the glob wildcard is preserved
         """
-        result = expand_tilde('~/projects/*.py')
-        expected = str(Path.home()) + '/projects/*.py'
+        result = expand_tilde("~/projects/*.py")
+        expected = str(Path.home()) + "/projects/*.py"
         self.assertEqual(result, expected)
 
 
@@ -220,10 +220,10 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the home path is collapsed to '~' ('cat ~/file.txt')
         """
-        path = str(self.home / 'file.txt')
-        command = f'cat {path}'
+        path = str(self.home / "file.txt")
+        command = f"cat {path}"
         result = normalize_command(command)
-        self.assertEqual(result, 'cat ~/file.txt')
+        self.assertEqual(result, "cat ~/file.txt")
 
     def test_normalize_command_with_multiple_slashes(self):
         """
@@ -231,9 +231,9 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the slashes collapse to '/tmp' (or the macOS '/private/tmp' symlink target)
         """
-        result = normalize_command('ls //tmp')
+        result = normalize_command("ls //tmp")
         # On macOS, /tmp is a symlink to /private/tmp, so accept either
-        self.assertIn(result, ['ls /tmp', 'ls /private/tmp'])
+        self.assertIn(result, ["ls /tmp", "ls /private/tmp"])
 
     def test_normalize_command_no_paths(self):
         """
@@ -241,8 +241,8 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the command is returned unchanged
         """
-        result = normalize_command('echo hello world')
-        self.assertEqual(result, 'echo hello world')
+        result = normalize_command("echo hello world")
+        self.assertEqual(result, "echo hello world")
 
     def test_normalize_command_multiple_paths(self):
         """
@@ -250,11 +250,11 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then both arguments collapse to '~' ('cp ~/file1.txt ~/file2.txt')
         """
-        path1 = str(self.home / 'file1.txt')
-        path2 = str(self.home / 'file2.txt')
-        command = f'cp {path1} {path2}'
+        path1 = str(self.home / "file1.txt")
+        path2 = str(self.home / "file2.txt")
+        command = f"cp {path1} {path2}"
         result = normalize_command(command)
-        self.assertEqual(result, 'cp ~/file1.txt ~/file2.txt')
+        self.assertEqual(result, "cp ~/file1.txt ~/file2.txt")
 
     def test_normalize_command_empty_string(self):
         """
@@ -262,8 +262,8 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then an empty string is returned
         """
-        result = normalize_command('')
-        self.assertEqual(result, '')
+        result = normalize_command("")
+        self.assertEqual(result, "")
 
     def test_normalize_command_with_flags(self):
         """
@@ -271,10 +271,10 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then flags are preserved and the path collapses to '~' ('ls -la ~/dir')
         """
-        path = str(self.home / 'dir')
-        command = f'ls -la {path}'
+        path = str(self.home / "dir")
+        command = f"ls -la {path}"
         result = normalize_command(command)
-        self.assertEqual(result, 'ls -la ~/dir')
+        self.assertEqual(result, "ls -la ~/dir")
 
     def test_normalize_command_relative_path(self):
         """
@@ -282,8 +282,8 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the argument receives a './' prefix ('cat ./file.txt')
         """
-        result = normalize_command('cat file.txt')
-        self.assertEqual(result, 'cat ./file.txt')
+        result = normalize_command("cat file.txt")
+        self.assertEqual(result, "cat ./file.txt")
 
     def test_normalize_command_already_normalized(self):
         """
@@ -291,8 +291,8 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the command is returned unchanged
         """
-        result = normalize_command('cat ~/file.txt')
-        self.assertEqual(result, 'cat ~/file.txt')
+        result = normalize_command("cat ~/file.txt")
+        self.assertEqual(result, "cat ~/file.txt")
 
     def test_normalize_command_mixed_paths(self):
         """
@@ -300,10 +300,10 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the home path collapses to '~' and the relative path gains './' ('diff ~/abs.txt ./rel.txt')
         """
-        path = str(self.home / 'abs.txt')
-        command = f'diff {path} rel.txt'
+        path = str(self.home / "abs.txt")
+        command = f"diff {path} rel.txt"
         result = normalize_command(command)
-        self.assertEqual(result, 'diff ~/abs.txt ./rel.txt')
+        self.assertEqual(result, "diff ~/abs.txt ./rel.txt")
 
     def test_normalize_command_is_a_relative_path(self):
         """
@@ -311,7 +311,7 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the first token gains a './' prefix ('./bin/script.sh')
         """
-        self.assertEqual(normalize_command('bin/script.sh'), './bin/script.sh')
+        self.assertEqual(normalize_command("bin/script.sh"), "./bin/script.sh")
 
     def test_normalize_command_already_dot_slash(self):
         """
@@ -319,7 +319,7 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the first token is preserved unchanged
         """
-        self.assertEqual(normalize_command('./bin/script.sh'), './bin/script.sh')
+        self.assertEqual(normalize_command("./bin/script.sh"), "./bin/script.sh")
 
     def test_normalize_command_relative_path_with_args_and_flag(self):
         """
@@ -327,8 +327,8 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the first token and the relative arg gain './' while the flag is preserved
         """
-        result = normalize_command('bin/script.sh --verbose other.txt')
-        self.assertEqual(result, './bin/script.sh --verbose ./other.txt')
+        result = normalize_command("bin/script.sh --verbose other.txt")
+        self.assertEqual(result, "./bin/script.sh --verbose ./other.txt")
 
     def test_normalize_command_bare_command_name_unchanged(self):
         """
@@ -336,9 +336,9 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the bare names are NOT treated as paths and are returned unchanged
         """
-        self.assertEqual(normalize_command('ls'), 'ls')
-        self.assertEqual(normalize_command('git status'), 'git status')
-        self.assertEqual(normalize_command('python'), 'python')
+        self.assertEqual(normalize_command("ls"), "ls")
+        self.assertEqual(normalize_command("git status"), "git status")
+        self.assertEqual(normalize_command("python"), "python")
 
     def test_normalize_command_absolute_first_token_under_home(self):
         """
@@ -346,9 +346,9 @@ class TestNormalizeCommand(unittest.TestCase):
         When normalize_command is applied
         Then the first token collapses to '~' ('~/bin/myscript')
         """
-        path = str(self.home / 'bin' / 'myscript')
-        self.assertEqual(normalize_command(path), '~/bin/myscript')
+        path = str(self.home / "bin" / "myscript")
+        self.assertEqual(normalize_command(path), "~/bin/myscript")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

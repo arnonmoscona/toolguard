@@ -32,12 +32,12 @@ class TestMarkerFiles(unittest.TestCase):
         When get_marker_file_path builds the path
         Then it is logs_dir/.toolguard-migration-YYYY-MM-DD for that date
         """
-        logs_dir = Path('/tmp/logs')
+        logs_dir = Path("/tmp/logs")
         test_date = date(2026, 2, 5)
 
         marker_path = get_marker_file_path(logs_dir, test_date)
 
-        self.assertEqual(marker_path, logs_dir / '.toolguard-migration-2026-02-05')
+        self.assertEqual(marker_path, logs_dir / ".toolguard-migration-2026-02-05")
 
     def test_marker_exists_for_today_false(self):
         """
@@ -74,7 +74,7 @@ class TestMarkerFiles(unittest.TestCase):
         Then the directory is created and today's migration marker exists
         """
         with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / 'logs'
+            logs_dir = Path(tmpdir) / "logs"
 
             create_marker_file(logs_dir)
 
@@ -116,7 +116,7 @@ class TestMarkerFiles(unittest.TestCase):
         Then it completes without raising an error
         """
         with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / 'nonexistent'
+            logs_dir = Path(tmpdir) / "nonexistent"
 
             # Should not raise error
             cleanup_old_markers(logs_dir, days=7)
@@ -131,8 +131,10 @@ class TestMarkerFiles(unittest.TestCase):
             logs_dir = Path(tmpdir)
 
             # Create valid and invalid marker files
-            valid_marker = get_marker_file_path(logs_dir, date.today() - timedelta(days=10))
-            invalid_marker = logs_dir / '.toolguard-migration-invalid'
+            valid_marker = get_marker_file_path(
+                logs_dir, date.today() - timedelta(days=10)
+            )
+            invalid_marker = logs_dir / ".toolguard-migration-invalid"
 
             valid_marker.touch()
             invalid_marker.touch()
@@ -157,9 +159,9 @@ class TestConfigSyncSettings(unittest.TestCase):
 
         result = load_config_sync_settings(config_files)
 
-        self.assertEqual(result['auto_migrate'], False)
-        self.assertEqual(result['backup_dir'], 'logs/config-backups')
-        self.assertEqual(result['auto_sort_on_migrate'], True)
+        self.assertEqual(result["auto_migrate"], False)
+        self.assertEqual(result["backup_dir"], "logs/config-backups")
+        self.assertEqual(result["auto_sort_on_migrate"], True)
 
     def test_load_config_sync_from_toml(self):
         """
@@ -168,7 +170,7 @@ class TestConfigSyncSettings(unittest.TestCase):
         Then the auto_migrate, backup_dir, and auto_sort_on_migrate values are read from the file
         """
         with TemporaryDirectory() as tmpdir:
-            toml_file = Path(tmpdir) / 'toolguard_hook.toml'
+            toml_file = Path(tmpdir) / "toolguard_hook.toml"
             toml_file.write_text(
                 """
 [config_sync]
@@ -178,13 +180,13 @@ auto_sort_on_migrate = false
 """
             )
 
-            config_files = [(toml_file, 'toolguard_hook', 'toml')]
+            config_files = [(toml_file, "toolguard_hook", "toml")]
 
             result = load_config_sync_settings(config_files)
 
-            self.assertEqual(result['auto_migrate'], True)
-            self.assertEqual(result['backup_dir'], 'custom/backup')
-            self.assertEqual(result['auto_sort_on_migrate'], False)
+            self.assertEqual(result["auto_migrate"], True)
+            self.assertEqual(result["backup_dir"], "custom/backup")
+            self.assertEqual(result["auto_sort_on_migrate"], False)
 
     def test_load_config_sync_from_json(self):
         """
@@ -193,20 +195,26 @@ auto_sort_on_migrate = false
         Then the auto_migrate, backup_dir, and auto_sort_on_migrate values are read from the file
         """
         with TemporaryDirectory() as tmpdir:
-            json_file = Path(tmpdir) / 'toolguard_hook.json'
+            json_file = Path(tmpdir) / "toolguard_hook.json"
             json_file.write_text(
                 json.dumps(
-                    {'config_sync': {'auto_migrate': True, 'backup_dir': '/tmp/backups', 'auto_sort_on_migrate': True}}
+                    {
+                        "config_sync": {
+                            "auto_migrate": True,
+                            "backup_dir": "/tmp/backups",
+                            "auto_sort_on_migrate": True,
+                        }
+                    }
                 )
             )
 
-            config_files = [(json_file, 'toolguard_hook', 'json')]
+            config_files = [(json_file, "toolguard_hook", "json")]
 
             result = load_config_sync_settings(config_files)
 
-            self.assertEqual(result['auto_migrate'], True)
-            self.assertEqual(result['backup_dir'], '/tmp/backups')
-            self.assertEqual(result['auto_sort_on_migrate'], True)
+            self.assertEqual(result["auto_migrate"], True)
+            self.assertEqual(result["backup_dir"], "/tmp/backups")
+            self.assertEqual(result["auto_sort_on_migrate"], True)
 
     def test_load_config_sync_ignores_claude_files(self):
         """
@@ -215,15 +223,15 @@ auto_sort_on_migrate = false
         Then the claude file is ignored and defaults are returned
         """
         with TemporaryDirectory() as tmpdir:
-            claude_file = Path(tmpdir) / 'settings.local.json'
-            claude_file.write_text(json.dumps({'config_sync': {'auto_migrate': True}}))
+            claude_file = Path(tmpdir) / "settings.local.json"
+            claude_file.write_text(json.dumps({"config_sync": {"auto_migrate": True}}))
 
-            config_files = [(claude_file, 'claude', 'json')]
+            config_files = [(claude_file, "claude", "json")]
 
             result = load_config_sync_settings(config_files)
 
             # Should return defaults (ignored claude file)
-            self.assertEqual(result['auto_migrate'], False)
+            self.assertEqual(result["auto_migrate"], False)
 
     def test_load_config_sync_partial_config(self):
         """
@@ -232,7 +240,7 @@ auto_sort_on_migrate = false
         Then auto_migrate is taken from the file and the other keys fall back to defaults
         """
         with TemporaryDirectory() as tmpdir:
-            toml_file = Path(tmpdir) / 'toolguard_hook.toml'
+            toml_file = Path(tmpdir) / "toolguard_hook.toml"
             toml_file.write_text(
                 """
 [config_sync]
@@ -240,13 +248,13 @@ auto_migrate = true
 """
             )
 
-            config_files = [(toml_file, 'toolguard_hook', 'toml')]
+            config_files = [(toml_file, "toolguard_hook", "toml")]
 
             result = load_config_sync_settings(config_files)
 
-            self.assertEqual(result['auto_migrate'], True)
-            self.assertEqual(result['backup_dir'], 'logs/config-backups')  # default
-            self.assertEqual(result['auto_sort_on_migrate'], True)  # default
+            self.assertEqual(result["auto_migrate"], True)
+            self.assertEqual(result["backup_dir"], "logs/config-backups")  # default
+            self.assertEqual(result["auto_sort_on_migrate"], True)  # default
 
     def test_load_config_sync_last_file_wins(self):
         """
@@ -255,18 +263,21 @@ auto_migrate = true
         Then the last file's value wins
         """
         with TemporaryDirectory() as tmpdir:
-            file1 = Path(tmpdir) / 'hook1.toml'
-            file1.write_text('[config_sync]\nauto_migrate = false\n')
+            file1 = Path(tmpdir) / "hook1.toml"
+            file1.write_text("[config_sync]\nauto_migrate = false\n")
 
-            file2 = Path(tmpdir) / 'hook2.toml'
-            file2.write_text('[config_sync]\nauto_migrate = true\n')
+            file2 = Path(tmpdir) / "hook2.toml"
+            file2.write_text("[config_sync]\nauto_migrate = true\n")
 
-            config_files = [(file1, 'toolguard_hook', 'toml'), (file2, 'toolguard_hook', 'toml')]
+            config_files = [
+                (file1, "toolguard_hook", "toml"),
+                (file2, "toolguard_hook", "toml"),
+            ]
 
             result = load_config_sync_settings(config_files)
 
             # Last file (file2) should win
-            self.assertEqual(result['auto_migrate'], True)
+            self.assertEqual(result["auto_migrate"], True)
 
     def test_load_config_sync_invalid_file(self):
         """
@@ -275,21 +286,21 @@ auto_migrate = true
         Then the invalid file is skipped and settings are loaded from the valid file
         """
         with TemporaryDirectory() as tmpdir:
-            invalid_toml = Path(tmpdir) / 'invalid.toml'
-            invalid_toml.write_text('invalid toml content [[[')
+            invalid_toml = Path(tmpdir) / "invalid.toml"
+            invalid_toml.write_text("invalid toml content [[[")
 
-            valid_toml = Path(tmpdir) / 'valid.toml'
-            valid_toml.write_text('[config_sync]\nauto_migrate = true\n')
+            valid_toml = Path(tmpdir) / "valid.toml"
+            valid_toml.write_text("[config_sync]\nauto_migrate = true\n")
 
             config_files = [
-                (invalid_toml, 'toolguard_hook', 'toml'),
-                (valid_toml, 'toolguard_hook', 'toml'),
+                (invalid_toml, "toolguard_hook", "toml"),
+                (valid_toml, "toolguard_hook", "toml"),
             ]
 
             result = load_config_sync_settings(config_files)
 
             # Should load from valid file despite invalid file present
-            self.assertEqual(result['auto_migrate'], True)
+            self.assertEqual(result["auto_migrate"], True)
 
 
 class TestShouldRunMigration(unittest.TestCase):
@@ -334,16 +345,22 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
             # Create marker file for today
             create_marker_file(logs_dir)
 
-            config_sync = {'auto_migrate': True, 'backup_dir': 'logs/backups', 'auto_sort_on_migrate': True}
-            takeover_config = {'enabled': False}
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {"enabled": False}
 
-            result = run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            result = run_auto_migration(
+                project_root, logs_dir, config_sync, takeover_config
+            )
 
             self.assertFalse(result)
 
@@ -355,20 +372,26 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
-            config_sync = {'auto_migrate': True, 'backup_dir': 'logs/backups', 'auto_sort_on_migrate': True}
-            takeover_config = {'enabled': False}
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {"enabled": False}
 
-            result = run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            result = run_auto_migration(
+                project_root, logs_dir, config_sync, takeover_config
+            )
 
             self.assertFalse(result)
 
-    @patch('toolguard.config_divergence.get_native_permissions')
-    @patch('toolguard.config_divergence.get_toolguard_permissions')
-    @patch('toolguard.config_divergence.find_divergent_patterns')
-    @patch('toolguard.config.discover_config_files')
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_no_divergence(
         self, mock_discover, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
@@ -379,29 +402,39 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(json.dumps({'permissions': {}}))
+            settings_path.write_text(json.dumps({"permissions": {}}))
 
-            mock_get_native.return_value = {'allow': [], 'deny': [], 'ask': []}
-            mock_get_toolguard.return_value = {'allow': [], 'deny': [], 'ask': []}
-            mock_find_divergent.return_value = {'allow': [], 'deny': [], 'ask': []}
+            mock_get_native.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {"allow": [], "deny": [], "ask": []}
             mock_discover.return_value = []
 
-            config_sync = {'auto_migrate': True, 'backup_dir': 'logs/backups', 'auto_sort_on_migrate': True}
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': [], 'additional_ignored_patterns': []}
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
 
-            result = run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            result = run_auto_migration(
+                project_root, logs_dir, config_sync, takeover_config
+            )
 
             self.assertFalse(result)
 
-    @patch('toolguard.config_divergence.get_native_permissions')
-    @patch('toolguard.config_divergence.get_toolguard_permissions')
-    @patch('toolguard.config_divergence.find_divergent_patterns')
-    @patch('toolguard.config.discover_config_files')
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_takeover_mode_ignored_patterns(
         self, mock_discover, mock_find_divergent, mock_get_toolguard, mock_get_native
     ):
@@ -412,38 +445,55 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(json.dumps({'permissions': {'allow': ['Bash(*)']}}))
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(*)"]}})
+            )
 
-            mock_get_native.return_value = {'allow': ['Bash(*)'], 'deny': [], 'ask': []}
-            mock_get_toolguard.return_value = {'allow': [], 'deny': [], 'ask': []}
+            mock_get_native.return_value = {"allow": ["Bash(*)"], "deny": [], "ask": []}
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
             # find_divergent_patterns should filter out ignored patterns
-            mock_find_divergent.return_value = {'allow': [], 'deny': [], 'ask': []}  # Bash(*) was ignored
+            mock_find_divergent.return_value = {
+                "allow": [],
+                "deny": [],
+                "ask": [],
+            }  # Bash(*) was ignored
             mock_discover.return_value = []
 
-            config_sync = {'auto_migrate': True, 'backup_dir': 'logs/backups', 'auto_sort_on_migrate': True}
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
             takeover_config = {
-                'enabled': True,
-                'ignored_allow_patterns': ['Bash(*)'],
-                'additional_ignored_patterns': [],
+                "enabled": True,
+                "ignored_allow_patterns": ["Bash(*)"],
+                "additional_ignored_patterns": [],
             }
 
-            result = run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            result = run_auto_migration(
+                project_root, logs_dir, config_sync, takeover_config
+            )
 
             # No divergence after filtering, so no migration
             self.assertFalse(result)
 
-    @patch('toolguard.config_divergence.get_native_permissions')
-    @patch('toolguard.config_divergence.get_toolguard_permissions')
-    @patch('toolguard.config_divergence.find_divergent_patterns')
-    @patch('toolguard.scripts.migrate_permissions.migrate')
-    @patch('toolguard.config.discover_config_files')
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.scripts.migrate_permissions.migrate")
+    @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_success(
-        self, mock_discover, mock_migrate, mock_find_divergent, mock_get_toolguard, mock_get_native
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
     ):
         """
         Given a divergent native pattern and a migrate call that succeeds
@@ -452,36 +502,61 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
             # Setup mocks
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(json.dumps({'permissions': {'allow': ['Bash(git status)']}}))
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
 
-            mock_get_native.return_value = {'allow': ['Bash(git status)'], 'deny': [], 'ask': []}
-            mock_get_toolguard.return_value = {'allow': [], 'deny': [], 'ask': []}
-            mock_find_divergent.return_value = {'allow': ['Bash(git status)'], 'deny': [], 'ask': []}
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
             mock_migrate.return_value = 0  # Success
             mock_discover.return_value = []
 
-            config_sync = {'auto_migrate': True, 'backup_dir': 'logs/backups', 'auto_sort_on_migrate': True}
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': [], 'additional_ignored_patterns': []}
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
 
-            result = run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            result = run_auto_migration(
+                project_root, logs_dir, config_sync, takeover_config
+            )
 
             self.assertTrue(result)
             self.assertTrue(marker_exists_for_today(logs_dir))
             mock_migrate.assert_called_once()
 
-    @patch('toolguard.config_divergence.get_native_permissions')
-    @patch('toolguard.config_divergence.get_toolguard_permissions')
-    @patch('toolguard.config_divergence.find_divergent_patterns')
-    @patch('toolguard.scripts.migrate_permissions.migrate')
-    @patch('toolguard.config.discover_config_files')
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.scripts.migrate_permissions.migrate")
+    @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_custom_backup_dir(
-        self, mock_discover, mock_migrate, mock_find_divergent, mock_get_toolguard, mock_get_native
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
     ):
         """
         Given config_sync specifies a custom backup_dir and auto_sort disabled
@@ -490,37 +565,63 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(json.dumps({'permissions': {'allow': ['Bash(git status)']}}))
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
 
-            mock_get_native.return_value = {'allow': ['Bash(git status)'], 'deny': [], 'ask': []}
-            mock_get_toolguard.return_value = {'allow': [], 'deny': [], 'ask': []}
-            mock_find_divergent.return_value = {'allow': ['Bash(git status)'], 'deny': [], 'ask': []}
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
             mock_migrate.return_value = 0
             mock_discover.return_value = []
 
-            custom_backup = '/custom/backup/path'
-            config_sync = {'auto_migrate': True, 'backup_dir': custom_backup, 'auto_sort_on_migrate': False}
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': [], 'additional_ignored_patterns': []}
+            custom_backup = "/custom/backup/path"
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": custom_backup,
+                "auto_sort_on_migrate": False,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
 
             run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
 
             # Verify migrate was called with custom backup dir and no sorting
             mock_migrate.assert_called_once_with(
-                project_root=project_root, dry_run=False, auto_sort=False, backup_dir=Path(custom_backup)
+                project_root=project_root,
+                dry_run=False,
+                auto_sort=False,
+                backup_dir=Path(custom_backup),
             )
 
-    @patch('toolguard.config_divergence.get_native_permissions')
-    @patch('toolguard.config_divergence.get_toolguard_permissions')
-    @patch('toolguard.config_divergence.find_divergent_patterns')
-    @patch('toolguard.scripts.migrate_permissions.migrate')
-    @patch('toolguard.config.discover_config_files')
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.scripts.migrate_permissions.migrate")
+    @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_migrate_failure(
-        self, mock_discover, mock_migrate, mock_find_divergent, mock_get_toolguard, mock_get_native
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
     ):
         """
         Given a divergent pattern but migrate returns a non-zero failure code
@@ -529,28 +630,48 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / 'logs'
+            logs_dir = project_root / "logs"
             logs_dir.mkdir()
 
-            settings_path = project_root / '.claude' / 'settings.local.json'
+            settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(json.dumps({'permissions': {'allow': ['Bash(git status)']}}))
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
 
-            mock_get_native.return_value = {'allow': ['Bash(git status)'], 'deny': [], 'ask': []}
-            mock_get_toolguard.return_value = {'allow': [], 'deny': [], 'ask': []}
-            mock_find_divergent.return_value = {'allow': ['Bash(git status)'], 'deny': [], 'ask': []}
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
             mock_migrate.return_value = 1  # Failure exit code
             mock_discover.return_value = []
 
-            config_sync = {'auto_migrate': True, 'backup_dir': 'logs/backups', 'auto_sort_on_migrate': True}
-            takeover_config = {'enabled': False, 'ignored_allow_patterns': [], 'additional_ignored_patterns': []}
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
 
-            result = run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            result = run_auto_migration(
+                project_root, logs_dir, config_sync, takeover_config
+            )
 
             self.assertFalse(result)
             # Marker should NOT be created on failure
             self.assertFalse(marker_exists_for_today(logs_dir))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

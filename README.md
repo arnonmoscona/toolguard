@@ -21,7 +21,7 @@ New to toolguard? Start with the quick-start, then dip into the topic guides as 
 |-------|----------------|
 | [Quick Start](docs/quickstart.md) | The shortest path to a working setup: register the hook, govern `Bash`, add a few patterns, verify. |
 | [Configuration](docs/configuration.md) | Full configuration reference: hook matchers, governed tools, permission patterns, environment variables, the hierarchy/resolution model, and the annotated config template. |
-| [Permission Patterns](docs/permission-patterns.md) | Pattern types (DEFAULT/REGEX/GLOB/NATIVE), file-path patterns, path normalization, and compound-command handling. |
+| [Permission Patterns](docs/permission-patterns.md) | Pattern types (DEFAULT/REGEX/GLOB/NATIVE), file-path patterns, path normalization, and compound / multi-line / heredoc handling (incl. the `__HEREDOC_TO_<sink>__` sentinel). |
 | [Takeover Mode](docs/takeover-mode.md) | The "blanket-allow + toolguard-enforces" mode, its risks, and a complete example. |
 | [Config Sync & Migration](docs/config-sync.md) | Detecting config divergence, migrating patterns into `toolguard_hook.toml`, backups, and session warnings. |
 | [Security Best Practices](docs/security.md) | Blanket-allow risks, recommended deny patterns, backups, and verifying toolguard is actually running. |
@@ -89,7 +89,8 @@ uv run python -m unittest discover -s test -t .
 uv run python -m unittest discover -s test/unit -p "test_patterns.py" -v
 ```
 
-The suite (683 tests as of this writing) covers all pattern types, compound commands,
+The suite (724 tests as of this writing) covers all pattern types, compound commands,
+multi-line commands / heredocs / control structures and their decomposition,
 command/subshell/brace-group extraction, file-path permissions, hierarchical resolution,
 hard-deny, configuration loading (TOML + JSON), config validation and divergence,
 auto-migration, the four logging streams, conflict logging, session warnings,

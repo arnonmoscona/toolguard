@@ -41,10 +41,10 @@ def _make_project(tmpdir, files):
     Returns:
         Path to the project root directory.
     """
-    project_dir = Path(tmpdir) / 'project'
+    project_dir = Path(tmpdir) / "project"
     project_dir.mkdir()
-    (project_dir / '.git').mkdir()
-    claude_dir = project_dir / '.claude'
+    (project_dir / ".git").mkdir()
+    claude_dir = project_dir / ".claude"
     claude_dir.mkdir()
     for name, content in files.items():
         (claude_dir / name).write_text(content)
@@ -64,13 +64,17 @@ class TestLoadConfigurationHierarchy(unittest.TestCase):
             project = _make_project(
                 tmp,
                 {
-                    'settings.local.json': json.dumps({'permissions': {'allow': ['Bash(git *)']}}),
-                    'toolguard_hook.json': json.dumps({'permissions': {'allow': ['Bash(ls *)']}}),
+                    "settings.local.json": json.dumps(
+                        {"permissions": {"allow": ["Bash(git *)"]}}
+                    ),
+                    "toolguard_hook.json": json.dumps(
+                        {"permissions": {"allow": ["Bash(ls *)"]}}
+                    ),
                 },
             )
             with patch.dict(os.environ, {}, clear=True):
-                os.environ.pop('CLAUDE_SETTINGS_PATH', None)
-                with patch('toolguard.config.find_project_root', return_value=project):
+                os.environ.pop("CLAUDE_SETTINGS_PATH", None)
+                with patch("toolguard.config.find_project_root", return_value=project):
                     config = load_configuration()
 
             self.assertIsInstance(config, Configuration)
@@ -88,7 +92,7 @@ class TestLoadConfigurationHierarchy(unittest.TestCase):
                 if str(project) in str(layer.provenance.path)
             ]
             self.assertTrue(project_levels)
-            self.assertTrue(all(level == 'project' for level in project_levels))
+            self.assertTrue(all(level == "project" for level in project_levels))
 
     def test_unparseable_file_skipped(self):
         """
@@ -100,17 +104,19 @@ class TestLoadConfigurationHierarchy(unittest.TestCase):
             project = _make_project(
                 tmp,
                 {
-                    'toolguard_hook.json': 'not valid json{',
-                    'settings.local.json': json.dumps({'permissions': {'allow': ['Bash(git *)']}}),
+                    "toolguard_hook.json": "not valid json{",
+                    "settings.local.json": json.dumps(
+                        {"permissions": {"allow": ["Bash(git *)"]}}
+                    ),
                 },
             )
             with patch.dict(os.environ, {}, clear=True):
-                os.environ.pop('CLAUDE_SETTINGS_PATH', None)
-                with patch('toolguard.config.find_project_root', return_value=project):
+                os.environ.pop("CLAUDE_SETTINGS_PATH", None)
+                with patch("toolguard.config.find_project_root", return_value=project):
                     config = load_configuration()
             # The valid settings layer is still present.
-            allow, _ = config.allow_deny_for('Bash')
-            self.assertIn('git *', allow)
+            allow, _ = config.allow_deny_for("Bash")
+            self.assertIn("git *", allow)
 
     def test_claude_settings_path_single_file(self):
         """
@@ -118,15 +124,15 @@ class TestLoadConfigurationHierarchy(unittest.TestCase):
         When load_configuration runs
         Then exactly one layer is produced, labelled 'explicit' and recognized as native
         """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump({'permissions': {'allow': ['Bash(git *)']}}, f)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"permissions": {"allow": ["Bash(git *)"]}}, f)
             f.flush()
             path = f.name
         try:
-            with patch.dict(os.environ, {'CLAUDE_SETTINGS_PATH': path}):
+            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": path}):
                 config = load_configuration()
             self.assertEqual(len(config.layers), 1)
-            self.assertEqual(config.layers[0].provenance.level, 'explicit')
+            self.assertEqual(config.layers[0].provenance.level, "explicit")
             self.assertTrue(config.layers[0].is_native)
         finally:
             Path(path).unlink()
@@ -138,15 +144,15 @@ class TestLoadConfigurationHierarchy(unittest.TestCase):
         Then both a 'claude' and a 'toolguard_hook' source layer are produced
         """
         with tempfile.TemporaryDirectory() as tmp:
-            settings = Path(tmp) / 'settings.json'
-            settings.write_text(json.dumps({'permissions': {'allow': ['Bash(git *)']}}))
-            hook = Path(tmp) / 'toolguard_hook.json'
-            hook.write_text(json.dumps({'permissions': {'allow': ['Bash(ls *)']}}))
-            with patch.dict(os.environ, {'CLAUDE_SETTINGS_PATH': str(settings)}):
+            settings = Path(tmp) / "settings.json"
+            settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
+            hook = Path(tmp) / "toolguard_hook.json"
+            hook.write_text(json.dumps({"permissions": {"allow": ["Bash(ls *)"]}}))
+            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(settings)}):
                 config = load_configuration()
             types = [layer.provenance.source_type for layer in config.layers]
-            self.assertIn('claude', types)
-            self.assertIn('toolguard_hook', types)
+            self.assertIn("claude", types)
+            self.assertIn("toolguard_hook", types)
 
 
 class TestPermissionLayers(unittest.TestCase):
@@ -160,23 +166,41 @@ class TestPermissionLayers(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/toolguard_hook.json')),
-                MappingProxyType({'permissions': {'allow': ['Read(/tmp/**)', 'Read(/a/**)'], 'deny': ['Read(/s/**)']}}),
+                Provenance(
+                    "project", "toolguard_hook", "json", Path("/p/toolguard_hook.json")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": ["Read(/tmp/**)", "Read(/a/**)"],
+                            "deny": ["Read(/s/**)"],
+                        }
+                    }
+                ),
             ),
             ConfigLayer(
-                Provenance('user', 'toolguard_hook', 'json', Path('/u/toolguard_hook.json')),
-                MappingProxyType({'permissions': {'allow': ['Read(/a/**)', 'Read(/b/**)'], 'deny': []}}),
+                Provenance(
+                    "user", "toolguard_hook", "json", Path("/u/toolguard_hook.json")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": ["Read(/a/**)", "Read(/b/**)"],
+                            "deny": [],
+                        }
+                    }
+                ),
             ),
         )
         config = Configuration(layers=layers)
         with patch.object(
             Configuration,
-            'takeover_mode',
-            return_value=TakeoverConfig(False, (), (), 'deny'),
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            allow, deny = config.allow_deny_for('Read')
-        self.assertEqual(allow, ('/tmp/**', '/a/**', '/b/**'))
-        self.assertEqual(deny, ('/s/**',))
+            allow, deny = config.allow_deny_for("Read")
+        self.assertEqual(allow, ("/tmp/**", "/a/**", "/b/**"))
+        self.assertEqual(deny, ("/s/**",))
 
     def test_only_requested_tool_extracted(self):
         """
@@ -186,16 +210,25 @@ class TestPermissionLayers(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'claude', 'json', Path('/p/settings.json')),
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
                 MappingProxyType(
-                    {'permissions': {'allow': ['Read(/tmp/**)', 'Write(/tmp/*)', 'Bash(git *)'], 'deny': []}}
+                    {
+                        "permissions": {
+                            "allow": ["Read(/tmp/**)", "Write(/tmp/*)", "Bash(git *)"],
+                            "deny": [],
+                        }
+                    }
                 ),
             ),
         )
         config = Configuration(layers=layers)
-        with patch.object(Configuration, 'takeover_mode', return_value=TakeoverConfig(False, (), (), 'deny')):
-            allow, _ = config.allow_deny_for('Read')
-        self.assertEqual(allow, ('/tmp/**',))
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            allow, _ = config.allow_deny_for("Read")
+        self.assertEqual(allow, ("/tmp/**",))
 
     def test_takeover_filters_native_allow_only(self):
         """
@@ -205,22 +238,26 @@ class TestPermissionLayers(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'claude', 'json', Path('/p/settings.json')),
-                MappingProxyType({'permissions': {'allow': ['Read(*)', 'Read(/tmp/**)'], 'deny': []}}),
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
+                MappingProxyType(
+                    {"permissions": {"allow": ["Read(*)", "Read(/tmp/**)"], "deny": []}}
+                ),
             ),
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/toolguard_hook.json')),
-                MappingProxyType({'permissions': {'allow': ['Read(*)'], 'deny': []}}),
+                Provenance(
+                    "project", "toolguard_hook", "json", Path("/p/toolguard_hook.json")
+                ),
+                MappingProxyType({"permissions": {"allow": ["Read(*)"], "deny": []}}),
             ),
         )
         config = Configuration(layers=layers)
-        takeover = TakeoverConfig(True, ('Read(*)',), (), 'deny')
-        with patch.object(Configuration, 'takeover_mode', return_value=takeover):
-            per_layer = config.permission_layers('Read')
+        takeover = TakeoverConfig(True, ("Read(*)",), (), "deny")
+        with patch.object(Configuration, "takeover_mode", return_value=takeover):
+            per_layer = config.permission_layers("Read")
         # Native layer: blanket '*' filtered out, '/tmp/**' kept.
-        self.assertEqual(per_layer[0].allow, ('/tmp/**',))
+        self.assertEqual(per_layer[0].allow, ("/tmp/**",))
         # Hook layer: '*' kept (never filtered).
-        self.assertEqual(per_layer[1].allow, ('*',))
+        self.assertEqual(per_layer[1].allow, ("*",))
 
     def test_per_layer_provenance_preserved(self):
         """
@@ -230,19 +267,31 @@ class TestPermissionLayers(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'toml', Path('/p/toolguard_hook.toml')),
-                MappingProxyType({'permissions': {'allow': ['Bash(git *)'], 'deny': []}}),
+                Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+                ),
+                MappingProxyType(
+                    {"permissions": {"allow": ["Bash(git *)"], "deny": []}}
+                ),
             ),
             ConfigLayer(
-                Provenance('user', 'toolguard_hook', 'json', Path('/u/toolguard_hook.json')),
-                MappingProxyType({'permissions': {'allow': ['Bash(ls *)'], 'deny': []}}),
+                Provenance(
+                    "user", "toolguard_hook", "json", Path("/u/toolguard_hook.json")
+                ),
+                MappingProxyType(
+                    {"permissions": {"allow": ["Bash(ls *)"], "deny": []}}
+                ),
             ),
         )
         config = Configuration(layers=layers)
-        with patch.object(Configuration, 'takeover_mode', return_value=TakeoverConfig(False, (), (), 'deny')):
-            per_layer = config.permission_layers('Bash')
-        self.assertEqual(per_layer[0].provenance.level, 'project')
-        self.assertEqual(per_layer[1].provenance.level, 'user')
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            per_layer = config.permission_layers("Bash")
+        self.assertEqual(per_layer[0].provenance.level, "project")
+        self.assertEqual(per_layer[1].provenance.level, "user")
         self.assertIsInstance(per_layer[0], ToolPatternLayer)
 
     def test_non_dict_permissions_tolerated(self):
@@ -253,13 +302,19 @@ class TestPermissionLayers(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/toolguard_hook.json')),
-                MappingProxyType({'permissions': 'oops-not-a-dict'}),
+                Provenance(
+                    "project", "toolguard_hook", "json", Path("/p/toolguard_hook.json")
+                ),
+                MappingProxyType({"permissions": "oops-not-a-dict"}),
             ),
         )
         config = Configuration(layers=layers)
-        with patch.object(Configuration, 'takeover_mode', return_value=TakeoverConfig(False, (), (), 'deny')):
-            allow, deny = config.allow_deny_for('Bash')
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            allow, deny = config.allow_deny_for("Bash")
         self.assertEqual(allow, ())
         self.assertEqual(deny, ())
 
@@ -269,7 +324,9 @@ class TestScalarsAndConfigSync(unittest.TestCase):
 
     def _hook_layer(self, level, content):
         return ConfigLayer(
-            Provenance(level, 'toolguard_hook', 'json', Path(f'/{level}/toolguard_hook.json')),
+            Provenance(
+                level, "toolguard_hook", "json", Path(f"/{level}/toolguard_hook.json")
+            ),
             MappingProxyType(content),
         )
 
@@ -285,11 +342,15 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         test_config_sync_conflict_is_project_wins for the explicit pin.
         """
         layers = (
-            self._hook_layer('project', {'config_sync': {'backup_dir': 'proj/backups'}}),
-            self._hook_layer('user', {'config_sync': {'backup_dir': 'user/backups'}}),
+            self._hook_layer(
+                "project", {"config_sync": {"backup_dir": "proj/backups"}}
+            ),
+            self._hook_layer("user", {"config_sync": {"backup_dir": "user/backups"}}),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'proj/backups')
+        self.assertEqual(
+            config.scalar("config_sync.backup_dir", "default"), "proj/backups"
+        )
 
     def test_config_sync_conflict_is_project_wins(self):
         """
@@ -302,20 +363,28 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         first, so the first defining layer (project) wins.
         """
         layers = (
-            self._hook_layer('project', {'config_sync': {'auto_migrate': True, 'backup_dir': 'proj/backups'}}),
-            self._hook_layer('user', {'config_sync': {'auto_migrate': False, 'backup_dir': 'user/backups'}}),
+            self._hook_layer(
+                "project",
+                {"config_sync": {"auto_migrate": True, "backup_dir": "proj/backups"}},
+            ),
+            self._hook_layer(
+                "user",
+                {"config_sync": {"auto_migrate": False, "backup_dir": "user/backups"}},
+            ),
         )
         config = Configuration(layers=layers)
 
         # scalar() resolves project-wins (more-specific-wins) on conflict.
-        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'proj/backups')
-        self.assertIs(config.scalar('config_sync.auto_migrate', None), True)
+        self.assertEqual(
+            config.scalar("config_sync.backup_dir", "default"), "proj/backups"
+        )
+        self.assertIs(config.scalar("config_sync.auto_migrate", None), True)
 
         # config_sync_settings() (the public accessor used by the hook) reflects
         # the same more-specific-wins resolution.
         cs = config.config_sync_settings()
-        self.assertEqual(cs['backup_dir'], 'proj/backups')
-        self.assertIs(cs['auto_migrate'], True)
+        self.assertEqual(cs["backup_dir"], "proj/backups")
+        self.assertIs(cs["auto_migrate"], True)
 
     def test_scalar_default_when_absent(self):
         """
@@ -324,7 +393,9 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         Then the supplied default 'fallback' is returned
         """
         config = Configuration(layers=())
-        self.assertEqual(config.scalar('config_sync.backup_dir', 'fallback'), 'fallback')
+        self.assertEqual(
+            config.scalar("config_sync.backup_dir", "fallback"), "fallback"
+        )
 
     def test_scalar_ignores_native_layers(self):
         """
@@ -334,12 +405,12 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'claude', 'json', Path('/p/settings.json')),
-                MappingProxyType({'config_sync': {'backup_dir': 'should-be-ignored'}}),
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
+                MappingProxyType({"config_sync": {"backup_dir": "should-be-ignored"}}),
             ),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.scalar('config_sync.backup_dir', 'default'), 'default')
+        self.assertEqual(config.scalar("config_sync.backup_dir", "default"), "default")
 
     def test_scalar_bare_top_level_key(self):
         """
@@ -347,9 +418,9 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         When scalar('some_flag', False) resolves the bare key
         Then it returns True
         """
-        layers = (self._hook_layer('project', {'some_flag': True}),)
+        layers = (self._hook_layer("project", {"some_flag": True}),)
         config = Configuration(layers=layers)
-        self.assertIs(config.scalar('some_flag', False), True)
+        self.assertIs(config.scalar("some_flag", False), True)
 
     def test_config_sync_settings_defaults(self):
         """
@@ -360,11 +431,11 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         config = Configuration(layers=())
         cs = config.config_sync_settings()
         self.assertIsInstance(cs, MappingProxyType)
-        self.assertEqual(cs['auto_migrate'], False)
-        self.assertEqual(cs['backup_dir'], 'logs/config-backups')
-        self.assertEqual(cs['auto_sort_on_migrate'], True)
+        self.assertEqual(cs["auto_migrate"], False)
+        self.assertEqual(cs["backup_dir"], "logs/config-backups")
+        self.assertEqual(cs["auto_sort_on_migrate"], True)
         with self.assertRaises(TypeError):
-            cs['auto_migrate'] = True  # read-only
+            cs["auto_migrate"] = True  # read-only
 
 
 class TestToolguardPermissions(unittest.TestCase):
@@ -378,20 +449,30 @@ class TestToolguardPermissions(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'claude', 'json', Path('/p/settings.json')),
-                MappingProxyType({'permissions': {'allow': ['Bash(should-skip)']}}),
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
+                MappingProxyType({"permissions": {"allow": ["Bash(should-skip)"]}}),
             ),
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/toolguard_hook.json')),
-                MappingProxyType({'permissions': {'allow': ['Bash(git *)'], 'deny': ['Bash(rm *)'], 'ask': []}}),
+                Provenance(
+                    "project", "toolguard_hook", "json", Path("/p/toolguard_hook.json")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git *)"],
+                            "deny": ["Bash(rm *)"],
+                            "ask": [],
+                        }
+                    }
+                ),
             ),
         )
         config = Configuration(layers=layers)
         perms = config.toolguard_permissions()
-        self.assertEqual(perms['allow'], ('Bash(git *)',))
-        self.assertEqual(perms['deny'], ('Bash(rm *)',))
-        self.assertEqual(perms['ask'], ())
-        self.assertNotIn('Bash(should-skip)', perms['allow'])
+        self.assertEqual(perms["allow"], ("Bash(git *)",))
+        self.assertEqual(perms["deny"], ("Bash(rm *)",))
+        self.assertEqual(perms["ask"], ())
+        self.assertNotIn("Bash(should-skip)", perms["allow"])
 
 
 class TestValidationIssues(unittest.TestCase):
@@ -405,17 +486,32 @@ class TestValidationIssues(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'toml', Path('/p/.claude/toolguard_hook.toml')),
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
                 MappingProxyType({}),
             ),
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "json",
+                    Path("/p/.claude/toolguard_hook.json"),
+                ),
                 MappingProxyType({}),
             ),
         )
         config = Configuration(layers=layers)
         issues = config.validation_issues()
-        self.assertTrue(any('Both toolguard_hook.toml and toolguard_hook.json' in i.message for i in issues))
+        self.assertTrue(
+            any(
+                "Both toolguard_hook.toml and toolguard_hook.json" in i.message
+                for i in issues
+            )
+        )
         for i in issues:
             self.assertIsInstance(i, Issue)
 
@@ -427,19 +523,24 @@ class TestValidationIssues(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "json",
+                    Path("/p/.claude/toolguard_hook.json"),
+                ),
                 MappingProxyType(
                     {
-                        'governed_tools': ['Bash'],
-                        'permissions': {'allow': ['Read(/tmp/**)', 'WebSearch']},
+                        "governed_tools": ["Bash"],
+                        "permissions": {"allow": ["Read(/tmp/**)", "WebSearch"]},
                     }
                 ),
             ),
         )
         config = Configuration(layers=layers)
-        messages = ' '.join(i.message for i in config.validation_issues())
-        self.assertIn('WebSearch', messages)  # unsupported
-        self.assertIn('Read', messages)  # supported but ungoverned
+        messages = " ".join(i.message for i in config.validation_issues())
+        self.assertIn("WebSearch", messages)  # unsupported
+        self.assertIn("Read", messages)  # supported but ungoverned
 
     def test_native_layers_not_validated(self):
         """
@@ -449,8 +550,10 @@ class TestValidationIssues(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'claude', 'json', Path('/p/.claude/settings.local.json')),
-                MappingProxyType({'permissions': {'allow': ['WebSearch', 'WebFetch']}}),
+                Provenance(
+                    "project", "claude", "json", Path("/p/.claude/settings.local.json")
+                ),
+                MappingProxyType({"permissions": {"allow": ["WebSearch", "WebFetch"]}}),
             ),
         )
         config = Configuration(layers=layers)
@@ -464,16 +567,21 @@ class TestValidationIssues(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
-                MappingProxyType({'takeover_mode': {'enabled': 'false'}}),
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "json",
+                    Path("/p/.claude/toolguard_hook.json"),
+                ),
+                MappingProxyType({"takeover_mode": {"enabled": "false"}}),
             ),
         )
         config = Configuration(layers=layers)
         issues = config.validation_issues()
-        matching = [i for i in issues if 'takeover_mode.enabled' in i.message]
+        matching = [i for i in issues if "takeover_mode.enabled" in i.message]
         self.assertEqual(len(matching), 1)
-        self.assertEqual(matching[0].level, 'error')
-        self.assertIn('str', matching[0].message)
+        self.assertEqual(matching[0].level, "error")
+        self.assertIn("str", matching[0].message)
 
     def test_bool_takeover_enabled_not_reported(self):
         """
@@ -483,12 +591,21 @@ class TestValidationIssues(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
-                MappingProxyType({'takeover_mode': {'enabled': False}}),
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "json",
+                    Path("/p/.claude/toolguard_hook.json"),
+                ),
+                MappingProxyType({"takeover_mode": {"enabled": False}}),
             ),
         )
         config = Configuration(layers=layers)
-        self.assertFalse(any('takeover_mode.enabled' in i.message for i in config.validation_issues()))
+        self.assertFalse(
+            any(
+                "takeover_mode.enabled" in i.message for i in config.validation_issues()
+            )
+        )
 
 
 class TestTakeoverConfig(unittest.TestCase):
@@ -502,11 +619,14 @@ class TestTakeoverConfig(unittest.TestCase):
         """
         tc = TakeoverConfig(
             enabled=True,
-            ignored_allow_patterns=('Bash(*)', 'Read(/tmp/**)'),
-            additional_ignored_patterns=('already-bare',),
-            no_match_fallback='deny',
+            ignored_allow_patterns=("Bash(*)", "Read(/tmp/**)"),
+            additional_ignored_patterns=("already-bare",),
+            no_match_fallback="deny",
         )
-        self.assertEqual(tc.normalized_ignored_patterns(), frozenset({'*', '/tmp/**', 'already-bare'}))
+        self.assertEqual(
+            tc.normalized_ignored_patterns(),
+            frozenset({"*", "/tmp/**", "already-bare"}),
+        )
 
 
 class TestImmutability(unittest.TestCase):
@@ -528,9 +648,9 @@ class TestImmutability(unittest.TestCase):
         When its level attribute is reassigned
         Then an exception is raised because the dataclass is frozen
         """
-        prov = Provenance('project', 'claude', 'json', Path('/x'))
+        prov = Provenance("project", "claude", "json", Path("/x"))
         with self.assertRaises(Exception):
-            prov.level = 'user'
+            prov.level = "user"
 
 
 class TestInternalHelpers(unittest.TestCase):
@@ -543,18 +663,20 @@ class TestInternalHelpers(unittest.TestCase):
         Then the last source wins on conflict and defaults fill unset keys
         """
         with tempfile.TemporaryDirectory() as tmp:
-            first = Path(tmp) / 'toolguard_hook.json'
-            first.write_text(json.dumps({'config_sync': {'auto_migrate': True, 'backup_dir': 'a'}}))
-            second = Path(tmp) / 'toolguard_hook.local.json'
-            second.write_text(json.dumps({'config_sync': {'backup_dir': 'b'}}))
+            first = Path(tmp) / "toolguard_hook.json"
+            first.write_text(
+                json.dumps({"config_sync": {"auto_migrate": True, "backup_dir": "a"}})
+            )
+            second = Path(tmp) / "toolguard_hook.local.json"
+            second.write_text(json.dumps({"config_sync": {"backup_dir": "b"}}))
             config_files = [
-                (first, 'toolguard_hook', 'json'),
-                (second, 'toolguard_hook', 'json'),
+                (first, "toolguard_hook", "json"),
+                (second, "toolguard_hook", "json"),
             ]
             result = config_sync_settings_from_sources(config_files)
-            self.assertEqual(result['auto_migrate'], True)
-            self.assertEqual(result['backup_dir'], 'b')  # last wins
-            self.assertEqual(result['auto_sort_on_migrate'], True)  # default
+            self.assertEqual(result["auto_migrate"], True)
+            self.assertEqual(result["backup_dir"], "b")  # last wins
+            self.assertEqual(result["auto_sort_on_migrate"], True)  # default
 
     def test_config_sync_settings_from_sources_defaults(self):
         """
@@ -565,7 +687,11 @@ class TestInternalHelpers(unittest.TestCase):
         result = config_sync_settings_from_sources([])
         self.assertEqual(
             result,
-            {'auto_migrate': False, 'backup_dir': 'logs/config-backups', 'auto_sort_on_migrate': True},
+            {
+                "auto_migrate": False,
+                "backup_dir": "logs/config-backups",
+                "auto_sort_on_migrate": True,
+            },
         )
 
     def test_config_sync_skips_unparseable_and_empty(self):
@@ -575,18 +701,18 @@ class TestInternalHelpers(unittest.TestCase):
         Then nothing usable is found and the documented defaults are returned
         """
         with tempfile.TemporaryDirectory() as tmp:
-            bad = Path(tmp) / 'toolguard_hook.json'
-            bad.write_text('}{ not json')
-            empty = Path(tmp) / 'toolguard_hook.local.json'
-            empty.write_text(json.dumps({'config_sync': {}}))
+            bad = Path(tmp) / "toolguard_hook.json"
+            bad.write_text("}{ not json")
+            empty = Path(tmp) / "toolguard_hook.local.json"
+            empty.write_text(json.dumps({"config_sync": {}}))
             config_files = [
-                (bad, 'toolguard_hook', 'json'),
-                (empty, 'toolguard_hook', 'json'),
+                (bad, "toolguard_hook", "json"),
+                (empty, "toolguard_hook", "json"),
             ]
             result = config_sync_settings_from_sources(config_files)
             # Falls back to defaults since nothing usable was found.
-            self.assertEqual(result['auto_migrate'], False)
-            self.assertEqual(result['backup_dir'], 'logs/config-backups')
+            self.assertEqual(result["auto_migrate"], False)
+            self.assertEqual(result["backup_dir"], "logs/config-backups")
 
 
 class TestGovernedAndTakeoverDelegation(unittest.TestCase):
@@ -596,7 +722,13 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
     def _hook_layer(level, content, specificity=0):
         """Build a toolguard_hook ConfigLayer at the given level/specificity."""
         return ConfigLayer(
-            Provenance(level, 'toolguard_hook', 'toml', Path(f'/{level}/toolguard_hook.toml'), specificity),
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
             MappingProxyType(content),
         )
 
@@ -607,7 +739,7 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         Then it returns the default ('Bash',)
         """
         config = Configuration(layers=())
-        self.assertEqual(config.governed_tools(), ('Bash',))
+        self.assertEqual(config.governed_tools(), ("Bash",))
 
     def test_governed_tools_union_across_three_levels(self):
         """
@@ -616,12 +748,12 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         Then all distinct tools appear once, in most-specific-first order
         """
         layers = (
-            self._hook_layer('project', {'governed_tools': ['Bash', 'Read']}, 0),
-            self._hook_layer('project', {'governed_tools': ['Write']}, 1),
-            self._hook_layer('user', {'governed_tools': ['Read', 'Edit']}, 2),
+            self._hook_layer("project", {"governed_tools": ["Bash", "Read"]}, 0),
+            self._hook_layer("project", {"governed_tools": ["Write"]}, 1),
+            self._hook_layer("user", {"governed_tools": ["Read", "Edit"]}, 2),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.governed_tools(), ('Bash', 'Read', 'Write', 'Edit'))
+        self.assertEqual(config.governed_tools(), ("Bash", "Read", "Write", "Edit"))
 
     def test_governed_tools_tolerates_non_list_value(self):
         """
@@ -629,9 +761,9 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         When Configuration.governed_tools() resolves
         Then the malformed entry is skipped and the default ('Bash',) is returned
         """
-        layers = (self._hook_layer('project', {'governed_tools': 'not-a-list'}, 0),)
+        layers = (self._hook_layer("project", {"governed_tools": "not-a-list"}, 0),)
         config = Configuration(layers=layers)
-        self.assertEqual(config.governed_tools(), ('Bash',))
+        self.assertEqual(config.governed_tools(), ("Bash",))
 
     def test_governed_tools_ignores_native_layers(self):
         """
@@ -641,12 +773,12 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'claude', 'json', Path('/p/settings.json'), 0),
-                MappingProxyType({'governed_tools': ['Read', 'Write']}),
+                Provenance("project", "claude", "json", Path("/p/settings.json"), 0),
+                MappingProxyType({"governed_tools": ["Read", "Write"]}),
             ),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.governed_tools(), ('Bash',))
+        self.assertEqual(config.governed_tools(), ("Bash",))
 
     def test_takeover_mode_shape(self):
         """
@@ -656,13 +788,13 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         """
         layers = (
             self._hook_layer(
-                'project',
+                "project",
                 {
-                    'takeover_mode': {
-                        'enabled': True,
-                        'ignored_allow_patterns': ['Bash(*)'],
-                        'additional_ignored_patterns': ['Read(/x/**)'],
-                        'no_match_fallback': 'warn_deny',
+                    "takeover_mode": {
+                        "enabled": True,
+                        "ignored_allow_patterns": ["Bash(*)"],
+                        "additional_ignored_patterns": ["Read(/x/**)"],
+                        "no_match_fallback": "warn_deny",
                     }
                 },
             ),
@@ -670,9 +802,9 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         config = Configuration(layers=layers)
         tc = config.takeover_mode()
         self.assertTrue(tc.enabled)
-        self.assertIn('Bash(*)', tc.ignored_allow_patterns)
-        self.assertEqual(tc.additional_ignored_patterns, ('Read(/x/**)',))
-        self.assertEqual(tc.no_match_fallback, 'warn_deny')
+        self.assertIn("Bash(*)", tc.ignored_allow_patterns)
+        self.assertEqual(tc.additional_ignored_patterns, ("Read(/x/**)",))
+        self.assertEqual(tc.no_match_fallback, "warn_deny")
         self.assertIsNone(tc.conflict)
 
 
@@ -683,7 +815,13 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
     def _hook_layer(level, content, specificity):
         """Build a toolguard_hook ConfigLayer at the given level/specificity."""
         return ConfigLayer(
-            Provenance(level, 'toolguard_hook', 'toml', Path(f'/{level}/toolguard_hook.toml'), specificity),
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
             MappingProxyType(content),
         )
 
@@ -694,8 +832,10 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         Then enabled is False (default OFF) and there is no conflict
         """
         layers = (
-            self._hook_layer('project', {'takeover_mode': {'no_match_fallback': 'deny'}}, 0),
-            self._hook_layer('user', {}, 1),
+            self._hook_layer(
+                "project", {"takeover_mode": {"no_match_fallback": "deny"}}, 0
+            ),
+            self._hook_layer("user", {}, 1),
         )
         tc = Configuration(layers=layers).takeover_mode()
         self.assertFalse(tc.enabled)
@@ -708,8 +848,8 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         Then enabled is True and there is no conflict
         """
         layers = (
-            self._hook_layer('project', {}, 0),
-            self._hook_layer('user', {'takeover_mode': {'enabled': True}}, 1),
+            self._hook_layer("project", {}, 0),
+            self._hook_layer("user", {"takeover_mode": {"enabled": True}}, 1),
         )
         tc = Configuration(layers=layers).takeover_mode()
         self.assertTrue(tc.enabled)
@@ -722,8 +862,8 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         Then enabled is True and there is no conflict (agreement, not disagreement)
         """
         layers = (
-            self._hook_layer('project', {'takeover_mode': {'enabled': True}}, 0),
-            self._hook_layer('user', {'takeover_mode': {'enabled': True}}, 1),
+            self._hook_layer("project", {"takeover_mode": {"enabled": True}}, 0),
+            self._hook_layer("user", {"takeover_mode": {"enabled": True}}, 1),
         )
         tc = Configuration(layers=layers).takeover_mode()
         self.assertTrue(tc.enabled)
@@ -736,8 +876,8 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         Then enabled is fail-safe False and a TakeoverEnabledConflict cites both sources with provenance
         """
         layers = (
-            self._hook_layer('project', {'takeover_mode': {'enabled': True}}, 0),
-            self._hook_layer('user', {'takeover_mode': {'enabled': False}}, 1),
+            self._hook_layer("project", {"takeover_mode": {"enabled": True}}, 0),
+            self._hook_layer("user", {"takeover_mode": {"enabled": False}}, 1),
         )
         tc = Configuration(layers=layers).takeover_mode()
         self.assertFalse(tc.enabled)
@@ -746,8 +886,8 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         values = [v for v, _prov in tc.conflict.sources]
         self.assertEqual(values, [True, False])
         levels = [prov.level for _v, prov in tc.conflict.sources]
-        self.assertEqual(levels, ['project', 'user'])
-        self.assertIn('conflicting values', tc.conflict.describe())
+        self.assertEqual(levels, ["project", "user"])
+        self.assertIn("conflicting values", tc.conflict.describe())
 
     def test_non_bool_enabled_does_not_vote(self):
         """
@@ -757,8 +897,8 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         vote wins with no conflict
         """
         layers = (
-            self._hook_layer('project', {'takeover_mode': {'enabled': True}}, 0),
-            self._hook_layer('user', {'takeover_mode': {'enabled': 'false'}}, 1),
+            self._hook_layer("project", {"takeover_mode": {"enabled": True}}, 0),
+            self._hook_layer("user", {"takeover_mode": {"enabled": "false"}}, 1),
         )
         tc = Configuration(layers=layers).takeover_mode()
         self.assertTrue(tc.enabled)
@@ -772,27 +912,35 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         """
         layers = (
             self._hook_layer(
-                'project',
-                {'takeover_mode': {'ignored_allow_patterns': ['Foo(*)'], 'additional_ignored_patterns': ['Read(/a/**)']}},
+                "project",
+                {
+                    "takeover_mode": {
+                        "ignored_allow_patterns": ["Foo(*)"],
+                        "additional_ignored_patterns": ["Read(/a/**)"],
+                    }
+                },
                 0,
             ),
             self._hook_layer(
-                'project',
-                {'takeover_mode': {'additional_ignored_patterns': ['Read(/b/**)']}},
+                "project",
+                {"takeover_mode": {"additional_ignored_patterns": ["Read(/b/**)"]}},
                 1,
             ),
             self._hook_layer(
-                'user',
-                {'takeover_mode': {'additional_ignored_patterns': ['Read(/c/**)']}},
+                "user",
+                {"takeover_mode": {"additional_ignored_patterns": ["Read(/c/**)"]}},
                 2,
             ),
         )
         tc = Configuration(layers=layers).takeover_mode()
         # Default blanket allows plus the project's extra are all present.
-        self.assertIn('Bash(*)', tc.ignored_allow_patterns)
-        self.assertIn('Foo(*)', tc.ignored_allow_patterns)
+        self.assertIn("Bash(*)", tc.ignored_allow_patterns)
+        self.assertIn("Foo(*)", tc.ignored_allow_patterns)
         # additional_ignored_patterns unions across all three levels.
-        self.assertEqual(tc.additional_ignored_patterns, ('Read(/a/**)', 'Read(/b/**)', 'Read(/c/**)'))
+        self.assertEqual(
+            tc.additional_ignored_patterns,
+            ("Read(/a/**)", "Read(/b/**)", "Read(/c/**)"),
+        )
 
     def test_no_match_fallback_more_specific_wins(self):
         """
@@ -801,11 +949,15 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         Then the project (more-specific) value wins
         """
         layers = (
-            self._hook_layer('project', {'takeover_mode': {'no_match_fallback': 'warn_deny'}}, 0),
-            self._hook_layer('user', {'takeover_mode': {'no_match_fallback': 'deny'}}, 1),
+            self._hook_layer(
+                "project", {"takeover_mode": {"no_match_fallback": "warn_deny"}}, 0
+            ),
+            self._hook_layer(
+                "user", {"takeover_mode": {"no_match_fallback": "deny"}}, 1
+            ),
         )
         tc = Configuration(layers=layers).takeover_mode()
-        self.assertEqual(tc.no_match_fallback, 'warn_deny')
+        self.assertEqual(tc.no_match_fallback, "warn_deny")
 
 
 class TestProvenanceAndIntrospection(unittest.TestCase):
@@ -817,11 +969,13 @@ class TestProvenanceAndIntrospection(unittest.TestCase):
         When describe(), source_type, and is_native are inspected
         Then describe mentions the level and source, source_type is 'toolguard_hook', and is_native is False
         """
-        prov = Provenance('project', 'toolguard_hook', 'toml', Path('/p/toolguard_hook.toml'))
+        prov = Provenance(
+            "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+        )
         layer = ConfigLayer(prov, MappingProxyType({}))
-        self.assertIn('project', prov.describe())
-        self.assertIn('toolguard_hook', prov.describe())
-        self.assertEqual(layer.source_type, 'toolguard_hook')
+        self.assertIn("project", prov.describe())
+        self.assertIn("toolguard_hook", prov.describe())
+        self.assertEqual(layer.source_type, "toolguard_hook")
         self.assertFalse(layer.is_native)
 
     def test_describe_sources(self):
@@ -831,12 +985,15 @@ class TestProvenanceAndIntrospection(unittest.TestCase):
         Then it returns one description mentioning the settings.json file
         """
         layers = (
-            ConfigLayer(Provenance('project', 'claude', 'json', Path('/p/settings.json')), MappingProxyType({})),
+            ConfigLayer(
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
+                MappingProxyType({}),
+            ),
         )
         config = Configuration(layers=layers)
         descs = config.describe_sources()
         self.assertEqual(len(descs), 1)
-        self.assertIn('settings.json', descs[0])
+        self.assertIn("settings.json", descs[0])
 
 
 class TestToolguardPermissionsEdgeCases(unittest.TestCase):
@@ -850,13 +1007,15 @@ class TestToolguardPermissionsEdgeCases(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/toolguard_hook.json')),
-                MappingProxyType({'permissions': ['not', 'a', 'dict']}),
+                Provenance(
+                    "project", "toolguard_hook", "json", Path("/p/toolguard_hook.json")
+                ),
+                MappingProxyType({"permissions": ["not", "a", "dict"]}),
             ),
         )
         config = Configuration(layers=layers)
         perms = config.toolguard_permissions()
-        self.assertEqual(perms['allow'], ())
+        self.assertEqual(perms["allow"], ())
 
 
 class TestValidationAdditionalSupportedTools(unittest.TestCase):
@@ -870,19 +1029,24 @@ class TestValidationAdditionalSupportedTools(unittest.TestCase):
         """
         layers = (
             ConfigLayer(
-                Provenance('project', 'toolguard_hook', 'json', Path('/p/.claude/toolguard_hook.json')),
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "json",
+                    Path("/p/.claude/toolguard_hook.json"),
+                ),
                 MappingProxyType(
                     {
-                        'governed_tools': ['Bash', 'mcp__custom__tool'],
-                        'additional_supported_tools': ['mcp__custom__tool'],
-                        'permissions': {'allow': ['mcp__custom__tool(do *)']},
+                        "governed_tools": ["Bash", "mcp__custom__tool"],
+                        "additional_supported_tools": ["mcp__custom__tool"],
+                        "permissions": {"allow": ["mcp__custom__tool(do *)"]},
                     }
                 ),
             ),
         )
         config = Configuration(layers=layers)
-        messages = ' '.join(i.message for i in config.validation_issues())
-        self.assertNotIn('not a known supported tool', messages)
+        messages = " ".join(i.message for i in config.validation_issues())
+        self.assertNotIn("not a known supported tool", messages)
 
 
 class TestExplicitModeAdjacentToml(unittest.TestCase):
@@ -895,18 +1059,24 @@ class TestExplicitModeAdjacentToml(unittest.TestCase):
         Then the TOML hook layer is used and the JSON one is excluded
         """
         with tempfile.TemporaryDirectory() as tmp:
-            settings = Path(tmp) / 'settings.json'
-            settings.write_text(json.dumps({'permissions': {'allow': ['Bash(git *)']}}))
-            hook_toml = Path(tmp) / 'toolguard_hook.toml'
+            settings = Path(tmp) / "settings.json"
+            settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
+            hook_toml = Path(tmp) / "toolguard_hook.toml"
             hook_toml.write_text('[permissions]\nallow = ["Bash(ls *)"]\n')
             # A JSON also present, but TOML must win.
-            (Path(tmp) / 'toolguard_hook.json').write_text(json.dumps({'permissions': {'allow': ['Bash(skip)']}}))
-            with patch.dict(os.environ, {'CLAUDE_SETTINGS_PATH': str(settings)}):
+            (Path(tmp) / "toolguard_hook.json").write_text(
+                json.dumps({"permissions": {"allow": ["Bash(skip)"]}})
+            )
+            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(settings)}):
                 config = load_configuration()
-            formats = {layer.provenance.file_format for layer in config.layers if not layer.is_native}
-            self.assertIn('toml', formats)
-            self.assertNotIn('json', formats)
+            formats = {
+                layer.provenance.file_format
+                for layer in config.layers
+                if not layer.is_native
+            }
+            self.assertIn("toml", formats)
+            self.assertNotIn("json", formats)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

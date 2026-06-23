@@ -38,12 +38,12 @@ from toolguard.permissions import decide_command_at_level_detailed
 def _bash_layer(allow, deny, specificity, path):
     """Build a toolguard_hook ConfigLayer with Bash permissions at a specificity."""
     content = {
-        'permissions': {
-            'allow': [f'Bash({p})' for p in allow],
-            'deny': [f'Bash({p})' for p in deny],
+        "permissions": {
+            "allow": [f"Bash({p})" for p in allow],
+            "deny": [f"Bash({p})" for p in deny],
         }
     }
-    prov = Provenance('project', 'toolguard_hook', 'toml', Path(path), specificity)
+    prov = Provenance("project", "toolguard_hook", "toml", Path(path), specificity)
     return ConfigLayer(provenance=prov, content=MappingProxyType(content))
 
 
@@ -68,13 +68,13 @@ class TestLogStreamSeparation(unittest.TestCase):
         """
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            log_error('boom', 'fix the error', log_dir)
-            log_warning('careful', 'fix the warning', log_dir)
-            log_conflict('overlap', 'resolve the conflict', log_dir)
+            log_error("boom", "fix the error", log_dir)
+            log_warning("careful", "fix the warning", log_dir)
+            log_conflict("overlap", "resolve the conflict", log_dir)
 
-            error_files = list(log_dir.glob('toolguard-error-*.md'))
-            warning_files = list(log_dir.glob('toolguard-warning-*.md'))
-            conflict_files = list(log_dir.glob('toolguard-conflict-*.md'))
+            error_files = list(log_dir.glob("toolguard-error-*.md"))
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+            conflict_files = list(log_dir.glob("toolguard-conflict-*.md"))
             self.assertEqual(len(error_files), 1)
             self.assertEqual(len(warning_files), 1)
             self.assertEqual(len(conflict_files), 1)
@@ -83,15 +83,15 @@ class TestLogStreamSeparation(unittest.TestCase):
             warning_text = warning_files[0].read_text()
             conflict_text = conflict_files[0].read_text()
 
-            self.assertIn('boom', error_text)
-            self.assertNotIn('careful', error_text)
-            self.assertNotIn('overlap', error_text)
+            self.assertIn("boom", error_text)
+            self.assertNotIn("careful", error_text)
+            self.assertNotIn("overlap", error_text)
 
-            self.assertIn('careful', warning_text)
-            self.assertNotIn('boom', warning_text)
+            self.assertIn("careful", warning_text)
+            self.assertNotIn("boom", warning_text)
 
-            self.assertIn('overlap', conflict_text)
-            self.assertIn('CONFLICT', conflict_text)
+            self.assertIn("overlap", conflict_text)
+            self.assertIn("CONFLICT", conflict_text)
 
     def test_error_log_holds_only_errors(self):
         """
@@ -101,9 +101,9 @@ class TestLogStreamSeparation(unittest.TestCase):
         """
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            log_warning('w', 's', log_dir)
-            log_conflict('c', 's', log_dir)
-            self.assertEqual(list(log_dir.glob('toolguard-error-*.md')), [])
+            log_warning("w", "s", log_dir)
+            log_conflict("c", "s", log_dir)
+            self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
 
 
 class TestTakeoverNoticeNotPersisted(unittest.TestCase):
@@ -120,13 +120,13 @@ class TestTakeoverNoticeNotPersisted(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            with patch('sys.stderr', new_callable=StringIO) as err:
+            with patch("sys.stderr", new_callable=StringIO) as err:
                 issue_takeover_warning(log_dir, to_stdout=True)
 
-            self.assertEqual(list(log_dir.glob('toolguard-*.md')), [])
+            self.assertEqual(list(log_dir.glob("toolguard-*.md")), [])
             # Marker present (once-per-session guard) and stderr echoed.
-            self.assertTrue(list(log_dir.glob('.toolguard-warned-*')))
-            self.assertIn('Takeover mode is active', err.getvalue())
+            self.assertTrue(list(log_dir.glob(".toolguard-warned-*")))
+            self.assertIn("Takeover mode is active", err.getvalue())
 
 
 class TestProvenanceInReasons(unittest.TestCase):
@@ -141,18 +141,20 @@ class TestProvenanceInReasons(unittest.TestCase):
              reason.split(': ', 1) still yields the pattern (+ suffix)
         """
         config = Configuration(
-            layers=(_bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml'),)
+            layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = config.resolve_permission_detailed('Bash', _detailed_decider('git status'))
+        resolved = config.resolve_permission_detailed(
+            "Bash", _detailed_decider("git status")
+        )
         self.assertIsInstance(resolved, ResolvedDecision)
-        self.assertEqual(resolved.decision, 'allow')
+        self.assertEqual(resolved.decision, "allow")
         # Backward-compatible substring still present.
-        self.assertIn('matches allow pattern: git *', resolved.reason)
+        self.assertIn("matches allow pattern: git *", resolved.reason)
         # Provenance suffix appended.
-        self.assertIn('[project: /proj/.claude/toolguard_hook.toml]', resolved.reason)
+        self.assertIn("[project: /proj/.claude/toolguard_hook.toml]", resolved.reason)
         # Existing split-based extraction still recovers the pattern (+ suffix).
-        extracted = resolved.reason.split(': ', 1)[1]
-        self.assertTrue(extracted.startswith('git *'))
+        extracted = resolved.reason.split(": ", 1)[1]
+        self.assertTrue(extracted.startswith("git *"))
         self.assertIsNotNone(resolved.provenance)
 
     def test_default_deny_has_no_provenance(self):
@@ -162,12 +164,14 @@ class TestProvenanceInReasons(unittest.TestCase):
         Then the fail-closed deny carries no provenance and the legacy reason
         """
         config = Configuration(
-            layers=(_bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml'),)
+            layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = config.resolve_permission_detailed('Bash', _detailed_decider('rm -rf /'))
-        self.assertEqual(resolved.decision, 'deny')
+        resolved = config.resolve_permission_detailed(
+            "Bash", _detailed_decider("rm -rf /")
+        )
+        self.assertEqual(resolved.decision, "deny")
         self.assertIsNone(resolved.provenance)
-        self.assertEqual(resolved.reason, 'Command does not match any allow patterns')
+        self.assertEqual(resolved.reason, "Command does not match any allow patterns")
 
 
 class TestConflictDetection(unittest.TestCase):
@@ -183,15 +187,17 @@ class TestConflictDetection(unittest.TestCase):
         """
         config = Configuration(
             layers=(
-                _bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml'),
-                _bash_layer([], ['git *'], 1, '/home/.claude/toolguard_hook.toml'),
+                _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),
+                _bash_layer([], ["git *"], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = config.resolve_permission_detailed('Bash', _detailed_decider('git push'))
-        self.assertEqual(resolved.decision, 'allow')
+        resolved = config.resolve_permission_detailed(
+            "Bash", _detailed_decider("git push")
+        )
+        self.assertEqual(resolved.decision, "allow")
         self.assertIsNotNone(resolved.override)
-        self.assertEqual(resolved.override.winning_pattern, 'git *')
-        self.assertEqual(resolved.override.overridden_pattern, 'git *')
+        self.assertEqual(resolved.override.winning_pattern, "git *")
+        self.assertEqual(resolved.override.overridden_pattern, "git *")
         self.assertEqual(resolved.override.winning_provenance.specificity, 0)
         self.assertEqual(resolved.override.overridden_provenance.specificity, 1)
 
@@ -202,10 +208,12 @@ class TestConflictDetection(unittest.TestCase):
         Then the decision is allow and NO override is reported
         """
         config = Configuration(
-            layers=(_bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml'),)
+            layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = config.resolve_permission_detailed('Bash', _detailed_decider('git push'))
-        self.assertEqual(resolved.decision, 'allow')
+        resolved = config.resolve_permission_detailed(
+            "Bash", _detailed_decider("git push")
+        )
+        self.assertEqual(resolved.decision, "allow")
         self.assertIsNone(resolved.override)
 
     def test_deny_decision_reports_no_override(self):
@@ -216,12 +224,14 @@ class TestConflictDetection(unittest.TestCase):
         """
         config = Configuration(
             layers=(
-                _bash_layer([], ['rm *'], 0, '/proj/.claude/toolguard_hook.toml'),
-                _bash_layer(['rm *'], [], 1, '/home/.claude/toolguard_hook.toml'),
+                _bash_layer([], ["rm *"], 0, "/proj/.claude/toolguard_hook.toml"),
+                _bash_layer(["rm *"], [], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = config.resolve_permission_detailed('Bash', _detailed_decider('rm -rf /'))
-        self.assertEqual(resolved.decision, 'deny')
+        resolved = config.resolve_permission_detailed(
+            "Bash", _detailed_decider("rm -rf /")
+        )
+        self.assertEqual(resolved.decision, "deny")
         self.assertIsNone(resolved.override)
 
 
@@ -236,7 +246,7 @@ class TestProvenanceHelpers(unittest.TestCase):
         """
         from toolguard.config import _append_provenance
 
-        self.assertEqual(_append_provenance('some reason', None), 'some reason')
+        self.assertEqual(_append_provenance("some reason", None), "some reason")
 
     def test_provenance_for_pattern_returns_none_on_miss(self):
         """
@@ -244,13 +254,13 @@ class TestProvenanceHelpers(unittest.TestCase):
         When _provenance_for_pattern is called
         Then None is returned
         """
-        layer = _bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml')
+        layer = _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml")
         from toolguard.config import Configuration as _Cfg
 
         # The ToolPatternLayer view is what _provenance_for_pattern consumes.
         cfg = Configuration(layers=(layer,))
-        tool_layers = cfg.permission_layers('Bash')
-        self.assertIsNone(_Cfg._provenance_for_pattern(tool_layers, 'no-such', 'allow'))
+        tool_layers = cfg.permission_layers("Bash")
+        self.assertIsNone(_Cfg._provenance_for_pattern(tool_layers, "no-such", "allow"))
 
     def test_override_skips_level_without_deny_then_finds_deeper_deny(self):
         """
@@ -262,13 +272,15 @@ class TestProvenanceHelpers(unittest.TestCase):
         """
         config = Configuration(
             layers=(
-                _bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml'),
-                _bash_layer(['ls *'], [], 1, '/mid/.claude/toolguard_hook.toml'),
-                _bash_layer([], ['git *'], 2, '/home/.claude/toolguard_hook.toml'),
+                _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),
+                _bash_layer(["ls *"], [], 1, "/mid/.claude/toolguard_hook.toml"),
+                _bash_layer([], ["git *"], 2, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = config.resolve_permission_detailed('Bash', _detailed_decider('git push'))
-        self.assertEqual(resolved.decision, 'allow')
+        resolved = config.resolve_permission_detailed(
+            "Bash", _detailed_decider("git push")
+        )
+        self.assertEqual(resolved.decision, "allow")
         self.assertIsNotNone(resolved.override)
         self.assertEqual(resolved.override.overridden_provenance.specificity, 2)
 
@@ -286,19 +298,22 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
             log_discovery(
-                ['project: /proj/.claude/toolguard_hook.toml', 'user: /home/.claude/toolguard_hook.toml'],
+                [
+                    "project: /proj/.claude/toolguard_hook.toml",
+                    "user: /home/.claude/toolguard_hook.toml",
+                ],
                 log_dir,
             )
-            resolution_files = list(log_dir.glob('toolguard-2*.md'))
+            resolution_files = list(log_dir.glob("toolguard-2*.md"))
             # Filter out any per-concern streams (they have a word after toolguard-).
-            resolution_files = [p for p in resolution_files if p.name.count('-') == 3]
+            resolution_files = [p for p in resolution_files if p.name.count("-") == 3]
             self.assertEqual(len(resolution_files), 1)
             text = resolution_files[0].read_text()
-            self.assertIn('discovered 2 config levels', text)
-            self.assertIn('project: /proj/.claude/toolguard_hook.toml', text)
+            self.assertIn("discovered 2 config levels", text)
+            self.assertIn("project: /proj/.claude/toolguard_hook.toml", text)
             # Not routed to other streams.
-            self.assertEqual(list(log_dir.glob('toolguard-warning-*.md')), [])
-            self.assertEqual(list(log_dir.glob('toolguard-conflict-*.md')), [])
+            self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
+            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
 
 class TestHookConflictLogging(unittest.TestCase):
@@ -318,38 +333,52 @@ class TestHookConflictLogging(unittest.TestCase):
 
         config = self._config_with_levels(
             [
-                _bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml'),
-                _bash_layer([], ['git *'], 1, '/home/.claude/toolguard_hook.toml'),
+                _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),
+                _bash_layer([], ["git *"], 1, "/home/.claude/toolguard_hook.toml"),
             ]
         )
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'git push'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push"},
+            "hook_event_name": "PreToolUse",
         }
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            env_config = {'log_dir': log_dir, 'logging_enabled': True, 'create_log_dir': True, 'extended_syntax': True}
+            env_config = {
+                "log_dir": log_dir,
+                "logging_enabled": True,
+                "create_log_dir": True,
+                "extended_syntax": True,
+            }
             hook_mod._discovery_diagnostic_done = True
             hook_mod._validation_done = True
             hook_mod._divergence_check_done = True
-            with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-                with patch('sys.stdout', new_callable=StringIO) as out:
-                    with patch('toolguard.hook.load_configuration', return_value=config):
-                        with patch('toolguard.hook.get_env_config', return_value=env_config):
-                            with patch('toolguard.hook.check_and_warn_divergence', return_value=[]):
+            with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+                with patch("sys.stdout", new_callable=StringIO) as out:
+                    with patch(
+                        "toolguard.hook.load_configuration", return_value=config
+                    ):
+                        with patch(
+                            "toolguard.hook.get_env_config", return_value=env_config
+                        ):
+                            with patch(
+                                "toolguard.hook.check_and_warn_divergence",
+                                return_value=[],
+                            ):
                                 try:
                                     hook_mod.main()
                                 except SystemExit:
                                     pass
             output = json.loads(out.getvalue())
-            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
-            conflict_files = list(log_dir.glob('toolguard-conflict-*.md'))
+            self.assertEqual(
+                output["hookSpecificOutput"]["permissionDecision"], "allow"
+            )
+            conflict_files = list(log_dir.glob("toolguard-conflict-*.md"))
             self.assertEqual(len(conflict_files), 1)
             conflict_text = conflict_files[0].read_text()
-            self.assertIn('allow-over-deny override', conflict_text)
-            self.assertIn('/proj/.claude/toolguard_hook.toml', conflict_text)
-            self.assertIn('/home/.claude/toolguard_hook.toml', conflict_text)
+            self.assertIn("allow-over-deny override", conflict_text)
+            self.assertIn("/proj/.claude/toolguard_hook.toml", conflict_text)
+            self.assertIn("/home/.claude/toolguard_hook.toml", conflict_text)
 
     def test_hook_does_not_log_conflict_without_override(self):
         """
@@ -360,31 +389,45 @@ class TestHookConflictLogging(unittest.TestCase):
         from toolguard import hook as hook_mod
 
         config = self._config_with_levels(
-            [_bash_layer(['git *'], [], 0, '/proj/.claude/toolguard_hook.toml')]
+            [_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml")]
         )
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'git status'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
         }
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            env_config = {'log_dir': log_dir, 'logging_enabled': True, 'create_log_dir': True, 'extended_syntax': True}
+            env_config = {
+                "log_dir": log_dir,
+                "logging_enabled": True,
+                "create_log_dir": True,
+                "extended_syntax": True,
+            }
             hook_mod._discovery_diagnostic_done = True
             hook_mod._validation_done = True
             hook_mod._divergence_check_done = True
-            with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-                with patch('sys.stdout', new_callable=StringIO) as out:
-                    with patch('toolguard.hook.load_configuration', return_value=config):
-                        with patch('toolguard.hook.get_env_config', return_value=env_config):
-                            with patch('toolguard.hook.check_and_warn_divergence', return_value=[]):
+            with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+                with patch("sys.stdout", new_callable=StringIO) as out:
+                    with patch(
+                        "toolguard.hook.load_configuration", return_value=config
+                    ):
+                        with patch(
+                            "toolguard.hook.get_env_config", return_value=env_config
+                        ):
+                            with patch(
+                                "toolguard.hook.check_and_warn_divergence",
+                                return_value=[],
+                            ):
                                 try:
                                     hook_mod.main()
                                 except SystemExit:
                                     pass
             output = json.loads(out.getvalue())
-            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'allow')
-            self.assertEqual(list(log_dir.glob('toolguard-conflict-*.md')), [])
+            self.assertEqual(
+                output["hookSpecificOutput"]["permissionDecision"], "allow"
+            )
+            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
     def test_hard_deny_goes_to_resolution_not_conflict(self):
         """
@@ -396,40 +439,64 @@ class TestHookConflictLogging(unittest.TestCase):
         from toolguard import hook as hook_mod
 
         content = {
-            'permissions': {'allow': ['Bash(*)'], 'deny': []},
-            'hard_deny': {'deny': ['Bash(rm *)'], 'allow': []},
+            "permissions": {"allow": ["Bash(*)"], "deny": []},
+            "hard_deny": {"deny": ["Bash(rm *)"], "allow": []},
         }
-        prov = Provenance('project', 'toolguard_hook', 'toml', Path('/proj/.claude/toolguard_hook.toml'), 0)
-        config = Configuration(layers=(ConfigLayer(provenance=prov, content=MappingProxyType(content)),))
+        prov = Provenance(
+            "project",
+            "toolguard_hook",
+            "toml",
+            Path("/proj/.claude/toolguard_hook.toml"),
+            0,
+        )
+        config = Configuration(
+            layers=(ConfigLayer(provenance=prov, content=MappingProxyType(content)),)
+        )
         hook_input = {
-            'tool_name': 'Bash',
-            'tool_input': {'command': 'rm -rf /'},
-            'hook_event_name': 'PreToolUse',
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+            "hook_event_name": "PreToolUse",
         }
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            env_config = {'log_dir': log_dir, 'logging_enabled': True, 'create_log_dir': True, 'extended_syntax': True}
+            env_config = {
+                "log_dir": log_dir,
+                "logging_enabled": True,
+                "create_log_dir": True,
+                "extended_syntax": True,
+            }
             hook_mod._discovery_diagnostic_done = True
             hook_mod._validation_done = True
             hook_mod._divergence_check_done = True
-            with patch('sys.stdin', StringIO(json.dumps(hook_input))):
-                with patch('sys.stdout', new_callable=StringIO) as out:
-                    with patch('toolguard.hook.load_configuration', return_value=config):
-                        with patch('toolguard.hook.get_env_config', return_value=env_config):
-                            with patch('toolguard.hook.check_and_warn_divergence', return_value=[]):
+            with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+                with patch("sys.stdout", new_callable=StringIO) as out:
+                    with patch(
+                        "toolguard.hook.load_configuration", return_value=config
+                    ):
+                        with patch(
+                            "toolguard.hook.get_env_config", return_value=env_config
+                        ):
+                            with patch(
+                                "toolguard.hook.check_and_warn_divergence",
+                                return_value=[],
+                            ):
                                 try:
                                     hook_mod.main()
                                 except SystemExit:
                                     pass
             output = json.loads(out.getvalue())
-            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
-            self.assertIn('hard_deny', output['hookSpecificOutput']['permissionDecisionReason'])
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertIn(
+                "hard_deny", output["hookSpecificOutput"]["permissionDecisionReason"]
+            )
             # No conflict file.
-            self.assertEqual(list(log_dir.glob('toolguard-conflict-*.md')), [])
+            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
             # Resolution log holds the refused entry.
-            resolution_files = [p for p in log_dir.glob('toolguard-2*.md') if p.name.count('-') == 3]
+            resolution_files = [
+                p for p in log_dir.glob("toolguard-2*.md") if p.name.count("-") == 3
+            ]
             self.assertEqual(len(resolution_files), 1)
-            self.assertIn('REFUSED', resolution_files[0].read_text())
+            self.assertIn("REFUSED", resolution_files[0].read_text())
 
 
 class TestM1SingleSourceWarning(unittest.TestCase):
@@ -447,28 +514,32 @@ class TestM1SingleSourceWarning(unittest.TestCase):
 
         with TemporaryDirectory() as proj:
             proj_root = Path(proj)
-            claude = proj_root / '.claude'
+            claude = proj_root / ".claude"
             claude.mkdir()
-            (proj_root / 'pyproject.toml').write_text('[project]\nname="x"\n')
-            (claude / 'toolguard_hook.toml').write_text('governed_tools = ["Bash"]\n[permissions]\nallow=["Bash(git *)"]\n')
-            (claude / 'toolguard_hook.json').write_text('{"permissions": {"allow": ["Bash(ls *)"]}}')
+            (proj_root / "pyproject.toml").write_text('[project]\nname="x"\n')
+            (claude / "toolguard_hook.toml").write_text(
+                'governed_tools = ["Bash"]\n[permissions]\nallow=["Bash(git *)"]\n'
+            )
+            (claude / "toolguard_hook.json").write_text(
+                '{"permissions": {"allow": ["Bash(ls *)"]}}'
+            )
 
-            log_dir = proj_root / 'logs'
-            env_config = {'log_dir': log_dir}
+            log_dir = proj_root / "logs"
+            env_config = {"log_dir": log_dir}
             config = load_configuration(proj_root, ignore_env_override=True)
 
             # Reset the once-per-session guard so validation runs here.
             hook_mod._validation_done = False
             hook_mod._run_startup_validation(env_config, str(proj_root), config)
 
-            warning_files = list(log_dir.glob('toolguard-warning-*.md'))
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)
             text = warning_files[0].read_text()
-            occurrences = text.count('Both toolguard_hook.toml and toolguard_hook.json')
+            occurrences = text.count("Both toolguard_hook.toml and toolguard_hook.json")
             self.assertEqual(occurrences, 1)
             # Not routed to error/conflict streams.
-            self.assertEqual(list(log_dir.glob('toolguard-error-*.md')), [])
-            self.assertEqual(list(log_dir.glob('toolguard-conflict-*.md')), [])
+            self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
+            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
 
 class TestValidationIssueRoutingByLevel(unittest.TestCase):
@@ -495,19 +566,21 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
         from toolguard.config import Issue
 
         with TemporaryDirectory() as proj:
-            log_dir = Path(proj) / 'logs'
-            env_config = {'log_dir': log_dir}
-            issue = Issue(level='error', message='bad config', corrective_steps='fix it')
+            log_dir = Path(proj) / "logs"
+            env_config = {"log_dir": log_dir}
+            issue = Issue(
+                level="error", message="bad config", corrective_steps="fix it"
+            )
             config = self._FakeConfig([issue])
 
             hook_mod._validation_done = False
             hook_mod._run_startup_validation(env_config, proj, config)
 
-            error_files = list(log_dir.glob('toolguard-error-*.md'))
+            error_files = list(log_dir.glob("toolguard-error-*.md"))
             self.assertEqual(len(error_files), 1)
-            self.assertIn('bad config', error_files[0].read_text())
-            self.assertEqual(list(log_dir.glob('toolguard-warning-*.md')), [])
-            self.assertEqual(list(log_dir.glob('toolguard-conflict-*.md')), [])
+            self.assertIn("bad config", error_files[0].read_text())
+            self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
+            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
     def test_warning_level_issue_routed_to_warning_stream(self):
         """
@@ -519,20 +592,22 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
         from toolguard.config import Issue
 
         with TemporaryDirectory() as proj:
-            log_dir = Path(proj) / 'logs'
-            env_config = {'log_dir': log_dir}
-            issue = Issue(level='warning', message='heads up', corrective_steps='review it')
+            log_dir = Path(proj) / "logs"
+            env_config = {"log_dir": log_dir}
+            issue = Issue(
+                level="warning", message="heads up", corrective_steps="review it"
+            )
             config = self._FakeConfig([issue])
 
             hook_mod._validation_done = False
             hook_mod._run_startup_validation(env_config, proj, config)
 
-            warning_files = list(log_dir.glob('toolguard-warning-*.md'))
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)
-            self.assertIn('heads up', warning_files[0].read_text())
-            self.assertEqual(list(log_dir.glob('toolguard-error-*.md')), [])
-            self.assertEqual(list(log_dir.glob('toolguard-conflict-*.md')), [])
+            self.assertIn("heads up", warning_files[0].read_text())
+            self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
+            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

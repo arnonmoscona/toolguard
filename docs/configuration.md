@@ -191,6 +191,13 @@ Permission patterns can be configured in two places:
 `settings.local.json` still work with Claude Code's native permission system. Extended
 syntax patterns are toolguard-specific and would pollute the native configuration.
 
+**Multi-line commands, heredocs, and control structures** are decomposed and validated
+statement-by-statement, and constructs that cannot be safely decomposed resolve to *ask*
+(never a silent allow). This also introduces the `__HEREDOC_TO_<sink>__` matchable sentinel
+for heredocs. See
+[Permission Patterns: compound and multi-line commands](permission-patterns.md#compound-and-multi-line-commands)
+before writing rules that involve heredocs, `bash -c`, or `python -c`-style inline code.
+
 ### Standard patterns (in settings.local.json)
 
 Add permission patterns in the `permissions` section of your Claude settings.

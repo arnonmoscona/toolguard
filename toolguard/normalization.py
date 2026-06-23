@@ -38,7 +38,7 @@ def normalize_path(path: str, project_root: Optional[Path] = None) -> str:
 
     # Step 1: Normalize multiple leading slashes
     # Replace multiple leading slashes with single slash
-    path = re.sub(r'^/+', '/', path)
+    path = re.sub(r"^/+", "/", path)
 
     # Step 2: Resolve symlinks (max 3 iterations)
     # Only resolve if the path actually is a symlink, not its parent directories
@@ -51,7 +51,7 @@ def normalize_path(path: str, project_root: Optional[Path] = None) -> str:
                 else:
                     break
             path = str(path_obj)
-    except (OSError, RuntimeError):
+    except OSError, RuntimeError:
         # If resolution fails, continue with original path
         pass
 
@@ -63,28 +63,28 @@ def normalize_path(path: str, project_root: Optional[Path] = None) -> str:
         if path_obj.is_absolute():
             try:
                 relative_to_home = path_obj.relative_to(home)
-                path = f'~/{relative_to_home}'
+                path = f"~/{relative_to_home}"
             except ValueError:
                 # Path is not under home directory
                 pass
-    except (OSError, ValueError):
+    except OSError, ValueError:
         pass
 
     # Step 4: Expand relative paths to ./
     # Don't add ./ if it already starts with . (like ./ or ../)
-    if not path.startswith(('/', '~', '.')):
+    if not path.startswith(("/", "~", ".")):
         # This is a relative path without ./ or ../ prefix
         if project_root:
             # Check if the path exists relative to project_root
             try:
                 full_path = project_root / path
                 if full_path.exists():
-                    path = f'./{path}'
-            except (OSError, ValueError):
+                    path = f"./{path}"
+            except OSError, ValueError:
                 pass
         else:
             # No project root, just add ./ prefix
-            path = f'./{path}'
+            path = f"./{path}"
 
     return path
 
@@ -105,15 +105,15 @@ def expand_tilde(path: str) -> str:
         >>> expand_tilde('~/projects/*.py')
         '/Users/arnon/projects/*.py'
     """
-    if not path or not path.startswith('~'):
+    if not path or not path.startswith("~"):
         return path
 
     home = str(Path.home())
 
-    if path == '~':
+    if path == "~":
         return home
 
-    if path.startswith('~/'):
+    if path.startswith("~/"):
         return home + path[1:]
 
     # Handle ~username format (though we don't use this currently)
@@ -157,7 +157,7 @@ def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
 
     for i, token in enumerate(tokens):
         # Skip flags (they never look like paths)
-        if token.startswith('-'):
+        if token.startswith("-"):
             normalized_tokens.append(token)
             continue
 
@@ -166,7 +166,7 @@ def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
         # normalize it so e.g. `bin/script.sh` becomes `./bin/script.sh` — matching
         # the canonical form a user would write in a rule.
         if i == 0:
-            if '/' in token:
+            if "/" in token:
                 normalized_tokens.append(normalize_path(token, project_root))
             else:
                 normalized_tokens.append(token)
@@ -174,14 +174,14 @@ def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
 
         # Check if token looks like a path
         # Paths typically start with /, ~, ./ or contain / somewhere
-        is_path = '/' in token or token.startswith('~') or token.startswith('.')
+        is_path = "/" in token or token.startswith("~") or token.startswith(".")
 
         # Additional heuristic: if it contains a dot (likely a file extension)
         # but check it's not just any word with a dot
-        if not is_path and '.' in token:
+        if not is_path and "." in token:
             # Check if it looks like a filename (has extension)
             # Example: file.txt, script.py, etc.
-            parts = token.rsplit('.', 1)
+            parts = token.rsplit(".", 1)
             if len(parts) == 2 and len(parts[1]) <= 4 and parts[1].isalnum():
                 # Likely a file extension
                 is_path = True
@@ -194,4 +194,4 @@ def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
             # Not a path, keep as-is
             normalized_tokens.append(token)
 
-    return ' '.join(normalized_tokens)
+    return " ".join(normalized_tokens)

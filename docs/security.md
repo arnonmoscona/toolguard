@@ -50,6 +50,51 @@ For rules that must hold no matter what any project config says, promote them to
 [`[hard_deny]`](configuration.md#configuration-reference), which is pooled across all
 hierarchy levels and cannot be overridden by an allow at any level.
 
+## Multi-line commands and the ASK-safe guarantee
+
+Claude Code frequently issues multi-line Bash, heredocs, and whole scripts in a single tool
+call. Toolguard decomposes these and validates **each statement separately** (strictest-wins:
+any denied statement denies the whole command). For the full mechanics see
+[Permission Patterns: compound and multi-line commands](permission-patterns.md#compound-and-multi-line-commands).
+
+The security guarantee is **fail-safe, not fail-open**: any construct toolguard cannot
+decompose with confidence resolves to **ASK** (a prompt) -- it is never silently allowed as an
+undecomposed blob. This covers complex/nested control structures, `case`, `if/else`, process
+substitution `<(...)`, and code in non-bash interpreters. *(Historically, a multi-line command
+whose first line matched an allowed prefix could slip later lines past the checks; that
+fail-open bypass is closed.)*
+
+**Inline code and heredocs fed to an executor are a blanket-allow-class risk.** Code passed to
+a shell or interpreter -- `python -c "..."`, `node -e "..."`, `bash <<EOF ... EOF`,
+`cat <<EOF | bash` -- can do anything, and toolguard cannot read what it will do. Two rules
+follow from this:
+
+- **Bash-family payloads are decomposed and validated.** `bash -c "git status; rm -rf /"` and
+  `cat <<EOF | bash` have their inner bash checked command-by-command.
+- **Foreign-interpreter payloads get an ASK floor.** `python -c`, `node -e`, a heredoc piped to
+  `python`, etc. always prompt -- and a broad `allow` (even `uv run*`) **cannot** downgrade
+  that to a silent allow. An explicit `deny` still applies. Versioned interpreters
+  (`python3.13`, `pypy3.11`, ...) are recognized automatically -- the list is not pinned to
+  specific releases.
+
+  *Caveat:* the floor applies to interpreters toolguard **recognizes** (the common Python /
+  Node / Perl / Ruby / PHP / R / non-bash-shell families). An interpreter it does not know
+  (e.g. `lua`, `deno`, `bun`, `julia`) is **not** floored, so a broad `allow` for it would
+  permit its inline code. It is still validated as a command (an explicit `deny` works) -- but
+  prefer not to broadly allow interpreters, recognized or not.
+
+**Do not write an `allow` rule that permits an executor-sink heredoc or inline foreign code.**
+Allowing `Bash([regex]__HEREDOC_TO_python__)` or `Bash(python3 -c:*)` re-creates exactly the
+blanket-allow problem this section warns about -- you would be approving arbitrary, unreviewed
+code. Leave them at ASK (or `deny`), and reserve `allow` for heredocs into data sinks
+(`cat`, `tee`, `pbcopy`) and for named scripts you trust. See the
+[heredoc sentinel patterns](permission-patterns.md#heredocs-and-the-__heredoc_to_sink__-sentinel)
+for how to write these rules.
+
+As always, **defense in depth**: add explicit `deny` / [`[hard_deny]`](configuration.md#configuration-reference)
+rules for destructive commands (e.g. `Bash([regex]rm\\s+-rf)`) so they hold no matter how a
+command is assembled.
+
 ## Backup importance
 
 **Always test changes with backups.**

@@ -28,7 +28,7 @@ def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
 
     while True:
         # Check for project markers
-        if (current / '.git').exists() or (current / 'pyproject.toml').exists():
+        if (current / ".git").exists() or (current / "pyproject.toml").exists():
             return current
 
         # Stop if we reach home or root
@@ -38,7 +38,7 @@ def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
         current = current.parent
 
 
-def load_env_file(project_root: Path, source_root: str = '') -> Dict[str, str]:
+def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:
     """
     Load environment variables from .env file.
 
@@ -54,7 +54,7 @@ def load_env_file(project_root: Path, source_root: str = '') -> Dict[str, str]:
     Returns:
         Dictionary of variables loaded from .env file (empty dict if not found)
     """
-    env_path = project_root / source_root / '.env'
+    env_path = project_root / source_root / ".env"
 
     if not env_path.exists():
         return {}
@@ -62,17 +62,17 @@ def load_env_file(project_root: Path, source_root: str = '') -> Dict[str, str]:
     env_vars = {}
 
     try:
-        with open(env_path, 'r') as f:
+        with open(env_path, "r") as f:
             for line in f:
                 line = line.strip()
                 # Skip comments and empty lines
-                if not line or line.startswith('#'):
+                if not line or line.startswith("#"):
                     continue
                 # Skip lines without =
-                if '=' not in line:
+                if "=" not in line:
                     continue
                 # Parse KEY=VALUE
-                key, value = line.split('=', 1)
+                key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
                 # Remove quotes if present
@@ -82,13 +82,15 @@ def load_env_file(project_root: Path, source_root: str = '') -> Dict[str, str]:
                     value = value[1:-1]
                 env_vars[key] = value
     except Exception as e:
-        print(f'Warning: Failed to load .env file: {e}', file=sys.stderr)
+        print(f"Warning: Failed to load .env file: {e}", file=sys.stderr)
         return {}
 
     return env_vars
 
 
-def get_bool_env(name: str, default: bool, env_vars: Optional[Dict[str, str]] = None) -> bool:
+def get_bool_env(
+    name: str, default: bool, env_vars: Optional[Dict[str, str]] = None
+) -> bool:
     """
     Get a boolean environment variable with case-insensitive parsing.
 
@@ -121,13 +123,16 @@ def get_bool_env(name: str, default: bool, env_vars: Optional[Dict[str, str]] = 
 
     # Parse boolean
     value_lower = value.lower()
-    if value_lower in ('true', '1', 'yes'):
+    if value_lower in ("true", "1", "yes"):
         return True
-    elif value_lower in ('false', '0', 'no'):
+    elif value_lower in ("false", "0", "no"):
         return False
     else:
         # Invalid value - warn and use default
-        print(f'Warning: Invalid boolean value for {name}: {value}. Using default: {default}', file=sys.stderr)
+        print(
+            f"Warning: Invalid boolean value for {name}: {value}. Using default: {default}",
+            file=sys.stderr,
+        )
         return default
 
 
@@ -147,7 +152,7 @@ def get_env_config() -> Dict[str, any]:
         - create_log_dir: bool
     """
     # Get project root (explicit or auto-detect)
-    project_root_str = os.environ.get('TOOLGUARD_PROJECT_ROOT')
+    project_root_str = os.environ.get("TOOLGUARD_PROJECT_ROOT")
     if project_root_str:
         project_root = Path(project_root_str).expanduser().resolve()
     else:
@@ -157,20 +162,20 @@ def get_env_config() -> Dict[str, any]:
             project_root = Path.cwd()
 
     # Get source root (for .env file location)
-    source_root = os.environ.get('TOOLGUARD_SOURCE_ROOT', '')
+    source_root = os.environ.get("TOOLGUARD_SOURCE_ROOT", "")
 
     # Load .env file
     env_vars = load_env_file(project_root, source_root)
 
     # Get configuration values
-    logging_enabled = get_bool_env('TOOLGUARD_LOGGING_ENABLED', True, env_vars)
-    extended_syntax = get_bool_env('TOOLGUARD_EXTENDED_SYNTAX', True, env_vars)
-    create_log_dir = get_bool_env('TOOLGUARD_CREATE_LOG_DIR', False, env_vars)
+    logging_enabled = get_bool_env("TOOLGUARD_LOGGING_ENABLED", True, env_vars)
+    extended_syntax = get_bool_env("TOOLGUARD_EXTENDED_SYNTAX", True, env_vars)
+    create_log_dir = get_bool_env("TOOLGUARD_CREATE_LOG_DIR", False, env_vars)
 
     # Get log directory
-    log_dir_str = os.environ.get('TOOLGUARD_LOG_DIR')
+    log_dir_str = os.environ.get("TOOLGUARD_LOG_DIR")
     if log_dir_str is None and env_vars:
-        log_dir_str = env_vars.get('TOOLGUARD_LOG_DIR')
+        log_dir_str = env_vars.get("TOOLGUARD_LOG_DIR")
 
     if log_dir_str:
         # Explicit log directory specified
@@ -180,13 +185,13 @@ def get_env_config() -> Dict[str, any]:
             log_dir = project_root / log_dir
     else:
         # Default: {project_root}/logs
-        log_dir = project_root / 'logs'
+        log_dir = project_root / "logs"
 
     return {
-        'logging_enabled': logging_enabled,
-        'log_dir': log_dir.resolve(),
-        'extended_syntax': extended_syntax,
-        'project_root': project_root,
-        'source_root': source_root,
-        'create_log_dir': create_log_dir,
+        "logging_enabled": logging_enabled,
+        "log_dir": log_dir.resolve(),
+        "extended_syntax": extended_syntax,
+        "project_root": project_root,
+        "source_root": source_root,
+        "create_log_dir": create_log_dir,
     }

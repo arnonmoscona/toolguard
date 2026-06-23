@@ -40,16 +40,18 @@ def log_command(
     """
     # Check if logging is enabled (backward compatibility with CHECKED_BASH_LOGGING_ON)
     if config is not None:
-        logging_on = config.get('logging_enabled', True)
+        logging_on = config.get("logging_enabled", True)
     else:
-        logging_on = os.environ.get('CHECKED_BASH_LOGGING_ON', 'true').lower() == 'true'
+        logging_on = os.environ.get("CHECKED_BASH_LOGGING_ON", "true").lower() == "true"
 
     if not logging_on:
         return
 
     try:
         # Get logging configuration
-        logging_format = os.environ.get('CHECKED_BASH_LOGGING_FORMAT', 'markdown').lower()
+        logging_format = os.environ.get(
+            "CHECKED_BASH_LOGGING_FORMAT", "markdown"
+        ).lower()
 
         # Resolve log directory path
         if log_dir is not None:
@@ -57,12 +59,15 @@ def log_command(
             # Check directory exists (old behavior for explicit log_dir - exit on error)
             log_dir_path = log_dir
             if not log_dir_path.exists():
-                print(f'Error: Logging directory does not exist: {log_dir_path}', file=sys.stderr)
+                print(
+                    f"Error: Logging directory does not exist: {log_dir_path}",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
         elif config is not None:
             # Use config from env_config
-            log_dir_path = config['log_dir']
-            create_log_dir = config.get('create_log_dir', False)
+            log_dir_path = config["log_dir"]
+            create_log_dir = config.get("create_log_dir", False)
 
             # Check if directory exists
             if not log_dir_path.exists():
@@ -72,13 +77,13 @@ def log_command(
                 else:
                     # Warn and disable logging for this invocation
                     print(
-                        f'Warning: Logging directory does not exist: {log_dir_path}. Logging disabled.',
+                        f"Warning: Logging directory does not exist: {log_dir_path}. Logging disabled.",
                         file=sys.stderr,
                     )
                     return
         else:
             # Backward compatibility: use environment variables
-            logging_dir = os.environ.get('CHECKED_BASH_LOGGING_DIR', 'logs')
+            logging_dir = os.environ.get("CHECKED_BASH_LOGGING_DIR", "logs")
             if Path(logging_dir).is_absolute():
                 log_dir_path = Path(logging_dir)
             else:
@@ -87,55 +92,60 @@ def log_command(
 
             # Check directory exists (old behavior - exit on error)
             if not log_dir_path.exists():
-                print(f'Error: Logging directory does not exist: {log_dir_path}', file=sys.stderr)
+                print(
+                    f"Error: Logging directory does not exist: {log_dir_path}",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
 
         # Generate log filename with current date and appropriate extension
-        extension = 'md' if logging_format == 'markdown' else 'jsonlines'
-        log_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.{extension}'
+        extension = "md" if logging_format == "markdown" else "jsonlines"
+        log_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.{extension}"
         log_file = log_dir_path / log_filename
 
         # Prepare log entry
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         violated_rules = violated_rules or []
 
         # Write log entry
-        with open(log_file, 'a', encoding='utf-8') as f:
-            if logging_format == 'jsonlines':
+        with open(log_file, "a", encoding="utf-8") as f:
+            if logging_format == "jsonlines":
                 # JSONLines format
                 import json
 
                 entry = {
-                    'timestamp': datetime.now().isoformat(),
-                    'status': status,
-                    'command': command_str,
-                    'violated_rules': violated_rules,
+                    "timestamp": datetime.now().isoformat(),
+                    "status": status,
+                    "command": command_str,
+                    "violated_rules": violated_rules,
                 }
                 if matched_rule:
-                    entry['matched_rule'] = matched_rule
+                    entry["matched_rule"] = matched_rule
                 if extra_info:
-                    entry['extra_info'] = extra_info
-                f.write(json.dumps(entry) + '\n\n')
+                    entry["extra_info"] = extra_info
+                f.write(json.dumps(entry) + "\n\n")
             else:
                 # Markdown format (default)
-                f.write(f'## {timestamp}\n\n')
-                f.write(f'- **Status**: {status.upper()}\n')
-                f.write(f'- **Command**: `{command_str}`\n')
+                f.write(f"## {timestamp}\n\n")
+                f.write(f"- **Status**: {status.upper()}\n")
+                f.write(f"- **Command**: `{command_str}`\n")
                 if matched_rule:
-                    f.write(f'- **Matched Rule**: `{matched_rule}`\n')
+                    f.write(f"- **Matched Rule**: `{matched_rule}`\n")
                 if violated_rules:
-                    f.write(f'- **Violated Rules**: {", ".join(f"`{rule}`" for rule in violated_rules)}\n')
+                    f.write(
+                        f"- **Violated Rules**: {', '.join(f'`{rule}`' for rule in violated_rules)}\n"
+                    )
                 if extra_info:
-                    f.write(f'- **Agent**: {extra_info}\n')
-                f.write('\n')
+                    f.write(f"- **Agent**: {extra_info}\n")
+                f.write("\n")
 
     except RuntimeError as e:
         # Project root not found - fatal error
-        print(f'Fatal error: {e}', file=sys.stderr)
+        print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         # Other logging errors - print warning but don't fail
-        print(f'Warning: Failed to write log: {e}', file=sys.stderr)
+        print(f"Warning: Failed to write log: {e}", file=sys.stderr)
 
 
 def log_discovery(source_descriptions: List[str], log_dir: Path) -> None:
@@ -157,15 +167,15 @@ def log_discovery(source_descriptions: List[str], log_dir: Path) -> None:
     """
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_filename = f'toolguard-{datetime.now().strftime("%Y-%m-%d")}.md'
+        log_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
         log_file = log_dir / log_filename
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         count = len(source_descriptions)
-        joined = ', '.join(source_descriptions) if source_descriptions else '(none)'
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f'## {timestamp}\n\n')
-            f.write(f'- **Discovery**: discovered {count} config levels: {joined}\n\n')
+        joined = ", ".join(source_descriptions) if source_descriptions else "(none)"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"## {timestamp}\n\n")
+            f.write(f"- **Discovery**: discovered {count} config levels: {joined}\n\n")
     except Exception as e:
         # Diagnostic logging must never fail the hook.
-        print(f'Warning: Failed to write discovery diagnostic: {e}', file=sys.stderr)
+        print(f"Warning: Failed to write discovery diagnostic: {e}", file=sys.stderr)

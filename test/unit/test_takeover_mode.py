@@ -25,21 +25,21 @@ class TestTakeoverModeConfig(unittest.TestCase):
         Then takeover is disabled, the default blanket ignored patterns are present, and no_match_fallback is 'deny'
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
+            (project_dir / ".git").mkdir()
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
-            self.assertFalse(config['enabled'])
+            self.assertFalse(config["enabled"])
             # Default ignored_allow_patterns includes standard blanket patterns
-            self.assertIn('Bash(*)', config['ignored_allow_patterns'])
-            self.assertIn('Read(*)', config['ignored_allow_patterns'])
-            self.assertIn('Write(*)', config['ignored_allow_patterns'])
-            self.assertIn('Edit(*)', config['ignored_allow_patterns'])
-            self.assertEqual(config['additional_ignored_patterns'], [])
-            self.assertEqual(config['no_match_fallback'], 'deny')
+            self.assertIn("Bash(*)", config["ignored_allow_patterns"])
+            self.assertIn("Read(*)", config["ignored_allow_patterns"])
+            self.assertIn("Write(*)", config["ignored_allow_patterns"])
+            self.assertIn("Edit(*)", config["ignored_allow_patterns"])
+            self.assertEqual(config["additional_ignored_patterns"], [])
+            self.assertEqual(config["no_match_fallback"], "deny")
 
     def test_load_takeover_mode_from_toml(self):
         """
@@ -48,10 +48,10 @@ class TestTakeoverModeConfig(unittest.TestCase):
         Then the enabled flag, ignored and additional patterns, and no_match_fallback are read from the TOML
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             toml_content = """
@@ -61,16 +61,16 @@ ignored_allow_patterns = ["Bash(*)", "Read(*)"]
 additional_ignored_patterns = ["Write(*)"]
 no_match_fallback = "warn_deny"
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(toml_content)
+            (claude_dir / "toolguard_hook.toml").write_text(toml_content)
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
-            self.assertTrue(config['enabled'])
-            self.assertIn('Bash(*)', config['ignored_allow_patterns'])
-            self.assertIn('Read(*)', config['ignored_allow_patterns'])
-            self.assertIn('Write(*)', config['additional_ignored_patterns'])
-            self.assertEqual(config['no_match_fallback'], 'warn_deny')
+            self.assertTrue(config["enabled"])
+            self.assertIn("Bash(*)", config["ignored_allow_patterns"])
+            self.assertIn("Read(*)", config["ignored_allow_patterns"])
+            self.assertIn("Write(*)", config["additional_ignored_patterns"])
+            self.assertEqual(config["no_match_fallback"], "warn_deny")
 
     def test_load_takeover_mode_from_json(self):
         """
@@ -79,28 +79,28 @@ no_match_fallback = "warn_deny"
         Then the enabled flag and ignored_allow_patterns are read from the JSON
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             json_content = {
-                'takeover_mode': {
-                    'enabled': True,
-                    'ignored_allow_patterns': ['Bash(*)', 'Read(*)'],
-                    'additional_ignored_patterns': [],
-                    'no_match_fallback': 'deny',
+                "takeover_mode": {
+                    "enabled": True,
+                    "ignored_allow_patterns": ["Bash(*)", "Read(*)"],
+                    "additional_ignored_patterns": [],
+                    "no_match_fallback": "deny",
                 }
             }
-            (claude_dir / 'toolguard_hook.json').write_text(json.dumps(json_content))
+            (claude_dir / "toolguard_hook.json").write_text(json.dumps(json_content))
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
-            self.assertTrue(config['enabled'])
-            self.assertIn('Bash(*)', config['ignored_allow_patterns'])
-            self.assertIn('Read(*)', config['ignored_allow_patterns'])
+            self.assertTrue(config["enabled"])
+            self.assertIn("Bash(*)", config["ignored_allow_patterns"])
+            self.assertIn("Read(*)", config["ignored_allow_patterns"])
 
     def test_merge_takeover_mode_from_multiple_files(self):
         """
@@ -109,10 +109,10 @@ no_match_fallback = "warn_deny"
         Then the patterns from both files are merged into the resulting config
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             # Project-level config
@@ -122,28 +122,30 @@ enabled = true
 ignored_allow_patterns = ["Bash(*)"]
 no_match_fallback = "deny"
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(project_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(project_toml)
 
             # User-level config
-            user_dir = Path.home() / '.claude'
+            user_dir = Path.home() / ".claude"
             user_dir.mkdir(exist_ok=True)
             user_toml = """
 [takeover_mode]
 ignored_allow_patterns = ["Read(*)"]
 additional_ignored_patterns = ["Write(*)"]
 """
-            user_toml_path = user_dir / 'toolguard_hook.toml'
+            user_toml_path = user_dir / "toolguard_hook.toml"
             user_toml_path.write_text(user_toml)
 
             try:
-                with patch('toolguard.config.find_project_root', return_value=project_dir):
+                with patch(
+                    "toolguard.config.find_project_root", return_value=project_dir
+                ):
                     config = load_takeover_mode_config()
 
                 # Should merge patterns from both files
-                self.assertTrue(config['enabled'])
-                self.assertIn('Bash(*)', config['ignored_allow_patterns'])
-                self.assertIn('Read(*)', config['ignored_allow_patterns'])
-                self.assertIn('Write(*)', config['additional_ignored_patterns'])
+                self.assertTrue(config["enabled"])
+                self.assertIn("Bash(*)", config["ignored_allow_patterns"])
+                self.assertIn("Read(*)", config["ignored_allow_patterns"])
+                self.assertIn("Write(*)", config["additional_ignored_patterns"])
             finally:
                 # Clean up user config
                 if user_toml_path.exists():
@@ -156,24 +158,29 @@ additional_ignored_patterns = ["Write(*)"]
         Then the setting is ignored and takeover remains disabled (defaults)
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             # Put takeover_mode in settings.local.json (should be ignored)
             settings_content = {
-                'takeover_mode': {'enabled': True, 'ignored_allow_patterns': ['Bash(*)']},
-                'permissions': {'allow': ['Bash(git status)']},
+                "takeover_mode": {
+                    "enabled": True,
+                    "ignored_allow_patterns": ["Bash(*)"],
+                },
+                "permissions": {"allow": ["Bash(git status)"]},
             }
-            (claude_dir / 'settings.local.json').write_text(json.dumps(settings_content))
+            (claude_dir / "settings.local.json").write_text(
+                json.dumps(settings_content)
+            )
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
             # Should use default config (takeover_mode from settings.json is ignored)
-            self.assertFalse(config['enabled'])
+            self.assertFalse(config["enabled"])
 
 
 class TestNoMatchFallback(unittest.TestCase):
@@ -186,10 +193,10 @@ class TestNoMatchFallback(unittest.TestCase):
         Then the resolved config reports no_match_fallback as 'deny'
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             hook_toml = """
@@ -200,12 +207,12 @@ no_match_fallback = "deny"
 [permissions]
 allow = ["Bash(git status)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
-            self.assertEqual(config['no_match_fallback'], 'deny')
+            self.assertEqual(config["no_match_fallback"], "deny")
 
     def test_warn_deny_fallback(self):
         """
@@ -214,10 +221,10 @@ allow = ["Bash(git status)"]
         Then the resolved config reports no_match_fallback as 'warn_deny'
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             hook_toml = """
@@ -228,12 +235,12 @@ no_match_fallback = "warn_deny"
 [permissions]
 allow = ["Bash(git status)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
-            self.assertEqual(config['no_match_fallback'], 'warn_deny')
+            self.assertEqual(config["no_match_fallback"], "warn_deny")
 
 
 class TestBackwardCompatibility(unittest.TestCase):
@@ -246,10 +253,10 @@ class TestBackwardCompatibility(unittest.TestCase):
         Then takeover is disabled and no_match_fallback defaults to 'deny'
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             # Config without takeover_mode section
@@ -257,20 +264,20 @@ class TestBackwardCompatibility(unittest.TestCase):
 [permissions]
 allow = ["Bash(git status)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
                 config = load_takeover_mode_config()
 
             # Should use default config
-            self.assertFalse(config['enabled'])
-            self.assertEqual(config['no_match_fallback'], 'deny')
+            self.assertFalse(config["enabled"])
+            self.assertEqual(config["no_match_fallback"], "deny")
 
 
 class TestFilePathToolTakeoverFiltering(unittest.TestCase):
     """Test that takeover mode filtering applies to file path tools (Read, Write, Edit)."""
 
-    @patch.dict('os.environ', {}, clear=True)
+    @patch.dict("os.environ", {}, clear=True)
     def test_filters_blanket_read_pattern(self):
         """
         Given takeover enabled with native Read(*) and a specific hook Read pattern
@@ -278,10 +285,10 @@ class TestFilePathToolTakeoverFiltering(unittest.TestCase):
         Then the blanket '*' is filtered and only the hook's '~/projects/**' remains
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             hook_toml = """
@@ -291,24 +298,20 @@ enabled = true
 [permissions]
 allow = ["Read(~/projects/**)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
             # Native Claude settings with blanket Read(*)
-            settings_json = {
-                'permissions': {
-                    'allow': ['Read(*)', 'Bash(*)']
-                }
-            }
-            (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
+            settings_json = {"permissions": {"allow": ["Read(*)", "Bash(*)"]}}
+            (claude_dir / "settings.local.json").write_text(json.dumps(settings_json))
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_file_path_patterns('Read')
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
+                allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
             # Blanket * should be filtered; specific pattern from toolguard_hook remains
-            self.assertNotIn('*', allow_patterns)
-            self.assertIn('~/projects/**', allow_patterns)
+            self.assertNotIn("*", allow_patterns)
+            self.assertIn("~/projects/**", allow_patterns)
 
-    @patch.dict('os.environ', {}, clear=True)
+    @patch.dict("os.environ", {}, clear=True)
     def test_filters_blanket_write_pattern(self):
         """
         Given takeover enabled with native Write(*) and a specific hook Write pattern
@@ -316,10 +319,10 @@ allow = ["Read(~/projects/**)"]
         Then the blanket '*' is filtered and only the hook's '~/projects/**' remains
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             hook_toml = """
@@ -329,22 +332,18 @@ enabled = true
 [permissions]
 allow = ["Write(~/projects/**)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-            settings_json = {
-                'permissions': {
-                    'allow': ['Write(*)', 'Bash(*)']
-                }
-            }
-            (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
+            settings_json = {"permissions": {"allow": ["Write(*)", "Bash(*)"]}}
+            (claude_dir / "settings.local.json").write_text(json.dumps(settings_json))
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_file_path_patterns('Write')
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
+                allow_patterns, deny_patterns = load_file_path_patterns("Write")
 
-            self.assertNotIn('*', allow_patterns)
-            self.assertIn('~/projects/**', allow_patterns)
+            self.assertNotIn("*", allow_patterns)
+            self.assertIn("~/projects/**", allow_patterns)
 
-    @patch.dict('os.environ', {}, clear=True)
+    @patch.dict("os.environ", {}, clear=True)
     def test_does_not_filter_file_patterns_when_disabled(self):
         """
         Given takeover disabled with native Read(*) and a hook Read pattern
@@ -352,10 +351,10 @@ allow = ["Write(~/projects/**)"]
         Then both '*' and '~/projects/**' are present (no filtering)
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             hook_toml = """
@@ -365,23 +364,19 @@ enabled = false
 [permissions]
 allow = ["Read(~/projects/**)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-            settings_json = {
-                'permissions': {
-                    'allow': ['Read(*)']
-                }
-            }
-            (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
+            settings_json = {"permissions": {"allow": ["Read(*)"]}}
+            (claude_dir / "settings.local.json").write_text(json.dumps(settings_json))
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_file_path_patterns('Read')
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
+                allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
             # Both patterns should be present (no filtering)
-            self.assertIn('*', allow_patterns)
-            self.assertIn('~/projects/**', allow_patterns)
+            self.assertIn("*", allow_patterns)
+            self.assertIn("~/projects/**", allow_patterns)
 
-    @patch.dict('os.environ', {}, clear=True)
+    @patch.dict("os.environ", {}, clear=True)
     def test_never_filters_toolguard_hook_file_patterns(self):
         """
         Given takeover enabled with the toolguard_hook itself allowing Read(*)
@@ -389,10 +384,10 @@ allow = ["Read(~/projects/**)"]
         Then the hook's '*' remains because toolguard_hook file patterns are never filtered
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             # toolguard_hook has Read(*) - should NOT be filtered even with takeover
@@ -403,15 +398,15 @@ enabled = true
 [permissions]
 allow = ["Read(*)"]
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_file_path_patterns('Read')
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
+                allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
             # * from toolguard_hook should remain (never filtered)
-            self.assertIn('*', allow_patterns)
+            self.assertIn("*", allow_patterns)
 
-    @patch.dict('os.environ', {}, clear=True)
+    @patch.dict("os.environ", {}, clear=True)
     def test_file_deny_patterns_not_filtered(self):
         """
         Given takeover enabled with native Read allow '*' and a native Read deny pattern
@@ -419,34 +414,31 @@ allow = ["Read(*)"]
         Then the deny pattern remains while the blanket allow '*' is filtered
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / 'project'
+            project_dir = Path(tmpdir) / "project"
             project_dir.mkdir()
-            (project_dir / '.git').mkdir()
-            claude_dir = project_dir / '.claude'
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
             claude_dir.mkdir()
 
             hook_toml = """
 [takeover_mode]
 enabled = true
 """
-            (claude_dir / 'toolguard_hook.toml').write_text(hook_toml)
+            (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
             settings_json = {
-                'permissions': {
-                    'allow': ['Read(*)'],
-                    'deny': ['Read(**/.env)']
-                }
+                "permissions": {"allow": ["Read(*)"], "deny": ["Read(**/.env)"]}
             }
-            (claude_dir / 'settings.local.json').write_text(json.dumps(settings_json))
+            (claude_dir / "settings.local.json").write_text(json.dumps(settings_json))
 
-            with patch('toolguard.config.find_project_root', return_value=project_dir):
-                allow_patterns, deny_patterns = load_file_path_patterns('Read')
+            with patch("toolguard.config.find_project_root", return_value=project_dir):
+                allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
             # Deny pattern should remain
-            self.assertIn('**/.env', deny_patterns)
+            self.assertIn("**/.env", deny_patterns)
             # Allow * should be filtered
-            self.assertNotIn('*', allow_patterns)
+            self.assertNotIn("*", allow_patterns)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

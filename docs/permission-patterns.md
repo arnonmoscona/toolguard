@@ -167,9 +167,24 @@ match is symmetric in either direction. You no longer need to list both `./bin/X
 | REGEX | None | None |
 | NATIVE | None | None |
 
-## Compound commands
+## Compound and multi-line commands
 
-Toolguard properly handles compound commands with shell operators.
+Toolguard parses each Bash command with a formal grammar, splits it into its individual
+sub-commands, and validates each one separately. The **strictest result wins**:
+
+1. If ANY sub-command is denied -> the whole command is **denied**.
+2. Otherwise if ANY sub-command requires "ask" -> the whole command **asks**.
+3. Otherwise (all allowed) -> the whole command is **allowed**.
+
+### The governing principle: when in doubt, ASK
+
+Toolguard only auto-decides constructs it can decompose with confidence. Anything it cannot
+safely break down -- a complex control structure, code in a non-bash interpreter, a construct
+it does not model -- resolves to **ASK** (a prompt), never to a silent allow of an
+undecomposed blob and never to a hard failure that would block a legitimate workflow. This is
+the single most important thing to understand about how multi-line input is handled.
+
+### Operators
 
 **Supported operators**: `&&`, `||`, `;`, `|`, `&`
 
@@ -181,68 +196,114 @@ Toolguard properly handles compound commands with shell operators.
 | `\|` | Pipe | Connect stdout of first to stdin of second |
 | `&` | Background | Run command in background |
 
-**Behavior**:
-
-1. The command is parsed and split into sub-commands.
-2. Each sub-command is validated separately.
-3. The strictest response wins:
-   - If ANY sub-command is denied -> the whole command is denied.
-   - Otherwise if ANY sub-command requires "ask" -> the whole command asks.
-   - Otherwise all allowed -> the whole command is allowed.
-
-**Example**:
-
 ```bash
 git status && rm -rf /    # DENIED - rm -rf is blocked even though git status is allowed
-ls -la | grep foo         # Both parts must be allowed
-sleep 10 &                # Background command - sleep is validated
+ls -la | grep foo         # both stages must be allowed
+sleep 10 &                # background command - sleep is validated
 ```
 
-### Command substitution support
+### Multi-line commands and scripts
 
-Toolguard extracts and validates commands inside substitutions:
+Claude Code routinely issues multi-line Bash (several statements, or a whole script) in one
+tool call. Toolguard decomposes these the same way it decomposes `;`-separated commands:
 
-| Construct | Example | Status |
-|-----------|---------|--------|
-| Command substitution | `$(rm -rf /)` | Inner command extracted and validated |
-| Backtick substitution | `` `rm -rf /` `` | Inner command extracted and validated |
-| Subshells | `(cd /tmp && rm -rf *)` | Inner commands extracted and validated |
-| Brace groups | `{ cmd1; cmd2; }` | Inner commands extracted and validated |
-
-**Nested constructs** are supported up to 5 levels deep:
+| Form | Handling |
+|------|----------|
+| Newline-separated statements | Each line is a separate statement (a newline acts like `;`). Every statement is validated. |
+| Blank lines / leading-trailing padding | Ignored. |
+| CRLF (`\r\n`) line endings | Normalized; handled identically to `\n`. |
+| Trailing operator continuation (line ends with `&&`, `\|\|`, or `\|`) | Joined with the next line into ONE compound command. |
+| Backslash line continuation (`\` then newline) | Joined into a single logical line before matching. |
+| `#` comments | Stripped (a `#` only starts a comment at a word boundary, so `http://x#frag` is kept as an argument). |
 
 ```bash
-echo $(cat $(find . -name '*.txt'))
-# All three commands validated: echo, cat, find
-
-(cd /tmp && rm -rf *)
-# Both commands validated: cd, rm -rf (denied)
+# this whole block is validated statement-by-statement:
+git status
+echo "building" && make
+rm -rf /            # <- this line alone causes the whole block to be DENIED
 ```
 
-### Current limitations
+### Command substitution and subshells
 
-The following bash constructs are **not currently parsed** -- their inner commands are
-treated as opaque:
+Commands **inside** substitutions, subshells, and brace groups are extracted and validated:
 
-| Construct | Example | Status |
-|-----------|---------|--------|
-| Process substitution | `<(cmd)` or `>(cmd)` | Inner command not validated |
-| Control structures | `if/for/while/case` | Body commands not validated |
+| Construct | Example | Handling |
+|-----------|---------|----------|
+| Command substitution | `rm $(ls)` | inner `ls` validated (and the outer `rm`) |
+| Backtick substitution | `` rm `ls` `` | inner `ls` validated |
+| Subshells | `(cd /tmp && rm -rf *)` | inner `cd`, `rm -rf` validated |
+| Brace groups | `{ cmd1; cmd2; }` | inner commands validated |
 
-**Note**: Analysis of historical command logs shows Claude Code rarely generates shell
-control structures at the start of commands. When `if/for/while` appear, they are typically
-inside Python one-liners or awk scripts where they are treated as string arguments rather
-than shell parsing constructs. This makes the risk of bypassing toolguard via control
-structures very low in practice.
+Nested substitutions are supported (e.g. `echo $(ls $(pwd))` validates `echo`, `ls`, and
+`pwd`).
 
-**Mitigation**: Use deny patterns that match dangerous commands even when nested. Remember
-that extended-syntax prefixes must live inside the tool wrapper:
+### Heredocs and the `__HEREDOC_TO_<sink>__` sentinel
 
-```json
-{
-  "deny": [
-    "Bash([regex]rm\\s+-rf)",
-    "Bash([regex]rm\\s+.*-rf)"
-  ]
-}
+A heredoc body (`cmd <<EOF ... EOF`) is **data fed to a command**, not shell to parse. Before
+matching, toolguard removes the body and presents the heredoc-bearing command with an
+all-letters sentinel argument, **`__HEREDOC_TO_<sink>__`**, where `<sink>` is the ultimate
+consumer of the body (it follows the pipe). What happens next depends on that sink:
+
+| Sink kind | Examples | Handling |
+|-----------|----------|----------|
+| **Non-executor** | `cat`, `tee`, `pbcopy` | The body is data. The bearer is matched normally, e.g. `cat __HEREDOC_TO_pbcopy__`. The body is never parsed as commands. |
+| **Bash-family shell** | `bash`, `sh`, `dash`, `ksh`, `zsh` | The body IS bash; it is decomposed and each inner command is validated. |
+| **Foreign interpreter / non-bash shell** | `python`, `node`, `perl`, `ruby`, `php`, `Rscript`, `uv`, `csh`, `fish` | The body is opaque code -> **ASK floor** (see below). |
+
+The sentinel uses only `[A-Za-z0-9_]`, so it is easy to match in rules without escaping. The
+bearer command keeps its other arguments, so a dangerous bearer is still caught
+(`tee /etc/passwd <<EOF` -> `tee /etc/passwd __HEREDOC_TO_tee__`, still subject to a `tee` or
+`Write` deny). Examples:
+
 ```
+# allow heredocs only into known data sinks:
+Bash([regex]__HEREDOC_TO_(cat|tee|pbcopy)__)
+
+# match any heredoc at all (e.g. to deny or audit):
+Bash([regex]__HEREDOC_TO_)
+```
+
+> **Safety:** never *allow* a heredoc whose sink is an executor (`bash`, `python`, ...). That
+> would allow an arbitrary, unreviewed body to run -- a blanket-allow-class risk. Toolguard
+> enforces an ASK floor on executor-sink heredocs (a plain `allow` cannot downgrade it; an
+> explicit `deny` still applies). See [Security](security.md#multi-line-commands-and-the-ask-safe-guarantee).
+
+### Inline interpreter code (`-c` / `-e` / `-r`)
+
+Code passed inline to an interpreter is handled by the same executor rule as heredocs:
+
+| Form | Handling |
+|------|----------|
+| `bash -c "<bash>"` (and `sh`/`dash`/`ksh`/`zsh -c`) | The inner string is bash -> decomposed and each command validated. |
+| `python -c "..."`, `node -e "..."`, `perl -e`, `ruby -e`, `php -r`, `uv run python -c "..."` | Opaque foreign code -> **ASK floor** (a broad allow such as `uv run*` cannot downgrade it). |
+| `python script.py`, `node app.js` (a named script, not inline code) | Matched normally -- only *inline* code gets the floor. |
+
+### Control structures
+
+| Construct | Handling |
+|-----------|----------|
+| Simple `if ... then ... fi`, `for/while ... do ... done` | Decomposed when non-nested, with no `else`/`elif`, a linear body, and a condition that is a plain command or a POSIX `[ ... ]` test. The condition and body commands are validated. |
+| `case ... esac`; any `else`/`elif`; nested control structures; `[[ ... ]]` / `(( ... ))` conditions | Too complex to decompose safely -> **ASK**. |
+
+A POSIX `[ ... ]` test is treated as a test, not a command (it needs no rule); any command
+substitution inside it is still extracted and validated.
+
+### Process substitution
+
+Process substitution `<(...)` / `>(...)` is **not** decomposed today; a command using it
+resolves to **ASK** (it is not silently allowed). Example: `diff <(sort a) <(sort b)` -> ASK.
+
+### Limitations (summary)
+
+These resolve to **ASK** rather than being auto-decided -- safe, but they will prompt:
+
+- Complex / nested control structures, `case`, and `if/else`.
+- Inline code in a non-bash interpreter (`python -c`, `node -e`, ...) and heredocs fed to one.
+- Process substitution `<(...)` / `>(...)`.
+- Any input the grammar cannot decompose.
+
+For the strongest protection, still add explicit `deny` / [`[hard_deny]`](configuration.md#configuration-reference)
+rules for destructive commands (e.g. `Bash([regex]rm\\s+-rf)`) so they hold regardless of how
+a command is constructed -- see [Security: defense in depth](security.md#maintaining-your-toolguard-configuration).
+
+Note that the design is intentionally simplified. It does not attempt to handle situations that would make toolguard code overly complex, hard to reason about, or error-prone. It also does not attempt to cover some situations that are plausible, but we have not seen convincing evidence that Claude Code actually uses them frequently enough. This is not a bash interpreter, nor is it a general security tool. Toolguard is focused on governing Claude Code behavior and making the configuration of the rules simple and easy to author and understand.
