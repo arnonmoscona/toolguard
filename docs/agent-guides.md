@@ -39,6 +39,9 @@ matter (not just `Bash`).
    Verify the hook runs by piping a sample event (it expects a JSON PreToolUse event on
    stdin, not a bare command) and checking for a JSON `permissionDecision`:
    `printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"hook_event_name":"PreToolUse"}' | ~/.local/bin/toolguard`
+   To keep a git install current, see
+   [Keeping toolguard up to date](quickstart.md#keeping-toolguard-up-to-date)
+   (`uv tool upgrade toolguard`, or the `toolguard-update-check` helper).
 
 2. **Register hooks** -- one PreToolUse matcher per governed tool, plus the SessionStart
    alert. Choose the scope first: for **one project** put the block in that project's

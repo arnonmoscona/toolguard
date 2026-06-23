@@ -42,8 +42,8 @@ printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"hook_event_name":
 (Feeding a bare command such as `echo ls | toolguard` is *not* a valid test -- it is not a
 hook event, so toolguard fail-closes with a `deny` and a JSON-parse reason.)
 
-Upgrade later with `uv tool upgrade toolguard` (or `uv tool install --force ...` from a local
-checkout).
+Upgrade later with `uv tool upgrade toolguard` -- see
+[Keeping toolguard up to date](#keeping-toolguard-up-to-date) below.
 
 **Alternative -- editable install (for development).** To hack on toolguard itself, install
 it editable instead:
@@ -57,6 +57,63 @@ With this style the same entry points are installed into the project's virtualen
 `~/.local/bin` -- you point the hooks at `<checkout>/.venv/bin/toolguard` and
 `<checkout>/.venv/bin/toolguard-session-start`. The
 [editable-install variant](#alternative-editable-install) in step 1 shows how.
+
+## Keeping toolguard up to date
+
+When you install from git (`git+https://...`), uv pins the exact commit it resolved. uv cannot
+do a *version*-tracking upgrade from a git source -- it follows the branch HEAD -- so toolguard
+ships a small `toolguard-update-check` command that compares your installed commit against the
+remote HEAD. (Once toolguard is published to a package index this becomes a plain version check
+and `uv tool upgrade` handles it natively.) Pick whichever of the three options below suits you.
+
+**1. Manual (simplest).** Upgrade whenever you like -- plain `uv tool upgrade` re-resolves the
+remote HEAD and rebuilds if it moved:
+
+```bash
+uv tool upgrade toolguard
+```
+
+To peek first without upgrading, run `toolguard-update-check` (exit code `0` = up to date,
+`1` = update available, `2` = could not determine, e.g. offline or not a git install).
+
+**2. Throttled startup alert (recommended).** Add this to `~/.zshrc` (or `~/.bashrc`) to be
+*told* when an update exists -- at most once a day, network-free the rest of the time, and it
+never upgrades on its own:
+
+```bash
+toolguard_update_alert() {
+  local stamp="$HOME/.cache/toolguard/update-check.stamp"
+  mkdir -p "$(dirname "$stamp")"
+  # only check once per 24h
+  if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
+    touch "$stamp"
+    toolguard-update-check --quiet   # prints only when an update is available
+  fi
+}
+toolguard_update_alert
+```
+
+**3. Auto-update (opt-in).** Same once-a-day throttle, but it *installs* the update when one is
+found:
+
+```bash
+toolguard_auto_update() {
+  local stamp="$HOME/.cache/toolguard/update-check.stamp"
+  mkdir -p "$(dirname "$stamp")"
+  if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
+    touch "$stamp"
+    toolguard-update-check --upgrade   # upgrades only if behind
+  fi
+}
+toolguard_auto_update
+```
+
+> **Security caveat for auto-update.** This pulls and runs whatever is at the remote HEAD into
+> your global permission hook, with no human review at pull time. That is fine if *you* are the
+> sole author and gatekeeper of the repository you track (you reviewed it when you pushed).
+> It is riskier if you track a repository you do not control -- a malicious or broken push
+> would silently become your active permission authority. When in doubt, use option 2 (alert)
+> and upgrade by hand.
 
 ## 1. Register the hooks
 

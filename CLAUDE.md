@@ -35,6 +35,18 @@ the grammar is not a full bash grammar -- it is only intended for the sole purpo
 breaking up compound commands from patterns often used by Claude Code. Canopy creates no
 runtime dependencies as the generated Python code depends only on the standard library.
 
+### Claude bad tendencies
+
+Claude has a strong tendency to implement parsing using regex and pure python. Often when instructed to make grammar changes, even if explicitly told to use the PEG parser and canopy, it would still use convoluted python code instead.
+
+The solution for this is to:
+* Always use the feature-coder subagent for the implementation
+* Require feature-coder to do the grammar changes first **only** in the PEG grammar file, validating by running canopy on it but without making any python file changes, which then gets reviewed before proceeding
+* In a second phase, after reviewing the PEG changes, feature-coder is invoked to complete the python side of the change
+* Even then it needs review because
+  * It may still make new weird changes in the process - ones that should still belong in the PEG grammar
+  * And it can create overly complex tree walking code, where it should really update the intermediate representation first (IR), and then end up with simpler, more readable processing code 
+
 ## Unit testing
 
 Tests use the standard-library `unittest` framework (NOT pytest -- pytest is not
@@ -121,6 +133,15 @@ See the global memory management guidelines (loaded via `~/.claude/common-memory
 
 When creating memories in the context of a specific ticket, add the ticket ID as a tag
 (e.g., `TOO-14`).
+
+## pre-push checks
+
+When we're about to wrap up a ticket, and it seems that I am ready to push a set of changes to github, check the following and remind me:
+
+* Have we verified that out code coverage is good enough?
+* Did we do necessary documentation updates (you would know, as you participate)
+* Should I bump the version in `pyproject.toml`
+* Do we need any release notes?
 
 ## Technical notes
 

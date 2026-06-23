@@ -1,6 +1,6 @@
 [project]
 name = "toolguard"
-version = "0.3.0"
+version = "0.3.1"
 description = "Pre-tool-use hook permission system for Claude Code"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -10,6 +10,7 @@ dependencies = []
 
 toolguard = "toolguard.hook:main"
 toolguard-session-start = "toolguard.session_start:main"
+toolguard-update-check = "toolguard.update_check:main"
 
 [dependency-groups]
 dev = [
