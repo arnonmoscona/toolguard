@@ -1306,5 +1306,75 @@ class TestLogAllowedCommand(unittest.TestCase):
         )
 
 
+class TestHookArgparseAndIsatty(unittest.TestCase):
+    """
+    Tests for the argparse --help flag and the interactive (TTY) guard added to
+    hook.main (TOO-16 Change 2+3).
+    """
+
+    def test_help_flag_exits_zero(self):
+        """
+        Given --help on the command line
+        When main is called
+        Then argparse exits with code 0 (informational, not an error)
+        """
+        with (
+            patch.object(__import__("sys"), "argv", ["toolguard", "--help"]),
+            patch("sys.stdout", StringIO()),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_isatty_true_prints_explanation_and_does_not_read_stdin(self):
+        """
+        Given a terminal invocation (sys.stdin.isatty() returns True)
+        When main is called
+        Then it prints an explanation to stderr, exits 0, and does not block on stdin
+        """
+        err = StringIO()
+        stdin_mock = StringIO("")  # empty -- would cause a parse error if read
+
+        with (
+            patch("sys.stdin", stdin_mock),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stderr", err),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+
+        self.assertEqual(ctx.exception.code, 0)
+        # A meaningful explanation should appear in stderr
+        self.assertIn("Claude Code", err.getvalue())
+
+    def test_isatty_false_processes_piped_event_normally(self):
+        """
+        Given a piped (non-TTY) invocation with a valid Bash allow event
+        When main is called (sys.stdin.isatty() returns False)
+        Then the hook processes the event and outputs a JSON permissionDecision
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+        config = _fake_config(governed=["Bash"], bash=(["git *"], []))
+
+        with (
+            patch("sys.stdin", StringIO(json.dumps(hook_input))),
+            patch("sys.stdin.isatty", return_value=False),
+            patch("sys.stdout", new_callable=StringIO) as mock_stdout,
+            patch("toolguard.hook.load_configuration", return_value=config),
+            patch("toolguard.hook.log_command"),
+        ):
+            try:
+                main()
+            except SystemExit:
+                pass
+
+        output = json.loads(mock_stdout.getvalue())
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -60,21 +60,46 @@ With this style the same entry points are installed into the project's virtualen
 
 ## Keeping toolguard up to date
 
-When you install from git (`git+https://...`), uv pins the exact commit it resolved. uv cannot
-do a *version*-tracking upgrade from a git source -- it follows the branch HEAD -- so toolguard
-ships a small `toolguard-update-check` command that compares your installed commit against the
-remote HEAD. (Once toolguard is published to a package index this becomes a plain version check
-and `uv tool upgrade` handles it natively.) Pick whichever of the three options below suits you.
+Toolguard ships a `toolguard-update-check` command that works for both install kinds:
 
-**1. Manual (simplest).** Upgrade whenever you like -- plain `uv tool upgrade` re-resolves the
-remote HEAD and rebuilds if it moved:
+- **Git install** (`uv tool install git+https://...`): uv pins the exact commit it resolved. uv
+  cannot do a *version*-tracking upgrade from a git source, so the checker compares your installed
+  commit against the remote HEAD. With `--upgrade` it runs `uv tool upgrade` automatically.
+- **Local/editable install** (`uv tool install /path/to/toolguard` or `uv pip install -e .`):
+  the checker compares your checkout's `HEAD` against the remote `origin HEAD`. Remediation is
+  manual (it prints the `git pull` command and, for non-editable installs, the reinstall step);
+  `--upgrade` prints the same manual steps without running anything (to avoid mutating your
+  working tree).
+- **Unknown**: if neither kind can be determined (no `direct_url.json` and no discoverable git
+  repo), the checker exits with code 2 and a message explaining the situation.
+
+Exit codes: `0` = up to date, `1` = update available, `2` = could not determine (offline, or
+install kind is unknown).
+
+(Once toolguard is published to a package index this whole commit-comparison becomes a plain
+version check and `uv tool upgrade` handles it natively; `toolguard-update-check` can then be
+retired.)
+
+Pick whichever of the three options below suits you.
+
+**1. Manual (simplest).**
+
+For a git install, upgrade whenever you like:
 
 ```bash
 uv tool upgrade toolguard
 ```
 
-To peek first without upgrading, run `toolguard-update-check` (exit code `0` = up to date,
-`1` = update available, `2` = could not determine, e.g. offline or not a git install).
+For a local/editable install, pull in your checkout (and reinstall if not editable):
+
+```bash
+git -C /path/to/toolguard pull
+# non-editable only (uv tool install /path):
+uv tool install --force /path/to/toolguard
+```
+
+To check first without upgrading, run `toolguard-update-check`. For a git install it reports
+whether you are behind; for a local install it reports and prints the manual steps.
 
 **2. Throttled startup alert (recommended).** Add this to `~/.zshrc` (or `~/.bashrc`) to be
 *told* when an update exists -- at most once a day, network-free the rest of the time, and it
@@ -93,8 +118,12 @@ toolguard_update_alert() {
 toolguard_update_alert
 ```
 
-**3. Auto-update (opt-in).** Same once-a-day throttle, but it *installs* the update when one is
-found:
+For a **local install**, when `toolguard-update-check --quiet` prints (meaning you are behind),
+it also prints the manual `git pull` / reinstall steps. No action is taken automatically.
+
+**3. Auto-update (opt-in, git install only).** Same once-a-day throttle, but it *installs* the
+update when one is found. This only auto-runs for a **git install**; for a local install it
+prints the manual steps instead (never auto-mutates your working tree):
 
 ```bash
 toolguard_auto_update() {
@@ -102,7 +131,7 @@ toolguard_auto_update() {
   mkdir -p "$(dirname "$stamp")"
   if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
     touch "$stamp"
-    toolguard-update-check --upgrade   # upgrades only if behind
+    toolguard-update-check --upgrade   # auto-upgrades git installs; prints steps for local
   fi
 }
 toolguard_auto_update

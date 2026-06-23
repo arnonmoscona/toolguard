@@ -693,5 +693,77 @@ class TestMain(unittest.TestCase):
         self.assertEqual(exit_code, 0)
 
 
+class TestSessionStartArgparseAndIsatty(unittest.TestCase):
+    """
+    Tests for the argparse --help flag and the interactive (TTY) guard added to
+    session_start.main (TOO-16 Change 2+3).
+    """
+
+    def test_help_flag_exits_zero(self):
+        """
+        Given --help on the command line
+        When main is called
+        Then argparse exits with code 0 (informational, not an error)
+        """
+        import sys
+
+        with (
+            patch.object(sys, "argv", ["toolguard-session-start", "--help"]),
+            patch("sys.stdout", StringIO()),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_isatty_true_prints_explanation_and_does_not_read_stdin(self):
+        """
+        Given a terminal invocation (sys.stdin.isatty() returns True)
+        When main is called
+        Then it prints an explanation to stderr, exits 0, and does not read from stdin
+        """
+        err = StringIO()
+        # Empty stdin -- any attempt to parse it would fail cleanly but shouldn't happen
+        stdin_mock = StringIO("")
+
+        with (
+            patch("sys.stdin", stdin_mock),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stderr", err),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+
+        self.assertEqual(ctx.exception.code, 0)
+        # A meaningful explanation mentioning Claude Code should appear in stderr
+        self.assertIn("Claude Code", err.getvalue())
+
+    def test_isatty_false_processes_piped_event_normally(self):
+        """
+        Given a piped (non-TTY) invocation with a valid SessionStart payload
+        When main is called (sys.stdin.isatty() returns False)
+        Then the hook processes the event normally (exits 0, no traceback)
+        """
+        payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
+        config = MagicMock(spec=Configuration)
+        config.takeover_mode.return_value = TakeoverConfig(
+            enabled=False,
+            ignored_allow_patterns=(),
+            additional_ignored_patterns=(),
+            no_match_fallback="deny",
+            conflict=None,
+        )
+        config.project_root = None
+
+        with (
+            patch("sys.stdin", StringIO(payload)),
+            patch("sys.stdin.isatty", return_value=False),
+            patch("toolguard.session_start.load_configuration", return_value=config),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+
+        self.assertEqual(ctx.exception.code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

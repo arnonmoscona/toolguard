@@ -14,6 +14,7 @@ Output: JSON via stdout with permission decision
 Exit code: Always 0 (errors communicated via JSON output)
 """
 
+import argparse
 import json
 import re
 import sys
@@ -588,24 +589,74 @@ def resolve_bash_permission_detailed(
     return decision, reason, overrides
 
 
+def _build_hook_argparser() -> argparse.ArgumentParser:
+    """
+    Build the argument parser for the toolguard PreToolUse hook.
+
+    Returns:
+        Configured :class:`~argparse.ArgumentParser` with a description explaining
+        that this is a Claude Code hook (not meant to be run directly by humans).
+    """
+    parser = argparse.ArgumentParser(
+        prog="toolguard",
+        description=(
+            "Claude Code PreToolUse permission hook. "
+            "Reads a JSON hook event on stdin and writes a JSON permissionDecision "
+            "to stdout. This is invoked automatically by Claude Code -- "
+            "it is not intended to be run directly from a terminal. "
+            "To smoke-test the install, pipe a sample event:\n\n"
+            '  printf \'{"tool_name":"Bash","tool_input":{"command":"ls -la"},'
+            '"hook_event_name":"PreToolUse"}\' | toolguard'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    return parser
+
+
 def main() -> None:
     """
     Main hook entry point.
 
     Algorithm:
-    1. Load environment configuration
-    2. Run startup validation (once per session) - logs warnings for config issues
-    3. Parse input from stdin
-    4. Check if tool is governed (configurable list)
-    5. Determine tool type (file path or command)
-    6. For file tools: extract file_path, check against glob patterns
-    7. For command tools: extract command, check against patterns
-    8. Log decision
-    9. Output decision as JSON to stdout
+    1. Parse args (provides --help; does NOT consume stdin).
+    2. Guard against interactive (TTY) invocation: print an explanation and exit.
+    3. Load environment configuration.
+    4. Run startup validation (once per session) - logs warnings for config issues.
+    5. Parse input from stdin.
+    6. Check if tool is governed (configurable list).
+    7. Determine tool type (file path or command).
+    8. For file tools: extract file_path, check against glob patterns.
+    9. For command tools: extract command, check against patterns.
+    10. Log decision.
+    11. Output decision as JSON to stdout.
 
     Exit codes:
-    - Always exits with 0 (errors communicated via JSON)
+    - Always exits with 0 (errors communicated via JSON), EXCEPT when --help
+      is requested (argparse exits 0) or when stdin is a TTY (exits 0 after
+      printing the informational message).
     """
+    parser = _build_hook_argparser()
+    # parse_known_args() is used instead of parse_args() so that the hook still
+    # works correctly when invoked via the test runner (which places test names
+    # in sys.argv). This hook accepts NO arguments -- it only reads stdin -- so
+    # unknown args are silently discarded. --help still exits 0 via argparse.
+    parser.parse_known_args()
+
+    # Interactive guard: if a human runs 'toolguard' in a terminal without piping
+    # a JSON event, do not block on stdin. Print a brief explanation and exit.
+    # Claude always pipes JSON (not a TTY), so this guard never fires in real use.
+    # Exit code 0: informational, not an error (Arnon: change to non-zero if preferred).
+    if sys.stdin.isatty():
+        print(
+            "toolguard: this is a Claude Code PreToolUse hook, not a standalone command.\n"
+            "It reads a JSON hook event on stdin and is invoked automatically by Claude.\n"
+            "To smoke-test: "
+            'printf \'{"tool_name":"Bash","tool_input":{"command":"ls -la"},'
+            '"hook_event_name":"PreToolUse"}\' | toolguard',
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
     try:
         # Load environment configuration
         env_config = get_env_config()

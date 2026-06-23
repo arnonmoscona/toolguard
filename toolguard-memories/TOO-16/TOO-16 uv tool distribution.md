@@ -106,3 +106,30 @@ Empirically verified against a real version bump (pushed commit e3e2698, 0.2.0 -
 - Hook still returns valid decisions post-upgrade; upgrade is idempotent.
 - NOTE for the shipped entry point: read the installed commit via `importlib.metadata`
   (the package can introspect its own `direct_url.json`) rather than a filesystem glob.
+
+## Follow-up requirements (2026-06-23, Arnon) -- update-check v2 + interactive guard
+
+Version bumped to 0.3.1 (Arnon).
+
+1. **update_check must support BOTH install kinds, not just git.** Current `installed_origin`
+   only handles `vcs_info` (a `git+https` uv-tool install). A `uv tool install /local/path`
+   and an editable `uv pip install -e .` record `dir_info` (a `file://` checkout path), no
+   `vcs_info`, so the checker punts (exit 2) -- which makes the quickstart "Keeping toolguard
+   up to date" section MISLEADING (it offers the local-path install). Fix: detect kind =
+   git (vcs_info) / local (dir_info file:// path, or discovered by walking up from the module's
+   own `__file__` to a `.git`) / unknown (punt, exit 2). For local: compare the checkout's
+   `git rev-parse HEAD` vs `git ls-remote origin HEAD`; remediation is manual (`git pull`, plus
+   `uv tool install --force <repo>` / `uv tool upgrade <dist> --reinstall` for a non-editable
+   local install; editable picks up source live). `--upgrade` must NOT auto-mutate a working
+   tree -- print manual steps for local installs; only auto-run `uv tool upgrade` for the git kind.
+2. **Interactive-run guard on the hooks.** `toolguard` (hook.main) and `toolguard-session-start`
+   (session_start.main) should detect `sys.stdin.isatty()` and, instead of blocking on stdin,
+   print a short explanation that they are Claude Code hooks meant to be invoked by Claude with
+   a JSON event on stdin -- then exit. Safe: Claude always pipes JSON (not a TTY), so the hook
+   path is unaffected.
+3. Update the quickstart "Keeping toolguard up to date" section to be accurate for both kinds.
+
+4. **`--help` on all three console scripts.** `toolguard-update-check` already has argparse
+   (free `--help`). Add `--help`/`-h` to `toolguard` (hook.main) and `toolguard-session-start`
+   (session_start.main) -- describe that they are Claude Code hooks. Adding argparse to the
+   hooks must not break normal invocation (Claude calls them with NO args + piped JSON).

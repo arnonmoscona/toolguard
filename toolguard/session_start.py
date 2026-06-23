@@ -26,6 +26,7 @@ Output: A short conflict summary on stdout when conflicts exist; nothing otherwi
 Exit code: Always 0 (a SessionStart hook must never block the session).
 """
 
+import argparse
 import json
 import os
 import sys
@@ -205,6 +206,26 @@ def _detect_conflicts(cwd: Optional[str]):
     return static_conflict, dynamic_conflict
 
 
+def _build_session_start_argparser() -> argparse.ArgumentParser:
+    """
+    Build the argument parser for the toolguard SessionStart hook.
+
+    Returns:
+        Configured :class:`~argparse.ArgumentParser` with a description explaining
+        that this is a Claude Code SessionStart hook (not meant to be run directly).
+    """
+    return argparse.ArgumentParser(
+        prog="toolguard-session-start",
+        description=(
+            "Claude Code SessionStart hook. "
+            "Reads a JSON SessionStart event on stdin and prints a brief conflict "
+            "summary to stdout when configuration conflicts exist. "
+            "This is invoked automatically by Claude Code at the start of each session -- "
+            "it is not intended to be run directly from a terminal."
+        ),
+    )
+
+
 def main() -> None:
     """
     Main entry point for the SessionStart hook.
@@ -216,8 +237,29 @@ def main() -> None:
     hook must never block or break a session.
 
     Exit codes:
-        0: Always.
+        0: Always (including --help, isatty guard, and error cases).
     """
+    parser = _build_session_start_argparser()
+    # parse_known_args() is used instead of parse_args() so that the hook still
+    # works correctly when invoked via the test runner (which places test names
+    # in sys.argv). This hook accepts NO arguments -- it only reads stdin -- so
+    # unknown args are silently discarded. --help still exits 0 via argparse.
+    parser.parse_known_args()
+
+    # Interactive guard: if a human runs 'toolguard-session-start' in a terminal
+    # without piping a JSON event, do not block on stdin. Print a brief explanation
+    # and exit. Claude always pipes JSON (not a TTY), so this guard is inert in real use.
+    # Exit code 0: informational (Arnon: change to non-zero if preferred).
+    if sys.stdin.isatty():
+        print(
+            "toolguard-session-start: this is a Claude Code SessionStart hook, "
+            "not a standalone command.\n"
+            "It reads a JSON SessionStart event on stdin and is invoked automatically "
+            "by Claude Code at the start of each session.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
     try:
         payload = _parse_session_start_input()
         cwd = payload.get("cwd") or os.getcwd()
