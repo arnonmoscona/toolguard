@@ -11,7 +11,56 @@ tags:
 # TOO-8 Follow-up: Loader Deletion and Takeover Coverage
 
 ## Task Summary
-Two code follow-ups to finish TOO-8 (hierarchical config) in toolguard.
+Behavior-preserving refactor: eliminate near-verbatim duplication between `toolguard/tools/decision.py` and `hook.py` resolver functions by creating a shared `toolguard/resolve.py` module.
+
+TICKET: TOO-15/TOO-11 P0 Clean-up
+DATE: 2026-06-25
+
+## Files Involved
+- `toolguard/hook.py` - source of pure resolver functions to move
+- `toolguard/tools/decision.py` - currently duplicates/reimplements logic
+- `toolguard/resolve.py` - NEW module to create with moved pure functions
+
+## What to Move from hook.py to resolve.py
+Functions to move (pure, no logging/exit):
+- `resolve_bash_permission_detailed` (lines 535-589)
+- `resolve_file_path_permission_detailed` (lines 417-467)
+- `_check_file_path_hard_deny` (lines 368-414)
+- `_decide_file_path_at_level_detailed` (lines 251-285)
+- `_anchor_file_pattern` (lines 193-225)
+- `_match_file_path_pattern` (lines 228-248)
+
+## Do NOT Move
+- `load_file_path_patterns` - has optional param loading, keep in hook
+- `FILE_PATH_TOOLS` constant - keep in hook, re-export from resolve.py if needed
+- `_format_conflict_message` (references override/provenance objects in hook context)
+- `_log_conflict_override` (has logging)
+- `_log_takeover_enabled_conflict` (has logging)
+- `_log_allowed_command` (has logging)
+- `_parse_compound_match_details` (utility for logging)
+- `main()` and all its supporting infra
+
+## Key Requirements
+1. Create `toolguard/resolve.py` with moved pure functions
+2. Update `hook.py` to import from `toolguard.resolve` (keep re-exports for backwards compat)
+3. Refactor `decision.py` to DELETE duplicated `_decide_bash`/`_decide_file_path` and DELEGATE to `resolve.*` instead
+4. No import cycles - resolve.py may import config, permissions, compound, patterns, normalization
+5. All 905 tests must still pass
+6. Add one anti-drift test in test/unit/test_tools_decision.py or test_resolve.py
+
+## Backwards Compatibility
+- Keep moved names importable from `hook` via re-exports
+- Check test files for `hook.<name>` references to underscore-prefixed helpers
+
+## Testing
+- Run: `uv run python -m unittest discover -s test -t .`
+- Must remain at 905 passing
+- Add anti-drift test in test/unit/
+
+## Out of Scope
+- Do NOT move fail-closed-when-nothing-configured pre-checks from main()
+- Do NOT change any decision semantics
+- Do NOT run ruff format
 
 ## Task 1: Migrate migrate_permissions.py off legacy loader, then delete it
 
@@ -86,3 +135,34 @@ config.py:1131: `if takeover.enabled and layer.is_native and pattern in ignored:
 2. `uv run ruff check .` clean
 3. `grep -rn load_takeover_mode_config .` shows zero references in code/comments/tests
 4. No git operations
+
+
+---
+## TOO-15 P0 Analyzers Slice (2026-06-25)
+
+Four new modules: redundancy.py, danger.py, takeover_audit.py, sorters.py
+Pre-implementation baseline: 833 tests passing.
+Featherhill corpus at /home/arnon/projects/flowers/featherhill/ used for realistic tests.
+
+## TOO-15/TOO-11 Task (2026-06-25)
+Two P0-end cleanups in toolguard project.
+
+### PART 1: Unify duplicate sort logic
+- Create `toolguard/rule_sort.py` with canonical functions moved from migrate_permissions.py
+- Update migrate_permissions.py to import from rule_sort (re-export for backward compat)
+- Replace sorters.py to delegate to rule_sort
+- Update test_tools_sorters.py to reflect canonical (tool-priority) order
+
+### PART 2: Trim danger.py secrets detector
+- Remove `secret`, `password`, `credentials` from `_SECRET_PATTERNS`
+- Keep file-indicator patterns only
+
+### Baseline: 910 tests all passing
+
+
+# Feature Coder Task Recall
+# Feature Coder Task Recall - TOO-15/TOO-11 Provenance
+
+## Task
+P0-end cleanup: Surface permission PROVENANCE through shared resolver layer for both Bash and file tools.
+Baseline: 919 tests, started 14:46.

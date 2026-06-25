@@ -8,6 +8,32 @@ Toolguard is a drop-in replacement for the native Claude Code permissions system
 `Bash`, `Read`, `Write`, and `Edit`. It is backwards compatible (as of January 2026), adds
 extended capabilities, and works around several long-standing bugs in the native system.
 
+## Why Toolguard?
+
+Key advantages over the native Claude Code permission system:
+
+- **Reliability** -- works around reported, long-unfixed bugs in the native permission
+  system, such as re-prompting for permissions that were already granted (which can stall an
+  unattended session) and broken `**` globstar support for `Write`/`Edit`.
+- **Granularity** -- parses compound commands and breaks heredocs and redirected script
+  inputs down into their constituent sub-commands (via the `__HEREDOC_TO_<sink>__` model), so
+  interpreter-fed payloads that the native system treats as one opaque blob are each governed
+  on their own.
+- **Richer permission syntax** -- a strict superset of Claude's pattern syntax for the
+  governed tools (adds regex, true globstar, and Claude 2.10 native word matching), and it
+  extends to additional tools (JetBrains terminal, custom MCP command tools, and more).
+- **Auditability** -- a full, structured log of every permission decision, with provenance:
+  which rule, at which configuration level, made the call.
+- **A disciplined answer to "approval fatigue"** -- instead of letting the model auto-approve
+  its own tool calls in the moment, toolguard enforces deterministic, transparent,
+  user-owned rules. Future releases will keep addressing approval fatigue with the same
+  discipline and rigor.
+- Automated rule and configuration **security audits** -- flagging risky allow rules across
+  the whole configuration hierarchy.
+- **Permission-rule maintenance automation** -- rule organization and sorting, consolidation,
+  and migration up the configuration hierarchy.
+- **Automatic rule discovery** -- suggesting new rules from your usage history.
+
 ## Documentation
 
 > **AI agents start here:** read **[docs/agent-guides.md](docs/agent-guides.md)** first. It

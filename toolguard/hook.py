@@ -21,15 +21,19 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 from toolguard.auto_migrate import run_auto_migration
-from toolguard.compound import resolve_compound_permission
-from toolguard.patterns import PatternType, match_pattern, parse_pattern
-from toolguard.permissions import check_hard_deny, decide_command_at_level_detailed
 from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_conflict, log_error, log_warning
 from toolguard.log_writer import log_command, log_discovery
-from toolguard.normalization import expand_tilde
+from toolguard.resolve import (
+    _anchor_file_pattern,  # noqa: F401  re-exported for backwards compat
+    _check_file_path_hard_deny,  # noqa: F401  re-exported for backwards compat
+    _decide_file_path_at_level_detailed,  # noqa: F401  re-exported for backwards compat
+    _match_file_path_pattern,  # noqa: F401  re-exported for backwards compat
+    resolve_bash_permission_detailed,
+    resolve_file_path_permission_detailed,
+)
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 
@@ -190,101 +194,6 @@ def load_file_path_patterns(
     return list(allow), list(deny)
 
 
-def _anchor_file_pattern(pattern: str, config, extended_syntax: bool) -> str:
-    """
-    Anchor a relative file-path permission pattern to the PROJECT ROOT.
-
-    Per the project-root-relative-path rule, a relative file-path pattern (one not
-    starting with ``/`` or ``~`` after any extended-syntax prefix) resolves against
-    the project root regardless of which config level declared it. Absolute and
-    ``~`` patterns are returned unchanged.
-
-    Any extended-syntax prefix (``[glob]``/``[regex]``/``[native]``) is preserved:
-    only the path body after the prefix is anchored. ``[regex]`` patterns are left
-    untouched (a regex is not a path and must not be path-joined).
-
-    Args:
-        pattern: A file-path permission pattern (wrapper already stripped).
-        config: The resolved :class:`~toolguard.config.Configuration`.
-        extended_syntax: Whether extended prefixes are honoured.
-
-    Returns:
-        The pattern with its path body anchored to the project root when relative.
-    """
-    prefix = ""
-    body = pattern
-    if extended_syntax:
-        for known in ("[glob]", "[regex]", "[native]"):
-            if pattern.startswith(known):
-                prefix = known
-                body = pattern[len(known) :]
-                break
-    # A regex pattern is not a filesystem path; never path-join it.
-    if prefix == "[regex]":
-        return pattern
-    return prefix + config.resolve_config_path(body)
-
-
-def _match_file_path_pattern(
-    pattern: str, expanded_path: str, extended_syntax: bool
-) -> bool:
-    """
-    Match a file path against a single pattern, respecting extended syntax prefixes.
-
-    DEFAULT patterns are treated as GLOB (backwards compatible with existing behavior).
-    Extended prefixes ([regex], [glob], [native]) are honored inside tool wrappers
-    e.g. "Write([regex]/path/.*)" — the wrapper is stripped by the caller, and this
-    function sees just "[regex]/path/.*".
-    """
-    pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
-
-    # For file paths, DEFAULT patterns use the same semantics as GLOB
-    if pattern_type == PatternType.DEFAULT:
-        pattern_type = PatternType.GLOB
-
-    try:
-        return match_pattern(pattern_type, actual_pattern, expanded_path)
-    except ValueError, TypeError:
-        return False
-
-
-def _decide_file_path_at_level_detailed(
-    file_path, allow_patterns, deny_patterns, config, extended_syntax
-):
-    """
-    Decide a file path's outcome at ONE level, reporting the matched pattern.
-
-    Mirrors :func:`toolguard.permissions.decide_command_at_level_detailed` for
-    file-path tools so a matched file-path pattern can be mapped back to its
-    source provenance by the provenance-aware resolver. Deny-first within the
-    level; relative patterns are anchored to the project root before matching.
-
-    Args:
-        file_path: The file path under evaluation.
-        allow_patterns: This level's allow patterns (wrapper-free).
-        deny_patterns: This level's deny patterns (wrapper-free).
-        config: The resolved Configuration (provides project-root anchoring).
-        extended_syntax: Whether extended prefixes are honoured.
-
-    Returns:
-        ``(decision, reason, matched_pattern)`` when this level matches, else
-        ``None``.
-    """
-    expanded_path = expand_tilde(file_path)
-
-    for pattern in deny_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return "deny", f"Path matches deny pattern: {pattern}", pattern
-
-    for pattern in allow_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return "allow", f"Path matches allow pattern: {pattern}", pattern
-
-    return None
-
-
 def _format_conflict_message(target, override) -> str:
     """
     Compose a human/LLM-readable conflict-log message for an allow-over-deny override.
@@ -365,108 +274,6 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     log_conflict(message, corrective, log_dir)
 
 
-def _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax):
-    """
-    Apply the unoverridable hard-deny rule to a file path, checked FIRST.
-
-    The pooled ``[hard_deny]`` (deny, allow) patterns for ``tool_name`` are
-    collected across ALL levels (see
-    :meth:`~toolguard.config.Configuration.hard_deny`). The path is hard-denied
-    when it matches any hard-deny ``deny`` pattern AND does NOT match a hard-deny
-    ``allow`` carve-out. Relative patterns are anchored to the project root, the
-    same as normal file-path patterns.
-
-    Args:
-        tool_name: 'Read', 'Write', or 'Edit'.
-        file_path: The file path under evaluation.
-        config: The resolved Configuration (provides hard_deny pool + anchoring).
-        extended_syntax: Whether extended prefixes are honoured.
-
-    Returns:
-        ``('deny', reason)`` when the path is hard-denied, otherwise ``None`` so
-        the caller falls through to the normal more-specific-wins cascade.
-    """
-    deny_patterns, allow_patterns = config.hard_deny(tool_name)
-    if not deny_patterns:
-        return None
-
-    expanded_path = expand_tilde(file_path)
-
-    matched_deny = None
-    for pattern in deny_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            matched_deny = pattern
-            break
-
-    if matched_deny is None:
-        return None
-
-    # A hard-deny matched. An allow carve-out exempts the path from the hard deny.
-    for pattern in allow_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return None
-
-    return (
-        "deny",
-        f"Path matches hard_deny pattern: {matched_deny} (cannot be overridden)",
-    )
-
-
-def resolve_file_path_permission_detailed(
-    tool_name, file_path, config, extended_syntax=True
-):
-    """
-    Resolve a file-path tool decision using more-specific-wins across levels.
-
-    The unoverridable ``[hard_deny]`` pool is checked FIRST (see
-    :func:`_check_file_path_hard_deny`); a hard-deny match denies immediately and
-    cannot be overridden by any level's normal allow. Otherwise this drives the
-    hard-deny-first, more-specific-wins cascade via
-    :meth:`~toolguard.config.Configuration.resolve_permission_detailed`, applying
-    deny-first within each level and project-root anchoring to relative patterns.
-    The first level that matches anything decides; no match at any level =>
-    fail-closed deny. Returns the allow-over-deny override (if any) so the caller
-    can log it to the conflict stream. Reasons carry the winning rule's
-    provenance as a bracketed suffix.
-
-    Args:
-        tool_name: 'Read', 'Write', or 'Edit'.
-        file_path: The file path under evaluation.
-        config: The resolved Configuration.
-        extended_syntax: Whether extended prefixes are honoured.
-
-    Returns:
-        Tuple ``(decision, reason, override)`` where ``override`` is a
-        :class:`~toolguard.config.ConflictOverride` (or None). A ``hard_deny``
-        match returns ``(decision, reason, None)``.
-    """
-    hard = _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
-    if hard is not None:
-        decision, reason = hard
-        return decision, reason, None
-
-    def _decide_detailed(allow_patterns, deny_patterns):
-        return _decide_file_path_at_level_detailed(
-            file_path,
-            list(allow_patterns),
-            list(deny_patterns),
-            config,
-            extended_syntax,
-        )
-
-    resolved = config.resolve_permission_detailed(tool_name, _decide_detailed)
-    reason = resolved.reason
-    if (
-        resolved.decision == "deny"
-        and reason == "Command does not match any allow patterns"
-    ):
-        # Normalise the default-deny reason to file-path phrasing.
-        reason = "Path does not match any allow patterns"
-    return resolved.decision, reason, resolved.override
-
-
 _COMPOUND_MATCH_PATTERN = re.compile(r"All \d+ sub-commands allowed: \[(.+)\]")
 
 
@@ -530,63 +337,6 @@ def _log_allowed_command(
             extra_info=agent_info,
             config=env_config,
         )
-
-
-def resolve_bash_permission_detailed(
-    command, config, extended_syntax, hard_deny_deny, hard_deny_allow
-):
-    """
-    Resolve a (possibly compound) Bash command with provenance and conflicts.
-
-    Each extracted sub-command is resolved independently through the
-    provenance-aware more-specific-wins cascade
-    (:meth:`~toolguard.config.Configuration.resolve_permission_detailed`), with
-    the unoverridable ``[hard_deny]`` pool checked FIRST per sub-command. The
-    compound decision uses the same strictness as
-    :func:`toolguard.compound.resolve_compound_permission` (any deny -> deny;
-    else any ask -> ask; else allow). Reasons carry the winning rule's provenance.
-
-    Allow-over-deny overrides discovered on any sub-command (only meaningful when
-    the overall decision is allow) are returned so the caller can log them to the
-    conflict stream. ``hard_deny`` denials are NOT conflicts.
-
-    Args:
-        command: The bash command line (may be compound).
-        config: The resolved Configuration.
-        extended_syntax: Whether extended prefixes are honoured.
-        hard_deny_deny: Pooled hard-deny deny patterns for Bash.
-        hard_deny_allow: Pooled hard-deny allow (carve-out) patterns for Bash.
-
-    Returns:
-        Tuple ``(decision, reason, overrides)`` where ``overrides`` is a list of
-        ``(sub_command, ConflictOverride)`` pairs (empty when none).
-    """
-    overrides: List[Tuple[str, Any]] = []
-
-    def _resolve_one(sub_command):
-        hard = check_hard_deny(
-            sub_command, list(hard_deny_deny), list(hard_deny_allow), extended_syntax
-        )
-        if hard is not None:
-            return hard
-
-        def _decide_detailed(allow_patterns, deny_patterns):
-            return decide_command_at_level_detailed(
-                sub_command, list(allow_patterns), list(deny_patterns), extended_syntax
-            )
-
-        resolved = config.resolve_permission_detailed("Bash", _decide_detailed)
-        if resolved.decision == "allow" and resolved.override is not None:
-            overrides.append((sub_command, resolved.override))
-        return resolved.decision, resolved.reason
-
-    decision, reason = resolve_compound_permission(command, _resolve_one)
-
-    # Only allow-over-deny overrides on an ALLOWED command are conflicts; if the
-    # overall decision is a deny, the recorded overrides are irrelevant.
-    if decision != "allow":
-        overrides = []
-    return decision, reason, overrides
 
 
 def _build_hook_argparser() -> argparse.ArgumentParser:
@@ -794,8 +544,13 @@ def main() -> None:
 
             # Resolve file path permission via more-specific-wins level cascade.
             extended_syntax = env_config.get("extended_syntax", True)
-            decision, reason, override = resolve_file_path_permission_detailed(
+            file_result = resolve_file_path_permission_detailed(
                 tool_name, file_path, config, extended_syntax
+            )
+            decision, reason, override = (
+                file_result.decision,
+                file_result.reason,
+                file_result.override,
             )
 
             # Log the decision
@@ -867,8 +622,13 @@ def main() -> None:
         extended_syntax = env_config.get("extended_syntax", True)
         hd_deny, hd_allow = config.hard_deny("Bash")
 
-        decision, reason, bash_overrides = resolve_bash_permission_detailed(
+        bash_result = resolve_bash_permission_detailed(
             command, config, extended_syntax, hd_deny, hd_allow
+        )
+        decision, reason, bash_overrides = (
+            bash_result.decision,
+            bash_result.reason,
+            bash_result.overrides,
         )
 
         # Apply takeover mode no_match_fallback if enabled and command was denied for not matching

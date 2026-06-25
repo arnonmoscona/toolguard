@@ -316,3 +316,162 @@ Overall shape approved; detailed spec/plan review by Arnon still pending before 
   real syntax appears in the wild" - but it CANNOT feed **decision-replay** or **ablation**,
   which need actual command history (only the user's own logs/transcripts provide that).
   GitHub = cross-user breadth for static heuristics; user logs = ground truth for replay.
+## P0 implementation sub-plan (started 2026-06-25)
+
+**Package decision (Arnon):** sub-package **`toolguard/tools/`** (import root `toolguard.tools.*`),
+NOT a top-level sibling. Ships with core; directory-level segregation. Tests under
+`test/unit/` as `test_tools_<module>.py` (stdlib unittest, BDD docstrings). Surface:
+**library-first, no CLI yet** (CLI added per-skill in P1/P2). Durable replay/harvest harness
+lives in `toolguard/tools/` (it is product + test-support); only throwaway eval scripts go
+under `test/`/`tmp/`.
+
+**Reuse points (no reimplementation):**
+- Hierarchy + takeover: `config.load_configuration()` -> `Configuration` (with
+  `ResolvedDecision`, `Provenance`, `TakeoverConfig`, `TakeoverEnabledConflict`).
+- Decision primitive: `permissions.decide_command_at_level_detailed` / `check_permission`;
+  `hook.resolve_bash_permission_detailed` / `hook.resolve_file_path_permission_detailed`.
+- Matcher: `patterns.match_pattern`, `permissions.match_command`.
+- Corpus: daily logs `logs/toolguard-*.md` (md sections: `Status`, `Command`,
+  `Matched Rule`/`Violated Rules`, `Agent`).
+
+**Components (dependency / build order):**
+1. `config_access` - facade over `Configuration` (load hierarchy, per-layer allow/deny/ask +
+   provenance, effective takeover). Mostly reuse.
+2. `decision` - `decide(config, tool, command|path) -> ResolvedDecision`. Single eval primitive.
+3. `log_harvest` - parse daily logs into a structured corpus; user-bounded time window. Logs
+   only in P0 (transcripts later).
+4. `replay` (**keystone, built + checkpointed first**) - corpus + config A vs B -> per-command
+   decision diff classified `unchanged/tightened/broadened` + summary stats.
+5. `redundancy` - exact/normalized duplicate detection + replay-backed subsumption (rule
+   redundant iff removal changes no corpus decision). Static family subsumption deferred to P2.
+6. `danger` - ranked static findings over allow rules (rm -rf, .env/.ssh, `uv run python`-class
+   arbitrary exec, unanchored `[regex]`, HEREDOC_TO non-bash, blanket allows outside takeover);
+   takeover-aware.
+7. `takeover_audit` - effective takeover state + invariant checks (enabled-consistency, blanket
+   allows covered by ignored set, hook registered for governed tools, `no_match_fallback`).
+8. `sorters` - deterministic stable rule-array sort (comment-preserving file rewrite = P2).
+
+**Build staging:** keystone slice first = `config_access` + `decision` + `log_harvest` +
+`replay` (+ unit tests) -> main-agent review/checkpoint -> then analyzers (redundancy, danger,
+takeover_audit, sorters). Dev gotchas: stdlib unittest (NOT pytest); do NOT run `ruff format`
+in this repo; PEP 758 except style is valid (3.14); verify with `uv run python -m py_compile`.
+## P0 status: COMPLETE (2026-06-25) - awaiting Arnon review + commit
+
+All in new sub-package `toolguard/tools/` (core files untouched - segregation held). Built by
+feature-coder in two slices, main-agent reviewed.
+- Keystone: `config_access`, `decision` (side-effect-free, faithful to hook), `log_harvest`,
+  `replay` (broaden/tighten/unchanged classification). Report:
+  [[TOO-15 P0 Keystone Implementation Report]].
+- Analyzers: `redundancy` (static dup + corpus-backed subsumption), `danger` (data-driven
+  detector table, takeover-aware), `takeover_audit` (4 invariants), `sorters`. Report:
+  [[TOO-15 P0 Analyzers Implementation Report]].
+- Tests: 131 new (`test/unit/test_tools_*.py`), full suite **905 OK**, ruff clean.
+
+**Items for Arnon's phase-end review / possible fixes before commit:**
+- `danger.py` detector set added `secret`/`password`/`credentials` substring matches beyond
+  the spec'd `.env`/`.ssh`/keys - noisier; tune the table if undesired.
+- A test prints "Migration completed..." to stdout (cosmetic stdout leak; not a failure).
+- Recommended core refactor (deferred): move pure file-path helpers out of `hook.py` into a
+  `file_permissions.py` (`decision.py` currently imports `hook._*`).
+- `decision.decide` returns `provenance=None` for compound Bash (reason string carries source)
+  - fine for P0; matters when P2 consolidation needs per-subcommand rule attribution.
+- `takeover_audit` is the most security-consequential analyzer (feeds skill #6 in P1) - worth
+  focused review (e.g. /code-review) before P1 relies on it.
+
+Next: P1 = security-flagging skill (#6) on top of `danger` + `takeover_audit`.
+## P0 cleanups deferred to END OF P0 (not end of all phases) - 2026-06-25
+
+### Done already this session
+- Resolver duplication removed: pure resolver layer extracted to `toolguard/resolve.py`;
+  `hook.py` and `tools/decision.py` both delegate (drift-proof by shared code). Anti-drift
+  contract test now in the discovered suite at `test/unit/test_resolve.py` (was wrongly placed
+  in `coder-test/` by feature-coder, citing a non-existent CLAUDE.md constraint - corrected).
+  Suite now **910 OK**.
+
+### Deferred to P0 end
+1. **Bash provenance (Arnon: required, not optional).** `decision.decide` currently returns
+   `provenance=None` for compound Bash. Compound provenance is inherently a COLLECTION (one
+   winning rule per sub-command), so the natural representation is an **extensible list of
+   per-sub-command match records** `[(sub_command, decision, matched_rule, provenance)]` plus
+   the overall verdict - NOT a tree (toolguard flattens sub-commands; the decision rule is
+   "any deny->deny, else any ask->ask, else allow", so nested boolean structure is not used).
+   This aligns with what already exists: `compound.resolve_compound_permission` resolves per
+   sub-command, the hook collects `bash_overrides` as a list, and
+   `hook._parse_compound_match_details` parses "All N sub-commands allowed: [cmd -> rule, ...]".
+   Plan: extend the resolver to surface ALL per-sub-command matches (not just overrides) and
+   carry an optional `sub_matches` list on `Decision`. Needed by P2 consolidation (per-rule
+   attribution) and richer audit/redundancy. Can be a bit messy -> do at P0 end.
+
+2b. **DISCOVERY (Arnon's recall, confirmed): comment-preserving, section-aware sort ALREADY
+   EXISTS AND IS TESTED** in `toolguard/scripts/migrate_permissions.py`:
+   `parse_permissions_section_with_comments()` (items typed comment_block/rule/header),
+   `reassemble_permissions_section()` (associates each comment block with the FOLLOWING rule,
+   preserves inline + top/bottom comments, sorts), `find_section_boundaries()`, and
+   `sort_patterns()`/`get_tool_priority()`. Tested in `test/unit/test_migration.py`:
+   test_preserves_inline_comments, test_preserves_comment_blocks_above_rules,
+   test_preserves_top_of_section_comments, test_preserves_bottom_of_section_comments,
+   test_preserves_blank_lines_in_comment_blocks, **test_comments_move_with_sorted_rules**.
+   => Do NOT rebuild this for P2; REUSE it. PROBLEM: `tools/sorters.py` (new) reimplemented
+   `sort_patterns` with a DIVERGENT order (pattern-TYPE-first vs migration's TOOL-priority),
+   so migration auto-sort and the maintenance skill would flip-flop the config (diff churn).
+   CLEANUP (P0-end): (a) standardize on migration's `get_tool_priority` order (the shipped
+   one); (b) extract the comment-preserving machinery + the single canonical sort out of
+   `scripts/migrate_permissions.py` into a shared module (same move as `resolve.py`) reused by
+   migration + tools (hands us the P2 comment-aware file-rewrite for free); (c) collapse
+   `tools/sorters.py` to a thin adapter or delete it.
+   PROCESS NOTE: 2nd time a subagent rebuilt existing tested code (resolver, now sorter) ->
+   future P0-end/P2 briefs MUST instruct: inventory `migrate_permissions.py`/`auto_migrate.py`
+   first and reuse.
+
+2. **`sorters.py` comment preservation (Arnon).** Current `sorters.py` sorts bare pattern
+   strings (`List[str] -> List[str]`) and has NO comment awareness - this was the EXPLICIT P0
+   scope (file rewrite + comments deferred to P2; documented in the module docstring). Arnon's
+   point is the design requirement for the eventual rewriter: in TOML, **a comment is
+   associated with the rule that FOLLOWS it**, so sorting must move "leading comment block (+
+   trailing inline comment) + rule" as an ATOMIC unit. The string-list API must evolve to a
+   rule-entry model (e.g. `RuleEntry(leading_comments, pattern, inline_comment)`).
+   ADDED HAZARD to design for: **group / section-header comments** (e.g. `# Git operations`
+   above several git rules) get semantically BROKEN by alphabetical sorting that scatters the
+   group. The comment-preserving sorter (P2, or pulled earlier if needed) must decide how to
+   handle these - e.g. treat a blank-line-delimited commented group as a unit and sort within
+   it, or WARN/skip reordering across comment boundaries rather than orphaning a header. Do not
+   ship a naive file-rewriter that orphans header comments.
+## FUTURE WORK: transcript harvesting (Arnon flagged 2026-06-25)
+
+`tools/log_harvest.py` is **logs-only by P0 design**; harvesting **Claude conversation
+transcripts** (`~/.claude/projects/<hash>/*.jsonl`) is deferred but is the RICHER source and
+must be added (likely P2, when the log-mining / rule-suggestion skill needs it).
+
+Why transcripts beat toolguard's own logs:
+- toolguard logs capture only GOVERNED tool calls + the decision toolguard made.
+- Transcripts capture **ASK resolutions** (Claude asked -> user approved/denied -> "don't ask
+  again" rule written) -- the core signal the TOO-11 log-mining skill needs to suggest new
+  rules. Much of this never reaches toolguard's logs.
+- Transcripts give a fuller command corpus (denied/ungoverned commands) + surrounding context
+  for risk assessment and ablation ground truth.
+
+REUSE (don't rebuild): toolguard already parses transcripts via
+`hook.identify_current_agent(transcript_path)` / `subagent.py`; also `~/bin/recall_main_agent_conversation`
+and the local-tools MCP read the `*.jsonl` transcripts. Transcript harvesting should reuse that
+parsing and emit the SAME `LogEntry` corpus shape so `replay`/`redundancy`/ablation are unchanged.
+### Transcript harvesting — second advantage: COLD START / onboarding (Arnon 2026-06-25)
+
+Beyond richer ongoing mining, transcripts are the **only** governance history a NEW toolguard
+user has (they have zero toolguard logs yet). This makes transcript harvesting a prerequisite
+for the **setup/migration skill (#2)**, not just maintenance (#3): the onboarding pitch is
+"you've been working without toolguard — let me mine your transcripts and propose a starting
+ruleset," paired with decision-replay (replay transcript commands against a candidate config to
+propose rules that would have allowed the legit work and surfaced the rest).
+
+**Auto-mode users are the strongest case AND the worst-served by logs-only:** they accumulate
+NO `settings` history either (no "don't ask again" rules, no recorded prompt decisions) — the
+transcript is the SOLE record of what ran. Exactly the users who most need an independent
+guardrail are invisible without transcripts.
+
+**Positioning (Arnon's view, endorsed with nuance):** Anthropic's auto-mode answer to approval
+fatigue is structurally weak — the same model that ISSUED the call also CLEARS it, in-the-moment,
+opaque, with no durable user-authored policy and no audit trail (self-judgment, no independent
+check). Nuance: the auto classifier is configurable for "trusted infrastructure" and framed as a
+separate safety check, so not purely "trust me" — but still not transparent/user-controllable at
+the decision boundary and leaves no reusable policy behind. This is a core argument FOR toolguard:
+deterministic, transparent, user-owned policy independent of the model's in-the-moment judgement.
