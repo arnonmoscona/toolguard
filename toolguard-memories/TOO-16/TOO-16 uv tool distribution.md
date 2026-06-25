@@ -133,3 +133,21 @@ Version bumped to 0.3.1 (Arnon).
    (free `--help`). Add `--help`/`-h` to `toolguard` (hook.main) and `toolguard-session-start`
    (session_start.main) -- describe that they are Claude Code hooks. Adding argparse to the
    hooks must not break normal invocation (Claude calls them with NO args + piped JSON).
+
+## STATUS: COMPLETE (2026-06-23)
+
+All TOO-16 work done, pushed, and validated by Arnon on the real global git install
+(`toolguard-update-check` -> up to date; `--help` on both hooks; isatty guard). Shipped:
+- `uv tool` install + hook-config docs (git+https and local-path); validation command;
+  `run_hook.sh` retired.
+- `toolguard-update-check` console script: detects git / local / editable installs and
+  responds correctly; punts (exit 2) only when undeterminable; `--upgrade`/`--quiet`;
+  offline-safe. Docs "Keeping toolguard up to date" (3-option menu + auto-update security caveat).
+- Hooks `toolguard` / `toolguard-session-start`: `--help` + interactive-tty guard (explain
+  instead of hanging). Piped hook path unchanged.
+- Version 0.3.1. 774 tests green, ruff clean.
+
+Deferred to a FUTURE separate ticket (not TOO-16): publish to PyPI at ~RC1, which requires
+renaming the DISTRIBUTION (name `toolguard` is taken on PyPI) and atomically updating docs;
+once on an index, native `uv tool upgrade` handles versions and `toolguard-update-check` can be
+retired. Release notes / CHANGELOG: not started (pre-RC1), offered.
