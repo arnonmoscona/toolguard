@@ -45,11 +45,11 @@ Detectors (in severity order, highest first):
    precision risk and every such rule deserves a human eye.
    Severity: MEDIUM.
 
-5. **LOW / blanket-allow-outside-takeover**: A wildcard allow (``*`` or matching
-   every input, e.g. pattern body is just ``*``) that is NOT covered by the
-   takeover ignored set while takeover is OFF.  In takeover-OFF mode blanket
-   allows bypass all toolguard checks.  Severity: LOW (it is the user's explicit
-   intent, but worth surfacing).
+5. **CRITICAL / blanket-allow-outside-takeover**: A wildcard allow (``*`` or
+   matching every input, e.g. pattern body is just ``*``) that is NOT covered by
+   the takeover ignored set.  Such a rule bypasses ALL toolguard checks for that
+   tool -- a complete governance bypass -- so it is flagged CRITICAL even though it
+   may be the user's explicit intent.
 
 Takeover-mode awareness
 -----------------------
@@ -66,7 +66,11 @@ from typing import Callable, List, Optional, Tuple
 
 from toolguard.config import Configuration, Provenance, TakeoverConfig
 from toolguard.patterns import PatternType, parse_pattern
-from toolguard.tools.config_access import per_layer_rules
+from toolguard.tools.config_access import (
+    discover_tools,
+    neutralized_by_takeover,
+    per_layer_rules,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +232,6 @@ _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
     "perl ",
     "sh -c",
     "bash -c",
-    "exec ",
     "python:",   # handle toolguard pattern form python:*
     "python3:",
     "node:",
@@ -236,15 +239,19 @@ _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
     "perl:",
     "sh -c:",
     "bash -c:",
-    "exec:",
 )
-# Bare "python" and "python3" with wildcard (covers "uv run python:*" style patterns)
+# Bare command names that, with a wildcard, allow arbitrary execution (covers
+# "python:*"/"exec *" style patterns). The bare check matches an exact body, a
+# "<name> ..." prefix, or a "<name>:..." prefix, so these also cover the "exec"
+# case that a trailing-space/colon prefix entry cannot (the prefix helper appends
+# its own separator, which would require a double space to match).
 _ARBITRARY_EXEC_BARE: Tuple[str, ...] = (
     "python",
     "python3",
     "node",
     "ruby",
     "perl",
+    "exec",
 )
 
 
@@ -544,17 +551,8 @@ def danger(
     # Pre-compute the ignored-allow set (extracted form) for blanket-allow check
     ignored_extracted = takeover.normalized_ignored_patterns()
 
-    # Iterate over all tools mentioned in any layer
-    tools_seen = set()
-    for layer in config.layers:
-        permissions = layer.content.get("permissions", {})
-        if isinstance(permissions, dict):
-            for perm in permissions.get("allow", []) + permissions.get("deny", []) + permissions.get("ask", []):
-                if isinstance(perm, str) and "(" in perm and perm.endswith(")"):
-                    tool_name = perm[: perm.index("(")]
-                    tools_seen.add(tool_name)
-
-    for tool in sorted(tools_seen):
+    # Iterate over all tools mentioned in any layer (via shared helper)
+    for tool in discover_tools(config):
         findings.extend(_audit_tool(config, tool, takeover, ignored_extracted))
 
     # Sort: severity descending, then tool, then pattern
@@ -593,7 +591,7 @@ def _audit_tool(
 
             # Skip native blanket allows that are intentionally in the ignored set
             # when takeover is ON (they are setup artefacts, not real risks)
-            if takeover.enabled and is_native and pattern in ignored_extracted:
+            if neutralized_by_takeover(pattern, is_native, takeover):
                 continue
 
             # Blanket allows are reported by the dedicated blanket-allow detector
@@ -637,7 +635,7 @@ def _audit_tool(
             ptype, body = parse_pattern(pattern, extended_syntax=True)
             if _is_blanket_allow(tool, body, ptype):
                 # If takeover is ON and this is in the ignored set, it's fine
-                if takeover.enabled and is_native and pattern in ignored_extracted:
+                if neutralized_by_takeover(pattern, is_native, takeover):
                     continue
                 # Flag: blanket allow that is live (not suppressed by takeover)
                 findings.append(

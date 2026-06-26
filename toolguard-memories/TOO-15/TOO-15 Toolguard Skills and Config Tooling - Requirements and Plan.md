@@ -475,3 +475,96 @@ check). Nuance: the auto classifier is configurable for "trusted infrastructure"
 separate safety check, so not purely "trust me" — but still not transparent/user-controllable at
 the decision boundary and leaves no reusable policy behind. This is a core argument FOR toolguard:
 deterministic, transparent, user-owned policy independent of the model's in-the-moment judgement.
+
+
+## Future / out-of-scope idea: auto-mode activity forensics (raised 2026-06-26)
+
+Idea: have the security audit also analyze what Claude actually DID in **auto mode**
+(auto mode reportedly emits its own dedicated log format).
+
+Decision/analysis (Claude's critical take, Arnon to confirm):
+
+- **Does NOT belong in the #6 security-CONFIG audit.** That skill is a *static
+  configuration* analyzer (what rules COULD permit). Auto-mode log review is
+  *behavioral/forensic* (what DID happen). Different activity, different trust model;
+  folding it in dilutes a clean purpose.
+- **Redundant when toolguard governs.** If toolguard is installed (esp. takeover mode),
+  every tool call is intercepted regardless of auto mode -- "what auto mode did" == "what
+  toolguard allowed," already in toolguard's own resolution/decision logs. So marginal
+  value is low for existing toolguard users (Arnon's own point).
+- **Where it IS valuable:** users with NO toolguard logs -- exactly the auto-mode-without-
+  toolguard cohort. Same target + same "what did the agent actually do" source class as the
+  planned **P2 transcript harvesting**. So auto-mode logs = one more optional forensic
+  source for rule discovery / risk spotting, not a config-audit feature.
+- **Thematic fit / placement:** strong toolguard adoption-motivator ("here's what auto mode
+  did without your oversight") aligned with toolguard's mission as a transparent, user-owned
+  alternative to opaque auto-approve. But keep it a SEPARATE skill/tool (or even separate
+  project), not part of #6. Likely a new ticket, P2-adjacent (shares transcript-parsing
+  plumbing: hook.identify_current_agent, subagent.py, recall_main_agent_conversation).
+- **Risk:** auto-mode log format is undocumented/Anthropic-internal and can change without
+  notice -- gate behind a tolerant parser; treat as optional source.
+
+
+## Pre-completion cleanup gate + setup-skill partial-install requirement (2026-06-26)
+
+**Cleanup before closing TOO-15 (REMIND Arnon):**
+- Remove the temporary dogfood symlinks: project `~/projects/toolguard/.claude/skills ->
+  ../skills` (gitignored), and confirm no stray links under `~/.claude/skills/`.
+- Install the bundled skills "properly" via the setup facilities built in TOO-15, not hand
+  symlinks.
+- Rationale: repo is intentionally left "dirty" during TOO-15 to continuously evaluate the
+  tooling against imperfect/realistic configs (already surfaced real findings on the toolguard
+  repo and on featherhill). Clean up + switch to the real install path at ticket close.
+
+**New requirement for the setup "disposable" skill (#4) and the bundled maintenance skill
+(#3): detect + handle a PARTIAL install.** This machine has toolguard installed globally but
+NOT the full post-TOO-15 setup. The flow must:
+- detect a stale/partial install and prompt `uv tool upgrade`;
+- detect which bundled skills are NOT installed -- check BOTH project `.claude/skills/` and
+  user `~/.claude/skills/`, and account for broken/dangling/incorrect symlinks (we hit several
+  relative-symlink footguns this session; a dangling link "exists" but doesn't resolve -- the
+  detector must not be fooled);
+- offer to install the missing skills, letting the USER choose scope: local-project vs
+  user-level (explain trade-off: audit/maintenance skills lean user-level; project-specific
+  lean local).
+- Detection should be deterministic (Python), driven by the skill. Reinforces the open TOO-16
+  "skill install story" item.
+
+
+## Self-permissioning: skills must get toolguard's own tools allowed (2026-06-26)
+
+Problem: bundled/private/disposable skills shell out to the installed toolguard console
+scripts (e.g. `toolguard-audit`). Under toolguard governance (esp. takeover mode), those
+are `Bash` commands toolguard must permit, or the skill's own call is denied
+(chicken-and-egg).
+
+Design (Arnon + Claude, to implement when authoring setup/maintenance skills):
+- The setup/maintenance skill **suggests concrete allow rules** for the toolguard tools the
+  skills actually invoke, gets **explicit user consent**, then writes them to the chosen
+  config level. **Never hard-code / auto-apply** -- toolguard must not make security
+  decisions for the user; every allow stays explicit and auditable. (Auto-self-grant is a
+  privilege-escalation smell and contradicts toolguard's mission.)
+- **Refine the set (Claude's pushback): do NOT blanket-allow all pyproject `[project.scripts]`.**
+  `toolguard` and `toolguard-session-start` are HOOK entry points run by Claude Code's hook
+  machinery, NOT as Bash tool calls -- they never need Bash allow rules. Allow only what
+  skills actually run via Bash (today: `toolguard-audit`; later: maintenance/update CLIs).
+  Minimal + skill-specific = more auditable.
+- **Granularity by tool risk:** read-only tools (`toolguard-audit:*`) are fine to allow
+  broadly. A future config-MUTATING maintenance tool must NOT be blanket-allowed -- use
+  ask-mode or per-invocation consent, else the model could mutate the security config via
+  the tool and bypass the human-approves-edits principle.
+- **Scope symmetry:** write the allow rules at the SAME level the skill is installed
+  (user-level vs project-level) -- unify with the installer's local-vs-user choice
+  ([[too15-completion-gate]]).
+- **Bootstrapping:** handle the allow-rule suggestion at INSTALL time (the user is already
+  consenting to scope/upgrade there) so the audit/maintenance skills "just work"; plus a
+  self-healing fallback (a skill detects its own command was denied and offers to add the
+  rule, then retries).
+- **Docs:** add a short note (security.md / skills doc) that toolguard's skills depend on
+  toolguard's own console scripts, and those must be allowed to be fully functional under
+  governance. The need is sharpest in takeover mode.
+
+**TOO-19 (raw, do not rely on yet):** Arnon has future ideas in ticket TOO-19 relevant to the
+self-permissioning / "always-ask" approach for the toolguard tools. Consider it when authoring
+the setup/maintenance skills (read it then -- it is raw now). Arnon leans toward agreement on
+ask-mode for mutating tools.

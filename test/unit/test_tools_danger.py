@@ -183,6 +183,22 @@ class TestArbitraryExecAllow(unittest.TestCase):
         exec_findings = [f for f in findings if f.detector_id == "arbitrary-exec-allow"]
         self.assertGreater(len(exec_findings), 0)
 
+    def test_exec_flagged(self):
+        """
+        Given an allow rule 'exec:*' for Bash (the shell 'exec' builtin replaces the
+        process image and thus permits arbitrary execution)
+        When danger() is called
+        Then a CRITICAL arbitrary-exec-allow finding is returned
+        (regression: 'exec' was previously undetected because its trailing-space and
+        colon prefix entries could never match)
+        """
+        layer = _make_layer("Bash", allow=["exec:*"])
+        config = _make_config(layer)
+        findings = danger(config)
+        exec_findings = [f for f in findings if f.detector_id == "arbitrary-exec-allow"]
+        self.assertGreater(len(exec_findings), 0)
+        self.assertEqual(exec_findings[0].severity, Severity.CRITICAL)
+
     def test_safe_python_specific_script_not_flagged(self):
         """
         Given an allow rule 'uv run python manage.py test:*' (specific script, no wildcard exec)

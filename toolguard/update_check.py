@@ -577,10 +577,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="toolguard-update-check",
         description=(
+            "Audience: END-USER -- a maintenance command you run yourself to check "
+            "for (and with --upgrade, install) toolguard updates.\n\n"
             "Check whether toolguard is up to date. Works for both git installs "
             "(uv tool install git+https://...) and local/editable installs. "
             "Exit code: 0=up-to-date, 1=update-available, 2=could-not-determine."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--upgrade",

@@ -350,6 +350,8 @@ def _build_hook_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="toolguard",
         description=(
+            "Audience: INTERNAL (Claude Code hook) -- run automatically, not a "
+            "user-facing command.\n\n"
             "Claude Code PreToolUse permission hook. "
             "Reads a JSON hook event on stdin and writes a JSON permissionDecision "
             "to stdout. This is invoked automatically by Claude Code -- "

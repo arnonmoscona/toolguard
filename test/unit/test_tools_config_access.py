@@ -12,7 +12,25 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
+from typing import Optional as _Optional
 from unittest.mock import patch
+
+from toolguard.config import (
+    ConfigLayer,
+    Configuration,
+    Provenance,
+    TakeoverConfig,
+)
+from toolguard.tools.config_access import (
+    audit_context,
+    config_summary,
+    discover_tools,
+    effective_takeover,
+    load_config,
+    neutralized_by_takeover,
+    per_layer_rules,
+)
 
 
 def _write_toml(claude_dir: Path, filename: str, content: str) -> None:
@@ -41,7 +59,6 @@ class TestLoadConfig(_IsolatedEnvTestCase):
         When load_config is called with the project directory
         Then a Configuration object is returned with at least one layer
         """
-        from toolguard.tools.config_access import load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -63,7 +80,6 @@ class TestLoadConfig(_IsolatedEnvTestCase):
         When load_config is called (which uses ignore_env_override=True)
         Then the project hierarchy is used, not the env override
         """
-        from toolguard.tools.config_access import load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -95,7 +111,6 @@ class TestPerLayerRules(_IsolatedEnvTestCase):
         When per_layer_rules is called with tool_name='Bash'
         Then the returned LayerRules carries the correct allow, deny, and ask patterns
         """
-        from toolguard.tools.config_access import per_layer_rules, load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -129,7 +144,6 @@ ask = ["Bash(sudo:*)"]
         When per_layer_rules is called
         Then the native layer has empty ask list (native settings have no ask concept)
         """
-        from toolguard.tools.config_access import per_layer_rules, load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -157,7 +171,6 @@ ask = ["Bash(sudo:*)"]
         When per_layer_rules is called
         Then the first returned layer corresponds to the project level (most specific)
         """
-        from toolguard.tools.config_access import per_layer_rules, load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -193,7 +206,6 @@ class TestEffectiveTakeover(_IsolatedEnvTestCase):
         When effective_takeover is called
         Then the returned TakeoverConfig has enabled=True
         """
-        from toolguard.tools.config_access import effective_takeover, load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -217,7 +229,6 @@ class TestEffectiveTakeover(_IsolatedEnvTestCase):
         When effective_takeover is called
         Then the returned TakeoverConfig has enabled=False (default off)
         """
-        from toolguard.tools.config_access import effective_takeover, load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -245,7 +256,6 @@ class TestConfigSummary(_IsolatedEnvTestCase):
         When config_summary is called
         Then the summary reports the correct governed tools and non-zero source count
         """
-        from toolguard.tools.config_access import config_summary, load_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir) / "proj"
@@ -265,3 +275,418 @@ class TestConfigSummary(_IsolatedEnvTestCase):
             self.assertIn("Read", summary.governed_tools)
             self.assertGreater(summary.layer_count, 0)
             self.assertGreater(len(summary.sources), 0)
+
+
+# ---------------------------------------------------------------------------
+# Fixture helpers for the new tests
+# ---------------------------------------------------------------------------
+
+# These mirror the style used in test_tools_security_audit.py so the two
+# test files stay consistent in fixture approach.
+
+
+def _prov(
+    level: str = "project",
+    source_type: str = "toolguard_hook",
+    path: str = "/fake/.claude/toolguard_hook.toml",
+    specificity: int = 0,
+) -> Provenance:
+    """Build a Provenance for test use."""
+    return Provenance(
+        level=level,
+        source_type=source_type,
+        file_format="toml",
+        path=Path(path),
+        specificity=specificity,
+    )
+
+
+def _toolguard_layer(
+    allow: _Optional[list] = None,
+    deny: _Optional[list] = None,
+    ask: _Optional[list] = None,
+    specificity: int = 0,
+    takeover_enabled: _Optional[bool] = None,
+    ignored_allow_patterns: _Optional[list] = None,
+) -> ConfigLayer:
+    """Build a toolguard_hook ConfigLayer."""
+    content: dict = {}
+    perms: dict = {}
+    if allow is not None:
+        perms["allow"] = allow
+    if deny is not None:
+        perms["deny"] = deny
+    if ask is not None:
+        perms["ask"] = ask
+    if perms:
+        content["permissions"] = perms
+    takeover_section: dict = {}
+    if takeover_enabled is not None:
+        takeover_section["enabled"] = takeover_enabled
+    if ignored_allow_patterns is not None:
+        takeover_section["ignored_allow_patterns"] = ignored_allow_patterns
+    if takeover_section:
+        content["takeover_mode"] = takeover_section
+    return ConfigLayer(
+        provenance=_prov(specificity=specificity),
+        content=MappingProxyType(content),
+    )
+
+
+def _native_layer(
+    allow: _Optional[list] = None,
+    specificity: int = 1,
+) -> ConfigLayer:
+    """Build a native Claude settings ConfigLayer."""
+    content: dict = {}
+    if allow is not None:
+        content["permissions"] = {"allow": allow, "deny": []}
+    return ConfigLayer(
+        provenance=_prov(
+            level="project",
+            source_type="claude",
+            path="/fake/.claude/settings.local.json",
+            specificity=specificity,
+        ),
+        content=MappingProxyType(content),
+    )
+
+
+def _make_config(*layers: ConfigLayer) -> Configuration:
+    """Build a Configuration from given layers."""
+    return Configuration(layers=tuple(layers), start_dir=None)
+
+
+# ---------------------------------------------------------------------------
+# Tests for discover_tools
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverTools(unittest.TestCase):
+    """Tests for config_access.discover_tools()."""
+
+    def test_discovers_tool_from_allow_list(self):
+        """
+        Given a config with a Bash allow rule in one layer
+        When discover_tools is called
+        Then 'Bash' appears in the returned tuple
+        """
+
+        layer = _toolguard_layer(allow=["Bash(git:*)"])
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertIn("Bash", tools)
+
+    def test_discovers_tool_from_deny_list(self):
+        """
+        Given a config whose only rule is a Bash deny (no allow)
+        When discover_tools is called
+        Then 'Bash' is still discovered (deny list also counts)
+        """
+
+        layer = _toolguard_layer(deny=["Bash(rm -rf:*)"])
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertIn("Bash", tools)
+
+    def test_discovers_tool_from_ask_list(self):
+        """
+        Given a config whose only rule is a Bash ask
+        When discover_tools is called
+        Then 'Bash' is still discovered (ask list also counts)
+        """
+
+        layer = _toolguard_layer(ask=["Bash(sudo:*)"])
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertIn("Bash", tools)
+
+    def test_discovers_multiple_tools_deduped(self):
+        """
+        Given a config with Bash and Read rules across two layers
+        When discover_tools is called
+        Then both tools appear exactly once (de-duplication)
+        """
+
+        layer1 = _toolguard_layer(allow=["Bash(ls:*)", "Read(*.py)"])
+        layer2 = _toolguard_layer(allow=["Bash(git:*)"])  # Bash again
+        config = _make_config(layer1, layer2)
+        tools = discover_tools(config)
+        self.assertIn("Bash", tools)
+        self.assertIn("Read", tools)
+        self.assertEqual(tools.count("Bash"), 1, "Bash should appear only once")
+
+    def test_result_is_sorted(self):
+        """
+        Given a config with Write, Bash, and Read rules
+        When discover_tools is called
+        Then the returned tuple is sorted alphabetically
+        """
+
+        layer = _toolguard_layer(allow=["Write(/tmp:*)", "Bash(ls:*)", "Read(*.txt)"])
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertEqual(list(tools), sorted(tools))
+
+    def test_empty_config_returns_empty_tuple(self):
+        """
+        Given a config with no permission rules (no allow/deny/ask in any layer)
+        When discover_tools is called
+        Then an empty tuple is returned
+        """
+
+        layer = _toolguard_layer()  # no permissions
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertEqual(tools, ())
+
+    def test_discovers_tool_from_native_layer(self):
+        """
+        Given a config with only a native layer that has a Bash allow
+        When discover_tools is called
+        Then 'Bash' is discovered (native layers are also scanned)
+        """
+
+        layer = _native_layer(allow=["Bash(*)"])
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertIn("Bash", tools)
+
+
+# ---------------------------------------------------------------------------
+# Tests for neutralized_by_takeover
+# ---------------------------------------------------------------------------
+
+
+class TestNeutralizedByTakeover(unittest.TestCase):
+    """Tests for config_access.neutralized_by_takeover()."""
+
+    def _takeover_on(self, ignored: list) -> TakeoverConfig:
+        """Build a TakeoverConfig with takeover enabled and given ignored patterns."""
+        return TakeoverConfig(
+            enabled=True,
+            ignored_allow_patterns=tuple(ignored),
+            additional_ignored_patterns=(),
+            no_match_fallback="deny",
+        )
+
+    def _takeover_off(self) -> TakeoverConfig:
+        """Build a TakeoverConfig with takeover disabled."""
+        return TakeoverConfig(
+            enabled=False,
+            ignored_allow_patterns=(),
+            additional_ignored_patterns=(),
+            no_match_fallback="deny",
+        )
+
+    def test_true_when_all_conditions_met(self):
+        """
+        Given takeover enabled, pattern is native, and pattern is in ignored set
+        When neutralized_by_takeover is called
+        Then True is returned
+        """
+
+        # normalized_ignored_patterns strips the tool wrapper, so "*" maps to "Bash(*)"
+        takeover = self._takeover_on(["Bash(*)"])
+        result = neutralized_by_takeover("*", is_native=True, takeover=takeover)
+        self.assertTrue(result)
+
+    def test_false_when_takeover_disabled(self):
+        """
+        Given takeover disabled (enabled=False), native pattern in what would be ignored
+        When neutralized_by_takeover is called
+        Then False is returned (takeover is OFF)
+        """
+
+        takeover = self._takeover_off()
+        result = neutralized_by_takeover("*", is_native=True, takeover=takeover)
+        self.assertFalse(result)
+
+    def test_false_when_not_native(self):
+        """
+        Given takeover enabled, pattern in ignored set, but layer is NOT native
+        When neutralized_by_takeover is called
+        Then False is returned (only native layers can be neutralized)
+        """
+
+        takeover = self._takeover_on(["Bash(*)"])
+        result = neutralized_by_takeover("*", is_native=False, takeover=takeover)
+        self.assertFalse(result)
+
+    def test_false_when_pattern_not_in_ignored_set(self):
+        """
+        Given takeover enabled and layer is native, but pattern NOT in the ignored set
+        When neutralized_by_takeover is called
+        Then False is returned (specific pattern is not suppressed)
+        """
+
+        takeover = self._takeover_on(["Bash(*)"])  # only Bash(*) is ignored
+        result = neutralized_by_takeover(
+            "git status", is_native=True, takeover=takeover
+        )
+        self.assertFalse(result)
+
+    def test_additional_ignored_patterns_also_neutralize(self):
+        """
+        Given takeover enabled, native layer, and pattern is in additional_ignored_patterns
+        When neutralized_by_takeover is called
+        Then True is returned (additional patterns also count)
+        """
+
+        takeover = TakeoverConfig(
+            enabled=True,
+            ignored_allow_patterns=(),
+            additional_ignored_patterns=("Read(*)",),
+            no_match_fallback="deny",
+        )
+        # normalized_ignored_patterns strips "Read(" and ")" -> "*"
+        result = neutralized_by_takeover("*", is_native=True, takeover=takeover)
+        self.assertTrue(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests for audit_context
+# ---------------------------------------------------------------------------
+
+
+class TestAuditContext(unittest.TestCase):
+    """Tests for config_access.audit_context()."""
+
+    def test_summary_and_takeover_populated(self):
+        """
+        Given a simple config with one toolguard layer
+        When audit_context is called
+        Then summary and takeover fields are populated (non-None)
+        """
+
+        layer = _toolguard_layer(allow=["Bash(ls:*)"])
+        config = _make_config(layer)
+        ctx = audit_context(config)
+        self.assertIsNotNone(ctx.summary)
+        self.assertIsNotNone(ctx.takeover)
+
+    def test_tools_tuple_contains_discovered_tools(self):
+        """
+        Given a config with Bash and Read rules
+        When audit_context is called
+        Then tools contains a ToolContext for each tool
+        """
+
+        layer = _toolguard_layer(allow=["Bash(ls:*)", "Read(*.py)"])
+        config = _make_config(layer)
+        ctx = audit_context(config)
+        tool_names = tuple(tc.tool for tc in ctx.tools)
+        self.assertIn("Bash", tool_names)
+        self.assertIn("Read", tool_names)
+
+    def test_tools_sorted_by_name(self):
+        """
+        Given a config with multiple tools in unsorted order
+        When audit_context is called
+        Then ctx.tools is ordered alphabetically by tool name
+        """
+
+        layer = _toolguard_layer(allow=["Write(/tmp:*)", "Bash(ls:*)", "Read(*.py)"])
+        config = _make_config(layer)
+        ctx = audit_context(config)
+        names = [tc.tool for tc in ctx.tools]
+        self.assertEqual(names, sorted(names))
+
+    def test_native_layer_flagged_is_native_true(self):
+        """
+        Given a config with both a toolguard layer and a native settings layer
+        When audit_context is called
+        Then the LayerContext for the native layer has is_native=True
+        """
+
+        tg_layer = _toolguard_layer(allow=["Bash(ls:*)"])
+        native = _native_layer(allow=["Bash(*)"])
+        config = _make_config(tg_layer, native)
+        ctx = audit_context(config)
+        bash_tool = next(tc for tc in ctx.tools if tc.tool == "Bash")
+        native_layer_ctxs = [lc for lc in bash_tool.layers if lc.is_native]
+        self.assertGreater(
+            len(native_layer_ctxs), 0, "Expected at least one native LayerContext"
+        )
+
+    def test_toolguard_layer_flagged_is_native_false(self):
+        """
+        Given a config with a toolguard_hook layer
+        When audit_context is called
+        Then the LayerContext for the toolguard layer has is_native=False
+        """
+
+        tg_layer = _toolguard_layer(allow=["Bash(ls:*)"])
+        config = _make_config(tg_layer)
+        ctx = audit_context(config)
+        bash_tool = next(tc for tc in ctx.tools if tc.tool == "Bash")
+        toolguard_layer_ctxs = [lc for lc in bash_tool.layers if not lc.is_native]
+        self.assertGreater(
+            len(toolguard_layer_ctxs), 0, "Expected at least one non-native LayerContext"
+        )
+
+    def test_neutralized_allow_patterns_empty_when_takeover_off(self):
+        """
+        Given a config with no takeover mode enabled
+        When audit_context is called
+        Then neutralized_allow_patterns is an empty tuple (nothing can be neutralized)
+        """
+
+        tg_layer = _toolguard_layer(allow=["Bash(ls:*)"])
+        native = _native_layer(allow=["Bash(*)"])
+        config = _make_config(tg_layer, native)
+        ctx = audit_context(config)
+        self.assertFalse(ctx.takeover.enabled)
+        self.assertEqual(ctx.neutralized_allow_patterns, ())
+
+    def test_neutralized_allow_patterns_lists_native_blanket_under_takeover(self):
+        """
+        Given a config with takeover enabled, Bash(*) in ignored set, and native Bash(*) allow
+        When audit_context is called
+        Then neutralized_allow_patterns contains the extracted pattern ('*')
+        """
+
+        tg_layer = _toolguard_layer(
+            allow=["Bash(ls:*)"],
+            takeover_enabled=True,
+            ignored_allow_patterns=["Bash(*)"],
+        )
+        native = _native_layer(allow=["Bash(*)"])
+        config = _make_config(tg_layer, native)
+        ctx = audit_context(config)
+        self.assertTrue(ctx.takeover.enabled)
+        # normalized_ignored_patterns strips the wrapper -> "*"
+        self.assertIn("*", ctx.neutralized_allow_patterns)
+
+    def test_layer_context_locus_matches_describe(self):
+        """
+        Given a config layer with known provenance
+        When audit_context is called
+        Then each LayerContext.locus matches provenance.describe() for that layer
+        """
+
+        tg_layer = _toolguard_layer(allow=["Bash(ls:*)"])
+        config = _make_config(tg_layer)
+        ctx = audit_context(config)
+        bash_tool = next(tc for tc in ctx.tools if tc.tool == "Bash")
+        expected_locus = tg_layer.provenance.describe()
+        loci = [lc.locus for lc in bash_tool.layers]
+        self.assertIn(expected_locus, loci)
+
+    def test_neutralized_allow_patterns_is_sorted_and_deduped(self):
+        """
+        Given a config with multiple tools having the same native blanket allow under takeover
+        When audit_context is called
+        Then neutralized_allow_patterns is sorted and contains no duplicates
+        """
+
+        tg_layer = _toolguard_layer(
+            allow=["Bash(ls:*)", "Read(*.txt)"],
+            takeover_enabled=True,
+            ignored_allow_patterns=["Bash(*)", "Read(*)"],
+        )
+        native = _native_layer(allow=["Bash(*)", "Read(*)"])
+        config = _make_config(tg_layer, native)
+        ctx = audit_context(config)
+        pats = list(ctx.neutralized_allow_patterns)
+        self.assertEqual(pats, sorted(set(pats)), "Patterns should be sorted and unique")

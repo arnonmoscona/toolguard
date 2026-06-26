@@ -29,3 +29,21 @@ Takeover-mode awareness is critical for #6. Autonomous, interruption-tolerant te
 likely separate ticket.
 
 Full detail: [[TOO-15 Toolguard Skills and Config Tooling - Requirements and Plan]]
+
+
+## **Status:**
+**Status:** Phasing P0->P4. P0 (deterministic foundation) committed (b10f6aa). P1
+(security-flagging skill #6) DONE, awaiting Arnon review/commit. P1 delivers:
+toolguard/tools/security_audit.py aggregator (danger()+audit_takeover() -> ranked
+SecurityReport, render(), toolguard-audit CLI json/markdown/text + --strict);
+two-pass bundled skills/toolguard-security-audit/SKILL.md (Pass1 deterministic;
+Pass2 opt-in AI-assisted, separate same-style section, ordinal HIGH/MED/LOW
+confidence); audit_context()/`--with-context` exporting the consolidated full
+hierarchy (toolguard + Claude-native rules per layer) + takeover state +
+neutralized ignore-list so the AI pass sees the same material and consumes the
+takeover verdict; shared helpers discover_tools/neutralized_by_takeover extracted
+from danger() (drift removal). Review fixes: exec detection hole, M2 CLI uses
+load_config (ignore_env_override), blanket-allow docstring CRITICAL, --help
+audience lines on all entry points. 1009 tests green, ruff clean.
+Next: P2 = config maintenance/analysis (#3, TOO-11) incl. deferred transcript
+harvesting; see plan note for the auto-mode-log forensic idea (likely separate).

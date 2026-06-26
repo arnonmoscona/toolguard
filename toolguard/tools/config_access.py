@@ -13,7 +13,7 @@ effective takeover state, etc.).
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from toolguard.config import (
     Configuration,
@@ -74,7 +74,7 @@ class ConfigSummary:
     layer_count: int
 
 
-def load_config(start_dir: Path = None) -> Configuration:
+def load_config(start_dir: Optional[Path] = None) -> Configuration:
     """
     Load the toolguard configuration hierarchy starting from ``start_dir``.
 
@@ -187,4 +187,229 @@ def config_summary(config: Configuration) -> ConfigSummary:
         governed_tools=config.governed_tools(),
         takeover=config.takeover_mode(),
         layer_count=len(config.layers),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool discovery helper
+# ---------------------------------------------------------------------------
+
+
+def discover_tools(config: Configuration) -> Tuple[str, ...]:
+    """
+    Return a sorted tuple of all tool names mentioned in any layer's permission lists.
+
+    A tool name is the text before the first ``"("`` in a ``"Tool(body)"``
+    permission pattern string.  Scans allow, deny, and ask lists across every
+    discovered config layer.
+
+    This is the canonical tool-discovery implementation extracted from the
+    inline loop that :func:`~toolguard.tools.danger.danger` formerly ran
+    internally.  Callers in both the audit and context paths share this
+    single implementation to prevent drift.
+
+    Args:
+        config: The resolved configuration.
+
+    Returns:
+        Sorted tuple of unique tool names (e.g. ``('Bash', 'Read', 'Write')``).
+    """
+    tools_seen: Set[str] = set()
+    for layer in config.layers:
+        permissions = layer.content.get("permissions", {})
+        if isinstance(permissions, dict):
+            for perm in (
+                permissions.get("allow", [])
+                + permissions.get("deny", [])
+                + permissions.get("ask", [])
+            ):
+                if isinstance(perm, str) and "(" in perm and perm.endswith(")"):
+                    tool_name = perm[: perm.index("(")]
+                    tools_seen.add(tool_name)
+    return tuple(sorted(tools_seen))
+
+
+# ---------------------------------------------------------------------------
+# Takeover neutralization helper
+# ---------------------------------------------------------------------------
+
+
+def neutralized_by_takeover(
+    pattern: str, is_native: bool, takeover: TakeoverConfig
+) -> bool:
+    """
+    Return True when a native allow pattern is intentionally neutralized by takeover mode.
+
+    A pattern is neutralized when all three conditions hold:
+
+    1. Takeover mode is enabled (``takeover.enabled`` is ``True``).
+    2. The pattern originates from a native Claude settings layer (``is_native``).
+    3. The extracted pattern appears in the effective ignored-allow set
+       (``takeover.normalized_ignored_patterns()``).
+
+    This is the single source of truth for the "native blanket allow
+    intentionally in the ignored set under takeover -- skip as a risk"
+    rule that :func:`~toolguard.tools.danger.danger` formerly applied
+    inline.
+
+    Args:
+        pattern: The extracted (tool-wrapper-free) allow pattern to test.
+        is_native: Whether the layer that owns the pattern is a native Claude
+            settings layer (``provenance.source_type == 'claude'``).
+        takeover: The resolved takeover configuration.
+
+    Returns:
+        ``True`` when all three conditions hold; ``False`` otherwise.
+    """
+    return takeover.enabled and is_native and pattern in takeover.normalized_ignored_patterns()
+
+
+# ---------------------------------------------------------------------------
+# Audit context dataclasses and builder
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LayerContext:
+    """
+    Per-layer rule view used by the audit context.
+
+    Carries the full pattern lists for a single configuration layer alongside
+    enough metadata for an AI pass to reason about layer identity without
+    reimplementing config logic.
+
+    Attributes:
+        locus: Human-readable origin label from ``provenance.describe()``.
+        is_native: ``True`` when the layer is a native Claude settings file
+            (``provenance.source_type == 'claude'``).
+        allow: Extracted allow patterns for this tool in this layer.
+        deny: Extracted deny patterns for this tool in this layer.
+        ask: Extracted ask patterns for this tool in this layer
+            (empty for native layers, which have no ask concept).
+    """
+
+    locus: str
+    is_native: bool
+    allow: Tuple[str, ...]
+    deny: Tuple[str, ...]
+    ask: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """
+    Full rule hierarchy for a single tool across all config layers.
+
+    Attributes:
+        tool: Tool name (e.g. ``'Bash'``, ``'Read'``).
+        layers: Per-layer rule views, most-specific first, matching the order
+            returned by :func:`per_layer_rules`.
+    """
+
+    tool: str
+    layers: Tuple[LayerContext, ...]
+
+
+@dataclass(frozen=True)
+class AuditContext:
+    """
+    Consolidated configuration context for an AI-assisted security pass.
+
+    Bundles everything the deterministic analyzers see into a single
+    serializable object so an LLM skill can receive exactly the same
+    consolidated material without reimplementing config logic.
+
+    Attributes:
+        summary: High-level configuration summary (discovered files,
+            governed tools, layer count, etc.).
+        takeover: Resolved takeover-mode configuration.
+        tools: Per-tool rule hierarchy, one :class:`ToolContext` per
+            tool name found in any layer, sorted by tool name.
+        neutralized_allow_patterns: Flat sorted de-duplicated tuple of every
+            allow pattern (across all tools and layers) for which
+            :func:`neutralized_by_takeover` returns ``True``.  These are
+            native blanket allows that takeover mode intentionally suppresses,
+            listed here so the AI pass can identify them without rechecking
+            the takeover logic itself.
+    """
+
+    summary: ConfigSummary
+    takeover: TakeoverConfig
+    tools: Tuple[ToolContext, ...]
+    neutralized_allow_patterns: Tuple[str, ...]
+
+
+def audit_context(config: Configuration) -> AuditContext:
+    """
+    Build and return a consolidated :class:`AuditContext` for ``config``.
+
+    Assembles the full rule hierarchy, takeover state, and the set of
+    neutralized native blanket allow patterns into one value using only the
+    existing config-facade helpers -- no detection logic, no custom parsing.
+
+    ``neutralized_allow_patterns`` is computed from the RAW native layer
+    content rather than from :func:`per_layer_rules`, because
+    :func:`per_layer_rules` (via ``Configuration.permission_layers``) already
+    filters out takeover-suppressed patterns before returning them.  Scanning
+    the raw content is the only way to discover which patterns were present in
+    the original config but suppressed by takeover mode.
+
+    Args:
+        config: The resolved configuration.
+
+    Returns:
+        An :class:`AuditContext` ready for serialization and hand-off to an
+        AI-assisted audit pass.
+    """
+    summary = config_summary(config)
+    takeover = effective_takeover(config)
+
+    tool_contexts: List[ToolContext] = []
+    for tool in discover_tools(config):
+        layer_rules = per_layer_rules(config, tool)
+        layer_contexts: List[LayerContext] = []
+        for lr in layer_rules:
+            is_native = lr.provenance.source_type == "claude"
+            layer_contexts.append(
+                LayerContext(
+                    locus=lr.provenance.describe(),
+                    is_native=is_native,
+                    allow=lr.allow,
+                    deny=lr.deny,
+                    ask=lr.ask,
+                )
+            )
+        tool_contexts.append(
+            ToolContext(
+                tool=tool,
+                layers=tuple(layer_contexts),
+            )
+        )
+
+    # Compute neutralized_allow_patterns from raw native layer content.
+    # per_layer_rules (via permission_layers) already filters out takeover-
+    # suppressed patterns, so we must look at the unfiltered raw allow lists
+    # to discover which native patterns are being suppressed.
+    neutralized: Set[str] = set()
+    if takeover.enabled:
+        for layer in config.layers:
+            is_native = layer.provenance.source_type == "claude"
+            if not is_native:
+                continue
+            permissions = layer.content.get("permissions", {})
+            if not isinstance(permissions, dict):
+                continue
+            for perm in permissions.get("allow", []):
+                if not isinstance(perm, str):
+                    continue
+                if "(" in perm and perm.endswith(")"):
+                    body = perm[perm.index("(") + 1 : -1]
+                    if neutralized_by_takeover(body, is_native=True, takeover=takeover):
+                        neutralized.add(body)
+
+    return AuditContext(
+        summary=summary,
+        takeover=takeover,
+        tools=tuple(tool_contexts),
+        neutralized_allow_patterns=tuple(sorted(neutralized)),
     )

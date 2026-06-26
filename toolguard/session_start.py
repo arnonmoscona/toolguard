@@ -217,12 +217,15 @@ def _build_session_start_argparser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         prog="toolguard-session-start",
         description=(
+            "Audience: INTERNAL (Claude Code hook) -- run automatically, not a "
+            "user-facing command.\n\n"
             "Claude Code SessionStart hook. "
             "Reads a JSON SessionStart event on stdin and prints a brief conflict "
             "summary to stdout when configuration conflicts exist. "
             "This is invoked automatically by Claude Code at the start of each session -- "
             "it is not intended to be run directly from a terminal."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
 

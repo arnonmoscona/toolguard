@@ -166,3 +166,25 @@ Two P0-end cleanups in toolguard project.
 ## Task
 P0-end cleanup: Surface permission PROVENANCE through shared resolver layer for both Bash and file tools.
 Baseline: 919 tests, started 14:46.
+
+
+# Coder Task Recall
+# Coder Task Recall - TOO-15 P1 Security Audit Aggregator
+
+## Ticket
+TOO-15, Phase P1
+
+## Task Summary
+Create a thin deterministic aggregator module `toolguard/tools/security_audit.py` that
+combines output from two already-tested modules:
+- `toolguard/tools/danger.py`
+- `toolguard/tools/takeover_audit.py`
+
+## Critical Anti-Duplication Constraint
+MUST NOT reimplement, re-derive, or copy any detection logic.
+ONLY calls existing public functions and reshapes their output.
+
+## Deliverables: See implementation plan captured at start of session.
+
+## Start Time
+06:46 local time
