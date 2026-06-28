@@ -1258,6 +1258,44 @@ deny = []
             self.assertIn("# This allows ls commands", new_content)
             self.assertIn("# Git commands", new_content)
 
+    def test_preserves_single_quoted_literal_rules(self):
+        """
+        Given a TOML config whose allow list uses a single-quoted LITERAL string
+              for a rule that contains backslashes (e.g. a [regex] find guard)
+        When write_toml_config rewrites the permissions (adding an unrelated rule)
+        Then the single-quoted literal rule is preserved verbatim and is NOT
+             dropped or regenerated into an escaped double-quoted form.
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+
+            initial_content = (
+                "[permissions]\n"
+                "allow = [\n"
+                "  # find guard\n"
+                "  'Bash([regex]\\bfind\\b(?!.*-exec))',\n"
+                '  "Bash(ls:*)",\n'
+                "]\n"
+            )
+            config_path.write_text(initial_content)
+
+            permissions = {
+                "allow": [
+                    "Bash([regex]\\bfind\\b(?!.*-exec))",
+                    "Bash(ls:*)",
+                    "Bash(git status:*)",
+                ],
+                "deny": [],
+                "ask": [],
+            }
+            write_toml_config(config_path, permissions, auto_sort=True)
+
+            new_content = config_path.read_text()
+            # Verbatim single-quoted literal preserved, comment kept, new rule added.
+            self.assertIn("'Bash([regex]\\bfind\\b(?!.*-exec))',", new_content)
+            self.assertIn("# find guard", new_content)
+            self.assertIn('"Bash(git status:*)"', new_content)
+
     def test_preserves_comment_blocks_above_rules(self):
         """
         Given a TOML config with comment blocks above individual rules

@@ -37,12 +37,11 @@ cascade.
 
 import re
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Dict, List, Optional, Set, Tuple
 
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.config import Configuration, Provenance
 from toolguard.patterns import parse_pattern
-from toolguard.tools.config_access import per_layer_rules
+from toolguard.tools.config_access import per_layer_rules, with_layer_allow_replaced
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import replay
 
@@ -232,68 +231,43 @@ def _config_without_allow(
     """
     Return a synthetic :class:`Configuration` with one allow pattern removed.
 
-    Removes the first occurrence of ``pattern_to_remove`` from the allow list
-    of ``tool`` across all layers, building a new Configuration with modified
-    layer content dicts.
+    Removes ``pattern_to_remove`` from the allow list of ``tool`` in the FIRST
+    layer that contains it.  All occurrences within that layer are removed
+    (duplicate patterns are fully purged).
 
-    This is a SHALLOW modification: only the allow list for the given tool in
-    the matching layer is modified.  All other content is shared by reference
-    (the dicts are rebuilt only for layers where a removal was made).
+    Delegates to :func:`~toolguard.tools.config_access.with_layer_allow_replaced`
+    using ``removed={pattern_to_remove}`` and ``added=[]``, so the modification
+    technique is kept in exactly one place.  The SHALLOW modification semantics
+    (only the matching layer's allow list is rebuilt; all other content is shared
+    by reference) are inherited from the shared primitive.
 
     Args:
         config: The original configuration.
-        tool: The tool whose allow list is modified.
-        pattern_to_remove: The raw pattern to remove (inner form, wrapper stripped).
+        tool: The tool whose allow list is modified (e.g. ``'Bash'``).
+        pattern_to_remove: The wrapper-free pattern body to remove.
 
     Returns:
-        A new :class:`Configuration` with the pattern absent from allow lists.
+        A new :class:`Configuration` with the pattern absent from the first
+        matching layer's allow list, or the original ``config`` when the pattern
+        is not found.
     """
     prefix = f"{tool}("
     wrapped_target = f"{prefix}{pattern_to_remove})"
 
-    removed = False
-    new_layers = []
     for layer in config.layers:
-        if removed:
-            new_layers.append(layer)
-            continue
-
         permissions = layer.content.get("permissions", {})
         if not isinstance(permissions, dict):
-            new_layers.append(layer)
             continue
-
         allow_list = permissions.get("allow", [])
         if not isinstance(allow_list, list):
-            new_layers.append(layer)
             continue
-
-        # Check if this layer has the wrapped form of the pattern
         if wrapped_target in allow_list:
-            # Remove ALL occurrences of the pattern from this layer's allow list.
-            # (membership is guaranteed above, so the result always differs.)
-            new_allow = [p for p in allow_list if p != wrapped_target]
-            # Build modified content dict
-            new_perms = dict(permissions)
-            new_perms["allow"] = new_allow
-            new_content = dict(layer.content)
-            new_content["permissions"] = new_perms
-            new_layer = ConfigLayer(
-                provenance=layer.provenance,
-                content=MappingProxyType(new_content),
+            return with_layer_allow_replaced(
+                config, tool, layer.provenance, {pattern_to_remove}, []
             )
-            new_layers.append(new_layer)
-            removed = True
-        else:
-            new_layers.append(layer)
 
-    if not removed:
-        # Pattern was not found in allow lists (perhaps already in extracted form)
-        # Try searching in extracted form by checking permission_layers
-        # This path handles patterns already extracted (without wrapper)
-        return config
-
-    return Configuration(layers=tuple(new_layers), start_dir=config.start_dir)
+    # Pattern was not found in any layer's allow list.
+    return config
 
 
 def find_corpus_redundant_allows(

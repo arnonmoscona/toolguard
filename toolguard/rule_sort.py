@@ -202,14 +202,27 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
                 comment_buffer = []
             continue
 
-        # Rule line (contains a quoted pattern).
-        if current_subsection and '"' in stripped:
-            pattern_match = re.search(r'"([^"]*)"', stripped)
-            if pattern_match:
-                pattern_value = pattern_match.group(1)
-                # Unescape the stored value.
-                pattern_value = pattern_value.replace('\\"', '"').replace("\\\\", "\\")
+        # Rule line (contains a quoted pattern -- double- OR single-quoted).
+        # TOML basic strings use double quotes (with backslash escapes); TOML
+        # literal strings use single quotes (no escaping).  Real configs use
+        # single-quoted literals for rules that contain backslashes, e.g.
+        # ``'Bash([regex]\bfind\b)'``, so both must be recognised or such a rule
+        # is silently dropped/regenerated on a sort-and-reassemble cycle.
+        if current_subsection and ('"' in stripped or "'" in stripped):
+            pattern_value = None
+            double_quoted = re.search(r'"([^"]*)"', stripped)
+            if double_quoted:
+                # Basic (double-quoted) string: unescape.
+                pattern_value = (
+                    double_quoted.group(1).replace('\\"', '"').replace("\\\\", "\\")
+                )
+            else:
+                single_quoted = re.search(r"'([^']*)'", stripped)
+                if single_quoted:
+                    # Literal (single-quoted) string: value is verbatim, no unescaping.
+                    pattern_value = single_quoted.group(1)
 
+            if pattern_value is not None:
                 # Attach any pending comments to this rule.
                 if comment_buffer:
                     result[current_subsection].append(
@@ -217,7 +230,8 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
                     )
                     comment_buffer = []
 
-                # Preserve the original line text (keeps inline comments).
+                # Preserve the original line text (keeps inline comments AND the
+                # original quoting style, so an unchanged literal rule round-trips).
                 result[current_subsection].append(("rule", line, pattern_value))
                 continue
 

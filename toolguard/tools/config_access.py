@@ -13,9 +13,11 @@ effective takeover state, etc.).
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import List, Optional, Set, Tuple
 
 from toolguard.config import (
+    ConfigLayer,
     Configuration,
     Provenance,
     TakeoverConfig,
@@ -227,6 +229,92 @@ def discover_tools(config: Configuration) -> Tuple[str, ...]:
                     tool_name = perm[: perm.index("(")]
                     tools_seen.add(tool_name)
     return tuple(sorted(tools_seen))
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-config primitive for proposal evaluation
+# ---------------------------------------------------------------------------
+
+
+def with_layer_allow_replaced(
+    config: Configuration,
+    tool: str,
+    provenance: Provenance,
+    removed: Set[str],
+    added: List[str],
+) -> Configuration:
+    """
+    Return a new :class:`~toolguard.config.Configuration` where, in the single
+    layer identified by ``provenance``, the allow list for ``tool`` has every
+    pattern in ``removed`` deleted and every pattern in ``added`` appended.
+
+    This is the canonical synthetic-config builder shared by redundancy analysis
+    and consolidation proposals.  Both ``removed`` and ``added`` are wrapper-free
+    pattern bodies; the function handles the ``Tool(body)`` wrapping internally,
+    preserving the same form used in the raw layer content.
+
+    The modification is SHALLOW: only the target layer's allow list is
+    reconstructed.  All other layer content -- including deny, ask, and all
+    patterns for other tools -- is shared by reference via
+    :class:`types.MappingProxyType` rebuilding, exactly as
+    :func:`toolguard.tools.redundancy._config_without_allow` does.
+
+    If no layer matches ``provenance``, the original ``config`` is returned
+    unchanged (safe fall-through).
+
+    Args:
+        config: The original :class:`~toolguard.config.Configuration`.
+        tool: Tool name whose allow list is modified (e.g. ``'Bash'``).
+        provenance: The :class:`~toolguard.config.Provenance` identifying which
+            layer to modify.  Only the first matching layer is modified.
+        removed: Set of wrapper-free pattern bodies to remove from the allow
+            list.  All occurrences of each pattern are removed.
+        added: List of wrapper-free pattern bodies to append to the allow list,
+            in the given order.  These are appended AFTER removals.
+
+    Returns:
+        A new :class:`~toolguard.config.Configuration` with the modified layer,
+        or the original ``config`` when ``provenance`` matches no layer.
+    """
+    prefix = f"{tool}("
+    wrapped_removed: Set[str] = {f"{prefix}{p})" for p in removed}
+    wrapped_added: List[str] = [f"{prefix}{p})" for p in added]
+
+    new_layers: List[ConfigLayer] = []
+    modified = False
+
+    for layer in config.layers:
+        if modified or layer.provenance != provenance:
+            new_layers.append(layer)
+            continue
+
+        permissions = layer.content.get("permissions", {})
+        if not isinstance(permissions, dict):
+            new_layers.append(layer)
+            continue
+
+        allow_list = permissions.get("allow", [])
+        if not isinstance(allow_list, list):
+            new_layers.append(layer)
+            continue
+
+        # Remove all occurrences of each pattern in ``removed``, then append added.
+        new_allow = [p for p in allow_list if p not in wrapped_removed] + wrapped_added
+        new_perms = dict(permissions)
+        new_perms["allow"] = new_allow
+        new_content = dict(layer.content)
+        new_content["permissions"] = new_perms
+        new_layer = ConfigLayer(
+            provenance=layer.provenance,
+            content=MappingProxyType(new_content),
+        )
+        new_layers.append(new_layer)
+        modified = True
+
+    if not modified:
+        return config
+
+    return Configuration(layers=tuple(new_layers), start_dir=config.start_dir)
 
 
 # ---------------------------------------------------------------------------

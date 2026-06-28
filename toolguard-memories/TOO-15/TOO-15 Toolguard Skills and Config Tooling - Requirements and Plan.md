@@ -568,3 +568,195 @@ Design (Arnon + Claude, to implement when authoring setup/maintenance skills):
 self-permissioning / "always-ask" approach for the toolguard tools. Consider it when authoring
 the setup/maintenance skills (read it then -- it is raw now). Arnon leans toward agreement on
 ask-mode for mutating tools.
+
+## P2 KICKOFF (2026-06-26) - decisions + P2-A spec
+
+P1 committed (fc16ce9), not pushed. Arnon: "ready for p2".
+
+**P0-end prerequisites: ALL LANDED** (verified this session) - so P2 starts from a solid base:
+- Shared canonical sort + comment-preserving file machinery extracted to `toolguard/rule_sort.py`
+  (`parse_permissions_section_with_comments`, `reassemble_permissions_section(parsed, new_permissions, auto_sort)`);
+  `tools/sorters.py` is now a thin delegate (no more divergent order / diff churn).
+- Bash provenance done: `tools/decision.Decision.sub_matches` carries per-sub-command `SubMatch`
+  records (per-rule attribution P2 consolidation needs).
+
+**P2 scoping decisions (AskUserQuestion):** start = **consolidation engine first** (P2-A);
+surface = **library-first, CLI/skill last** (CLI + SKILL.md land in P2-E). Same rhythm as P0/P1.
+
+**Proposed P2 slicing:** P2-A consolidation engine + apply + change-report -> P2-B transcript
+harvesting -> P2-C mining->rule-suggestion + hierarchy migration -> P2-D families 3-4 (agent-judged)
+-> P2-E maintenance SKILL.md + CLI.
+
+**NEW cross-skill requirement (Arnon 2026-06-26):** the maintenance skill (#3) must be able to
+**invoke the security-audit skill (#6) and turn its remediations into reviewable edit proposals**
+(e.g. tighten/narrow/remove a flagged dangerous allow). Primarily P2-E wiring, BUT the P2-A
+proposal data model must be general enough to represent a remediation EDIT, not only a
+consolidation - so audit findings can be ingested as proposals later. `danger` findings already
+carry `remediation`; the maintenance core ingests finding -> proposal -> replay-gate -> human approve.
+
+### P2-A sub-plan (keystone-first, mirrors P0)
+
+Reuse map (INVENTORY FIRST - do NOT rebuild; 2 prior subagent rebuilds of existing tested code):
+- `config_access.per_layer_rules(config, tool) -> List[LayerRules(provenance, allow/deny/ask tuples)]`.
+- `replay.replay(corpus, A, B) -> ReplayDiff` (broadened/tightened/unchanged) = THE GATE.
+- `redundancy._config_without_allow(config, tool, pattern)` = existing "build synthetic Configuration
+  with a layer's allow list modified (MappingProxyType rebuild) then replay" technique. GENERALIZE
+  it into one shared primitive; refactor `_config_without_allow` to delegate (anti-drift).
+- `patterns.parse_pattern(pattern, extended_syntax=True) -> (PatternType, body)` for tokenizing/building.
+- `rule_sort.reassemble_permissions_section` for the (P2-A.2) comment-preserving file rewrite (TOML-only
+  today; JSON writer is a P2-A.2 open item).
+
+**P2-A.1 (library-only, NO file I/O) - the keystone, build + checkpoint first:**
+New `toolguard/tools/consolidate.py`.
+- Step 0: extract `with_layer_allow_replaced(config, tool, provenance, removed:Set, added:List) -> Configuration`
+  (generalize `_config_without_allow`; make it delegate). Single "make config B" primitive.
+- Family 1 literal-alternation: per layer+list, find >=2 DEFAULT rules token-identical except ONE
+  literal (wildcard-free) slot; propose `[regex]^<prefix> (v1|v2|..)<suffix>` honoring DEFAULT `:*`==trailing ` *`.
+  STRICT acceptance = BOTH (a) self-contained probe-equivalence (synth positive probes = literal
+  expansions all stay allow; negative near-miss probes change NO config-A verdict) AND (b) historical
+  replay broadened_count==0. Else DO NOT emit as strict (defer to P2-D agent-judged).
+- Family 2 static subsumption: conservative, corpus-INDEPENDENT subset proof (DEFAULT glob/`:*`
+  structural superset, e.g. `mkdir -p /tmp/claude-code:*` ⊆ `mkdir -p /tmp/:*`); drop subsumed rule.
+  Replay as secondary guard. Distinct from redundancy's corpus-only subsumption.
+- `ConsolidationProposal(kind, tool, list_type, layer_provenance, removed_patterns, added_pattern,
+  rationale, replay_evidence)` - general enough to also model a remediation edit (see cross-skill req).
+- `propose_consolidations(config, tool, corpus=None) -> List[ConsolidationProposal]` (strict, verified only).
+- Allow/deny asymmetry: allow-direction conservative (this slice); deny broadening is later.
+- Tests (BDD): git-family family-1 happy path; **alembic landmine REJECTED** (ask->allow broadening
+  caught by probe+replay); mkdir family-2 subsumption; conservative non-claim; synthetic-config
+  builder + redundancy delegation still green. Suite must stay OK (currently ~1009).
+
+**P2-A.2 (after checkpoint):** comment-preserving apply (rule_sort) writing approved proposals to
+toolguard_hook.toml (+ JSON-writer decision); structured change-report; dirty-tree guard belongs at
+skill/CLI level (P2-E), apply fn stays pure.
+
+## P2-A.1 review findings + family-1 decision + curated-tool-advisor idea (2026-06-26)
+
+**Verification (main agent, against faithful `decide` oracle):** the delivered family-1 is SAFE
+(never broadens: DEFAULT `cmd:*` is a PREFIX fnmatch, e.g. `git diff:*` already matches
+`git difftool`/`git diff-index`; the generated `^...\b` regex is a strict SUBSET), BUT it
+**silently TIGHTENS**: the trailing `\b` drops `git difftool`/`git diffstat` from allow->deny,
+undisclosed and not caught by the probes. Violates the "strict family-1 = verified-EQUIVALENT" contract.
+
+**DECISION (Arnon): family-1 must be EQUIVALENCE-PRESERVING.** Fix dispatched to feature-coder:
+(1) drop the trailing `\b` so the regex mirrors DEFAULT `:*` prefix semantics exactly; (2) harden
+the gate to require **zero changed decisions** (reject on ANY `tightened` OR `broadened`, via
+`replay.classify_change`) - this enforces true equivalence AND self-protects edge arg-forms
+(no-colon exact patterns); (3) probe set must include prefix-extension near-misses; (4) replace the
+weak/misleading "alembic = token-count" test+docstring with a test that actually exercises the
+gate's reject path + a positive equivalence test (difftool/diffstat stay allowed). Behavior-CHANGING
+consolidations belong to the later agent-judged family, not strict family-1.
+
+**NEW DIRECTION (Arnon, worth pursuing - see assessment): curated well-known-tool advisor.**
+Beyond literal-alternation, two things:
+- **(a) More simple statically-analyzable families** - literal-alternation is just the first; harvest
+  more verifiable families from real configs/GitHub (already aligned with "families not frozen").
+- **(b) Curated knowledge base for a VERY SELECT FEW ubiquitous Bash tools** (git chief among them;
+  ls/cat/head/wc/grep) whose read-only vs state-changing surface is stable + well-known. For these the
+  maintenance tool can: never silently tighten them; proactively SUGGEST safe completions the user
+  never configured (e.g. observe several read-only git subcommands allowed -> suggest the full
+  read-only set); and suggest completing an INCOMPLETE deny set (e.g. some state-changing git commands
+  denied -> suggest the rest: commit/push/branch/reset/rebase/...). NOTE alembic is NOT such a tool
+  (project-specific, not universally known) - the curated set is deliberately tiny.
+
+**CRITICAL CAVEAT (the load-bearing subtlety): "read-only" is a property of (tool + FLAG constraints),
+NOT the tool alone.** Trapdoors most users miss:
+- `find`: `-exec`/`-execdir`/`-ok`/`-okdir` (arbitrary exec), `-delete` (destructive),
+  `-fprintf`/`-fprint`/`-fls` (write files). (Arnon's example.)
+- `git`: `-c core.pager=...`/`--ext-diff`/`-O`/aliases (exec), `git config` (writes), `git clean -f`
+  (deletes), `git checkout`/`restore`/`stash` (mutate), `git grep --open-files-in-pager`.
+- `tar`/`zip`: `--to-command`, `-I`/`--use-compress-program` (exec).
+- redirection (`> file`) is a SHELL write, seen by toolguard as a separate compound part, not the tool.
+So the curated table must encode trapdoor FLAGS as first-class (whitelist read-only subcommands AND
+constrain/deny trapdoor flags), never assert "read-only" naively.
+
+**Placement / design (recommended):** keep this OUT of the core consolidation engine (Arnon's
+constraint: don't make that code complex). Put the curated knowledge in a SEPARATE, versioned,
+conservatively-reviewed deterministic data table under `toolguard/tools/` (like `danger.py`'s detector
+table) = SINGLE SOURCE OF TRUTH consumed by BOTH the maintenance advisor (suggestions) AND skill #6
+danger detection (an allow rule permitting `find ... -exec` or `git -c ...` is a FINDING). Suggestion
+engine, human-in-the-loop, replay-gated. Direction-of-risk aligns with allow/deny asymmetry:
+deny-completion = fail-safe/bold (the safer, high-value half); read-only allow-expansion = broadening,
+must be conservative + trapdoor-aware + approved + replay-quantified. Ongoing-maintenance liability
+mitigated by keeping the set TINY, suggestions never auto-applied, honest confidence, prefer
+deny-direction when unsure. Likely its OWN ticket / a later P2 slice (knowledge-driven, not derivable
+from the config). Shared knowledge base = good ROI that justifies the maintenance cost.
+
+## Deep-tool-knowledge feeds the SECURITY AUDIT too (Arnon 2026-06-27)
+
+The curated tool-knowledge base is a SHARED capability consumed by BOTH #3 (maintenance/suggest)
+AND #6 (security audit/flag). Audit angle:
+- A plain allow like `Bash(find:*)` / `Bash(find :*)` looks innocent but grants a trapdoor tool
+  (find `-exec`/`-execdir`/`-ok`/`-okdir`/`-delete`/`-fprintf`/`-fprint`/`-fls`) -> must be flagged.
+- A hand-authored guard like featherhill's `Bash([regex]\bfind\b(?!.*\s-(exec|execdir|delete)\b))`
+  is better but INCOMPLETE (misses -fprintf/-fprint/-fls/-ok/-okdir) -> a real low/medium finding.
+
+**Deterministic vs AI split for the audit (Arnon's distinction, endorsed):**
+- DETERMINISTIC detector (new, additive to `danger.py`'s table): robustly handle the SIMPLE/known
+  forms only - plain DEFAULT/`:*`/limited shapes (incl. the limited `[regex]` forms toolguard's OWN
+  suggestion generator authors). Flag "allow grants a known-trapdoor tool with NO guard" (e.g.
+  `find:*`). Do NOT attempt full semantic analysis of arbitrary hand-written regex/negative-lookahead.
+- AI-DRIVEN pass: evaluates partial/complex guards (e.g. the incomplete `find` lookahead) and raises
+  low/medium suspects. GROUND it by feeding the curated tool-knowledge table into
+  `toolguard-audit --with-context` so the AI reasons from real trapdoor-flag knowledge instead of
+  hallucinating. (Note: deterministic audit currently analyzes neither - this is new work.)
+
+**Short-list selection = TRANSCRIPT-EVIDENCE-DRIVEN.** Pick the "deep knowledge" tools from what Claude
+actually invokes (frequency-rank harvested transcripts - ties directly to P2-B transcript harvesting),
+optionally enriched with a few ultra-common community tools from Claude's training knowledge. Arnon is
+happy to START with only hard-evidence-from-his-transcripts tools.
+
+**Trapdoor-tool candidates from training knowledge (enrichment; unit is (tool, FLAGS) not tool):**
+exec/write/delete trapdoors hiding in "benign-looking" tools: `find` (above); `awk`/`gawk`
+(system(), `print > file`); `sed` (`-i` writes, GNU `e` execs, `w file`); `xargs` (runs arbitrary cmd);
+`tar` (`--to-command`, `-I`); `git` (`-c`,`--ext-diff`,aliases,config,clean,checkout/restore/stash);
+pagers/editors `less`/`vim`/`man`/`view` (`!cmd`, LESSOPEN); command-runners `env`/`timeout`/`nice`/
+`watch`/`nohup`/`xargs`; net tools `curl`/`wget`(`-o`/`-O` write, curl `-K`), `ssh`/`scp`/`rsync`(`-e`/
+`--rsh` remote exec); interpreters `python`/`perl`/`ruby`/`node` `-c`/`-e`. EVEN "pure" text tools have
+edge writes: `sort -o FILE` overwrites, `tee` writes. So "read-only" is ALWAYS per-flag.
+Shell redirection (`> file`) is seen by toolguard as a separate compound part, not the tool.
+
+**Placement reaffirmed:** one versioned deterministic data table under `toolguard/tools/` (single source
+of truth) consumed by danger.py (#6 deterministic), the maintenance advisor (#3), and the audit
+--with-context (#6 AI). Likely its own ticket; evidence (short-list) comes from P2-B transcripts.
+
+## P2-A.1 STATUS: consolidation core DONE + equivalence fix LANDED (2026-06-28)
+
+Family-1 (literal-alternation) + Family-2 (static-subsumption) consolidation engine built
+(`toolguard/tools/consolidate.py`), library-only, replay/probe-gated. Equivalence-preserving fix
+applied (no `\b`; gate hardened to no-changed-decision; prefix-extension probes; prefix-forms only).
+Full suite **1037 OK**, ruff clean. NOT committed (TOO-15 dirty-by-design). See
+[[TOO-15 P2-A.1 Consolidation Core Implementation Report]] addendum.
+Next: P2-A.2 (comment-preserving apply via rule_sort + change-report; dirty-tree guard at skill level)
+-> then P2-B transcripts, P2-C mining+hierarchy, P2-D families 3-4, P2-E SKILL+CLI. Curated
+tool-knowledge advisor/audit-integration = separate later slice/ticket (transcript-evidence-driven).
+
+## P2-A.2 STATUS: apply + change-report DONE (2026-06-28)
+
+New `toolguard/tools/rule_apply.py` (library-only): `apply_proposals(proposals, *, dry_run=False)
+-> ChangeReport` and `render_change_report(report, fmt)`. Groups proposals by file, removes
+`removed_patterns` / adds `added_pattern` from the allow list, rewrites comment-preservingly.
+- REUSE (no rebuild): `migrate_permissions.write_toml_config`/`write_json_config` for the write;
+  stdlib `tomllib`/`json` to read RAW current perms (deliberately NOT a loaded Configuration --
+  that may be takeover-filtered, which would drop blanket allows on write); `difflib.unified_diff`.
+- dry_run computes the diff by rendering onto a TEMP COPY (real file untouched) -- the skill uses
+  this to show the change before approval. Config drift (removed pattern absent) -> skipped+reported,
+  not applied. path=None / unsupported list_type -> skipped+reported.
+- `FileChange`/`ChangeReport` dataclasses; structured (golden-testable), ASCII report renderer.
+
+**Prerequisite fix landed in core `rule_sort.parse_permissions_section_with_comments`:** it only
+recognized DOUBLE-quoted rule lines, so SINGLE-quoted TOML literals (e.g. featherhill's
+`'Bash([regex]\bfind\b(?!...))'`) were silently dropped/regenerated on a sort-reassemble cycle
+(the "don't orphan rules/comments" hazard). Now parses single-quoted literals too and PRESERVES the
+original line verbatim (keeps quoting + literal backslashes + comment association). Benefits migration
+too. Regression test added in test_migration.TestCommentPreservation.
+
+Tests: +10 `test_tools_rule_apply.py` (toml/json apply, dry-run+diff, single-quote+comment+other-rule
+preservation, drift skip, no-path skip, multi-proposal-same-file, report render+invalid-fmt) +1
+migration. **Full suite 1048 OK, ruff clean.** NOT committed (TOO-15 dirty-by-design).
+
+P2-A COMPLETE (consolidation engine + apply + change-report). Open items for P2-A.2 noting:
+- reassemble repositions a section-level comment that preceded `allow =` to inside the list (preserved,
+  not lost) -- acceptable churn, user reviews diff.
+- dirty-tree guard + user-approval flow are P2-E (skill), apply fn stays pure.
+Next checkpoint: review/commit P2-A as a unit, then P2-B transcripts.
