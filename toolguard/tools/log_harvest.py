@@ -46,13 +46,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator, List, Optional
 
+from toolguard.constants import FILE_TOOLS
+
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
-
-# Tools that log as "ToolName(/abs/path)" rather than as raw bash commands.
-_FILE_TOOLS = {"Read", "Write", "Edit"}
 
 # Pattern to detect and parse ``ToolName(...)`` command forms in the log.
 _TOOL_WRAPPER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\((.+)\)$", re.DOTALL)
@@ -123,7 +122,7 @@ def _parse_command_field(raw: str):
     if m:
         tool_name = m.group(1)
         inner = m.group(2).strip()
-        if tool_name in _FILE_TOOLS:
+        if tool_name in FILE_TOOLS:
             return tool_name, inner
         # Unrecognised wrapper -- treat as Bash with the raw text as command
         return "Bash", raw.strip()

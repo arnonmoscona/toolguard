@@ -23,6 +23,7 @@ from toolguard.config import (
     TakeoverConfig,
     ToolPatternLayer,
     load_configuration,
+    wrap_tool_pattern,
 )
 
 
@@ -276,9 +277,8 @@ def with_layer_allow_replaced(
         A new :class:`~toolguard.config.Configuration` with the modified layer,
         or the original ``config`` when ``provenance`` matches no layer.
     """
-    prefix = f"{tool}("
-    wrapped_removed: Set[str] = {f"{prefix}{p})" for p in removed}
-    wrapped_added: List[str] = [f"{prefix}{p})" for p in added]
+    wrapped_removed: Set[str] = {wrap_tool_pattern(tool, p) for p in removed}
+    wrapped_added: List[str] = [wrap_tool_pattern(tool, p) for p in added]
 
     new_layers: List[ConfigLayer] = []
     modified = False

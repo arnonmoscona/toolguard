@@ -39,7 +39,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
-from toolguard.config import Configuration, Provenance
+from toolguard.config import Configuration, Provenance, wrap_tool_pattern
 from toolguard.patterns import parse_pattern
 from toolguard.tools.config_access import per_layer_rules, with_layer_allow_replaced
 from toolguard.tools.log_harvest import LogEntry
@@ -251,8 +251,7 @@ def _config_without_allow(
         matching layer's allow list, or the original ``config`` when the pattern
         is not found.
     """
-    prefix = f"{tool}("
-    wrapped_target = f"{prefix}{pattern_to_remove})"
+    wrapped_target = wrap_tool_pattern(tool, pattern_to_remove)
 
     for layer in config.layers:
         permissions = layer.content.get("permissions", {})

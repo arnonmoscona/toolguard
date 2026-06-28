@@ -15,10 +15,11 @@ Reuse (no reimplementation)
   :func:`~toolguard.scripts.migrate_permissions.write_json_config` perform the
   actual section rewrite (TOML comments are preserved via
   :mod:`toolguard.rule_sort`; JSON is rewritten structurally).
-- Current (raw, unresolved) permissions are read with the stdlib ``tomllib`` /
-  ``json`` -- deliberately NOT from a loaded :class:`Configuration`, whose layer
-  content may have been takeover-filtered (writing that back would silently drop
-  the blanket allows takeover strips).
+- Current (raw, unresolved) permissions are read with the canonical
+  :func:`toolguard.config.load_config_file` loader -- deliberately NOT from a
+  loaded :class:`Configuration`, whose layer content may have been
+  takeover-filtered (writing that back would silently drop the blanket allows
+  takeover strips).
 - The unified diff is produced with :func:`difflib.unified_diff` by rendering the
   change onto a throwaway copy, so a dry run never touches the real file.
 
@@ -31,13 +32,12 @@ and reported rather than applied.
 """
 
 import difflib
-import json
 import tempfile
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from toolguard.config import load_config_file, wrap_tool_pattern
 from toolguard.scripts.migrate_permissions import write_json_config, write_toml_config
 from toolguard.tools.consolidate import ConsolidationProposal
 
@@ -108,27 +108,13 @@ class ChangeReport:
 # ---------------------------------------------------------------------------
 
 
-def _wrap(tool: str, body: str) -> str:
-    """
-    Wrap a wrapper-free pattern body in its tool envelope.
-
-    Args:
-        tool: Tool name (e.g. ``'Bash'``).
-        body: Wrapper-free pattern body (e.g. ``'git diff:*'``).
-
-    Returns:
-        The wrapped pattern as stored in config files (e.g. ``'Bash(git diff:*)'``).
-    """
-    return f"{tool}({body})"
-
-
 def _read_raw_permissions(path: Path, file_format: str) -> Dict[str, List[str]]:
     """
     Read the raw (unresolved, unfiltered) allow/deny/ask lists from a config file.
 
-    Uses ``tomllib``/``json`` directly so the values are exactly what is on disk
-    -- NOT what a loaded :class:`Configuration` would expose (which may be
-    takeover-filtered).  Missing keys yield empty lists.
+    Uses the canonical :func:`toolguard.config.load_config_file` loader so the
+    values are exactly what is on disk -- NOT what a loaded :class:`Configuration`
+    would expose (which may be takeover-filtered).  Missing keys yield empty lists.
 
     Args:
         path: Config file path.
@@ -142,12 +128,7 @@ def _read_raw_permissions(path: Path, file_format: str) -> Dict[str, List[str]]:
     if not path.exists():
         return empty
 
-    if file_format == "json":
-        with open(path, "r") as handle:
-            data = json.load(handle)
-    else:
-        with open(path, "rb") as handle:
-            data = tomllib.load(handle)
+    data = load_config_file(path, file_format)
 
     if not isinstance(data, dict):
         return empty
@@ -241,7 +222,7 @@ def _apply_to_file(
             skipped.append((prop, f"unsupported list_type {prop.list_type!r} (allow only)"))
             continue
 
-        removed_wrapped = [_wrap(prop.tool, body) for body in prop.removed_patterns]
+        removed_wrapped = [wrap_tool_pattern(prop.tool, body) for body in prop.removed_patterns]
         missing = [w for w in removed_wrapped if w not in allow]
         if missing:
             skipped.append((prop, f"patterns not found in file: {missing}"))
@@ -252,7 +233,7 @@ def _apply_to_file(
             removed_all.append(wrapped)
 
         if prop.added_pattern is not None:
-            added_wrapped = _wrap(prop.tool, prop.added_pattern)
+            added_wrapped = wrap_tool_pattern(prop.tool, prop.added_pattern)
             if added_wrapped not in allow:
                 allow.append(added_wrapped)
             added_all.append(added_wrapped)
@@ -374,14 +355,14 @@ def render_change_report(report: ChangeReport, fmt: str = "text") -> str:
         lines.append(f"## {header}" if md else header)
 
         for prop in fchange.applied:
-            removed = ", ".join(_wrap(prop.tool, b) for b in prop.removed_patterns)
+            removed = ", ".join(wrap_tool_pattern(prop.tool, b) for b in prop.removed_patterns)
             if prop.added_pattern is not None:
-                lines.append(f"  + {prop.kind}: {removed} -> {_wrap(prop.tool, prop.added_pattern)}")
+                lines.append(f"  + {prop.kind}: {removed} -> {wrap_tool_pattern(prop.tool, prop.added_pattern)}")
             else:
                 lines.append(f"  + {prop.kind}: drop {removed}")
 
         for prop, reason in fchange.skipped:
-            removed = ", ".join(_wrap(prop.tool, b) for b in prop.removed_patterns)
+            removed = ", ".join(wrap_tool_pattern(prop.tool, b) for b in prop.removed_patterns)
             lines.append(f"  - skipped {prop.kind} ({removed}): {reason}")
 
         lines.append("")

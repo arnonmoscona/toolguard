@@ -760,3 +760,103 @@ P2-A COMPLETE (consolidation engine + apply + change-report). Open items for P2-
   not lost) -- acceptable churn, user reviews diff.
 - dirty-tree guard + user-approval flow are P2-E (skill), apply fn stays pure.
 Next checkpoint: review/commit P2-A as a unit, then P2-B transcripts.
+
+## P2-B STATUS: transcript harvesting DONE (2026-06-28)
+
+New `toolguard/tools/transcript_harvest.py` (library-only). Parses Claude Code session
+transcripts `~/.claude/projects/<encoded>/*.jsonl` into the SAME `log_harvest.LogEntry` shape,
+so replay/redundancy/consolidate work unchanged (validated end-to-end: 200 harvested Bash cmds
+ran straight through `replay_single` against the live config).
+- `harvest_transcripts(dir, since, max_age_days)` mirrors `log_harvest.harvest` windowing (floor
+  applied PER ENTRY by timestamp, since transcript files aren't per-day); `harvest_transcript_file(path)`;
+  `transcript_dir_for_project(project_dir, claude_home=None)` encodes path `/`->`-`.
+- REUSE: `subagent.parse_jsonl_lines` for JSONL; emits `log_harvest.LogEntry`.
+- Walks assistant `tool_use` items for governed tools (Bash->input.command; Read/Write/Edit->
+  input.file_path), joins each to its `tool_result` by id for status.
+- RICHER STATUS than logs (the cold-start/auto-mode value): is_error False -> EXECUTED; is_error True
+  + "doesn't want to proceed"/"rejected" -> **REFUSED** (the ASK->deny resolution = the rule-mining
+  gold; reason text kept in rule_text); other is_error -> ERROR (permitted-but-failed); no result ->
+  UNKNOWN. Timestamps ISO/UTC -> naive LOCAL (matches log convention). agent = subagent if isSidechain
+  else main (coarse, best-effort). Malformed lines / missing dir handled gracefully.
+- On the real toolguard transcript: 1336 governed uses (Bash 570/Read 316/Write 92/Edit 358);
+  2 REFUSED were real `find` rejections with reason captured.
+
+Tests: +15 `test_tools_transcript_harvest.py` (status derivation x4, tool extraction x3, timestamp/
+agent/windowing x5, robustness/helpers x3). **Full suite 1063 OK, ruff clean.** NOT committed.
+
+Note: harvesting only (corpus producer). The MINING (REFUSED/ASK -> suggested rules) + auto-mode
+forensics is P2-C. Next: P2-C mining + hierarchy migration; then P2-D families 3-4; P2-E SKILL+CLI.
+
+## P2-C.1 STATUS: rule mining core DONE (2026-06-28)
+
+New `toolguard/tools/mining.py` (library-only) -- deterministic successor to the `denied-summary`
+prototype. Does NOT generate patterns (that stays agent/skill + the future curated-tool advisor);
+it AGGREGATES + CLASSIFIES + VERIFIES.
+- `mine_rule_candidates(config, corpus, *, min_occurrences=1) -> MiningReport`: for each corpus entry,
+  compares CURRENT `decide()` verdict vs OBSERVED status and classifies:
+  `allow-candidate` (config asks/denies but it EXECUTED -- approval fatigue / blocked-but-used),
+  `declined` (user REFUSED the prompt -- transcript signal), `denied`, `asked`; `consistent`
+  (already-allowed+ran) omitted. Groups by (tool, command_key, signal): Bash key = executable token,
+  file tools = parent dir. Sorted by occurrences desc.
+- `evaluate_added_allow_rule(config, tool, pattern, target_provenance, corpus) -> AddRuleEffect`:
+  replay-measures EXACTLY which corpus commands a proposed allow rule newly admits (the risk-note
+  blast radius); reuses `with_layer_allow_replaced` + `replay`. tightened should be 0.
+- `render_mining_report(report, fmt)` ASCII.
+- ENGINE NOTE (learned): a bare `ask` rule with no allow yields `deny` ("no allow match"), and the
+  compound-resolution path collapses ask; deterministic `ask` verdicts are awkward to construct
+  synthetically (real corpus allow-candidates were all deny-origin). So the ask->allow-candidate
+  mapping is unit-tested via `_classify` directly, not via decide().
+- Real smoke (this repo's transcript, 30d, min_occ=3): 49 allow-candidates -- top `cd` x259,
+  `echo` x62, Read/Edit of project dirs (all deny under the repo's minimal config but constantly run).
+
+Tests: +12 `test_tools_mining.py` (classify mappings, deny-but-ran/declined/denied/consistent,
+grouping by exec-token + parent-dir, sort, min_occurrences, evaluate_added_allow_rule, render+invalid).
+**Full suite 1075 OK, ruff clean.** NOT committed.
+
+P2-C remaining: P2-C.2 = hierarchy migration (move a rule up a level), replay-gated -- NOT yet built.
+Then P2-D families 3-4 (agent-judged), P2-E SKILL+CLI.
+
+## Dup/drift audit (2026-06-28, Arnon requested) + fixes
+
+FIXED (reimplementation drift, logic-level):
+1. `rule_apply._read_raw_permissions` re-rolled the `if toml: tomllib.load else json.load` branch ->
+   now calls the canonical cached `config.load_config_file(path, file_format)` (whose own docstring
+   says it is "the single internal config-file loader" replacing exactly those per-site branches).
+   Dropped now-unused `json`/`tomllib` imports.
+2. Wrapper BUILD `f"{tool}({body})"` was duplicated 3x (config_access.with_layer_allow_replaced,
+   redundancy._config_without_allow, rule_apply._wrap). Added `config.wrap_tool_pattern(tool, body)` --
+   the public inverse of the existing `config._strip_tool_wrapper` -- and routed all three through it
+   (`_wrap` removed). Single source of truth for the wrapper shape.
+Full suite 1075 OK, ruff clean after both.
+
+REPORTED, lower severity (constant duplication, low drift risk -- left for a later cleanup pass, told
+Arnon):
+3. `{"Read","Write","Edit"}` set declared in 4 places: hook.FILE_PATH_TOOLS (canonical core) +
+   log_harvest._FILE_TOOLS + transcript_harvest._FILE_TOOLS + mining._FILE_TOOLS. Recommend one shared
+   constant; not fixed now (importing hook into the pure parsers adds coupling; needs a light shared home).
+4. Status vocabulary ("EXECUTED"/"REFUSED") as constants in transcript_harvest but string literals in
+   replay + mining. Recommend a shared STATUS_* home (log_harvest, next to LogEntry). Not fixed now.
+
+ACCEPTABLE (not drift):
+5. Three ASCII renderers (security_audit.render, rule_apply.render_change_report, mining.render_mining_report)
+   share scaffolding but are independent formats; Arnon earlier chose independent renderers. OK.
+6. transcript_harvest._index_tool_results vs subagent.find_tool_results -- both index tool_results by id
+   but return different things (is_error+text vs entry index) for different purposes. OK.
+7. config_access ask-unwrap (`perm[len(prefix):-1]` with startswith/endswith) vs config._strip_tool_wrapper:
+   config_access also filters by the specific tool, so partly justified; minor, noted.
+
+Verified clean (NO dup): the synthetic-config rebuild is a single primitive (with_layer_allow_replaced;
+redundancy delegates); jsonl parsing reuses subagent.parse_jsonl_lines; sort reuses rule_sort; writers
+reuse migrate_permissions.
+
+## Dup/drift audit FOLLOW-UP: constants consolidated (2026-06-28)
+
+Findings #3 (FILE_TOOLS set x4) and #4 (status literals) now FIXED via new leaf module
+`toolguard/constants.py` (imports nothing from toolguard -> no coupling):
+- `GOVERNED_TOOLS = frozenset({Bash,Read,Write,Edit})`, `FILE_TOOLS = frozenset({Read,Write,Edit})`
+  (immutable, per Arnon's "shared immutable set"), `STATUS_EXECUTED/REFUSED/ERROR/UNKNOWN`.
+- `hook.FILE_PATH_TOOLS` kept as an ALIAS of `FILE_TOOLS` (test_hook + decision.py import that name; len/in
+  still work on a frozenset). `log_harvest`/`transcript_harvest`/`mining` use `FILE_TOOLS` directly;
+  `transcript_harvest`/`mining`/`replay` use the `STATUS_*` constants instead of literals.
+- Deliberately NOT touched: `error_log.py` "ERROR" (a log-LEVEL label, different semantic domain) and
+  mining `SIGNAL_*` (not duplicated). BDD refactor: NO test changes; full suite 1075 OK, ruff clean.

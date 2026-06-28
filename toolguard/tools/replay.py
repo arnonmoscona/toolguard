@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from toolguard.config import Configuration
+from toolguard.constants import STATUS_EXECUTED, STATUS_REFUSED
 from toolguard.tools.decision import Decision, decide
 from toolguard.tools.log_harvest import LogEntry
 
@@ -263,8 +264,8 @@ def _verdict_matches_status(verdict: str, status: str) -> bool:
         ``True`` when the verdict is consistent with the observed status.
     """
     status_upper = status.upper()
-    if status_upper == "EXECUTED":
+    if status_upper == STATUS_EXECUTED:
         return verdict == "allow"
-    if status_upper == "REFUSED":
+    if status_upper == STATUS_REFUSED:
         return verdict in ("deny", "ask")
     return False

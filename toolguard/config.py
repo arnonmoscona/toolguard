@@ -471,6 +471,26 @@ def is_tool_wrapper(pattern: str) -> bool:
     return isinstance(pattern, str) and _TOOL_WRAPPER_RE.fullmatch(pattern) is not None
 
 
+def wrap_tool_pattern(tool: str, body: str) -> str:
+    """
+    Wrap a pattern body in its ``Tool(...)`` envelope.
+
+    The structural inverse of :func:`_strip_tool_wrapper`: given a tool name and a
+    wrapper-free body, produce the wrapped form as stored in config files (e.g.
+    ``wrap_tool_pattern('Bash', 'git diff:*') -> 'Bash(git diff:*)'``).  This is
+    the single source of truth for that construction so tooling never re-derives
+    the ``f"{tool}({body})"`` idiom site by site.
+
+    Args:
+        tool: Tool name (e.g. ``'Bash'``).
+        body: Wrapper-free pattern body (e.g. ``'git diff:*'``).
+
+    Returns:
+        The wrapped permission pattern string.
+    """
+    return f"{tool}({body})"
+
+
 def _append_provenance(reason: str, provenance) -> str:
     """
     Append matched-rule provenance to a reason as a bracketed suffix.

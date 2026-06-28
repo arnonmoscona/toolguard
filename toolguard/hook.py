@@ -34,11 +34,14 @@ from toolguard.resolve import (
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
+from toolguard.constants import FILE_TOOLS
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 
-# Tools that operate on file paths (use GLOB matching)
-FILE_PATH_TOOLS = {"Read", "Write", "Edit"}
+# Tools that operate on file paths (use GLOB matching).  Alias of the shared
+# constant, kept under this name for backward compatibility with importers
+# (e.g. toolguard.tools.decision, tests).
+FILE_PATH_TOOLS = FILE_TOOLS
 
 # Tools that execute commands (use compound command parsing)
 COMMAND_TOOLS = {
