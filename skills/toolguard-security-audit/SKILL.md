@@ -194,7 +194,9 @@ That JSON is the Pass-1 payload plus an additive top-level `context` block:
         { "locus": str,                    // which config file/level
           "is_native": bool,               // true = Claude-native settings; false = toolguard
           "allow": [...], "deny": [...], "ask": [...] }   // wrapper-free pattern bodies
-    ]} ]
+    ]} ],
+  "proposed_migrations": [...]             // OPTIONAL -- present only when the audit was run
+                                           // with --migrations; see "Proposed migrations" below
 }
 ```
 
@@ -237,6 +239,90 @@ Look for what the deterministic detectors cannot, for example:
 
 Do **not** restate deterministic findings. You may cross-reference one via a
 `relates-to` line. Anchor every finding to something concrete in the config.
+
+### Remediations -- offer a concrete, usable fix
+
+For every finding, propose a remediation the user can paste in, not just a
+description of the problem:
+
+- **Exhaustive, not illustrative.** Cover EVERY case you flagged. "here is a fix for
+  `cat`, do the same for the others" is not acceptable -- spell them all out.
+- **Simple over clever.** Prefer an anchored, readable rule a developer can edit over
+  a maximally-precise one. Anchor regexes (`^`) and keep them legible; do NOT emit
+  giant regexes.
+- **A remediation may span multiple rules AND multiple sections.** It is often better
+  to keep a broad allow and ADD targeted `deny` rules than to contort one allow. Deny
+  the dangerous FILE/operation by token (one deny covers every reader) rather than
+  enumerating tools.
+- **Use the structurally-correct layer.** Read/Edit/Write of secret files is best
+  denied at the file-tool layer (real path-glob semantics); but note Bash readers
+  (`cat .env`) bypass that, so a Bash deny is still needed.
+- **Arbitrary execution -> recommend DELETION** (or replacement by specific allows),
+  never a rewrite that keeps the escape hatch.
+
+Few-shot examples (style, not a fixed catalogue):
+
+1. **Inline replacement** -- complete an incomplete guard:
+   - finding: `Bash([regex]\bfind\b(?!.*\s-(exec|execdir|delete)\b))` misses the write
+     trapdoors `-fprintf`/`-fprint`/`-fls`/`-ok`/`-okdir`.
+   - fix (replace the one rule):
+     `Bash([regex]\bfind\b(?!.*\s-(exec|execdir|ok|okdir|delete|fprintf|fprint|fls)\b))`
+
+2. **Rule combination across sections** -- close a secret-read gap without narrowing
+   normal use (KEEP the broad allows; ADD denies; deny by file token, not per reader):
+   - finding: `.env`/`.ssh` reads slip through un-denied tools (`grep .env`, `tail ~/.ssh/id_rsa`).
+   - fix (add these denies):
+     `Bash([regex]\.env\b)`        -- any Bash command naming a .env file (all readers)
+     `Bash([regex]/\.ssh/)`        -- any Bash command touching a .ssh path
+     `Read([glob]**/.env)` `Read([glob]**/.ssh/**)`  -- the Read/Edit/Write tool path
+
+3. **Delete outright** -- arbitrary execution:
+   - finding: `Bash(uv run python:*)` is an arbitrary-exec escape hatch.
+   - fix: REMOVE it. If specific scripts are needed, allow them explicitly, e.g.
+     `Bash(uv run python ./bin/known_script.py)`.
+
+4. **Anchor an unanchored allow:**
+   - finding: `Bash([regex]rm /home/.../memory/.*)` is unanchored (`re.search`) -- it
+     matches the substring anywhere in a command.
+   - fix: `Bash([regex]^rm /home/.../memory/[^;&|]*$)`.
+
+### Proposed migrations (ONLY when `context.proposed_migrations` is present -- otherwise skip entirely)
+
+**If `proposed_migrations` is absent (the normal case for a plain permission
+review), SKIP this whole section.** You NEVER propose or invent migrations yourself
+-- you only risk-assess moves explicitly handed to you via `--migrations` (typically
+when the maintenance skill invokes this audit). When the array IS present, assess the
+risk of each migration **as if it were enacted in full**, and fold those findings
+into this same AI section.
+
+Each entry carries: `tool`, `list_type`, `pattern`, `from_locus`/`to_locus`,
+`from_specificity`/`to_specificity` (lower = more specific), `decision_neutral`,
+`broadened_count`/`tightened_count`, and a `scope_note`.
+
+- **`decision_neutral` is NOT a safety proof.** It only means the move changed no
+  decision over the harvested corpus of *this* context. It says nothing about
+  developer intent or about contexts the corpus never exercised. A migration can be
+  `decision_neutral: true` and still be risky -- this is exactly where your
+  judgement is needed.
+- **Focus on rules for the SAME command / command family across BOTH sections and
+  layers.** A migration that relocates an allow (or deny) can change how it composes
+  with a deny/ask/allow for a related command that stays put. Look especially for:
+  - **Allow broadened past a deny.** Promoting a broad allow (e.g. `git:*`) up to a
+    user layer while a more-specific deny the developer relies on (e.g. a reserved
+    `git push`) stays at the project layer -- or vice versa -- may let the allow win
+    in contexts where the deny no longer applies. This is NOT a read/write boundary;
+    it is a deliberate carve-out that the split can silently defeat.
+  - **Orphaned / split guards.** A deny and the allow it was carving an exception
+    out of becoming separated across layers, so the pair no longer resolves as the
+    author intended.
+  - **Cross-context broadening.** A promotion applies the rule to every project the
+    broader layer governs; the corpus cannot see those other projects. Flag the
+    breadth the user is signing up for.
+- **You cannot fully prove these; the developer decides.** Raise each as a finding
+  with an honest severity and confidence, name the specific interacting rules and
+  loci, state what intent the move *might* defeat, and explicitly leave the final
+  call to the developer. Prefer flagging a plausible intent-defeating split even at
+  `MEDIUM`/`LOW` confidence over staying silent.
 
 ### Severity and confidence
 

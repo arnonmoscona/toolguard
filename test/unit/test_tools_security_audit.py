@@ -19,6 +19,7 @@ patterns: MappingProxyType layers built directly from Configuration/ConfigLayer/
 
 import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import MappingProxyType
@@ -762,6 +763,50 @@ class TestRenderJson(unittest.TestCase):
         data = json.loads(out)
         for key in ("takeover_active", "highest_severity", "counts", "findings"):
             self.assertIn(key, data, msg=f"Missing key: {key}")
+
+    def test_migrations_embedded_in_context(self):
+        """
+        Given a JSON file of proposed hierarchy-migration analyses
+        When main() runs with --format json --migrations PATH
+        Then the output's context contains proposed_migrations with those entries,
+             so an AI-assisted pass can assess the risk of enacting them.
+        """
+        migs = [
+            {
+                "tool": "Bash",
+                "pattern": "git status:*",
+                "decision_neutral": True,
+                "scope_note": "Promotion: moving up ...",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            mig_path = Path(td) / "migs.json"
+            mig_path.write_text(json.dumps(migs))
+            with patch("toolguard.tools.security_audit.load_config") as mock_load:
+                with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
+                    mock_load.return_value = MagicMock()
+                    mock_sa.return_value = self._make_report()
+                    out, _ = self._capture_main(
+                        ["--dir", ".", "--format", "json", "--migrations", str(mig_path)]
+                    )
+        data = json.loads(out)
+        self.assertIn("context", data)
+        self.assertEqual(data["context"]["proposed_migrations"], migs)
+
+    def test_bad_migrations_file_raises_system_exit(self):
+        """
+        Given a --migrations path that cannot be read
+        When main() runs
+        Then it exits (argparse error) rather than producing a report.
+        """
+        with patch("toolguard.tools.security_audit.load_config") as mock_load:
+            with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
+                mock_load.return_value = MagicMock()
+                mock_sa.return_value = self._make_report()
+                with self.assertRaises(SystemExit):
+                    self._capture_main(
+                        ["--dir", ".", "--format", "json", "--migrations", "/no/such/file.json"]
+                    )
 
     def test_json_findings_list_with_required_fields(self):
         """

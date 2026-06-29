@@ -468,8 +468,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "silently for other formats."
         ),
     )
+    parser.add_argument(
+        "--migrations",
+        dest="migrations",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file holding a list of PROPOSED hierarchy-migration "
+            "analyses (as produced by hierarchy.migration_effect_to_dict).  When "
+            "given, they are embedded under context['proposed_migrations'] in JSON "
+            "output so an AI-assisted pass can assess the risk of enacting them.  "
+            "Only meaningful with --format json."
+        ),
+    )
 
     args = parser.parse_args(argv)
+
+    proposed_migrations = None
+    if args.migrations is not None:
+        try:
+            with open(args.migrations, "r") as handle:
+                proposed_migrations = json.load(handle)
+        except (OSError, ValueError) as exc:
+            parser.error(f"could not read --migrations file {args.migrations!r}: {exc}")
 
     # Use the tooling facade loader (ignore_env_override=True) so the audit always
     # reflects the project-rooted hierarchy, consistent with the rest of the tooling
@@ -499,10 +520,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for f in report.findings
             ],
         }
+        context = None
         if args.with_context:
             ctx = audit_context(config)
             tc = ctx.takeover
-            payload["context"] = {
+            context = {
                 "summary": {
                     "start_dir": str(ctx.summary.start_dir) if ctx.summary.start_dir is not None else None,
                     "project_root": str(ctx.summary.project_root) if ctx.summary.project_root is not None else None,
@@ -535,6 +557,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     for tc_item in ctx.tools
                 ],
             }
+        if proposed_migrations is not None:
+            if context is None:
+                context = {}
+            context["proposed_migrations"] = proposed_migrations
+        if context is not None:
+            payload["context"] = context
         print(json.dumps(payload, ensure_ascii=True, indent=2))
     else:
         print(render(report, fmt=args.format))

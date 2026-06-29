@@ -860,3 +860,185 @@ Findings #3 (FILE_TOOLS set x4) and #4 (status literals) now FIXED via new leaf 
   `transcript_harvest`/`mining`/`replay` use the `STATUS_*` constants instead of literals.
 - Deliberately NOT touched: `error_log.py` "ERROR" (a log-LEVEL label, different semantic domain) and
   mining `SIGNAL_*` (not duplicated). BDD refactor: NO test changes; full suite 1075 OK, ruff clean.
+
+## Curated-tool short-list: best-guess (2026-06-28) -- FINAL list TBD from fuller transcript mining
+
+Arnon: take this as the working guess; before the curated-tool advisor is actually built we will
+mine the transcripts more completely (frequency-rank) for the FINAL development short-list. Evidence
+this session (toolguard repo transcript): Bash 570 uses; top mined groups `cd` x259, `echo` x62, plus
+`grep`, the `git` family, and `find` (both REFUSED entries were find). That maps onto:
+
+- **Tier 1 (broad read-only -> codify allow, kill approval fatigue):** `git` (the anchor: rich stable
+  read-only vs state-changing subcommand split), `ls`/`cat`/`head`/`tail`/`wc` (trapdoor-free read
+  baseline -- but `sort -o`/`tee` write, so still per-flag), `grep`/`rg`/`ag`, `cd`/`pwd`/`echo`
+  (trivially safe but DOMINATE the corpus).
+- **Tier 2 (trapdoor cases -- most valuable for the AUDIT side, NOT broad-allow):** `find`
+  (-exec/-execdir/-ok/-delete/-fprintf), `sed` (-i writes, GNU `e` execs), `awk` (system(), print>file).
+- **Tier 3 (common but project-specific / exec-heavy -> lean ask + deny-completion):** runner/installer
+  family `uv`/`pip`/`npm`/`pnpm`/`yarn`/`pytest`/`make`, interpreters `python`/`node` (-c/-e),
+  `curl`/`wget`.
+
+Starting set recommendation = **Tier 1 + `find`**. HARD caveat: "read-only" is per-(tool, FLAG), never
+per-tool; the table must encode trapdoor flags as first-class. Final selection = frequency rank from
+Arnon's real transcripts (the harvester now produces this), not this guess. See the curated-tool-advisor
+design above (separate ticket; feeds both #3 maintenance-suggest and #6 audit).
+
+## P2-C.2 STATUS: hierarchy migration DONE (2026-06-28) -- P2-C COMPLETE
+
+New `toolguard/tools/hierarchy.py` (library-only). specificity: 0 = most specific (project), higher =
+broader (user); most-specific-wins (verified empirically on synthetic layers).
+- `HierarchyMigration(tool, list_type, pattern, from_provenance, to_provenance, rationale)`;
+  `migrate_config(config, migration)` composes TWO `with_layer_allow_replaced` calls (remove from
+  source, add to target). allow-only this slice.
+- `evaluate_migration(config, migration, corpus) -> MigrationEffect`: replays before/after;
+  `decision_neutral` = no corpus decision changed (safe for the CURRENT context). The genuine
+  promotion effect -- broadening to OTHER contexts the broader layer governs -- is outside any single
+  corpus and surfaced as a `scope_note` (promotion/demotion/same-level). Replay-gate CAUGHT the key
+  hazard in test: promoting an allow PAST an intermediate-layer deny tightens the verdict
+  (decision_neutral False, tightened_count 1).
+- `find_cross_layer_redundancies(config, tool) -> [CrossLayerRedundancy]`: a more-specific allow rule
+  normalised-EQUAL to a broader-layer rule is redundant (broader already covers it -> drop the specific
+  copy, decision-neutral). The cross-layer counterpart redundancy.py deferred. Conservative (equal only;
+  cross-layer glob subsumption deferred). Reuses `redundancy._normalised_body`.
+- REUSE (clean, no rebuild): with_layer_allow_replaced, replay, per_layer_rules, _normalised_body.
+
+Tests: +7 `test_tools_hierarchy.py` (migrate relocates; neutral promotion; non-neutral-past-deny caught;
+demotion scope-note; cross-layer redundancy flagged/unique-not-flagged/direction). **Full suite 1082 OK,
+ruff clean.** NOT committed.
+
+NOTE: hierarchy migration produces proposals + verification; the FILE apply (remove from file A, add to
+file B) is not built -- it composes two rule_apply-style edits; generalize rule_apply or add a thin
+apply when P2-E wires it.
+
+P2 remaining: P2-D families 3-4 (agent-judged multi-option broadening) -- mostly SKILL guidance over the
+existing replay/probe machinery; P2-E maintenance SKILL.md + CLI (the user-facing wiring, dirty-tree
+guard, self-permissioning). Plus the curated-tool advisor (separate ticket, transcript-evidence-driven).
+
+## Migration risk -> AI-audit refinement + DOCS requirement (Arnon 2026-06-29)
+
+**DOCS requirement (note for user-facing docs / P2-E + docs pass):** hierarchy migration can have
+security-relevant interactions the DETERMINISTIC tool CANNOT fully analyze -- across SECTIONS
+(allow vs deny vs ask) and across LAYERS. replay only proves current-corpus decision-neutrality; it
+cannot see developer INTENT or cross-context effects. Example: a broad `git:*` allow plus a deny on a
+specific op the dev reserves for themselves (e.g. `git push`, NOT a read/write boundary). Splitting the
+allow and the deny across different layers may or may not defeat that intent. The AI-driven security
+audit (#6) CAN flag this -- ESPECIALLY when instructed to focus on rules for the SAME command/command
+family across sections and layers -- and leave the final call to the developer.
+
+**NEW WORK this phase (P2-C addition): feed proposed-but-unimplemented migrations to the AI audit.**
+- Python: `hierarchy.migration_effect_to_dict(effect)` -> JSON-able dict (tool, list_type, pattern,
+  from_locus/to_locus, from/to specificity, decision_neutral, broadened/tightened/changed counts,
+  scope_note, rationale). Structured so it can be passed as context.
+- `security_audit`: new optional `--migrations PATH` (JSON list of those dicts); when given with
+  `--with-context`, embed under `context["proposed_migrations"]` -- the concrete "passing" mechanism so
+  the AI pass sees the migration analysis alongside the rule hierarchy in ONE context blob.
+- security-audit SKILL.md: new Pass-2 section "Evaluating proposed (unimplemented) migrations" --
+  instruct the AI to evaluate each migration's risk IF ENACTED IN FULL: focus on same-command/family
+  rules across allow/deny/ask AND across layers; flag allow-broadening-past-a-deny, orphaned/split deny
+  that may defeat intent (the git-push example), and cross-context broadening the replay can't see;
+  emit severity + confidence; the deterministic `decision_neutral`/replay is current-corpus ONLY, NOT a
+  safety proof -- this is exactly where AI judgement adds value; leave the final decision to the developer.
+- Tests: serializer round-trip + audit `--migrations` embedding into context.
+
+## Coverage snapshot (2026-06-29, before P2-C commit)
+Ran tools/coverage_stdlib.py. NOTE: stdlib `trace` flags multi-line signature CONTINUATION lines as
+uncovered (false positives) -> raw % understated. Genuine new-module coverage is solid; most real gaps:
+transcript_harvest (_extract_text list branch + timestamp None/invalid) and consolidate
+(_static_prefix_of branches, suffix handling). Fold top-ups into a PRE-PUSH coverage pass.
+
+## DONE: migration -> AI-audit refinement (2026-06-29)
+
+Implemented the "feed proposed-but-unimplemented migrations to the AI audit" refinement:
+- `hierarchy.migration_effect_to_dict(effect)` -> JSON-able dict (tool/list_type/pattern, from/to
+  locus + specificity, decision_neutral, broadened/tightened/changed counts, scope_note, rationale).
+- `security_audit` CLI: new `--migrations PATH` (loads a JSON list; argparse-errors on bad file);
+  embeds under `context["proposed_migrations"]` (works with or without `--with-context`; context
+  created if needed). Reads a plain user JSON via json.load (NOT a config file -> load_config_file
+  doesn't apply; not drift). Smoke + tests green end-to-end.
+- security-audit SKILL.md Pass 2: new "### Proposed migrations -- assess the risk of enacting them"
+  subsection + documented `proposed_migrations` in the context JSON shape. Instructs the AI to assess
+  each migration AS IF ENACTED IN FULL; decision_neutral is NOT a safety proof; focus on same-command/
+  family rules across BOTH sections (allow/deny/ask) and layers; flag allow-broadened-past-a-deny
+  (the git-push reserved-op example), orphaned/split guards, cross-context broadening; severity +
+  confidence; developer decides.
+- Tests: +1 hierarchy (serializer round-trip JSON-able) +2 security_audit (--migrations embeds;
+  bad file -> SystemExit). Full suite 1085 OK, ruff clean. NOT committed.
+
+This closes the migration-risk item. P2-C (mining + hierarchy + this refinement) fully done.
+
+## Project-root definition + migration safety gate (design, Arnon + Claude 2026-06-29)
+
+Drove out of the featherhill dry run (need a project-agnostic-vs-specific rule classifier). DESIGN
+agreed (no code yet; for the migration skill #2/#3, agnostic detector, and setup skill):
+
+**Project root = deterministic primitive.** Already exists: `config.find_project_root(start_dir)`
+walks up for nearest `pyproject.toml` OR `.git` and RAISES if neither. Reconcile to ONE primitive;
+do NOT fork a second definition.
+- **`.git` (VCS root) is the canonical BOUNDARY/safety anchor** for migration (language-agnostic,
+  unambiguous; `pyproject.toml` can sit in a sub-package below the git root -> wrong boundary).
+- **Grain = REPO, not package** for migration-to-user-level (monorepo = one project; conservative).
+  Package-grain (pyproject/.claude) is out of scope.
+- **No project marker -> REFUSE to migrate** by default (safe), but frame as an overridable default
+  with clear language, not an absolute. Precedence: `.git`/VCS >> build manifests >> CLAUDE.md >> pwd.
+
+**Necessary but NOT sufficient (key caveat):** knowing the root does not classify a rule as agnostic.
+Featherhill proof: `curl localhost:8001`, `uv run uvicorn flowers.app.main:app`, `lsof -i :8001`,
+`canopy`, `./bin/*` are project-specific yet reference NO path inside the root. Classifier needs TWO
+clauses: (a) no path inside the project root AND (b) no project-specific TOKEN (ports, app-module
+names, sibling-project abs paths, project-named binaries). **Default to SPECIFIC/don't-promote when
+unsure** (allow-direction asymmetry: wrong-promote = silent hole; wrong-keep = mild friction).
+
+**Ask-when-in-doubt, layered (Arnon):** the elegant framing -- git root OR explicit user answer is the
+CORRECTNESS anchor; a configurable, DEFAULTED, explicitly-NON-AUTHORITATIVE indicator list is only a
+CONVENIENCE to propose candidates / reduce prompts, so the list never has to be complete. Flow:
+try `.git` -> else PROPOSE candidates from markers ("found .git at X, pyproject at Y -- which is your
+root?", show the signal) -> else ASK for a path -> else REFUSE. Non-interactive: ask degrades to refuse.
+- **Two distinct config concepts:** (a) the INDICATORS (how to detect; user-editable, incomplete,
+  defaulted, proposed at install) vs (b) a RESOLVED-ROOT OVERRIDE (this IS my root) PERSISTED after the
+  user answers so we don't re-ask every run.
+- Default indicators (small, starting point, NOT exhaustive): `.git`/`.hg`/`.jj`, `pyproject.toml`,
+  `package.json`, `go.mod`, `Cargo.toml`, `pom.xml`/`build.gradle`, `CMakeLists.txt`.
+
+**Clarity is a HARD principle (Arnon):** recommendation text is the product. Deterministic core emits
+STRUCTURED facts; skill renders with CALIBRATED language that never overstates ("no decision change in
+your history; cannot verify other projects" NOT "safe"). Same principle applies to the disambiguation
+prompt (show the signal). Note: `find_project_root` currently treats pyproject/.git as EQUAL (OR) and
+RAISES rather than returning None -- making it git-primary + graceful-None for the gate is a small
+deliberate change when we build it (design choice, not a bug).
+
+## Review of P2-C.2 + featherhill dry run (Arnon 2026-06-29): fixes done + DEFERRED requirements
+
+**DONE NOW (in this slice's commit):**
+- Simplified `hierarchy.find_cross_layer_redundancies` (was cognitive-complexity-borderline triple
+  nest) -> coverage index `key -> [(specificity, provenance)]` + `_nearest_broader_cover` helper; one
+  finding per redundant pattern citing the nearest broader cover. Tests green.
+- security-audit SKILL.md: (a) sharpened the proposed-migrations section -- heading now "ONLY when
+  context.proposed_migrations is present -- otherwise skip entirely", explicit "SKIP if absent", and
+  "NEVER propose/invent migrations yourself; only risk-assess moves passed via --migrations". (b) NEW
+  "### Remediations -- offer a concrete, usable fix" subsection: exhaustive-not-illustrative, simple>clever
+  (anchor regexes, no giant regexes), remediation MAY span multiple rules AND sections, deny by file
+  TOKEN not per-reader, prefer structurally-correct layer (file-tool deny for Read/Edit/Write but Bash
+  readers still need a Bash deny), arbitrary-exec -> DELETE. + 4 few-shot examples (inline replacement /
+  rule-combination across sections / delete / anchor-unanchored).
+
+**DEFERRED to P2-E / an audit-enhancement slice (Arnon agreed all):**
+- **Maintenance recommendation report** = the "just right" summary PLUS VERBATIM per-file config
+  sections (use `rule_apply.apply_proposals(dry_run=True)` -- already yields exact per-file diff/new
+  text). Three APPLICATION MODES the user picks: (i) user edits themselves from the recommendation
+  (preferred -- they know their config), (ii) agent applies all in bulk, (iii) agent applies with
+  case-by-case approval, GROUPED by interacting/very-similar rules (same command family; a rule + the
+  deny it interacts with). Grouping comes from the migration-risk/interaction analysis.
+- **Audit must REMEDIATE (structured + audience-aware):** evolve `RankedFinding.remediation` from a
+  string into a STRUCTURED action (remove|replace|narrow|move + target + replacement rule(s)) so the
+  maintenance skill can post-process without NLP. Audit needs a HUMAN vs SKILL audience mode (a
+  `--for-skill`/agent flag or the maintenance skill telling it). OPEN QUESTION (Arnon on the fence):
+  one report or two when invoked by the maintenance skill -- Arnon leans ONE (the human wants to read
+  it too); likely resolution = ONE human-readable report PLUS structured remediation data the skill
+  consumes (in JSON / sidecar), not two prose reports.
+- **`#NOSECURITY` comment tag (bandit `# nosec` precedent):** (1) suppress = ACKNOWLEDGE not hide
+  (Pass 1 still reports it, marked "acknowledged (#NOSECURITY: <reason>)", de-prioritized -- never
+  silently drop, per toolguard transparency). (2) free-form reason scopes the exclusion (about .env,
+  not unrelated issues) AND signals project-local -> a #NOSECURITY rule is therefore NOT a migration
+  candidate (blessed HERE, not everywhere). (3) ENABLING Python work: `config_access.audit_context`
+  must EXPOSE per-rule comments (leading + inline) -- `rule_sort` already parses them; the context
+  currently throws them away. That comment-exposure is the prerequisite that unlocks the feature.
