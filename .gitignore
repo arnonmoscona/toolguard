@@ -8,3 +8,23 @@ tmp/
 # Coverage artifacts (tools/coverage_stdlib.py)
 .coverage
 cover/
+.tokensave
+# Added by code-review-graph
+.code-review-graph/
+
+# code-review-graph installer noise: instruction/skill files generated for other
+# AI platforms we do not use (Claude Code reads CLAUDE.md, not these). They
+# regenerate whenever `code-review-graph install` runs, so keep them out of git.
+.cursorrules
+.windsurfrules
+.opencode.json
+.gemini/
+GEMINI.md
+.kiro/
+.qoder/
+QODER.md
+.github/code-review-graph.instruction.md
+skills/debug-issue/
+skills/explore-codebase/
+skills/refactor-safely/
+skills/review-changes/

@@ -147,3 +147,123 @@ When we're about to wrap up a ticket, and it seems that I am ready to push a set
 
 Additional project-specific notes can be found in [technical-notes.md](technical-notes.md),
 if the file exists.
+
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph.** For structural and
+symbol-shaped questions it is often the best first stop -- faster, cheaper
+(fewer tokens), and it gives structural context (callers, dependents, impact,
+architecture) that file scanning cannot. It does **not** replace the global
+search guidance in `~/.claude/common-search.md`; it is a third lane alongside
+`ag`/`ack` and the JetBrains MCP. Reach for any of those three before defaulting
+to Grep/Glob/Read -- see "How this fits the global search directives" below for
+the division of labor.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
+- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
+- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
+- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of
+- **Finding a function's tests**: `query_graph` pattern="callers_of" and keep the
+  `is_test:true` results -- **NOT** `tests_for` (see caveats below)
+- **Architecture questions**: `get_architecture_overview` + `list_communities`
+
+When the graph doesn't fit, choose the next lane by the rules below -- not
+automatically Grep.
+
+### How this fits the global search directives (don't bury them)
+
+The global guidance in `~/.claude/common-search.md` still governs. This graph is a
+**third lane**, not a replacement. Decision order for this repo:
+
+- **Text-anchored** (string literal, comment, log message, config value, TODO, or any
+  gitignored / just-created file): **`ag`/`ack`** -- the graph indexes structure, not
+  arbitrary text, and `ag` sees the live filesystem (immune to graph drift and
+  IDE-index lag).
+- **Symbol / relationship / architecture-anchored**: prefer a semantic tool over grep,
+  choosing by need --
+  - **code-review-graph** for token-cheap breadth: exploration, `get_impact_radius`,
+    `detect_changes` / review context, `get_architecture_overview` / communities. Its
+    wins are token cost and structural reach.
+  - **JetBrains MCP** (`search_symbol`, `analyze_calls`, `get_symbol_info`) for
+    live-accurate precision on a specific symbol: aliases, overloads, just-edited code,
+    or whenever the graph's enrichment may be **stale** (see the drift note below).
+  - Tiebreak: graph first to map the territory cheaply; JetBrains MCP to confirm or
+    disambiguate an exact symbol, or when the graph looks stale.
+- **Grep/Glob**: genuinely last resort -- only when none of the above fits. (Noted
+  because the default reflex is to reach for grep first; resist it.)
+
+### Project-specific caveats (verified 2026-06-29)
+
+- **`tests_for` is unreliable on this repo.** The `TESTED_BY` heuristic misses
+  class-based `unittest.TestCase` methods (which is how this project's tests are
+  written -- not pytest), so `tests_for(fn)` returns false zeros. The underlying
+  test->function `CALLS` edges DO exist, so to find a function's tests use
+  `query_graph` pattern="callers_of" and filter to `is_test:true`.
+- **Semantic search is true vector mode** -- embeddings are built (local
+  `sentence-transformers`, ~2086 vectors) and communities are post-processed
+  (igraph). `search_mode:"hybrid"` and the small (~0.015) scores are constant
+  RRF fusion artifacts, NOT a sign of keyword-only fallback; ignore them. If a
+  fresh `uv sync` ever wipes the venv, re-run `code-review-graph embed` +
+  `postprocess` and restart the session to re-activate query-time embedding.
+
+### Periodic maintenance (avoiding graph drift)
+
+The **structural** graph (nodes/edges/calls/FTS) self-maintains: a `PostToolUse`
+hook runs `code-review-graph update --skip-flows` after every Edit/Write/Bash, so
+it stays current as code changes (and catches external changes -- git pull, IDE
+edits -- on the first tool use of a session). The `SessionStart` hook only prints
+`status`; it does not rebuild.
+
+The **enrichment** layers do NOT auto-update and drift as the code evolves:
+
+- **embeddings** -- new/renamed functions get no (or stale) vectors; semantic
+  search silently degrades.
+- **communities** -- only `postprocess` rebuilds them.
+- **flows** -- the hook passes `--skip-flows`, so flows drift too.
+
+Refresh them at checkpoints (end of a phase/slice, before relying on
+`semantic_search`/`get_architecture_overview`, before an ultrareview):
+
+```bash
+uv run code-review-graph embed        # recompute vectors (local sentence-transformers)
+uv run code-review-graph postprocess  # rebuild communities + flows + FTS (igraph)
+```
+
+**Suspect the embeddings are out of sync when:** `semantic_search` stops surfacing
+recently-added functions, a concept query returns only older code, or you have just
+landed a batch of new/renamed functions (a new module, a big refactor). Confirm via
+`list_graph_stats` -- compare `embeddings_count` against the function+class+test node
+count; a large shortfall means new nodes are unembedded. Fix: run `embed` (then a
+session restart is only needed if the MCP **server process** itself must reload a
+newly-installed embedding library; for a routine re-embed the running server picks up
+the refreshed vectors from the DB). If structure itself looks stale (a function you
+know exists is missing), force a full structural pass with
+`uv run code-review-graph update` (or `build` for a from-scratch rebuild), then
+`embed` + `postprocess`.
+
+These commands are local, offline, and write only to the gitignored
+`.code-review-graph/`.
+
+### Key Tools
+
+| Tool | Use when |
+| ------ | ---------- |
+| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context` | Need source snippets for review — token-efficient |
+| `get_impact_radius` | Understanding blast radius of a change |
+| `get_affected_flows` | Finding which execution paths are impacted |
+| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes` | Finding functions/classes by name or keyword |
+| `get_architecture_overview` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes` for code review.
+3. Use `get_affected_flows` to understand impact.
+4. To check a function's test coverage, use `query_graph` pattern="callers_of"
+   and keep `is_test:true` results (`tests_for` is unreliable here -- see caveats).

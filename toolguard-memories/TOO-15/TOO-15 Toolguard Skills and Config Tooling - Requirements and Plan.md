@@ -1042,3 +1042,28 @@ deliberate change when we build it (design choice, not a bug).
   candidate (blessed HERE, not everywhere). (3) ENABLING Python work: `config_access.audit_context`
   must EXPOSE per-rule comments (leading + inline) -- `rule_sort` already parses them; the context
   currently throws them away. That comment-exposure is the prerequisite that unlocks the feature.
+
+## >>> RESUME POINT (session end 2026-06-29) <<<
+
+COMMITTED, not pushed. P2-A, P2-B, P2-C (mining + hierarchy + migration->AI-audit refinement) all
+landed. Deterministic maintenance core is essentially complete:
+config_access/decision/replay/log_harvest/transcript_harvest/redundancy/danger/takeover_audit/
+sorters(+rule_sort)/consolidate/rule_apply/mining/hierarchy + security_audit (+ --migrations) +
+constants. Full suite 1085 OK, ruff clean. Repo intentionally still "dirty"/dogfood per
+[[too15-completion-gate]] (temp skill symlinks NOT yet removed; do at ticket close).
+
+NEXT (pick up here):
+- **P2-D** -- agent-judged families 3-4 (multi-option broadening); mostly SKILL guidance over existing
+  replay/probe machinery, little new Python.
+- **P2-E** -- maintenance SKILL.md + CLI. This is where the big DEFERRED items land (see the three
+  "DEFERRED" blocks above): verbatim per-file recommendation sections via apply_proposals(dry_run);
+  3 application modes (self-edit / bulk / case-by-case grouped by interaction); structured +
+  audience-aware audit remediations (RankedFinding.remediation -> typed; human-vs-skill mode; ONE
+  report + structured sidecar per Arnon's lean); #NOSECURITY (acknowledge-not-hide; scoped reason
+  blocks migration; PREREQ = expose per-rule comments in audit_context); self-permissioning; dirty-tree
+  guard; project-root resolution (git-primary, configurable indicators, ask-then-refuse -- see design
+  block above); glob-defect docs.
+- Pre-PUSH (per project CLAUDE.md): coverage top-ups (transcript_harvest/_extract_text + consolidate
+  static-subsumption branches), version bump in pyproject.toml, release notes, glob-defect user docs.
+- Curated-tool advisor = separate ticket (transcript-evidence-driven; short-list best-guess = Tier 1 +
+  find, recorded above).
