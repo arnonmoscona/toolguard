@@ -45,7 +45,11 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from toolguard.config import Configuration, Provenance
 from toolguard.patterns import PatternType, parse_pattern
-from toolguard.tools.config_access import per_layer_rules, with_layer_allow_replaced
+from toolguard.tools.config_access import (
+    LayerRules,
+    per_layer_rules,
+    with_layer_allow_replaced,
+)
 from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import replay
@@ -91,6 +95,60 @@ class ConsolidationProposal:
     added_pattern: Optional[str]
     rationale: str
     replay_summary: str
+
+
+@dataclass(frozen=True)
+class BroadeningProposal:
+    """
+    An *agent-judged* proposal to broaden a set of allow rules into one wider rule.
+
+    Unlike :class:`ConsolidationProposal` (which is strict and
+    equivalence-preserving), a broadening DELIBERATELY admits more commands than
+    the union of the rules it replaces.  It is therefore never auto-applied: the
+    deterministic layer only ENUMERATES the candidate and attaches concrete replay
+    evidence so the maintenance skill (and the developer) can judge it with the
+    security-audit lens.  The strict-vs-judged seam lives exactly here.
+
+    Attributes:
+        kind: The broadening shape.  ``'prefix-broadening'`` collapses several
+            ``<prefix> <sub>:*`` rules into a single ``<prefix> :*`` that admits
+            any command starting with that prefix.
+        tool: Tool name the proposal applies to (e.g. ``'Bash'``).
+        list_type: Which permission list is modified.  Always ``'allow'`` here.
+        layer_provenance: The :class:`~toolguard.config.Provenance` of the config
+            layer holding the rules being broadened.
+        removed_patterns: Wrapper-free bodies of the narrow rules being replaced.
+        added_pattern: Wrapper-free body of the single broadened replacement rule.
+        rationale: Human-readable explanation of what the broadening admits.
+        newly_admitted_commands: Corpus commands whose verdict flips TOWARD allow
+            under the broadened config (the real blast radius, from replay's
+            ``broadened()`` entries).  Empty when no corpus was supplied.
+        overlaps_guard_rules: Same-layer ask/deny rule bodies whose command-space
+            TEXTUALLY overlaps the broadened pattern (tested in isolation, ignoring
+            resolution precedence), each labelled ``"ask '<body>'"`` or
+            ``"deny '<body>'"``.  toolguard's resolution PROTECTS these in-context
+            (deny always wins; a more-specific ask wins over the broadened allow),
+            so this is NOT a punch-through -- it is a FRAGILITY signal: the
+            broadening's safety now leans on that guard, and the protection
+            evaporates if the allow is later migrated up the hierarchy (the
+            featherhill ``.env``-deny-left-behind class).  Verdict-based
+            punch-through is unreachable here, which is why this is a textual
+            overlap rather than a decided collision.
+        probe_admitted_surface: Synthetic near-miss commands the broadened rule
+            admits but the originals did not -- demonstrates that the rule now
+            admits arbitrary commands under the prefix, even with no corpus.
+    """
+
+    kind: str
+    tool: str
+    list_type: str
+    layer_provenance: Provenance
+    removed_patterns: Tuple[str, ...]
+    added_pattern: str
+    rationale: str
+    newly_admitted_commands: Tuple[str, ...] = ()
+    overlaps_guard_rules: Tuple[str, ...] = ()
+    probe_admitted_surface: Tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +828,267 @@ def propose_consolidations(
         )
 
     # Stable, deterministic sort.
+    proposals.sort(
+        key=lambda p: (
+            p.kind,
+            p.layer_provenance.describe() if hasattr(p.layer_provenance, "describe") else str(p.layer_provenance),
+            sorted(p.removed_patterns),
+        )
+    )
+    return proposals
+
+
+# ---------------------------------------------------------------------------
+# Agent-judged broadening (families 3-4) -- enumerate + attach evidence
+# ---------------------------------------------------------------------------
+
+
+def _default_prefix_tokens(body: str) -> Optional[List[str]]:
+    """
+    Return the command-prefix tokens of a DEFAULT ``cmd:*``/``cmd:**`` pattern.
+
+    Args:
+        body: A wrapper-free pattern body.
+
+    Returns:
+        The command tokens (e.g. ``['uv', 'run', 'alembic']``) when ``body`` is a
+        DEFAULT prefix pattern with a ``*``/``**`` argument tail, else ``None``
+        (non-DEFAULT patterns are not analysed for overlap here).
+    """
+    ptype, inner = parse_pattern(body, extended_syntax=True)
+    if ptype != PatternType.DEFAULT:
+        return None
+    cmd_tokens, args_part = _split_default_body(inner)
+    if not cmd_tokens or args_part not in ("*", "**"):
+        return None
+    return cmd_tokens
+
+
+def _prefixes_overlap(a: List[str], b: List[str]) -> bool:
+    """
+    Return whether two DEFAULT command prefixes share a command.
+
+    Two prefix patterns match a common command exactly when one token sequence is
+    a prefix of the other (e.g. ``['uv','run']`` and ``['uv','run','alembic']``
+    both match ``uv run alembic ...``).
+
+    Args:
+        a: First command-prefix token list.
+        b: Second command-prefix token list.
+
+    Returns:
+        ``True`` when their command-spaces intersect.
+    """
+    n = min(len(a), len(b))
+    return a[:n] == b[:n]
+
+
+def _overlapping_guard_rules(
+    broadened_prefix: Tuple[str, ...],
+    ask_rules: Tuple[str, ...],
+    deny_rules: Tuple[str, ...],
+) -> Tuple[str, ...]:
+    """
+    Find same-layer ask/deny rules whose command-space overlaps a broadening.
+
+    This is a TEXTUAL overlap (precedence-ignorant): it reports guards the
+    broadened allow now also spans, regardless of which rule wins at decision
+    time.  Only DEFAULT guard patterns are analysed; ``[regex]``/``[glob]`` guards
+    are skipped (their command-space is not prefix-comparable here).
+
+    Args:
+        broadened_prefix: Command-prefix tokens of the broadened allow rule.
+        ask_rules: Wrapper-free ask bodies in the same layer.
+        deny_rules: Wrapper-free deny bodies in the same layer.
+
+    Returns:
+        Sorted tuple of labelled guard bodies, e.g. ``("deny 'uv run:*'",)``.
+    """
+    prefix_list = list(broadened_prefix)
+    overlaps: List[str] = []
+    for section, rules in (("ask", ask_rules), ("deny", deny_rules)):
+        for body in rules:
+            gtokens = _default_prefix_tokens(body)
+            if gtokens is not None and _prefixes_overlap(prefix_list, gtokens):
+                overlaps.append(f"{section} '{body}'")
+    return tuple(sorted(overlaps))
+
+
+def _broadening_probe_surface(
+    config_a: Configuration,
+    config_b: Configuration,
+    tool: str,
+    prefix_joined: str,
+) -> Tuple[str, ...]:
+    """
+    Synthesize near-miss probes the broadened rule admits but the originals do not.
+
+    Uses an absent sentinel token so the probe cannot collide with any original
+    narrow rule: under the broadened config the prefix matches it (``allow``),
+    while under the original config nothing does.  A probe is kept only when it is
+    genuinely newly admitted -- ``allow`` under ``config_b`` and NOT ``allow``
+    under ``config_a`` -- so a pre-existing broad allow does not produce a false
+    surface entry.
+
+    Args:
+        config_a: The baseline configuration.
+        config_b: The broadened configuration.
+        tool: Tool name to decide under.
+        prefix_joined: The space-joined command prefix being broadened.
+
+    Returns:
+        Tuple of synthetic command strings the broadening newly admits.
+    """
+    probes = (
+        f"{prefix_joined} {_PROBE_NEGATIVE_TOKEN}",
+        f"{prefix_joined} {_PROBE_NEGATIVE_TOKEN} --flag value",
+    )
+    surface = [
+        cmd
+        for cmd in probes
+        if decide(config_b, tool, cmd).verdict == "allow"
+        and decide(config_a, tool, cmd).verdict != "allow"
+    ]
+    return tuple(surface)
+
+
+def _find_prefix_broadenings(
+    config: Configuration,
+    tool: str,
+    layer: LayerRules,
+    corpus: Optional[List[LogEntry]],
+) -> List[BroadeningProposal]:
+    """
+    Enumerate prefix-broadening candidates within one config layer.
+
+    Groups DEFAULT ``<prefix> <sub>:*`` allow patterns that share an identical
+    leading command prefix (all tokens but the last) and a literal, varying final
+    token, and proposes collapsing each group of >= 2 distinct finals into a
+    single ``<prefix> :*`` rule that admits ANY command under the prefix.  Each
+    candidate is replay-measured against the corpus (when supplied) to record
+    exactly which commands it newly admits, and checked against the same layer's
+    ask/deny rules for textual overlap (the fragility signal).
+
+    Args:
+        config: The resolved configuration.
+        tool: Tool name to inspect.
+        layer: The :class:`~toolguard.tools.config_access.LayerRules` to inspect
+            (its ``allow`` is broadened; its ``ask``/``deny`` are checked for
+            overlap).
+        corpus: Optional command corpus for replay evidence.
+
+    Returns:
+        List of :class:`BroadeningProposal` records (unsorted; the public entry
+        point sorts).
+    """
+    provenance = layer.provenance
+
+    # Group eligible DEFAULT prefix patterns by (prefix-tuple, args) with a
+    # literal varying final token.  A non-empty prefix is required so we never
+    # collapse single-token commands (e.g. ``ls:*`` + ``cat:*``) into a bare
+    # `` :*`` that would allow everything.
+    groups: Dict[Tuple[Tuple[str, ...], str], List[Tuple[str, str]]] = defaultdict(list)
+    for raw in layer.allow:
+        ptype, body = parse_pattern(raw, extended_syntax=True)
+        if ptype != PatternType.DEFAULT:
+            continue
+        cmd_tokens, args_part = _split_default_body(body)
+        if args_part not in ("*", "**"):
+            continue
+        if len(cmd_tokens) < 2:
+            continue
+        last = cmd_tokens[-1]
+        if not _is_literal_token(last):
+            continue
+        prefix = tuple(cmd_tokens[:-1])
+        groups[(prefix, args_part)].append((raw, last))
+
+    proposals: List[BroadeningProposal] = []
+    seen: Set[Tuple[str, str]] = set()
+    for (prefix, args_part), members in groups.items():
+        finals = {last for _, last in members}
+        if len(finals) < 2:
+            continue
+
+        removed = tuple(sorted(raw for raw, _ in members))
+        prefix_joined = " ".join(prefix)
+        added = f"{prefix_joined} :{args_part}"
+        key = (added, "\x00".join(removed))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        config_b = with_layer_allow_replaced(
+            config, tool, provenance, set(removed), [added]
+        )
+
+        newly_admitted: Tuple[str, ...] = ()
+        if corpus:
+            newly_admitted = tuple(
+                d.entry.command
+                for d in replay(corpus, config, config_b).broadened()
+                if d.entry.tool == tool
+            )
+
+        overlaps = _overlapping_guard_rules(prefix, layer.ask, layer.deny)
+        probe_surface = _broadening_probe_surface(config, config_b, tool, prefix_joined)
+
+        rationale = (
+            f"Broaden {len(removed)} '{prefix_joined} <sub>:{args_part}' allow rules "
+            f"into '{added}', admitting ANY command beginning with '{prefix_joined}' "
+            f"(known subcommands {sorted(finals)} -> all)."
+        )
+        proposals.append(
+            BroadeningProposal(
+                kind="prefix-broadening",
+                tool=tool,
+                list_type="allow",
+                layer_provenance=provenance,
+                removed_patterns=removed,
+                added_pattern=added,
+                rationale=rationale,
+                newly_admitted_commands=newly_admitted,
+                overlaps_guard_rules=overlaps,
+                probe_admitted_surface=probe_surface,
+            )
+        )
+    return proposals
+
+
+def propose_broadening_consolidations(
+    config: Configuration,
+    tool: str,
+    corpus: Optional[List[LogEntry]] = None,
+) -> List[BroadeningProposal]:
+    """
+    Enumerate AGENT-JUDGED broadening proposals for ``tool``'s allow list.
+
+    Unlike :func:`propose_consolidations` (strict, equivalence-preserving), this
+    deliberately surfaces consolidations that ADMIT MORE than the union of the
+    rules they replace.  Nothing here is safe to auto-apply: each proposal is
+    enumerated with concrete replay evidence (the real commands it newly admits,
+    the subset that reaches past an explicit guard, and a synthetic admitted
+    surface) so the maintenance skill and the developer can judge it with the
+    security-audit lens.  This is the deterministic half of the deterministic-core
+    / agent-judgment seam.
+
+    Args:
+        config: The resolved :class:`~toolguard.config.Configuration`.
+        tool: Tool name to inspect (e.g. ``'Bash'``).
+        corpus: Optional harvested command corpus.  When supplied, replay records
+            the real ``newly_admitted_commands`` and ``collides_with_guard``
+            evidence; when ``None`` or empty, only the synthetic
+            ``probe_admitted_surface`` is populated.
+
+    Returns:
+        Deterministically ordered list of :class:`BroadeningProposal` records.
+        Order is sorted by ``kind``, ``layer_provenance``, then
+        ``removed_patterns``.
+    """
+    proposals: List[BroadeningProposal] = []
+    for layer in per_layer_rules(config, tool):
+        proposals.extend(_find_prefix_broadenings(config, tool, layer, corpus))
+
     proposals.sort(
         key=lambda p: (
             p.kind,

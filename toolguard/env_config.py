@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional
 
+from toolguard.path_utils import find_nearest_marker
+
 
 def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
     """
@@ -23,19 +25,8 @@ def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
     Returns:
         Path to project root, or None if not found
     """
-    current = start_dir if start_dir else Path.cwd()
-    home = Path.home()
-
-    while True:
-        # Check for project markers
-        if (current / ".git").exists() or (current / "pyproject.toml").exists():
-            return current
-
-        # Stop if we reach home or root
-        if current == home or current == current.parent:
-            return None
-
-        current = current.parent
+    start = start_dir if start_dir else Path.cwd()
+    return find_nearest_marker(start, (".git", "pyproject.toml"))
 
 
 def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:

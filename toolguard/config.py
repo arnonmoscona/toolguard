@@ -34,6 +34,7 @@ from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from toolguard.config_validation import validate_permissions
+from toolguard.path_utils import find_nearest_marker
 
 # Structural matcher for a ``Tool(inner)`` permission wrapper. An identifier made
 # of word characters followed by a parenthesised body. ``.*`` (greedy, DOTALL via
@@ -168,22 +169,14 @@ def find_project_root(start_dir: Path = None) -> Path:
     Raises:
         RuntimeError: If project root cannot be found
     """
-    current = Path(start_dir) if start_dir else Path.cwd()
-    home = Path.home()
-
-    while True:
-        # Check for project markers
-        if (current / "pyproject.toml").exists() or (current / ".git").exists():
-            return current
-
-        # Stop if we reach home or root
-        if current == home or current == current.parent:
-            raise RuntimeError(
-                "Project root not found. Searched for pyproject.toml or .git directory "
-                f"from {Path.cwd()} up to {current}. Something is badly wrong."
-            )
-
-        current = current.parent
+    start = Path(start_dir) if start_dir else Path.cwd()
+    root = find_nearest_marker(start, ("pyproject.toml", ".git"))
+    if root is None:
+        raise RuntimeError(
+            "Project root not found. Searched for pyproject.toml or .git directory "
+            f"from {start} up to {Path.home()}. Something is badly wrong."
+        )
+    return root
 
 
 def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]:

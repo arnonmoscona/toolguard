@@ -18,7 +18,12 @@ from typing import List, Optional
 
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.config_access import with_layer_allow_replaced
-from toolguard.tools.consolidate import _check_family1_safe, propose_consolidations
+from toolguard.tools.consolidate import (
+    BroadeningProposal,
+    _check_family1_safe,
+    propose_broadening_consolidations,
+    propose_consolidations,
+)
 from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.redundancy import _config_without_allow
@@ -725,6 +730,100 @@ class TestConsolidateEdgeCases(unittest.TestCase):
         config = _make_config(layer)
         proposals = propose_consolidations(config, "Read")
         self.assertEqual(proposals, [])
+
+
+class TestPrefixBroadening(unittest.TestCase):
+    """
+    Tests for propose_broadening_consolidations() -- the agent-judged broadening
+    enumerator and its replay/overlap/probe evidence (families 3-4, P2-D).
+    """
+
+    def test_git_broadening_newly_admits_corpus_subcommand(self):
+        """
+        Given three narrow 'git <sub>:*' allow rules and a corpus containing a git
+            subcommand none of them allow
+        When propose_broadening_consolidations is called with that corpus
+        Then a single prefix-broadening proposal to 'git :*' is returned whose
+            newly_admitted_commands includes the previously-unallowed git command.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["git diff:*", "git status:*", "git log:*"],
+                provenance=prov,
+            )
+        )
+        corpus = [_make_log_entry("Bash", "git push origin main")]
+        proposals = propose_broadening_consolidations(config, "Bash", corpus)
+        self.assertEqual(len(proposals), 1)
+        proposal = proposals[0]
+        self.assertEqual(proposal.kind, "prefix-broadening")
+        self.assertEqual(proposal.added_pattern, "git :*")
+        self.assertIn("git push origin main", proposal.newly_admitted_commands)
+
+    def test_broadening_flags_overlapping_same_layer_guard(self):
+        """
+        Given two narrow 'uv run alembic <sub>:*' allows plus a broader same-layer
+            ask guard 'uv run:*'
+        When propose_broadening_consolidations enumerates the broadening
+        Then overlaps_guard_rules names the overlapping ask guard (the fragility
+            signal), surfaced even though resolution protects it in-context.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["uv run alembic upgrade:*", "uv run alembic current:*"],
+                ask=["uv run:*"],
+                provenance=prov,
+            )
+        )
+        proposals = propose_broadening_consolidations(config, "Bash", None)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].added_pattern, "uv run alembic :*")
+        self.assertIn("ask 'uv run:*'", proposals[0].overlaps_guard_rules)
+
+    def test_no_corpus_yields_probe_only_evidence(self):
+        """
+        Given a broadenable git allow set and NO corpus
+        When propose_broadening_consolidations is called with corpus=None
+        Then newly_admitted_commands is empty while probe_admitted_surface is
+            non-empty -- the synthetic admitted surface still demonstrates breadth.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["git diff:*", "git status:*", "git log:*"],
+                provenance=prov,
+            )
+        )
+        proposals = propose_broadening_consolidations(config, "Bash", None)
+        self.assertEqual(len(proposals), 1)
+        proposal = proposals[0]
+        self.assertEqual(proposal.newly_admitted_commands, ())
+        self.assertTrue(proposal.probe_admitted_surface)
+
+    def test_strict_consolidation_output_unchanged(self):
+        """
+        Given a git-family config that yields a strict family-1 proposal
+        When propose_consolidations is called alongside the new broadening API
+        Then it still returns its literal-alternation proposal and emits NO
+            BroadeningProposal objects -- the strict path is unaffected.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["git diff:*", "git status:*", "git log:*"],
+                provenance=prov,
+            )
+        )
+        strict = propose_consolidations(config, "Bash")
+        family1 = [p for p in strict if p.kind == "literal-alternation"]
+        self.assertTrue(family1)
+        self.assertFalse(any(isinstance(p, BroadeningProposal) for p in strict))
 
 
 if __name__ == "__main__":

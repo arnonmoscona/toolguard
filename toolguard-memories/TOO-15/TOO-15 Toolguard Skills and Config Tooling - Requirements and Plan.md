@@ -1006,6 +1006,40 @@ prompt (show the signal). Note: `find_project_root` currently treats pyproject/.
 RAISES rather than returning None -- making it git-primary + graceful-None for the gate is a small
 deliberate change when we build it (design choice, not a bug).
 
+### P2-E.1 STATUS: LANDED (2026-06-30, inline) -- project-root resolver
+
+PREMISE CORRECTION (found via code-review-graph callers_of): there are TWO existing finders, not one --
+`config.find_project_root` (package-grain, RAISES; used by config DISCOVERY: discover_config_files,
+_discover_levels, Configuration.project_root, log_writer, migrate_permissions) and
+`env_config.find_project_root` (nearest .git/pyproject or None, for .env loading). BOTH are
+nearest-marker finders; NEITHER is repo-grain/git-primary/structured. Mutating config.find_project_root
+(as the old note implied) would have broken config discovery's package grain. So I did NOT touch either.
+
+BUILT NEW pure primitive `toolguard/tools/project_root.py`: `resolve_project_root(start_dir, *,
+override=None, indicators=DEFAULT_INDICATORS) -> ProjectRootResolution`. Status enum RESOLVED_OVERRIDE /
+RESOLVED_VCS / AMBIGUOUS / NONE; `.safe_to_migrate` = VCS-or-override only. Order: override > nearest VCS
+(repo boundary) > non-VCS build-marker candidates (AMBIGUOUS, for skill to ask) > NONE (refuse).
+`indicators` (defaulted, non-authoritative) + `override` (persisted resolved-root) are PARAMETERS -- the
+WHERE-persisted config schema is deferred to the skill/CLI wiring (keeps the primitive pure/testable).
+Calibrated `reason` strings never say "safe". 6 BDD tests (test_tools_project_root.py). Suite 1095 OK,
+ruff clean. The deterministic core never prompts; ask/refuse is the skill's job (per spec).
+
+### P2-E.2 STATUS: LANDED (2026-06-30, inline) -- maintenance aggregator
+
+NEW `toolguard/tools/maintenance.py` (mirrors security_audit.py shape): `ToolMaintenance` +
+`MaintenanceReport` dataclasses; `run_maintenance(config, tools=None, corpus=None) -> MaintenanceReport`
+COMPOSES (no reimpl) find_redundancy + propose_consolidations + propose_broadening_consolidations +
+find_cross_layer_redundancies per tool, plus config-wide mine_rule_candidates; `render(report, fmt)`
+SUMMARY view reusing mining.render_mining_report. 5 BDD tests. Suite 1100 OK, ruff clean. DEFERRED to
+later P2-E sub-slices: CLI main(), verbose paste-ready per-file recommendation + 3 application modes,
+#NOSECURITY, dirty-tree guard, self-permissioning, wiring resolve_project_root into the migration gate.
+
+### FINDER CLEANUP: DONE (2026-06-30, Arnon asked to do it now). Extracted the shared bounded walk-up into
+leaf module `toolguard/path_utils.py` (`iter_dirs_upward`, `find_nearest_marker` -- stdlib only, no
+cycle risk). `config.find_project_root` (raises), `env_config.find_project_root` (None), and
+`tools/project_root.py` (structured) now all DELEGATE to it, each keeping its own contract + grain. No
+behavior change (suite 1095 OK, ruff clean; config-discovery + env_config finder tests green).
+
 ## Review of P2-C.2 + featherhill dry run (Arnon 2026-06-29): fixes done + DEFERRED requirements
 
 **DONE NOW (in this slice's commit):**
@@ -1067,3 +1101,90 @@ NEXT (pick up here):
   static-subsumption branches), version bump in pyproject.toml, release notes, glob-defect user docs.
 - Curated-tool advisor = separate ticket (transcript-evidence-driven; short-list best-guess = Tier 1 +
   find, recorded above).
+
+## P2-D design (2026-06-29) -- agent-judged broadening, "thin enumerator + evidence" (Arnon chose)
+
+Seam decision (AskUserQuestion): add a SMALL deterministic enumerator that proposes broadenings and
+attaches CONCRETE replay evidence; the JUDGMENT stays in the maintenance SKILL (P2-E). Not pure-SKILL,
+not deferred. Matches the deterministic-core/agent-judgment seam.
+
+NEW in `toolguard/tools/consolidate.py` (extend, do NOT fork the module):
+- `BroadeningProposal` dataclass (distinct from strict `ConsolidationProposal`, so the strict
+  equivalence contract stays pristine). Fields: kind ('lossy-alternation' | 'prefix-broadening'),
+  tool, list_type, layer_provenance, removed_patterns: Tuple[str,...], added_pattern: str,
+  rationale, plus STRUCTURED EVIDENCE: newly_admitted_commands: Tuple[str,...] (corpus commands that
+  flip toward allow under B), collides_with_guard: Tuple[str,...] (the security-critical SUBSET whose
+  decision_a was ask/deny and decision_b is allow -- the alembic-landmine surface), and
+  probe_admitted_surface: Tuple[str,...] (near-miss probe commands the broader rule now admits but the
+  originals did not).
+- `propose_broadening_consolidations(config, tool, corpus) -> List[BroadeningProposal]`. corpus is
+  REQUIRED here (evidence is the point; with no corpus, newly_admitted is probe-only).
+- Family-3 enumeration = the LOSSY counterpart of `_find_literal_alternations`: same grouping
+  (token-identical except one slot) BUT also propose the broader `cmd :*`-style merge (drop the varying
+  slot entirely, e.g. `git diff:*`+`git status:*` -> `git :*`) AND keep alternations that the strict
+  gate REJECTED because they broaden. Prefix-broadening: collapse a set of `git <sub>:*` to `git :*`
+  when a common static prefix exists.
+- Evidence extraction: build config_b via `with_layer_allow_replaced` (REUSE), `replay(corpus, A, B)`
+  (REUSE), then newly_admitted = [d.entry.command for d in diff.broadened()]; collides_with_guard =
+  the subset where d.decision_a.verdict in {ask,deny}. probe surface from a broader-near-miss generator.
+- NO auto-reject for broadening (that's the whole point) -- but DO surface collides_with_guard
+  prominently; the SKILL's rubric (P2-E) + security-audit lens decides. Strict families 1-2 unchanged.
+
+REUSE MAP (anti-drift -- these EXIST, do not rebuild): `_split_default_body`, `_is_literal_token`,
+`parse_pattern`(patterns), `per_layer_rules`/`with_layer_allow_replaced`(config_access),
+`replay`+`ReplayDiff.broadened()`+`EntryDiff(entry,decision_a,decision_b,classification)`(replay),
+`decide`(decision), `_build_alternation_regex` for the alternation case.
+
+SUCCESS CRITERIA (BDD unittest, suite stays green): (1) git-family prefix-broadening emits a
+BroadeningProposal with newly_admitted including a git subcommand NOT in the originals; (2) the alembic
+case emits a proposal whose collides_with_guard names the alembic command that was ask->allow (surfaced,
+NOT silently dropped); (3) a no-corpus call yields probe-only evidence (empty newly_admitted, non-empty
+probe_admitted_surface); (4) strict `propose_consolidations` output UNCHANGED (no regression).
+
+### P2-D STATUS: LANDED (2026-06-30, inline -- feature-coder hit monthly spend limit again)
+
+Implemented in `toolguard/tools/consolidate.py`: `BroadeningProposal` dataclass +
+`propose_broadening_consolidations(config, tool, corpus=None)` + helpers
+`_find_prefix_broadenings`, `_overlapping_guard_rules`, `_default_prefix_tokens`,
+`_prefixes_overlap`, `_broadening_probe_surface`. 4 BDD tests in test_tools_consolidate.py
+(TestPrefixBroadening). Full suite 1089 OK, ruff clean. Strict family-1/2 path unchanged
+(regression test green). Pre-push: top up coverage on defensive branches
+(`_default_prefix_tokens` None path, dedup `seen`, `len(finals)<2` skip).
+
+### P2-D SEMANTIC DISCOVERY (2026-06-30) -- collides reframed; new clarity requirement
+
+Probed toolguard's REAL within-layer resolution while building P2-D:
+- **Deny always wins** -- even a MORE-specific broadened allow loses to a broader deny in the same
+  layer (`allow "uv run alembic :*"` vs `deny "uv run:*"` -> deny).
+- **Ask collapses** -- a broad ask with no matching allow resolves to deny with provenance=None
+  (compound ask-collapse). For ask to WIN (prov set) it must out-specific every matching allow, which a
+  broadening (which only lowers allow specificity) can never achieve.
+- => a within-layer broadening can essentially NEVER flip an explicitly-decided ask/deny command to
+  allow in-context. So the verdict-based `collides_with_guard` would be a permanently-empty dead field.
+
+DECISION (Arnon, option 1): replace `collides_with_guard` with **`overlaps_guard_rules`** -- the
+same-layer ask/deny rule bodies whose command-space TEXTUALLY overlaps the broadened pattern (tested in
+isolation, ignoring precedence; for DEFAULT patterns = one cmd-prefix is a prefix of the other). Honest
+framing: "protected in-context today by resolution, but FRAGILE -- the protection is load-bearing and
+evaporates under hierarchy migration (the featherhill .env-deny-left-behind class)." newly_admitted +
+probe_admitted_surface unchanged. Criterion 2 reframed accordingly (overlaps_guard_rules names the
+overlapping deny/ask body, not a punched-through command).
+
+NEW REQUIREMENT (Arnon) -- **rule-interaction CLARITY analyzer** (its own slice, call it P2-F /
+audit-enhancement; feeds BOTH security audit #6 and maintenance #3, shared analyzer like the
+curated-tool table):
+- toolguard's within-FILE resolution is complex enough that even an expert can't eyeball it (deny-
+  always-wins, ask-collapse, specific-allow-beats-broad-ask-but-not-deny, most-specific-LAYER-wins).
+  A "correct but inscrutable" consolidation/remediation is a latent bug. Clarity becomes a first-class
+  audit dimension, not just security.
+- Detect a FINITE CURATED CATALOG of confusing interactions (a lint rule set, NOT "confusing" in the
+  abstract): deny silently shadows an overlapping allow; broad ask shadowed by specific allow (ask-
+  collapse); same command across multiple sections same file; a rule whose effect depends on another
+  layer. Each = detector + ONE canonical explanation + (where applicable) a canonical clearer form.
+- Two output modes: **rewrite** to a clearer EQUIVALENT only when one provably exists (replay-equal);
+  otherwise **explain + annotate** (inherent semantics cannot be rewritten away -- do not pretend).
+- When a recommended result (incl. multi-rule/multi-section remediations) could be confusing, the
+  explicit paste-ready proposal must carry GENERATED COMMENTS noting each rule's interaction (overrides
+  X in another section / coupled to Y / overrides a broader-layer rule). Comments carry a stable marker
+  (e.g. `# toolguard:`) so re-apply REPLACES (never accretes) them and never clobbers human comments --
+  rides the existing comment-preserving apply machinery + couples with #NOSECURITY.
