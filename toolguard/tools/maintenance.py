@@ -26,11 +26,15 @@ broadenings and mining candidates are agent-judged and must be weighed (with the
 security-audit lens) before acting -- the skill layer owns that decision.
 """
 
+import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration
 from toolguard.constants import GOVERNED_TOOLS
+from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
+from toolguard.tools.config_access import load_config
 from toolguard.tools.consolidate import (
     BroadeningProposal,
     ConsolidationProposal,
@@ -60,6 +64,8 @@ class ToolMaintenance:
             must be judged, never auto-applied).
         cross_layer_redundancies: Specific rules already covered by a broader
             layer (safe to drop the specific copy).
+        interactions: Confusing same-file rule interactions (clarity findings;
+            informational -- they explain non-obvious resolution, not a fix).
     """
 
     tool: str
@@ -67,6 +73,7 @@ class ToolMaintenance:
     consolidations: Tuple[ConsolidationProposal, ...]
     broadenings: Tuple[BroadeningProposal, ...]
     cross_layer_redundancies: Tuple[CrossLayerRedundancy, ...]
+    interactions: Tuple[InteractionFinding, ...]
 
     @property
     def total(self) -> int:
@@ -76,6 +83,7 @@ class ToolMaintenance:
             + len(self.consolidations)
             + len(self.broadenings)
             + len(self.cross_layer_redundancies)
+            + len(self.interactions)
         )
 
     @property
@@ -146,6 +154,7 @@ def run_maintenance(
                 cross_layer_redundancies=tuple(
                     find_cross_layer_redundancies(config, tool)
                 ),
+                interactions=tuple(find_confusing_interactions(config, tool)),
             )
         )
 
@@ -167,10 +176,11 @@ def _headline(report: MaintenanceReport) -> str:
     consolidations = sum(len(t.consolidations) for t in report.tools)
     broadenings = sum(len(t.broadenings) for t in report.tools)
     cross_layer = sum(len(t.cross_layer_redundancies) for t in report.tools)
+    interactions = sum(len(t.interactions) for t in report.tools)
     return (
         f"{redundancies} redundancy, {consolidations} strict-consolidation, "
         f"{broadenings} broadening (agent-judged), {cross_layer} cross-layer, "
-        f"{len(report.mining.groups)} mining candidate(s)."
+        f"{interactions} clarity, {len(report.mining.groups)} mining candidate(s)."
     )
 
 
@@ -224,6 +234,10 @@ def render(report: MaintenanceReport, fmt: str = "markdown") -> str:
                 f"{bullet}cross-layer redundant: `{redundancy.pattern}` -- "
                 f"{redundancy.note}"
             )
+        for interaction in tool_report.interactions:
+            lines.append(
+                f"{bullet}clarity ({interaction.kind}): {interaction.explanation}"
+            )
 
     if report.mining.groups:
         lines.append("")
@@ -231,3 +245,70 @@ def render(report: MaintenanceReport, fmt: str = "markdown") -> str:
         lines.append(render_mining_report(report.mining, "text"))
 
     return "\n".join(lines)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """
+    CLI entry point for the ``toolguard-maintain`` console script.
+
+    Loads the toolguard configuration from the given directory, runs the
+    maintenance aggregator (:func:`run_maintenance`), and prints the summary.
+    This function is READ-ONLY: it never writes or modifies any file -- applying
+    a change is a separate, explicitly-approved step.
+
+    Args:
+        argv: Argument list (defaults to ``sys.argv[1:]`` when ``None``).
+
+    Returns:
+        Exit code ``0``.
+
+    Note:
+        Corpus-backed enrichment (replay evidence, mining) and JSON output are
+        follow-up slices; this MVP reports the static findings in markdown/text.
+    """
+    parser = argparse.ArgumentParser(
+        prog="toolguard-maintain",
+        description=(
+            "Audience: END-USER and SKILL -- run it yourself, or it is driven by "
+            "the maintenance skill. Read-only; never edits config.\n\n"
+            "Aggregate toolguard rule-maintenance findings (redundancies, strict "
+            "consolidations, agent-judged broadenings, cross-layer redundancies, "
+            "and clarity interactions) for the governed tools."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dir",
+        default=".",
+        metavar="DIR",
+        help="Directory to load the toolguard configuration from (default: .).",
+    )
+    parser.add_argument(
+        "--format",
+        dest="format",
+        choices=["markdown", "text"],
+        default="markdown",
+        help="Output format: markdown (default) or text.",
+    )
+    parser.add_argument(
+        "--tool",
+        dest="tool",
+        action="append",
+        default=None,
+        metavar="TOOL",
+        help=(
+            "Restrict to this tool (repeatable). Default: all governed tools "
+            "(Bash, Read, Write, Edit)."
+        ),
+    )
+
+    args = parser.parse_args(argv)
+
+    config = load_config(Path(args.dir))
+    report = run_maintenance(config, tools=args.tool)
+    print(render(report, fmt=args.format))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

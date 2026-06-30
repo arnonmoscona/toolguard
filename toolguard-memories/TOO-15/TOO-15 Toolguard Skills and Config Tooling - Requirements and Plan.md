@@ -1031,8 +1031,17 @@ NEW `toolguard/tools/maintenance.py` (mirrors security_audit.py shape): `ToolMai
 COMPOSES (no reimpl) find_redundancy + propose_consolidations + propose_broadening_consolidations +
 find_cross_layer_redundancies per tool, plus config-wide mine_rule_candidates; `render(report, fmt)`
 SUMMARY view reusing mining.render_mining_report. 5 BDD tests. Suite 1100 OK, ruff clean. DEFERRED to
-later P2-E sub-slices: CLI main(), verbose paste-ready per-file recommendation + 3 application modes,
-#NOSECURITY, dirty-tree guard, self-permissioning, wiring resolve_project_root into the migration gate.
+later P2-E sub-slices: CLI main() (DONE -- P2-E.3), verbose paste-ready per-file recommendation + 3
+application modes, #NOSECURITY, dirty-tree guard, self-permissioning, wiring resolve_project_root into
+the migration gate.
+
+### P2-E.3 STATUS: LANDED (2026-06-30, inline) -- maintenance CLI
+
+`maintenance.main()` + console script `toolguard-maintain` (pyproject [project.scripts]). Args: --dir,
+--format markdown|text, --tool (repeatable). Read-only; mirrors security_audit.main(). Loads via
+load_config, runs run_maintenance, prints render(). 1 BDD test (load_config patched). Verified live
+against the repo. MVP: corpus enrichment (replay/mining) + JSON output deferred to the SKILL slice.
+Suite 1107 OK, ruff clean.
 
 ### FINDER CLEANUP: DONE (2026-06-30, Arnon asked to do it now). Extracted the shared bounded walk-up into
 leaf module `toolguard/path_utils.py` (`iter_dirs_upward`, `find_nearest_marker` -- stdlib only, no
@@ -1188,3 +1197,52 @@ curated-tool table):
   X in another section / coupled to Y / overrides a broader-layer rule). Comments carry a stable marker
   (e.g. `# toolguard:`) so re-apply REPLACES (never accretes) them and never clobbers human comments --
   rides the existing comment-preserving apply machinery + couples with #NOSECURITY.
+
+### P2-F.1 STATUS: LANDED (2026-06-30, inline) -- clarity analyzer, first detector
+
+De-dup first: extracted the overlap primitives into NEW leaf `toolguard/tools/pattern_overlap.py`
+(`split_default_body`, `default_prefix_tokens`, `prefixes_overlap`); consolidate.py now IMPORTS them
+(removed its 3 private copies, repointed call sites) -- removed duplication, did not add any. 32
+consolidate tests still green.
+NEW `toolguard/tools/clarity.py`: `InteractionFinding` + `find_confusing_interactions(config, tool)`.
+First detector = a DEFAULT allow whose command-space overlaps a same-layer deny/ask, with a CANONICAL
+explanation of the real resolution ('deny-shadows-allow': deny always wins -> allow partly dead;
+'ask-overlaps-allow': more-specific wins / broad-ask collapses). Non-DEFAULT guards skipped. 4 BDD tests.
+WIRED into the maintenance aggregator: `ToolMaintenance.interactions` + headline/render. 1 more BDD test.
+ALSO WIRED into the SECURITY AUDIT (security_audit.py): find_confusing_interactions -> RankedFinding
+with source='clarity', severity LOW (reuses danger.Severity), clearly labelled so it never dilutes a
+real vuln; 1 audit BDD test. So the shared analyzer now feeds BOTH audit #6 and maintenance #3 as
+designed. Suite 1106 OK, ruff clean. DEFERRED P2-F slices: more detectors (same-command-multi-section,
+cross-layer-dependent), the clearer-equivalent REWRITE mode, and the `# toolguard:`-marked generated
+comments.
+
+## P4 NOTE (2026-06-30, Arnon) -- code-review-graph install + CLAUDE.md softening in personal setup
+
+When P4 (personal project setup) is built, offer an OPTIONAL code-review-graph installation that runs
+ALL the prescribed steps (see [[project-code-review-graph-setup]]): register the MCP server manually if
+the installer balks on .mcp.json, add the [embeddings,communities,enrichment] LOCAL extras, run embed +
+postprocess, restart. THEN auto-edit CLAUDE.md (and ANY file up the hierarchy the installer touched --
+it injects into CLAUDE.md/AGENTS.md and writes other-platform files) to SOFTEN + FOCUS the injected
+"## MCP Tools: code-review-graph" section exactly as we did here this session: it must sit side-by-side
+with the global ag/ack + JetBrains MCP search guidance (text vs symbol vs architecture division of
+labor; grep last; tests_for->callers_of caveat; embeddings/maintenance note), NOT bury it. The exact
+softening wording will likely EVOLVE by P4.
+
+Approach to avoid reinventing the softening each time: keep OUR canonical version of the softened
+section in an external file (e.g. `~/.config/toolguard/code-review-graph-claude-section.md`). The P4
+setup then either (a) inserts it, or (b) -- preferred -- writes a SHORT pointer in the corrected
+CLAUDE.md that REFERENCES that external file rather than pasting it verbatim, so a single edit to the
+canonical file updates the guidance everywhere. Also gitignore the installer's other-platform noise
+(.cursorrules/.gemini/etc.) as part of setup.
+
+## PRE-PUSH GATE (2026-06-30, Arnon) -- run pyscn before pushing TOO-15
+
+Before pushing TOO-15, run **`pyscn`** to score and fix issues -- it catches problems Claude does NOT
+catch (a static-analysis/quality scorer). NOT every issue it raises is a required fix; triage them.
+- `pyscn analyze --help` for options.
+- e.g. `pyscn analyze toolguard --html` writes an HTML report to `.pyscn/` (json/yaml formats also
+  available -- pick a machine-readable one if I want to parse findings).
+- Make sure `.pyscn/` is gitignored (build artifact) if it isn't already.
+Add to the existing pre-push list alongside: coverage top-ups (P2-D/project_root defensive branches,
+transcript_harvest._extract_text, consolidate static-subsumption), version bump in pyproject.toml,
+release notes, glob-defect user docs.

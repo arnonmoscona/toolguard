@@ -34,8 +34,10 @@ from pathlib import Path
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration, TakeoverConfig
+from toolguard.constants import GOVERNED_TOOLS
+from toolguard.tools.clarity import find_confusing_interactions
 from toolguard.tools.config_access import audit_context, load_config
-from toolguard.tools.danger import danger
+from toolguard.tools.danger import Severity, danger
 from toolguard.tools.takeover_audit import audit_takeover, effective_takeover_state
 
 
@@ -187,6 +189,35 @@ def security_audit(
                 takeover_active=takeover.enabled,
             )
         )
+
+    # --- clarity findings (source = "clarity") ------------------------------
+    # A confusing within-file interaction is a latent security risk: you cannot
+    # reason about what is actually permitted.  Reported at LOW severity and
+    # clearly labelled so it never dilutes a genuine vulnerability.
+    for tool in sorted(GOVERNED_TOOLS):
+        for cf in find_confusing_interactions(config, tool):
+            ranked.append(
+                RankedFinding(
+                    source="clarity",
+                    finding_id=cf.kind,
+                    severity_value=Severity.LOW.value,
+                    severity_label=Severity.LOW.label(),
+                    tool=cf.tool,
+                    locus=cf.provenance.describe_brief() if cf.provenance else None,
+                    pattern=cf.allow_pattern,
+                    summary=cf.explanation,
+                    impact=(
+                        "Non-obvious within-file resolution makes it hard to reason "
+                        "about what is actually permitted -- a latent security risk."
+                    ),
+                    remediation=(
+                        "Make the interaction explicit: drop the overlapping rule if "
+                        "it is redundant, or annotate it so the effective verdict is "
+                        "clear."
+                    ),
+                    takeover_active=takeover.enabled,
+                )
+            )
 
     # Sort: severity DESC, source, tool (None -> ""), finding_id
     ranked.sort(

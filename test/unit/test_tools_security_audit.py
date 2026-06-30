@@ -1252,5 +1252,34 @@ class TestWithContextFlag(unittest.TestCase):
         self.assertEqual(non_ascii, [], "Expected ASCII-only output with --with-context")
 
 
+class TestSecurityAuditClarity(unittest.TestCase):
+    """The audit surfaces clarity (confusing-interaction) findings at LOW severity."""
+
+    def test_confusing_interaction_appears_as_low_clarity_finding(self):
+        """
+        Given a config whose same-file allow is overlapped by a broader deny
+        When security_audit() is called
+        Then a finding with source 'clarity' and severity LOW is reported for the
+            confusing interaction.
+        """
+        layer = ConfigLayer(
+            provenance=_prov(),
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": ["Bash(uv run alembic upgrade:*)"],
+                        "deny": ["Bash(uv run:*)"],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        report = security_audit(Configuration(layers=(layer,), start_dir=None))
+        clarity = [f for f in report.findings if f.source == "clarity"]
+        self.assertEqual(len(clarity), 1)
+        self.assertEqual(clarity[0].finding_id, "deny-shadows-allow")
+        self.assertEqual(clarity[0].severity_label, "LOW")
+
+
 if __name__ == "__main__":
     unittest.main()

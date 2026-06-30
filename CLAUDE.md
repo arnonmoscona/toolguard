@@ -142,6 +142,8 @@ When we're about to wrap up a ticket, and it seems that I am ready to push a set
 * Did we do necessary documentation updates (you would know, as you participate)
 * Should I bump the version in `pyproject.toml`
 * Do we need any release notes?
+* Run `pyscn analyze toolguard` to find issues, read the report, and discuss what to fix, what to defer, and what to ignore
+* Consider running the toolguard maintenance skill to keep the toolguard configuration constantly curated. A push is a good checkpoint for this.
 
 ## Technical notes
 

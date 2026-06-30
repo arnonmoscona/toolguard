@@ -12,6 +12,7 @@ toolguard = "toolguard.hook:main"
 toolguard-session-start = "toolguard.session_start:main"
 toolguard-update-check = "toolguard.update_check:main"
 toolguard-audit = "toolguard.tools.security_audit:main"
+toolguard-maintain = "toolguard.tools.maintenance:main"
 
 [dependency-groups]
 dev = [

@@ -6,16 +6,20 @@ a single structured report, and that render produces a readable summary.  Local
 fixture helpers mirror the other maintenance-tool tests for consistency.
 """
 
+import io
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import List, Optional
+from unittest import mock
 
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.maintenance import (
     MaintenanceReport,
+    main,
     run_maintenance,
     render,
 )
@@ -118,6 +122,24 @@ class TestRunMaintenance(unittest.TestCase):
         report = run_maintenance(config, tools=["Bash"], corpus=corpus)
         self.assertTrue(report.mining.groups)
 
+    def test_clarity_interactions_surface_in_report(self):
+        """
+        Given a Bash config with a same-file allow overlapped by a broader deny
+        When run_maintenance is called
+        Then the Bash tool report carries a clarity interaction finding and the
+            rendered summary mentions it.
+        """
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["uv run alembic upgrade:*"],
+                deny=["uv run:*"],
+            )
+        )
+        report = run_maintenance(config, tools=["Bash"])
+        self.assertTrue(report.tools[0].interactions)
+        self.assertIn("clarity", render(report))
+
     def test_empty_config_reports_no_findings(self):
         """
         Given a config with no rules
@@ -149,6 +171,28 @@ class TestRenderMaintenance(unittest.TestCase):
         self.assertIn("Maintenance summary", out)
         self.assertIn("Bash", out)
         self.assertIn("broaden", out)
+
+
+class TestMaintenanceCLI(unittest.TestCase):
+    """The toolguard-maintain CLI entry point."""
+
+    def test_main_runs_read_only_and_prints_summary(self):
+        """
+        Given a config with Bash findings (load_config patched to return it)
+        When main(['--tool', 'Bash', '--format', 'text']) is invoked
+        Then it returns 0 and prints the maintenance summary to stdout.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+        buffer = io.StringIO()
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config", return_value=config
+        ):
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--format", "text"])
+        self.assertEqual(code, 0)
+        self.assertIn("Maintenance summary", buffer.getvalue())
 
 
 if __name__ == "__main__":

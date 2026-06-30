@@ -52,6 +52,11 @@ from toolguard.tools.config_access import (
 )
 from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
+from toolguard.tools.pattern_overlap import (
+    default_prefix_tokens,
+    prefixes_overlap,
+    split_default_body,
+)
 from toolguard.tools.replay import replay
 
 
@@ -171,32 +176,6 @@ def _is_literal_token(token: str) -> bool:
         True when the token is free of ``*``, ``?``, ``[``, and ``]``.
     """
     return not any(c in token for c in ("*", "?", "[", "]"))
-
-
-def _split_default_body(body: str) -> Tuple[List[str], str]:
-    """
-    Split a DEFAULT pattern body into ``(cmd_tokens, args_part)``.
-
-    Splits on the FIRST ``:`` in ``body``.  The left side is stripped and
-    tokenised on whitespace; the right side is stripped and returned as-is.
-    If no ``:`` is present, ``args_part`` is the empty string.
-
-    Args:
-        body: Wrapper-free DEFAULT pattern body (e.g. ``'git diff:*'``).
-
-    Returns:
-        Tuple of ``(cmd_tokens, args_part)`` where ``cmd_tokens`` is a list of
-        whitespace-split tokens from the command portion and ``args_part`` is
-        the args portion (e.g. ``'*'``).
-    """
-    if ":" in body:
-        colon_idx = body.index(":")
-        cmd_part = body[:colon_idx].strip()
-        args_part = body[colon_idx + 1 :].strip()
-    else:
-        cmd_part = body.strip()
-        args_part = ""
-    return cmd_part.split(), args_part
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +415,7 @@ def _check_family1_safe(
         ptype, body = parse_pattern(pat, extended_syntax=True)
         if ptype != PatternType.DEFAULT:
             continue
-        cmd_tokens, args = _split_default_body(body)
+        cmd_tokens, args = split_default_body(body)
         parsed_group.append((cmd_tokens, args, pos, prefix_tokens, suffix_tokens))
 
     # Full probe set: positive members, prefix-extension near-misses, and the
@@ -511,7 +490,7 @@ def _find_literal_alternations(
         ptype, body = parse_pattern(raw, extended_syntax=True)
         if ptype != PatternType.DEFAULT:
             continue
-        cmd_tokens, args_part = _split_default_body(body)
+        cmd_tokens, args_part = split_default_body(body)
         if not cmd_tokens:
             continue
         # Only consolidate DEFAULT prefix forms (cmd:* / cmd:**).  No-colon EXACT
@@ -702,7 +681,7 @@ def _find_static_subsumptions(
         ptype, body = parse_pattern(raw, extended_syntax=True)
         if ptype != PatternType.DEFAULT:
             continue
-        cmd_tokens, args_part = _split_default_body(body)
+        cmd_tokens, args_part = split_default_body(body)
         if not cmd_tokens:
             continue
         if args_part not in ("*", "**", ""):
@@ -843,46 +822,6 @@ def propose_consolidations(
 # ---------------------------------------------------------------------------
 
 
-def _default_prefix_tokens(body: str) -> Optional[List[str]]:
-    """
-    Return the command-prefix tokens of a DEFAULT ``cmd:*``/``cmd:**`` pattern.
-
-    Args:
-        body: A wrapper-free pattern body.
-
-    Returns:
-        The command tokens (e.g. ``['uv', 'run', 'alembic']``) when ``body`` is a
-        DEFAULT prefix pattern with a ``*``/``**`` argument tail, else ``None``
-        (non-DEFAULT patterns are not analysed for overlap here).
-    """
-    ptype, inner = parse_pattern(body, extended_syntax=True)
-    if ptype != PatternType.DEFAULT:
-        return None
-    cmd_tokens, args_part = _split_default_body(inner)
-    if not cmd_tokens or args_part not in ("*", "**"):
-        return None
-    return cmd_tokens
-
-
-def _prefixes_overlap(a: List[str], b: List[str]) -> bool:
-    """
-    Return whether two DEFAULT command prefixes share a command.
-
-    Two prefix patterns match a common command exactly when one token sequence is
-    a prefix of the other (e.g. ``['uv','run']`` and ``['uv','run','alembic']``
-    both match ``uv run alembic ...``).
-
-    Args:
-        a: First command-prefix token list.
-        b: Second command-prefix token list.
-
-    Returns:
-        ``True`` when their command-spaces intersect.
-    """
-    n = min(len(a), len(b))
-    return a[:n] == b[:n]
-
-
 def _overlapping_guard_rules(
     broadened_prefix: Tuple[str, ...],
     ask_rules: Tuple[str, ...],
@@ -908,8 +847,8 @@ def _overlapping_guard_rules(
     overlaps: List[str] = []
     for section, rules in (("ask", ask_rules), ("deny", deny_rules)):
         for body in rules:
-            gtokens = _default_prefix_tokens(body)
-            if gtokens is not None and _prefixes_overlap(prefix_list, gtokens):
+            gtokens = default_prefix_tokens(body)
+            if gtokens is not None and prefixes_overlap(prefix_list, gtokens):
                 overlaps.append(f"{section} '{body}'")
     return tuple(sorted(overlaps))
 
@@ -992,7 +931,7 @@ def _find_prefix_broadenings(
         ptype, body = parse_pattern(raw, extended_syntax=True)
         if ptype != PatternType.DEFAULT:
             continue
-        cmd_tokens, args_part = _split_default_body(body)
+        cmd_tokens, args_part = split_default_body(body)
         if args_part not in ("*", "**"):
             continue
         if len(cmd_tokens) < 2:
