@@ -1043,6 +1043,28 @@ load_config, runs run_maintenance, prints render(). 1 BDD test (load_config patc
 against the repo. MVP: corpus enrichment (replay/mining) + JSON output deferred to the SKILL slice.
 Suite 1107 OK, ruff clean.
 
+### P2-E.4 STATUS: LANDED (2026-06-30, inline) -- dirty-tree guard
+
+NEW `toolguard/tools/working_tree.py`: `working_tree_status(root) -> WorkingTreeStatus`
+(is_git_repo, is_clean, dirty_paths, `.is_safe_to_apply`). Read-only `git status --porcelain` via
+subprocess (matches update_check.py's git pattern + _GIT_TIMEOUT_SECONDS; catches OSError/
+SubprocessError/Timeout -> non-repo). Pure/decision-free, mirrors project_root resolver shape; the
+skill decides warn/refuse. 5 BDD tests (clean/dirty/non-repo/git-missing/timeout). Suite 1112 OK,
+ruff clean.
+
+### P2-E.5 STATUS: LANDED (2026-06-30, inline) -- migration pre-flight (combines E.1 + E.4)
+
+NEW `toolguard/tools/migration_gate.py`: `migration_preflight(start_dir, override=None) ->
+MigrationPreflight` composes resolve_project_root + working_tree_status into one decision-free verdict
+(`.is_safe`, `.blockers`, `.root`, `.working_tree`). Safe iff boundary resolved (VCS/override) AND tree
+is a clean git repo; blockers give the root reason or name the dirty paths. Keeps the skill thin (single
+tested entry, no re-derived combination logic). 3 BDD tests. Suite 1115 OK, ruff clean.
+
+PRE-APPLY SAFETY GATES NOW COMPLETE: project_root resolver (E.1) + working_tree guard (E.4) +
+migration_preflight combiner (E.5). REMAINING for the SKILL: corpus harvesting into run_maintenance,
+JSON output, the 3 application modes (skill glue over apply_proposals dry-run), self-permissioning,
+#NOSECURITY, then the maintenance SKILL.md itself.
+
 ### FINDER CLEANUP: DONE (2026-06-30, Arnon asked to do it now). Extracted the shared bounded walk-up into
 leaf module `toolguard/path_utils.py` (`iter_dirs_upward`, `find_nearest_marker` -- stdlib only, no
 cycle risk). `config.find_project_root` (raises), `env_config.find_project_root` (None), and
