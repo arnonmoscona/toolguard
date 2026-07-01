@@ -27,14 +27,28 @@ security-audit lens) before acting -- the skill layer owns that decision.
 """
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from toolguard.config import Configuration
+from toolguard.config import Configuration, Provenance
 from toolguard.constants import GOVERNED_TOOLS
 from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
 from toolguard.tools.config_access import load_config
+from toolguard.tools.corpus import harvest_corpus
+from toolguard.tools.edit_proposal import (
+    ACTION_REPLACE,
+    EditProposal,
+    RuleEdit,
+    edit_proposal_to_dict,
+)
+from toolguard.tools.migration_gate import migration_preflight
+from toolguard.tools.rule_apply import (
+    ChangeReport,
+    apply_proposals,
+    render_change_report,
+)
 from toolguard.tools.consolidate import (
     BroadeningProposal,
     ConsolidationProposal,
@@ -247,6 +261,325 @@ def render(report: MaintenanceReport, fmt: str = "markdown") -> str:
     return "\n".join(lines)
 
 
+def _provenance_to_dict(provenance: Optional[Provenance]) -> Optional[Dict[str, Any]]:
+    """
+    Serialize a :class:`~toolguard.config.Provenance` to a JSON-safe dict.
+
+    Args:
+        provenance: The provenance to serialize, or ``None``.
+
+    Returns:
+        A dict with the raw provenance fields plus a human-readable ``describe``
+        string, or ``None`` when ``provenance`` is ``None``.
+    """
+    if provenance is None:
+        return None
+    return {
+        "level": provenance.level,
+        "source_type": provenance.source_type,
+        "file_format": provenance.file_format,
+        "path": str(provenance.path),
+        "specificity": provenance.specificity,
+        "describe": provenance.describe(),
+    }
+
+
+def _tool_to_dict(tool_report: ToolMaintenance) -> Dict[str, Any]:
+    """
+    Serialize a :class:`ToolMaintenance` to a JSON-safe dict.
+
+    Args:
+        tool_report: The per-tool findings to serialize.
+
+    Returns:
+        A dict mirroring the dataclass, with provenances expanded and tuples
+        rendered as lists.
+    """
+    return {
+        "tool": tool_report.tool,
+        "total": tool_report.total,
+        "redundancies": [
+            {
+                "redundant_pattern": r.redundant_pattern,
+                "provenance": _provenance_to_dict(r.provenance),
+                "kind": r.kind,
+                "list_type": r.list_type,
+                "tool": r.tool,
+                "covered_by": r.covered_by,
+                "note": r.note,
+            }
+            for r in tool_report.redundancies
+        ],
+        "consolidations": [
+            {
+                "kind": c.kind,
+                "tool": c.tool,
+                "list_type": c.list_type,
+                "layer_provenance": _provenance_to_dict(c.layer_provenance),
+                "removed_patterns": list(c.removed_patterns),
+                "added_pattern": c.added_pattern,
+                "rationale": c.rationale,
+                "replay_summary": c.replay_summary,
+            }
+            for c in tool_report.consolidations
+        ],
+        "broadenings": [
+            {
+                "kind": b.kind,
+                "tool": b.tool,
+                "list_type": b.list_type,
+                "layer_provenance": _provenance_to_dict(b.layer_provenance),
+                "removed_patterns": list(b.removed_patterns),
+                "added_pattern": b.added_pattern,
+                "rationale": b.rationale,
+                "newly_admitted_commands": list(b.newly_admitted_commands),
+                "overlaps_guard_rules": list(b.overlaps_guard_rules),
+                "probe_admitted_surface": list(b.probe_admitted_surface),
+            }
+            for b in tool_report.broadenings
+        ],
+        "cross_layer_redundancies": [
+            {
+                "tool": x.tool,
+                "pattern": x.pattern,
+                "redundant_provenance": _provenance_to_dict(x.redundant_provenance),
+                "covered_by_provenance": _provenance_to_dict(x.covered_by_provenance),
+                "note": x.note,
+            }
+            for x in tool_report.cross_layer_redundancies
+        ],
+        "interactions": [
+            {
+                "tool": i.tool,
+                "provenance": _provenance_to_dict(i.provenance),
+                "kind": i.kind,
+                "allow_pattern": i.allow_pattern,
+                "guard_section": i.guard_section,
+                "guard_pattern": i.guard_pattern,
+                "explanation": i.explanation,
+            }
+            for i in tool_report.interactions
+        ],
+    }
+
+
+def report_to_dict(report: MaintenanceReport) -> Dict[str, Any]:
+    """
+    Serialize a :class:`MaintenanceReport` to a JSON-safe dict.
+
+    This is the structured contract the maintenance skill (and any AI-assisted
+    pass) consumes instead of re-parsing the rendered text.  Provenances are
+    expanded to dicts, tuples to lists, and corpus-mining groups are included.
+
+    Args:
+        report: The maintenance report to serialize.
+
+    Returns:
+        A JSON-serializable dict capturing the whole report.
+    """
+    return {
+        "total_findings": report.total_findings,
+        "has_any_findings": report.has_any_findings,
+        "tools": [_tool_to_dict(t) for t in report.tools],
+        "mining": {
+            "groups": [
+                {
+                    "tool": g.tool,
+                    "command_key": g.command_key,
+                    "signal": g.signal,
+                    "distinct_commands": list(g.distinct_commands),
+                    "occurrences": g.occurrences,
+                    "current_verdict": g.current_verdict,
+                    "observed_counts": dict(g.observed_counts),
+                }
+                for g in report.mining.groups
+            ],
+        },
+    }
+
+
+def collect_consolidations(report: MaintenanceReport) -> List[ConsolidationProposal]:
+    """
+    Flatten every tool's strict consolidation proposals into one list.
+
+    Only :class:`~toolguard.tools.consolidate.ConsolidationProposal` records are
+    returned -- the replay-verified, semantically-safe allow-list merges that the
+    apply path (:func:`~toolguard.tools.rule_apply.apply_proposals`) can enact.
+    Agent-judged broadenings and the informational findings (redundancies,
+    cross-layer, clarity interactions) are deliberately excluded: they are
+    reported for human action, not auto-applied.
+
+    Args:
+        report: The maintenance report to harvest proposals from.
+
+    Returns:
+        All consolidation proposals across tools, in tool/report order.
+    """
+    return [c for tool in report.tools for c in tool.consolidations]
+
+
+def consolidation_to_edit_proposal(prop: ConsolidationProposal) -> EditProposal:
+    """
+    Express a consolidation as a general :class:`~toolguard.tools.edit_proposal.EditProposal`.
+
+    A consolidation replaces a family of allow patterns with one merged pattern at
+    a single layer; that maps to a ``replace`` edit on the ``list_type`` list.
+    The shared model lets the maintenance skill hand its proposed changes to
+    ``toolguard-audit --edits`` for an as-if-enacted security review before writing.
+
+    Args:
+        prop: The consolidation proposal to convert.
+
+    Returns:
+        The equivalent :class:`EditProposal` (a single-edit ``replace``).
+    """
+    return EditProposal(
+        action=ACTION_REPLACE,
+        tool=prop.tool,
+        rationale=prop.rationale,
+        edits=(
+            RuleEdit(
+                tool=prop.tool,
+                list_type=prop.list_type,
+                provenance=prop.layer_provenance,
+                removed_patterns=tuple(prop.removed_patterns),
+                added_patterns=(prop.added_pattern,) if prop.added_pattern else (),
+            ),
+        ),
+        origin=f"consolidation:{prop.kind}",
+    )
+
+
+def change_report_to_dict(change: ChangeReport) -> Dict[str, Any]:
+    """
+    Serialize a :class:`~toolguard.tools.rule_apply.ChangeReport` to a dict.
+
+    This is the structured contract for the apply path: it lets the maintenance
+    skill present each file's diff and applied/skipped proposals without
+    re-parsing the rendered text.
+
+    Args:
+        change: The change report (from a dry-run or real apply) to serialize.
+
+    Returns:
+        A JSON-serializable dict capturing the per-file outcome, including the
+        unified diff for each changed file.
+    """
+    return {
+        "total_applied": change.total_applied,
+        "total_skipped": change.total_skipped,
+        "files_written": [str(f.path) for f in change.files_written if f.path],
+        "files": [
+            {
+                "path": str(f.path) if f.path is not None else None,
+                "file_format": f.file_format,
+                "applied": [
+                    {
+                        "removed_patterns": list(p.removed_patterns),
+                        "added_pattern": p.added_pattern,
+                        "rationale": p.rationale,
+                    }
+                    for p in f.applied
+                ],
+                "skipped": [
+                    {"removed_patterns": list(p.removed_patterns), "reason": reason}
+                    for p, reason in f.skipped
+                ],
+                "patterns_removed": list(f.patterns_removed),
+                "patterns_added": list(f.patterns_added),
+                "diff": f.diff,
+                "written": f.written,
+            }
+            for f in change.files
+        ],
+    }
+
+
+def _render_apply(change: ChangeReport, fmt: str) -> str:
+    """
+    Render an apply outcome for a human, inlining each file's unified diff.
+
+    :func:`~toolguard.tools.rule_apply.render_change_report` summarises applied
+    and skipped proposals but does NOT inline diffs; for an apply preview the
+    diff is the whole point, so this appends each changed file's diff under the
+    summary.
+
+    Args:
+        change: The change report to render.
+        fmt: ``'text'`` or ``'markdown'`` (passed through to the summary
+            renderer).
+
+    Returns:
+        The summary followed by the per-file diffs.
+    """
+    parts = [render_change_report(change, fmt=fmt)]
+    for fchange in change.files:
+        if fchange.diff:
+            header = str(fchange.path) if fchange.path is not None else "(config)"
+            if fmt == "markdown":
+                parts.append(f"\n### Diff: {header}\n\n```diff\n{fchange.diff}```")
+            else:
+                parts.append(f"\n--- Diff: {header} ---\n{fchange.diff}")
+    return "\n".join(parts)
+
+
+def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
+    """
+    Execute the ``--apply`` path: preview by default, write only with ``--write``.
+
+    Collects the strict consolidation proposals from ``report`` and runs
+    :func:`~toolguard.tools.rule_apply.apply_proposals`.  Without ``--write`` it
+    is a dry run (nothing is touched on disk).  With ``--write`` it first runs
+    the migration/working-tree pre-flight and REFUSES (leaving the config
+    untouched) if there are any blockers, so a real edit is always reviewable and
+    revertible.
+
+    Args:
+        args: Parsed CLI namespace (uses ``write``, ``dir``, ``format``).
+        report: The maintenance report whose consolidations to apply.
+
+    Returns:
+        Exit code: ``0`` on success (preview or write), ``2`` when ``--write``
+        is refused by the safety pre-flight.
+    """
+    proposals = collect_consolidations(report)
+
+    if args.write:
+        preflight = migration_preflight(Path(args.dir))
+        if preflight.blockers:
+            lines = [
+                "Refusing to write changes -- the safety pre-flight found blockers:",
+                *(f"  - {b}" for b in preflight.blockers),
+                "Resolve these (commit/stash your changes, confirm the project "
+                "root) and re-run.",
+            ]
+            print("\n".join(lines))
+            return 2
+
+    change = apply_proposals(proposals, dry_run=not args.write)
+
+    if args.format == "json":
+        payload = change_report_to_dict(change)
+        payload["dry_run"] = not args.write
+        # The equivalent EditProposals, so the maintenance skill can hand these to
+        # `toolguard-audit --edits` for an as-if-enacted security review before writing.
+        payload["edit_proposals"] = [
+            edit_proposal_to_dict(consolidation_to_edit_proposal(p)) for p in proposals
+        ]
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    fmt = "markdown" if args.format == "markdown" else "text"
+    banner = (
+        "APPLIED changes to disk."
+        if args.write
+        else "DRY RUN -- no files were modified. Re-run with --write to apply."
+    )
+    print(_render_apply(change, fmt))
+    print(f"\n{banner}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     CLI entry point for the ``toolguard-maintain`` console script.
@@ -263,8 +596,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Exit code ``0``.
 
     Note:
-        Corpus-backed enrichment (replay evidence, mining) and JSON output are
-        follow-up slices; this MVP reports the static findings in markdown/text.
+        Static analysis runs by default and is fast.  Pass ``--corpus`` to also
+        harvest an evidence corpus (daily logs + transcripts) and populate
+        replay-backed and mining findings; that pass parses every observed
+        command and can take a while on a large history, so bound it with
+        ``--max-age-days``.  Use ``--format json`` for the structured contract
+        the maintenance skill consumes.
     """
     parser = argparse.ArgumentParser(
         prog="toolguard-maintain",
@@ -286,9 +623,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--format",
         dest="format",
-        choices=["markdown", "text"],
+        choices=["markdown", "text", "json"],
         default="markdown",
-        help="Output format: markdown (default) or text.",
+        help=(
+            "Output format: markdown (default), text, or json. Use json for the "
+            "structured contract consumed by the maintenance skill / an AI pass."
+        ),
     )
     parser.add_argument(
         "--tool",
@@ -301,12 +641,72 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "(Bash, Read, Write, Edit)."
         ),
     )
+    parser.add_argument(
+        "--corpus",
+        dest="corpus",
+        action="store_true",
+        default=False,
+        help=(
+            "Also harvest an evidence corpus (daily logs + transcripts) to back "
+            "replay and mining findings. Off by default; this pass parses every "
+            "observed command and can be slow on a large history -- bound it with "
+            "--max-age-days."
+        ),
+    )
+    parser.add_argument(
+        "--max-age-days",
+        dest="max_age_days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "When harvesting the corpus (--corpus), only include observations "
+            "from the last N calendar days (default: no age cap)."
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        dest="apply",
+        action="store_true",
+        default=False,
+        help=(
+            "Switch to apply mode: enact the strict (replay-verified) "
+            "consolidation proposals. PREVIEW by default (dry run, shows the "
+            "diffs, writes nothing) -- add --write to actually modify the config."
+        ),
+    )
+    parser.add_argument(
+        "--write",
+        dest="write",
+        action="store_true",
+        default=False,
+        help=(
+            "With --apply, actually write the changes to disk (otherwise --apply "
+            "is a dry-run preview). Refused if the safety pre-flight finds "
+            "blockers (dirty working tree, unresolved project root)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
+    if args.write and not args.apply:
+        parser.error("--write requires --apply")
+
     config = load_config(Path(args.dir))
-    report = run_maintenance(config, tools=args.tool)
-    print(render(report, fmt=args.format))
+    corpus = (
+        harvest_corpus(Path(args.dir), max_age_days=args.max_age_days)
+        if args.corpus
+        else None
+    )
+    report = run_maintenance(config, tools=args.tool, corpus=corpus)
+
+    if args.apply:
+        return _run_apply(args, report)
+
+    if args.format == "json":
+        print(json.dumps(report_to_dict(report), indent=2))
+    else:
+        print(render(report, fmt=args.format))
     return 0
 
 

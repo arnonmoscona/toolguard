@@ -31,19 +31,53 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration, TakeoverConfig
 from toolguard.constants import GOVERNED_TOOLS
 from toolguard.tools.clarity import find_confusing_interactions
 from toolguard.tools.config_access import audit_context, load_config
-from toolguard.tools.danger import Severity, danger
+from toolguard.tools.danger import DangerFinding, Severity, danger
+from toolguard.tools.edit_proposal import (
+    ACTION_REMOVE,
+    ACTION_REPLACE,
+    EditProposal,
+    RuleEdit,
+    apply_edits,
+    edit_proposal_from_dict,
+    edit_proposal_to_dict,
+)
 from toolguard.tools.takeover_audit import audit_takeover, effective_takeover_state
+
+# Marker prefix for an extended-syntax regex pattern body (``[regex]<body>``).
+_REGEX_MARKER = "[regex]"
 
 
 # ---------------------------------------------------------------------------
 # Normalised finding
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Remediation:
+    """
+    A finding's suggested fix, in both human and machine-actionable forms.
+
+    Attributes:
+        text: The human-readable remediation guidance -- always present.  This may
+            describe a more surgical or judgement-based fix than ``proposal``
+            (e.g. "narrow this rule" where the mechanical proposal is a removal).
+        proposal: A structured, mechanically-appliable
+            :class:`~toolguard.tools.edit_proposal.EditProposal` when the fix can
+            be expressed deterministically (e.g. delete a dangerous allow, anchor
+            an unanchored regex), or ``None`` when the fix is a judgement call
+            carried only in ``text``.  The proposal is the CONSERVATIVE mechanical
+            fix a consumer (the maintenance skill) can ingest without parsing
+            prose; it is a proposal to review as-if-enacted, never auto-applied.
+    """
+
+    text: str
+    proposal: Optional[EditProposal]
 
 
 @dataclass(frozen=True)
@@ -76,7 +110,8 @@ class RankedFinding:
         impact: Additional impact text.  Empty string for danger findings (danger
             embeds impact in the rationale); takeover findings carry a separate
             ``impact`` field.
-        remediation: Suggested fix or mitigation.
+        remediation: Suggested fix or mitigation, as a :class:`Remediation`
+            (human ``text`` plus an optional structured, appliable ``proposal``).
         takeover_active: Whether takeover mode was ON when this finding was produced.
     """
 
@@ -89,7 +124,7 @@ class RankedFinding:
     pattern: Optional[str]
     summary: str
     impact: str
-    remediation: str
+    remediation: Remediation
     takeover_active: bool
 
 
@@ -120,6 +155,83 @@ class SecurityReport:
     takeover_active: bool
     highest_severity: int
     counts: Mapping[str, int]
+
+
+# ---------------------------------------------------------------------------
+# Structured remediation
+# ---------------------------------------------------------------------------
+
+
+def _danger_proposal(df: DangerFinding) -> Optional[EditProposal]:
+    """
+    Build the structured, applicable edit for a danger finding, when one exists.
+
+    Uses the finding's ``remediation_kind`` hint to synthesise a conservative,
+    mechanically-safe :class:`~toolguard.tools.edit_proposal.EditProposal` that
+    targets the exact rule at its exact layer:
+
+    * ``'remove'`` -- delete the flagged rule (always a tightening; the safe
+      structured answer for a dangerous allow, even when the human text suggests
+      a more surgical narrowing).
+    * ``'anchor'`` -- replace an unanchored ``[regex]`` body with the same body
+      anchored at ``^``.
+
+    Returns ``None`` when there is no mechanical fix (no ``remediation_kind``, no
+    provenance to target, or an ``anchor`` hint on a non-``[regex]`` body) -- the
+    guidance then lives only in the human ``text``.
+
+    Args:
+        df: The danger finding to build a structured remediation for.
+
+    Returns:
+        An :class:`EditProposal`, or ``None`` when no deterministic fix applies.
+    """
+    if df.remediation_kind is None or df.provenance is None:
+        return None
+
+    origin = f"audit:{df.detector_id}"
+
+    if df.remediation_kind == "remove":
+        return EditProposal(
+            action=ACTION_REMOVE,
+            tool=df.tool,
+            rationale=df.remediation,
+            edits=(
+                RuleEdit(
+                    tool=df.tool,
+                    list_type=df.list_type,
+                    provenance=df.provenance,
+                    removed_patterns=(df.pattern,),
+                    added_patterns=(),
+                ),
+            ),
+            origin=origin,
+        )
+
+    if df.remediation_kind == "anchor":
+        if not df.pattern.startswith(_REGEX_MARKER):
+            return None
+        body = df.pattern[len(_REGEX_MARKER):]
+        if body.startswith("^"):
+            return None  # already anchored; nothing to change
+        anchored = f"{_REGEX_MARKER}^{body}"
+        return EditProposal(
+            action=ACTION_REPLACE,
+            tool=df.tool,
+            rationale=df.remediation,
+            edits=(
+                RuleEdit(
+                    tool=df.tool,
+                    list_type=df.list_type,
+                    provenance=df.provenance,
+                    removed_patterns=(df.pattern,),
+                    added_patterns=(anchored,),
+                ),
+            ),
+            origin=origin,
+        )
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +279,7 @@ def security_audit(
                 pattern=df.pattern,
                 summary=df.rationale,
                 impact="",
-                remediation=df.remediation,
+                remediation=Remediation(text=df.remediation, proposal=_danger_proposal(df)),
                 takeover_active=df.takeover_active,
             )
         )
@@ -185,7 +297,7 @@ def security_audit(
                 pattern=None,
                 summary=af.description,
                 impact=af.impact,
-                remediation=af.remediation,
+                remediation=Remediation(text=af.remediation, proposal=None),
                 takeover_active=takeover.enabled,
             )
         )
@@ -210,10 +322,13 @@ def security_audit(
                         "Non-obvious within-file resolution makes it hard to reason "
                         "about what is actually permitted -- a latent security risk."
                     ),
-                    remediation=(
-                        "Make the interaction explicit: drop the overlapping rule if "
-                        "it is redundant, or annotate it so the effective verdict is "
-                        "clear."
+                    remediation=Remediation(
+                        text=(
+                            "Make the interaction explicit: drop the overlapping rule "
+                            "if it is redundant, or annotate it so the effective "
+                            "verdict is clear."
+                        ),
+                        proposal=None,
                     ),
                     takeover_active=takeover.enabled,
                 )
@@ -366,7 +481,9 @@ def _render_finding_markdown(f: RankedFinding, lines: List[str]) -> None:
     lines.append(f"  - summary: {f.summary}")
     if f.impact:
         lines.append(f"  - impact: {f.impact}")
-    lines.append(f"  - remediation: {f.remediation}")
+    lines.append(f"  - remediation: {f.remediation.text}")
+    if f.remediation.proposal is not None:
+        lines.append("  - structured fix: available (see JSON `remediation.proposal`)")
     lines.append("")
 
 
@@ -420,8 +537,84 @@ def _render_finding_text(f: RankedFinding, lines: List[str]) -> None:
     lines.append(f"    summary     : {f.summary}")
     if f.impact:
         lines.append(f"    impact      : {f.impact}")
-    lines.append(f"    remediation : {f.remediation}")
+    lines.append(f"    remediation : {f.remediation.text}")
+    if f.remediation.proposal is not None:
+        lines.append("    structured  : fix available (see JSON remediation.proposal)")
     lines.append("")
+
+
+# ---------------------------------------------------------------------------
+# As-if-enacted edit review (--edits)
+# ---------------------------------------------------------------------------
+
+
+def _finding_key(f: RankedFinding) -> tuple:
+    """Identity of a finding for delta comparison (id + tool + pattern + locus)."""
+    return (f.finding_id, f.tool, f.pattern, f.locus)
+
+
+def _finding_summary(f: RankedFinding) -> Dict[str, object]:
+    """A compact, JSON-safe summary of a finding for the edit delta."""
+    return {
+        "finding_id": f.finding_id,
+        "severity_label": f.severity_label,
+        "tool": f.tool,
+        "pattern": f.pattern,
+        "locus": f.locus,
+    }
+
+
+def _finding_delta(
+    base: SecurityReport, proposed: SecurityReport
+) -> Dict[str, object]:
+    """
+    Compute which findings the proposed edits introduce or resolve.
+
+    Args:
+        base: The audit of the current config.
+        proposed: The audit of the as-if-enacted config.
+
+    Returns:
+        A dict with ``introduced`` (findings present only after the edits) and
+        ``resolved`` (findings present only before), each a list of compact
+        finding summaries.
+    """
+    base_map = {_finding_key(f): f for f in base.findings}
+    proposed_map = {_finding_key(f): f for f in proposed.findings}
+    introduced = [_finding_summary(proposed_map[k]) for k in proposed_map if k not in base_map]
+    resolved = [_finding_summary(base_map[k]) for k in base_map if k not in proposed_map]
+    return {"introduced": introduced, "resolved": resolved}
+
+
+def _render_edit_banner(
+    proposals: List[EditProposal], delta: Dict[str, object]
+) -> str:
+    """
+    Render a human banner for an as-if-enacted (--edits) audit.
+
+    Args:
+        proposals: The proposed edits that were applied.
+        delta: The finding delta from :func:`_finding_delta`.
+
+    Returns:
+        A short ASCII banner summarising the review scope and the delta.
+    """
+    introduced = delta["introduced"]  # type: ignore[index]
+    resolved = delta["resolved"]  # type: ignore[index]
+    lines = [
+        "AS-IF-ENACTED REVIEW",
+        "====================",
+        f"Audited the configuration as if {len(proposals)} proposed edit(s) "
+        "were applied (whole hierarchy, all sections).",
+        f"Findings introduced by the edits: {len(introduced)}",
+        f"Findings resolved by the edits:   {len(resolved)}",
+    ]
+    for item in introduced:
+        lines.append(f"  + INTRODUCED {item['finding_id']} ({item['severity_label']}) {item['pattern'] or ''}")
+    for item in resolved:
+        lines.append(f"  - resolved   {item['finding_id']} ({item['severity_label']}) {item['pattern'] or ''}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +705,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Only meaningful with --format json."
         ),
     )
+    parser.add_argument(
+        "--edits",
+        dest="edits",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file holding a list of PROPOSED edits (EditProposal "
+            "dicts, as produced by edit_proposal.edit_proposal_to_dict or a "
+            "finding's remediation_proposal).  Unlike --migrations, these are "
+            "actually APPLIED in memory and the audit runs on the AS-IF-ENACTED "
+            "config (whole hierarchy, all sections), so findings reflect the "
+            "proposed state.  A finding delta (introduced/resolved) is added under "
+            "context['proposed_edits'].  The maintenance skill uses this to review "
+            "its changes before writing."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -523,11 +732,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except (OSError, ValueError) as exc:
             parser.error(f"could not read --migrations file {args.migrations!r}: {exc}")
 
+    proposed_edits = None
+    if args.edits is not None:
+        try:
+            with open(args.edits, "r") as handle:
+                raw_edits = json.load(handle)
+            proposed_edits = [edit_proposal_from_dict(d) for d in raw_edits]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            parser.error(f"could not read --edits file {args.edits!r}: {exc}")
+
     # Use the tooling facade loader (ignore_env_override=True) so the audit always
     # reflects the project-rooted hierarchy, consistent with the rest of the tooling
     # and not diverted by a stale CLAUDE_SETTINGS_PATH.
     config = load_config(Path(args.dir))
     report = security_audit(config)
+
+    # When proposed edits are supplied, audit the config AS IF they were enacted
+    # (whole hierarchy, all sections) and compute the finding delta, so the caller
+    # sees exactly which risks the edits introduce or resolve.  From here on
+    # ``config``/``report`` reflect the proposed state.
+    edit_delta: Optional[Dict[str, object]] = None
+    if proposed_edits is not None:
+        base_report = report
+        config = apply_edits(config, proposed_edits)
+        report = security_audit(config)
+        edit_delta = _finding_delta(base_report, report)
 
     if args.format == "json":
         payload = {
@@ -545,7 +774,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "pattern": f.pattern,
                     "summary": f.summary,
                     "impact": f.impact,
-                    "remediation": f.remediation,
+                    "remediation": f.remediation.text,
+                    "remediation_proposal": (
+                        edit_proposal_to_dict(f.remediation.proposal)
+                        if f.remediation.proposal is not None
+                        else None
+                    ),
                     "takeover_active": f.takeover_active,
                 }
                 for f in report.findings
@@ -592,10 +826,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if context is None:
                 context = {}
             context["proposed_migrations"] = proposed_migrations
+        if proposed_edits is not None:
+            if context is None:
+                context = {}
+            context["proposed_edits"] = {
+                "edits": [edit_proposal_to_dict(p) for p in proposed_edits],
+                "delta": edit_delta,
+            }
         if context is not None:
             payload["context"] = context
         print(json.dumps(payload, ensure_ascii=True, indent=2))
     else:
+        if proposed_edits is not None and edit_delta is not None:
+            print(_render_edit_banner(proposed_edits, edit_delta))
         print(render(report, fmt=args.format))
 
     if args.strict:

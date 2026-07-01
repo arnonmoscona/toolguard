@@ -593,3 +593,98 @@ are false positives -- backticks inside strings/heredoc bodies -- or benign `$(d
 - The foreign-executor **ASK floor** slightly constrains authoring (a plain `allow` cannot
   permit foreign inline/heredoc code -- by design, to prevent fail-open).
 - Truly-unparseable input fails closed honoring `no_match_fallback` (default ASK).
+
+## Maintenance and audit tooling (TOO-15 Phase 2)
+
+TOO-15 adds two operator-facing capabilities on top of the config hierarchy: a **security
+audit** (`toolguard-audit`, read-only, flags risk) and **rule maintenance**
+(`toolguard-maintain`, finds redundant/consolidatable/confusing rules and applies safe
+consolidations). They are exposed both as console scripts and as agent **skills**
+(`toolguard-security-audit`, `toolguard-maintenance`). The decisions below shaped how they
+fit together; they are recorded here while the rationale is fresh.
+
+### Library-first, thin-skill seam
+
+All analysis and editing lives in the deterministic library (`toolguard/tools/`); the skills
+only orchestrate the CLIs and add human/AI judgement. Corollary: the pure aggregators do no
+IO. `run_maintenance` takes an already-harvested corpus as a parameter rather than reading
+logs itself, and corpus harvesting lives in its own module (`tools/corpus.py`). This keeps
+the analysis testable without a filesystem and keeps "which proposals to apply / is the tree
+clean / did the user approve" firmly on the skill side.
+
+### Corpus harvesting is opt-in, not automatic
+
+Replay- and mining-backed findings need a corpus of observed commands (daily logs +
+Claude transcripts, merged and time-bounded by `tools/corpus.py`). Harvesting is **opt-in**
+(`toolguard-maintain --corpus`, bounded by `--max-age-days`), and static analysis is the fast
+default. Reason: mining parses every observed command through the bash grammar, which on a
+real history (measured: ~37s for a 2-day window over a 69 MB transcript store) is far too slow
+to run by default. The daily-log dir is resolved from the project root's `logs/`; transcripts
+from `~/.claude/projects/<encoded>/` via the same `/`<->`-` path encoding the harvester
+already uses.
+
+### One report, two audiences -- `--format json` is the agent sidecar
+
+The audit and maintenance reports serve both a human and a driving skill. Rather than add a
+separate `--for-skill`/`--audience` mode, the existing `--format json` **is** the agent
+report: once a finding's remediation is structured (below), the JSON carries both the human
+`remediation` string (unchanged, back-compatible) and a machine-actionable
+`remediation_proposal`. Humans read the text; skills read the proposal. A distinct audience
+flag was rejected as premature surface.
+
+### Structured remediation is a conservative, mechanical fix
+
+`RankedFinding.remediation` is a `Remediation(text, proposal)`: the human text is retained,
+plus an optional `EditProposal` when the fix is mechanically expressible. The proposal is the
+**conservative** action -- deleting a dangerous allow (always a tightening) or anchoring an
+unanchored `[regex]` -- even where the human text suggests a more surgical narrowing. It is a
+proposal to review as-if-enacted, never auto-applied. Danger detectors declare a
+`remediation_kind` hint (`remove`/`anchor`); findings with no mechanical fix carry text only.
+
+### The shared EditProposal model, and one edit primitive
+
+A single representation (`tools/edit_proposal.py`: `EditProposal` = an intent label
+`remove|replace|narrow|move` plus atomic `RuleEdit`s that may span **sections and layers**)
+lets the two skills exchange proposed changes without parsing prose. Both directions reuse it:
+the audit **emits** it (structured remediation), the audit **ingests** it (`--edits`), and the
+maintenance skill converts its consolidations into it. Applying edits in memory
+(`apply_edits`) is built on a section-generic `with_layer_rules_replaced`, generalized from the
+former allow-only `with_layer_allow_replaced` (which now delegates -- one implementation). This
+generalization mirrors the existing `migrate_config`, which already builds a modified config in
+memory for the hierarchy-migration case.
+
+### As-if-enacted review: `--edits` vs `--migrations`
+
+Two ways to hand the audit a proposed change, deliberately different:
+
+- **`--migrations`** embeds migration metadata under `context['proposed_migrations']` for the
+  AI to reason about a hypothetical move. The config is NOT changed; the AI judges intent.
+- **`--edits`** actually **applies** the proposals in memory and audits the resulting config,
+  so the top-level findings reflect the proposed state (whole hierarchy, all sections), plus a
+  finding delta (`introduced`/`resolved`). This is the maintenance->audit review path.
+
+Reason `--edits` applies-then-audits rather than reasons-about: a consolidation (or an audit
+remediation) can replace one rule with a SET of rules across sections, whose interaction only
+shows up when the whole config is resolved as-if-enacted. `introduced` findings are the
+headline risk; a change that resolves a MEDIUM but introduces a CRITICAL is a bad trade the
+skill must surface.
+
+### Apply is preview-first and gated
+
+`toolguard-maintain --apply` is a **dry-run preview** (renders the per-file unified diffs,
+writes nothing); only `--apply --write` mutates files, and only after `migration_preflight`
+passes (clean working tree, resolved project root -- refuses on a dirty tree, exit 2, so a
+change stays reviewable and revertible). Only strict, replay-verified consolidations
+(null-or-tightening decision diff) are machine-appliable; broadenings and cross-layer/clarity
+findings are reported for human judgement, never auto-applied.
+
+### Flagged gap (open) -- cross-project blast radius
+
+The `--edits` as-if-enacted review is **single-project**: it evaluates the current project's
+hierarchy only. Edits to a SHARED layer (user `~/.claude`, enterprise) can affect OTHER
+projects that inherit it, which this review does not yet surface -- a user-level refactor can
+read "0 introduced" here while changing another project. Closing this (at minimum: detect a
+shared-layer edit and WARN before `--write`; ideally: a filtered multi-project audit over the
+user's projects discovered from `~/.claude/projects/` and `~/.claude.json`) is tracked as
+remaining TOO-15 work. Until then, treat a clean single-project review of a user-level edit as
+necessary but not sufficient.

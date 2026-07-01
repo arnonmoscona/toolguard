@@ -237,46 +237,59 @@ def discover_tools(config: Configuration) -> Tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
-def with_layer_allow_replaced(
+def with_layer_rules_replaced(
     config: Configuration,
     tool: str,
     provenance: Provenance,
+    list_type: str,
     removed: Set[str],
     added: List[str],
 ) -> Configuration:
     """
     Return a new :class:`~toolguard.config.Configuration` where, in the single
-    layer identified by ``provenance``, the allow list for ``tool`` has every
-    pattern in ``removed`` deleted and every pattern in ``added`` appended.
+    layer identified by ``provenance``, the ``list_type`` list (``'allow'``,
+    ``'deny'``, or ``'ask'``) for ``tool`` has every pattern in ``removed``
+    deleted and every pattern in ``added`` appended.
 
-    This is the canonical synthetic-config builder shared by redundancy analysis
-    and consolidation proposals.  Both ``removed`` and ``added`` are wrapper-free
-    pattern bodies; the function handles the ``Tool(body)`` wrapping internally,
-    preserving the same form used in the raw layer content.
+    This is the canonical synthetic-config builder shared by redundancy analysis,
+    consolidation proposals, hierarchy migration, and general edit-proposal
+    application (:func:`toolguard.tools.edit_proposal.apply_edits`).  Both
+    ``removed`` and ``added`` are wrapper-free pattern bodies; the function
+    handles the ``Tool(body)`` wrapping internally, preserving the same form used
+    in the raw layer content.
 
-    The modification is SHALLOW: only the target layer's allow list is
-    reconstructed.  All other layer content -- including deny, ask, and all
+    The modification is SHALLOW: only the target layer's ``list_type`` list is
+    reconstructed.  All other layer content -- the other permission lists and all
     patterns for other tools -- is shared by reference via
-    :class:`types.MappingProxyType` rebuilding, exactly as
-    :func:`toolguard.tools.redundancy._config_without_allow` does.
+    :class:`types.MappingProxyType` rebuilding.
 
     If no layer matches ``provenance``, the original ``config`` is returned
     unchanged (safe fall-through).
 
     Args:
         config: The original :class:`~toolguard.config.Configuration`.
-        tool: Tool name whose allow list is modified (e.g. ``'Bash'``).
+        tool: Tool name whose list is modified (e.g. ``'Bash'``).
         provenance: The :class:`~toolguard.config.Provenance` identifying which
             layer to modify.  Only the first matching layer is modified.
-        removed: Set of wrapper-free pattern bodies to remove from the allow
-            list.  All occurrences of each pattern are removed.
-        added: List of wrapper-free pattern bodies to append to the allow list,
-            in the given order.  These are appended AFTER removals.
+        list_type: Which permission list to edit: ``'allow'``, ``'deny'``, or
+            ``'ask'``.
+        removed: Set of wrapper-free pattern bodies to remove.  All occurrences
+            of each pattern are removed.
+        added: List of wrapper-free pattern bodies to append, in the given order.
+            These are appended AFTER removals.
 
     Returns:
         A new :class:`~toolguard.config.Configuration` with the modified layer,
         or the original ``config`` when ``provenance`` matches no layer.
+
+    Raises:
+        ValueError: When ``list_type`` is not one of ``allow``/``deny``/``ask``.
     """
+    if list_type not in ("allow", "deny", "ask"):
+        raise ValueError(
+            f"unknown list_type {list_type!r} (expected 'allow', 'deny', or 'ask')"
+        )
+
     wrapped_removed: Set[str] = {wrap_tool_pattern(tool, p) for p in removed}
     wrapped_added: List[str] = [wrap_tool_pattern(tool, p) for p in added]
 
@@ -293,15 +306,15 @@ def with_layer_allow_replaced(
             new_layers.append(layer)
             continue
 
-        allow_list = permissions.get("allow", [])
-        if not isinstance(allow_list, list):
+        target_list = permissions.get(list_type, [])
+        if not isinstance(target_list, list):
             new_layers.append(layer)
             continue
 
         # Remove all occurrences of each pattern in ``removed``, then append added.
-        new_allow = [p for p in allow_list if p not in wrapped_removed] + wrapped_added
+        new_list = [p for p in target_list if p not in wrapped_removed] + wrapped_added
         new_perms = dict(permissions)
-        new_perms["allow"] = new_allow
+        new_perms[list_type] = new_list
         new_content = dict(layer.content)
         new_content["permissions"] = new_perms
         new_layer = ConfigLayer(
@@ -315,6 +328,37 @@ def with_layer_allow_replaced(
         return config
 
     return Configuration(layers=tuple(new_layers), start_dir=config.start_dir)
+
+
+def with_layer_allow_replaced(
+    config: Configuration,
+    tool: str,
+    provenance: Provenance,
+    removed: Set[str],
+    added: List[str],
+) -> Configuration:
+    """
+    Allow-list specialisation of :func:`with_layer_rules_replaced`.
+
+    Retained as the canonical allow-only builder used by redundancy analysis,
+    consolidation proposals, and hierarchy migration; it simply delegates with
+    ``list_type='allow'`` so there is a single implementation.
+
+    Args:
+        config: The original :class:`~toolguard.config.Configuration`.
+        tool: Tool name whose allow list is modified (e.g. ``'Bash'``).
+        provenance: The :class:`~toolguard.config.Provenance` identifying which
+            layer to modify.
+        removed: Set of wrapper-free pattern bodies to remove from the allow list.
+        added: List of wrapper-free pattern bodies to append to the allow list.
+
+    Returns:
+        A new :class:`~toolguard.config.Configuration` with the modified layer,
+        or the original ``config`` when ``provenance`` matches no layer.
+    """
+    return with_layer_rules_replaced(
+        config, tool, provenance, "allow", removed, added
+    )
 
 
 # ---------------------------------------------------------------------------

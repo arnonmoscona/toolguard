@@ -115,9 +115,18 @@ class DangerFinding:
         pattern: The raw flagged pattern (inner form, tool wrapper stripped).
         provenance: Origin of the rule in the configuration hierarchy.
         rationale: Human-readable explanation of the risk.
-        remediation: Suggested fix or mitigation.
+        remediation: Suggested fix or mitigation (human-readable text).
         takeover_active: Whether takeover mode was ON when this finding was
             produced (for display/context).
+        list_type: Which permission list the flagged rule lives in
+            (``'allow'``/``'deny'``/``'ask'``); needed to build a structured
+            remediation edit that targets the right section.
+        remediation_kind: Mechanical remediation kind the audit layer can turn
+            into a structured :class:`~toolguard.tools.edit_proposal.EditProposal`:
+            ``'remove'`` (delete the dangerous rule -- always a safe tightening),
+            ``'anchor'`` (prepend ``^`` to an unanchored ``[regex]`` body), or
+            ``None`` when the fix is a judgement call carried only in
+            ``remediation`` text.
     """
 
     detector_id: str
@@ -128,6 +137,8 @@ class DangerFinding:
     rationale: str
     remediation: str
     takeover_active: bool
+    list_type: str = "allow"
+    remediation_kind: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +166,10 @@ class DangerDetector:
         rationale_template: Template for the rationale string (may reference
             ``{tool}`` and ``{pattern}``).
         remediation: Suggested remediation text.
+        remediation_kind: Mechanical remediation kind for a structured fix
+            (``'remove'``, ``'anchor'``, or ``None`` -- see
+            :class:`DangerFinding.remediation_kind`).  Carried onto every finding
+            this detector produces.
     """
 
     detector_id: str
@@ -164,6 +179,7 @@ class DangerDetector:
     predicate: _DetectorPredicate
     rationale_template: str
     remediation: str
+    remediation_kind: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +466,7 @@ _DETECTORS: List[DangerDetector] = [
             "'uv run python:*' with explicit named-script allows like 'uv run python scripts/lint.py:*'. "
             "If arbitrary execution is intentional, add a comment explaining why."
         ),
+        remediation_kind="remove",
     ),
     DangerDetector(
         detector_id="destructive-cmd-allow",
@@ -466,6 +483,7 @@ _DETECTORS: List[DangerDetector] = [
             "Narrow the pattern to a specific safe target path or remove the rule. "
             "Consider using a deny rule in [hard_deny] to prevent accidental execution."
         ),
+        remediation_kind="remove",
     ),
     DangerDetector(
         detector_id="secrets-exposure-allow",
@@ -483,6 +501,7 @@ _DETECTORS: List[DangerDetector] = [
             "for a tooling task, prefer a more-specific path and add a comment. "
             "Consider using a hard_deny rule to block .env and .ssh access globally."
         ),
+        remediation_kind="remove",
     ),
     DangerDetector(
         detector_id="unanchored-regex-allow",
@@ -500,6 +519,7 @@ _DETECTORS: List[DangerDetector] = [
             "from the beginning of the command. Example: '[regex]^git\\\\b' instead of "
             "'[regex]git\\\\b'. If unanchored matching is intentional, add a comment."
         ),
+        remediation_kind="anchor",
     ),
     # Blanket-allow-outside-takeover is handled separately in danger() because
     # it needs the effective takeover state to decide whether to fire.
@@ -624,6 +644,8 @@ def _audit_tool(
                             rationale=rationale,
                             remediation=detector.remediation,
                             takeover_active=takeover.enabled,
+                            list_type=detector.list_type,
+                            remediation_kind=detector.remediation_kind,
                         )
                     )
                     break  # Only one finding per pattern per detector pass; don't stack
@@ -658,6 +680,8 @@ def _audit_tool(
                             "the pattern appears in ignored_allow_patterns."
                         ),
                         takeover_active=takeover.enabled,
+                        list_type="allow",
+                        remediation_kind="remove",
                     )
                 )
 

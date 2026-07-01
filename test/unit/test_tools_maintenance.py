@@ -7,6 +7,7 @@ fixture helpers mirror the other maintenance-tool tests for consistency.
 """
 
 import io
+import json
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -19,10 +20,15 @@ from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.maintenance import (
     MaintenanceReport,
+    change_report_to_dict,
+    collect_consolidations,
+    consolidation_to_edit_proposal,
     main,
+    report_to_dict,
     run_maintenance,
     render,
 )
+from toolguard.tools.rule_apply import ChangeReport, FileChange
 
 
 def _make_provenance(specificity: int = 0) -> Provenance:
@@ -173,6 +179,65 @@ class TestRenderMaintenance(unittest.TestCase):
         self.assertIn("broaden", out)
 
 
+class TestReportToDict(unittest.TestCase):
+    """JSON serialization of a MaintenanceReport (the skill's structured contract)."""
+
+    def test_serializes_findings_with_expanded_provenance(self):
+        """
+        Given a report carrying Bash consolidation/broadening findings
+        When report_to_dict serializes it
+        Then the payload mirrors the report (top-level counts, a Bash tool entry
+            with the finding lists) and each finding's provenance is expanded to
+            a dict including a describe string.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+        report = run_maintenance(config, tools=["Bash"])
+        payload = report_to_dict(report)
+        self.assertEqual(payload["total_findings"], report.total_findings)
+        self.assertTrue(payload["has_any_findings"])
+        self.assertEqual([t["tool"] for t in payload["tools"]], ["Bash"])
+        bash = payload["tools"][0]
+        self.assertTrue(bash["broadenings"])
+        prov = bash["broadenings"][0]["layer_provenance"]
+        self.assertEqual(prov["level"], "project")
+        self.assertIn("describe", prov)
+
+    def test_serializes_mining_groups_when_corpus_supplied(self):
+        """
+        Given a report built with a corpus that yields a mining group
+        When report_to_dict serializes it
+        Then the payload's mining.groups carries the group with its observed
+            counts, and the whole payload round-trips through json.dumps.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+        corpus = [_make_log_entry("Bash", "git push origin main")]
+        report = run_maintenance(config, tools=["Bash"], corpus=corpus)
+        payload = report_to_dict(report)
+        self.assertTrue(payload["mining"]["groups"])
+        group = payload["mining"]["groups"][0]
+        self.assertEqual(group["tool"], "Bash")
+        self.assertIsInstance(group["observed_counts"], dict)
+        # Must be JSON-serializable end to end.
+        self.assertIsInstance(json.dumps(payload), str)
+
+    def test_empty_report_serializes_to_empty_findings(self):
+        """
+        Given a config with no rules
+        When report_to_dict serializes the resulting report
+        Then has_any_findings is False and the tool entry has empty finding lists.
+        """
+        config = _make_config(_make_layer("Bash", allow=[]))
+        report = run_maintenance(config, tools=["Bash"])
+        payload = report_to_dict(report)
+        self.assertFalse(payload["has_any_findings"])
+        self.assertEqual(payload["tools"][0]["broadenings"], [])
+        self.assertEqual(payload["mining"]["groups"], [])
+
+
 class TestMaintenanceCLI(unittest.TestCase):
     """The toolguard-maintain CLI entry point."""
 
@@ -193,6 +258,258 @@ class TestMaintenanceCLI(unittest.TestCase):
                 code = main(["--tool", "Bash", "--format", "text"])
         self.assertEqual(code, 0)
         self.assertIn("Maintenance summary", buffer.getvalue())
+
+    def test_json_format_prints_valid_serialized_report(self):
+        """
+        Given a config with Bash findings
+        When main(['--tool', 'Bash', '--format', 'json']) is invoked
+        Then it returns 0 and stdout is valid JSON carrying the Bash tool entry.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+        buffer = io.StringIO()
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config", return_value=config
+        ):
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--format", "json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual([t["tool"] for t in payload["tools"]], ["Bash"])
+
+    def test_corpus_off_by_default_does_not_harvest(self):
+        """
+        Given no --corpus flag
+        When main is invoked
+        Then run_maintenance is called with corpus=None and the corpus harvester
+            is never touched (static-only is the fast default).
+        """
+        config = _make_config(_make_layer("Bash", allow=[]))
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config", return_value=config
+        ), mock.patch(
+            "toolguard.tools.maintenance.harvest_corpus"
+        ) as harvest, mock.patch(
+            "toolguard.tools.maintenance.run_maintenance",
+            wraps=run_maintenance,
+        ) as run:
+            with redirect_stdout(io.StringIO()):
+                code = main(["--tool", "Bash"])
+        self.assertEqual(code, 0)
+        harvest.assert_not_called()
+        self.assertIsNone(run.call_args.kwargs["corpus"])
+
+    def test_corpus_flag_harvests_and_passes_corpus_through(self):
+        """
+        Given the --corpus flag with a max-age bound
+        When main is invoked (harvester patched to a fixed corpus)
+        Then harvest_corpus is called with that max_age_days and its result is
+            forwarded to run_maintenance.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+        corpus = [_make_log_entry("Bash", "git push origin main")]
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config", return_value=config
+        ), mock.patch(
+            "toolguard.tools.maintenance.harvest_corpus", return_value=corpus
+        ) as harvest, mock.patch(
+            "toolguard.tools.maintenance.run_maintenance",
+            wraps=run_maintenance,
+        ) as run:
+            with redirect_stdout(io.StringIO()):
+                code = main(["--tool", "Bash", "--corpus", "--max-age-days", "7"])
+        self.assertEqual(code, 0)
+        self.assertEqual(harvest.call_args.kwargs["max_age_days"], 7)
+        self.assertIs(run.call_args.kwargs["corpus"], corpus)
+
+
+class TestApplyMode(unittest.TestCase):
+    """The toolguard-maintain --apply path (preview by default, --write to commit)."""
+
+    def _git_config(self) -> Configuration:
+        """A Bash config whose git-family allows are consolidatable."""
+        return _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+
+    def test_collect_consolidations_flattens_proposals(self):
+        """
+        Given a report with a consolidatable git-family allow set
+        When collect_consolidations runs
+        Then it returns the strict consolidation proposal(s) only.
+        """
+        report = run_maintenance(self._git_config(), tools=["Bash"])
+        proposals = collect_consolidations(report)
+        self.assertTrue(proposals)
+        self.assertTrue(all(p.kind for p in proposals))
+
+    def test_consolidation_to_edit_proposal_maps_to_replace(self):
+        """
+        Given a consolidation proposal (git family -> one merged allow)
+        When consolidation_to_edit_proposal converts it
+        Then it is a 'replace' EditProposal whose single edit removes the family
+            and adds the merged pattern in the allow section at the same layer.
+        """
+        report = run_maintenance(self._git_config(), tools=["Bash"])
+        prop = collect_consolidations(report)[0]
+        ep = consolidation_to_edit_proposal(prop)
+        self.assertEqual(ep.action, "replace")
+        self.assertEqual(len(ep.edits), 1)
+        edit = ep.edits[0]
+        self.assertEqual(edit.list_type, "allow")
+        self.assertEqual(set(edit.removed_patterns), set(prop.removed_patterns))
+        self.assertEqual(edit.added_patterns, (prop.added_pattern,))
+        self.assertTrue(ep.origin.startswith("consolidation:"))
+
+    def test_apply_json_includes_edit_proposals_for_audit_review(self):
+        """
+        Given --apply --format json
+        When main runs
+        Then the payload carries an 'edit_proposals' array (one per consolidation)
+            that the maintenance skill can feed to `toolguard-audit --edits`.
+        """
+        buffer = io.StringIO()
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config",
+            return_value=self._git_config(),
+        ), mock.patch(
+            "toolguard.tools.maintenance.apply_proposals",
+            return_value=ChangeReport(files=()),
+        ):
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--apply", "--format", "json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertTrue(payload["edit_proposals"])
+        self.assertEqual(payload["edit_proposals"][0]["action"], "replace")
+
+    def test_change_report_to_dict_includes_diff_and_outcome(self):
+        """
+        Given a ChangeReport with one written file carrying a diff
+        When change_report_to_dict serializes it
+        Then the payload exposes the file path, the diff, the written flag, and
+            the applied/removed/added patterns.
+        """
+        fchange = FileChange(
+            path=Path("/proj/.claude/toolguard_hook.toml"),
+            file_format="toml",
+            applied=(),
+            skipped=(),
+            patterns_removed=("Bash(git diff:*)",),
+            patterns_added=("Bash([regex]^git (diff|log|status))",),
+            diff="--- a\n+++ b\n",
+            written=True,
+        )
+        payload = change_report_to_dict(ChangeReport(files=(fchange,)))
+        self.assertEqual(payload["files"][0]["written"], True)
+        self.assertIn("diff", payload["files"][0])
+        self.assertEqual(
+            payload["files_written"], ["/proj/.claude/toolguard_hook.toml"]
+        )
+
+    def test_apply_preview_is_dry_run_and_writes_nothing(self):
+        """
+        Given --apply without --write
+        When main runs (apply_proposals patched to observe the call)
+        Then apply_proposals is called with dry_run=True, the pre-flight gate is
+            NOT consulted, and the banner reports a dry run.
+        """
+        buffer = io.StringIO()
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config",
+            return_value=self._git_config(),
+        ), mock.patch(
+            "toolguard.tools.maintenance.apply_proposals",
+            return_value=ChangeReport(files=()),
+        ) as apply, mock.patch(
+            "toolguard.tools.maintenance.migration_preflight"
+        ) as preflight:
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--apply"])
+        self.assertEqual(code, 0)
+        self.assertTrue(apply.call_args.kwargs["dry_run"])
+        preflight.assert_not_called()
+        self.assertIn("DRY RUN", buffer.getvalue())
+
+    def test_write_refused_when_preflight_has_blockers(self):
+        """
+        Given --apply --write but a pre-flight that reports blockers (dirty tree)
+        When main runs
+        Then it returns 2, prints the blockers, and never calls apply_proposals
+            (the config is left untouched).
+        """
+        buffer = io.StringIO()
+        blocked = mock.Mock(blockers=["The working tree has uncommitted changes: x"])
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config",
+            return_value=self._git_config(),
+        ), mock.patch(
+            "toolguard.tools.maintenance.migration_preflight", return_value=blocked
+        ), mock.patch(
+            "toolguard.tools.maintenance.apply_proposals"
+        ) as apply:
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--apply", "--write"])
+        self.assertEqual(code, 2)
+        apply.assert_not_called()
+        self.assertIn("Refusing to write", buffer.getvalue())
+
+    def test_write_applies_when_preflight_is_clean(self):
+        """
+        Given --apply --write and a clean pre-flight (no blockers)
+        When main runs (apply_proposals patched)
+        Then apply_proposals is called with dry_run=False and exit code is 0.
+        """
+        buffer = io.StringIO()
+        clean = mock.Mock(blockers=[])
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config",
+            return_value=self._git_config(),
+        ), mock.patch(
+            "toolguard.tools.maintenance.migration_preflight", return_value=clean
+        ), mock.patch(
+            "toolguard.tools.maintenance.apply_proposals",
+            return_value=ChangeReport(files=()),
+        ) as apply:
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--apply", "--write"])
+        self.assertEqual(code, 0)
+        self.assertFalse(apply.call_args.kwargs["dry_run"])
+        self.assertIn("APPLIED", buffer.getvalue())
+
+    def test_apply_json_emits_change_report_with_dry_run_flag(self):
+        """
+        Given --apply --format json
+        When main runs
+        Then stdout is a JSON change report carrying a dry_run=true flag.
+        """
+        buffer = io.StringIO()
+        with mock.patch(
+            "toolguard.tools.maintenance.load_config",
+            return_value=self._git_config(),
+        ), mock.patch(
+            "toolguard.tools.maintenance.apply_proposals",
+            return_value=ChangeReport(files=()),
+        ):
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--apply", "--format", "json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertTrue(payload["dry_run"])
+        self.assertIn("files", payload)
+
+    def test_write_requires_apply(self):
+        """
+        Given --write without --apply
+        When main runs
+        Then argparse errors out (SystemExit), guarding against an accidental
+            bare --write.
+        """
+        with self.assertRaises(SystemExit):
+            main(["--write"])
 
 
 if __name__ == "__main__":

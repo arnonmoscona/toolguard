@@ -106,12 +106,32 @@ Parse the JSON. Its shape:
       "pattern":         str?,   // the flagged rule (rule findings only)
       "summary":         str,    // what is wrong
       "impact":          str,    // extra impact text (takeover findings)
-      "remediation":     str,    // suggested fix
+      "remediation":     str,    // suggested fix (HUMAN text; may be more surgical
+                                 // than the structured proposal below)
+      "remediation_proposal": obj?,  // STRUCTURED, machine-appliable fix or null.
+                                 // Present when the fix is mechanical (delete a
+                                 // dangerous allow, anchor an unanchored regex).
+                                 // Shape = an EditProposal:
+                                 //   { action: remove|replace|narrow|move,
+                                 //     tool, rationale, origin: "audit:<finding_id>",
+                                 //     edits: [ { tool, list_type, provenance,
+                                 //                removed_patterns, added_patterns } ] }
+                                 // The maintenance skill ingests this directly (no
+                                 // NLP) to build a reviewable edit; it is a
+                                 // CONSERVATIVE tightening to review as-if-enacted,
+                                 // never auto-applied. null => text-only judgement fix.
       "takeover_active": bool    // whether takeover was ON when this finding fired
     }, ...
   ]
 }
 ```
+
+> **Structured remediation = the agent audience.** For a human, present the
+> `remediation` text. For a driving skill (maintenance), `remediation_proposal` is
+> the agent-oriented sidecar: a typed `EditProposal` the skill can enact via
+> `edit_proposal.apply_edits` and re-audit as-if-enacted. There is no separate
+> "agent mode" -- the same `--format json` serves both, humans reading the text
+> and skills reading the proposal.
 
 ### Present it
 
@@ -197,6 +217,10 @@ That JSON is the Pass-1 payload plus an additive top-level `context` block:
     ]} ],
   "proposed_migrations": [...]             // OPTIONAL -- present only when the audit was run
                                            // with --migrations; see "Proposed migrations" below
+  "proposed_edits": {                      // OPTIONAL -- present only with --edits. The
+    "edits": [...],                        //   whole audit above is ALREADY as-if-enacted;
+    "delta": { "introduced": [...],        //   see "Proposed edits" below.
+               "resolved": [...] } }
 }
 ```
 
@@ -285,6 +309,42 @@ Few-shot examples (style, not a fixed catalogue):
    - finding: `Bash([regex]rm /home/.../memory/.*)` is unanchored (`re.search`) -- it
      matches the substring anywhere in a command.
    - fix: `Bash([regex]^rm /home/.../memory/[^;&|]*$)`.
+
+### Proposed edits (ONLY when `context.proposed_edits` is present -- otherwise skip entirely)
+
+This block appears when the audit was invoked with `--edits` (typically the
+maintenance skill handing you the concrete changes it wants to make -- e.g. its
+consolidations, or your own `remediation_proposal`s it decided to apply). Unlike
+`--migrations`, these edits were **actually applied in memory**, so the top-level
+`findings` you already analysed reflect the **AS-IF-ENACTED** config (the whole
+hierarchy, all sections). Your job is to judge whether enacting the edits is safe.
+
+`context.proposed_edits` carries:
+
+- `edits` -- the `EditProposal`s that were applied (each an `action`, `tool`,
+  `rationale`, `origin`, and atomic `edits[]` with `list_type`/`provenance`/
+  `removed_patterns`/`added_patterns`). An edit may span several sections
+  (allow + deny) and layers.
+- `delta` -- `introduced` and `resolved`: the findings that appear ONLY after the
+  edits, and ONLY before them.
+
+How to reason:
+
+- **`delta.introduced` is the headline risk.** Any finding the edits CREATE is a
+  reason to push back -- call each one out with its severity and say which edit
+  caused it. A change that resolves one MEDIUM but introduces a CRITICAL is a bad
+  trade; say so plainly.
+- **`delta.resolved` is the benefit.** Acknowledge what the edits fix.
+- **Look past the delta for cross-section / cross-layer interactions.** Replacing
+  one rule with a set (e.g. narrow an allow AND add a deny) can change how a
+  DIFFERENT rule for the same command family resolves, even when no finding id
+  changed. Walk the as-if-enacted `tools[].layers` for the edited command family
+  and confirm the effective verdict is what the edit intends (deny-wins;
+  broad-ask-collapses; else more-specific-wins).
+- **These findings are REAL for the proposed state, not hypothetical** -- be
+  concrete, cite the actual patterns/loci in the as-if-enacted config.
+- Give a clear bottom line: safe to enact, enact-with-changes (name them), or do
+  not enact (why).
 
 ### Proposed migrations (ONLY when `context.proposed_migrations` is present -- otherwise skip entirely)
 

@@ -17,6 +17,7 @@ Fixture helpers are reused from test_tools_danger.py and test_tools_takeover_aud
 patterns: MappingProxyType layers built directly from Configuration/ConfigLayer/Provenance.
 """
 
+import contextlib
 import io
 import json
 import tempfile
@@ -33,11 +34,17 @@ from toolguard.config import (
 )
 from toolguard.tools.security_audit import (
     RankedFinding,
+    Remediation,
     SecurityReport,
+    _danger_proposal,
+    _finding_delta,
     main,
     render,
     security_audit,
 )
+from toolguard.tools.config_access import per_layer_rules
+from toolguard.tools.danger import DangerFinding, Severity
+from toolguard.tools.edit_proposal import apply_edits, edit_proposal_to_dict
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +831,7 @@ class TestRenderJson(unittest.TestCase):
             pattern="uv run python:*",
             summary="rationale text",
             impact="",
-            remediation="remediation text",
+            remediation=Remediation(text="remediation text", proposal=None),
             takeover_active=False,
         )
         report = SecurityReport(
@@ -844,10 +851,13 @@ class TestRenderJson(unittest.TestCase):
         expected_fields = [
             "source", "finding_id", "severity_value", "severity_label",
             "tool", "locus", "pattern", "summary", "impact",
-            "remediation", "takeover_active",
+            "remediation", "remediation_proposal", "takeover_active",
         ]
         for field in expected_fields:
             self.assertIn(field, fd, msg=f"Missing field in JSON finding: {field}")
+        # remediation stays a human string; the structured fix is a separate sidecar.
+        self.assertEqual(fd["remediation"], "remediation text")
+        self.assertIsNone(fd["remediation_proposal"])
 
     def test_json_is_ascii_safe(self):
         """
@@ -1279,6 +1289,245 @@ class TestSecurityAuditClarity(unittest.TestCase):
         self.assertEqual(len(clarity), 1)
         self.assertEqual(clarity[0].finding_id, "deny-shadows-allow")
         self.assertEqual(clarity[0].severity_label, "LOW")
+
+
+def _danger_finding(
+    detector_id: str,
+    pattern: str,
+    *,
+    remediation_kind=None,
+    list_type: str = "allow",
+    provenance=None,
+) -> DangerFinding:
+    """Build a DangerFinding for structured-remediation tests."""
+    prov = provenance or Provenance(
+        level="project",
+        source_type="toolguard_hook",
+        file_format="toml",
+        path=Path("/p/.claude/toolguard_hook.toml"),
+        specificity=0,
+    )
+    return DangerFinding(
+        detector_id=detector_id,
+        severity=Severity.CRITICAL,
+        tool="Bash",
+        pattern=pattern,
+        provenance=prov,
+        rationale="danger",
+        remediation="fix it",
+        takeover_active=False,
+        list_type=list_type,
+        remediation_kind=remediation_kind,
+    )
+
+
+class TestStructuredRemediation(unittest.TestCase):
+    """S2: RankedFinding.remediation carries a structured, appliable proposal."""
+
+    def test_remove_kind_builds_removal_edit(self):
+        """
+        Given a danger finding with remediation_kind='remove'
+        When _danger_proposal builds its structured fix
+        Then it is a 'remove' EditProposal deleting the flagged pattern at its
+            locus, and applying it drops the rule from the config.
+        """
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/p/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        df = _danger_finding(
+            "arbitrary-exec-allow", "uv run python:*",
+            remediation_kind="remove", provenance=prov,
+        )
+        proposal = _danger_proposal(df)
+        self.assertEqual(proposal.action, "remove")
+        edit = proposal.edits[0]
+        self.assertEqual(edit.removed_patterns, ("uv run python:*",))
+        self.assertEqual(edit.added_patterns, ())
+        # And it actually removes the rule when applied.
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {"permissions": {"allow": ["Bash(uv run python:*)"], "deny": [], "ask": []}}
+            ),
+        )
+        config = Configuration(layers=(layer,), start_dir=None)
+        result = apply_edits(config, [proposal])
+        self.assertEqual(per_layer_rules(result, "Bash")[0].allow, ())
+
+    def test_anchor_kind_builds_anchoring_replace(self):
+        """
+        Given a danger finding with remediation_kind='anchor' on an unanchored
+            [regex] body
+        When _danger_proposal builds its structured fix
+        Then it is a 'replace' EditProposal swapping the body for a '^'-anchored one.
+        """
+        df = _danger_finding(
+            "unanchored-regex-allow", "[regex]rm\\b", remediation_kind="anchor"
+        )
+        proposal = _danger_proposal(df)
+        self.assertEqual(proposal.action, "replace")
+        edit = proposal.edits[0]
+        self.assertEqual(edit.removed_patterns, ("[regex]rm\\b",))
+        self.assertEqual(edit.added_patterns, ("[regex]^rm\\b",))
+
+    def test_anchor_on_already_anchored_returns_none(self):
+        """
+        Given an 'anchor' finding whose body is already anchored
+        When _danger_proposal runs
+        Then it returns None (nothing to change).
+        """
+        df = _danger_finding(
+            "unanchored-regex-allow", "[regex]^rm\\b", remediation_kind="anchor"
+        )
+        self.assertIsNone(_danger_proposal(df))
+
+    def test_anchor_on_non_regex_returns_none(self):
+        """
+        Given an 'anchor' finding whose body is not a [regex] pattern
+        When _danger_proposal runs
+        Then it returns None (anchor only applies to regex bodies).
+        """
+        df = _danger_finding(
+            "unanchored-regex-allow", "rm -rf:*", remediation_kind="anchor"
+        )
+        self.assertIsNone(_danger_proposal(df))
+
+    def test_no_kind_or_no_provenance_returns_none(self):
+        """
+        Given a finding with no remediation_kind, or one with no provenance
+        When _danger_proposal runs
+        Then it returns None in both cases (no mechanical fix to target).
+        """
+        self.assertIsNone(_danger_proposal(_danger_finding("x", "foo:*")))
+        df = DangerFinding(
+            detector_id="arbitrary-exec-allow",
+            severity=Severity.CRITICAL,
+            tool="Bash",
+            pattern="foo:*",
+            provenance=None,
+            rationale="danger",
+            remediation="fix it",
+            takeover_active=False,
+            list_type="allow",
+            remediation_kind="remove",
+        )
+        self.assertIsNone(_danger_proposal(df))
+
+    def test_json_carries_structured_proposal_and_string_text(self):
+        """
+        Given a config with an arbitrary-exec allow
+        When the audit is rendered as JSON
+        Then the finding's 'remediation' stays a human string AND
+            'remediation_proposal' carries the structured removal edit.
+        """
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/p/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {"permissions": {"allow": ["Bash(uv run python:*)"], "deny": [], "ask": []}}
+            ),
+        )
+        config = Configuration(layers=(layer,), start_dir=None)
+        report = security_audit(config)
+        arb = [f for f in report.findings if f.finding_id == "arbitrary-exec-allow"][0]
+        self.assertIsInstance(arb.remediation.text, str)
+        self.assertIsNotNone(arb.remediation.proposal)
+        self.assertEqual(arb.remediation.proposal.action, "remove")
+
+
+class TestEditsReview(unittest.TestCase):
+    """S3: --edits audits the config AS IF the proposed edits were enacted."""
+
+    def _dangerous_config(self):
+        """A config with an arbitrary-exec allow (fires arbitrary-exec-allow)."""
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/p/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {"permissions": {"allow": ["Bash(uv run python:*)"], "deny": [], "ask": []}}
+            ),
+        )
+        return Configuration(layers=(layer,), start_dir=None)
+
+    def _capture_main(self, argv):
+        """Run main(argv) capturing (stdout, exit_code)."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = main(argv)
+        return buf.getvalue(), code
+
+    def test_finding_delta_reports_resolved_and_introduced(self):
+        """
+        Given a base audit and an as-if-enacted audit that drops one finding
+        When _finding_delta compares them
+        Then the dropped finding is 'resolved' and none are 'introduced'.
+        """
+        config = self._dangerous_config()
+        base = security_audit(config)
+        removal = [f.remediation.proposal for f in base.findings if f.remediation.proposal][0]
+        proposed = security_audit(apply_edits(config, [removal]))
+        delta = _finding_delta(base, proposed)
+        self.assertIn(
+            "arbitrary-exec-allow", [f["finding_id"] for f in delta["resolved"]]
+        )
+        self.assertEqual(delta["introduced"], [])
+
+    def test_edits_flag_audits_proposed_state_and_adds_delta(self):
+        """
+        Given an --edits file with the audit's own removal proposal
+        When main runs with --format json --edits FILE
+        Then the top-level findings reflect the AS-IF-ENACTED config (the
+            arbitrary-exec finding is gone) and context.proposed_edits.delta lists
+            it as resolved.
+        """
+        config = self._dangerous_config()
+        base = security_audit(config)
+        removal = [f.remediation.proposal for f in base.findings if f.remediation.proposal][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            edits_path = Path(tmp) / "edits.json"
+            edits_path.write_text(json.dumps([edit_proposal_to_dict(removal)]))
+            with patch("toolguard.tools.security_audit.load_config", return_value=config):
+                out, code = self._capture_main(
+                    ["--dir", ".", "--format", "json", "--edits", str(edits_path)]
+                )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        ids = [f["finding_id"] for f in data["findings"]]
+        self.assertNotIn("arbitrary-exec-allow", ids)
+        delta = data["context"]["proposed_edits"]["delta"]
+        self.assertIn(
+            "arbitrary-exec-allow", [f["finding_id"] for f in delta["resolved"]]
+        )
+
+    def test_malformed_edits_file_errors_out(self):
+        """
+        Given an --edits file that is not valid JSON
+        When main runs
+        Then argparse errors out (SystemExit) rather than crashing.
+        """
+        config = self._dangerous_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.json"
+            bad.write_text("{not json")
+            with patch("toolguard.tools.security_audit.load_config", return_value=config):
+                with self.assertRaises(SystemExit):
+                    self._capture_main(["--dir", ".", "--edits", str(bad)])
 
 
 if __name__ == "__main__":
