@@ -36,12 +36,15 @@ from toolguard.tools.security_audit import (
     RankedFinding,
     Remediation,
     SecurityReport,
+    _acknowledgement_label,
     _danger_proposal,
     _finding_delta,
+    _render_edit_banner,
     main,
     render,
     security_audit,
 )
+from toolguard.tools.edit_proposal import EditProposal
 from toolguard.tools.config_access import per_layer_rules
 from toolguard.tools.danger import DangerFinding, Severity
 from toolguard.tools.edit_proposal import apply_edits, edit_proposal_to_dict
@@ -1674,6 +1677,135 @@ class TestNoSecurityAcknowledgement(unittest.TestCase):
         self.assertEqual(len(exec_json), 1)
         self.assertTrue(exec_json[0]["acknowledged"])
         self.assertEqual(exec_json[0]["acknowledgement"], "intentional dev tool")
+
+
+def _ranked(finding_id, acknowledged=False, acknowledgement=None, pattern="git push:*"):
+    """Build a RankedFinding for acknowledgement / delta rendering tests."""
+    return RankedFinding(
+        source="rule",
+        finding_id=finding_id,
+        severity_value=3,
+        severity_label="HIGH",
+        tool="Bash",
+        locus="project: /fake/path.toml",
+        pattern=pattern,
+        summary="summary text",
+        impact="",
+        remediation=Remediation(text="remediation text", proposal=None),
+        takeover_active=False,
+        acknowledged=acknowledged,
+        acknowledgement=acknowledgement,
+    )
+
+
+class TestAcknowledgementRendering(unittest.TestCase):
+    """
+    #NOSECURITY-acknowledged findings are still reported, but carry a visible
+    acknowledgement marker in both render formats.
+    """
+
+    def test_acknowledgement_label_with_reason(self):
+        """
+        Given an acknowledged finding whose acknowledgement carries a reason
+        When its label is rendered
+        Then it reads '#NOSECURITY: <reason>'
+        """
+        f = _ranked("x", acknowledged=True, acknowledgement="trusted dev box")
+        self.assertEqual(_acknowledgement_label(f), "#NOSECURITY: trusted dev box")
+
+    def test_acknowledgement_label_without_reason(self):
+        """
+        Given an acknowledged finding with no reason text
+        When its label is rendered
+        Then it reads a bare '#NOSECURITY'
+        """
+        f = _ranked("x", acknowledged=True, acknowledgement=None)
+        self.assertEqual(_acknowledgement_label(f), "#NOSECURITY")
+
+    def test_markdown_render_shows_acknowledged_marker(self):
+        """
+        Given a report with one acknowledged finding
+        When it is rendered as markdown
+        Then the acknowledgement marker line is present
+        """
+        report = SecurityReport(
+            findings=(_ranked("x", acknowledged=True, acknowledgement="ack me"),),
+            takeover_active=False,
+            highest_severity=3,
+            counts={"HIGH": 1},
+        )
+        out = render(report, fmt="markdown")
+        self.assertIn("acknowledged: #NOSECURITY: ack me", out)
+
+    def test_text_render_shows_acknowledged_marker(self):
+        """
+        Given a report with one acknowledged finding
+        When it is rendered as plain text
+        Then the acknowledgement marker line is present
+        """
+        report = SecurityReport(
+            findings=(_ranked("x", acknowledged=True, acknowledgement="ack me"),),
+            takeover_active=False,
+            highest_severity=3,
+            counts={"HIGH": 1},
+        )
+        out = render(report, fmt="text")
+        self.assertIn("acknowledged: #NOSECURITY: ack me", out)
+
+
+class TestFindingDeltaAndBanner(unittest.TestCase):
+    """
+    The as-if-enacted (--edits) review computes a finding delta between the
+    current and proposed audits and renders it as a banner.
+    """
+
+    def _report(self, *findings):
+        return SecurityReport(
+            findings=tuple(findings),
+            takeover_active=False,
+            highest_severity=3 if findings else 0,
+            counts={},
+        )
+
+    def test_finding_delta_splits_introduced_and_resolved(self):
+        """
+        Given a base audit with finding A and a proposed audit with finding B
+        When the finding delta is computed
+        Then A is 'resolved' and B is 'introduced'
+        """
+        base = self._report(_ranked("A", pattern="a:*"))
+        proposed = self._report(_ranked("B", pattern="b:*"))
+        delta = _finding_delta(base, proposed)
+        self.assertEqual([i["finding_id"] for i in delta["introduced"]], ["B"])
+        self.assertEqual([r["finding_id"] for r in delta["resolved"]], ["A"])
+
+    def test_finding_delta_unchanged_finding_is_neither(self):
+        """
+        Given a finding present in both base and proposed audits
+        When the finding delta is computed
+        Then it appears in neither 'introduced' nor 'resolved'
+        """
+        shared = _ranked("S", pattern="s:*")
+        delta = _finding_delta(self._report(shared), self._report(shared))
+        self.assertEqual(delta["introduced"], [])
+        self.assertEqual(delta["resolved"], [])
+
+    def test_render_edit_banner_lists_delta(self):
+        """
+        Given proposals and a delta with one introduced and one resolved finding
+        When the banner is rendered
+        Then it reports the counts and lists both findings in ASCII
+        """
+        base = self._report(_ranked("A", pattern="a:*"))
+        proposed = self._report(_ranked("B", pattern="b:*"))
+        delta = _finding_delta(base, proposed)
+        proposals = [EditProposal(action="replace", tool="Bash", rationale="r", edits=())]
+        banner = _render_edit_banner(proposals, delta)
+        self.assertIn("AS-IF-ENACTED REVIEW", banner)
+        self.assertIn("as if 1 proposed edit(s)", banner)
+        self.assertIn("+ INTRODUCED B", banner)
+        self.assertIn("- resolved   A", banner)
+        self.assertTrue(all(ord(c) < 128 for c in banner))
 
 
 if __name__ == "__main__":

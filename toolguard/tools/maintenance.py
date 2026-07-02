@@ -27,6 +27,7 @@ security-audit lens) before acting -- the skill layer owns that decision.
 """
 
 import argparse
+import difflib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration, Provenance
 from toolguard.constants import GOVERNED_TOOLS
+from toolguard.tools.annotate import annotate_config_file, clarity_annotations
 from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
 from toolguard.tools.config_access import load_config, nosecurity_reason_for
 from toolguard.tools.corpus import harvest_corpus
@@ -669,6 +671,124 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
     return 0
 
 
+def _collect_annotations(
+    config: Configuration, tools: Optional[Sequence[str]]
+) -> Dict[Path, Dict[str, List[str]]]:
+    """
+    Merge per-file clarity annotations across all requested tools.
+
+    Args:
+        config: The resolved configuration to analyze.
+        tools: Tools to annotate, or ``None`` for all governed tools.
+
+    Returns:
+        ``{ path -> { full_pattern -> [note, ...] } }`` with notes merged and
+        sorted across tools (patterns are tool-qualified, so they never collide).
+    """
+    target_tools = list(tools) if tools is not None else sorted(GOVERNED_TOOLS)
+    merged: Dict[Path, Dict[str, List[str]]] = {}
+    for tool in target_tools:
+        for path, patterns in clarity_annotations(config, tool).items():
+            dest = merged.setdefault(path, {})
+            for pattern, notes in patterns.items():
+                bucket = dest.setdefault(pattern, [])
+                for note in notes:
+                    if note not in bucket:
+                        bucket.append(note)
+    for patterns in merged.values():
+        for pattern in patterns:
+            patterns[pattern] = sorted(patterns[pattern])
+    return merged
+
+
+def _unified_diff(path: Path, old: str, new: str) -> str:
+    """Return a unified diff between *old* and *new* text, labeled with *path*."""
+    return "".join(
+        difflib.unified_diff(
+            old.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile=str(path),
+            tofile=str(path),
+        )
+    )
+
+
+def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
+    """
+    Execute the ``--annotate`` path: preview by default, write only with ``--write``.
+
+    Computes the ``# toolguard:`` clarity comments for every confusing rule and,
+    per file, produces the before/after text.  Without ``--write`` it is a dry run
+    (nothing is touched).  With ``--write`` it runs the same safety pre-flight as
+    ``--apply`` and REFUSES on blockers (dirty tree / unresolved root), leaving the
+    files untouched.
+
+    Args:
+        args: Parsed CLI namespace (uses ``write``, ``dir``, ``format``, ``tool``).
+        config: The resolved configuration to annotate.
+
+    Returns:
+        Exit code: ``0`` on success (preview or write), ``2`` when ``--write`` is
+        refused by the pre-flight.
+    """
+    merged = _collect_annotations(config, args.tool)
+
+    results: List[Tuple[Path, str, str]] = []
+    for path in sorted(merged, key=str):
+        try:
+            old, new = annotate_config_file(path, merged[path])
+        except OSError:
+            continue
+        results.append((path, old, new))
+    changed = [(p, o, n) for (p, o, n) in results if o != n]
+
+    if args.write:
+        preflight = migration_preflight(Path(args.dir))
+        if preflight.blockers:
+            print(
+                "\n".join(
+                    [
+                        "Refusing to write annotations -- the safety pre-flight found "
+                        "blockers:",
+                        *(f"  - {b}" for b in preflight.blockers),
+                        "Resolve these (commit/stash your changes, confirm the project "
+                        "root) and re-run.",
+                    ]
+                )
+            )
+            return 2
+        for path, _old, new in changed:
+            Path(path).write_text(new, encoding="utf-8")
+
+    if args.format == "json":
+        payload = {
+            "dry_run": not args.write,
+            "total_changed": len(changed),
+            "files": [
+                {"path": str(p), "changed": o != n, "diff": _unified_diff(p, o, n)}
+                for (p, o, n) in results
+            ],
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if not changed:
+        print(
+            "No clarity annotations to write -- no confusing interactions, or the "
+            "config is already annotated."
+        )
+        return 0
+    for path, old, new in changed:
+        print(_unified_diff(path, old, new))
+    banner = (
+        "ANNOTATED config files."
+        if args.write
+        else "DRY RUN -- no files were modified. Re-run with --write to apply."
+    )
+    print(f"\n{banner}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     CLI entry point for the ``toolguard-maintain`` console script.
@@ -765,23 +885,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--annotate",
+        dest="annotate",
+        action="store_true",
+        default=False,
+        help=(
+            "Switch to annotate mode: write '# toolguard:' comments above rules "
+            "with confusing interactions, explaining the real resolution. PREVIEW "
+            "by default (dry run) -- add --write to modify the config. Idempotent "
+            "and comment-only; never changes a rule and never clobbers your own "
+            "comments."
+        ),
+    )
+    parser.add_argument(
         "--write",
         dest="write",
         action="store_true",
         default=False,
         help=(
-            "With --apply, actually write the changes to disk (otherwise --apply "
-            "is a dry-run preview). Refused if the safety pre-flight finds "
-            "blockers (dirty working tree, unresolved project root)."
+            "With --apply or --annotate, actually write the changes to disk "
+            "(otherwise the mode is a dry-run preview). Refused if the safety "
+            "pre-flight finds blockers (dirty working tree, unresolved project root)."
         ),
     )
 
     args = parser.parse_args(argv)
 
-    if args.write and not args.apply:
-        parser.error("--write requires --apply")
+    if args.apply and args.annotate:
+        parser.error("--apply and --annotate are separate modes; run them separately")
+    if args.write and not (args.apply or args.annotate):
+        parser.error("--write requires --apply or --annotate")
 
     config = load_config(Path(args.dir))
+
+    if args.annotate:
+        return _run_annotate(args, config)
+
     corpus = (
         harvest_corpus(Path(args.dir), max_age_days=args.max_age_days)
         if args.corpus

@@ -22,8 +22,10 @@ from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.maintenance import (
     MaintenanceReport,
+    _collect_annotations,
     _nosecurity_block_reason,
     _partition_nosecurity,
+    _run_annotate,
     _run_apply,
     change_report_to_dict,
     collect_consolidations,
@@ -622,6 +624,111 @@ class TestNoSecurityWithholding(unittest.TestCase):
                 for pat in edit["removed_patterns"]
             }
             self.assertNotIn("git diff:*", emitted_removed)
+
+
+class TestAnnotateMode(unittest.TestCase):
+    """The --annotate mode previews/writes '# toolguard:' clarity comments, gated."""
+
+    def _confusing_config(self, tmpdir: str) -> Configuration:
+        """
+        Write a real toolguard_hook.toml with a confusing interaction (allow 'git:*'
+        shadowed by deny 'git push:*') and a human comment, and return a matching
+        Configuration whose layer provenance points at it.
+        """
+        text = (
+            "[permissions]\n"
+            "allow = [\n"
+            "    # human note stays\n"
+            "    'Bash(git:*)',\n"
+            "]\n"
+            "deny = [\n"
+            "    'Bash(git push:*)',\n"
+            "]\n"
+            "ask = []\n"
+        )
+        path = Path(tmpdir) / "toolguard_hook.toml"
+        path.write_text(text, encoding="utf-8")
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=path,
+            specificity=0,
+        )
+        layer = _make_layer("Bash", allow=["git:*"], deny=["git push:*"])
+        # Rebuild the layer with the real-file provenance.
+        layer = ConfigLayer(provenance=prov, content=layer.content)
+        return _make_config(layer)
+
+    def test_collect_annotations_groups_confusing_rule_by_file(self):
+        """
+        Given a config with a confusing 'git:*' allow
+        When _collect_annotations runs for Bash
+        Then the rule's file maps 'Bash(git:*)' to at least one note
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            merged = _collect_annotations(config, ["Bash"])
+            path = Path(d) / "toolguard_hook.toml"
+            self.assertIn(path, merged)
+            self.assertIn("Bash(git:*)", merged[path])
+
+    def test_dry_run_json_shows_diff_and_writes_nothing(self):
+        """
+        Given --annotate --format json (no --write)
+        When _run_annotate runs
+        Then it reports dry_run True with a diff adding a '# toolguard:' line, and
+            the file on disk is unchanged
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            path = Path(d) / "toolguard_hook.toml"
+            before = path.read_text(encoding="utf-8")
+            args = argparse.Namespace(write=False, format="json", dir=d, tool=["Bash"])
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = _run_annotate(args, config)
+            self.assertEqual(code, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["total_changed"], 1)
+            self.assertIn("# toolguard:", payload["files"][0]["diff"])
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_write_refused_on_unsafe_tree(self):
+        """
+        Given --annotate --write in a directory that is not a clean git work tree
+        When _run_annotate runs
+        Then it refuses (exit 2) and leaves the file untouched
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            path = Path(d) / "toolguard_hook.toml"
+            before = path.read_text(encoding="utf-8")
+            args = argparse.Namespace(write=True, format="text", dir=d, tool=["Bash"])
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = _run_annotate(args, config)
+            self.assertEqual(code, 2)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_apply_and_annotate_are_mutually_exclusive(self):
+        """
+        Given both --apply and --annotate
+        When main parses the arguments
+        Then it errors out (they are separate modes)
+        """
+        with self.assertRaises(SystemExit):
+            main(["--apply", "--annotate"])
+
+    def test_write_requires_apply_or_annotate(self):
+        """
+        Given --write with neither --apply nor --annotate
+        When main parses the arguments
+        Then it errors out
+        """
+        with self.assertRaises(SystemExit):
+            main(["--write"])
 
 
 if __name__ == "__main__":

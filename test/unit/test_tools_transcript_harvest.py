@@ -21,6 +21,7 @@ from pathlib import Path
 
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.transcript_harvest import (
+    _extract_text,
     harvest_transcript_file,
     harvest_transcripts,
     transcript_dir_for_project,
@@ -372,6 +373,54 @@ class TestRobustnessAndHelpers(_TempDirMixin, unittest.TestCase):
             Path("/home/arnon/projects/toolguard"), claude_home=self.tmpdir
         )
         self.assertEqual(result, self.tmpdir / "projects" / "-home-arnon-projects-toolguard")
+
+
+class TestExtractText(unittest.TestCase):
+    """
+    _extract_text flattens a tool_result content value (string, list of blocks,
+    None, or other) into a single string.
+    """
+
+    def test_plain_string_passthrough(self):
+        """
+        Given a plain string content value
+        When it is extracted
+        Then the same string is returned
+        """
+        self.assertEqual(_extract_text("hello"), "hello")
+
+    def test_list_of_text_blocks_joined(self):
+        """
+        Given a list of text block dicts
+        When it is extracted
+        Then their text fields are space-joined
+        """
+        content = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+        self.assertEqual(_extract_text(content), "a b")
+
+    def test_non_dict_block_is_stringified(self):
+        """
+        Given a list containing a non-dict block
+        When it is extracted
+        Then that block is stringified into the result
+        """
+        self.assertEqual(_extract_text(["raw", {"text": "x"}]), "raw x")
+
+    def test_none_yields_empty_string(self):
+        """
+        Given a None content value
+        When it is extracted
+        Then an empty string is returned
+        """
+        self.assertEqual(_extract_text(None), "")
+
+    def test_other_type_is_stringified(self):
+        """
+        Given a content value that is neither string, list, nor None
+        When it is extracted
+        Then it is stringified
+        """
+        self.assertEqual(_extract_text(42), "42")
 
 
 if __name__ == "__main__":

@@ -263,6 +263,30 @@ and have the user commit/stash, then re-run. After a successful write the tree i
 now dirty (the change is uncommitted); a second `--write` is correctly refused
 until the user commits. Leave the git commit to the user.
 
+## Stage 3 -- Annotate (opt-in, gated, comment-only)
+
+Separately from applying consolidations, you can write **`# toolguard:` comments**
+above rules with confusing interactions, so the real resolution is legible in the
+config file itself. This changes NO rule -- it only adds/updates generated comment
+lines.
+
+```bash
+toolguard-maintain --annotate                 # dry-run PREVIEW: unified diff, writes nothing
+toolguard-maintain --annotate --format json   # same, structured (per-file diffs)
+toolguard-maintain --annotate --write         # writes, gated by the same pre-flight as --apply
+```
+
+- **Idempotent + human-safe.** Re-running replaces the previous generation (no
+  accreted duplicates) and removes a stale note when a rule is no longer confusing.
+  Only `# toolguard:`-marked lines are ever touched; your own comments are
+  preserved, as are rule order, blank lines, and empty sections (minimal diff).
+- **Gated.** `--annotate --write` runs the working-tree / project-root pre-flight
+  and refuses on blockers, exactly like `--apply --write`. `--annotate` and
+  `--apply` are separate modes -- run them separately.
+- **When to offer it.** After presenting clarity-interaction findings, offer to
+  annotate so the config self-documents; always preview the diff and get consent
+  before `--write`.
+
 ## Relationship to the security-audit skill
 
 These are siblings with different jobs that form a loop: `toolguard-security-audit`

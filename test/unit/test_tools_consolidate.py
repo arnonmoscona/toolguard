@@ -21,6 +21,7 @@ from toolguard.tools.config_access import with_layer_allow_replaced
 from toolguard.tools.consolidate import (
     BroadeningProposal,
     _check_family1_safe,
+    _static_prefix_of,
     propose_broadening_consolidations,
     propose_consolidations,
 )
@@ -824,6 +825,45 @@ class TestPrefixBroadening(unittest.TestCase):
         family1 = [p for p in strict if p.kind == "literal-alternation"]
         self.assertTrue(family1)
         self.assertFalse(any(isinstance(p, BroadeningProposal) for p in strict))
+
+
+class TestStaticPrefixOf(unittest.TestCase):
+    """
+    _static_prefix_of structurally proves that a smaller command's match-set is a
+    subset of a larger command's, across the several boundary forms.
+    """
+
+    def test_identical_commands_subsume(self):
+        """
+        Given two identical command prefixes
+        When static subsumption is checked
+        Then it holds (a set is a subset of itself)
+        """
+        self.assertTrue(_static_prefix_of("git push", "git push"))
+
+    def test_word_boundary_prefix_subsumes(self):
+        """
+        Given a small command that extends the large one at a space boundary
+        When static subsumption is checked
+        Then it holds
+        """
+        self.assertTrue(_static_prefix_of("git", "git push"))
+
+    def test_path_boundary_prefix_subsumes(self):
+        """
+        Given a small command that extends the large one at a path boundary
+        When static subsumption is checked
+        Then it holds
+        """
+        self.assertTrue(_static_prefix_of("/usr/bin", "/usr/bin/env"))
+
+    def test_bare_textual_prefix_does_not_subsume(self):
+        """
+        Given a small command that shares only a bare textual prefix (no boundary)
+        When static subsumption is checked
+        Then it does NOT hold (git-crypt is not under git)
+        """
+        self.assertFalse(_static_prefix_of("git", "git-crypt"))
 
 
 if __name__ == "__main__":

@@ -219,3 +219,30 @@ Purpose: assess how well the skills actually perform on real situations.
 [[project-too15-p2-wrapup]] (session resume anchor), [[project-too15-completion-gate]],
 [[feedback-phase-end-gate]], [[project-headroom-watch]],
 [[project-experimental-tooling-local-only]], [[project-distribution-model]].
+
+
+## 2026-07-02: #4 CLOSED via annotation; equivalent-rewrite PUNTED to new ticket
+
+Decision (Arnon): #4 (rule-interaction clarity remediation) ships with #4(c) generated
+`# toolguard:` annotations as the remediation. #4(b) equivalent-rewrite mode is PUNTED
+to a NEW TICKET (create in YouTrack), not built in TOO-15.
+
+Rationale (soundness): `tools/replay.replay` only proves equivalence OVER THE RECORDED
+CORPUS, not universally -- two patterns can agree on all logged commands then diverge on
+the first unseen one. Offering an auto-rewrite labeled "equivalent" on that basis is a
+trap for a security tool. The truly-sound-and-clearer rewrite set is nearly empty
+(ask-overlaps-allow / cross-layer-dependent are confusing precisely because of the
+more-specific-wins interaction; the one clean case -- an allow fully shadowed by a
+same-file deny -> drop dead allow -- is essentially redundancy removal we already have).
+#4(c) annotation already delivers the clarity value honestly (explains real resolution,
+changes no behavior).
+
+NEW TICKET content to file: "Equivalent-rewrite mode for confusing rule interactions."
+- Generate a clearer config for a confusing interaction and offer it ONLY when provably
+  decision-equivalent.
+- CAVEAT to solve: replay-equivalence is corpus-scoped, not a universal proof. Either
+  (a) restrict to universally-provable structural no-ops (dead-allow removal, redundant-
+  rule removal) with replay as a secondary guard, or (b) if using corpus replay, label
+  LOUDLY as "verified over recorded history only, not a universal equivalence proof."
+- Revisit once corpus/coverage matures. Primitive already exists: `tools/replay.replay`
+  (ReplayDiff: broadened/tightened/unchanged) + `tools/decision.decide`.

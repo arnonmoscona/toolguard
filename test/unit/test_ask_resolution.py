@@ -58,6 +58,26 @@ def _config(*layers: ConfigLayer) -> Configuration:
     return Configuration(layers=tuple(layers), start_dir=None)
 
 
+def _file_layer(
+    specificity: int = 0,
+    tool: str = "Read",
+    allow: Optional[List[str]] = None,
+    deny: Optional[List[str]] = None,
+    ask: Optional[List[str]] = None,
+) -> ConfigLayer:
+    """Build a single toolguard layer with wrapped file-path allow/deny/ask bodies."""
+    content = MappingProxyType(
+        {
+            "permissions": {
+                "allow": [f"{tool}({p})" for p in (allow or [])],
+                "deny": [f"{tool}({p})" for p in (deny or [])],
+                "ask": [f"{tool}({p})" for p in (ask or [])],
+            }
+        }
+    )
+    return ConfigLayer(provenance=_prov(specificity), content=content)
+
+
 class TestAskResolution(unittest.TestCase):
     """The ask list participates in resolution per the documented model."""
 
@@ -188,6 +208,78 @@ class TestAskResolution(unittest.TestCase):
             ).verdict,
             "deny",
         )
+
+
+class TestAskAllowTieBreak(unittest.TestCase):
+    """
+    Exercise the literal-prefix tie-break used when a broad allow and a specific
+    ask both match one command at one level (permissions._literal_prefix_specificity).
+    """
+
+    def test_fully_literal_ask_outranks_broad_allow(self):
+        """
+        Given a broad allow '*' and a fully-literal ask 'git-status' (no wildcard)
+        When the exact command 'git-status' is evaluated
+        Then the more-specific ask wins and the decision is ask
+        """
+        cfg = _config(_layer(allow=["*"], ask=["git-status"]))
+        self.assertEqual(decide(cfg, "Bash", "git-status").verdict, "ask")
+
+    def test_extended_syntax_ask_scored_by_literal_lead_outranks_broad_allow(self):
+        """
+        Given a broad allow '*' and a regex ask whose literal lead is '^gitx'
+        When a command matching the regex is evaluated
+        Then the marker is stripped, the ask outscores the broad allow, and it asks
+        """
+        cfg = _config(_layer(allow=["*"], ask=["[regex]^gitx.*"]))
+        self.assertEqual(decide(cfg, "Bash", "gitx status").verdict, "ask")
+
+
+class TestFilePathAskResolution(unittest.TestCase):
+    """
+    The same ask-resolution model must hold for file-path tools (Read/Write/Edit),
+    not just Bash.  These drive resolve.py's file-path level resolver, whose ask
+    branch mirrors the Bash one (blanket ``*``-class ask ignored; otherwise
+    more-specific-wins between allow and ask).
+    """
+
+    def test_specific_file_ask_with_no_allow_prompts(self):
+        """
+        Given a Read layer whose only rule is a specific ask on /secrets/**
+        When a file under /secrets is read
+        Then the decision is ask (a specific ask with no allow yields a prompt)
+        """
+        cfg = _config(_file_layer(tool="Read", ask=["/secrets/**"]))
+        self.assertEqual(decide(cfg, "Read", "/secrets/key.txt").verdict, "ask")
+
+    def test_blanket_file_ask_collapses_to_deny(self):
+        """
+        Given a Read layer whose only rule is a blanket ask on * (universal)
+        When an arbitrary file is read
+        Then the blanket ask is ignored and it falls through to fail-closed deny
+        """
+        cfg = _config(_file_layer(tool="Read", ask=["*"]))
+        self.assertEqual(decide(cfg, "Read", "/etc/hosts").verdict, "deny")
+
+    def test_more_specific_file_ask_gates_broad_allow(self):
+        """
+        Given a Read layer that allows /proj/** but asks on the narrower /proj/secret/**
+        When a file under /proj/secret is read
+        Then the more-specific ask wins and the decision is ask
+        """
+        cfg = _config(
+            _file_layer(tool="Read", allow=["/proj/**"], ask=["/proj/secret/**"])
+        )
+        self.assertEqual(decide(cfg, "Read", "/proj/secret/x").verdict, "ask")
+
+    def test_broad_allow_survives_blanket_ask_for_non_gated_path(self):
+        """
+        Given a Read layer that allows /proj/** alongside a blanket ask on *
+        When a file under /proj that is not otherwise gated is read
+        Then the blanket ask is ignored and the allow wins (allow)
+        """
+        cfg = _config(_file_layer(tool="Read", allow=["/proj/**"], ask=["*"]))
+        self.assertEqual(decide(cfg, "Read", "/proj/readme.md").verdict, "allow")
 
 
 if __name__ == "__main__":
