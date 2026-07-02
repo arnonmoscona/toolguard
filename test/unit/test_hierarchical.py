@@ -278,9 +278,12 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
         per-level decision logic the cascade consumes.
         """
 
-        def _decide(allow_patterns, deny_patterns):
+        def _decide(allow_patterns, deny_patterns, ask_patterns=()):
             return decide_command_at_level_detailed(
-                command, list(allow_patterns), list(deny_patterns)
+                command,
+                list(allow_patterns),
+                list(deny_patterns),
+                ask_patterns=list(ask_patterns),
             )
 
         return _decide

@@ -326,9 +326,12 @@ class TestBashTakeoverFiltering(unittest.TestCase):
             Tuple of (decision, reason).
         """
 
-        def _decide(allow_patterns, deny_patterns):
+        def _decide(allow_patterns, deny_patterns, ask_patterns=()):
             return decide_command_at_level_detailed(
-                command, list(allow_patterns), list(deny_patterns)
+                command,
+                list(allow_patterns),
+                list(deny_patterns),
+                ask_patterns=list(ask_patterns),
             )
 
         resolved = config.resolve_permission_detailed("Bash", _decide)

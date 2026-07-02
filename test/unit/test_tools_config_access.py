@@ -23,13 +23,16 @@ from toolguard.config import (
     TakeoverConfig,
 )
 from toolguard.tools.config_access import (
+    RuleComment,
     audit_context,
     config_summary,
     discover_tools,
     effective_takeover,
     load_config,
     neutralized_by_takeover,
+    nosecurity_reason_for,
     per_layer_rules,
+    rule_comments_for_tool,
 )
 
 
@@ -690,3 +693,149 @@ class TestAuditContext(unittest.TestCase):
         ctx = audit_context(config)
         pats = list(ctx.neutralized_allow_patterns)
         self.assertEqual(pats, sorted(set(pats)), "Patterns should be sorted and unique")
+
+
+class TestRuleCommentExposure(unittest.TestCase):
+    """Per-rule comment recovery and the ``#NOSECURITY`` acknowledge-not-hide tag."""
+
+    _TOML = (
+        "[permissions]\n"
+        "allow = [\n"
+        "    'Bash(node:*)',  # NOSECURITY: intentional dev tool\n"
+        "    # NOSECURITY\n"
+        "    'Bash(ruby:*)',\n"
+        "    'Bash(git:*)',\n"
+        "    'Bash([regex]^ls#notacomment)',\n"
+        "]\n"
+        "deny = []\n"
+        "ask = []\n"
+    )
+
+    def _prov(self, path: Path, file_format: str = "toml") -> Provenance:
+        """Build a toolguard_hook Provenance pointing at a real file path."""
+        return Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format=file_format,
+            path=path,
+            specificity=0,
+        )
+
+    def test_inline_nosecurity_reason_recovered(self):
+        """
+        Given a TOML allow rule 'Bash(node:*)' with an inline
+        '# NOSECURITY: intentional dev tool' comment
+        When nosecurity_reason_for is called for that rule
+        Then it returns the reason text 'intentional dev tool'
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            self.assertEqual(
+                nosecurity_reason_for(self._prov(path), "allow", "Bash", "node:*"),
+                "intentional dev tool",
+            )
+
+    def test_leading_bare_nosecurity_returns_empty_reason(self):
+        """
+        Given a TOML allow rule 'Bash(ruby:*)' preceded by a bare '# NOSECURITY'
+        leading comment line
+        When nosecurity_reason_for is called for that rule
+        Then it returns '' (tagged, but no reason given) -- not None
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            self.assertEqual(
+                nosecurity_reason_for(self._prov(path), "allow", "Bash", "ruby:*"),
+                "",
+            )
+
+    def test_untagged_rule_returns_none(self):
+        """
+        Given a TOML allow rule 'Bash(git:*)' with no comment at all
+        When nosecurity_reason_for is called for that rule
+        Then it returns None (not tagged)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            self.assertIsNone(
+                nosecurity_reason_for(self._prov(path), "allow", "Bash", "git:*")
+            )
+
+    def test_hash_inside_regex_pattern_is_not_an_inline_comment(self):
+        """
+        Given an allow rule whose regex body contains a '#'
+        ('Bash([regex]^ls#notacomment)') but no trailing comment
+        When nosecurity_reason_for is called for that rule
+        Then it returns None (the '#' inside the quoted pattern is not a comment)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            self.assertIsNone(
+                nosecurity_reason_for(
+                    self._prov(path), "allow", "Bash", "[regex]^ls#notacomment"
+                )
+            )
+
+    def test_native_json_layer_has_no_comments(self):
+        """
+        Given a layer whose provenance file_format is 'json' (native settings)
+        When nosecurity_reason_for is called
+        Then it returns None without reading any file (JSON carries no comments)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "settings.local.json"
+            path.write_text("{}", encoding="utf-8")
+            self.assertIsNone(
+                nosecurity_reason_for(
+                    self._prov(path, file_format="json"), "allow", "Bash", "node:*"
+                )
+            )
+
+    def test_missing_file_degrades_to_no_reason(self):
+        """
+        Given a TOML provenance whose file does not exist on disk
+        When nosecurity_reason_for is called
+        Then it returns None (safe degradation: the finding is shown normally,
+        not hidden)
+        """
+        prov = self._prov(Path("/no/such/dir/toolguard_hook.toml"))
+        self.assertIsNone(nosecurity_reason_for(prov, "allow", "Bash", "node:*"))
+
+    def test_rule_comments_for_tool_lists_only_commented_rules(self):
+        """
+        Given the TOML fixture with two commented Bash rules (node, ruby) and one
+        uncommented (git)
+        When rule_comments_for_tool is called for 'Bash'
+        Then it returns exactly the commented rules, each a RuleComment carrying
+        the recovered #NOSECURITY reason
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            comments = rule_comments_for_tool(self._prov(path), "Bash")
+            by_pattern = {c.pattern: c for c in comments}
+            self.assertIn("node:*", by_pattern)
+            self.assertIn("ruby:*", by_pattern)
+            self.assertNotIn("git:*", by_pattern)
+            self.assertEqual(
+                by_pattern["node:*"].nosecurity_reason(), "intentional dev tool"
+            )
+            self.assertEqual(by_pattern["ruby:*"].nosecurity_reason(), "")
+
+    def test_rule_comment_nosecurity_reason_variants(self):
+        """
+        Given RuleComment instances with an inline reason, a bare inline tag, and
+        no tag
+        When nosecurity_reason is called on each
+        Then it returns the reason, '', and None respectively (inline preferred)
+        """
+        with_reason = RuleComment("allow", "node:*", "", "# NOSECURITY: because dev")
+        bare = RuleComment("allow", "ruby:*", "# NOSECURITY", "")
+        untagged = RuleComment("allow", "git:*", "# just a note", "# trailing note")
+        self.assertEqual(with_reason.nosecurity_reason(), "because dev")
+        self.assertEqual(bare.nosecurity_reason(), "")
+        self.assertIsNone(untagged.nosecurity_reason())

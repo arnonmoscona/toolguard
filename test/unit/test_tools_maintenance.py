@@ -6,8 +6,10 @@ a single structured report, and that render produces a readable summary.  Local
 fixture helpers mirror the other maintenance-tool tests for consistency.
 """
 
+import argparse
 import io
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -20,6 +22,9 @@ from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.maintenance import (
     MaintenanceReport,
+    _nosecurity_block_reason,
+    _partition_nosecurity,
+    _run_apply,
     change_report_to_dict,
     collect_consolidations,
     consolidation_to_edit_proposal,
@@ -510,6 +515,113 @@ class TestApplyMode(unittest.TestCase):
         """
         with self.assertRaises(SystemExit):
             main(["--write"])
+
+
+class TestNoSecurityWithholding(unittest.TestCase):
+    """A #NOSECURITY-blessed rule is never auto-migrated/rewritten by --apply."""
+
+    _ALLOWS = ["git diff:*", "git status:*", "git log:*"]
+
+    def _config_with_real_file(self, tmpdir: str, tagged: bool) -> Configuration:
+        """
+        Write a real toolguard_hook.toml (with a #NOSECURITY comment on 'git diff:*'
+        when *tagged*) and return a Configuration whose layer provenance points at it,
+        so the comment can be recovered from disk during consolidation withholding.
+        """
+        lines = []
+        for body in self._ALLOWS:
+            if tagged and body == "git diff:*":
+                lines.append(f"    'Bash({body})',  # NOSECURITY: audited manually")
+            else:
+                lines.append(f"    'Bash({body})',")
+        text = (
+            "[permissions]\nallow = [\n" + "\n".join(lines) + "\n]\ndeny = []\nask = []\n"
+        )
+        path = Path(tmpdir) / "toolguard_hook.toml"
+        path.write_text(text, encoding="utf-8")
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=path,
+            specificity=0,
+        )
+        return _make_config(_make_layer("Bash", allow=self._ALLOWS, provenance=prov))
+
+    def test_partition_withholds_consolidation_touching_blessed_rule(self):
+        """
+        Given a consolidatable git family in which 'git diff:*' is #NOSECURITY-blessed
+        When _partition_nosecurity runs over the collected consolidations
+        Then the proposal is withheld (nothing appliable) with the reason recovered
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=True), tools=["Bash"]
+            )
+            proposals = collect_consolidations(report)
+            self.assertTrue(proposals)
+            appliable, withheld = _partition_nosecurity(proposals)
+            self.assertEqual(appliable, [])
+            self.assertTrue(withheld)
+            self.assertEqual(withheld[0][1], "audited manually")
+
+    def test_partition_applies_when_no_rule_is_blessed(self):
+        """
+        Given the same consolidatable git family with NO #NOSECURITY comment
+        When _partition_nosecurity runs
+        Then nothing is withheld; every consolidation stays appliable
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=False), tools=["Bash"]
+            )
+            proposals = collect_consolidations(report)
+            self.assertTrue(proposals)
+            appliable, withheld = _partition_nosecurity(proposals)
+            self.assertEqual(withheld, [])
+            self.assertEqual(len(appliable), len(proposals))
+
+    def test_nosecurity_block_reason_matches_removed_rule(self):
+        """
+        Given a consolidation whose removed family includes the blessed 'git diff:*'
+        When _nosecurity_block_reason inspects it
+        Then it returns the blocking reason string
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=True), tools=["Bash"]
+            )
+            prop = collect_consolidations(report)[0]
+            self.assertEqual(_nosecurity_block_reason(prop), "audited manually")
+
+    def test_apply_json_lists_withheld_and_omits_blessed_edit(self):
+        """
+        Given --apply --format json over a config with a #NOSECURITY-blessed rule
+        When _run_apply renders the change report (dry run)
+        Then the payload lists the withheld consolidation under 'withheld_nosecurity'
+            and no emitted edit_proposal removes the blessed 'git diff:*' rule
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=True), tools=["Bash"]
+            )
+            args = argparse.Namespace(write=False, format="json", dir=d)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = _run_apply(args, report)
+            self.assertEqual(code, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertTrue(payload["withheld_nosecurity"])
+            self.assertEqual(
+                payload["withheld_nosecurity"][0]["reason"], "audited manually"
+            )
+            emitted_removed = {
+                pat
+                for ep in payload["edit_proposals"]
+                for edit in ep["edits"]
+                for pat in edit["removed_patterns"]
+            }
+            self.assertNotIn("git diff:*", emitted_removed)
 
 
 if __name__ == "__main__":

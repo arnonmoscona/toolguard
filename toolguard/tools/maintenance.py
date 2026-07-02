@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from toolguard.config import Configuration, Provenance
 from toolguard.constants import GOVERNED_TOOLS
 from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
-from toolguard.tools.config_access import load_config
+from toolguard.tools.config_access import load_config, nosecurity_reason_for
 from toolguard.tools.corpus import harvest_corpus
 from toolguard.tools.edit_proposal import (
     ACTION_REPLACE,
@@ -523,6 +523,84 @@ def _render_apply(change: ChangeReport, fmt: str) -> str:
     return "\n".join(parts)
 
 
+def _nosecurity_block_reason(proposal: ConsolidationProposal) -> Optional[str]:
+    """
+    Return the ``#NOSECURITY`` reason when *proposal* would rewrite a blessed rule.
+
+    A consolidation replaces a family of rules with one merged rule.  If any rule
+    it would REMOVE carries a ``#NOSECURITY`` comment, that rule is intentionally
+    blessed HERE (project-local); moving or rewriting it would strip the user's
+    deliberate annotation, so the whole proposal is withheld from the apply path.
+
+    Args:
+        proposal: The consolidation proposal to check.
+
+    Returns:
+        The first blocking reason (``""`` for a bare tag), or ``None`` when no
+        removed rule is ``#NOSECURITY``-tagged.
+    """
+    for pattern in proposal.removed_patterns:
+        reason = nosecurity_reason_for(
+            proposal.layer_provenance, proposal.list_type, proposal.tool, pattern
+        )
+        if reason is not None:
+            return reason
+    return None
+
+
+def _withheld_to_dict(
+    withheld: List[Tuple[ConsolidationProposal, str]],
+) -> List[Dict[str, Any]]:
+    """Serialize withheld (``#NOSECURITY``-blessed) consolidations for the JSON contract."""
+    return [
+        {
+            "tool": p.tool,
+            "list_type": p.list_type,
+            "removed_patterns": list(p.removed_patterns),
+            "added_pattern": p.added_pattern,
+            "reason": reason,
+        }
+        for p, reason in withheld
+    ]
+
+
+def _partition_nosecurity(
+    proposals: List[ConsolidationProposal],
+) -> Tuple[List[ConsolidationProposal], List[Tuple[ConsolidationProposal, str]]]:
+    """
+    Split consolidations into appliable vs withheld because they touch a blessed rule.
+
+    Returns ``(appliable, withheld)`` where *withheld* is a list of
+    ``(proposal, reason)``.  This is the ``#NOSECURITY`` migration/edit block: a
+    rule the user annotated intentionally-insecure is never auto-rewritten.
+    """
+    appliable: List[ConsolidationProposal] = []
+    withheld: List[Tuple[ConsolidationProposal, str]] = []
+    for proposal in proposals:
+        reason = _nosecurity_block_reason(proposal)
+        if reason is None:
+            appliable.append(proposal)
+        else:
+            withheld.append((proposal, reason))
+    return appliable, withheld
+
+
+def _render_withheld(
+    withheld: List[Tuple[ConsolidationProposal, str]], fmt: str
+) -> str:
+    """Render the withheld (``#NOSECURITY``-blessed) consolidations for a human."""
+    if not withheld:
+        return ""
+    lines = []
+    header = "Withheld (blessed by #NOSECURITY -- not rewritten):"
+    lines.append(f"\n### {header}" if fmt == "markdown" else f"\n{header}")
+    for proposal, reason in withheld:
+        removed = ", ".join(proposal.removed_patterns)
+        tag = f"#NOSECURITY: {reason}" if reason else "#NOSECURITY"
+        lines.append(f"  - {proposal.tool} [{proposal.list_type}] {removed} ({tag})")
+    return "\n".join(lines)
+
+
 def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
     """
     Execute the ``--apply`` path: preview by default, write only with ``--write``.
@@ -542,7 +620,9 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
         Exit code: ``0`` on success (preview or write), ``2`` when ``--write``
         is refused by the safety pre-flight.
     """
-    proposals = collect_consolidations(report)
+    # Withhold any consolidation that would rewrite a #NOSECURITY-blessed rule:
+    # such a rule is intentionally insecure HERE and is never auto-migrated/rewritten.
+    proposals, withheld = _partition_nosecurity(collect_consolidations(report))
 
     if args.write:
         preflight = migration_preflight(Path(args.dir))
@@ -566,6 +646,7 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
         payload["edit_proposals"] = [
             edit_proposal_to_dict(consolidation_to_edit_proposal(p)) for p in proposals
         ]
+        payload["withheld_nosecurity"] = _withheld_to_dict(withheld)
         print(json.dumps(payload, indent=2))
         return 0
 
@@ -576,6 +657,9 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
         else "DRY RUN -- no files were modified. Re-run with --write to apply."
     )
     print(_render_apply(change, fmt))
+    withheld_text = _render_withheld(withheld, fmt)
+    if withheld_text:
+        print(withheld_text)
     print(f"\n{banner}")
     return 0
 

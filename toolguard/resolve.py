@@ -47,7 +47,12 @@ from typing import Any, List, Optional, Tuple
 from toolguard.compound import resolve_compound_permission
 from toolguard.normalization import expand_tilde
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
-from toolguard.permissions import check_hard_deny, decide_command_at_level_detailed
+from toolguard.permissions import (
+    check_hard_deny,
+    decide_command_at_level_detailed,
+    is_universal_pattern,
+    resolve_allow_ask,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +242,24 @@ def _match_file_path_pattern(
         return False
 
 
+def _first_matching_file_pattern(
+    patterns: List[str], expanded_path: str, config, extended_syntax: bool
+) -> Tuple[bool, Optional[str]]:
+    """Return ``(True, pattern)`` for the first file pattern that matches, else ``(False, None)``."""
+    for pattern in patterns:
+        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
+        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+            return True, pattern
+    return False, None
+
+
 def _decide_file_path_at_level_detailed(
     file_path: str,
     allow_patterns: List[str],
     deny_patterns: List[str],
     config,
     extended_syntax: bool,
+    ask_patterns: Optional[List[str]] = None,
 ):
     """
     Decide a file path's outcome at ONE config level, reporting the matched pattern.
@@ -250,7 +267,9 @@ def _decide_file_path_at_level_detailed(
     Mirrors :func:`toolguard.permissions.decide_command_at_level_detailed` for
     file-path tools so a matched file-path pattern can be mapped back to its
     source provenance by the provenance-aware resolver. Deny-first within the
-    level; relative patterns are anchored to the project root before matching.
+    level; the allow and ask lists then combine by more-specific-wins (blanket
+    ``*``-class ask patterns ignored) so an ask pattern yields an ``ask`` prompt.
+    Relative patterns are anchored to the project root before matching.
 
     Args:
         file_path: The file path under evaluation.
@@ -259,6 +278,8 @@ def _decide_file_path_at_level_detailed(
         config: The resolved :class:`~toolguard.config.Configuration` (provides
             project-root anchoring).
         extended_syntax: Whether extended prefixes are honoured.
+        ask_patterns: This level's ask patterns (wrapper-free).  Optional/defaulting
+            to none so legacy callers keep their exact allow/deny behavior.
 
     Returns:
         ``(decision, reason, matched_pattern)`` when this level matches, else
@@ -271,12 +292,26 @@ def _decide_file_path_at_level_detailed(
         if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
             return "deny", f"Path matches deny pattern: {pattern}", pattern
 
-    for pattern in allow_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return "allow", f"Path matches allow pattern: {pattern}", pattern
+    allow_hit = _first_matching_file_pattern(
+        allow_patterns, expanded_path, config, extended_syntax
+    )
 
-    return None
+    ask_hit: Tuple[bool, Optional[str]] = (False, None)
+    if ask_patterns:
+        non_blanket_ask = [p for p in ask_patterns if not is_universal_pattern(p)]
+        ask_hit = _first_matching_file_pattern(
+            non_blanket_ask, expanded_path, config, extended_syntax
+        )
+
+    combined = resolve_allow_ask(allow_hit, ask_hit)
+    if combined is None:
+        return None
+    decision, matched_pattern = combined
+    return (
+        decision,
+        f"Path matches {decision} pattern: {matched_pattern}",
+        matched_pattern,
+    )
 
 
 def _check_file_path_hard_deny(
@@ -366,13 +401,14 @@ def resolve_file_path_permission_detailed(
         decision, reason = hard
         return FileResolution(decision=decision, reason=reason, override=None, provenance=None)
 
-    def _decide_detailed(allow_patterns, deny_patterns):
+    def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
         return _decide_file_path_at_level_detailed(
             file_path,
             list(allow_patterns),
             list(deny_patterns),
             config,
             extended_syntax,
+            ask_patterns=list(ask_patterns),
         )
 
     resolved = config.resolve_permission_detailed(tool_name, _decide_detailed)
@@ -461,9 +497,13 @@ def resolve_bash_permission_detailed(
             )
             return hard_decision, hard_reason
 
-        def _decide_detailed(allow_patterns, deny_patterns):
+        def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
             return decide_command_at_level_detailed(
-                sub_command, list(allow_patterns), list(deny_patterns), extended_syntax
+                sub_command,
+                list(allow_patterns),
+                list(deny_patterns),
+                extended_syntax,
+                ask_patterns=list(ask_patterns),
             )
 
         resolved = config.resolve_permission_detailed("Bash", _decide_detailed)
@@ -476,7 +516,11 @@ def resolve_bash_permission_detailed(
         # Strip the bracketed provenance suffix if present
         if "  [" in reason_body:
             reason_body = reason_body[: reason_body.rindex("  [")]
-        for marker in ("Command matches allow pattern: ", "Command matches deny pattern: "):
+        for marker in (
+            "Command matches allow pattern: ",
+            "Command matches deny pattern: ",
+            "Command matches ask pattern: ",
+        ):
             if reason_body.startswith(marker):
                 sub_matched_rule = reason_body[len(marker):]
                 break

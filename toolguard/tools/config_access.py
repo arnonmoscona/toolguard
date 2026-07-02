@@ -11,10 +11,11 @@ wrappers tailored to the tooling use-cases (per-layer rule listing with provenan
 effective takeover state, etc.).
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from toolguard.config import (
     ConfigLayer,
@@ -24,6 +25,10 @@ from toolguard.config import (
     ToolPatternLayer,
     load_configuration,
     wrap_tool_pattern,
+)
+from toolguard.rule_sort import (
+    find_section_boundaries,
+    parse_permissions_section_with_comments,
 )
 
 
@@ -397,6 +402,175 @@ def neutralized_by_takeover(
 
 
 # ---------------------------------------------------------------------------
+# Per-rule comment exposure (enables the #NOSECURITY acknowledge-not-hide tag)
+# ---------------------------------------------------------------------------
+
+# ``#NOSECURITY`` (optionally ``# NOSECURITY``), case-insensitive, with an
+# optional free-form reason after an optional colon.  Mirrors bandit's
+# ``# nosec`` precedent.  A bare tag yields an empty ("") reason; an absent tag
+# yields ``None`` (see :meth:`RuleComment.nosecurity_reason`).
+_NOSECURITY_RE = re.compile(r"#\s*NOSECURITY\b\s*:?\s*(.*)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class RuleComment:
+    """
+    The source-file comments attached to a single permission rule.
+
+    TOML parsers discard comments, so these are recovered by re-reading the
+    layer file and re-associating leading/inline comments with their rule (via
+    :func:`~toolguard.rule_sort.parse_permissions_section_with_comments`).  Only
+    exists for ``toml`` layers; native ``json`` settings carry no comments.
+
+    Attributes:
+        list_type: Which list the rule lives in (``'allow'``/``'deny'``/``'ask'``).
+        pattern: The extracted inner pattern body (tool wrapper stripped), aligned
+            with the entries in :attr:`LayerContext.allow`/``deny``/``ask``.
+        leading: The comment block immediately preceding the rule line (``""``
+            when none), newlines preserved.
+        inline: The trailing ``#`` comment on the rule's own line (``""`` when none).
+    """
+
+    list_type: str
+    pattern: str
+    leading: str
+    inline: str
+
+    def nosecurity_reason(self) -> Optional[str]:
+        """
+        Return the ``#NOSECURITY`` reason for this rule, or ``None`` when untagged.
+
+        Checks the inline comment first (more specific to the rule), then the
+        leading block.  A bare ``#NOSECURITY`` returns ``""`` (tagged, no reason);
+        ``#NOSECURITY: <reason>`` returns the stripped reason text.
+        """
+        for text in (self.inline, self.leading):
+            match = _NOSECURITY_RE.search(text)
+            if match:
+                return match.group(1).strip()
+        return None
+
+
+def _split_tool_pattern(full_pattern: str) -> Tuple[str, str]:
+    """
+    Split a full ``Tool(body)`` pattern into ``(tool, body)``.
+
+    Falls back to ``("", full_pattern)`` when the pattern has no tool wrapper,
+    so bare patterns still key deterministically.
+    """
+    if "(" in full_pattern and full_pattern.endswith(")"):
+        return full_pattern[: full_pattern.index("(")], full_pattern[full_pattern.index("(") + 1 : -1]
+    return "", full_pattern
+
+
+def _inline_comment_after_pattern(line: str) -> str:
+    """
+    Extract a trailing ``#`` comment that follows the quoted pattern on *line*.
+
+    Locates the closing quote of the pattern (the last quote character on the
+    line) and returns the first ``#``-to-end run after it, stripped.  Returns
+    ``""`` when there is no trailing comment.  Anchoring on the closing quote
+    avoids treating a ``#`` inside the pattern body (e.g. a regex) as a comment.
+    """
+    last_quote = max(line.rfind("'"), line.rfind('"'))
+    if last_quote == -1:
+        return ""
+    rest = line[last_quote + 1 :]
+    hash_pos = rest.find("#")
+    return rest[hash_pos:].strip() if hash_pos != -1 else ""
+
+
+def _layer_comment_map(provenance: Provenance) -> Dict[Tuple[str, str, str], RuleComment]:
+    """
+    Build a ``(list_type, tool, inner_pattern) -> RuleComment`` map for a layer.
+
+    Reads the layer's TOML file and re-associates comments with rules.  Returns
+    an empty map for native (``json``) layers, an unreadable/absent file, or a
+    file with no ``[permissions]`` section -- so callers can treat "no comments"
+    and "cannot read comments" identically (both degrade to no acknowledgement,
+    which is the safe direction: a finding is shown normally rather than hidden).
+
+    Args:
+        provenance: Origin of the layer whose file is read.
+
+    Returns:
+        Mapping from ``(list_type, tool, inner_pattern)`` to its
+        :class:`RuleComment`.  Rules without any comment are omitted.
+    """
+    if provenance.file_format != "toml":
+        return {}
+    try:
+        text = Path(provenance.path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    start, end = find_section_boundaries(text, "permissions")
+    if start == -1:
+        return {}
+    parsed = parse_permissions_section_with_comments(text[start:end])
+
+    result: Dict[Tuple[str, str, str], RuleComment] = {}
+    for list_type in ("allow", "deny", "ask"):
+        pending_leading = ""
+        for item_type, content, value in parsed.get(list_type, []):
+            if item_type == "comment_block":
+                pending_leading = content
+                continue
+            if item_type == "rule":
+                tool, inner = _split_tool_pattern(value)
+                inline = _inline_comment_after_pattern(content)
+                if pending_leading or inline:
+                    result[(list_type, tool, inner)] = RuleComment(
+                        list_type=list_type,
+                        pattern=inner,
+                        leading=pending_leading,
+                        inline=inline,
+                    )
+                pending_leading = ""
+    return result
+
+
+def rule_comments_for_tool(provenance: Provenance, tool: str) -> Tuple[RuleComment, ...]:
+    """
+    Return all :class:`RuleComment` records for *tool* in the given layer.
+
+    Convenience wrapper over :func:`_layer_comment_map` that filters to a single
+    tool and drops the key, for embedding in :class:`LayerContext`.  Order is
+    stable (allow, then deny, then ask; insertion order within each).
+    """
+    return tuple(
+        comment
+        for (_, key_tool, _), comment in _layer_comment_map(provenance).items()
+        if key_tool == tool
+    )
+
+
+def nosecurity_reason_for(
+    provenance: Provenance, list_type: str, tool: str, pattern: str
+) -> Optional[str]:
+    """
+    Return the ``#NOSECURITY`` reason tagged on a specific rule, or ``None``.
+
+    Looks the rule up by ``(list_type, tool, pattern)`` in its layer's recovered
+    comment map.  ``None`` means "not tagged" (or the comment could not be read);
+    ``""`` means "tagged with no reason"; any other string is the reason.  This
+    is the deterministic hook the audit uses to acknowledge-not-hide an
+    intentionally-insecure rule.
+
+    Args:
+        provenance: Origin of the rule (its layer file is read for comments).
+        list_type: ``'allow'``/``'deny'``/``'ask'``.
+        tool: Tool name the rule belongs to (e.g. ``'Bash'``).
+        pattern: Extracted inner pattern body (tool wrapper stripped).
+
+    Returns:
+        The reason string (possibly empty) when tagged, else ``None``.
+    """
+    comment = _layer_comment_map(provenance).get((list_type, tool, pattern))
+    return comment.nosecurity_reason() if comment is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Audit context dataclasses and builder
 # ---------------------------------------------------------------------------
 
@@ -418,6 +592,10 @@ class LayerContext:
         deny: Extracted deny patterns for this tool in this layer.
         ask: Extracted ask patterns for this tool in this layer
             (empty for native layers, which have no ask concept).
+        comments: Per-rule comments recovered from the layer file for this tool
+            (leading + inline), one :class:`RuleComment` per commented rule.
+            Empty for native (``json``) layers and for rules without comments.
+            Exposes the ``#NOSECURITY`` annotations an AI pass reasons about.
     """
 
     locus: str
@@ -425,6 +603,7 @@ class LayerContext:
     allow: Tuple[str, ...]
     deny: Tuple[str, ...]
     ask: Tuple[str, ...]
+    comments: Tuple[RuleComment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -509,6 +688,7 @@ def audit_context(config: Configuration) -> AuditContext:
                     allow=lr.allow,
                     deny=lr.deny,
                     ask=lr.ask,
+                    comments=rule_comments_for_tool(lr.provenance, tool),
                 )
             )
         tool_contexts.append(

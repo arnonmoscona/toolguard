@@ -600,11 +600,16 @@ class ToolPatternLayer:
         provenance: Origin of the patterns in this layer.
         allow: Extracted allow patterns from this layer (order preserved).
         deny: Extracted deny patterns from this layer (order preserved).
+        ask: Extracted ask patterns from this layer (order preserved).  A command
+            matching an ask pattern resolves to an ``ask`` (prompt) verdict per the
+            more-specific-wins model; defaults to empty for back-compatibility with
+            constructors that predate ask-list resolution.
     """
 
     provenance: Provenance
     allow: Tuple[str, ...]
     deny: Tuple[str, ...]
+    ask: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1066,9 +1071,21 @@ class Configuration:
                 ):
                     deny.append(perm[len(prefix) : -1])
 
+            ask = []
+            for perm in permissions.get("ask", []):
+                if (
+                    isinstance(perm, str)
+                    and perm.startswith(prefix)
+                    and perm.endswith(")")
+                ):
+                    ask.append(perm[len(prefix) : -1])
+
             result.append(
                 ToolPatternLayer(
-                    provenance=layer.provenance, allow=tuple(allow), deny=tuple(deny)
+                    provenance=layer.provenance,
+                    allow=tuple(allow),
+                    deny=tuple(deny),
+                    ask=tuple(ask),
                 )
             )
 
@@ -1097,22 +1114,30 @@ class Configuration:
             tool_name: Tool to resolve patterns for (e.g. 'Bash', 'Read').
 
         Returns:
-            Tuple of (allow_patterns, deny_patterns, layers) triples, one per
-            hierarchy level, ordered most-specific first.
+            Tuple of (allow_patterns, deny_patterns, ask_patterns, layers) tuples,
+            one per hierarchy level, ordered most-specific first.
         """
-        grouped: Dict[int, Tuple[List[str], List[str], List[ToolPatternLayer]]] = {}
+        grouped: Dict[
+            int, Tuple[List[str], List[str], List[str], List[ToolPatternLayer]]
+        ] = {}
         order: List[int] = []
         for layer in self.permission_layers(tool_name):
             spec = layer.provenance.specificity
             if spec not in grouped:
-                grouped[spec] = ([], [], [])
+                grouped[spec] = ([], [], [], [])
                 order.append(spec)
-            allow_acc, deny_acc, layers_acc = grouped[spec]
+            allow_acc, deny_acc, ask_acc, layers_acc = grouped[spec]
             allow_acc.extend(layer.allow)
             deny_acc.extend(layer.deny)
+            ask_acc.extend(layer.ask)
             layers_acc.append(layer)
         return tuple(
-            (tuple(grouped[s][0]), tuple(grouped[s][1]), tuple(grouped[s][2]))
+            (
+                tuple(grouped[s][0]),
+                tuple(grouped[s][1]),
+                tuple(grouped[s][2]),
+                tuple(grouped[s][3]),
+            )
             for s in order
         )
 
@@ -1133,7 +1158,12 @@ class Configuration:
             pattern, or None when not found (e.g. format drift).
         """
         for layer in layers:
-            candidates = layer.allow if kind == "allow" else layer.deny
+            if kind == "allow":
+                candidates = layer.allow
+            elif kind == "ask":
+                candidates = layer.ask
+            else:
+                candidates = layer.deny
             if pattern in candidates:
                 return layer.provenance
         return None
@@ -1161,18 +1191,20 @@ class Configuration:
         Args:
             tool_name: Tool whose levels to evaluate.
             decide_detailed: Callable
-                ``(allow, deny) -> (decision, reason, matched_pattern) | None``.
+                ``(allow, deny, ask) -> (decision, reason, matched_pattern) | None``.
 
         Returns:
             A :class:`ResolvedDecision`.
         """
         levels = self.permission_levels_with_provenance(tool_name)
-        for index, (allow, deny, layers) in enumerate(levels):
-            result = decide_detailed(allow, deny)
+        for index, (allow, deny, ask, layers) in enumerate(levels):
+            result = decide_detailed(allow, deny, ask)
             if result is None:
                 continue
             decision, reason, matched_pattern = result
-            kind = "allow" if decision == "allow" else "deny"
+            # decision is 'allow' | 'ask' | 'deny'; map it to the list the matched
+            # pattern lives in so provenance resolves to the right rule.
+            kind = decision
             prov = self._provenance_for_pattern(layers, matched_pattern, kind)
             reason_with_prov = _append_provenance(reason, prov)
 
@@ -1207,10 +1239,10 @@ class Configuration:
             A :class:`ConflictOverride` for the first less-specific deny match, or
             None when no less-specific level denies the command.
         """
-        for allow, deny, layers in levels[winning_index + 1 :]:
+        for allow, deny, ask, layers in levels[winning_index + 1 :]:
             if not deny:
                 continue
-            result = decide_detailed(allow, deny)
+            result = decide_detailed(allow, deny, ask)
             # We only care about a DENY at this less-specific level. ``decide``
             # is deny-first, so a deny here surfaces as decision == 'deny'.
             if result is not None and result[0] == "deny":

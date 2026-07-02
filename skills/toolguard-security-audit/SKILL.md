@@ -69,12 +69,16 @@ the full hierarchy upward from that directory, exactly as the live hook does).
   arbitrary project: that only works inside the toolguard source tree, and will fail
   confusingly elsewhere (the target project has no toolguard to import).
 
-> **Prerequisite under toolguard governance.** When toolguard governs the current project
-> (especially in takeover mode), running `toolguard-audit` is itself a `Bash` command that
-> toolguard must permit -- otherwise this skill's own call is denied. If you hit a denial of
-> `toolguard-audit`, that is the cause: the toolguard tools need an explicit allow rule. This
-> skill does not add it (read-only, and allows must be explicit/auditable) -- the
-> setup/maintenance skills offer to add the needed allow rules with your consent.
+> **Prerequisite under toolguard governance (self-permissioning).** When toolguard governs
+> the current project (especially in takeover mode), running `toolguard-audit` is itself a
+> `Bash` command toolguard must permit -- otherwise this skill's own call is denied. Toolguard
+> never self-grants; the fix is an explicit, consented rule at the scope the skill is
+> installed. The concrete rule (bake it in -- a denied call cannot run a tool to compute it):
+> add **`Bash(toolguard-audit:*)` to allow** (read-only, so a standing allow is fine). If you
+> hit a denial of `toolguard-audit`, tell the user that exact rule and retry once added. The
+> mutating `toolguard-maintain` is handled by the maintenance skill and belongs in **ask**,
+> not allow (see its Self-permissioning section). Hook entry points (`toolguard`,
+> `toolguard-session-start`) run under the hook machinery and never need an allow rule.
 
 Useful options:
 
@@ -120,11 +124,27 @@ Parse the JSON. Its shape:
                                  // NLP) to build a reviewable edit; it is a
                                  // CONSERVATIVE tightening to review as-if-enacted,
                                  // never auto-applied. null => text-only judgement fix.
-      "takeover_active": bool    // whether takeover was ON when this finding fired
+      "takeover_active": bool,   // whether takeover was ON when this finding fired
+      "acknowledged":    bool,   // true when the flagged rule carries a #NOSECURITY
+                                 // comment: the user has BLESSED this risk here.
+                                 // Still reported (never hidden), but de-prioritized
+                                 // (sorted after every un-acknowledged finding).
+      "acknowledgement": str?    // the #NOSECURITY reason ("" for a bare tag), or null
     }, ...
   ]
 }
 ```
+
+### Acknowledged (`#NOSECURITY`) findings
+
+A rule annotated with a `#NOSECURITY[: reason]` comment is **acknowledged, not
+hidden**: it still appears in the report, flagged `acknowledged` with its reason,
+and sorted last. Treat it as an intentional, project-local risk the user already
+accepted -- do NOT re-raise it as a fresh headline or propose removing it. Do
+still surface it (transparency), and if a #NOSECURITY rule genuinely became far
+more dangerous than its reason covers, say so explicitly rather than silently
+trusting the tag. When `context` is present, each layer's `comments[]` carries the
+recovered `leading`/`inline` text and a `nosecurity_reason` per commented rule.
 
 > **Structured remediation = the agent audience.** For a human, present the
 > `remediation` text. For a driving skill (maintenance), `remediation_proposal` is
@@ -213,7 +233,11 @@ That JSON is the Pass-1 payload plus an additive top-level `context` block:
     { "tool": "Bash", "layers": [
         { "locus": str,                    // which config file/level
           "is_native": bool,               // true = Claude-native settings; false = toolguard
-          "allow": [...], "deny": [...], "ask": [...] }   // wrapper-free pattern bodies
+          "allow": [...], "deny": [...], "ask": [...],   // wrapper-free pattern bodies
+          "comments": [                    // per-rule comments recovered from the file
+            { "list_type": str, "pattern": str,          //   (toml layers only; #NOSECURITY
+              "leading": str, "inline": str,             //   lives here). Empty for json layers
+              "nosecurity_reason": str? } ] }            //   and uncommented rules.
     ]} ],
   "proposed_migrations": [...]             // OPTIONAL -- present only when the audit was run
                                            // with --migrations; see "Proposed migrations" below

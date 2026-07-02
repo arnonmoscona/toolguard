@@ -71,12 +71,30 @@ does). Pick the invocation by where you are -- the same rule as the audit skill:
   `uv run python -m ...` form on an arbitrary project: that only works inside the
   toolguard source tree and fails confusingly elsewhere.
 
-> **Prerequisite under toolguard governance.** When toolguard governs the current
-> project (especially in takeover mode), running `toolguard-maintain` is itself a
-> `Bash` command toolguard must permit -- and `--apply --write` edits config
-> files, which the file tools must also permit. If you hit a denial of
-> `toolguard-maintain`, that is the cause: the toolguard tools need explicit allow
-> rules. The setup/maintenance skills offer to add them with your consent.
+## Self-permissioning (running toolguard's tools under governance)
+
+When toolguard governs the current project (especially in takeover mode), running
+`toolguard-maintain` / `toolguard-audit` is itself a `Bash` command toolguard must
+permit, or the skill's own call is denied (a chicken-and-egg bootstrap). Toolguard
+**never self-grants** -- SUGGEST the rules, get explicit consent, and write them at
+the **same scope the skill is installed** (user vs project). The concrete rules
+(bake these in; the self-healing case below cannot run any tool to compute them):
+
+- **`toolguard-audit`** -> add `Bash(toolguard-audit:*)` to **allow**. It is
+  read-only, so a standing allow is fine.
+- **`toolguard-maintain`** -> add `Bash(toolguard-maintain:*)` to **ask** (NOT
+  allow). It can `--apply --write` config edits directly, so a blanket allow would
+  let the model mutate the security config with no review. An `ask` rule prompts
+  per invocation (a specific ask with no covering allow resolves to a prompt). Do
+  **not** blanket-allow it.
+- Hook entry points (`toolguard`, `toolguard-session-start`) are run by Claude
+  Code's hook machinery, not as Bash calls -- they never need an allow rule.
+
+**Proactively (tools can run):** `toolguard.tools.self_permission.missing_self_permissions(config)`
+reports which of the above are not yet permitted and the exact rule to add, so you
+can offer them at install/first-run. **Self-healing (a call was denied):** you
+cannot run anything under the denial -- tell the user the exact rule above to add
+at their chosen scope, then retry. Every added rule stays explicit and auditable.
 
 ## Stage 1 -- Report
 
@@ -178,8 +196,18 @@ you (and the user) see exactly what would change. The JSON change report shape:
   "files": [ { "path", "file_format",
                "applied": [ { "removed_patterns", "added_pattern", "rationale" } ],
                "skipped": [ { "removed_patterns", "reason" } ],
-               "patterns_removed", "patterns_added", "diff", "written" } ] }
+               "patterns_removed", "patterns_added", "diff", "written" } ],
+  "edit_proposals": [ ... ],          // appliable consolidations (for --edits review)
+  "withheld_nosecurity": [ { "tool", "list_type", "removed_patterns",
+                             "added_pattern", "reason" } ] }   // see below
 ```
+
+**`#NOSECURITY`-blessed rules are never auto-rewritten.** A consolidation that
+would remove/merge a rule the user annotated with a `#NOSECURITY[: reason]` comment
+is **withheld** from the apply path (and from the `edit_proposals` handed to the
+audit review) -- that rule is intentionally-insecure *here* and is the user's to
+change. Surface the `withheld_nosecurity` entries so the user knows a tidy-up was
+deliberately skipped; do not try to route around it.
 
 ### Choose how to present the change to the user
 

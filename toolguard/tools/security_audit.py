@@ -36,7 +36,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from toolguard.config import Configuration, TakeoverConfig
 from toolguard.constants import GOVERNED_TOOLS
 from toolguard.tools.clarity import find_confusing_interactions
-from toolguard.tools.config_access import audit_context, load_config
+from toolguard.tools.config_access import audit_context, load_config, nosecurity_reason_for
 from toolguard.tools.danger import DangerFinding, Severity, danger
 from toolguard.tools.edit_proposal import (
     ACTION_REMOVE,
@@ -113,6 +113,12 @@ class RankedFinding:
         remediation: Suggested fix or mitigation, as a :class:`Remediation`
             (human ``text`` plus an optional structured, appliable ``proposal``).
         takeover_active: Whether takeover mode was ON when this finding was produced.
+        acknowledged: ``True`` when the flagged rule carries a ``#NOSECURITY``
+            comment.  The finding is still reported (never silently dropped), but
+            it is de-prioritized (sorted after every un-acknowledged finding) and
+            labeled as acknowledged -- toolguard acknowledges, it does not hide.
+        acknowledgement: The ``#NOSECURITY`` reason text when ``acknowledged`` is
+            ``True`` (``""`` for a bare tag with no reason); ``None`` otherwise.
     """
 
     source: str
@@ -126,6 +132,8 @@ class RankedFinding:
     impact: str
     remediation: Remediation
     takeover_active: bool
+    acknowledged: bool = False
+    acknowledgement: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +275,14 @@ def security_audit(
     ranked: List[RankedFinding] = []
 
     # --- danger findings (source = "rule") ----------------------------------
+    # A rule the user has annotated with #NOSECURITY is acknowledged, not hidden:
+    # still reported, but de-prioritized and labeled (see the sort key below).
     for df in danger(config, takeover):
+        reason = (
+            nosecurity_reason_for(df.provenance, df.list_type, df.tool, df.pattern)
+            if df.provenance
+            else None
+        )
         ranked.append(
             RankedFinding(
                 source="rule",
@@ -281,6 +296,8 @@ def security_audit(
                 impact="",
                 remediation=Remediation(text=df.remediation, proposal=_danger_proposal(df)),
                 takeover_active=df.takeover_active,
+                acknowledged=reason is not None,
+                acknowledgement=reason,
             )
         )
 
@@ -334,9 +351,10 @@ def security_audit(
                 )
             )
 
-    # Sort: severity DESC, source, tool (None -> ""), finding_id
+    # Sort: acknowledged LAST (#NOSECURITY findings are de-prioritized but never
+    # dropped), then severity DESC, source, tool (None -> ""), finding_id.
     ranked.sort(
-        key=lambda f: (-f.severity_value, f.source, f.tool or "", f.finding_id)
+        key=lambda f: (f.acknowledged, -f.severity_value, f.source, f.tool or "", f.finding_id)
     )
 
     findings_tuple: Tuple[RankedFinding, ...] = tuple(ranked)
@@ -478,6 +496,8 @@ def _render_finding_markdown(f: RankedFinding, lines: List[str]) -> None:
         lines.append(f"  - pattern: `{f.pattern}`")
     if f.locus:
         lines.append(f"  - locus: {f.locus}")
+    if f.acknowledged:
+        lines.append(f"  - acknowledged: {_acknowledgement_label(f)}")
     lines.append(f"  - summary: {f.summary}")
     if f.impact:
         lines.append(f"  - impact: {f.impact}")
@@ -534,6 +554,8 @@ def _render_finding_text(f: RankedFinding, lines: List[str]) -> None:
         lines.append(f"    pattern     : {f.pattern}")
     if f.locus:
         lines.append(f"    locus       : {f.locus}")
+    if f.acknowledged:
+        lines.append(f"    acknowledged: {_acknowledgement_label(f)}")
     lines.append(f"    summary     : {f.summary}")
     if f.impact:
         lines.append(f"    impact      : {f.impact}")
@@ -541,6 +563,17 @@ def _render_finding_text(f: RankedFinding, lines: List[str]) -> None:
     if f.remediation.proposal is not None:
         lines.append("    structured  : fix available (see JSON remediation.proposal)")
     lines.append("")
+
+
+def _acknowledgement_label(f: RankedFinding) -> str:
+    """
+    Render the ``#NOSECURITY`` acknowledgement marker for a finding.
+
+    ``#NOSECURITY: <reason>`` when a reason was given, else a bare ``#NOSECURITY``.
+    """
+    if f.acknowledgement:
+        return f"#NOSECURITY: {f.acknowledgement}"
+    return "#NOSECURITY"
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +814,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         else None
                     ),
                     "takeover_active": f.takeover_active,
+                    "acknowledged": f.acknowledged,
+                    "acknowledgement": f.acknowledgement,
                 }
                 for f in report.findings
             ],
@@ -815,6 +850,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 "allow": list(lc.allow),
                                 "deny": list(lc.deny),
                                 "ask": list(lc.ask),
+                                "comments": [
+                                    {
+                                        "list_type": rc.list_type,
+                                        "pattern": rc.pattern,
+                                        "leading": rc.leading,
+                                        "inline": rc.inline,
+                                        "nosecurity_reason": rc.nosecurity_reason(),
+                                    }
+                                    for rc in lc.comments
+                                ],
                             }
                             for lc in tc_item.layers
                         ],

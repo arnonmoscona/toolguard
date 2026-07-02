@@ -1530,5 +1530,151 @@ class TestEditsReview(unittest.TestCase):
                     self._capture_main(["--dir", ".", "--edits", str(bad)])
 
 
+class TestNoSecurityAcknowledgement(unittest.TestCase):
+    """The #NOSECURITY tag acknowledges (labels + de-prioritizes) but never hides."""
+
+    def _real_toml_layer(self, dir_path, allow_lines, allow_patterns):
+        """
+        Write a real toolguard_hook.toml (so comments can be recovered from disk)
+        and return a matching ConfigLayer whose provenance points at that file.
+
+        Args:
+            dir_path: Directory to write the file into.
+            allow_lines: Full ``allow`` array element lines, INCLUDING any comments.
+            allow_patterns: The parsed pattern strings (no comments) for the layer
+                content, matching what a TOML parser would produce.
+        """
+        elements = "".join(f"    {ln}\n" for ln in allow_lines)
+        text = "[permissions]\nallow = [\n" + elements + "]\ndeny = []\nask = []\n"
+        path = Path(dir_path) / "toolguard_hook.toml"
+        path.write_text(text, encoding="utf-8")
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=path,
+            specificity=0,
+        )
+        return ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {"permissions": {"allow": allow_patterns, "deny": [], "ask": []}}
+            ),
+        )
+
+    def test_nosecurity_rule_is_acknowledged_not_hidden(self):
+        """
+        Given a CRITICAL arbitrary-exec allow 'Bash(node:*)' carrying an inline
+        '# NOSECURITY: intentional dev tool' comment
+        When security_audit() runs
+        Then the finding is STILL reported (not hidden), flagged acknowledged with
+        the recovered reason
+        """
+        with tempfile.TemporaryDirectory() as d:
+            layer = self._real_toml_layer(
+                d,
+                ["'Bash(node:*)',  # NOSECURITY: intentional dev tool"],
+                ["Bash(node:*)"],
+            )
+            report = security_audit(_make_config(layer))
+            exec_findings = [
+                f for f in report.findings if f.finding_id == "arbitrary-exec-allow"
+            ]
+            self.assertEqual(len(exec_findings), 1)
+            self.assertTrue(exec_findings[0].acknowledged)
+            self.assertEqual(exec_findings[0].acknowledgement, "intentional dev tool")
+
+    def test_untagged_dangerous_rule_is_not_acknowledged(self):
+        """
+        Given the same dangerous allow 'Bash(node:*)' but with NO #NOSECURITY comment
+        When security_audit() runs
+        Then the finding is not acknowledged (acknowledged False, reason None)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            layer = self._real_toml_layer(d, ["'Bash(node:*)',"], ["Bash(node:*)"])
+            report = security_audit(_make_config(layer))
+            exec_findings = [
+                f for f in report.findings if f.finding_id == "arbitrary-exec-allow"
+            ]
+            self.assertEqual(len(exec_findings), 1)
+            self.assertFalse(exec_findings[0].acknowledged)
+            self.assertIsNone(exec_findings[0].acknowledgement)
+
+    def test_acknowledged_finding_is_deprioritized_below_unacknowledged(self):
+        """
+        Given a CRITICAL arbitrary-exec rule tagged #NOSECURITY and a separate
+        un-acknowledged MEDIUM unanchored-regex rule
+        When security_audit() runs
+        Then the un-acknowledged MEDIUM sorts BEFORE the acknowledged CRITICAL
+        (acknowledgement de-prioritizes regardless of severity), yet both remain
+        in the report
+        """
+        with tempfile.TemporaryDirectory() as d:
+            layer = self._real_toml_layer(
+                d,
+                [
+                    "'Bash(node:*)',  # NOSECURITY: blessed",
+                    "'Bash([regex]rm)',",
+                ],
+                ["Bash(node:*)", "Bash([regex]rm)"],
+            )
+            report = security_audit(_make_config(layer))
+            ack = [f for f in report.findings if f.acknowledged]
+            unack_rule = [
+                f
+                for f in report.findings
+                if f.source == "rule" and not f.acknowledged
+            ]
+            self.assertTrue(ack, "acknowledged CRITICAL should still be present")
+            self.assertTrue(unack_rule, "un-acknowledged MEDIUM should be present")
+            # Every un-acknowledged rule finding precedes the acknowledged one(s).
+            first_ack_index = min(report.findings.index(f) for f in ack)
+            last_unack_index = max(report.findings.index(f) for f in unack_rule)
+            self.assertLess(last_unack_index, first_ack_index)
+
+    def test_json_output_carries_acknowledgement_fields(self):
+        """
+        Given a report whose finding is acknowledged via #NOSECURITY
+        When main() renders it with --format json
+        Then the serialized finding carries 'acknowledged' true and the
+        'acknowledgement' reason
+        """
+        finding = RankedFinding(
+            source="rule",
+            finding_id="arbitrary-exec-allow",
+            severity_value=4,
+            severity_label="CRITICAL",
+            tool="Bash",
+            locus="project: /p/.claude/toolguard_hook.toml",
+            pattern="node:*",
+            summary="permits arbitrary code execution",
+            impact="",
+            remediation=Remediation(text="remove the rule", proposal=None),
+            takeover_active=False,
+            acknowledged=True,
+            acknowledgement="intentional dev tool",
+        )
+        report = SecurityReport(
+            findings=(finding,),
+            takeover_active=False,
+            highest_severity=4,
+            counts={"CRITICAL": 1},
+        )
+        buf = io.StringIO()
+        with patch("toolguard.tools.security_audit.load_config") as mock_load:
+            with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
+                mock_load.return_value = MagicMock()
+                mock_sa.return_value = report
+                with contextlib.redirect_stdout(buf):
+                    main(["--dir", ".", "--format", "json"])
+        payload = json.loads(buf.getvalue())
+        exec_json = [
+            f for f in payload["findings"] if f["finding_id"] == "arbitrary-exec-allow"
+        ]
+        self.assertEqual(len(exec_json), 1)
+        self.assertTrue(exec_json[0]["acknowledged"])
+        self.assertEqual(exec_json[0]["acknowledgement"], "intentional dev tool")
+
+
 if __name__ == "__main__":
     unittest.main()

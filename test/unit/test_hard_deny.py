@@ -162,9 +162,12 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
             if hard is not None:
                 return hard
 
-            def _decide(allow_patterns, deny_patterns):
+            def _decide(allow_patterns, deny_patterns, ask_patterns=()):
                 return decide_command_at_level_detailed(
-                    sub, list(allow_patterns), list(deny_patterns)
+                    sub,
+                    list(allow_patterns),
+                    list(deny_patterns),
+                    ask_patterns=list(ask_patterns),
                 )
 
             resolved = config.resolve_permission_detailed("Bash", _decide)

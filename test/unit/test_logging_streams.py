@@ -50,8 +50,10 @@ def _bash_layer(allow, deny, specificity, path):
 def _detailed_decider(command):
     """Return a per-level detailed decider bound to a command (for Bash)."""
 
-    def _decide(allow, deny):
-        return decide_command_at_level_detailed(command, list(allow), list(deny))
+    def _decide(allow, deny, ask=()):
+        return decide_command_at_level_detailed(
+            command, list(allow), list(deny), ask_patterns=list(ask)
+        )
 
     return _decide
 

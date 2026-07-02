@@ -306,28 +306,105 @@ def check_permission(
     return "deny", "Command does not match any allow patterns"
 
 
+def is_universal_pattern(pattern: str) -> bool:
+    """
+    Return True when a pattern matches EVERY input (a blanket ``*``-class rule).
+
+    Handles the wrapper-free ``*`` and the ``[glob]``/``[native]`` variants.  Used
+    by the resolver's "a broad ask with no matching allow collapses to deny" rule:
+    a blanket ask does not, by itself, grant a prompt.
+    """
+    body = pattern.strip()
+    for marker in ("[glob]", "[native]"):
+        if body.startswith(marker):
+            body = body[len(marker) :]
+    return body == "*"
+
+
+def _literal_prefix_specificity(pattern: str) -> int:
+    """
+    Heuristic specificity: the length of the literal prefix before the first
+    wildcard.  Longer = more specific; a blanket ``*`` scores 0.
+
+    Used only to break the more-specific-wins comparison between an allow and an
+    ask pattern that BOTH match the same command at one level (e.g. broad allow
+    ``*`` vs specific ask ``git diff:*``).  An extended-syntax marker is stripped
+    first so ``[regex]``/``[glob]``/``[native]`` bodies score by their literal
+    lead too.
+    """
+    body = pattern.strip()
+    for marker in ("[regex]", "[glob]", "[native]"):
+        if body.startswith(marker):
+            body = body[len(marker) :]
+            break
+    for i, ch in enumerate(body):
+        if ch in "*?[":
+            return i
+    return len(body)
+
+
+def resolve_allow_ask(
+    allow_hit: Tuple[bool, Optional[str]],
+    ask_hit: Tuple[bool, Optional[str]],
+) -> Optional[Tuple[str, str]]:
+    """
+    Combine an allow-match and a (non-blanket) ask-match into ``(decision, pattern)``.
+
+    Implements toolguard's documented within-level more-specific-wins model between
+    allow and ask: a more-specific allow bypasses the ask (``allow``); a
+    more-specific -- or exactly-tied -- ask gates it (``ask``, i.e. a prompt is the
+    safe resolution of a tie).  The caller MUST already have excluded blanket ask
+    patterns (a broad ask does not grant a prompt).
+
+    Args:
+        allow_hit: ``(matched, pattern)`` from matching the allow list.
+        ask_hit: ``(matched, pattern)`` from matching the non-blanket ask list.
+
+    Returns:
+        ``(decision, matched_pattern)`` where decision is ``'allow'`` or ``'ask'``,
+        or ``None`` when neither the allow nor the ask matched (fall through).
+    """
+    allow_match, allow_pat = allow_hit
+    ask_match, ask_pat = ask_hit
+    if ask_match and not allow_match:
+        return "ask", ask_pat
+    if allow_match and not ask_match:
+        return "allow", allow_pat
+    if allow_match and ask_match:
+        if _literal_prefix_specificity(allow_pat) > _literal_prefix_specificity(ask_pat):
+            return "allow", allow_pat
+        return "ask", ask_pat
+    return None
+
+
 def decide_command_at_level_detailed(
     command: str,
     allow_patterns: List[str],
     deny_patterns: List[str],
     extended_syntax: bool = True,
+    ask_patterns: Optional[List[str]] = None,
 ) -> Optional[Tuple[str, str, str]]:
     """
     Decide a command's outcome against ONE hierarchy level's patterns.
 
-    Deny-first within the level: a deny match yields ``('deny', reason, pattern)``;
-    else an allow match yields ``('allow', reason, pattern)``. When the level
-    matches NOTHING, returns ``None`` so the more-specific-wins cascade can fall
-    through to the next (less-specific) level. The matched pattern is reported so
-    the provenance-aware resolver can map it back to the
-    :class:`~toolguard.config.ToolPatternLayer` (and thus the source file/level)
-    that contributed it.
+    Deny-first within the level: a deny match yields ``('deny', reason, pattern)``.
+    Otherwise the allow and ask lists are combined by more-specific-wins (a
+    more-specific allow bypasses a matching ask; a more-specific or tied ask gates
+    the allow into an ``ask`` prompt), with blanket ``*``-class ask patterns
+    ignored (a broad ask does not, alone, grant a prompt).  When the level matches
+    NOTHING, returns ``None`` so the more-specific-wins cascade can fall through to
+    the next (less-specific) level.  The matched pattern is reported so the
+    provenance-aware resolver can map it back to the
+    :class:`~toolguard.config.ToolPatternLayer` (and thus the source file/level).
 
     Args:
         command: The bash command (sub-command) to evaluate.
         allow_patterns: This level's allow patterns (wrapper-free).
         deny_patterns: This level's deny patterns (wrapper-free).
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
+        ask_patterns: This level's ask patterns (wrapper-free).  Optional and
+            defaulting to none so legacy callers that predate ask resolution keep
+            their exact allow/deny behavior.
 
     Returns:
         ``(decision, reason, matched_pattern)`` when this level matches, else
@@ -338,8 +415,20 @@ def decide_command_at_level_detailed(
         if matched:
             return "deny", f"Command matches deny pattern: {pattern}", pattern
 
-    matched, pattern = match_command(command, allow_patterns, extended_syntax)
-    if matched:
-        return "allow", f"Command matches allow pattern: {pattern}", pattern
+    allow_hit = match_command(command, allow_patterns, extended_syntax)
 
-    return None
+    ask_hit: Tuple[bool, Optional[str]] = (False, None)
+    if ask_patterns:
+        non_blanket_ask = [p for p in ask_patterns if not is_universal_pattern(p)]
+        if non_blanket_ask:
+            ask_hit = match_command(command, non_blanket_ask, extended_syntax)
+
+    combined = resolve_allow_ask(allow_hit, ask_hit)
+    if combined is None:
+        return None
+    decision, matched_pattern = combined
+    return (
+        decision,
+        f"Command matches {decision} pattern: {matched_pattern}",
+        matched_pattern,
+    )

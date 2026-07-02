@@ -118,7 +118,9 @@ def _fake_config(
             # so no override (conflict) is ever produced here.
             allow, deny = _patterns_for(tool_name)
             if allow or deny:
-                result = decide_detailed(tuple(allow), tuple(deny))
+                # API-sync with Configuration.resolve_permission_detailed, whose
+                # callback now receives (allow, deny, ask); the fake models no ask.
+                result = decide_detailed(tuple(allow), tuple(deny), ())
                 if result is not None:
                     decision, reason, _matched = result
                     return ResolvedDecision(decision, reason, None, None)

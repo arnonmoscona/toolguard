@@ -199,6 +199,41 @@ class TestArbitraryExecAllow(unittest.TestCase):
         self.assertGreater(len(exec_findings), 0)
         self.assertEqual(exec_findings[0].severity, Severity.CRITICAL)
 
+    def test_regex_anchored_python_flagged(self):
+        """
+        Given an anchored regex allow rule '[regex]^python:.*' for Bash
+        When danger() is called
+        Then a CRITICAL arbitrary-exec-allow finding is returned
+        (baseline that documents the intended symmetry with node/ruby/perl below)
+        """
+        layer = _make_layer("Bash", allow=[r"[regex]^python:.*"])
+        config = _make_config(layer)
+        findings = danger(config)
+        exec_findings = [f for f in findings if f.detector_id == "arbitrary-exec-allow"]
+        self.assertGreater(len(exec_findings), 0)
+        self.assertEqual(exec_findings[0].severity, Severity.CRITICAL)
+
+    def test_regex_anchored_node_ruby_perl_flagged(self):
+        """
+        Given anchored regex allow rules '[regex]^node:.*', '[regex]^ruby:.*',
+        and '[regex]^perl:.*' for Bash
+        When danger() is called on each
+        Then a CRITICAL arbitrary-exec-allow finding is returned for each
+        (regression: these escaped the REGEX branch because it matched only the
+        literal token 'node ' with a trailing space, absent in the ':' form,
+        while the equivalent DEFAULT pattern 'node:*' was correctly flagged)
+        """
+        for body in (r"[regex]^node:.*", r"[regex]^ruby:.*", r"[regex]^perl:.*"):
+            with self.subTest(pattern=body):
+                layer = _make_layer("Bash", allow=[body])
+                config = _make_config(layer)
+                findings = danger(config)
+                exec_findings = [
+                    f for f in findings if f.detector_id == "arbitrary-exec-allow"
+                ]
+                self.assertGreater(len(exec_findings), 0)
+                self.assertEqual(exec_findings[0].severity, Severity.CRITICAL)
+
     def test_safe_python_specific_script_not_flagged(self):
         """
         Given an allow rule 'uv run python manage.py test:*' (specific script, no wildcard exec)

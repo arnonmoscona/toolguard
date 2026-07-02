@@ -238,14 +238,33 @@ def _regex_body_matches_any(body: str, patterns: Tuple[str, ...]) -> bool:
 # ---------------------------------------------------------------------------
 
 # 1. Arbitrary code execution
+#
+# Single source of truth for the INTERPRETER NAMES that, when permitted, allow
+# arbitrary code execution.  Both matching branches of ``_is_arbitrary_exec`` build
+# on this so the regex and default/glob checks cannot silently drift apart -- add a
+# new interpreter HERE and both branches pick it up.
+#
+# This is a heuristic curation of the common scripting interpreters, NOT derived
+# from usage evidence; known omissions (php, deno, bun, pwsh/powershell, python2,
+# Rscript, other shells, ...) are deliberately out for now.  The shell-eval forms
+# (``sh -c``/``bash -c``/``uv run python``) and ``exec`` are matched slightly
+# differently per branch (see below), so they are added alongside this set rather
+# than folded into it: ``exec`` is checked only in the default/glob branch, and the
+# multi-token eval forms are prefixes in that branch but substrings in the regex one.
+_ARBITRARY_EXEC_INTERPRETERS: Tuple[str, ...] = (
+    "python",
+    "python3",
+    "node",
+    "ruby",
+    "perl",
+)
+
 _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
     "uv run python",
     "python3",
-    "python ",
-    "python3 ",
-    "node ",
-    "ruby ",
-    "perl ",
+    # NOTE: bare-name forms ("python <args>", "node <args>", ...) are covered by
+    # _ARBITRARY_EXEC_BARE below. Trailing-space entries were removed here because
+    # _body_fnmatch_matches_any strips the body, so "node " could never match.
     "sh -c",
     "bash -c",
     "python:",   # handle toolguard pattern form python:*
@@ -261,14 +280,9 @@ _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
 # "<name> ..." prefix, or a "<name>:..." prefix, so these also cover the "exec"
 # case that a trailing-space/colon prefix entry cannot (the prefix helper appends
 # its own separator, which would require a double space to match).
-_ARBITRARY_EXEC_BARE: Tuple[str, ...] = (
-    "python",
-    "python3",
-    "node",
-    "ruby",
-    "perl",
-    "exec",
-)
+# Default/glob branch: the shared interpreter names plus ``exec`` (checked here
+# only -- see the note on _ARBITRARY_EXEC_INTERPRETERS).
+_ARBITRARY_EXEC_BARE: Tuple[str, ...] = _ARBITRARY_EXEC_INTERPRETERS + ("exec",)
 
 
 def _is_arbitrary_exec(tool: str, body: str, ptype: PatternType) -> bool:
@@ -291,19 +305,18 @@ def _is_arbitrary_exec(tool: str, body: str, ptype: PatternType) -> bool:
     body_lower = body_stripped.lower()
 
     if ptype == PatternType.REGEX:
+        # Conservative substring heuristic: if a dangerous interpreter/eval token
+        # appears anywhere in the regex body, treat the rule as arbitrary-exec.
+        # Uses the shared interpreter names (bare, so an anchored body like
+        # "^node:.*" is caught the same way "^python:.*" is) plus the eval forms.
+        # "python" subsumes "python3"; "exec" is deliberately NOT a substring token
+        # because it appears in negative lookaheads that forbid exec (e.g.
+        # "(?!.*exec)") -- the DEFAULT branch checks it precisely. False positives
+        # are acceptable here; false negatives are not.
         return _regex_body_matches_any(
             body_lower,
-            (
-                "uv run python",
-                r"\bpython\b",
-                r"\bpython3\b",
-                r"\bnode\b",
-                r"\bruby\b",
-                r"\bperl\b",
-                "sh -c",
-                "bash -c",
-            ),
-        ) or any(x in body_lower for x in ("python", "node ", "ruby ", "perl ", "sh -c", "bash -c"))
+            _ARBITRARY_EXEC_INTERPRETERS + ("uv run python", "sh -c", "bash -c"),
+        )
     else:
         # DEFAULT or GLOB: check for literal prefix
         if _body_fnmatch_matches_any(body_lower, _ARBITRARY_EXEC_PREFIXES):
