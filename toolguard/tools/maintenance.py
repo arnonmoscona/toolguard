@@ -357,6 +357,11 @@ def _tool_to_dict(tool_report: ToolMaintenance) -> Dict[str, Any]:
                 "guard_section": i.guard_section,
                 "guard_pattern": i.guard_pattern,
                 "explanation": i.explanation,
+                "guard_provenance": (
+                    _provenance_to_dict(i.guard_provenance)
+                    if i.guard_provenance is not None
+                    else None
+                ),
             }
             for i in tool_report.interactions
         ],

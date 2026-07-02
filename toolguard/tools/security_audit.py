@@ -336,8 +336,9 @@ def security_audit(
                     pattern=cf.allow_pattern,
                     summary=cf.explanation,
                     impact=(
-                        "Non-obvious within-file resolution makes it hard to reason "
-                        "about what is actually permitted -- a latent security risk."
+                        "Non-obvious rule resolution (within a file or across layers) "
+                        "makes it hard to reason about what is actually permitted -- a "
+                        "latent security risk."
                     ),
                     remediation=Remediation(
                         text=(

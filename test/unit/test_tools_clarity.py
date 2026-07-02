@@ -131,5 +131,133 @@ class TestFindConfusingInteractions(unittest.TestCase):
         self.assertEqual(find_confusing_interactions(config, "Bash"), [])
 
 
+class TestMultiSectionInteraction(unittest.TestCase):
+    """An allow overlapping BOTH a deny and an ask in one file is called out."""
+
+    def test_allow_overlapping_deny_and_ask_flags_multi_section(self):
+        """
+        Given a same-file allow 'git:*' overlapping both deny 'git push:*' and ask
+            'git commit:*'
+        When find_confusing_interactions runs for Bash
+        Then a 'multi-section-interaction' finding is produced (alongside the
+            pairwise findings) whose explanation names both guards
+        """
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["git:*"],
+                deny=["git push:*"],
+                ask=["git commit:*"],
+            )
+        )
+        findings = find_confusing_interactions(config, "Bash")
+        kinds = {f.kind for f in findings}
+        self.assertIn("multi-section-interaction", kinds)
+        ms = next(f for f in findings if f.kind == "multi-section-interaction")
+        self.assertEqual(ms.guard_section, "deny+ask")
+        self.assertIn("git push:*", ms.explanation)
+        self.assertIn("git commit:*", ms.explanation)
+
+    def test_allow_overlapping_only_one_section_has_no_multi_section(self):
+        """
+        Given an allow overlapping only a deny (no ask overlap)
+        When find_confusing_interactions runs
+        Then no 'multi-section-interaction' finding is produced
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git:*"], deny=["git push:*"])
+        )
+        kinds = {f.kind for f in find_confusing_interactions(config, "Bash")}
+        self.assertNotIn("multi-section-interaction", kinds)
+
+
+class TestCrossLayerInteraction(unittest.TestCase):
+    """An allow whose verdict depends on a guard in another layer is flagged."""
+
+    def _two_layer(self, project_kwargs, user_kwargs):
+        """Build a project (specificity 0) over user (specificity 1) config."""
+
+        def mk(spec, kw):
+            return _make_layer(
+                "Bash",
+                kw.get("allow", []),
+                deny=kw.get("deny"),
+                ask=kw.get("ask"),
+                provenance=_make_provenance(spec),
+            )
+
+        return _make_config(mk(0, project_kwargs), mk(1, user_kwargs))
+
+    def _cross_layer(self, config):
+        return [
+            f
+            for f in find_confusing_interactions(config, "Bash")
+            if f.kind == "cross-layer-dependent"
+        ]
+
+    def test_more_specific_allow_overrides_broader_deny_across_layers(self):
+        """
+        Given a project allow 'git:*' and a broader user deny 'git push:*'
+        When find_confusing_interactions runs
+        Then a 'cross-layer-dependent' finding says the more-specific allow OVERRIDES
+            the broader deny, and carries the deny's layer as guard_provenance
+        """
+        config = self._two_layer({"allow": ["git:*"]}, {"deny": ["git push:*"]})
+        findings = self._cross_layer(config)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("OVERRIDES", findings[0].explanation)
+        self.assertEqual(findings[0].guard_section, "deny")
+        self.assertEqual(findings[0].guard_provenance.specificity, 1)
+
+    def test_more_specific_deny_wins_over_broader_allow_across_layers(self):
+        """
+        Given a project deny 'git push:*' and a broader user allow 'git:*'
+        When find_confusing_interactions runs
+        Then a 'cross-layer-dependent' finding says the more-specific deny WINS
+        """
+        config = self._two_layer({"deny": ["git push:*"]}, {"allow": ["git:*"]})
+        findings = self._cross_layer(config)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("WINS", findings[0].explanation)
+
+    def test_more_specific_ask_gates_broader_allow_across_layers(self):
+        """
+        Given a project ask 'git push:*' and a broader user allow 'git:*'
+        When find_confusing_interactions runs
+        Then a 'cross-layer-dependent' finding says the more-specific ask GATES the
+            allow into a prompt
+        """
+        config = self._two_layer({"ask": ["git push:*"]}, {"allow": ["git:*"]})
+        findings = self._cross_layer(config)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("GATES", findings[0].explanation)
+
+    def test_more_specific_allow_bypasses_broader_ask_across_layers(self):
+        """
+        Given a project allow 'git:*' and a broader user ask 'git push:*'
+        When find_confusing_interactions runs
+        Then a 'cross-layer-dependent' finding says the more-specific allow BYPASSES
+            the broader ask
+        """
+        config = self._two_layer({"allow": ["git:*"]}, {"ask": ["git push:*"]})
+        findings = self._cross_layer(config)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("BYPASSES", findings[0].explanation)
+
+    def test_same_specificity_layers_are_not_cross_layer(self):
+        """
+        Given an allow and an overlapping deny in two DIFFERENT files at the SAME
+            specificity
+        When find_confusing_interactions runs
+        Then no 'cross-layer-dependent' finding is produced (they resolve as one
+            level, not a cross-level dependency)
+        """
+        config = _make_config(
+            _make_layer("Bash", ["git:*"], provenance=_make_provenance(0)),
+            _make_layer("Bash", [], deny=["git push:*"], provenance=_make_provenance(0)),
+        )
+        self.assertEqual(self._cross_layer(config), [])
+
+
 if __name__ == "__main__":
     unittest.main()
