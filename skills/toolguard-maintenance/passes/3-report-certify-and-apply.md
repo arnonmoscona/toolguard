@@ -124,9 +124,20 @@ the tool did not make), which is exactly why Step 3 certifies it.
 Never let the user paste un-certified AI-authored TOML. Prove it with the tool:
 
 1. Copy the project's config tree to a temp dir (scratchpad), then overwrite the
-   candidate file(s) with your Step-2 TOML.
+   candidate file(s) with your Step-2 TOML. **The temp dir MUST be a recognized
+   project root**, or the audit will not discover the staged config at all: it
+   discovers config by walking up from a project root (a `.git` dir or equivalent
+   marker), so a bare temp dir loads NOTHING. Make it a root (e.g. `git init` the
+   temp dir) before auditing.
 2. Run `toolguard-audit --dir <tempdir> --format json --with-context` against the
    staged copy.
+   - **VERIFY the audit actually loaded your staged config before trusting any
+     result.** Check that `context.summary.sources` includes your staged file and
+     that `takeover_active` matches the real project (usually `true`). If takeover
+     flips to `false`, `sources` shows only user-level JSON, or you see a spurious
+     `hook-not-registered` finding, the staging FAILED to load -- the "clean" result
+     is false. Do not report it; fix the staging (project root) and re-run. This
+     failure is silent and produces a config that looks like it resolved everything.
    - If it **fails to load/parse**, the TOML is wrong -- fix it and repeat; never
      hand the user TOML that does not parse.
    - Compare its findings to the current config's audit (the `audit.before` you

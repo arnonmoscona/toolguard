@@ -91,9 +91,11 @@ the CWD-relative spelling and only the enumerated readers; `head /abs/path/.env`
 tool-agnostic form (`.env`/`.ssh` conventions are universal -- assert this):
 
 - **Bash layer (matches command text):** one `Bash([regex]\.env\b)` catches every
-  reader that names a `.env`; `Bash([regex]/\.ssh/)` for ssh keys. A path glob does
+  reader that names a `.env`; `Bash([regex]\.ssh/)` for ssh keys. A path glob does
   NOT work on the Bash layer -- Bash rules match the command string, not a filesystem
-  path, so use a regex here. Give such a broad rule a **clarifying trailing comment**
+  path, so use a regex here. Do NOT anchor the ssh regex with a leading slash
+  (`/\.ssh/`) -- that misses the relative spelling `cat .ssh/id_rsa`; `\.ssh/` catches
+  both relative and absolute. Give such a broad rule a **clarifying trailing comment**
   (e.g. `# applies to ANY command-line tool, not just cat/head/...`) so its reach is
   obvious in the file.
 - **File tools (match paths):** `Read`/`Write`/`Edit` want a glob deny --

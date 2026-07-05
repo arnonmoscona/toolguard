@@ -126,9 +126,11 @@ options that shape how ALL those rules behave. Capture them into `config_setting
 permissions while leaving these in an incoherent state is exactly the "unintended mess" to
 avoid.
 
-Source them structurally where possible: the audit `context` already exposes `takeover`
-(enabled, `no_match_fallback`, `ignored_allow_patterns`, cross-level `conflict`),
-`summary.governed_tools`, and `summary.sources` (the levels). For settings the contract
+Source them structurally where possible: the audit `context` already exposes
+`context.takeover` (enabled, `no_match_fallback`, `ignored_allow_patterns`, cross-level
+`conflict`), `context.summary.governed_tools`, and `context.summary.sources` (the levels).
+Note these live UNDER `context` -- the top-level `summary` key is null; use
+`context.summary.*`. For settings the contract
 does not expose (`[config_sync]` -- `auto_migrate`/`backup_dir`/`auto_sort_on_migrate` --
 and `additional_supported_tools`), read the toolguard TOML's non-permission tables
 directly. (This is reading declared key/values, not re-deriving permission-rule semantics
