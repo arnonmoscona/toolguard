@@ -127,11 +127,21 @@ def get_bool_env(
         return default
 
 
-def get_env_config() -> Dict[str, any]:
+def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
     """
     Load all toolguard configuration from environment variables and .env file.
 
     Environment variables take precedence over .env file values.
+
+    Args:
+        start_dir: When provided, anchor project-root discovery (and hence the
+            ``.env`` file that supplies ``extended_syntax`` etc.) to THIS directory,
+            ignoring the ``TOOLGUARD_PROJECT_ROOT`` override.  This mirrors
+            ``load_configuration(start_dir, ignore_env_override=True)`` and is used
+            by the read-only ``--eval`` probe so a cross-project sweep reads each
+            probed project's own settings rather than the sweep-runner's cwd.  When
+            ``None`` (the live hook's path), the original override / auto-detect
+            behaviour is preserved.
 
     Returns:
         Dictionary with all config values:
@@ -142,15 +152,20 @@ def get_env_config() -> Dict[str, any]:
         - source_root: str
         - create_log_dir: bool
     """
-    # Get project root (explicit or auto-detect)
-    project_root_str = os.environ.get("TOOLGUARD_PROJECT_ROOT")
-    if project_root_str:
-        project_root = Path(project_root_str).expanduser().resolve()
+    # Get project root. An explicit start_dir (e.g. the --eval probe passing the
+    # event's cwd) anchors to that project and bypasses TOOLGUARD_PROJECT_ROOT, so
+    # the probe cannot be diverted to the wrong project's .env.
+    if start_dir is not None:
+        project_root = find_project_root(Path(start_dir)) or Path(start_dir).expanduser().resolve()
     else:
-        project_root = find_project_root()
-        if project_root is None:
-            # No project root found - use current directory
-            project_root = Path.cwd()
+        project_root_str = os.environ.get("TOOLGUARD_PROJECT_ROOT")
+        if project_root_str:
+            project_root = Path(project_root_str).expanduser().resolve()
+        else:
+            project_root = find_project_root()
+            if project_root is None:
+                # No project root found - use current directory
+                project_root = Path.cwd()
 
     # Get source root (for .env file location)
     source_root = os.environ.get("TOOLGUARD_SOURCE_ROOT", "")

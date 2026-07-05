@@ -320,6 +320,44 @@ class TestGetEnvConfig(unittest.TestCase):
 
                 self.assertEqual(config["project_root"], Path(tmpdir).resolve())
 
+    def test_start_dir_anchors_project_root_and_env(self):
+        """
+        Given a start_dir whose own .env sets TOOLGUARD_EXTENDED_SYNTAX=false
+        When get_env_config(start_dir=...) is called
+        Then project_root and the extended_syntax setting come from THAT directory
+        (this is what keeps the --eval probe faithful to each probed project)
+        """
+        with TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".env").write_text(
+                "TOOLGUARD_EXTENDED_SYNTAX=false\n", encoding="utf-8"
+            )
+            with patch.dict(os.environ, {}, clear=False):
+                # Remove any ambient override so the project's .env is what decides.
+                os.environ.pop("TOOLGUARD_EXTENDED_SYNTAX", None)
+                with patch(
+                    "toolguard.env_config.find_project_root",
+                    return_value=Path(tmpdir),
+                ):
+                    config = get_env_config(start_dir=Path(tmpdir))
+            self.assertEqual(config["project_root"], Path(tmpdir))
+            self.assertFalse(config["extended_syntax"])
+
+    def test_start_dir_bypasses_project_root_override(self):
+        """
+        Given TOOLGUARD_PROJECT_ROOT points at one directory but start_dir names another
+        When get_env_config(start_dir=...) is called
+        Then start_dir wins and the override is ignored, so a cross-project probe
+        stays anchored to the target project rather than the sweep-runner's env
+        """
+        with TemporaryDirectory() as target, TemporaryDirectory() as other:
+            with patch.dict(os.environ, {"TOOLGUARD_PROJECT_ROOT": other}):
+                with patch(
+                    "toolguard.env_config.find_project_root",
+                    return_value=Path(target),
+                ):
+                    config = get_env_config(start_dir=Path(target))
+            self.assertEqual(config["project_root"], Path(target))
+
     def test_explicit_log_dir_absolute(self):
         """
         Given TOOLGUARD_LOG_DIR set to an absolute path

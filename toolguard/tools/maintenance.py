@@ -21,9 +21,13 @@ For each governed tool it collects:
 and, once for the whole config, the corpus **mining** report
 (:func:`toolguard.tools.mining.mine_rule_candidates`).
 
-Strict findings (redundancies, consolidations, cross-layer) are safe to apply;
-broadenings and mining candidates are agent-judged and must be weighed (with the
-security-audit lens) before acting -- the skill layer owns that decision.
+Consolidations and cross-layer findings are replay-verified (decision-neutral
+over the corpus) and redundancies are exact/normalised duplicates -- but that
+verification is EVIDENCE, not consent: even a decision-neutral merge may belong
+at a different level, or be one the user wants left alone. Nothing here is
+auto-applied. Broadenings and mining candidates additionally need the
+security-audit lens. Every apply decision is the user's, made through the skill
+conversation; this module only gathers the evidence.
 """
 
 import argparse
@@ -73,13 +77,14 @@ class ToolMaintenance:
 
     Attributes:
         tool: The tool name (e.g. ``'Bash'``).
-        redundancies: Duplicate/subsumed rule findings (safe to drop).
+        redundancies: Duplicate/subsumed rule findings (candidates to drop --
+            the user decides).
         consolidations: Strict, equivalence-preserving merge proposals (families
-            1-2; safe to apply).
+            1-2; replay-verified but never auto-applied -- the user decides).
         broadenings: Agent-judged widening proposals with evidence (families 3-4;
             must be judged, never auto-applied).
         cross_layer_redundancies: Specific rules already covered by a broader
-            layer (safe to drop the specific copy).
+            layer (candidate to drop the specific copy -- the user decides).
         interactions: Confusing same-file rule interactions (clarity findings;
             informational -- they explain non-obvious resolution, not a fix).
     """
@@ -410,8 +415,9 @@ def collect_consolidations(report: MaintenanceReport) -> List[ConsolidationPropo
     Flatten every tool's strict consolidation proposals into one list.
 
     Only :class:`~toolguard.tools.consolidate.ConsolidationProposal` records are
-    returned -- the replay-verified, semantically-safe allow-list merges that the
-    apply path (:func:`~toolguard.tools.rule_apply.apply_proposals`) can enact.
+    returned -- the replay-verified (decision-neutral over the corpus) allow-list
+    merges that the apply path (:func:`~toolguard.tools.rule_apply.apply_proposals`)
+    can enact once the user has approved them.
     Agent-judged broadenings and the informational findings (redundancies,
     cross-layer, clarity interactions) are deliberately excluded: they are
     reported for human action, not auto-applied.
@@ -879,9 +885,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         default=False,
         help=(
-            "Switch to apply mode: enact the strict (replay-verified) "
-            "consolidation proposals. PREVIEW by default (dry run, shows the "
-            "diffs, writes nothing) -- add --write to actually modify the config."
+            "Switch to apply mode: enact the replay-verified consolidation "
+            "proposals the user has approved. Replay-verification is evidence, "
+            "not consent -- these are never applied automatically. PREVIEW by "
+            "default (dry run, shows the diffs, writes nothing); add --write to "
+            "modify the config."
         ),
     )
     parser.add_argument(

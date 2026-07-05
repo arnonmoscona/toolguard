@@ -1,50 +1,96 @@
 ---
 name: toolguard-maintenance
 description: >
-  Curate the active toolguard permission configuration: find redundant,
-  consolidatable, and confusing rules across the whole config hierarchy, then
-  apply the safe, replay-verified consolidations with the user's consent. Use
-  when asked to clean up, tidy, consolidate, simplify, de-duplicate, or maintain
-  the toolguard / Claude Code permission rules, to shrink an over-grown allow
-  list, or as a periodic config-curation checkpoint (e.g. before a push). Runs a
-  deterministic analyzer, presents findings, and -- only on explicit go-ahead --
-  applies consolidations behind a dry-run preview and a working-tree safety gate.
-argument-hint: "[directory (default: current project)] [--corpus] [--apply]"
+  Curate the active toolguard permission configuration through a guided,
+  conversational review: find redundant, consolidatable, mis-levelled, and
+  confusing rules across the whole config hierarchy, present them grouped by
+  command family with a plain-English before/after, and -- only on explicit,
+  per-item consent -- apply the changes the user approves. Use when asked to
+  clean up, tidy, consolidate, simplify, de-duplicate, or maintain the toolguard
+  / Claude Code permission rules, to shrink an over-grown allow list, or as a
+  periodic config-curation checkpoint (e.g. before a push). Runs a deterministic
+  analyzer for evidence, reasons about it in passes, and never applies anything
+  automatically.
+argument-hint: "[directory (default: current project)] [--corpus]"
 ---
 
 # Toolguard Maintenance
 
-Keep the active toolguard permission configuration tidy and intelligible. This
-skill orchestrates the tested `toolguard-maintain` analyzer/apply tool; it does
-**not** re-implement any analysis or editing itself. It works in two stages:
+Maintaining permission rules is judgement-heavy refactoring, not a mechanical
+sort. The right consolidation, the right level for a rule, and whether a "confusing"
+overlap is actually a bug all depend on *user intent* that the tool cannot infer.
+So this skill is anchored on a conversation, not on code: the tested
+`toolguard-maintain` analyzer produces **evidence**, and the skill turns that
+evidence into a proposal you can understand and decide on, family by family.
 
-1. **Report (always).** Run the deterministic analyzer to surface maintenance
-   findings across the whole config hierarchy: redundant rules, consolidatable
-   rule families, agent-judged broadenings, cross-layer redundancies, and
-   confusing same-file rule interactions. High trust, mechanical, repeatable.
-2. **Apply (opt-in, gated).** *After* presenting the report and getting an
-   explicit go-ahead, apply the **strict, replay-verified consolidations** behind
-   a dry-run preview and a safety pre-flight. Every other finding category is
-   reported for the human to act on -- it is never auto-applied.
+**The model in one paragraph.** The analyzer produces evidence -- findings,
+replay-verification, as-if-enacted audits. It never produces consent. Even a
+strict, replay-verified, decision-neutral merge is only a *recommendation*: it may
+belong at a different level, or be one you want left alone. This skill presents the
+whole change set grouped by command family, discusses it with you, and enacts only
+the pieces you explicitly approve. **Nothing is applied automatically, ever.**
 
 ## Hard constraints
 
-- **Reporting is read-only.** The report stage reads only local config files,
-  makes no network calls, and costs no model tokens to run.
-- **Applying needs explicit consent AND is gated.** Never write to a config file
-  without (a) the user agreeing to apply, (b) showing them the dry-run diff
-  first, and (c) the tool's own pre-flight passing (clean working tree, resolved
-  project root). The tool refuses to write on a dirty tree; do not try to
-  circumvent that.
-- **Apply consolidations only.** Only the strict `literal-alternation`-style
-  consolidation proposals are machine-appliable (they are replay-verified to
-  preserve every decision). **Broadenings, redundancies, cross-layer findings,
-  and clarity interactions are NEVER auto-applied** -- present them for human
-  judgement. A broadening widens what is permitted; that is always the user's
-  call.
-- **Don't re-derive the analysis by hand.** Get findings from the tool's JSON
-  contract; do not eyeball config files and invent findings.
+- **No auto-apply, ever.** No change reaches a config file without an explicit,
+  informed user choice for that specific change -- no matter how trivial or how
+  well replay-verified.
+- **Replay-verification is evidence, not consent.** "Decision-neutral over the
+  corpus" proves the tool did not change an *observed* decision; it says nothing
+  about intent, level, or contexts the corpus never exercised. **Bulk-apply is an
+  explicit user opt-in ("just do it all"), never a default and never a label the
+  skill assigns.**
+- **Layer-targeting before consolidation.** Decide the right level for each rule
+  *before* merging. Never merge rules that belong at different levels; if the tool
+  proposes a merge that welds project-specific and user/machine-generic patterns
+  into one rule, split it and flag it.
+- **Heterogeneity is a discussion trigger, not a silent merge.** When a command
+  family contains an outlier in shape or scope (a flag-with-value, a
+  target/selector token, a member narrower or broader than its siblings), stop and
+  ask -- do NOT consolidate it away, and do NOT go research an unfamiliar
+  domain-specific tool to resolve it yourself. General programming judgement to
+  *notice* the outlier is enough; the user supplies the intent. Conversely, **assert
+  the standard semantics of ubiquitous, stable tools (git, .env, ssh, core unix) with
+  confidence** -- the ceiling is for obscure/domain-specific behavior, not universal
+  tooling.
+- **Don't re-derive the analysis by hand.** Get findings and config from the tool's
+  JSON contracts (below); do not eyeball config files and invent findings.
+- **Read-only until consent; respect the write gate.** Only the tool's
+  `--apply --write` / `--annotate --write` modify files, and only after the user
+  approves. Both run a safety pre-flight (clean working tree, resolved project
+  root) and refuse otherwise -- relay blockers, do not circumvent them.
 - **ASCII only** in anything you render for the clipboard or a commit message.
+
+## How this skill runs -- the passes
+
+This skill executes as an ordered sequence of **passes**, each with its own
+instruction file under `passes/`. Trying to gather, level, consolidate, audit, and
+present all at once invites mistakes; each pass has a focused job. The passes share
+one working document -- the **recommendation set** (schema:
+`passes/recommendation-set-schema.md`), a JSON file kept in the session scratchpad
+(never in the repo) that each pass reads and annotates.
+
+Load and follow each pass file in order:
+
+1. **`passes/1-gather-and-target.md`** -- run the analyzer + the security audit for
+   evidence, build the recommendation set, group every rule into command families
+   (across all sections), target the right level for each proposed change (blocking
+   cross-level welds), and capture the top-level config settings (takeover mode,
+   governed_tools, config_sync) as observations.
+2. **`passes/2-consolidate-and-group.md`** -- treat the tool's consolidations as
+   *candidates*, refine them at the judgement level under the level constraints,
+   flag heterogeneous families for discussion, and write the per-family narrative.
+3. **`passes/3-report-certify-and-apply.md`** -- render the understanding view, a
+   detect-and-inform section on the non-permission config settings (takeover
+   coherence, promotion-worthy posture), and a separate cut/paste TOML section;
+   certify the assembled config with the tool (parse + as-if-enacted audit); then
+   discuss and apply **case-by-case** on explicit consent.
+
+> Phasing note (implementation in progress): the discussion loop, corpus-replay
+> validation, first-run-vs-periodic trust levels, the prior-decision ledger, and
+> user-level promotion are being layered in next. Until then, keep every proposed
+> change at its current level and treat promotion opportunities as observations to
+> raise, not moves to enact.
 
 ## Picking the invocation
 
@@ -96,45 +142,35 @@ can offer them at install/first-run. **Self-healing (a call was denied):** you
 cannot run anything under the denial -- tell the user the exact rule above to add
 at their chosen scope, then retry. Every added rule stays explicit and auditable.
 
-## Stage 1 -- Report
+## Tool reference (commands and JSON contracts)
 
-### Run it
+The passes call these; the shapes are collected here as the single source of truth.
 
-Default run is **static and fast** (sub-second); it needs no corpus:
+### `toolguard-maintain` -- the analyzer
 
 ```bash
-toolguard-maintain --format json
+toolguard-maintain --format json          # findings (static, sub-second, no corpus)
 ```
 
-Options:
+Options: `--dir DIR` (curate another directory; default current), `--format
+json|markdown|text` (**json** for anything you re-present), `--tool TOOL`
+(restrict to one governed tool, repeatable; default all governed tools),
+`--corpus` (opt-in: also harvest toolguard daily logs + Claude Code transcripts so
+replay-backed and command-mining findings populate; can be slow -- bound with
+`--max-age-days N`; offer when the user wants usage-evidence-driven findings).
 
-- `--dir DIR` -- curate a different project directory (default: current).
-- `--format json|markdown|text` -- use **json** when you will interpret and
-  re-present findings (it is the structured contract); `markdown`/`text` only
-  when the user wants the raw report.
-- `--tool TOOL` -- restrict to one governed tool (repeatable). Default: all
-  governed tools (Bash, Read, Write, Edit).
-- `--corpus` -- **opt-in.** Also harvest an evidence corpus (toolguard daily logs
-  + Claude Code transcripts) so replay-backed and command-mining findings are
-  populated. This parses every observed command and **can be slow on a large
-  history** (tens of seconds), so bound it with `--max-age-days N`. Offer it when
-  the user wants usage-evidence-driven findings (mining of frequently-asked
-  commands, broadenings); warn that it takes a while. Example:
-  `toolguard-maintain --corpus --max-age-days 30 --format json`.
-
-### The JSON contract
+Findings JSON contract:
 
 ```
 {
-  "total_findings": int,
-  "has_any_findings": bool,
+  "total_findings": int, "has_any_findings": bool,
   "tools": [
     { "tool": "Bash", "total": int,
       "redundancies":   [ { "redundant_pattern", "provenance", "kind",
                             "list_type", "tool", "covered_by", "note" } ],
       "consolidations": [ { "kind", "tool", "list_type", "layer_provenance",
                             "removed_patterns", "added_pattern", "rationale",
-                            "replay_summary" } ],   // the APPLIABLE proposals
+                            "replay_summary" } ],   // CANDIDATE proposals -- evidence, not consent
       "broadenings":    [ { "kind", "tool", "list_type", "layer_provenance",
                             "removed_patterns", "added_pattern", "rationale",
                             "newly_admitted_commands", "overlaps_guard_rules",
@@ -142,177 +178,81 @@ Options:
       "cross_layer_redundancies": [ { "tool", "pattern", "redundant_provenance",
                                       "covered_by_provenance", "note" } ],
       "interactions":   [ { "tool", "provenance", "kind", "allow_pattern",
-                            "guard_section", "guard_pattern", "explanation" } ]
-    } ],
-  "mining": { "groups": [ { "tool", "command_key", "signal",
-                            "distinct_commands", "occurrences",
-                            "current_verdict", "observed_counts" } ] }
+                            "guard_section", "guard_pattern", "explanation" } ] } ],
+  "mining": { "groups": [ { "tool", "command_key", "signal", "distinct_commands",
+                            "occurrences", "current_verdict", "observed_counts" } ] }
 }
 ```
 
 Every `provenance` is expanded to `{ level, source_type, file_format, path,
-specificity, describe }` -- cite the `describe` string when you tell the user
-*where* a rule lives.
+specificity, describe }` -- `describe` tells the user *where* a rule lives, and
+`level` is what layer-targeting reasons about.
 
-### Present it
-
-Group findings by category and explain each in the user's own config terms:
-
-- **Consolidations** -- safe merges of a rule family into one clearer rule (e.g.
-  three `git diff|status|log` allows into one anchored regex). Replay-verified to
-  change no decision. These are what Stage 2 can apply.
-- **Broadenings** -- a *wider* rule the evidence suggests; spell out exactly what
-  new commands it would admit (`newly_admitted_commands`) and any guard rules it
-  overlaps. **Human decision -- never auto-applied.**
-- **Redundancies / cross-layer redundancies** -- rules already covered by another
-  rule (same file, or a broader layer). Suggest removal; name both loci.
-- **Clarity interactions** -- "correct but confusing" overlaps where toolguard's
-  resolution (deny always wins; broad ask collapses to deny; else more-specific
-  wins) makes the effective verdict non-obvious. Surface the tool's
-  `explanation` verbatim -- the value is making the real behavior legible.
-- **Mining groups** (only with `--corpus`) -- frequently-seen command families
-  and how they currently resolve, as evidence for consolidation/broadening.
-
-If `has_any_findings` is false, say the config is already tidy.
-
-## Stage 2 -- Apply (opt-in, gated)
-
-Only after presenting the report and the user agreeing to apply. **Applies the
-strict consolidations only.**
-
-### Always preview first (dry run)
+### `toolguard-maintain --apply` -- the dry-run preview (CANDIDATE edits)
 
 ```bash
-toolguard-maintain --apply               # dry-run PREVIEW: shows the diffs, writes nothing
-toolguard-maintain --apply --format json # same, as a structured change report
+toolguard-maintain --apply --format json  # dry-run: edit_proposals + diffs, writes NOTHING
 ```
 
-The preview prints a per-file change report **with the unified diff inlined**, so
-you (and the user) see exactly what would change. The JSON change report shape:
-
-```
-{ "dry_run": bool, "total_applied": int, "total_skipped": int,
-  "files_written": [path, ...],
-  "files": [ { "path", "file_format",
-               "applied": [ { "removed_patterns", "added_pattern", "rationale" } ],
-               "skipped": [ { "removed_patterns", "reason" } ],
-               "patterns_removed", "patterns_added", "diff", "written" } ],
-  "edit_proposals": [ ... ],          // appliable consolidations (for --edits review)
-  "withheld_nosecurity": [ { "tool", "list_type", "removed_patterns",
-                             "added_pattern", "reason" } ] }   // see below
-```
+Change-report JSON: `{ "dry_run", "total_applied", "total_skipped",
+"files_written", "files": [ { "path", "file_format", "applied":[{...}],
+"skipped":[{...}], "diff", "written" } ], "edit_proposals": [ EditProposal, ... ],
+"withheld_nosecurity": [ {...} ] }`. The `edit_proposals` array is what the audit's
+`--edits` consumes. **This is a preview, not an application** -- `files_written` is
+`[]` without `--write`.
 
 **`#NOSECURITY`-blessed rules are never auto-rewritten.** A consolidation that
-would remove/merge a rule the user annotated with a `#NOSECURITY[: reason]` comment
-is **withheld** from the apply path (and from the `edit_proposals` handed to the
-audit review) -- that rule is intentionally-insecure *here* and is the user's to
-change. Surface the `withheld_nosecurity` entries so the user knows a tidy-up was
-deliberately skipped; do not try to route around it.
+would touch a rule the user annotated `#NOSECURITY[: reason]` is **withheld** and
+surfaced in `withheld_nosecurity`; treat it as the user's to change and never route
+around it.
 
-### Choose how to present the change to the user
-
-Match the user's appetite -- these are presentation strategies over the same
-dry-run preview, not different tools:
-
-- **Self-edit (paste-ready).** Show the diff and the exact rule(s) to add/remove
-  so the user can hand-edit. Best when they want full control or to tweak wording.
-- **Bulk-apply.** Show the whole change report, then apply everything at once on
-  confirmation. Best when the consolidations are obviously safe and uniform.
-- **Case-by-case.** Walk the proposals (grouped by file / interacting rules),
-  confirming each. Best when some merges touch rules the user cares about, or
-  when clarity interactions overlap the same commands.
-
-### Review the proposed changes with the security-audit skill (before writing)
-
-**Always run this security review before `--write`.** A consolidation swaps a
-family of rules for a new rule (and a fix may span sections/layers), so it must be
-judged against the WHOLE config, not rule-by-rule. The audit does this
-as-if-enacted:
-
-1. Get the structured proposals from the dry-run preview: the JSON payload from
-   `toolguard-maintain --apply --format json` carries an `edit_proposals` array
-   (one `EditProposal` per consolidation).
-2. Write that array to a temp file and hand it to the audit:
-   ```bash
-   toolguard-audit --edits /tmp/tg-edits.json --format json
-   # dev checkout: uv run python -m toolguard.tools.security_audit --edits ... --format json
-   ```
-   The audit applies the edits in memory and reports on the AS-IF-ENACTED config;
-   `context.proposed_edits.delta` lists findings `introduced` and `resolved`.
-3. **Invoke the security-audit skill's judgement** on that result (its Pass-2
-   "Proposed edits" section). Treat any `introduced` finding as a blocker to
-   surface: a consolidation that resolves a MEDIUM but introduces a CRITICAL is a
-   bad trade -- do not write it without the user's explicit, informed go-ahead.
-4. Only proceed to `--write` when the review is clean or the user accepts the
-   introduced risk with full knowledge of it.
-
-The audit can also feed maintenance the OTHER direction: its own findings carry a
-structured `remediation_proposal` (an `EditProposal`); you may ingest those as
-proposed edits, preview them the same way, and (after the same review) apply them.
-
-### Commit the change (only on explicit confirmation)
+### `toolguard-audit --edits` -- as-if-enacted review
 
 ```bash
-toolguard-maintain --apply --write
+toolguard-audit --edits <edits.json> --format json --with-context
 ```
 
-`--write` is the only flag that modifies files, and it runs the safety pre-flight
-first. If the working tree is dirty or the project root cannot be resolved, it
-**refuses and exits non-zero** (leaving config untouched) -- relay the blockers
-and have the user commit/stash, then re-run. After a successful write the tree is
-now dirty (the change is uncommitted); a second `--write` is correctly refused
-until the user commits. Leave the git commit to the user.
+Applies the edits in memory and reports on the AS-IF-ENACTED config;
+`context.proposed_edits.delta` lists findings `introduced` and `resolved`, and
+`context.tools[].layers` is the full rule hierarchy per tool (every section, with
+`is_native` and per-rule `comments`). This is both the audit input and the richest
+source of the *current* config for family grouping.
 
-## Stage 3 -- Annotate (opt-in, gated, comment-only)
+### `toolguard-maintain --apply --write` / `--annotate` -- the only writers
 
-Separately from applying consolidations, you can write **`# toolguard:` comments**
-above rules with confusing interactions, so the real resolution is legible in the
-config file itself. This changes NO rule -- it only adds/updates generated comment
-lines.
-
-```bash
-toolguard-maintain --annotate                 # dry-run PREVIEW: unified diff, writes nothing
-toolguard-maintain --annotate --format json   # same, structured (per-file diffs)
-toolguard-maintain --annotate --write         # writes, gated by the same pre-flight as --apply
-```
-
-- **Idempotent + human-safe.** Re-running replaces the previous generation (no
-  accreted duplicates) and removes a stale note when a rule is no longer confusing.
-  Only `# toolguard:`-marked lines are ever touched; your own comments are
-  preserved, as are rule order, blank lines, and empty sections (minimal diff).
-- **Gated.** `--annotate --write` runs the working-tree / project-root pre-flight
-  and refuses on blockers, exactly like `--apply --write`. `--annotate` and
-  `--apply` are separate modes -- run them separately.
-- **When to offer it.** After presenting clarity-interaction findings, offer to
-  annotate so the config self-documents; always preview the diff and get consent
-  before `--write`.
+`--apply --write` enacts the approved consolidations; `--annotate [--write]`
+writes/refreshes `# toolguard:` comments above confusing interactions (comment-only,
+idempotent, touches only `# toolguard:` lines). Both run the working-tree /
+project-root pre-flight and **refuse on a dirty tree or unresolved root** (exit
+non-zero, config untouched) -- relay blockers, have the user commit/stash, re-run.
+Leave the git commit to the user.
 
 ## Relationship to the security-audit skill
 
-These are siblings with different jobs that form a loop: `toolguard-security-audit`
-flags **risk** (read-only), this skill curates **clarity and redundancy** and
-applies safe consolidations. They connect through the shared `EditProposal` model:
+Siblings with different jobs that form a loop through the shared `EditProposal`
+model: `toolguard-security-audit` flags **risk** (read-only); this skill curates
+**clarity, redundancy, and level** and enacts approved changes.
 
-- **Maintenance -> audit (mandatory before writing):** hand your proposed edits to
-  `toolguard-audit --edits` for the as-if-enacted review above.
+- **Maintenance -> audit (mandatory before any write):** hand proposed edits to
+  `toolguard-audit --edits` for the as-if-enacted review (pass 3).
 - **Audit -> maintenance:** each audit finding carries a structured
-  `remediation_proposal` (an `EditProposal`) you can ingest and apply through the
-  same preview + review + write path.
+  `remediation_proposal` (an `EditProposal`) you can ingest and drive through the
+  same propose -> discuss -> certify -> apply flow.
 
 Clarity interactions surface in both.
 
 ## When to use
 
 - On demand: "clean up my toolguard rules", "consolidate these allow patterns",
-  "my permission config has grown -- tidy it", "are any rules redundant or
-  confusing?".
-- As a periodic checkpoint -- a good pre-push curation step (the project's
-  pre-push checklist explicitly suggests running maintenance).
+  "my permission config has grown -- tidy it", "are any rules redundant, confusing,
+  or at the wrong level?".
+- As a periodic checkpoint -- a good pre-push curation step (the project's pre-push
+  checklist explicitly suggests running maintenance).
 
 ## Notes
 
-- The analyzer is offline for the report stage; only `--corpus` reads logs and
-  transcripts, and only `--write` ever modifies a file.
+- The analyzer is offline for gathering; only `--corpus` reads logs/transcripts,
+  and only `--write` ever modifies a file.
 - A clean report means no *known* maintenance patterns matched; it is not a proof
   the config is optimal.
 - toolguard is a desktop tool that works in **local time**; corpus windows

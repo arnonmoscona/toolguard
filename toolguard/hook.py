@@ -365,7 +365,109 @@ def _build_hook_argparser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--eval",
+        dest="eval_mode",
+        action="store_true",
+        default=False,
+        help=(
+            "READ-ONLY evaluation mode: read one hook event on stdin, resolve it "
+            "against the config, and print the JSON permissionDecision -- WITHOUT "
+            "logging, divergence checks, or auto-migration.  Used by the "
+            "cross-project security-audit skill to probe a project's safety floor "
+            "without mutating it or polluting its logs."
+        ),
+    )
     return parser
+
+
+def _resolve_event(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    config,
+    extended_syntax: bool,
+) -> Tuple[str, str]:
+    """
+    Resolve a single hook event to a ``(decision, reason)`` pair, READ-ONLY.
+
+    This adds only the parts :func:`main` owns on top of the shared decision
+    primitive -- the governed-tool check and the empty-input guard -- and then
+    delegates the actual resolution to :func:`toolguard.tools.decision.decide`, the
+    single side-effect-free primitive that also backs the replay harness and other
+    tooling.  Delegating (rather than re-copying the file-vs-command dispatch and
+    the ``[hard_deny]`` handling) makes the ``--eval`` verdict identical to the live
+    hook's by construction.  No logging, divergence checks, auto-migration, or
+    takeover reason-rewriting happen here (the takeover ``no_match_fallback`` rewrite
+    is cosmetic -- it changes a deny *reason* string but never the decision).
+
+    Args:
+        tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
+        tool_input: The tool input dict (carrying ``command`` or ``file_path``).
+        config: The resolved configuration to evaluate against.
+        extended_syntax: Whether extended (regex/glob) prefixes are honoured.
+
+    Returns:
+        A ``(decision, reason)`` tuple where decision is ``'allow'``, ``'deny'``,
+        or ``'ask'``.
+    """
+    # Local import: toolguard.tools.decision imports FILE_PATH_TOOLS from this
+    # module, so importing decide() at module top-level would be a circular import.
+    # This documented cycle is the sanctioned exception to the no-local-imports rule.
+    from toolguard.tools.decision import decide
+
+    governed_tools = list(config.governed_tools())
+    if tool_name not in governed_tools:
+        return "allow", f"Not a governed tool (governed: {', '.join(governed_tools)})"
+
+    if tool_name in FILE_PATH_TOOLS:
+        target = tool_input.get("file_path", "")
+        if not target:
+            return "deny", "No file_path provided in tool input"
+    else:
+        target = tool_input.get("command", "")
+        if not target:
+            return "deny", "No command provided in tool input"
+
+    result = decide(config, tool_name, target, extended_syntax)
+    return result.verdict, result.reason
+
+
+def _run_eval_mode() -> None:
+    """
+    Handle ``toolguard --eval``: read one hook event on stdin, resolve it
+    READ-ONLY, and print the JSON permissionDecision to stdout.
+
+    No logging, divergence checks, or auto-migration are performed, so probing a
+    project's configuration (e.g. from the cross-project security-audit skill)
+    never mutates the project or writes to its logs.  Errors are reported as a
+    ``deny`` decision on stderr, matching the live hook's fail-safe contract.
+    """
+    try:
+        hook_data = parse_hook_input()
+        tool_name = hook_data["tool_name"]
+        tool_input = hook_data["tool_input"]
+        cwd = hook_data.get("cwd", None)
+        # Anchor BOTH the rule hierarchy and the env/.env-derived settings
+        # (extended_syntax) to the TARGET project's cwd, ignoring any stale
+        # CLAUDE_SETTINGS_PATH / TOOLGUARD_PROJECT_ROOT override -- the same
+        # project-rooted rule the audit tooling uses (config_access.load_config).
+        # This keeps a cross-project sweep faithful to each probed project.
+        config = load_configuration(cwd, ignore_env_override=True)
+        env_config = get_env_config(start_dir=cwd)
+        extended_syntax = env_config.get("extended_syntax", True)
+        decision, reason = _resolve_event(
+            tool_name, tool_input, config, extended_syntax
+        )
+        print(json.dumps(create_hook_output(decision, reason)))
+    except json.JSONDecodeError as e:
+        output = create_hook_output("deny", f"Failed to parse hook input: {str(e)}")
+        print(json.dumps(output), file=sys.stderr)
+    except ValueError as e:
+        output = create_hook_output("deny", f"Invalid hook input: {str(e)}")
+        print(json.dumps(output), file=sys.stderr)
+    except Exception as e:
+        output = create_hook_output("deny", f"Unexpected error in hook: {str(e)}")
+        print(json.dumps(output), file=sys.stderr)
 
 
 def main() -> None:
@@ -395,11 +497,13 @@ def main() -> None:
     # works correctly when invoked via the test runner (which places test names
     # in sys.argv). This hook accepts NO arguments -- it only reads stdin -- so
     # unknown args are silently discarded. --help still exits 0 via argparse.
-    parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     # Interactive guard: if a human runs 'toolguard' in a terminal without piping
     # a JSON event, do not block on stdin. Print a brief explanation and exit.
     # Claude always pipes JSON (not a TTY), so this guard never fires in real use.
+    # This is placed before the --eval branch so 'toolguard --eval' typed by hand
+    # (no piped stdin) shows the message instead of hanging on stdin.read().
     # Exit code 0: informational, not an error (Arnon: change to non-zero if preferred).
     if sys.stdin.isatty():
         print(
@@ -411,6 +515,14 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(0)
+
+    # Read-only evaluation mode (--eval): resolve one piped event and print the
+    # verdict WITHOUT logging, divergence checks, or auto-migration. Used by the
+    # cross-project security-audit skill to probe a project's safety floor without
+    # mutating it.
+    if args.eval_mode:
+        _run_eval_mode()
+        return
 
     try:
         # Load environment configuration
