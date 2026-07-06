@@ -80,17 +80,47 @@ Load and follow each pass file in order:
 2. **`passes/2-consolidate-and-group.md`** -- treat the tool's consolidations as
    *candidates*, refine them at the judgement level under the level constraints,
    flag heterogeneous families for discussion, and write the per-family narrative.
-3. **`passes/3-report-certify-and-apply.md`** -- render the understanding view, a
-   detect-and-inform section on the non-permission config settings (takeover
+3. **`passes/3-report-and-certify.md`** (READ-ONLY) -- render the understanding view,
+   a detect-and-inform section on the non-permission config settings (takeover
    coherence, promotion-worthy posture), and a separate cut/paste TOML section;
-   certify the assembled config with the tool (parse + as-if-enacted audit); then
-   discuss and apply **case-by-case** on explicit consent.
+   certify the assembled config with the tool (parse + as-if-enacted audit +
+   corpus replay). Writes nothing.
+4. **`passes/4-discuss-and-apply.md`** (the WRITE pass) -- present the certified
+   proposal, drive the **case-by-case** approval conversation, and enact only what
+   the user explicitly approves; record each decision for the next run.
 
-> Phasing note (implementation in progress): the discussion loop, corpus-replay
-> validation, first-run-vs-periodic trust levels, the prior-decision ledger, and
-> user-level promotion are being layered in next. Until then, keep every proposed
-> change at its current level and treat promotion opportunities as observations to
-> raise, not moves to enact.
+> Phasing note (implementation in progress): the **prior-decision sidecar ledger**
+> (Phase C) and **user-level promotion** (Phase D) are still being layered in. Until
+> the ledger lands, a periodic run reads prior decisions only from in-file
+> annotations (`# toolguard:` / `#NOSECURITY`). Keep every proposed change at its
+> current level and treat promotion opportunities as observations to raise, not moves
+> to enact.
+
+## First run vs periodic (trust level)
+
+The **first** maintenance run on a project is large: everything is a fresh decision,
+so discuss it all. **Periodic** runs (the pre-push checkpoint) should be quiet --
+mostly no-ops, a few new rules -- and must not re-litigate questions the user already
+settled. The recommendation set carries `run_kind` (`"first"` | `"periodic"`) and a
+`trust_level` dial the user can set.
+
+- **Determine `run_kind` up front (pass 1).** If it is not obvious, ASK the user
+  ("first maintenance run on this project, or a periodic checkpoint?") and default to
+  `"first"` when unsure -- the safe default is to discuss more, never less. A project
+  that already carries `# toolguard:` annotations has almost certainly been maintained
+  before.
+- **What "already settled" means.** A decision recorded in-file -- a `# toolguard:`
+  note or a `#NOSECURITY: <reason>` the user accepted on a rule -- is a prior decision
+  a periodic run should honor and not re-raise. (The sidecar meta-decision ledger is
+  Phase C; until then, in-file annotations are the whole ledger.)
+- **Periodic behavior.** Still gather and certify everything (pass 1 + pass 3 are
+  unchanged), but in the report (pass 3 Step 1) collapse unchanged, already-settled
+  families to a one-line summary and surface in full only what is NEW or CHANGED plus
+  any material audit finding; in the conversation (pass 4) only open discussions for
+  those. The `trust_level` widens or narrows how much a periodic run pre-collapses.
+- **The floor never moves.** No run kind and no trust level ever authorizes an
+  automatic write. Periodic just means *quieter*, not *unattended* -- pass 4 still
+  enacts only on explicit consent.
 
 ## Invocation
 

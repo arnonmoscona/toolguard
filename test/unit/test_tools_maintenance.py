@@ -25,16 +25,20 @@ from toolguard.tools.maintenance import (
     _collect_annotations,
     _nosecurity_block_reason,
     _partition_nosecurity,
+    _render_replay,
     _run_annotate,
     _run_apply,
+    _run_replay_candidate,
     change_report_to_dict,
     collect_consolidations,
     consolidation_to_edit_proposal,
     main,
+    replay_diff_to_dict,
     report_to_dict,
     run_maintenance,
     render,
 )
+from toolguard.tools.replay import replay
 from toolguard.tools.rule_apply import ChangeReport, FileChange
 
 
@@ -729,6 +733,129 @@ class TestAnnotateMode(unittest.TestCase):
         """
         with self.assertRaises(SystemExit):
             main(["--write"])
+
+
+class TestReplayCandidate(unittest.TestCase):
+    """Corpus-validation mode: replay the corpus against current vs candidate config."""
+
+    def _broadened_and_tightened(self):
+        """
+        Build (config_a, config_b, corpus) where one command is broadened and one
+        tightened, then return the resulting ReplayDiff.
+        """
+        # A: rm allowed, git push denied.  B: the reverse.
+        config_a = _make_config(
+            _make_layer("Bash", allow=["rm:*"], deny=["git push:*"])
+        )
+        config_b = _make_config(
+            _make_layer("Bash", allow=["git push:*"], deny=["rm:*"])
+        )
+        corpus = [
+            _make_log_entry("Bash", "git push origin main"),
+            _make_log_entry("Bash", "rm -rf /tmp/x"),
+        ]
+        return replay(corpus, config_a, config_b)
+
+    def test_serializer_reports_broadened_and_tightened(self):
+        """
+        Given a candidate that admits a previously-denied command and denies a
+          previously-allowed one
+        When the replay diff is serialized for the skill
+        Then the counts and the broadened/tightened command lists reflect both
+        """
+        diff = self._broadened_and_tightened()
+        payload = replay_diff_to_dict(diff, corpus_size=2)["replay_candidate"]
+
+        self.assertEqual(payload["corpus_size"], 2)
+        self.assertEqual(payload["broadened"], 1)
+        self.assertEqual(payload["tightened"], 1)
+        broadened = payload["broadened_commands"]
+        self.assertEqual(len(broadened), 1)
+        self.assertEqual(broadened[0]["command"], "git push origin main")
+        self.assertEqual(broadened[0]["verdict_before"], "deny")
+        self.assertEqual(broadened[0]["verdict_after"], "allow")
+        self.assertEqual(payload["tightened_commands"][0]["command"], "rm -rf /tmp/x")
+
+    def test_render_flags_broadened_with_caveat(self):
+        """
+        Given a replay diff with a broadened command
+        When it is rendered as text
+        Then the broadened command and the necessary-not-sufficient caveat are shown
+        """
+        diff = self._broadened_and_tightened()
+        text = _render_replay(diff, corpus_size=2)
+
+        self.assertIn("BROADENED", text)
+        self.assertIn("git push origin main", text)
+        self.assertIn("Necessary, not sufficient", text)
+
+    def test_empty_corpus_is_reported_vacuous_not_clean(self):
+        """
+        Given an empty corpus (no observations to replay)
+        When the result is rendered
+        Then it is called out as vacuous rather than presented as a clean pass
+        """
+        from toolguard.tools.replay import ReplayDiff
+
+        text = _render_replay(ReplayDiff(), corpus_size=0)
+        self.assertIn("vacuous", text)
+        self.assertNotIn("BROADENED", text)
+
+    def test_cli_missing_candidate_dir_returns_2(self):
+        """
+        Given a --replay-candidate directory that does not exist
+        When the CLI runs
+        Then it prints an error and returns exit code 2 (no bogus clean result)
+        """
+        args = argparse.Namespace(
+            dir=".",
+            replay_candidate="/nonexistent/candidate/dir",
+            max_age_days=2,
+            format="json",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = _run_replay_candidate(args)
+        self.assertEqual(rc, 2)
+        self.assertIn("not found", buf.getvalue())
+
+    def test_cli_dispatch_emits_replay_json(self):
+        """
+        Given a valid candidate directory and mocked config/corpus loading
+        When the CLI runs in --replay-candidate JSON mode
+        Then it emits the replay_candidate payload with the broadened command
+        """
+        config_a = _make_config(
+            _make_layer("Bash", allow=["rm:*"], deny=["git push:*"])
+        )
+        config_b = _make_config(
+            _make_layer("Bash", allow=["git push:*"], deny=["rm:*"])
+        )
+        corpus = [_make_log_entry("Bash", "git push origin main")]
+        with tempfile.TemporaryDirectory() as candidate:
+            with mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                side_effect=[config_a, config_b],
+            ), mock.patch(
+                "toolguard.tools.maintenance.harvest_corpus",
+                return_value=corpus,
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = main(["--dir", ".", "--replay-candidate", candidate, "--format", "json"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())["replay_candidate"]
+        self.assertEqual(payload["broadened"], 1)
+        self.assertEqual(payload["broadened_commands"][0]["command"], "git push origin main")
+
+    def test_cli_rejects_combining_with_apply(self):
+        """
+        Given --replay-candidate combined with --apply
+        When the CLI parses arguments
+        Then it exits (the two modes are mutually exclusive)
+        """
+        with self.assertRaises(SystemExit):
+            main(["--replay-candidate", ".", "--apply"])
 
 
 if __name__ == "__main__":

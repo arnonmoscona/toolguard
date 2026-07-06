@@ -31,9 +31,17 @@ section (suggest the exact rule, get consent, retry) -- do not work around it.
 ## Step 2 -- initialise the recommendation set
 
 Create the JSON document per the schema. Fill `meta` (`project_dir`,
-`generated_at` in local time, `toolguard_version`; set `run_kind:"first"` and leave
-`trust_level` at a neutral default for now). Leave `audit`, `corpus_validation`,
-`certification`, and `final_toml` null -- later passes fill them.
+`generated_at` in local time, `toolguard_version`; set `trust_level` to a neutral
+default). Leave `audit`, `corpus_validation`, `certification`, and `final_toml` null
+-- later passes fill them.
+
+**Determine `run_kind`** (see SKILL.md "First run vs periodic"). If the current
+config already carries `# toolguard:` annotations, this project has been maintained
+before -- lean `"periodic"`. If it plainly has not, or you cannot tell, ASK the user
+and default to `"first"` when unsure (the safe default discusses more, never less).
+While walking the config in Step 3, note which rules already carry a prior in-file
+decision (`# toolguard:` or `#NOSECURITY: <reason>`): those are settled and a
+periodic run must not re-litigate them.
 
 ## Step 3 -- group every rule into command families
 

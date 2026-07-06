@@ -80,6 +80,19 @@ For a family whose merge members are homogeneous and share one level:
   as one discussion point; do not claim the merge "fixes" it.
 - Keep `replay_summary` as the evidence line; it is decision-neutrality over the
   observed corpus, not a correctness proof -- say so if you cite it.
+- **Never remove a narrower rule that is subsumed by an audit-FLAGGED parent.** The
+  tool proposes `remove` for a rule when a broader sibling subsumes it (static
+  subsumption / redundancy). But if that broader parent carries a CRITICAL/HIGH
+  finding in `audit.before`, removing the narrower rule is a security regression
+  disguised as tidy-up. The classic trap: the specific `uv run python <script>`
+  allows are "redundant" under the blanket `uv run python:*` -- but `uv run python:*`
+  IS the arbitrary-exec CRITICAL, and those narrower, safer allows are exactly the
+  fallback the user keeps if they take the secure path and DROP the flagged parent.
+  Cross-check every proposed removal against `audit.before`: if the subsuming parent
+  is flagged, keep the narrower rule, mark the redundancy `no-change`, and note the
+  coupling. The removal only becomes safe once the parent is confirmed staying AND is
+  itself clean. Following the maintenance findings mechanically hides this: it cuts
+  the finding count while worsening posture.
 
 ## Step 3a -- recommend known hardening confidently (secret files)
 
@@ -150,4 +163,5 @@ suggested") so the final report can still show them in context without noise.
 The recommendation set with every consolidation either refined (homogeneous,
 same-level, legible) or converted to a discussion/split, heterogeneity outliers
 flagged and questioned, and a narrative on every family. Hand off to
-`3-report-certify-and-apply.md`.
+`3-report-and-certify.md` (read-only), which certifies the proposal; the write
+happens in `4-discuss-and-apply.md`.

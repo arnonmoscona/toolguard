@@ -1,13 +1,19 @@
-# Pass 3 -- Report, certify, and apply
+# Pass 3 -- Report and certify (READ-ONLY)
 
-**Goal:** present the proposal so the user can understand and decide it, prove the
-proposed config is sound with the tool, and enact -- case by case, on explicit
-consent -- only what the user approves. This is the pass that finally talks to the
-user and (only then) may write.
+**Goal:** turn the fully-judged recommendation set into a proposal the user can
+understand and decide, and PROVE the proposed config is sound with the tool --
+without writing anything. This pass renders the understanding view, the paste-ready
+TOML, and the certification (parse + as-if-enacted audit + corpus replay). It ends
+read-only: the conversation and any writes happen in **pass 4**.
 
-Read `../SKILL.md` (hard constraints, tool reference, self-permissioning) and
-`recommendation-set-schema.md` first. Input: the fully-annotated recommendation set
-from pass 2.
+Read `../SKILL.md` (hard constraints, tool reference, self-permissioning, first-run
+vs periodic) and `recommendation-set-schema.md` first. Input: the fully-annotated
+recommendation set from pass 2.
+
+> **Nothing is written in this pass.** Do not run `--apply --write`, `--annotate
+> --write`, or edit any config file here. Produce the certified proposal and hand it
+> to pass 4, which drives the case-by-case discussion and enacts only what the user
+> approves.
 
 ## Step 1 -- render the understanding view (for comprehension, not paste)
 
@@ -22,7 +28,8 @@ Group by **command family**. For each family, in this order:
 - The **narrative** paragraph from pass 2.
 - Any **discussion questions** for this family, called out clearly (broadening
   opportunity, heterogeneity outlier, promotion opportunity, persisting
-  ask/deny interaction). These are the decisions you are asking the user to make.
+  ask/deny interaction). These are the decisions you will ask the user to make in
+  pass 4.
 
 Sort families with the most-consequential first: families with changes or open
 questions before all-`no-change` families, and **within that tier, tie-break by the
@@ -33,6 +40,12 @@ interactions rather than re-deriving resolution semantics. ASCII only.
 
 Do not bury a section/deny/hard_deny change inside an allow discussion -- if a change
 spans sections, show each section's line under the same family.
+
+**On a periodic run (see SKILL.md "First run vs periodic"),** collapse the families
+that are unchanged AND already settled (a prior decision recorded in-file, or in the
+ledger once Phase C lands) into a single one-line summary ("N families unchanged
+since the last run, not re-litigated"). Surface in full only NEW or CHANGED families
+and any material audit finding. On a first run, show everything.
 
 ## Step 1b -- render the configuration-settings section (detect and inform)
 
@@ -134,18 +147,21 @@ Never let the user paste un-certified AI-authored TOML. Prove it with the tool:
    temp dir) before auditing.
 2. Run `toolguard-audit --dir <tempdir> --format json --with-context` against the
    staged copy. **This staging audit is the authoritative pre-write certification**
-   -- it covers
-   the ENTIRE assembled config, including hand-authored changes (level splits, deny
-   hardening) that a `--edits` delta cannot see. When both were run, the `--dir`
-   staging verdict governs; treat any `--edits` delta as a narrower cross-check of
-   the tool-appliable consolidations, not the gate.
+   -- it covers the ENTIRE assembled config, including hand-authored changes (level
+   splits, deny hardening) that a `--edits` delta cannot see. When both were run, the
+   `--dir` staging verdict governs; treat any `--edits` delta as a narrower cross-check
+   of the tool-appliable consolidations, not the gate.
    - **VERIFY the audit actually loaded your staged config before trusting any
-     result.** Check that `context.summary.sources` includes your staged file and
-     that `takeover_active` matches the real project (usually `true`). If takeover
-     flips to `false`, `sources` shows only user-level JSON, or you see a spurious
-     `hook-not-registered` finding, the staging FAILED to load -- the "clean" result
-     is false. Do not report it; fix the staging (project root) and re-run. This
-     failure is silent and produces a config that looks like it resolved everything.
+     result.** Mind the exact JSON paths: `sources` lives under
+     `context.summary.sources` (a list), but **`takeover_active` is a TOP-LEVEL audit
+     key** (`<result>.takeover_active`) -- it is NOT under `context.summary`, where it
+     reads as absent/None. Check that `context.summary.sources` includes your staged
+     file and that the top-level `takeover_active` matches the real project (usually
+     `true`). If takeover flips to `false`, `sources` shows only user-level JSON, or
+     you see a spurious `hook-not-registered` finding, the staging FAILED to load --
+     the "clean" result is false. Do not report it; fix the staging (project root) and
+     re-run. This failure is silent and produces a config that looks like it resolved
+     everything.
    - If it **fails to load/parse**, the TOML is wrong -- fix it and repeat; never
      hand the user TOML that does not parse.
    - Compare its findings to the current config's audit (the `audit.before` you
@@ -153,10 +169,9 @@ Never let the user paste un-certified AI-authored TOML. Prove it with the tool:
      the `--edits` review would flag. A change that resolves a MEDIUM but introduces
      a CRITICAL is a bad trade -- say so.
 3. Record the result in the recommendation set `certification`
-   (`parses`, `audit_clean`, `notes`). Corpus-replay validation is a later phase;
-   for now note it as not-yet-run rather than claiming it.
+   (`parses`, `audit_clean`, `notes`).
 
-State the certification outcome to the user with the report: "the proposed config
+State the certification outcome to the user in the report: "the proposed config
 parses and the security audit is clean / introduces the following ...".
 
 ## Step 3a -- let the audit REVISE the proposal, not just gate it
@@ -200,39 +215,52 @@ alternative** the user can accept:
 The point: a finding that touches what you are already editing must reshape the
 recommendation, not sit beside it as a caveat.
 
-## Step 4 -- discuss and apply, case by case, on explicit consent
+## Step 3b -- corpus-replay validation (necessary, NOT sufficient)
 
-Present the understanding view + cut/paste section + certification. Then **let the
-user drive**:
+Once the candidate is settled (Step 3 clean, any Step-3a revision folded in),
+validate it against what the project has actually done. The `--dir` staging audit
+proves the config is *sound*; corpus replay checks it does not silently **change the
+verdict** on commands the project really ran.
 
-- Default to **case-by-case**: walk the families with changes or questions, take the
-  user's decision (accept / reject / modify), and record it in each member's
-  `user_decision` / `user_note`. Answer their questions; if a heterogeneity or
-  broadening question changes the plan, update the proposal and re-certify.
-- **Bulk-apply only if the user explicitly asks for it** ("just apply it all"). It is
-  never the default and never something you label "safe" on their behalf.
-- **Self-edit** is always offered: the cut/paste TOML lets the user hand-edit if they
-  want full control or to tweak wording.
+```bash
+toolguard-maintain --dir <project> --replay-candidate <tempdir> --format json
+```
 
-### Enacting approved changes
+This replays the project's observed corpus against the current config vs the staged
+candidate and classifies each observed command as `unchanged`, `tightened`
+(candidate stricter -- usually fine), or `broadened` (candidate now *admits*
+something the current config did not). Record the result in the recommendation set
+`corpus_validation` (`corpus_size`, `broadened`, `tightened`, and the broadened
+commands).
 
-- For approved **tool-appliable consolidations** (the pass-1 `edit_proposals`
-  subset the user accepted), enact with `toolguard-maintain --apply --write` after a
-  final `--apply` dry-run preview shown to the user. Respect the write pre-flight
-  (clean tree, resolved root); on refusal relay the blockers and have the user
-  commit/stash, then retry. If the user accepted only a subset, prefer guiding a
-  self-edit from the certified TOML over applying more than they approved.
-- For approved changes the tool cannot mechanically apply (level splits, hand-tuned
-  rewrites): have the user paste the certified TOML, or apply via their chosen edit
-  path. Do not invent a write mechanism the tool does not provide.
-- After presenting clarity interactions, offer `toolguard-maintain --annotate` to
-  write `# toolguard:` comments so the config self-documents (comment-only, same
-  write gate; preview first).
-- **Leave the git commit to the user.**
+- **`--replay-candidate` harvests its OWN corpus, independently of `--corpus`.** Do
+  not conclude the replay is vacuous just because the pass-1 findings reported "no
+  corpus": the maintenance findings only replay when `--corpus` was passed, whereas
+  `--replay-candidate` always harvests. Trust the `corpus_size` this command reports,
+  not the findings output. (In the featherhill dry-run this harvested ~4700 commands
+  even though the default findings showed none.)
+- **Expect benign stderr noise.** The parser prints non-fatal
+  `Grammar parse failed for command ...` warnings for exotic command strings (unusual
+  quoting, inline scripts). They are swallowed gracefully and do NOT mean the tool
+  failed -- read the `corpus_size`/counts on stdout, not the stderr warnings.
+
+- **`broadened` commands are the red flag.** A consolidation you believed was
+  behavior-preserving that broadens a real observed command is exactly the mistake
+  replay exists to catch -- surface each one in the report and reconcile it against
+  the family's proposal before pass 4.
+- **Necessary, not sufficient -- say so.** Replay only covers OBSERVED commands; a
+  clean replay is NOT proof the candidate is safe for unobserved input, and it does
+  NOT grant consent. It is corroborating evidence for the understanding view, never a
+  gate that authorizes an apply on its own.
+- **An empty corpus is vacuous, not clean.** If `corpus_size` is 0 (no harvestable
+  history, or `--corpus` mining found nothing in the window), state that the replay
+  proved nothing rather than reporting a pass. Consider widening `--max-age-days` or
+  simply noting the absence of evidence.
 
 ## Output
 
-Approved changes enacted (or handed off as certified paste-ready TOML); the
-recommendation set records every decision (`user_decision`/`user_note`) for the
-future prior-decision ledger. Nothing was applied that the user did not explicitly
-approve.
+A certified, replay-validated proposal, fully recorded in the recommendation set
+(`certification`, `corpus_validation`, per-family narratives and discussion
+questions). **Nothing has been written.** Hand off to `4-discuss-and-apply.md`, which
+presents this to the user, drives the case-by-case decision, and enacts only what is
+approved.

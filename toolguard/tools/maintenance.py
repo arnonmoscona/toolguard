@@ -68,6 +68,7 @@ from toolguard.tools.hierarchy import (
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.mining import MiningReport, mine_rule_candidates, render_mining_report
 from toolguard.tools.redundancy import RedundancyFinding, find_redundancy
+from toolguard.tools.replay import EntryDiff, ReplayDiff, replay
 
 
 @dataclass(frozen=True)
@@ -795,6 +796,125 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     return 0
 
 
+def _replay_entry_to_dict(diff_entry: EntryDiff) -> Dict[str, str]:
+    """Serialize one replay :class:`EntryDiff` to a small JSON-friendly dict."""
+    return {
+        "tool": diff_entry.entry.tool,
+        "command": diff_entry.entry.command,
+        "verdict_before": diff_entry.decision_a.verdict,
+        "verdict_after": diff_entry.decision_b.verdict,
+    }
+
+
+def replay_diff_to_dict(diff: ReplayDiff, corpus_size: int) -> Dict[str, Any]:
+    """
+    Serialize a candidate-replay :class:`ReplayDiff` for the maintenance skill.
+
+    Args:
+        diff: The two-config replay result (current config vs candidate).
+        corpus_size: Number of corpus observations replayed (0 means the replay
+            is vacuous -- necessary evidence is simply absent).
+
+    Returns:
+        A dict under the ``replay_candidate`` key with summary counts and the
+        broadened/tightened command lists.  Broadened commands are the risk
+        signal (the candidate would newly admit them); tightened are usually fine.
+    """
+    return {
+        "replay_candidate": {
+            "corpus_size": corpus_size,
+            "unchanged": diff.unchanged_count,
+            "tightened": diff.tightened_count,
+            "broadened": diff.broadened_count,
+            "broadened_commands": [_replay_entry_to_dict(d) for d in diff.broadened()],
+            "tightened_commands": [_replay_entry_to_dict(d) for d in diff.tightened()],
+        }
+    }
+
+
+def _render_replay(diff: ReplayDiff, corpus_size: int, fmt: str = "markdown") -> str:
+    """
+    Render a candidate-replay result as human-readable text.
+
+    Leads with the necessary-not-sufficient caveat, then lists broadened commands
+    (the risk) and tightened commands (informational).  An empty corpus is called
+    out explicitly as vacuous rather than reported as a clean pass.
+    """
+    title = "Corpus replay: current config vs candidate"
+    lines = [f"# {title}" if fmt == "markdown" else title, ""]
+    if corpus_size == 0:
+        lines.append(
+            "No corpus observations were harvested, so this replay proves NOTHING "
+            "about the candidate. Corpus validation is necessary but not "
+            "sufficient; an empty corpus is vacuous, not a clean pass."
+        )
+        return "\n".join(lines)
+
+    lines.append(f"Observations replayed: {diff.total_count}")
+    lines.append(f"  unchanged:                     {diff.unchanged_count}")
+    lines.append(f"  tightened (candidate stricter): {diff.tightened_count}")
+    lines.append(f"  broadened (candidate looser):   {diff.broadened_count}")
+
+    if diff.broadened_count:
+        lines.append("")
+        lines.append("BROADENED -- commands the candidate would newly admit (review each):")
+        for d in diff.broadened():
+            lines.append(f"  [{d.entry.tool}] {d.entry.command}")
+            lines.append(f"      {d.decision_a.verdict} -> {d.decision_b.verdict}")
+    if diff.tightened_count:
+        lines.append("")
+        lines.append("TIGHTENED -- commands the candidate would newly restrict (usually fine):")
+        for d in diff.tightened():
+            lines.append(f"  [{d.entry.tool}] {d.entry.command}")
+            lines.append(f"      {d.decision_a.verdict} -> {d.decision_b.verdict}")
+
+    lines.append("")
+    lines.append(
+        "Necessary, not sufficient: replay only covers OBSERVED commands. A clean "
+        "replay is not proof the candidate is safe for unobserved input."
+    )
+    return "\n".join(lines)
+
+
+def _run_replay_candidate(args: argparse.Namespace) -> int:
+    """
+    Execute ``--replay-candidate``: corpus-validate an assembled candidate config.
+
+    Replays the observed command corpus of ``--dir`` against BOTH the current
+    config and the candidate config discovered from the ``--replay-candidate``
+    directory (a staged project root the maintenance skill assembled), then reports
+    which observed commands the candidate would newly BROADEN (admit) or TIGHTEN
+    (restrict).
+
+    This is the corpus-validation step of the skill's certification. It is
+    read-only and NEVER a gate on its own: a broadening is a red flag to surface,
+    an empty corpus is vacuous, and a clean replay only covers observed commands.
+    Exit code is ``0`` unless the candidate directory does not exist.
+
+    Args:
+        args: Parsed CLI arguments (uses ``dir``, ``replay_candidate``,
+            ``max_age_days``, ``format``).
+
+    Returns:
+        Process exit code (``0`` on success, ``2`` if the candidate dir is missing).
+    """
+    candidate_dir = Path(args.replay_candidate)
+    if not candidate_dir.exists():
+        print(f"--replay-candidate: directory not found: {candidate_dir}")
+        return 2
+
+    config_a = load_config(Path(args.dir))
+    config_b = load_config(candidate_dir)
+    corpus = harvest_corpus(Path(args.dir), max_age_days=args.max_age_days)
+    diff = replay(corpus, config_a, config_b)
+
+    if args.format == "json":
+        print(json.dumps(replay_diff_to_dict(diff, len(corpus)), indent=2))
+    else:
+        print(_render_replay(diff, len(corpus), fmt=args.format))
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     CLI entry point for the ``toolguard-maintain`` console script.
@@ -916,13 +1036,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "pre-flight finds blockers (dirty working tree, unresolved project root)."
         ),
     )
+    parser.add_argument(
+        "--replay-candidate",
+        dest="replay_candidate",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Corpus-validation mode (read-only): replay the observed command "
+            "corpus of --dir against BOTH the current config and the assembled "
+            "candidate config discovered from DIR (a staged project root), and "
+            "report which observed commands the candidate would newly broaden "
+            "(admit) or tighten (restrict). Harvests the corpus automatically. "
+            "Necessary but not sufficient -- covers only observed commands and "
+            "never gates on its own."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
     if args.apply and args.annotate:
         parser.error("--apply and --annotate are separate modes; run them separately")
+    if args.replay_candidate and (args.apply or args.annotate):
+        parser.error(
+            "--replay-candidate is a separate read-only mode; do not combine it "
+            "with --apply or --annotate"
+        )
     if args.write and not (args.apply or args.annotate):
         parser.error("--write requires --apply or --annotate")
+
+    if args.replay_candidate:
+        return _run_replay_candidate(args)
 
     config = load_config(Path(args.dir))
 
