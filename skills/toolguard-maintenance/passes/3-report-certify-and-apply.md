@@ -24,8 +24,11 @@ Group by **command family**. For each family, in this order:
   opportunity, heterogeneity outlier, promotion opportunity, persisting
   ask/deny interaction). These are the decisions you are asking the user to make.
 
-Sort families with the most-consequential first (families with changes or open
-questions before all-`no-change` families). Keep the tool's `explanation` text for
+Sort families with the most-consequential first: families with changes or open
+questions before all-`no-change` families, and **within that tier, tie-break by the
+highest audit severity landing in the family** (from `audit.before` -- a family
+carrying a CRITICAL/HIGH finding sorts above one whose changes are cosmetic, so the
+riskiest material is read first). Keep the tool's `explanation` text for
 interactions rather than re-deriving resolution semantics. ASCII only.
 
 Do not bury a section/deny/hard_deny change inside an allow discussion -- if a change
@@ -130,7 +133,12 @@ Never let the user paste un-certified AI-authored TOML. Prove it with the tool:
    marker), so a bare temp dir loads NOTHING. Make it a root (e.g. `git init` the
    temp dir) before auditing.
 2. Run `toolguard-audit --dir <tempdir> --format json --with-context` against the
-   staged copy.
+   staged copy. **This staging audit is the authoritative pre-write certification**
+   -- it covers
+   the ENTIRE assembled config, including hand-authored changes (level splits, deny
+   hardening) that a `--edits` delta cannot see. When both were run, the `--dir`
+   staging verdict governs; treat any `--edits` delta as a narrower cross-check of
+   the tool-appliable consolidations, not the gate.
    - **VERIFY the audit actually loaded your staged config before trusting any
      result.** Check that `context.summary.sources` includes your staged file and
      that `takeover_active` matches the real project (usually `true`). If takeover

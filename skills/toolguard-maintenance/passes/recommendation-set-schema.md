@@ -7,6 +7,12 @@ that carries the whole change proposal from raw findings through to the paste-re
 This file is the contract between passes. Keep every pass's reads/writes to these fields.
 Store the document in the session scratchpad (never in the repo).
 
+> **Internal scratch -- not a user-facing artifact.** This JSON is the skill's own
+> working state. It lives ONLY in the session scratchpad, is never committed to the
+> repo, and is never shown to the user as-is. The user sees the rendered
+> understanding view and the paste-ready TOML (pass 3), never this document. Do not
+> quote its raw JSON at the user or offer it as output.
+
 ## Shape
 
 ```

@@ -9,7 +9,7 @@ description: >
   Runs a deterministic analyzer first, then optionally offers a deeper,
   judgement-based AI-assisted assessment. Read-only: it reports findings and
   proposes fixes but never edits the config.
-argument-hint: "[directory (default: current project)] [--format json|markdown|text] [--with-context] [--strict]"
+argument-hint: "[directory (default: current project)] [--format json|markdown|text] [--with-context] [--strict] [--dev (toolguard maintainers only)]"
 ---
 
 # Toolguard Security Audit
@@ -54,26 +54,37 @@ can always tell mechanical certainty from model judgement.
 Run from the project whose configuration you want to audit (the analyzer discovers
 the full hierarchy upward from that directory, exactly as the live hook does).
 
-**Pick the invocation by where you are:**
+**Default -- always use the installed console script.** `toolguard-audit` is put on
+the user's PATH by `uv tool install toolguard` and runs inside toolguard's OWN
+virtualenv, so the audited project needs nothing on its Python path. Use it
+**verbatim**: do NOT prefix it with `uv run` and do NOT rewrite it as `python -m ...`.
 
-- **Auditing any normal project** -- use the installed console script. It runs inside
-  toolguard's own environment, so the audited project does **not** need toolguard on its
-  Python path:
-  ```bash
-  toolguard-audit --format json
-  ```
-- **Developing toolguard itself** -- if the current project IS the toolguard source repo
-  (its `pyproject.toml` declares `name = "toolguard"` and `toolguard/tools/security_audit.py`
-  exists), run the in-repo module so you exercise the **working branch**, not the installed
-  release:
-  ```bash
-  uv run python -m toolguard.tools.security_audit --format json
-  ```
-- **If `toolguard-audit` is not found** (and you are not in the toolguard repo) -- the
-  install is too old or partial (it predates this tool). Tell the user and suggest
-  `uv tool upgrade toolguard`. Do **not** fall back to the `uv run python -m ...` form on an
-  arbitrary project: that only works inside the toolguard source tree, and will fail
-  confusingly elsewhere (the target project has no toolguard to import).
+```bash
+toolguard-audit --format json
+```
+
+- **If `toolguard-audit` is not found** (and you are not a toolguard maintainer -- see
+  Development mode) -- the install is missing, too old, or partial. Tell the user and
+  suggest `uv tool install toolguard` / `uv tool upgrade toolguard`. Do not improvise
+  another invocation form.
+
+#### Development mode (toolguard maintainers only -- the ONLY exception)
+
+One situation departs from the console-script default: maintaining the toolguard
+project *itself* (its source tree, on the maintainer's machine), where you run the
+in-repo module to exercise the **working branch**. This never applies to a normal
+audited project. **Enter dev mode when EITHER** the skill was invoked with the
+**`--dev`** argument (authoritative; use it when developing/testing toolguard) **or**
+the current project IS the toolguard source repo (its `pyproject.toml` declares
+`name = "toolguard"` and `toolguard/tools/security_audit.py` exists -- the fallback if
+`--dev` was forgotten). In dev mode, and only then, substitute:
+
+| console script (default) | dev-mode form |
+| --- | --- |
+| `toolguard-audit ...` | `uv run python -m toolguard.tools.security_audit ...` |
+
+This table is the sole place the `uv run python -m ...` form is defined; everywhere
+else this skill speaks only `toolguard-audit`.
 
 > **Prerequisite under toolguard governance (self-permissioning).** When toolguard governs
 > the current project (especially in takeover mode), running `toolguard-audit` is itself a
@@ -216,7 +227,6 @@ same consolidated material the deterministic analyzers used, from one call:
 
 ```bash
 toolguard-audit --format json --with-context
-# dev checkout: uv run python -m toolguard.tools.security_audit --format json --with-context
 ```
 
 That JSON is the Pass-1 payload plus an additive top-level `context` block:
@@ -342,7 +352,8 @@ Few-shot examples (style, not a fixed catalogue):
    - finding: `.env`/`.ssh` reads slip through un-denied tools (`grep .env`, `tail ~/.ssh/id_rsa`).
    - fix (add these denies):
      `Bash([regex]\.env\b)`        -- any Bash command naming a .env file (all readers)
-     `Bash([regex]/\.ssh/)`        -- any Bash command touching a .ssh path
+     `Bash([regex]\.ssh/)`         -- any Bash command touching a .ssh path (no leading
+                                      slash: `\.ssh/` catches relative AND absolute)
      `Read([glob]**/.env)` `Read([glob]**/.ssh/**)`  -- the Read/Edit/Write tool path
 
 3. **Delete outright** -- arbitrary execution:

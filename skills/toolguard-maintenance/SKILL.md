@@ -11,7 +11,7 @@ description: >
   periodic config-curation checkpoint (e.g. before a push). Runs a deterministic
   analyzer for evidence, reasons about it in passes, and never applies anything
   automatically.
-argument-hint: "[directory (default: current project)] [--corpus]"
+argument-hint: "[directory (default: current project)] [--corpus] [--dev (toolguard maintainers only)]"
 ---
 
 # Toolguard Maintenance
@@ -92,30 +92,54 @@ Load and follow each pass file in order:
 > change at its current level and treat promotion opportunities as observations to
 > raise, not moves to enact.
 
-## Picking the invocation
+## Invocation
 
 Run from the project whose configuration you want to curate (the analyzer
 discovers the full hierarchy upward from that directory, exactly as the live hook
-does). Pick the invocation by where you are -- the same rule as the audit skill:
+does).
 
-- **Curating any normal project** -- use the installed console script (it runs
-  inside toolguard's own environment, so the target project does not need
-  toolguard on its Python path):
-  ```bash
-  toolguard-maintain --format json
-  ```
-- **Developing toolguard itself** -- if the current project IS the toolguard
-  source repo (its `pyproject.toml` declares `name = "toolguard"` and
-  `toolguard/tools/maintenance.py` exists), run the in-repo module so you
-  exercise the **working branch**, not the installed release:
-  ```bash
-  uv run python -m toolguard.tools.maintenance --format json
-  ```
-- **If `toolguard-maintain` is not found** (and you are not in the toolguard
-  repo) -- the global install is too old or partial (it predates this tool). Tell
-  the user and suggest `uv tool upgrade toolguard`. Do **not** fall back to the
-  `uv run python -m ...` form on an arbitrary project: that only works inside the
-  toolguard source tree and fails confusingly elsewhere.
+**Default -- always use the installed console scripts.** Every command in this skill
+and in its passes is written in console-script form (`toolguard-maintain`,
+`toolguard-audit`). `uv tool install toolguard` puts these on the user's PATH and
+they run inside toolguard's OWN virtualenv, so the target project needs nothing on
+its Python path. Use them **verbatim**: do NOT prefix them with `uv run` and do NOT
+rewrite them as `python -m ...`. Outside the toolguard source repo there is no `uv`
+project to run and no importable `toolguard` package, so those forms just fail.
+
+- **If `toolguard-maintain` is not found** (and you are not a toolguard maintainer --
+  see Development mode) -- the global install is missing, too old, or partial. Tell
+  the user and suggest `uv tool install toolguard` / `uv tool upgrade toolguard`. Do
+  not improvise another invocation form.
+
+Three names, reconciled: `toolguard-maintain` and `toolguard-audit` are the two
+console scripts this skill drives; **`toolguard-security-audit` is a sibling *skill***
+that wraps the audit analyzer -- it is never a shell command.
+
+### Development mode (toolguard maintainers only -- the ONLY exception)
+
+One situation, and only one, departs from the console-script default: maintaining the
+toolguard project *itself* (working on its source tree, on the maintainer's machine).
+There the installed release may lag the checkout, so you run the in-repo modules to
+exercise the **working branch**. This never applies to a normal target project.
+
+**Enter dev mode when EITHER holds:**
+
+- the skill was invoked with the **`--dev`** argument -- authoritative; use this when
+  developing/testing toolguard, as we are now; or
+- the current project IS the toolguard source repo as a fallback (its
+  `pyproject.toml` declares `name = "toolguard"` and `toolguard/tools/maintenance.py`
+  exists), so it still works if `--dev` was forgotten.
+
+In dev mode, apply this ONE mechanical substitution to every command in this skill
+and its passes; nothing else changes:
+
+| console script (default) | dev-mode form |
+| --- | --- |
+| `toolguard-maintain ...` | `uv run python -m toolguard.tools.maintenance ...` |
+| `toolguard-audit ...`    | `uv run python -m toolguard.tools.security_audit ...` |
+
+This table is the **sole** place the `uv run python -m ...` form is defined. The rest
+of the skill body speaks only console scripts.
 
 ## Self-permissioning (running toolguard's tools under governance)
 
@@ -135,6 +159,14 @@ the **same scope the skill is installed** (user vs project). The concrete rules
   **not** blanket-allow it.
 - Hook entry points (`toolguard`, `toolguard-session-start`) are run by Claude
   Code's hook machinery, not as Bash calls -- they never need an allow rule.
+- **Self-permission rules always name the console-script form**
+  (`toolguard-audit:*`, `toolguard-maintain:*`) -- never the in-repo module
+  dev-form. Even when you invoke the tools via `uv run python -m toolguard.tools.*`
+  inside the toolguard source repo, do NOT bake a
+  `Bash(uv run python -m toolguard.tools.*:*)` rule into config: that is
+  dev-machine-specific cruft, and the dev repo's own `uv run python` allowance
+  already covers the dev-form. The persisted self-permission rules are for the
+  normal console-script invocation.
 
 **Proactively (tools can run):** `toolguard.tools.self_permission.missing_self_permissions(config)`
 reports which of the above are not yet permitted and the exact rule to add, so you
@@ -206,7 +238,7 @@ would touch a rule the user annotated `#NOSECURITY[: reason]` is **withheld** an
 surfaced in `withheld_nosecurity`; treat it as the user's to change and never route
 around it.
 
-### `toolguard-audit --edits` -- as-if-enacted review
+### `toolguard-audit --edits` -- as-if-enacted review (tool-appliable subset only)
 
 ```bash
 toolguard-audit --edits <edits.json> --format json --with-context
@@ -217,6 +249,14 @@ Applies the edits in memory and reports on the AS-IF-ENACTED config;
 `context.tools[].layers` is the full rule hierarchy per tool (every section, with
 `is_native` and per-rule `comments`). This is both the audit input and the richest
 source of the *current* config for family grouping.
+
+**Scope caveat:** `--edits` as-if-enacts ONLY the **tool-appliable subset** -- the
+machine-shaped `edit_proposals` (the mechanical consolidations). It does NOT cover
+hand-authored changes (level splits, deny hardening, rewrites) that live only in
+your paste-ready TOML. So `--edits` gives the introduced/resolved **delta on the
+consolidations**, but it is NOT the whole-config certification. The authoritative
+pre-write gate is pass 3's `--dir <tempdir>` staging audit of the entire assembled
+config (see pass 3, Step 3).
 
 ### `toolguard-maintain --apply --write` / `--annotate` -- the only writers
 
@@ -233,8 +273,13 @@ Siblings with different jobs that form a loop through the shared `EditProposal`
 model: `toolguard-security-audit` flags **risk** (read-only); this skill curates
 **clarity, redundancy, and level** and enacts approved changes.
 
-- **Maintenance -> audit (mandatory before any write):** hand proposed edits to
-  `toolguard-audit --edits` for the as-if-enacted review (pass 3).
+- **Maintenance -> audit (mandatory before any write):** certify the full assembled
+  config with the audit before anything is written. The AUTHORITATIVE gate is pass
+  3's `--dir <tempdir>` staging audit of the whole paste-ready config -- it sees
+  every hand-authored change (level splits, deny hardening), not just the mechanical
+  ones. `toolguard-audit --edits` is the narrower **delta view over the
+  tool-appliable subset** (the `edit_proposals`); use it for the introduced/resolved
+  delta on the consolidations, never as the whole-config certification.
 - **Audit -> maintenance:** each audit finding carries a structured
   `remediation_proposal` (an `EditProposal`) you can ingest and drive through the
   same propose -> discuss -> certify -> apply flow.

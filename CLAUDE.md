@@ -145,6 +145,23 @@ When we're about to wrap up a ticket, and it seems that I am ready to push a set
 * Run `pyscn analyze toolguard` to find issues, read the report, and discuss what to fix, what to defer, and what to ignore
 * Consider running the toolguard maintenance skill to keep the toolguard configuration constantly curated. A push is a good checkpoint for this.
 
+## Running toolguard's own skills in this repo: pass `--dev`
+
+The `toolguard-maintenance` and `toolguard-security-audit` skills default to the
+**installed console scripts** (`toolguard-maintain`, `toolguard-audit`) -- those are
+what a normal `uv tool install toolguard` puts on PATH, and they run in toolguard's
+own venv. That default is correct for every *other* project but wrong here: when we
+work on THIS repo we want to exercise the working branch, not the installed release.
+
+So whenever you run either skill against the toolguard project itself (development and
+testing, as we usually do), invoke it with the **`--dev`** argument. That switches the
+skill to the in-repo module form (`uv run python -m toolguard.tools.maintenance` /
+`... .security_audit`). The skills also auto-detect the source repo as a fallback, but
+prefer the explicit `--dev` -- it is unambiguous and does not depend on detection.
+
+Never bake the `uv run python -m ...` form into a self-permission rule or into the
+skill body; the dev-form lives only in each skill's "Development mode" section.
+
 ## Technical notes
 
 Additional project-specific notes can be found in [technical-notes.md](technical-notes.md),

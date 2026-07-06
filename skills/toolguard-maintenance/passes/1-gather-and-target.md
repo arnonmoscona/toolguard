@@ -80,6 +80,14 @@ and `flags`. Do **not** yet decide anything -- you are annotating candidates.
 - **withheld_nosecurity** -> flag those members `nosecurity` and never propose
   changing them; they are surfaced for transparency only.
 - **mining groups** (corpus runs) -> attach as evidence to the relevant family.
+- **Cross-cutting finding -> one owning family.** A finding that spans several
+  families (a tool-agnostic deny that subsumes per-reader denies belonging to
+  different families, an interaction naming members of more than one family, a
+  broadening that fuses across signatures) is assigned to a SINGLE owning family --
+  the one whose command signature it reads under most naturally (for a secret-read
+  deny, the secret token like `.env`/`.ssh`, NOT each individual reader). Cross-
+  reference the affected members from that owner. Never duplicate the finding into
+  every family it touches (double-counting) nor let it fall between them (dropped).
 
 ## Step 5 -- target the level for each proposed change (and block welds)
 
