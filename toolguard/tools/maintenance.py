@@ -33,6 +33,7 @@ conversation; this module only gathers the evidence.
 import argparse
 import difflib
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -43,6 +44,14 @@ from toolguard.tools.annotate import annotate_config_file, clarity_annotations
 from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
 from toolguard.tools.config_access import load_config, nosecurity_reason_for
 from toolguard.tools.corpus import harvest_corpus
+from toolguard.tools.decision_ledger import (
+    LedgerDecision,
+    LedgerError,
+    decision_to_dict,
+    load_merged,
+    new_decision,
+    record_decision,
+)
 from toolguard.tools.edit_proposal import (
     ACTION_REPLACE,
     EditProposal,
@@ -915,6 +924,123 @@ def _run_replay_candidate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_ledger(decisions: Sequence[Any], fmt: str = "text") -> str:
+    """
+    Render the merged prior-decision ledger as human-readable text.
+
+    Args:
+        decisions: The merged :class:`LedgerDecision` list (project then user).
+        fmt: ``markdown`` or ``text`` (both currently identical plain output).
+
+    Returns:
+        A short, readable summary of every settled decision, grouped by level.
+    """
+    if not decisions:
+        return "No prior maintenance decisions recorded (project or user ledger)."
+    lines = [f"Prior maintenance decisions ({len(decisions)}):", ""]
+    for decision in decisions:
+        reason = f" -- {decision.rationale}" if decision.rationale else ""
+        lines.append(
+            f"  [{decision.level}] {decision.decision}: {decision.kind} "
+            f"on {decision.family_id} ({decision.target}){reason}"
+        )
+    return "\n".join(lines)
+
+
+def _run_ledger_show(args: argparse.Namespace) -> int:
+    """
+    Execute ``--ledger-show``: print the merged prior-decision ledger (read-only).
+
+    Loads the project ledger (``<root>/.claude/toolguard_decisions.json``) and the
+    user ledger (``~/.toolguard/decisions.json``) for ``--dir`` and prints them so
+    the maintenance skill can filter already-settled suggestions on a periodic run.
+
+    Args:
+        args: Parsed CLI arguments (uses ``dir`` and ``format``).
+
+    Returns:
+        Process exit code (``0`` on success, ``2`` if a ledger file is malformed).
+    """
+    try:
+        decisions = load_merged(Path(args.dir))
+    except LedgerError as exc:
+        print(f"--ledger-show: {exc}")
+        return 2
+
+    if args.format == "json":
+        payload = [{**decision_to_dict(d), "level": d.level} for d in decisions]
+        print(json.dumps(payload, indent=2))
+    else:
+        print(_render_ledger(decisions, fmt=args.format))
+    return 0
+
+
+def _run_record_decision(args: argparse.Namespace) -> int:
+    """
+    Execute ``--record-decision``: append settled decision(s) to a level's ledger.
+
+    Reads a JSON file (or ``-`` for stdin) describing one decision object or a list
+    of them, stamps each with the local time and toolguard version, and records it in
+    the ledger for ``--ledger-level`` (idempotent by decision id). This persists the
+    meta-decisions the maintenance skill's discussion pass gathers -- the "do not
+    re-suggest this" outcomes that have no surviving rule to annotate.
+
+    ``kind``, ``family_id`` and ``target`` are required per entry (a missing one is a
+    validation error, exit 2). ``decision`` is optional and defaults to ``"reject"`` --
+    the common case, since this mode records rejections; pass ``accept``/``defer``
+    explicitly for the others. The whole batch is validated BEFORE anything is written,
+    so a malformed entry partway through a list aborts without persisting the earlier
+    ones.
+
+    Args:
+        args: Parsed CLI arguments (uses ``dir``, ``record_decision``,
+            ``ledger_level``).
+
+    Returns:
+        Process exit code (``0`` on success, ``2`` on a read/parse/validation error).
+    """
+    source = args.record_decision
+    try:
+        raw = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"--record-decision: cannot read {source}: {exc}")
+        return 2
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"--record-decision: invalid JSON in {source}: {exc}")
+        return 2
+
+    entries = payload if isinstance(payload, list) else [payload]
+    # Validate/construct EVERY entry before writing ANY of them. Recording is a durable
+    # write, so a malformed entry midway through a batch must not leave the earlier
+    # entries persisted behind a failure exit code (they would silence suggestions the
+    # caller never confirmed). Build all decisions first; only then commit.
+    decisions: List[LedgerDecision] = []
+    try:
+        for entry in entries:
+            decisions.append(
+                new_decision(
+                    kind=entry["kind"],
+                    family_id=entry["family_id"],
+                    target=entry["target"],
+                    decision=entry.get("decision", "reject"),
+                    rationale=entry.get("rationale", ""),
+                    level=args.ledger_level,
+                )
+            )
+    except (KeyError, TypeError) as exc:
+        print(f"--record-decision: malformed decision entry ({exc}) in {source}")
+        return 2
+    except LedgerError as exc:
+        print(f"--record-decision: {exc}")
+        return 2
+
+    written = sorted({str(record_decision(Path(args.dir), d)) for d in decisions})
+    print(f"Recorded {len(decisions)} decision(s) in: {', '.join(written)}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     CLI entry point for the ``toolguard-maintain`` console script.
@@ -1051,19 +1177,67 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "never gates on its own."
         ),
     )
+    parser.add_argument(
+        "--ledger-show",
+        dest="ledger_show",
+        action="store_true",
+        default=False,
+        help=(
+            "Prior-decision ledger mode (read-only): print the settled maintenance "
+            "decisions for --dir, merging the project ledger "
+            "(<root>/.claude/toolguard_decisions.json) and the user ledger "
+            "(~/.toolguard/decisions.json). The skill uses this to avoid "
+            "re-litigating decisions on a periodic run."
+        ),
+    )
+    parser.add_argument(
+        "--record-decision",
+        dest="record_decision",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Prior-decision ledger mode (write): read a decision JSON object (or a "
+            "list of them) from FILE ('-' for stdin) and append it to the ledger for "
+            "--ledger-level, idempotent by decision id. Records the 'do not "
+            "re-suggest this' outcomes of the skill's discussion that have no "
+            "surviving rule to annotate."
+        ),
+    )
+    parser.add_argument(
+        "--ledger-level",
+        dest="ledger_level",
+        choices=["project", "user"],
+        default="project",
+        help=(
+            "Which ledger --record-decision writes to: 'project' (travels with the "
+            "repo, default) or 'user' (~/.toolguard, applies everywhere)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
-    if args.apply and args.annotate:
-        parser.error("--apply and --annotate are separate modes; run them separately")
-    if args.replay_candidate and (args.apply or args.annotate):
+    ledger_modes = [
+        name
+        for name, on in (
+            ("--apply", args.apply),
+            ("--annotate", args.annotate),
+            ("--replay-candidate", bool(args.replay_candidate)),
+            ("--ledger-show", args.ledger_show),
+            ("--record-decision", bool(args.record_decision)),
+        )
+        if on
+    ]
+    if len(ledger_modes) > 1:
         parser.error(
-            "--replay-candidate is a separate read-only mode; do not combine it "
-            "with --apply or --annotate"
+            f"{', '.join(ledger_modes)} are separate modes; run them separately"
         )
     if args.write and not (args.apply or args.annotate):
         parser.error("--write requires --apply or --annotate")
 
+    if args.ledger_show:
+        return _run_ledger_show(args)
+    if args.record_decision:
+        return _run_record_decision(args)
     if args.replay_candidate:
         return _run_replay_candidate(args)
 

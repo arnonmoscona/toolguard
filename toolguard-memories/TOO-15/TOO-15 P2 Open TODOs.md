@@ -85,10 +85,7 @@ proposal)`, json = agent sidecar), and the full S1-S4 loop:
 - Run `pyscn analyze toolguard --html` -> `.pyscn/`; triage (not every finding is
   required); ensure `.pyscn/` is gitignored.
 - Bump version in `pyproject.toml`.
-- Release notes.
-- Glob-defect user docs (document the glob defect referenced in the plan).
-
-### 7. TOO-15 completion gate  (see [[project-too15-completion-gate]])
+- Release notion gate  (see [[project-too15-completion-gate]])
 - Remove temp skill symlinks.
 - Install skills via the setup/maintenance facilities: must DETECT a partial global
   install (older `uv tool`) -> remind `uv tool upgrade toolguard`; install MISSING

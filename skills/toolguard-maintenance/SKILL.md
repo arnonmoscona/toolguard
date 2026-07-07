@@ -12,6 +12,8 @@ description: >
   analyzer for evidence, reasons about it in passes, and never applies anything
   automatically.
 argument-hint: "[directory (default: current project)] [--corpus] [--dev (toolguard maintainers only)]"
+model: sonnet
+effort: high
 ---
 
 # Toolguard Maintenance
@@ -89,12 +91,14 @@ Load and follow each pass file in order:
    proposal, drive the **case-by-case** approval conversation, and enact only what
    the user explicitly approves; record each decision for the next run.
 
-> Phasing note (implementation in progress): the **prior-decision sidecar ledger**
-> (Phase C) and **user-level promotion** (Phase D) are still being layered in. Until
-> the ledger lands, a periodic run reads prior decisions only from in-file
-> annotations (`# toolguard:` / `#NOSECURITY`). Keep every proposed change at its
-> current level and treat promotion opportunities as observations to raise, not moves
-> to enact.
+> Phasing note: the **prior-decision sidecar ledger** (Phase C) and **user-level
+> promotion** (Phase D) have both landed. A periodic run reads prior decisions from
+> in-file annotations (`# toolguard:` / `#NOSECURITY`) AND the sidecar ledger
+> (`toolguard-maintain --ledger-show`), and records new meta-decisions with
+> `--record-decision`. Promotions are first-class proposed MOVES (`status:"promote"`),
+> certified by a live two-level staged audit (pass 3 Step 3c, via a redirected `HOME`)
+> and hand-applied as a two-file edit (pass 4) -- never auto-enacted, always with the
+> cross-context-broadening caveat and the full-user-setup admonition.
 
 ## First run vs periodic (trust level)
 
@@ -109,10 +113,13 @@ settled. The recommendation set carries `run_kind` (`"first"` | `"periodic"`) an
   `"first"` when unsure -- the safe default is to discuss more, never less. A project
   that already carries `# toolguard:` annotations has almost certainly been maintained
   before.
-- **What "already settled" means.** A decision recorded in-file -- a `# toolguard:`
-  note or a `#NOSECURITY: <reason>` the user accepted on a rule -- is a prior decision
-  a periodic run should honor and not re-raise. (The sidecar meta-decision ledger is
-  Phase C; until then, in-file annotations are the whole ledger.)
+- **What "already settled" means.** Two durable stores, read in pass 1: (1) an in-file
+  decision on a surviving rule -- a `# toolguard:` note or a `#NOSECURITY: <reason>`
+  the user accepted; (2) a `reject` entry in the sidecar meta-decision ledger
+  (`toolguard-maintain --ledger-show`) for a decision with no rule to hang on (a
+  rejected merge or promotion). Either kind is a prior decision a periodic run honors
+  and does not re-raise. A settled decision only SUPPRESSES a re-suggestion; it never
+  enacts anything.
 - **Periodic behavior.** Still gather and certify everything (pass 1 + pass 3 are
   unchanged), but in the report (pass 3 Step 1) collapse unchanged, already-settled
   families to a one-line summary and surface in full only what is NEW or CHANGED plus
@@ -274,6 +281,11 @@ around it.
 toolguard-audit --edits <edits.json> --format json --with-context
 ```
 
+`<edits.json>` must be a **bare `EditProposal` array**, not the whole
+`toolguard-maintain --apply --format json` object. Extract just its `edit_proposals`
+value into the file first (e.g. `... --apply --format json | jq '.edit_proposals' >
+edits.json`); handing `--edits` the full apply object fails with a raw `TypeError`.
+
 Applies the edits in memory and reports on the AS-IF-ENACTED config;
 `context.proposed_edits.delta` lists findings `introduced` and `resolved`, and
 `context.tools[].layers` is the full rule hierarchy per tool (every section, with
@@ -296,6 +308,29 @@ idempotent, touches only `# toolguard:` lines). Both run the working-tree /
 project-root pre-flight and **refuse on a dirty tree or unresolved root** (exit
 non-zero, config untouched) -- relay blockers, have the user commit/stash, re-run.
 Leave the git commit to the user.
+
+### `toolguard-maintain --ledger-show` / `--record-decision` -- the prior-decision ledger
+
+The durable memory of what the user already decided, so periodic runs stay quiet.
+Level-scoped like config: a **project** ledger travels with the repo at
+`<root>/.claude/toolguard_decisions.json`; a **user** ledger under
+`~/.toolguard/decisions.json` applies everywhere.
+
+```bash
+toolguard-maintain --ledger-show --format json            # read (pass 1): merged list
+toolguard-maintain --record-decision FILE --ledger-level project   # write (pass 4)
+```
+
+`--ledger-show` is read-only and merges both levels into a flat list of
+`{ id, kind, family_id, target, decision, rationale, recorded_at,
+toolguard_version, level }`. `--record-decision` reads a decision object (or a JSON
+list) from `FILE` (`-` for stdin) and appends it to the `--ledger-level` file
+(`project` default, or `user`), **idempotent by `(kind, family_id, target)`** -- a
+re-record updates in place. `kind` is one of `reject-consolidation`,
+`reject-promotion`, `reject-broadening`, `reject-removal`, `intentional-scope`,
+`custom`; `decision` defaults to `reject`. This is a small DATA sidecar, not a config
+rule, so it does not go through the apply pre-flight; it never enacts a rule change --
+it only suppresses re-RAISING a settled question (pass 1 Step 4).
 
 ## Relationship to the security-audit skill
 

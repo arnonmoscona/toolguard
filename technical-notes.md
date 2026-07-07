@@ -688,3 +688,100 @@ shared-layer edit and WARN before `--write`; ideally: a filtered multi-project a
 user's projects discovered from `~/.claude/projects/` and `~/.claude.json`) is tracked as
 remaining TOO-15 work. Until then, treat a clean single-project review of a user-level edit as
 necessary but not sufficient.
+
+### Multi-pass maintenance: SKILL.md orchestrator + `passes/` + a JSON state artifact
+
+Maintenance is judgement-heavy refactoring, so the skill is a **conversation over evidence**,
+not a one-shot report. `skills/toolguard-maintenance/SKILL.md` is only the orchestrator; the
+real instructions live in `passes/*.md`, loaded one at a time (progressive disclosure -- doing
+gather + level + consolidate + audit + present all at once invites mistakes):
+
+1. `1-gather-and-target.md` -- run the analyzer + audit for evidence, group every rule into
+   command families, target the level of each change (blocking cross-level welds), read the
+   prior-decision ledger, capture non-permission settings.
+2. `2-consolidate-and-group.md` -- treat the tool's consolidations as *candidates*, refine
+   under level constraints, flag heterogeneous families, write per-family narratives.
+3. `3-report-and-certify.md` (read-only) -- render the understanding view + cut/paste TOML,
+   then certify with the tool (parse + as-if-enacted audit + corpus replay).
+4. `4-discuss-and-apply.md` (the only write pass) -- case-by-case consent, then enact only
+   what the user approved.
+
+The passes do not re-derive each other's work: they read and annotate one **recommendation
+set** JSON (`passes/recommendation-set-schema.md`) kept in the session scratchpad, never in
+the repo. It is internal scratch -- the user sees the rendered understanding view and the
+paste-ready TOML, never the JSON. The skill runs INLINE in the main conversation (not a forked
+subagent) because pass 4 is an interactive per-item consent dialogue; the audit skill, being a
+read-only report, may fork.
+
+### Certify-by-staging: author by AI, certify by tool
+
+Once consolidation involves judgement the final TOML cannot be purely tool-derived, so the
+skill authors it and the tool certifies it: copy the project config into a temp dir, `git
+init` it (the audit discovers config by walking up from a project-root marker -- a bare temp
+dir loads nothing), overwrite the candidate TOML, and run `toolguard-audit --dir <tempdir>
+--with-context`. This whole-config staging audit is the **authoritative** pre-write gate
+(covers hand-authored changes `--edits` cannot represent). It has a silent-failure trap: a
+mis-staged root makes the audit load nothing and report a bogus clean, so the pass verifies
+`context.summary.sources` includes the staged file and the TOP-LEVEL `takeover_active` matches
+before trusting the delta (`takeover_active` is top-level, NOT under `context.summary`).
+
+### Corpus-replay candidate validation (`--replay-candidate`)
+
+`toolguard-maintain --dir <project> --replay-candidate <staged>` replays the project's
+observed corpus against the current config vs the assembled candidate and classifies each
+observed command `unchanged` / `tightened` / `broadened`. It harvests its own corpus
+independently of `--corpus`. It is **necessary, not sufficient**: it only covers observed
+commands, an empty corpus is vacuous (not clean), a `broadened` is the red flag, and large
+`tightened` counts are expected for deny-hardening. It never gates an apply on its own.
+
+### Prior-decision ledger (`decision_ledger.py`)
+
+A periodic run must not re-litigate settled questions. Two stores hold "prior decisions":
+in-file annotations (`# toolguard:` / `#NOSECURITY`) for a decision attached to a surviving
+rule, and the **sidecar ledger** for a meta-decision with no rule to hang on (a rejected merge
+or promotion). The ledger is deliberately tool-owned and canonical (re-parsed mechanically
+each run), not outsourced to a human-memory system. It is level-scoped like config: the
+project ledger travels in the repo at `<root>/.claude/toolguard_decisions.json`; the user
+ledger lives under toolguard's own namespace at `~/.toolguard/decisions.json` (NOT `~/.claude`
+-- kept out of Claude Code's config dir).
+
+A decision is identified by `(kind, family_id, target)`, independent of which level stores it,
+so a suppression recorded at either level answers a re-raise. Only a `reject` disposition
+suppresses (accept/defer do not). Recording is idempotent by id (same-id replaces in place). A
+corrupt ledger raises `LedgerError` and is surfaced -- never silently emptied, since a dropped
+decision would re-open a settled question. CLI: `--ledger-show [--format json]` (read, merges
+both levels) and `--record-decision FILE --ledger-level {project,user}` (append; the whole
+batch is validated before any entry is written, so a malformed member aborts atomically).
+
+### Layer promotion certified by a live two-level HOME-staged audit
+
+Promoting a rule to the user level is a cross-context broadening only the developer can
+approve, so it is a first-class proposed **move** (`status:"promote"`), never auto-enacted
+(there is no cross-level move writer -- it is a two-file hand-apply). Project-only staging
+cannot certify it (the removed rule reads as gone), so pass 3 step 3c stages BOTH levels: the
+project with the rule removed, and a temp `HOME/.claude/toolguard_hook.toml` with the rule
+added (plus base setup if the user level does not exist yet). Because config discovery anchors
+the user level on `Path.home()/".claude"`, redirecting `HOME` on the audit subprocess
+(`HOME=<staged_home> toolguard-audit --dir <staged_project>`) stages the user level with no
+tool change -- both `sources` then show, and the two-level verdict certifies the move. What no
+audit can see (stated, not glossed): cross-context broadening of a promoted ALLOW across the
+whole fleet, so a clean promotion audit is necessary, not sufficient.
+
+### CLI mode summary
+
+`toolguard-maintain` is read-only by default; the write modes each run `migration_preflight`
+(clean tree + resolved root, else exit 2). Modes are mutually exclusive:
+
+- default -- print findings (`--format markdown|text|json`); `--corpus [--max-age-days N]` adds
+  replay/mining evidence.
+- `--apply [--write]` -- dry-run preview of machine-appliable consolidations (`--write` enacts).
+- `--annotate [--write]` -- write/refresh `# toolguard:` comments (comment-only, idempotent).
+- `--replay-candidate <dir>` -- corpus-validate an assembled candidate (read-only).
+- `--ledger-show` / `--record-decision FILE --ledger-level {project,user}` -- the ledger.
+
+`toolguard-audit` is always read-only: `--with-context` (full hierarchy + summary), `--edits
+<file>` (as-if-enacted delta; expects a bare `EditProposal` array), `--migrations`, `--strict`.
+The `toolguard --eval` hook flag (read-only resolve, no migration/logging) backs the audit
+skill's cross-project safety-floor probe.
+
+User-facing usage of both skills is in [docs/skills.md](docs/skills.md).

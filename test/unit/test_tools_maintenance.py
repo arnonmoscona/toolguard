@@ -25,9 +25,11 @@ from toolguard.tools.maintenance import (
     _collect_annotations,
     _nosecurity_block_reason,
     _partition_nosecurity,
+    _render_ledger,
     _render_replay,
     _run_annotate,
     _run_apply,
+    _run_record_decision,
     _run_replay_candidate,
     change_report_to_dict,
     collect_consolidations,
@@ -856,6 +858,203 @@ class TestReplayCandidate(unittest.TestCase):
         """
         with self.assertRaises(SystemExit):
             main(["--replay-candidate", ".", "--apply"])
+
+
+class TestLedgerMode(unittest.TestCase):
+    """The prior-decision ledger CLI modes (--ledger-show / --record-decision)."""
+
+    def test_record_then_show_roundtrips_via_cli(self):
+        """
+        Given a decision JSON recorded through --record-decision
+        When --ledger-show --format json is run for the same project
+        Then the recorded decision is listed with its level
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            entry = root / "dec.json"
+            entry.write_text(
+                json.dumps(
+                    {
+                        "kind": "reject-consolidation",
+                        "family_id": "git-diff",
+                        "target": "^git (diff|log)",
+                        "rationale": "keep apart",
+                    }
+                )
+            )
+            with redirect_stdout(io.StringIO()):
+                rc = main(
+                    [
+                        "--dir",
+                        str(root),
+                        "--record-decision",
+                        str(entry),
+                        "--ledger-level",
+                        "project",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main(["--dir", str(root), "--ledger-show", "--format", "json"])
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(len(payload), 1)
+            self.assertEqual(payload[0]["family_id"], "git-diff")
+            self.assertEqual(payload[0]["level"], "project")
+
+    def test_show_empty_ledger_text(self):
+        """
+        Given a project with no recorded decisions
+        When --ledger-show runs in text mode
+        Then it reports that no prior decisions exist (not an error)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main(["--dir", str(root), "--ledger-show"])
+            self.assertEqual(rc, 0)
+            self.assertIn("No prior maintenance decisions", buf.getvalue())
+
+    def test_render_ledger_lists_each_decision(self):
+        """
+        Given a merged ledger with one decision
+        When it is rendered as text
+        Then the level, disposition, kind, family, and rationale appear
+        """
+        from toolguard.tools.decision_ledger import new_decision
+
+        text = _render_ledger(
+            [new_decision("reject-promotion", "rm", "promote:user", "reject", "too broad", "user")]
+        )
+        self.assertIn("[user] reject: reject-promotion on rm", text)
+        self.assertIn("too broad", text)
+
+    def test_record_missing_file_returns_2(self):
+        """
+        Given a --record-decision path that does not exist
+        When _run_record_decision runs
+        Then it prints an error and returns exit code 2
+        """
+        args = argparse.Namespace(
+            dir=".", record_decision="/nonexistent/dec.json", ledger_level="project"
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = _run_record_decision(args)
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot read", buf.getvalue())
+
+    def test_record_malformed_entry_returns_2(self):
+        """
+        Given a decision JSON missing the required 'target' field
+        When _run_record_decision runs
+        Then it reports the malformed entry and returns exit code 2
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            entry = root / "bad.json"
+            entry.write_text(json.dumps({"kind": "custom", "family_id": "x"}))
+            args = argparse.Namespace(
+                dir=str(root), record_decision=str(entry), ledger_level="project"
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = _run_record_decision(args)
+            self.assertEqual(rc, 2)
+            self.assertIn("malformed", buf.getvalue())
+
+    def test_record_omitting_decision_defaults_to_reject(self):
+        """
+        Given a decision entry that omits the optional 'decision' field
+        When it is recorded and read back
+        Then the recorded disposition is 'reject' (the documented default)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            entry = root / "dec.json"
+            entry.write_text(
+                json.dumps({"kind": "custom", "family_id": "fam", "target": "t"})
+            )
+            args = argparse.Namespace(
+                dir=str(root), record_decision=str(entry), ledger_level="project"
+            )
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(_run_record_decision(args), 0)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                main(["--dir", str(root), "--ledger-show", "--format", "json"])
+            self.assertEqual(json.loads(buf.getvalue())[0]["decision"], "reject")
+
+    def test_record_batch_with_bad_entry_is_atomic(self):
+        """
+        Given a JSON list of decisions whose last entry is malformed
+        When --record-decision processes the batch
+        Then it returns 2 AND persists none of the earlier valid entries (atomic)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            entry = root / "batch.json"
+            entry.write_text(
+                json.dumps(
+                    [
+                        {"kind": "custom", "family_id": "a", "target": "t"},
+                        {"kind": "custom", "family_id": "b", "target": "t"},
+                        {"kind": "custom", "family_id": "c"},  # missing target
+                    ]
+                )
+            )
+            args = argparse.Namespace(
+                dir=str(root), record_decision=str(entry), ledger_level="project"
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = _run_record_decision(args)
+            self.assertEqual(rc, 2)
+            self.assertIn("malformed", buf.getvalue())
+            # Nothing from the batch was persisted despite two valid leading entries.
+            self.assertFalse((root / ".claude" / "toolguard_decisions.json").exists())
+
+    def test_record_rejects_combining_with_apply(self):
+        """
+        Given --record-decision combined with --apply
+        When the CLI parses arguments
+        Then it exits (the ledger write mode and apply are mutually exclusive)
+        """
+        with self.assertRaises(SystemExit):
+            main(["--record-decision", "x.json", "--apply"])
+
+    def test_ledger_show_malformed_returns_2(self):
+        """
+        Given a project whose ledger file is corrupt JSON
+        When --ledger-show runs
+        Then it reports the error and returns exit code 2 (never a bogus empty list)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / ".claude").mkdir()
+            (root / ".claude" / "toolguard_decisions.json").write_text("{ not json")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main(["--dir", str(root), "--ledger-show"])
+            self.assertEqual(rc, 2)
+            self.assertIn("cannot read", buf.getvalue())
+
+    def test_ledger_show_rejects_combining_with_record(self):
+        """
+        Given --ledger-show combined with --record-decision
+        When the CLI parses arguments
+        Then it exits (the ledger modes are mutually exclusive)
+        """
+        with self.assertRaises(SystemExit):
+            main(["--ledger-show", "--record-decision", "x.json"])
 
 
 if __name__ == "__main__":

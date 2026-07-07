@@ -9,7 +9,7 @@ blocked). No consolidation refinement and no narrative yet -- those are pass 2.
 Read `../SKILL.md` first for the invocation rules, the JSON contracts, and the hard
 constraints. This pass is entirely read-only.
 
-## Step 1 -- gather evidence (three tool calls)
+## Step 1 -- gather evidence (four tool calls)
 
 Pick the invocation form (installed console script vs in-repo module) per SKILL.md.
 Run, capturing each to the session scratchpad:
@@ -24,6 +24,14 @@ Run, capturing each to the session scratchpad:
    `files_written` must be `[]`). Its `edit_proposals` are the tool's machine-shaped
    consolidation candidates, and `withheld_nosecurity` lists rules a tidy-up
    deliberately skipped.
+4. **Prior decisions** -- `toolguard-maintain --ledger-show --format json` (read-only).
+   This merges the project ledger (`<root>/.claude/toolguard_decisions.json`) and the
+   user ledger (`~/.toolguard/decisions.json`) into a flat list of settled
+   meta-decisions the user made on a previous run. Each entry has `kind`, `family_id`,
+   `target`, `decision`, and `rationale`. A `decision: "reject"` entry means "do not
+   re-raise this" -- you will use it in Step 4 to keep a periodic run quiet. An empty
+   list is normal on a first run. If the call reports a malformed ledger (exit 2), tell
+   the user and proceed as if empty rather than guessing.
 
 If a self-permission denial blocks a call, follow SKILL.md's Self-permissioning
 section (suggest the exact rule, get consent, retry) -- do not work around it.
@@ -36,17 +44,35 @@ default). Leave `audit`, `corpus_validation`, `certification`, and `final_toml` 
 -- later passes fill them.
 
 **Determine `run_kind`** (see SKILL.md "First run vs periodic"). If the current
-config already carries `# toolguard:` annotations, this project has been maintained
-before -- lean `"periodic"`. If it plainly has not, or you cannot tell, ASK the user
-and default to `"first"` when unsure (the safe default discusses more, never less).
-While walking the config in Step 3, note which rules already carry a prior in-file
-decision (`# toolguard:` or `#NOSECURITY: <reason>`): those are settled and a
-periodic run must not re-litigate them.
+config already carries `# toolguard:` annotations, OR the prior-decision ledger
+(Step 1 call 4) is non-empty, this project has been maintained before -- lean
+`"periodic"`. If it plainly has not, or you cannot tell, ASK the user and default to
+`"first"` when unsure (the safe default discusses more, never less). While walking the
+config in Step 3, note which rules already carry a prior in-file decision
+(`# toolguard:` or `#NOSECURITY: <reason>`): those are settled and a periodic run must
+not re-litigate them.
+
+**Load the prior-decision ledger into memory.** Keep the Step 1 call-4 list at hand as
+the settled-meta-decision index, keyed by `(kind, family_id, target)`. It complements
+the in-file annotations: annotations settle decisions attached to a surviving rule; the
+ledger settles META-decisions with no rule to hang on (a rejected merge, a rejected
+promotion). Step 4 consults it to suppress re-raising what the user already declined.
 
 ## Step 3 -- group every rule into command families
 
 From `context.tools[].layers`, walk **every** layer and **every** section
 (`allow`/`deny`/`ask`; `hard_deny` where present), for every governed tool.
+
+> **`context.tools[]` is not the governed-tool list -- reconcile the two.** The
+> authoritative set of governed tools is `context.summary.governed_tools`;
+> `context.tools[]` does not match it in either direction. It can INCLUDE native-only
+> tools that toolguard does not govern (`Skill`, `WebFetch`) -- skip those -- and it can
+> OMIT a governed tool that carries rules (observed: an `mcp__local-tools__checked_bash`
+> blanket deny lived only in the raw TOML, invisible to `context.tools[]`). So: take the
+> governed set from `governed_tools`, and for any governed tool NOT represented in
+> `context.tools[]`, read its `[permissions."<tool>"]` rules from the toolguard TOML
+> directly (same as Step 6 does for non-permission tables). Otherwise the "union equals
+> the full config" invariant below is quietly violated -- a governed deny goes unseen.
 
 - A **family** is a set of rules that share a leading command signature -- the same
   head token(s) before the first variable part. Examples from a real config:
@@ -71,11 +97,16 @@ and `flags`. Do **not** yet decide anything -- you are annotating candidates.
 - **redundancies** and **cross_layer_redundancies** -> mark the redundant member
   `status:"remove"` (candidate), noting in `rationale` what covers it. These are
   the safest class (exact/normalised duplicate, or already covered by a broader
-  layer) but still the user's call.
+  layer) but still the user's call. **Note the tooling asymmetry:** redundancy
+  removals are NOT in the `--apply` `edit_proposals` (that dry-run carries only
+  strict *consolidations* -- `collect_consolidations`). So a `remove` here is a
+  candidate the user hand-applies from the certified TOML, not something
+  `toolguard-maintain --apply --write` will enact. Do not expect to find it there.
 - **consolidations** (`edit_proposals`) -> for each, mark the removed members
   `status:"consolidate"` with `into` = the proposed `added_pattern`, sharing one
   rationale. Carry the `replay_summary` as evidence. **These are candidates the tool
-  found by single-token literal alternation -- pass 2 re-judges them.**
+  found by single-token literal alternation -- pass 2 re-judges them.** They are the
+  ONLY finding class present in `--apply` `edit_proposals`.
 - **broadenings** -> do NOT set a change status. Add a `needs-discussion` flag and a
   `discussion` entry on the family: a broadening widens what is permitted and is
   always the user's decision. Record `newly_admitted_commands` /
@@ -88,6 +119,15 @@ and `flags`. Do **not** yet decide anything -- you are annotating candidates.
 - **withheld_nosecurity** -> flag those members `nosecurity` and never propose
   changing them; they are surfaced for transparency only.
 - **mining groups** (corpus runs) -> attach as evidence to the relevant family.
+- **Settled meta-decisions -> pre-mark, do not drop.** For each candidate you overlay
+  (a consolidation, a promotion, a broadening), form its `(kind, family_id, target)`
+  key and look it up in the ledger loaded in Step 2. On a `decision: "reject"` match,
+  pre-seed the member's `user_decision: "reject"` (with the ledger's `rationale` as
+  `user_note`) and add a `settled` flag. Do NOT delete the member -- it stays in the
+  family view so the final state is still reconstructable. The `settled` flag tells
+  pass 4 to stay silent about it on a periodic run, while a first run or an explicit
+  re-review may still revisit it. Never let the ledger auto-ENACT anything; it only
+  suppresses re-RAISING a settled question.
 - **Cross-cutting finding -> one owning family.** A finding that spans several
   families (a tool-agnostic deny that subsumes per-reader denies belonging to
   different families, an interaction naming members of more than one family, a
@@ -100,9 +140,15 @@ and `flags`. Do **not** yet decide anything -- you are annotating candidates.
 ## Step 5 -- target the level for each proposed change (and block welds)
 
 For every member with a change status, decide the level its result should live at,
-and detect welds. **This pass, keep every change at its current level** (promotion
-is being layered in later) -- but still do the analysis and record it, because it
-gates consolidation in pass 2:
+and detect welds. **Consolidations stay at their current level** -- a merge never
+welds levels (that is the weld rule below). **Promotion is now a first-class proposed
+MOVE**, not just an observation: a rule that belongs at a higher level gets
+`status:"promote"` and a `target_level`, and is certified and applied as its own
+change (see pass 3's promotion-staging and pass 4). A promotion is still NEVER
+auto-enacted -- the tool has no cross-level move writer, so it is hand-applied from the
+certified two-file TOML; but it IS a real proposal that flows through the rest of the
+pipeline, not a passive note. Do the level analysis here because it both gates
+consolidation (welds) AND drives the promotion proposals:
 
 - **Cross-level weld (blocking).** If a consolidation's removed members do not all
   share one level, or its `added_pattern` fuses clearly project-specific tokens
@@ -117,12 +163,35 @@ gates consolidation in pass 2:
     "when in doubt, restrict". Universal safety denies (`.env`/`.ssh` reads, `rm -rf`,
     secret paths under `~`) are almost always better at the user level. Recommend it
     unless the deny is genuinely project-specific policy.
-  - **ALLOW -> promote cautiously.** An allow at the user level *broadens* every project
-    (cross-context broadening the corpus cannot see). Recommend only for clearly
-    project-agnostic, benign allows (e.g. `git diff|status|log`), always with the
-    caveat, and never for anything execution-broad.
-  Record a `promotion` flag, the suggested `target_level`, and the reasoning. Do not
-  enact the move; recommend it and let the user decide.
+  - **ALLOW -> promote cautiously, but DO survey them -- do not skip the allow side.**
+    An allow at the user level *broadens* every project (cross-context broadening the
+    corpus cannot see), so the bar is higher than for denies -- but "cautious" means
+    *judge each one*, NOT *stay silent on all of them*. Walk **every** allow family and
+    classify its promotability, the same as you do for denies:
+    - **Benign, project-agnostic, read-only / utility allows are genuine candidates.**
+      Ubiquitous dev-machine commands the user runs everywhere -- `echo`, `ls`, `du`,
+      `date`, `sleep`, `ps`, `wc`, `sort`, `ag`/`ack`, `pbcopy`, `git diff|status|log`,
+      and similar -- are clearly project-agnostic and low-risk. Surface these as
+      promotion candidates (recommend, do not merely observe); do not leave them silent
+      under a bare `no-change`.
+    - **Reader allows are COUPLED to the secret denies -- flag it.** `grep`, `head`,
+      `tail`, `cat`, `find` and friends can read secret files, so promoting THEIR allows
+      is only safe alongside the `.env`/`.ssh` (and similar) denies at the same-or-higher
+      precedence. Recommend promoting these readers only *together with* the guarding
+      secret denies (deny out-ranks allow), and say so; never promote a reader allow to
+      the user level while leaving the secret deny project-local.
+    - **Never promote execution-broad allows** (`uv run python:*`, blanket interpreters,
+      `curl` to arbitrary hosts) -- those broaden arbitrary execution everywhere.
+    To avoid per-rule noise, you MAY group the clearly-benign utility allows into ONE
+    promotion candidate ("these N read-only utility allows -> promote as a batch") rather
+    than a separate entry each -- but the survey itself is not optional: a harmless allow
+    left un-promotable-assessed is a missed recommendation, exactly the gap to avoid.
+  Set `status:"promote"` and `target_level:"user"` on the member, add the `promotion`
+  flag, and record the reasoning in `rationale`. The member's `pattern` is unchanged
+  (a move, not a rewrite); the before->after is "project rule -> same rule at user
+  level". Do not enact the move; it is certified in pass 3 and hand-applied in pass 4.
+  A promotion the user declines is recorded in the ledger as `reject-promotion`
+  (pass 4), so a periodic run does not re-raise it.
 - **Incomplete-config guard -- attach to EVERY promotion recommendation.** A user-level
   toolguard *rule* only takes effect where toolguard actually runs. If the user level
   lacks the FULL toolguard setup -- the hook registered globally AND the base config

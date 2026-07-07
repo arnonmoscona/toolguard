@@ -10,6 +10,10 @@ description: >
   judgement-based AI-assisted assessment. Read-only: it reports findings and
   proposes fixes but never edits the config.
 argument-hint: "[directory (default: current project)] [--format json|markdown|text] [--with-context] [--strict] [--dev (toolguard maintainers only)]"
+context: fork
+agent: Explore
+model: sonnet
+effort: high
 ---
 
 # Toolguard Security Audit

@@ -51,11 +51,13 @@ New to toolguard? Start with the quick-start, then dip into the topic guides as 
 | [Takeover Mode](docs/takeover-mode.md) | The "blanket-allow + toolguard-enforces" mode, its risks, and a complete example. |
 | [Config Sync & Migration](docs/config-sync.md) | Detecting config divergence, migrating patterns into `toolguard_hook.toml`, backups, and session warnings. |
 | [Security Best Practices](docs/security.md) | Blanket-allow risks, recommended deny patterns, backups, and verifying toolguard is actually running. |
+| [Maintenance & Audit Skills](docs/skills.md) | The `toolguard-security-audit` and `toolguard-maintenance` skills: audit your config for risk, and clean up / consolidate / promote rules with per-item consent. |
 | [Agent Guides](docs/agent-guides.md) | Task-oriented, few-shot recipes aimed at AI coding agents configuring toolguard. |
 | [Technical Architecture](docs/architecture.md) | Package structure, hook flow, pattern-matching implementation, and logging streams. |
 
 Developer-facing internals (subagent identification, the TOO-8 hierarchy/resolution design,
-logging streams, hard-deny semantics) live in [technical-notes.md](technical-notes.md).
+logging streams, hard-deny semantics, and the maintenance/audit skill CLIs, passes, and JSON
+contracts) live in [technical-notes.md](technical-notes.md).
 
 ## Motivation
 

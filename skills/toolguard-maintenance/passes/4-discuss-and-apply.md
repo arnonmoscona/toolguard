@@ -35,8 +35,9 @@ Then hand control to the user. Default to a **case-by-case** walk:
 - **How much to raise depends on the run kind** (SKILL.md "First run vs periodic"). On
   a first run, walk everything. On a periodic run at a higher trust level, only open a
   discussion for NEW or CHANGED families and material audit findings; do not
-  re-litigate a question already settled in a prior run (recorded in-file, or in the
-  ledger once Phase C lands). Never silently apply, even on the quietest periodic run.
+  re-litigate a question already settled in a prior run (recorded in-file, or a member
+  the pass-1 `settled` flag marked from a ledger `reject`). Never silently apply, even
+  on the quietest periodic run.
 
 - **Bulk-apply only if the user explicitly asks** ("just apply it all"). Offer it as
   an option, never assume it.
@@ -58,6 +59,16 @@ Enact only what the user approved, by the narrowest mechanism that fits:
 - **Changes the tool cannot mechanically apply** (level splits, hand-tuned rewrites,
   promotions): have the user paste the certified TOML, or apply via their chosen edit
   path. Do NOT invent a write mechanism the tool does not provide.
+- **Promotions are a TWO-FILE hand-apply.** The tool has no cross-level move writer, so
+  a `status:"promote"` change is never enacted by `--apply`. Present it as two paste
+  actions from the pass-3 certified output: (1) REMOVE the rule from the project file,
+  (2) ADD it to the user file (`~/.claude/toolguard_hook.toml`) -- creating that file
+  with the full base setup (`[takeover_mode]`, `governed_tools`) if it does not yet
+  exist. Repeat the incomplete-user-setup admonition: a promoted rule does nothing in
+  projects that lack the toolguard hook, so promoting AND standing up the full
+  user-level setup go together. For a promoted allow, restate the cross-context
+  broadening caveat before the user commits. If the user declines the promotion, record
+  it (Step 3) as a `reject-promotion` ledger entry so a periodic run stays quiet.
 - **Inline clarity annotations:** after presenting clarity interactions, offer
   `toolguard-maintain --annotate` to write `# toolguard:` comments so the config
   self-documents (comment-only, same write pre-flight; show the `--annotate` preview
@@ -71,14 +82,35 @@ future periodic run does not re-litigate it:
 
 - Keep `user_decision` / `user_note` on every member of the recommendation set (the
   in-session record).
-- Where a decision attaches to a surviving rule, prefer an **in-file annotation** on
-  that rule (a `# toolguard:` note via `--annotate`, or a `#NOSECURITY: <reason>`
+- Where a decision attaches to a **surviving rule**, prefer an **in-file annotation**
+  on that rule (a `# toolguard:` note via `--annotate`, or a `#NOSECURITY: <reason>`
   where the user accepted a flagged risk): it is visible, versioned, and travels with
-  the config. This is the prior-decision signal a periodic run reads today.
-- A META-decision with no rule to hang on ("don't ever suggest merging this family")
-  belongs in the sidecar ledger -- that store is **Phase C**; until it lands, note
-  such a decision to the user and, where possible, express it as an in-file annotation
-  so it is not lost.
+  the config. This is the first-choice prior-decision signal.
+- A **META-decision with no rule to hang on** -- "don't ever suggest merging this
+  family", "don't re-propose promoting these allows to the user level", "this rule is
+  intentionally kept project-scoped" -- has nothing to annotate, so record it in the
+  **sidecar decision ledger** with `toolguard-maintain --record-decision`. This is the
+  store a periodic run reads (pass 1) to stay quiet on settled questions. Build a small
+  JSON entry per rejected suggestion and record it at the level the decision belongs to:
+
+  ```
+  # one object, or a JSON list of them; then:
+  toolguard-maintain --dir <project> --record-decision <file.json> --ledger-level project
+  ```
+
+  Each entry: `kind` (one of `reject-consolidation`, `reject-promotion`,
+  `reject-broadening`, `reject-removal`, `intentional-scope`, `custom`), `family_id`
+  (the recommendation-set family slug), `target` (the canonical thing rejected -- the
+  proposed merge pattern, or `promote:user` for a promotion), optional `decision`
+  (defaults to `reject`), and `rationale` (the user's own words, from `user_note`).
+  Choose `--ledger-level user` only for a decision that should hold across every project
+  (e.g. rejecting a universal-deny promotion); default `project` so it travels with the
+  repo. Recording is idempotent -- re-recording the same `(kind, family_id, target)`
+  updates in place, so a later run may safely re-affirm it.
+- The `target` you record MUST match what pass 1 will query, so use the family's slug
+  and the same canonical target string the report showed. If in doubt, run
+  `toolguard-maintain --ledger-show` afterwards and confirm the entry reads back as the
+  suggestion you intend to suppress.
 
 ## Output
 

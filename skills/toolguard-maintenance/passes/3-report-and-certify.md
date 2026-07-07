@@ -41,11 +41,22 @@ interactions rather than re-deriving resolution semantics. ASCII only.
 Do not bury a section/deny/hard_deny change inside an allow discussion -- if a change
 spans sections, show each section's line under the same family.
 
+**Surface promotion candidates as first-class -- never fold them into a no-change
+bundle.** A family (or member) that pass 1 marked `status:"promote"` -- including the
+grouped benign read-only/utility allows and the reader-allows coupled to secret denies --
+gets an explicit "promotion opportunity" line, not a silent `no-change`. Give the batched
+utility allows ONE clear entry ("these N read-only utility allows are user-level promotion
+candidates"), state the reader/secret-deny coupling where it applies, and attach the
+incomplete-user-setup admonition when no full user-level setup exists. A machine with no
+user-level setup is a reason to PAIR the promotion with a "stand up the user setup first"
+recommendation, never a reason to drop the opportunity from the report.
+
 **On a periodic run (see SKILL.md "First run vs periodic"),** collapse the families
-that are unchanged AND already settled (a prior decision recorded in-file, or in the
-ledger once Phase C lands) into a single one-line summary ("N families unchanged
-since the last run, not re-litigated"). Surface in full only NEW or CHANGED families
-and any material audit finding. On a first run, show everything.
+that are unchanged AND already settled -- a prior decision recorded in-file, or a
+member carrying the `settled` flag pass 1 set from a `reject` in the sidecar ledger --
+into a single one-line summary ("N families unchanged since the last run, not
+re-litigated"). Surface in full only NEW or CHANGED families and any material audit
+finding. On a first run, show everything.
 
 ## Step 1b -- render the configuration-settings section (detect and inform)
 
@@ -117,6 +128,13 @@ the tool did not make), which is exactly why Step 3 certifies it.
   not forgotten. Never show only the section that changed.
 - Each section is a **drop-in replacement**: include its surrounding unchanged rules,
   not just the delta, so the user can paste the whole block.
+- **TOML backslash trap -- single-quote every `[regex]` (and any backslash) pattern.**
+  A double-quoted TOML string interprets backslash escapes, so `"Bash([regex]\.env\b)"`
+  fails to parse (invalid `\.`/`\b` escapes) or silently mangles the pattern. Emit such
+  patterns in TOML **literal (single-quoted) strings**: `'Bash([regex]\.env\b)'`. This
+  applies to any pattern containing a backslash (`\.`, `\b`, `\s`, ...). Certification
+  (Step 3) will catch a parse failure, but authoring it single-quoted from the start
+  avoids a broken paste. (Native-syntax patterns without backslashes are unaffected.)
 - Preserve `#NOSECURITY` and other user comments verbatim; never rewrite a
   `withheld_nosecurity` rule.
 - **Annotate interacting rules inline.** Where a rule's real effect depends on another
@@ -168,11 +186,26 @@ Never let the user paste un-certified AI-authored TOML. Prove it with the tool:
      already have): any **introduced** finding is a blocker to surface, exactly as
      the `--edits` review would flag. A change that resolves a MEDIUM but introduces
      a CRITICAL is a bad trade -- say so.
+   - **Do not credit a finding as "resolved" when it merely became invisible.** The
+     clarity/interaction detector only analyses DEFAULT-shaped patterns; rewriting a
+     rule into `[regex]`/`[glob]` removes it from interaction detection even though the
+     interaction still exists at runtime. So a drop in ask-overlap / deny-shadow
+     findings that coincides with a regex rewrite is likely **detector blindness, not a
+     real fix** -- verify each "resolved" interaction is genuinely gone (the rule no
+     longer overlaps) before crediting it, and if it only disappeared because the shape
+     changed, say so plainly in the notes rather than banking it as an improvement.
 3. Record the result in the recommendation set `certification`
-   (`parses`, `audit_clean`, `notes`).
+   (`parses`, `audit_clean`, `notes`). **`audit_clean` is DELTA-based: it is `true`
+   when the staged proposal introduces NO new findings versus `audit.before`, even if
+   pre-existing findings remain** (a remaining, escalated `uv run python:*` CRITICAL
+   does NOT make certification unclean -- it is the user's open decision, not a defect
+   of the proposal). Never set `audit_clean` from the absolute finding count. Record
+   any remaining pre-existing findings separately in `notes` so the user sees both "the
+   change is safe (introduces nothing)" and "these known issues still await your call".
 
-State the certification outcome to the user in the report: "the proposed config
-parses and the security audit is clean / introduces the following ...".
+State the certification outcome to the user in the report using that split: "the
+proposed config parses; it introduces no new findings (clean) / it introduces the
+following ...; and these pre-existing findings still await your decision: ...".
 
 ## Step 3a -- let the audit REVISE the proposal, not just gate it
 
@@ -256,6 +289,67 @@ commands).
   history, or `--corpus` mining found nothing in the window), state that the replay
   proved nothing rather than reporting a pass. Consider widening `--max-age-days` or
   simply noting the absence of evidence.
+- **Large `tightened` counts are EXPECTED for deny-hardening / promotion-heavy
+  candidates.** A new tool-agnostic secret deny (or a promoted deny) legitimately flips
+  many observed reads from allow to deny -- that is the hardening working, not a
+  problem. Only `broadened` is the red flag. Say the tightenings are expected and, where
+  useful, name a representative one (e.g. the historical `grep ... .env`) rather than
+  alarming at the count.
+
+## Step 3c -- certify promotions with a LIVE two-level staged audit
+
+Skip this step unless the proposal contains a `status:"promote"` member. A promotion
+MOVES a rule from the project level to the user level, so the project-only staging of
+Step 3 does not represent it: staging just the project side (rule removed) would show
+the rule as GONE and read as a regression. Certify a promotion by staging **both**
+levels and auditing the assembled two-level config live. **Certify ALL promotions
+together in ONE staged two-level audit** -- they share the same target user level, so a
+single staged home holding every promoted rule certifies the whole batch; you do not
+run a separate audit per promoted rule.
+
+The user level is discovered from `~/.claude`, so redirect it with a staged `HOME`
+rather than touching the real one:
+
+1. **Stage the project level** exactly as Step 3 (temp project root, `git init`, your
+   Step-2 project TOML with the promoted rule REMOVED from it). **Copy the project's
+   native `settings.local.json` alongside the toolguard TOML** -- omitting it makes the
+   audit report a spurious `hook-not-registered` finding and can flip `takeover_active`,
+   which reads as a false regression.
+2. **Stage the user level** under a separate temp home: create
+   `<staged_home>/.claude/toolguard_hook.toml` containing the user level *as it would
+   be after the promotion* -- i.e. the current user-level toolguard config (copy it if
+   one exists) PLUS the promoted rule. If the machine has **no** user-level toolguard
+   config yet (the common case), the staged user file must also include the base setup
+   (`[takeover_mode]`, `governed_tools`) so it is a coherent, complete user level --
+   this doubles as a preview of the full user-level setup the promotion requires.
+3. **Run the audit with the staged home:**
+   ```bash
+   HOME=<staged_home> toolguard-audit --dir <staged_project> --format json --with-context
+   ```
+   The staged `HOME` needs ONLY `.claude/toolguard_hook.toml` -- you do NOT have to
+   recreate a full Claude settings tree there; a toolguard-only staged home audits
+   correctly (the absent user-level native `settings.json` simply does not appear in
+   `sources`, which is expected and harmless for this check).
+   **Verify BOTH levels loaded** before trusting anything: `context.summary.sources`
+   must list the staged project file AND the staged user file (`user: <staged_home>/
+   .claude/toolguard_hook.toml`), and top-level `takeover_active` must be `true`. If the
+   user source is missing, the `HOME` redirect did not take -- fix and re-run; do not
+   report a result that silently audited only one level.
+4. **Read the two-level verdict.** Compare against `audit.before`: a promoted DENY should
+   introduce nothing (it only tightens -- restricts every project) and may RESOLVE
+   findings; a promoted ALLOW must be scrutinised for any interaction it creates at the
+   user level. Record it in the promotion member's narrative.
+
+Two things the live audit still cannot see -- state them, do not paper over them:
+- **Cross-context broadening is invisible to any audit.** A promoted ALLOW widens
+  *every* project, including ones with no corpus and no toolguard config; the staged
+  audit checks one assembled config, not the fleet. So a clean promotion audit is
+  necessary, not sufficient -- promoting an allow remains a developer decision, made
+  with the cross-context caveat, never on the audit's say-so alone.
+- **The promotion only bites where toolguard runs.** Repeat the Step-5 incomplete-setup
+  admonition here: a promoted rule at the user level does nothing in a project that has
+  no toolguard hook. If the staged user level had to invent the base setup (step 2), say
+  plainly that the promotion REQUIRES standing up the full user-level setup, together.
 
 ## Output
 

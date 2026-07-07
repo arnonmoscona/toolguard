@@ -23,10 +23,12 @@ For every consolidation flagged `cross-level-weld` in pass 1: **do not** keep th
 tool's single merged rule. Split it along level lines into per-level candidates
 (e.g. the `/tmp`, `/tmp/claude-code` members become one candidate destined for the
 user level; the `flowers/`, `~/projects/flowers/` members another destined for the
-project level). In this phase, since promotion is deferred, present the split as:
-keep the project-level members merged (if homogeneous) and raise the user-level
-members as a *promotion opportunity* discussion entry rather than enacting the move.
-The point is: never emit a rule that welds levels together.
+project level). Keep the project-level members merged (if homogeneous). The
+user-level members become a first-class **promotion** proposal (`status:"promote"`,
+`target_level:"user"`) -- certified by the pass-3 Step 3c live two-level staged audit
+and hand-applied in pass 4, exactly like any other promotion; they are NOT merely a
+passive discussion note. The point is: never emit a single rule that welds levels
+together -- split, keep the project part, and PROPOSE the user part as a move.
 
 ## Step 2 -- heterogeneity scan (flag, do not merge)
 

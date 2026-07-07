@@ -59,9 +59,14 @@ Store the document in the session scratchpad (never in the repo).
           "rationale": str,        // plain-English why (fills the narrative)
           "source_finding_ids": [str],   // maintenance finding ids this came from
           "flags": [str],          // e.g. "heterogeneity", "needs-discussion",
-                                   //      "cross-level-weld", "guard-overlap"
+                                   //      "cross-level-weld", "guard-overlap",
+                                   //      "settled" (a prior-run ledger reject covers
+                                   //      this; pass 4 stays silent on periodic runs)
           "user_decision": "pending" | "accept" | "reject" | "modify",
-          "user_note": str | null  // what the user said; drives the ledger later
+                                   // may be PRE-SEEDED to "reject" in pass 1 from a
+                                   // settled ledger decision; still never ENACTS
+          "user_note": str | null  // what the user said; drives the ledger (pass 4
+                                   // records META-decisions via --record-decision)
         }
       ],
 
@@ -85,7 +90,11 @@ Store the document in the session scratchpad (never in the repo).
 
   "certification": {               // filled by the finalize pass; author-by-AI/certify-by-tool
     "parses": bool | null,
-    "audit_clean": bool | null,
+    "audit_clean": bool | null,    // DELTA-based: true iff the staged proposal INTRODUCES
+                                   // no new findings vs audit.before. Pre-existing findings
+                                   // that remain (e.g. an escalated uv-run-python CRITICAL)
+                                   // do NOT make it false -- record those in `notes`. Never
+                                   // set from the absolute finding count.
     "corpus_ok": bool | null,
     "notes": str | null
   } | null,
