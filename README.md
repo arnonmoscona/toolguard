@@ -41,10 +41,17 @@ Key advantages over the native Claude Code permission system:
 > rules, diagnose denials) and is usually enough on its own. Only open the other guides when
 > a task needs the detail -- they are verbose and human-oriented.
 
+> **Want an AI agent to install it for you?** Open this repo in Claude Code (or point your
+> agent at it) and say "install toolguard" -- it will follow
+> **[docs/install.md](docs/install.md)**, a guided setup that handles scope, options, the
+> install, hook registration, validation, and an optional first audit/maintenance pass, and
+> records every step for a clean rollback later.
+
 New to toolguard? Start with the quick-start, then dip into the topic guides as needed.
 
 | Guide | What it covers |
 |-------|----------------|
+| [Guided Install](docs/install.md) | Agent-driven, first-time setup for a new user: scope, options (incl. takeover mode), `uv tool install`, hook registration, validation, and an optional migration/audit/maintenance -- with a journaled, reversible rollback ([uninstall](docs/uninstall.md)). |
 | [Quick Start](docs/quickstart.md) | The shortest path to a working setup: register the hook, govern `Bash`, add a few patterns, verify. |
 | [Configuration](docs/configuration.md) | Full configuration reference: hook matchers, governed tools, permission patterns, environment variables, the hierarchy/resolution model, and the annotated config template. |
 | [Permission Patterns](docs/permission-patterns.md) | Pattern types (DEFAULT/REGEX/GLOB/NATIVE), file-path patterns, path normalization, and compound / multi-line / heredoc handling (incl. the `__HEREDOC_TO_<sink>__` sentinel). |

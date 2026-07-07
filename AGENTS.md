@@ -5,12 +5,21 @@ might have here -- pick the right entry point.
 
 ## Helping a user adopt or configure toolguard
 
-If your job is to install toolguard for a user, register its hooks, or write/adjust
-permission rules, **read [docs/agent-guides.md](docs/agent-guides.md) first**. It is the
-terse, task-oriented version of the documentation (install, register hooks for every governed
-tool, write rules, diagnose denials) and is usually enough on its own. Open the other guides
-under [docs/](docs/) only when a task needs the detail; [llms.txt](llms.txt) is a map of all
-the docs.
+If your job is a **full guided install for a user who does not have toolguard yet** -- they
+pointed you at this repo and said "install toolguard" -- follow
+**[docs/install.md](docs/install.md)**. It is a step-by-step runbook: scope and options
+(including takeover mode), installing via `uv tool install` (setting up `uv` if needed),
+registering the hook, validating, and offering an initial permission migration, security
+audit, and maintenance pass -- doing the work for the user with consent at each step and
+journaling every action to `~/.toolguard/install-journal.md` so it can be rolled back
+reliably. To REMOVE toolguard later, follow [docs/uninstall.md](docs/uninstall.md).
+
+If your job is narrower -- register hooks, write/adjust permission rules, or diagnose denials
+on an existing setup -- **read [docs/agent-guides.md](docs/agent-guides.md)**. It is the terse,
+task-oriented version of the documentation and is usually enough on its own. The two
+operator skills (audit, maintenance) are described in [docs/skills.md](docs/skills.md). Open
+the other guides under [docs/](docs/) only when a task needs the detail; [llms.txt](llms.txt)
+is a map of all the docs.
 
 What toolguard is, in one line: a Claude Code PreToolUse hook that replaces the native
 permission system for Bash/Read/Write/Edit with regex/glob/native pattern matching,

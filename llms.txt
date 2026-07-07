@@ -12,9 +12,16 @@ the detail -- they are verbose and human-oriented.
 
 ## Agent docs (read first)
 
+- [Guided install](docs/install.md): step-by-step runbook to install toolguard for a new user
+  who pointed you at the repo -- scope/options (incl. takeover mode), `uv tool install`, hook
+  registration, validation, optional migration/audit/maintenance, with every action journaled
+  to ~/.toolguard/install-journal.md for a reversible rollback ([uninstall](docs/uninstall.md)).
 - [Agent guides](docs/agent-guides.md): few-shot recipes for setting up and configuring
   toolguard on a user's behalf -- installation, registering hooks for every governed tool,
   governed_tools / additional_supported_tools, writing rules, and diagnosing denials.
+- [Maintenance & audit skills](docs/skills.md): the toolguard-security-audit and
+  toolguard-maintenance skills -- audit config for risk, and clean up / consolidate / promote
+  rules with per-item consent.
 
 ## Core docs
 

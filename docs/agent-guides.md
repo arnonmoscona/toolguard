@@ -21,6 +21,11 @@ edit can be applied directly. For full syntax see [Permission Patterns](permissi
 
 ## Recipe: install and register toolguard from scratch
 
+> For a **full guided install** -- scope/options conversation, installing via `uv`, validation,
+> an optional first migration/audit/maintenance, and a journaled rollback -- follow
+> [install.md](install.md). The steps below are the terse wiring reference it builds on; use
+> them directly when you only need to register hooks and write the base config.
+
 **Goal**: set up toolguard for a user who does not have it yet, governing all the tools that
 matter (not just `Bash`).
 
