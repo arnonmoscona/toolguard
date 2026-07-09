@@ -413,12 +413,11 @@ def resolve_file_path_permission_detailed(
 
     resolved = config.resolve_permission_detailed(tool_name, _decide_detailed)
     reason = resolved.reason
-    if (
-        resolved.decision == "deny"
-        and reason == "Command does not match any allow patterns"
-    ):
-        # Normalise the default-deny reason to file-path phrasing.
-        reason = "Path does not match any allow patterns"
+    _no_match_prefix = "Command does not match any allow patterns"
+    if reason.startswith(_no_match_prefix):
+        # Normalise the "Command"-phrased no-match reason to file-path phrasing,
+        # preserving any suffix (e.g. the TOO-15 warn_deny fallback explanation).
+        reason = "Path does not match any allow patterns" + reason[len(_no_match_prefix):]
     return FileResolution(
         decision=resolved.decision,
         reason=reason,

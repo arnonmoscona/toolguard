@@ -8,183 +8,182 @@ tags:
 - coder-task
 ---
 
-# TOO-8 Follow-up: Loader Deletion and Takeover Coverage
-
-## Task Summary
-Behavior-preserving refactor: eliminate near-verbatim duplication between `toolguard/tools/decision.py` and `hook.py` resolver functions by creating a shared `toolguard/resolve.py` module.
-
-TICKET: TOO-15/TOO-11 P0 Clean-up
-DATE: 2026-06-25
-
-## Files Involved
-- `toolguard/hook.py` - source of pure resolver functions to move
-- `toolguard/tools/decision.py` - currently duplicates/reimplements logic
-- `toolguard/resolve.py` - NEW module to create with moved pure functions
-
-## What to Move from hook.py to resolve.py
-Functions to move (pure, no logging/exit):
-- `resolve_bash_permission_detailed` (lines 535-589)
-- `resolve_file_path_permission_detailed` (lines 417-467)
-- `_check_file_path_hard_deny` (lines 368-414)
-- `_decide_file_path_at_level_detailed` (lines 251-285)
-- `_anchor_file_pattern` (lines 193-225)
-- `_match_file_path_pattern` (lines 228-248)
-
-## Do NOT Move
-- `load_file_path_patterns` - has optional param loading, keep in hook
-- `FILE_PATH_TOOLS` constant - keep in hook, re-export from resolve.py if needed
-- `_format_conflict_message` (references override/provenance objects in hook context)
-- `_log_conflict_override` (has logging)
-- `_log_takeover_enabled_conflict` (has logging)
-- `_log_allowed_command` (has logging)
-- `_parse_compound_match_details` (utility for logging)
-- `main()` and all its supporting infra
-
-## Key Requirements
-1. Create `toolguard/resolve.py` with moved pure functions
-2. Update `hook.py` to import from `toolguard.resolve` (keep re-exports for backwards compat)
-3. Refactor `decision.py` to DELETE duplicated `_decide_bash`/`_decide_file_path` and DELEGATE to `resolve.*` instead
-4. No import cycles - resolve.py may import config, permissions, compound, patterns, normalization
-5. All 905 tests must still pass
-6. Add one anti-drift test in test/unit/test_tools_decision.py or test_resolve.py
-
-## Backwards Compatibility
-- Keep moved names importable from `hook` via re-exports
-- Check test files for `hook.<name>` references to underscore-prefixed helpers
-
-## Testing
-- Run: `uv run python -m unittest discover -s test -t .`
-- Must remain at 905 passing
-- Add anti-drift test in test/unit/
-
-## Out of Scope
-- Do NOT move fail-closed-when-nothing-configured pre-checks from main()
-- Do NOT change any decision semantics
-- Do NOT run ruff format
-
-## Task 1: Migrate migrate_permissions.py off legacy loader, then delete it
-
-### Current state
-- `toolguard/scripts/migrate_permissions.py` line 906 calls `load_takeover_mode_config(project_root)`
-- This is the ONLY production caller of the legacy loader
-- The script already builds a `Configuration` two lines above (lines 897-899)
-- `load_configuration(project_root, ignore_env_override=True)` is already called
-
-### What to do
-1. Rework migrate_permissions.py to reuse a SINGLE Configuration object
-2. Read takeover via `.takeover_mode()` on the existing config object
-3. `ignored_patterns` = union of `ignored_allow_patterns + additional_ignored_patterns` when enabled
-4. Remove `load_takeover_mode_config` import from migrate_permissions.py line 22ish
-5. Keep `discover_config_files` import (still needed for write-target selection at line 903)
-6. DELETE `load_takeover_mode_config` from `toolguard/config.py` entirely
-7. Clean up stale comment in config.py docstring (line ~20) referencing it
-8. Reword comment at line ~48 ("Shared between the legacy load_takeover_mode_config...") 
-9. Keep `_DEFAULT_IGNORED_ALLOW_PATTERNS` constant (still used by hierarchical resolver)
-10. Verify with `grep -rn load_takeover_mode_config` that no references remain
-
-### Key insight on ignored_patterns behavior
-- Old code: `ignored_patterns = ignored_allow_patterns + additional_ignored_patterns` when enabled
-- New `TakeoverConfig`: has `.ignored_allow_patterns` and `.additional_ignored_patterns` as tuples
-- Preserved behavior: only populated when takeover enabled
-
-## Task 2: Rework test/unit/test_takeover_mode.py
-
-### Tests currently in test_takeover_mode.py (16 references to load_takeover_mode_config):
-- `TestTakeoverModeConfig`:
-  - `test_default_config_when_no_files` - defaults when no files
-  - `test_load_takeover_mode_from_toml` - reads TOML
-  - `test_load_takeover_mode_from_json` - reads JSON
-  - `test_merge_takeover_mode_from_multiple_files` - merges from project + user level
-  - `test_takeover_mode_not_loaded_from_claude_settings` - ignores settings.json
-- `TestNoMatchFallback`:
-  - `test_deny_fallback_silent` - deny fallback
-  - `test_warn_deny_fallback` - warn_deny fallback
-- `TestBackwardCompatibility`:
-  - `test_no_takeover_mode_section_uses_defaults` - no section uses defaults
-- `TestFilePathToolTakeoverFiltering`: (uses `load_file_path_patterns` from hook - KEEP these)
-  - `test_filters_blanket_read_pattern`
-  - `test_filters_blanket_write_pattern`
-  - `test_does_not_filter_file_patterns_when_disabled`
-  - `test_never_filters_toolguard_hook_file_patterns`
-  - `test_file_deny_patterns_not_filtered`
-
-### Strategy for porting:
-- Re-point tests at `load_configuration(project_dir, ignore_env_override=True).takeover_mode()`
-- Where a scenario is ALREADY covered equivalently by test_hierarchical.py or test_configuration.py, DROP it
-- Do not weaken any assertion
-- Keep `TestFilePathToolTakeoverFiltering` tests as-is (use hook, not legacy loader)
-
-### What's covered in other test files:
-- test_configuration.py:783 covers `takeover_mode_shape` (TakeoverConfig fields)
-- test_configuration.py:233 covers takeover filtering native layer (Read)
-- Various tests in test_configuration.py cover enabled/conflict/default resolution
-
-## Task 3: Confirm live Bash takeover filtering coverage
-
-### Key question
-With takeover enabled and a NATIVE settings allow of Bash(*), does a test prove that:
-1. The native blanket allow is suppressed at the live resolve path
-2. A toolguard deny still fires
-3. toolguard_hook allow entries are NOT filtered
-
-### Live path
-config.py:1131: `if takeover.enabled and layer.is_native and pattern in ignored:`
-
-## Success criteria
-1. `uv run python -m unittest discover -s test -t .` fully green
-2. `uv run ruff check .` clean
-3. `grep -rn load_takeover_mode_config .` shows zero references in code/comments/tests
-4. No git operations
-
-
----
-## TOO-15 P0 Analyzers Slice (2026-06-25)
-
-Four new modules: redundancy.py, danger.py, takeover_audit.py, sorters.py
-Pre-implementation baseline: 833 tests passing.
-Featherhill corpus at /home/arnon/projects/flowers/featherhill/ used for realistic tests.
-
-## TOO-15/TOO-11 Task (2026-06-25)
-Two P0-end cleanups in toolguard project.
-
-### PART 1: Unify duplicate sort logic
-- Create `toolguard/rule_sort.py` with canonical functions moved from migrate_permissions.py
-- Update migrate_permissions.py to import from rule_sort (re-export for backward compat)
-- Replace sorters.py to delegate to rule_sort
-- Update test_tools_sorters.py to reflect canonical (tool-priority) order
-
-### PART 2: Trim danger.py secrets detector
-- Remove `secret`, `password`, `credentials` from `_SECRET_PATTERNS`
-- Keep file-indicator patterns only
-
-### Baseline: 910 tests all passing
-
-
-# Feature Coder Task Recall
-# Feature Coder Task Recall - TOO-15/TOO-11 Provenance
-
-## Task
-P0-end cleanup: Surface permission PROVENANCE through shared resolver layer for both Bash and file tools.
-Baseline: 919 tests, started 14:46.
-
-
-# Coder Task Recall
-# Coder Task Recall - TOO-15 P1 Security Audit Aggregator
-
 ## Ticket
-TOO-15, Phase P1
+TOO-15 (permission-decision semantics change)
 
-## Task Summary
-Create a thin deterministic aggregator module `toolguard/tools/security_audit.py` that
-combines output from two already-tested modules:
-- `toolguard/tools/danger.py`
-- `toolguard/tools/takeover_audit.py`
+## Problem
+When toolguard governs a tool (Bash/Read/Write/Edit) but that tool has NO allow rules
+configured, the hook currently DENIES everything unconditionally
+(`toolguard/hook.py` around lines 648 for file-path tools and 721 for Bash).
+This bricks a fresh install. Also `no_match_fallback="warn_deny"` currently only
+rewrites the deny reason string (`hook.py` ~line 751-761) and never actually allows;
+and that fallback logic is wired only for Bash, not for Read/Write/Edit.
 
-## Critical Anti-Duplication Constraint
-MUST NOT reimplement, re-derive, or copy any detection logic.
-ONLY calls existing public functions and reshapes their output.
+## Required new semantics (spec, implement exactly)
+For a governed tool, the decision resolves as:
+1. Command/path matches a deny or hard_deny rule -> deny (unchanged).
+2. Matches an allow rule (more-specific-wins over deny) -> allow (unchanged).
+3. NO rules at all for the tool (no allow AND no deny AND no ask AND no hard_deny
+   patterns at ANY config level for that tool) -> return "ask" (KEY CHANGE; was deny).
+   This is ALWAYS ask; NOT affected by no_match_fallback. Do NOT add a config item to
+   override this -- a user wanting fail-closed-on-empty writes their own catch-all deny
+   rule (flows through path #1).
+4. Rules exist but none match -> apply no_match_fallback: default "deny";
+   "warn_deny" -> ALLOW the operation but surface a warning (fix: must actually allow,
+   not just reword a deny); "deny" -> deny. Must work for BOTH Bash and file-path tools.
+5. no_match_fallback raised to a top-level config key, AND still accepted under
+   existing [takeover_mode] section as backwards-compatible legacy alias, identical
+   semantics. Now applies in BOTH takeover and non-takeover modes (previously gated on
+   takeover enabled). If both top-level and [takeover_mode] set, top-level wins.
+   Default "deny". See toolguard/config.py (_DEFAULT_NO_MATCH_FALLBACK, takeover/config
+   parsing ~lines 654-921).
 
-## Deliverables: See implementation plan captured at start of session.
+## CRITICAL: keep all decision paths consistent
+hook.py is not the only decision path. toolguard/tools/decision.py (decide()) is used
+by toolguard/tools/self_permission.py and audit tooling to evaluate what hook WOULD
+decide. Must map every decision path first (hook.py, decision.py,
+resolve_bash_permission_detailed, resolve_file_path_permission_detailed, and anything
+in config.py / compound.py). Apply new semantics in shared/source-of-truth layer so
+hook.py and decide() AGREE -- do NOT duplicate divergent logic. compound.py:71 already
+emits "ask", create_hook_output passes permissionDecision straight through -- "ask" is
+already fully supported.
 
-## Start Time
-06:46 local time
+## Process -- STRICT RED-GREEN (explicit requirement)
+1. RED phase FIRST. Edit existing tests asserting OLD behavior (deny-on-empty,
+   warn_deny-still-denies) to assert NEW behavior. ADD new tests for every changed
+   behavior:
+   - empty-config -> ask (Bash + each file tool)
+   - rules-exist-no-match -> deny by default (Bash + file)
+   - warn_deny -> allow+warn (Bash + file)
+   - takeover + no_match_fallback="deny" still fail-closed
+   - top-level no_match_fallback honored
+   - legacy [takeover_mode].no_match_fallback still honored, same semantics
+   - top-level wins when both set
+   Run FULL suite, CONFIRM ONLY touched/added tests fail (intended red), nothing
+   unrelated broke. Record exact red state -- required checkpoint.
+2. GREEN phase. Only now modify production code (hook.py, decision.py/resolution
+   layer, config.py) until ENTIRE suite passes. Do NOT edit tests during green (except
+   genuine mistakes in own new tests -- call those out explicitly).
+3. Run full suite: uv run python -m unittest discover -s test -t .
+
+## Hard constraints
+- Do NOT run any git write operations, do NOT commit. Leave tree dirty.
+- Do NOT run `ruff format` on this project (corrupts `except (A, B):` tuples). May run
+  `uv run ruff check .`.
+- Always `uv run python ...`, never bare python.
+- Every new/edited test function MUST carry Given/When/Then BDD docstring, kept in sync.
+- No async, no threading, no imports inside functions.
+- Add doc comments to any new/changed functions.
+
+## PROCESS CHECKPOINT (added mid-task by coordinator)
+HARD CHECKPOINT before GREEN phase. Complete RED phase fully (edit/add tests, run full
+suite), confirm ONLY touched/added tests fail and nothing else broke. Then STOP --
+do NOT modify any production code yet. Report red state back to coordinator (list of
+every test file/function added or changed, one-line note of new behavior each asserts,
+exact set of failing tests + failure reasons). WAIT for explicit approval before
+starting GREEN phase.
+
+## Report requirements
+Write implementation report to basic-memory (project 'toolguard', tag TOO-15) covering:
+decision paths found and where centralized; red state achieved (failing tests list)
+before green; final green result (test counts); config precedence handling
+(top-level vs legacy takeover_mode alias); decisions/edge cases hit. Give report
+path/permalink in final message, don't ask to read inline.
+
+If spec genuinely ambiguous or blocker found, STOP and report specific question rather
+than guessing.
+
+
+## RED-phase checkpoint reached (awaiting approval before GREEN)
+
+Baseline before any test edits: 1282 tests, all passing (`uv run python -m unittest
+discover -s test -t .`).
+
+After RED-phase test edits: 1308 tests total (+26 new/changed test methods).
+Result: `FAILED (failures=8, errors=14)` -- exactly 22 of the 26 touched tests fail;
+the other 4 are regression-guard tests asserting UNCHANGED behavior (rules-exist,
+no-match -> deny by default) which already pass today and must stay green after
+GREEN too.
+
+### Files touched (tests only, no production code changed)
+1. `test/unit/test_configuration.py` -- two new classes:
+   - `TestHasAnyRules` (7 tests) -- for a new `Configuration.has_any_rules(tool_name)`
+     method (does not exist yet -> AttributeError/ERROR).
+   - `TestResolvedNoMatchFallback` (7 tests) -- for a new
+     `Configuration.resolved_no_match_fallback()` method (does not exist yet ->
+     AttributeError/ERROR).
+2. `test/unit/test_resolve.py` -- new class `TestNoMatchSemanticsNoDrift` (9 tests),
+   anti-drift style (decide() vs resolve_bash/file_permission_detailed()), real
+   Configuration objects via existing `_make_config` helper.
+3. `test/unit/test_hook.py`:
+   - Renamed/changed `test_read_no_allow_patterns_denied` ->
+     `test_read_no_allow_patterns_asks` (expects 'ask' instead of 'deny').
+   - Added `test_bash_no_allow_patterns_asks` (new).
+   - Added new class `TestNoMatchFallbackThroughMain` (2 tests) using REAL
+     `Configuration`/`ConfigLayer` objects (not the hand-rolled `_FakeConfig`)
+     driven through `main()`.
+   - Updated the `_FakeConfig.resolve_permission_detailed` test double in
+     `_fake_config()` to model the new "tool entirely unconfigured -> ask" case
+     (previously hardcoded unconditional deny).
+
+### Exact RED state (22 failing before GREEN)
+ERRORS (14, all `AttributeError` -- methods don't exist yet):
+- test_configuration.TestHasAnyRules: test_false_when_tool_fully_unconfigured,
+  test_false_when_no_layers_at_all, test_true_when_allow_configured,
+  test_true_when_only_deny_configured, test_true_when_only_ask_configured,
+  test_true_when_only_hard_deny_configured, test_false_is_tool_scoped
+- test_configuration.TestResolvedNoMatchFallback: test_defaults_to_deny_when_nothing_set,
+  test_top_level_key_honored, test_legacy_takeover_alias_honored_when_no_top_level_key,
+  test_top_level_wins_over_legacy_alias_when_both_set,
+  test_top_level_wins_even_when_set_at_a_less_specific_level,
+  test_top_level_more_specific_layer_wins_among_top_level_setters,
+  test_native_layer_top_level_key_ignored
+
+FAILURES (8, assertion mismatches -- old value returned instead of new):
+- test_hook.TestFilePathToolsInMain.test_bash_no_allow_patterns_asks (got 'deny', want 'ask')
+- test_hook.TestFilePathToolsInMain.test_read_no_allow_patterns_asks (got 'deny', want 'ask')
+- test_hook.TestNoMatchFallbackThroughMain.test_bash_warn_deny_fallback_allows_via_main
+  (got 'deny', want 'allow')
+- test_resolve.TestNoMatchSemanticsNoDrift.test_bash_fully_unconfigured_resolves_to_ask_no_drift
+  (got 'deny', want 'ask')
+- test_resolve.TestNoMatchSemanticsNoDrift.test_read_fully_unconfigured_resolves_to_ask_no_drift
+  (got 'deny', want 'ask')
+- test_resolve.TestNoMatchSemanticsNoDrift.test_bash_warn_deny_fallback_allows_no_drift
+  (got 'deny', want 'allow')
+- test_resolve.TestNoMatchSemanticsNoDrift.test_read_warn_deny_fallback_allows_no_drift
+  (got 'deny', want 'allow')
+- test_resolve.TestNoMatchSemanticsNoDrift.test_legacy_takeover_alias_warn_deny_honored_no_drift
+  (got 'deny', want 'allow')
+
+PASSING already (4, regression guards for behavior that must NOT change):
+- test_resolve.TestNoMatchSemanticsNoDrift.test_bash_rules_exist_no_match_denies_by_default_no_drift
+- test_resolve.TestNoMatchSemanticsNoDrift.test_read_rules_exist_no_match_denies_by_default_no_drift
+- test_resolve.TestNoMatchSemanticsNoDrift.test_top_level_no_match_fallback_wins_over_legacy_alias_no_drift
+- test_resolve.TestNoMatchSemanticsNoDrift.test_takeover_enabled_no_match_fallback_deny_still_fails_closed_no_drift
+- test_hook.TestNoMatchFallbackThroughMain.test_bash_takeover_enabled_deny_fallback_still_fails_closed_via_main
+
+Nothing else in the suite is affected: 1282 - 0 changed = all still pass (verified
+via failures+errors totalling exactly 22, all within the touched/added set).
+
+### Planned GREEN-phase design (not yet implemented)
+- `toolguard/config.py`: add `Configuration.has_any_rules(tool_name)` and
+  `Configuration.resolved_no_match_fallback()`; modify the fail-closed branch at the
+  end of `resolve_permission_detailed` to consult both instead of unconditionally
+  returning deny.
+- `toolguard/resolve.py`: extend the file-path "Command"->"Path" reason rename to a
+  `startswith` check (covers the new warn_deny-allow reason too); no other change
+  needed (resolve_bash_permission_detailed/resolve_file_path_permission_detailed
+  already just propagate whatever ResolvedDecision comes back).
+- `toolguard/hook.py`: remove the two early "if not all_allow: deny" pre-checks
+  (~644-660, ~719-733) and the now-redundant takeover-gated warn_deny reason-rewrite
+  block (~751-761); add an `elif decision == "ask":` logging branch (status "ask")
+  alongside the existing allow/deny branches for both the file-path and Bash
+  resolution blocks.
+- No changes planned to `toolguard/tools/takeover_audit.py` or
+  `toolguard/tools/security_audit.py` (TakeoverConfig.no_match_fallback keeps
+  resolving ONLY the legacy `[takeover_mode]` section, unchanged, for audit purposes
+  -- this is intentionally a separate, narrower concept from the new
+  `resolved_no_match_fallback()`).
+
+STATUS: Awaiting explicit approval from coordinator before starting GREEN phase
+(hard checkpoint per mid-task process-change instruction).

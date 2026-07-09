@@ -54,6 +54,9 @@ _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "mcp__jetbrains__execute_terminal_command(*)",
 )
 _DEFAULT_NO_MATCH_FALLBACK = "deny"
+# The recognized ``no_match_fallback`` values. Any other (typo/bad config) value is
+# normalized to the safe fail-closed default rather than propagated (TOO-15).
+_VALID_NO_MATCH_FALLBACKS = frozenset({"deny", "warn_deny"})
 
 # Documented defaults for the ``config_sync`` section. Single source of truth
 # shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
@@ -1215,9 +1218,98 @@ class Configuration:
                 )
             return ResolvedDecision(decision, reason_with_prov, prov, override)
 
+        # No level matched anything for this command/path (TOO-15). Two distinct
+        # cases share this fail-closed branch:
+        #
+        # - The tool has NO permission rules configured anywhere (no allow, deny,
+        #   ask, or hard_deny at any level): the tool is entirely unconfigured, so
+        #   this ALWAYS resolves to 'ask' -- regardless of no_match_fallback -- so
+        #   a fresh install is never bricked by a blanket deny. A user who wants
+        #   fail-closed-on-empty writes their own catch-all deny rule, which then
+        #   flows through the normal matched-deny branch above.
+        # - Rules ARE configured but simply did not match: governed by
+        #   no_match_fallback ('deny' by default; 'warn_deny' auto-allows with a
+        #   warning reason instead of blocking).
+        if not self.has_any_rules(tool_name):
+            return ResolvedDecision(
+                "ask",
+                f"No {tool_name} permission rules configured at any level; "
+                f"defaulting to 'ask'",
+                None,
+                None,
+            )
+        if self.resolved_no_match_fallback() == "warn_deny":
+            return ResolvedDecision(
+                "allow",
+                "Command does not match any allow patterns; auto-allowed by "
+                "no_match_fallback=warn_deny (add an explicit rule to silence this)",
+                None,
+                None,
+            )
         return ResolvedDecision(
             "deny", "Command does not match any allow patterns", None, None
         )
+
+    def has_any_rules(self, tool_name: str) -> bool:
+        """
+        Return whether ANY permission rule (allow, deny, ask, or hard_deny on
+        either side) is configured for ``tool_name`` at any level (TOO-15).
+
+        Distinguishes a genuinely UNCONFIGURED tool (which should resolve to
+        ``'ask'`` so a fresh install is not bricked) from a CONFIGURED tool whose
+        rules simply do not match the current command/path (which is governed by
+        :meth:`resolved_no_match_fallback`).
+
+        Args:
+            tool_name: Tool to check (e.g. ``'Bash'``, ``'Read'``, ``'Write'``,
+                ``'Edit'``).
+
+        Returns:
+            ``True`` when at least one allow/deny/ask/hard_deny pattern exists
+            for ``tool_name`` anywhere in the hierarchy.
+        """
+        for layer in self.permission_layers(tool_name):
+            if layer.allow or layer.deny or layer.ask:
+                return True
+        hd_deny, hd_allow = self.hard_deny(tool_name)
+        return bool(hd_deny or hd_allow)
+
+    def resolved_no_match_fallback(self) -> str:
+        """
+        Resolve the EFFECTIVE ``no_match_fallback`` setting (TOO-15).
+
+        ``no_match_fallback`` is a top-level ``toolguard_hook`` key, checked
+        across ALL non-native layers (most-specific first; the first layer that
+        sets it wins). For backwards compatibility, the legacy alias nested
+        under ``[takeover_mode].no_match_fallback`` (see :meth:`takeover_mode`)
+        is honoured ONLY when NO layer sets the top-level key. When BOTH are set
+        anywhere, the top-level key wins outright -- regardless of the relative
+        specificity of the two settings. Applies in BOTH takeover and
+        non-takeover modes (no longer gated on ``takeover_mode.enabled``).
+
+        Returns:
+            ``'deny'`` or ``'warn_deny'``. The resolved value is validated against
+            the recognized set; an unset OR unrecognized value (typo/bad config)
+            resolves to the safe default ``'deny'`` and is never propagated as-is.
+        """
+        raw = None
+        for layer in self.layers:
+            # no_match_fallback is a toolguard extension; ignore native settings.
+            if layer.is_native:
+                continue
+            if "no_match_fallback" in layer.content:
+                value = layer.content["no_match_fallback"]
+                if isinstance(value, str):
+                    raw = value
+                    break
+        if raw is None:
+            # No top-level key anywhere: fall back to the legacy [takeover_mode]
+            # alias (already defaults to 'deny' when unset anywhere).
+            raw = self.takeover_mode().no_match_fallback
+        # Validate: an unrecognized value must not propagate. Normalize to the
+        # fail-closed default rather than raising, so bad config never breaks
+        # loading (TOO-15 review suggestion).
+        return raw if raw in _VALID_NO_MATCH_FALLBACKS else _DEFAULT_NO_MATCH_FALLBACK
 
     @staticmethod
     def _detect_override(

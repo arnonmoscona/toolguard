@@ -11,8 +11,12 @@ uninstall may be frustrated, and a clean, complete rollback is the point.
   action the install took and its exact reverse. Undo those reverses in REVERSE order (last
   action first).
 - **Consent per step, and re-confirm shared things.** Confirm before each undo. For anything
-  the install flagged as possibly shared (uv, the `~/.toolguard` directory itself), re-confirm
-  explicitly -- the user may have started relying on it.
+  the install flagged as possibly shared (e.g. uv), re-confirm explicitly -- the user may have
+  started relying on it.
+- **Keep `~/.toolguard/`.** Its contents are non-executable records (install journal, config
+  backups, decision ledger, a `README.txt`). Uninstall does NOT delete them -- they exist for
+  auditability and problem resolution, and a frustrated user especially should not lose the
+  record of what was done. See Step 3.
 - **Back up before you delete/restore**, so an uninstall is itself recoverable.
 - **Verify at the end** that toolguard no longer governs.
 
@@ -53,16 +57,23 @@ user since install), stop and explain rather than forcing it.
 
 ---
 
-## Step 3 -- The `~/.toolguard` directory and the journal
+## Step 3 -- Leave `~/.toolguard/` in place (do NOT delete it)
 
-`~/.toolguard/` may hold more than install state -- the decision ledger
-(`decisions.json`) and other toolguard data. Ask before removing the directory. Offer to:
+**Do not remove `~/.toolguard/` or anything in it.** It holds only non-executable records --
+the install journal, the config/settings backups the install and uninstall made, the decision
+ledger (`decisions.json`), and `README.txt`. Toolguard no longer runs anything from here, so
+keeping it costs nothing and preserves a full, auditable history of what was installed and
+removed -- invaluable if the user hit problems (the reason they may be uninstalling) or later
+wants to reinstall or understand what happened.
 
-- keep it (in case they reinstall later), or
-- remove it entirely.
+**Tell the user explicitly, at the end, that you left it:** state that `~/.toolguard/` was kept
+on purpose for auditability and problem resolution, that it contains nothing executable, where
+it is, and that they are free to delete it by hand at any time (`rm -rf ~/.toolguard`) if they
+want it gone -- that is their call, not something uninstall does for them. `README.txt` in the
+directory says the same.
 
-Remove the journal itself LAST, and only if the user wants a full teardown -- otherwise leave
-it as the record of what was done.
+(If you want a clean marker, you may append a final "uninstalled" entry to the journal noting
+what was removed and when -- but never delete or rewrite earlier entries.)
 
 ---
 
@@ -92,7 +103,8 @@ If there is no usable journal, do a careful best-effort removal, confirming each
 3. Delete `toolguard_hook.toml` at the user level (`~/.claude/`) and in any projects that have
    one, if the user wants toolguard fully gone.
 4. Remove `~/.claude/skills/toolguard-*` if present.
-5. Ask about `~/.toolguard/`.
+5. Leave `~/.toolguard/` in place (Step 3) -- even in a best-effort teardown, keep the records;
+   tell the user it is there and that they can delete it by hand if they want.
 
 Tell the user this path is best-effort because there was no recorded install history, and that
 a future guided install would keep one.

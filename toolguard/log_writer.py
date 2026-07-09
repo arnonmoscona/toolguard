@@ -21,6 +21,7 @@ def log_command(
     extra_info: Optional[str] = None,
     config: Optional[dict] = None,
     matched_rule: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> None:
     """
     Log command execution to file if logging is enabled.
@@ -29,14 +30,20 @@ def log_command(
     Logs to logs/toolguard-YYYY-MM-DD.md by default.
 
     Args:
-        command_str: The command that was executed or refused
-        status: Either 'executed' or 'refused'
-        violated_rules: List of rules that were violated (for refused commands)
+        command_str: The command that was executed, refused, or left pending a prompt
+        status: 'executed', 'refused', or 'ask' (TOO-15: the command was not
+            outright blocked but requires an interactive permission prompt)
+        violated_rules: List of rules that were violated (for 'refused' commands
+            only -- NOT used for 'ask', which is not a violation; see ``note``)
         log_dir: Optional directory path for logs (for testing). If provided, uses this
                  directory directly instead of resolving from environment or project root.
         extra_info: Optional additional info to include in the log entry (e.g., agent identification)
         config: Optional environment config dict (from get_env_config())
         matched_rule: Optional pattern string that permitted the command (for allowed commands)
+        note: Optional free-text note for a non-violation outcome (e.g. WHY an
+            'ask' verdict was reached). Rendered under its own field, distinct
+            from ``violated_rules``, so an 'ask' outcome is never mislabeled as
+            a rule violation.
     """
     # Check if logging is enabled (backward compatibility with CHECKED_BASH_LOGGING_ON)
     if config is not None:
@@ -121,6 +128,8 @@ def log_command(
                 }
                 if matched_rule:
                     entry["matched_rule"] = matched_rule
+                if note:
+                    entry["note"] = note
                 if extra_info:
                     entry["extra_info"] = extra_info
                 f.write(json.dumps(entry) + "\n\n")
@@ -135,6 +144,11 @@ def log_command(
                     f.write(
                         f"- **Violated Rules**: {', '.join(f'`{rule}`' for rule in violated_rules)}\n"
                     )
+                if note:
+                    # A non-violation note (e.g. WHY an 'ask' verdict was
+                    # reached) -- deliberately rendered under its own field,
+                    # never under Violated Rules (TOO-15 review finding #3).
+                    f.write(f"- **Note**: {note}\n")
                 if extra_info:
                     f.write(f"- **Agent**: {extra_info}\n")
                 f.write("\n")

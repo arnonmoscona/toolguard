@@ -8,6 +8,13 @@ Toolguard is a drop-in replacement for the native Claude Code permissions system
 `Bash`, `Read`, `Write`, and `Edit`. It is backwards compatible (as of January 2026), adds
 extended capabilities, and works around several long-standing bugs in the native system.
 
+> **Installing? Let an AI agent do it.** Open this repository in Claude Code (or point your
+> coding agent at it) and say **"install toolguard"**. The agent should follow the guided
+> runbook in **[docs/install.md](docs/install.md)** -- it handles the install, hook wiring,
+> validation, an optional first migration/audit/maintenance, and enabling takeover mode, and
+> records every step so it can be cleanly undone. Prefer this over improvising; the runbook has
+> the exact, current commands.
+
 ## Why Toolguard?
 
 Key advantages over the native Claude Code permission system:
@@ -40,12 +47,6 @@ Key advantages over the native Claude Code permission system:
 > is the terse, task-oriented version of everything below (install, register hooks, write
 > rules, diagnose denials) and is usually enough on its own. Only open the other guides when
 > a task needs the detail -- they are verbose and human-oriented.
-
-> **Want an AI agent to install it for you?** Open this repo in Claude Code (or point your
-> agent at it) and say "install toolguard" -- it will follow
-> **[docs/install.md](docs/install.md)**, a guided setup that handles scope, options, the
-> install, hook registration, validation, and an optional first audit/maintenance pass, and
-> records every step for a clean rollback later.
 
 New to toolguard? Start with the quick-start, then dip into the topic guides as needed.
 

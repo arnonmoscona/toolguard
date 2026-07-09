@@ -113,9 +113,9 @@ def _fake_config(
 
         def resolve_permission_detailed(self_inner, tool_name, decide_detailed):
             # API-sync with Configuration.resolve_permission_detailed (TOO-8
-            # Phase 4) -- the sole cascade entry point the hook now calls. The
-            # fake models a single hierarchy level per tool with no provenance,
-            # so no override (conflict) is ever produced here.
+            # Phase 4, TOO-15) -- the sole cascade entry point the hook now
+            # calls. The fake models a single hierarchy level per tool with no
+            # provenance, so no override (conflict) is ever produced here.
             allow, deny = _patterns_for(tool_name)
             if allow or deny:
                 # API-sync with Configuration.resolve_permission_detailed, whose
@@ -124,8 +124,24 @@ def _fake_config(
                 if result is not None:
                     decision, reason, _matched = result
                     return ResolvedDecision(decision, reason, None, None)
+                # Rules ARE configured for this tool but none matched this
+                # specific command/path (TOO-15 case 4): default no_match_fallback
+                # is 'deny'. The fake does not model a configurable warn_deny
+                # fallback -- tests that need that exercise a real Configuration.
+                return ResolvedDecision(
+                    "deny", "Command does not match any allow patterns", None, None
+                )
+            # No allow/deny configured at all for this tool anywhere (and the
+            # fake models no hard_deny/ask patterns either): TOO-15 case 3 --
+            # the tool is entirely unconfigured, so it ALWAYS resolves to 'ask'
+            # regardless of no_match_fallback (a fresh install must not be
+            # bricked).
             return ResolvedDecision(
-                "deny", "Command does not match any allow patterns", None, None
+                "ask",
+                f"No {tool_name} permission rules configured at any level; "
+                f"defaulting to 'ask'",
+                None,
+                None,
             )
 
         def describe_levels(self_inner):
@@ -984,11 +1000,14 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 ],
                             )
 
-    def test_read_no_allow_patterns_denied(self):
+    def test_read_no_allow_patterns_asks(self):
         """
-        Given Read is governed but there are no allow patterns configured
+        Given Read is governed but NO permission rules are configured at all
+            (no allow, deny, ask, or hard_deny anywhere)
         When main() processes a Read of '/tmp/test.txt'
-        Then the decision is 'deny' and the reason notes there are no Read permissions
+        Then the decision is 'ask' (TOO-15: an entirely unconfigured tool must
+             not brick a fresh install by denying everything) and the reason
+             notes no Read permission rules are configured
         """
         hook_input = {
             "tool_name": "Read",
@@ -1016,13 +1035,173 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 output = json.loads(mock_stdout.getvalue())
                                 self.assertEqual(
                                     output["hookSpecificOutput"]["permissionDecision"],
-                                    "deny",
+                                    "ask",
                                 )
                                 self.assertIn(
-                                    "No Read permissions",
+                                    "No Read permission",
                                     output["hookSpecificOutput"][
                                         "permissionDecisionReason"
                                     ],
+                                )
+
+    def test_bash_no_allow_patterns_asks(self):
+        """
+        Given Bash is governed but NO permission rules are configured at all
+            (no allow, deny, ask, or hard_deny anywhere)
+        When main() processes a 'git status' Bash invocation
+        Then the decision is 'ask' (TOO-15: an entirely unconfigured tool must
+             not brick a fresh install by denying everything)
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        config = _fake_config(governed=["Bash"])  # bash defaults to ((), ())
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "ask",
+                            )
+                            self.assertIn(
+                                "No Bash permission",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
+                            )
+
+
+class TestNoMatchFallbackThroughMain(unittest.TestCase):
+    """
+    TOO-15 end-to-end: main() driven with a REAL Configuration (not the hand
+    rolled _FakeConfig double), so the actual centralized no_match_fallback
+    resolution in toolguard.config/toolguard.resolve is exercised exactly as
+    it runs in production. Covers: warn_deny actually ALLOWS (the bug fix),
+    and takeover mode with an explicit 'deny' fallback stays fail-closed.
+    """
+
+    @staticmethod
+    def _hook_layer(content):
+        """Build a single project-level toolguard_hook ConfigLayer."""
+        return ConfigLayer(
+            Provenance(
+                "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml"), 0
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_bash_warn_deny_fallback_allows_via_main(self):
+        """
+        Given a real Configuration governing Bash, allowing only 'git *', with
+            the top-level no_match_fallback set to 'warn_deny'
+        When main() processes a 'whoami' Bash invocation (matches no rule)
+        Then the decision is 'allow' (the fix: warn_deny must actually allow,
+             not just reword a deny) and the reason mentions warn_deny
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "no_match_fallback": "warn_deny",
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "allow",
+                            )
+                            self.assertIn(
+                                "warn_deny",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
+                            )
+
+    def test_bash_takeover_enabled_deny_fallback_still_fails_closed_via_main(self):
+        """
+        Given a real Configuration with takeover_mode enabled and an explicit
+            no_match_fallback='deny', allowing only 'git *' for Bash
+        When main() processes a 'whoami' Bash invocation (matches no rule)
+        Then the decision is still 'deny' (takeover mode does not weaken the
+             default fail-closed fallback)
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "takeover_mode": {"enabled": True, "no_match_fallback": "deny"},
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch(
+                        "toolguard.hook.get_env_config",
+                        return_value={"log_dir": Path("/fake/logs")},
+                    ):
+                        with patch("toolguard.hook.log_command"):
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                output = json.loads(mock_stdout.getvalue())
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "deny",
                                 )
 
 

@@ -960,6 +960,270 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         self.assertEqual(tc.no_match_fallback, "warn_deny")
 
 
+class TestHasAnyRules(unittest.TestCase):
+    """
+    Configuration.has_any_rules() (TOO-15): distinguishes a tool with NO
+    permission rules configured anywhere (allow/deny/ask/hard_deny all empty at
+    every level) from a tool that has rules which simply do not match a given
+    command/path. The former must resolve to 'ask'; the latter is governed by
+    no_match_fallback.
+    """
+
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_false_when_tool_fully_unconfigured(self):
+        """
+        Given a hook layer with no permissions/hard_deny section at all for 'Bash'
+        When Configuration.has_any_rules('Bash') is checked
+        Then it returns False
+        """
+        layers = (self._hook_layer("project", {}),)
+        config = Configuration(layers=layers)
+        self.assertFalse(config.has_any_rules("Bash"))
+
+    def test_false_when_no_layers_at_all(self):
+        """
+        Given a Configuration with zero layers
+        When Configuration.has_any_rules('Bash') is checked
+        Then it returns False
+        """
+        config = Configuration(layers=())
+        self.assertFalse(config.has_any_rules("Bash"))
+
+    def test_true_when_allow_configured(self):
+        """
+        Given a hook layer with a Bash allow pattern
+        When Configuration.has_any_rules('Bash') is checked
+        Then it returns True
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"permissions": {"allow": ["Bash(git *)"]}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertTrue(config.has_any_rules("Bash"))
+
+    def test_true_when_only_deny_configured(self):
+        """
+        Given a hook layer with ONLY a Bash deny pattern (no allow/ask)
+        When Configuration.has_any_rules('Bash') is checked
+        Then it returns True
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"permissions": {"deny": ["Bash(rm *)"]}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertTrue(config.has_any_rules("Bash"))
+
+    def test_true_when_only_ask_configured(self):
+        """
+        Given a hook layer with ONLY a Bash ask pattern (no allow/deny)
+        When Configuration.has_any_rules('Bash') is checked
+        Then it returns True
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"permissions": {"ask": ["Bash(curl *)"]}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertTrue(config.has_any_rules("Bash"))
+
+    def test_true_when_only_hard_deny_configured(self):
+        """
+        Given a hook layer with ONLY a [hard_deny] section for Bash (no normal
+            permissions section at all)
+        When Configuration.has_any_rules('Bash') is checked
+        Then it returns True (hard_deny counts as a configured rule)
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"hard_deny": {"deny": ["Bash(rm -rf *)"]}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertTrue(config.has_any_rules("Bash"))
+
+    def test_false_is_tool_scoped(self):
+        """
+        Given a hook layer with rules configured for 'Read' but nothing for 'Bash'
+        When Configuration.has_any_rules is checked for each tool
+        Then it is True for 'Read' and False for 'Bash'
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"permissions": {"allow": ["Read(/tmp/**)"]}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertTrue(config.has_any_rules("Read"))
+        self.assertFalse(config.has_any_rules("Bash"))
+
+
+class TestResolvedNoMatchFallback(unittest.TestCase):
+    """
+    Configuration.resolved_no_match_fallback() (TOO-15): the top-level
+    ``no_match_fallback`` key, with the legacy ``[takeover_mode].no_match_fallback``
+    honoured as a backwards-compatible alias when no layer sets the top-level
+    key. The top-level key wins when both are set. Applies regardless of
+    takeover_mode.enabled. Defaults to 'deny'.
+    """
+
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_defaults_to_deny_when_nothing_set(self):
+        """
+        Given no layer sets either the top-level key or the legacy alias
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it returns 'deny'
+        """
+        config = Configuration(layers=(self._hook_layer("project", {}),))
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_top_level_key_honored(self):
+        """
+        Given a hook layer setting the top-level 'no_match_fallback' key to 'warn_deny'
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it returns 'warn_deny'
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": "warn_deny"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "warn_deny")
+
+    def test_legacy_takeover_alias_honored_when_no_top_level_key(self):
+        """
+        Given only the legacy [takeover_mode].no_match_fallback is set (no
+            top-level key anywhere)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the legacy alias value is used
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"takeover_mode": {"no_match_fallback": "warn_deny"}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "warn_deny")
+
+    def test_top_level_wins_over_legacy_alias_when_both_set(self):
+        """
+        Given the top-level key is set to 'deny' AND the legacy
+            [takeover_mode].no_match_fallback is set to 'warn_deny'
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the top-level value ('deny') wins
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback": "deny",
+                    "takeover_mode": {"no_match_fallback": "warn_deny"},
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_top_level_wins_even_when_set_at_a_less_specific_level(self):
+        """
+        Given the legacy alias is set at the MORE-specific (project) level to
+            'warn_deny' and the top-level key is set at the LESS-specific (user)
+            level to 'deny'
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the top-level value ('deny') still wins over the legacy alias,
+            regardless of relative specificity between the two mechanisms
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"takeover_mode": {"no_match_fallback": "warn_deny"}}, 0
+            ),
+            self._hook_layer("user", {"no_match_fallback": "deny"}, 1),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_top_level_more_specific_layer_wins_among_top_level_setters(self):
+        """
+        Given two layers both set the top-level key, project='warn_deny' and
+            user='deny'
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the more-specific (project) value ('warn_deny') wins
+        """
+        layers = (
+            self._hook_layer("project", {"no_match_fallback": "warn_deny"}, 0),
+            self._hook_layer("user", {"no_match_fallback": "deny"}, 1),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "warn_deny")
+
+    def test_native_layer_top_level_key_ignored(self):
+        """
+        Given ONLY a native ('claude') layer sets a top-level 'no_match_fallback'
+            key (toolguard extensions are never read from native settings)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the native value is ignored and the default 'deny' is returned
+        """
+        native_layer = ConfigLayer(
+            Provenance("project", "claude", "json", Path("/p/settings.json"), 0),
+            MappingProxyType({"no_match_fallback": "warn_deny"}),
+        )
+        config = Configuration(layers=(native_layer,))
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_invalid_top_level_value_falls_back_to_deny(self):
+        """
+        Given a layer sets the top-level 'no_match_fallback' to an unrecognized
+            value (a typo / bad config, e.g. 'ask' or 'nonsense')
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the value is not propagated; it normalizes to the safe default 'deny'
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": "nonsense"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_invalid_legacy_alias_value_falls_back_to_deny(self):
+        """
+        Given only the legacy [takeover_mode].no_match_fallback is set, to an
+            unrecognized value (no top-level key anywhere)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the bad legacy value normalizes to the safe default 'deny'
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"takeover_mode": {"no_match_fallback": "bogus"}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+
 class TestProvenanceAndIntrospection(unittest.TestCase):
     """Provenance.describe, source_type property, describe_sources."""
 

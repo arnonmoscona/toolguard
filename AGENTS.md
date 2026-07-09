@@ -3,6 +3,13 @@
 Guidance for AI agents that encounter this repository. There are two different jobs an agent
 might have here -- pick the right entry point.
 
+> **Fetching files from this repo over the web?** The default branch is `master` (not `main`).
+> Do NOT guess the branch in raw URLs -- use the `HEAD` ref, which always resolves to the
+> default branch regardless of its name:
+> `https://raw.githubusercontent.com/<owner>/toolguard/HEAD/docs/install.md`. Better still,
+> once you have run `uv tool install`, read the installed package source as ground truth rather
+> than trusting a web summary (which can paraphrase JSON/TOML shapes incorrectly).
+
 ## Helping a user adopt or configure toolguard
 
 If your job is a **full guided install for a user who does not have toolguard yet** -- they

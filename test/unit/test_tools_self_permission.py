@@ -82,19 +82,24 @@ class TestSelfPermissionTable(unittest.TestCase):
 class TestSelfPermissionEvaluation(unittest.TestCase):
     """Evaluation uses the real decision engine and is risk-aware."""
 
-    def test_unconfigured_config_flags_both_as_needed(self):
+    def test_unconfigured_config_flags_audit_as_needed(self):
         """
-        Given a config with no rules (fail-closed deny)
+        Given a config with no rules at all (TOO-15: an entirely unconfigured
+        tool now resolves to 'ask', not a fail-closed 'deny' -- so a fresh
+        install is never bricked)
         When missing_self_permissions is evaluated
-        Then both toolguard-audit and toolguard-maintain need action, each with
-        its recommended list (allow for audit, ask for maintain)
+        Then toolguard-audit (read-only) still needs action -- its current
+        verdict is 'ask', not 'allow', so read-only audit calls would still
+        interrupt with a prompt -- but toolguard-maintain (mutating) needs NO
+        action: its current verdict is already 'ask', which is exactly the
+        desired per-invocation-consent posture for a mutating tool, so no
+        additional rule is required
         """
         missing = missing_self_permissions(Configuration(layers=(), start_dir=None))
         by_cmd = {s.permission.command: s for s in missing}
-        self.assertEqual(set(by_cmd), {"toolguard-audit", "toolguard-maintain"})
-        self.assertEqual(by_cmd["toolguard-audit"].current_verdict, "deny")
+        self.assertEqual(set(by_cmd), {"toolguard-audit"})
+        self.assertEqual(by_cmd["toolguard-audit"].current_verdict, "ask")
         self.assertIn("ALLOW", by_cmd["toolguard-audit"].recommendation)
-        self.assertIn("ASK", by_cmd["toolguard-maintain"].recommendation)
 
     def test_properly_permissioned_config_needs_no_action(self):
         """

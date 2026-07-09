@@ -396,9 +396,11 @@ def _resolve_event(
     single side-effect-free primitive that also backs the replay harness and other
     tooling.  Delegating (rather than re-copying the file-vs-command dispatch and
     the ``[hard_deny]`` handling) makes the ``--eval`` verdict identical to the live
-    hook's by construction.  No logging, divergence checks, auto-migration, or
-    takeover reason-rewriting happen here (the takeover ``no_match_fallback`` rewrite
-    is cosmetic -- it changes a deny *reason* string but never the decision).
+    hook's by construction.  No logging, divergence checks, or auto-migration
+    happen here.  ``no_match_fallback`` (including the TOO-15 ``warn_deny``
+    auto-allow) is resolved entirely inside :func:`~toolguard.tools.decision.decide`
+    via the shared config layer -- there is no separate reason-rewrite step here or
+    in :func:`main` to keep in sync.
 
     Args:
         tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
@@ -641,25 +643,13 @@ def main() -> None:
                 print(json.dumps(output))
                 sys.exit(0)
 
-            # Determine whether ANY level configures allow patterns for this tool
-            # (fail-closed when nothing is configured anywhere).
-            all_allow, _all_deny = config.allow_deny_for(tool_name)
-
-            if not all_allow:
-                # No allow patterns at any level - deny (fail closed)
-                reason = f"No {tool_name} permissions found in settings - all operations blocked"
-                output = create_hook_output("deny", reason)
-                log_command(
-                    f"{tool_name}({file_path})",
-                    "refused",
-                    ["no allow patterns configured"],
-                    extra_info=agent_info,
-                    config=env_config,
-                )
-                print(json.dumps(output))
-                sys.exit(0)
-
             # Resolve file path permission via more-specific-wins level cascade.
+            # No early "no allow configured" short-circuit here (TOO-15): an
+            # entirely unconfigured tool resolves to 'ask' and a configured-but-
+            # non-matching tool resolves per no_match_fallback -- both are
+            # decided centrally inside resolve_file_path_permission_detailed /
+            # Configuration.resolve_permission_detailed, so the hook and
+            # toolguard.tools.decision.decide() cannot drift apart.
             extended_syntax = env_config.get("extended_syntax", True)
             file_result = resolve_file_path_permission_detailed(
                 tool_name, file_path, config, extended_syntax
@@ -680,6 +670,14 @@ def main() -> None:
                     log_target,
                     "executed",
                     matched_rule=matched_rule,
+                    extra_info=agent_info,
+                    config=env_config,
+                )
+            elif decision == "ask":
+                log_command(
+                    log_target,
+                    "ask",
+                    note=reason,
                     extra_info=agent_info,
                     config=env_config,
                 )
@@ -714,24 +712,12 @@ def main() -> None:
             sys.exit(0)
 
         # Command tools (Bash, MCP terminals) all resolve against the Bash
-        # permission patterns. Fail-closed when no allow pattern is configured at
-        # any level.
-        all_allow, _all_deny = config.allow_deny_for("Bash")
-
-        if not all_allow:
-            # No allow patterns at any level - deny everything (fail closed)
-            reason = "No Bash permissions found in settings - all commands blocked"
-            output = create_hook_output("deny", reason)
-            log_command(
-                command,
-                "refused",
-                ["no allow patterns configured"],
-                extra_info=agent_info,
-                config=env_config,
-            )
-            print(json.dumps(output))
-            sys.exit(0)
-
+        # permission patterns. No early "no allow configured" short-circuit here
+        # (TOO-15): an entirely unconfigured Bash resolves to 'ask' and a
+        # configured-but-non-matching Bash resolves per no_match_fallback (default
+        # 'deny'; 'warn_deny' auto-allows) -- both decided centrally inside
+        # resolve_bash_permission_detailed / Configuration.resolve_permission_detailed
+        # so the hook and toolguard.tools.decision.decide() cannot drift apart.
         # Resolve via more-specific-wins: each sub-command of a compound command
         # cascades independently through the levels; compound allowed iff all are.
         # The unoverridable [hard_deny] pool is checked FIRST per sub-command, so a
@@ -748,18 +734,6 @@ def main() -> None:
             bash_result.overrides,
         )
 
-        # Apply takeover mode no_match_fallback if enabled and command was denied for not matching
-        if (
-            takeover.enabled
-            and decision == "deny"
-            and "does not match any allow patterns" in reason.lower()
-        ):
-            if takeover.no_match_fallback == "warn_deny":
-                reason = (
-                    "Command does not match any allow patterns. "
-                    "Consider adding a rule to toolguard_hook.toml to explicitly allow or deny this command."
-                )
-
         # Log the decision with agent identification
         if decision == "allow":
             # Conflict logging: any sub-command whose more-specific allow overrode
@@ -768,6 +742,14 @@ def main() -> None:
             for sub_command, override in bash_overrides:
                 _log_conflict_override(sub_command, override, conflict_log_dir)
             _log_allowed_command(command, reason, agent_info, env_config)
+        elif decision == "ask":
+            log_command(
+                command,
+                "ask",
+                note=reason,
+                extra_info=agent_info,
+                config=env_config,
+            )
         else:
             # Extract violated rule from reason for logging
             violated_rules = [reason.split(": ", 1)[1] if ": " in reason else reason]
