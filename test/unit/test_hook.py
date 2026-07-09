@@ -6,6 +6,7 @@ Includes tests for file path tools (Read, Write, Edit) with GLOB pattern matchin
 """
 
 import json
+import os
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -1203,6 +1204,91 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                     output["hookSpecificOutput"]["permissionDecision"],
                                     "deny",
                                 )
+
+
+class TestSettingsPathOverrideWarning(unittest.TestCase):
+    """
+    TOO-15: when CLAUDE_SETTINGS_PATH is set, toolguard runs in single-file mode
+    with the whole configuration hierarchy bypassed. The hook must surface this
+    footgun on stderr on every invocation so the bypass is never invisible.
+    """
+
+    @staticmethod
+    def _allow_whoami_config():
+        """A minimal real Configuration that governs and allows the probe command."""
+        return Configuration(
+            layers=(
+                ConfigLayer(
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/p/toolguard_hook.toml"),
+                        0,
+                    ),
+                    MappingProxyType(
+                        {
+                            "governed_tools": ["Bash"],
+                            "permissions": {"allow": ["Bash(whoami)"], "deny": []},
+                        }
+                    ),
+                ),
+            )
+        )
+
+    def _run_main_capture_stderr(self):
+        """Drive main() with a benign allowed Bash event, returning captured stderr."""
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+        config = self._allow_whoami_config()
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO):
+                with patch("sys.stderr", new_callable=StringIO) as mock_stderr:
+                    with patch(
+                        "toolguard.hook.load_configuration", return_value=config
+                    ):
+                        with patch(
+                            "toolguard.hook.get_env_config",
+                            return_value={"log_dir": None},
+                        ):
+                            with patch("toolguard.hook.log_command"):
+                                with patch(
+                                    "toolguard.hook.identify_current_agent",
+                                    return_value={"agent_type": "main"},
+                                ):
+                                    try:
+                                        main()
+                                    except SystemExit:
+                                        pass
+        return mock_stderr.getvalue()
+
+    def test_warns_when_settings_path_override_active(self):
+        """
+        Given CLAUDE_SETTINGS_PATH is set in the environment
+        When the hook's main() processes an event
+        Then a single-file-mode / hierarchy-bypassed warning is printed to stderr,
+             naming the variable and the exact override path
+        """
+        override = "/other/project/.claude/settings.local.json"
+        with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": override}):
+            stderr = self._run_main_capture_stderr()
+        self.assertIn("CLAUDE_SETTINGS_PATH is set", stderr)
+        self.assertIn("single-file mode", stderr)
+        self.assertIn(override, stderr)
+
+    def test_no_warning_when_override_absent(self):
+        """
+        Given CLAUDE_SETTINGS_PATH is NOT set in the environment
+        When the hook's main() processes an event
+        Then no single-file-mode override warning is printed to stderr
+        """
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_SETTINGS_PATH", None)
+            stderr = self._run_main_capture_stderr()
+        self.assertNotIn("CLAUDE_SETTINGS_PATH is set", stderr)
 
 
 class TestStartupValidation(unittest.TestCase):

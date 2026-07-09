@@ -16,6 +16,7 @@ Exit code: Always 0 (errors communicated via JSON output)
 
 import argparse
 import json
+import os
 import re
 import sys
 from typing import Any, Dict, List, Tuple
@@ -541,6 +542,22 @@ def main() -> None:
         # All file discovery, parsing, and format/location decisions live in the
         # config module; the hook only consumes semantic accessors from here on.
         config = load_configuration(cwd)
+
+        # Single-file override footgun (TOO-15): CLAUDE_SETTINGS_PATH makes toolguard
+        # read ONE settings file for EVERY directory, bypassing the whole hierarchy. As
+        # a persistently-exported shell variable it silently lets one project's config
+        # govern the entire machine (and, if that config is fail-closed takeover, can
+        # lock it out). Surface it on stderr so the bypass is never invisible.
+        settings_path_override = os.environ.get("CLAUDE_SETTINGS_PATH")
+        if settings_path_override:
+            print(
+                "[TOOLGUARD WARNING] CLAUDE_SETTINGS_PATH is set "
+                f"({settings_path_override}). Toolguard is in single-file mode: the "
+                "configuration hierarchy is BYPASSED -- only this file and its adjacent "
+                "toolguard_hook.toml govern every directory. If this is unintended, "
+                "unset CLAUDE_SETTINGS_PATH.",
+                file=sys.stderr,
+            )
 
         # Emit a once-per-session config-discovery diagnostic to the resolution
         # log (TOO-8 Phase 4, M2): "discovered N config levels: <level: path>, ...".

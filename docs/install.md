@@ -29,6 +29,15 @@ sequence them, get consent, and keep a rollback record.
   an entry to `~/.toolguard/install-journal.md` recording the action AND the exact command to
   undo it (see "The install journal"). This is what makes a clean, reliable uninstall possible
   later -- treat it as mandatory, not optional.
+- **Apply changes in atomic groups, not trickle-by-trickle.** Half-applied intermediate states
+  are where installs break -- above all the instant hooks go live and toolguard starts governing
+  the very tools you are using. So where a phase makes several related changes, **stage them
+  together and apply the group as a single unit**: write the whole group into one short shell
+  script under `~/.toolguard/stage/` (e.g. `stage/02-config.sh`), show it to the user, then run
+  it once. Order the groups so the go-live step (registering the hooks) is **last**, after
+  everything toolguard will need is already on disk. Each applied group is still journaled with
+  its reverse. This makes each step atomic from the running agent's perspective and minimizes
+  fragile in-between states.
 - **Local time, ASCII.** Timestamps in the user's local time; keep everything you write ASCII.
 
 ---
@@ -74,7 +83,29 @@ the project are being blocked:
 - Whichever they pick, keep journaling; a blocked step that the user runs manually is still
   journaled (with its reverse) so uninstall stays reliable.
 
-**0.4 Detect an existing toolguard install (edge cases).**
+**0.4 Check for a `CLAUDE_SETTINGS_PATH` override (important footgun).** Run
+`echo "$CLAUDE_SETTINGS_PATH"`. If it is set, STOP and explain it before going further: this
+environment variable puts toolguard in **single-file mode** -- it makes *every* toolguard
+decision, in *every* directory, read that one settings file plus its adjacent
+`toolguard_hook.toml`, **bypassing the entire configuration hierarchy** (including the
+`~/.claude` config you are about to write). It is honored deliberately (handy for testing a
+specific config), but as a *persistently exported* shell variable it is a footgun: if it points
+at another project's config -- especially one with `takeover_mode` + `no_match_fallback = "deny"`
+-- that project's fail-closed rules govern this whole machine, and the install can lock itself
+out of `~/.claude`. This is a real failure we have seen. Show the user the value and ask plainly:
+**"Is this intentional?"**
+
+- **Not intended (the common case -- a stale export in a shell profile):** have them
+  remove/comment the export in their shell startup (`~/.zshrc`, `~/.zshenv`, `~/.bashrc`, ...)
+  AND `unset CLAUDE_SETTINGS_PATH` in the current shell, then continue. A user-level install
+  cannot work correctly while it points at another project. (Note: a hook already registered in
+  the *current* Claude Code session picked up the old environment; the variable is only fully
+  cleared for a fresh session -- for in-session probes, invoke the hook with
+  `env -u CLAUDE_SETTINGS_PATH`.)
+- **Intended:** explain that the hierarchy stays bypassed, so the user-level install will not
+  take effect until it is unset; let them decide whether to proceed anyway, unset it, or stop.
+
+**0.5 Detect an existing toolguard install (edge cases).**
 
 - **Already fully installed at the user level** (a `~/.claude/toolguard_hook.toml` plus the
   hook registered in `~/.claude/settings.json`): tell the user toolguard is already set up.
@@ -182,24 +213,33 @@ absolute path if `~` is not expanded in hook commands.
 
 ---
 
-## Phase 4 -- Register the hook and write the base config
+## Phase 4 -- Write the base config, then register the hook (go-live LAST)
 
 Use the exact hook JSON and `toolguard_hook.toml` shape from
 [agent-guides.md](agent-guides.md#recipe-install-and-register-toolguard-from-scratch); do not
 reinvent them. Put them at the scope chosen in Phase 1 (`~/.claude/` for user level, the
-project's `.claude/` for a single project).
+project's `.claude/` for a single project). **Order matters:** registering the hook is the
+instant toolguard goes live and starts governing your own tool calls, so do it **last**, after
+the config it will read is already on disk. Stage the file writes as one script (per the
+atomic-groups principle) and apply it; register the hooks as a separate final step.
 
 1. **Back up first.** Copy any file you are about to edit (`settings.json` /
-   `settings.local.json`) to a timestamped backup, and journal the backup path (reverse:
-   restore the backup).
-2. **Register hooks** -- one PreToolUse matcher per governed tool + the SessionStart alert,
-   pointing at the installed `toolguard` / `toolguard-session-start` entry points. Journal the
-   exact edit (reverse: restore the backup, or remove the added hook block).
-3. **Write `toolguard_hook.toml`** with `governed_tools` (and `additional_supported_tools` for
-   any custom MCP command tool) from Phase 2, and **takeover disabled** for now -- either omit
-   the `[takeover_mode]` section or write `enabled = false`. Do NOT enable takeover here even if
-   the user chose it: Phase 10 does that once rules exist (see Phase 2). Journal it (reverse:
-   delete the file, or restore its prior version if one existed).
+   `settings.local.json`) to a timestamped backup under `~/.toolguard/backups/`, and journal the
+   backup path (reverse: restore the backup).
+2. **Write the config (group 1 -- while toolguard is still dormant).** Write `toolguard_hook.toml`
+   with `governed_tools` (and `additional_supported_tools` for any custom MCP command tool) from
+   Phase 2, and **takeover disabled** for now -- either omit the `[takeover_mode]` section or
+   write `enabled = false`. Do NOT enable takeover here even if the user chose it: Phase 10 does
+   that once rules exist (see Phase 2). Stage this (plus any other non-hook file writes) into one
+   script under `~/.toolguard/stage/`, apply it once, and journal it (reverse: delete the file,
+   or restore its prior version if one existed). Nothing is governing yet, so this cannot lock
+   you out.
+3. **Register the hooks LAST (go-live).** Only now edit `settings.json` / `settings.local.json`
+   to add one PreToolUse matcher per governed tool + the SessionStart alert, pointing at the
+   installed `toolguard` / `toolguard-session-start` entry points. This is the step that makes
+   toolguard live -- and because the config from step 2 is already on disk (and takeover is off,
+   so unmatched calls resolve to `ask`, never a hard deny), it will not lock the session out.
+   Journal the exact edit (reverse: restore the backup, or remove the added hook block).
 
 ---
 
@@ -367,6 +407,10 @@ Summarize what was done (scope, install method, whether takeover was enabled and
   [docs/uninstall.md](uninstall.md) and you will roll everything back reliably from the
   journal** -- they will not have to reverse-engineer what was changed.
 
+Then **offer the session-trace dump** (Phase T.1) -- useful even for a clean install. If
+anything about toolguard itself misbehaved along the way, also offer to file an issue (Phase
+T.2).
+
 ---
 
 ## The install journal (`~/.toolguard/install-journal.md`)
@@ -410,4 +454,41 @@ If the user wants to abandon the install partway through, do NOT improvise: read
 and undo the recorded steps in reverse order, each with consent and using the recorded reverse
 action, exactly as [docs/uninstall.md](uninstall.md) describes. Then confirm toolguard no
 longer governs (a `toolguard --eval` that no longer resolves, or the hooks gone from settings).
-The journal makes this reliable even mid-flight.
+The journal makes this reliable even mid-flight. When you are done, offer the trace dump and, if
+toolguard itself misbehaved, the issue report -- see Phase T.
+
+---
+
+## Phase T -- Trace dump and issue reporting (offer this)
+
+**Offer a session-trace dump at the end** -- always after a rollback or any toolguard
+misbehavior, and it is reasonable to offer it after a clean install too. Users often need an
+auditable record of what happened, to reproduce a problem or to send to the toolguard author.
+
+**T.1 Offer the trace dump.** Offer to write a focused, auditable markdown record of the session
+to a file the user chooses (e.g. `~/toolguard-install-trace-<date>.md`). Build it **from the
+session transcript, not your working memory**; fill obvious gaps from working memory only where
+the transcript clearly missed something, and label such notes `[inferred]`. Include: the
+environment and toolguard version/commit; the ordered timeline of user messages and every tool
+call with its result (allows / denies / warnings, verbatim strings); the exact reproduction of
+any problem; a clear separation of "the agent did X" vs "toolguard did Y" (so agent mistakes are
+not misread as toolguard bugs); and the final state. This is the same record that makes a good
+bug report.
+
+**T.2 If toolguard ITSELF appears to have a bug, offer to file an issue.** Whenever the trouble
+looks like a defect in toolguard rather than the environment or your own mistake -- and
+**especially if the user chose to roll the install back** -- offer to open a GitHub issue **on
+the user's behalf** at <https://github.com/arnonmoscona/toolguard/issues>, attaching the summary
+and the T.1 trace dump. Before opening anything:
+
+- **Search existing issues first.** Query the repo's issues (open, and recently closed) for the
+  same symptom -- `gh issue list` / `gh search issues` if `gh` is available, otherwise the
+  GitHub search UI/API. **Show the user any that look related.**
+- **Let the user judge:** are any of these the same problem (then add a comment with your trace,
+  or just point them at it), or is this genuinely new?
+- **Open a new issue only with the user's explicit go-ahead.** Title it by the symptom; body = a
+  short summary + environment/versions + the trace dump (linked or pasted). Keep it ASCII. If
+  `gh` is not authenticated, hand the user the prepared title+body to paste into the web "New
+  issue" form rather than failing silently.
+
+Never file an issue, or comment on one, without the user's consent.

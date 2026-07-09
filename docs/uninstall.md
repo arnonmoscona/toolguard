@@ -17,6 +17,11 @@ uninstall may be frustrated, and a clean, complete rollback is the point.
   backups, decision ledger, a `README.txt`). Uninstall does NOT delete them -- they exist for
   auditability and problem resolution, and a frustrated user especially should not lose the
   record of what was done. See Step 3.
+- **Keep the logs by default.** Toolguard's decision logs (`logs/toolguard-*.md` under each
+  governed project, plus the conflict/session streams) are the single best artifact for
+  debugging a problem after the fact -- exactly what a user would send the author. Do NOT delete
+  them as part of a routine uninstall; recommend keeping them and only remove them if the user
+  explicitly asks (see Step 3). Distinguish *your own* install/probe logs from pre-existing ones.
 - **Back up before you delete/restore**, so an uninstall is itself recoverable.
 - **Verify at the end** that toolguard no longer governs.
 
@@ -77,6 +82,22 @@ what was removed and when -- but never delete or rewrite earlier entries.)
 
 ---
 
+## Step 3b -- Keep the logs (do NOT delete them by default)
+
+Toolguard writes decision logs to `logs/toolguard-YYYY-MM-DD.md` (plus conflict and session
+streams) under each governed project's root. These are the most useful artifact for diagnosing
+whatever went wrong -- and the thing a user would send to the toolguard author. **A routine
+uninstall should keep them.**
+
+- **Default: keep the logs.** Do not delete them as part of teardown. Tell the user where they
+  are and that you left them on purpose for debugging.
+- **Only remove logs the user explicitly wants gone**, and be precise about *which*: if this
+  install/attempt created its own logs (e.g. under a temp probe dir, or a fresh `logs/` you made
+  today), you may offer to remove just those, but leave any pre-existing logs untouched unless
+  the user says otherwise. When unsure whether a log predates your work, keep it and ask.
+
+---
+
 ## Step 4 -- Verify
 
 Confirm toolguard no longer governs:
@@ -88,6 +109,21 @@ Confirm toolguard no longer governs:
   permissions).
 
 Report what was removed and what (if anything) was intentionally kept.
+
+---
+
+## Step 5 -- Offer a trace dump, and an issue report if toolguard misbehaved
+
+A user reaching uninstall often hit a problem, so this matters here even more than at install.
+Follow **[install.md](install.md#phase-t----trace-dump-and-issue-reporting-offer-this) Phase T**:
+
+- **Offer a session-trace dump** (Phase T.1) built from the transcript -- the environment,
+  timeline, verbatim allow/deny/warning strings, the reproduction, and the final state. Together
+  with the kept logs (Step 3b) and the journal, this is a complete record.
+- **If the trouble looks like a toolguard defect** (not the environment or an agent mistake),
+  **offer to file a GitHub issue** on the user's behalf (Phase T.2): search existing issues
+  first, show the user any that match, ask whether it is the same or new, and open one only with
+  their explicit go-ahead -- attaching the summary and the trace dump.
 
 ---
 
