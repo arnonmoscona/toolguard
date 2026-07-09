@@ -9,7 +9,7 @@ Toolguard is a drop-in replacement for the native Claude Code permissions system
 extended capabilities, and works around several long-standing bugs in the native system.
 
 > **Installing? Let an AI agent do it.** Open this repository in Claude Code (or point your
-> coding agent at it) and say **"install toolguard"**. The agent should follow the guided
+> coding agent at it) and say **"install toolguard from https://github.com/arnonmoscona/toolguard"**. The agent should follow the guided
 > runbook in **[docs/install.md](docs/install.md)** -- it handles the install, hook wiring,
 > validation, an optional first migration/audit/maintenance, and enabling takeover mode, and
 > records every step so it can be cleanly undone. Prefer this over improvising; the runbook has
