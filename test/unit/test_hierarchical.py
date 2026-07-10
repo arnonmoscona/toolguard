@@ -333,15 +333,16 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
         decision, _reason = self._resolve(config, "git status")
         self.assertEqual(decision, "allow")
 
-    def test_no_match_anywhere_is_deny(self):
+    def test_no_match_anywhere_falls_through_to_no_match_fallback(self):
         """
-        Given no level matches the command
+        Given no level matches the command (the cascade exhausts every level)
         When it is resolved
-        Then the result is a fail-closed deny
+        Then the result falls through to the shared no_match_fallback
+            resolution -- 'ask' by default (TOO-15)
         """
         config = self._config((["ls *"], []), (["cat *"], []))
         decision, reason = self._resolve(config, "git status")
-        self.assertEqual(decision, "deny")
+        self.assertEqual(decision, "ask")
         self.assertIn("does not match any allow patterns", reason)
 
     def test_deny_first_within_a_single_level(self):
@@ -664,8 +665,10 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         """
         Given a relative Read allow pattern 'src/**' anchored to the project root
         When a Read targets a same-named 'src/x.py' OUTSIDE the project root
-        Then it is DENIED -- the anchored pattern only matches inside the project,
-            pinning that relative patterns are no longer matched as authored
+        Then it is NOT ALLOWED -- the anchored pattern only matches inside the
+            project, pinning that relative patterns are no longer matched as
+            authored; the unmatched path falls through to the shared
+            no_match_fallback resolution ('ask' by default, TOO-15)
         """
         from toolguard.hook import resolve_file_path_permission_detailed
 
@@ -690,7 +693,7 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
                             "Read", outside_file, config
                         )
                     )
-            self.assertEqual(decision, "deny")
+            self.assertEqual(decision, "ask")
 
 
 class TestConfigLayerSpecificity(_IsolatedEnvTestCase):

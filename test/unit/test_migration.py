@@ -657,9 +657,13 @@ class TestMigration(unittest.TestCase):
             claude_dir = project_root / ".claude"
             claude_dir.mkdir()
 
-            # Create existing toolguard_hook.toml
+            # Create existing toolguard_hook.toml. Governs Bash AND Read so the
+            # Read pattern below is eligible to migrate (migration only moves rules
+            # for governed tools -- issue #1).
             toml_path = claude_dir / "toolguard_hook.toml"
-            toml_content = """[permissions]
+            toml_content = """governed_tools = ["Bash", "Read"]
+
+[permissions]
 allow = [
   "Bash(ls:*)",
 ]

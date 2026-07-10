@@ -304,6 +304,90 @@ class TestFindDivergentPatterns(unittest.TestCase):
         self.assertEqual(result["deny"], [])
         self.assertEqual(result["ask"], [])
 
+    def test_governed_filter_excludes_ungoverned_tools(self):
+        """
+        Given native patterns for governed (Bash/Read) AND ungoverned (WebFetch/Skill)
+            tools, none present in toolguard, and a governed_tools set of {Bash,Read,Write,Edit}
+        When find_divergent_patterns is given that governed_tools set
+        Then only the governed-tool patterns are reported divergent; WebFetch/Skill
+            patterns are excluded (so migration never moves and disables them -- issue #1)
+        """
+        native = {
+            "allow": [
+                "Bash(git push:*)",
+                "Read(/tmp/**)",
+                "WebFetch(domain:docs.anthropic.com)",
+                "Skill(recall)",
+            ],
+            "deny": [],
+            "ask": [],
+        }
+        toolguard = {"allow": [], "deny": [], "ask": []}
+
+        result = find_divergent_patterns(
+            native, toolguard, [], governed_tools={"Bash", "Read", "Write", "Edit"}
+        )
+
+        self.assertEqual(result["allow"], ["Bash(git push:*)", "Read(/tmp/**)"])
+
+    def test_governed_filter_none_keeps_all_backward_compatible(self):
+        """
+        Given native patterns for governed and ungoverned tools
+        When find_divergent_patterns is called WITHOUT a governed_tools argument
+            (the default None)
+        Then no tool filtering happens -- every divergent pattern is reported
+            (preserving the pre-existing behavior for callers that pass no filter)
+        """
+        native = {
+            "allow": ["Bash(git push:*)", "WebFetch(domain:x)"],
+            "deny": [],
+            "ask": [],
+        }
+        toolguard = {"allow": [], "deny": [], "ask": []}
+
+        result = find_divergent_patterns(native, toolguard, [])
+
+        self.assertIn("Bash(git push:*)", result["allow"])
+        self.assertIn("WebFetch(domain:x)", result["allow"])
+
+    def test_governed_filter_is_dynamic_includes_webfetch_when_governed(self):
+        """
+        Given a governed_tools set that INCLUDES WebFetch (the list changes over time
+            -- WebFetch is slated to become governed)
+        When find_divergent_patterns filters an unmatched WebFetch pattern
+        Then the WebFetch pattern IS reported divergent, proving the filter tracks the
+            actual governed set rather than a hardcoded Bash/Read/Write/Edit literal
+        """
+        native = {"allow": ["WebFetch(domain:x)", "Skill(recall)"], "deny": [], "ask": []}
+        toolguard = {"allow": [], "deny": [], "ask": []}
+
+        result = find_divergent_patterns(
+            native, toolguard, [], governed_tools={"Bash", "Read", "Write", "Edit", "WebFetch"}
+        )
+
+        self.assertEqual(result["allow"], ["WebFetch(domain:x)"])
+
+    def test_governed_filter_applies_to_deny_and_ask_too(self):
+        """
+        Given ungoverned-tool patterns in the deny and ask lists as well as allow
+        When find_divergent_patterns filters by governed_tools
+        Then ungoverned patterns are excluded from ALL three permission lists
+        """
+        native = {
+            "allow": ["WebFetch(domain:x)"],
+            "deny": ["Skill(danger)"],
+            "ask": ["WebFetch(domain:y)"],
+        }
+        toolguard = {"allow": [], "deny": [], "ask": []}
+
+        result = find_divergent_patterns(
+            native, toolguard, [], governed_tools={"Bash", "Read", "Write", "Edit"}
+        )
+
+        self.assertEqual(result["allow"], [])
+        self.assertEqual(result["deny"], [])
+        self.assertEqual(result["ask"], [])
+
     def test_ignore_patterns_in_takeover_mode(self):
         """
         Given native-only patterns that are all listed as ignored

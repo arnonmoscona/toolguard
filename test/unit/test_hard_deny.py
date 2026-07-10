@@ -419,8 +419,13 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         Given a hard_deny with a RELATIVE Edit pattern 'secrets/**' declared at the
             user level and a project-level allow for Edit of '**'
         When an Edit of <project>/secrets/key is resolved
-        Then the relative hard_deny pattern is anchored to the project root and the
-            edit is denied (unoverridable)
+        Then the relative hard_deny pattern is anchored to the project root and
+            the edit is denied (unoverridable) -- and a same-named path OUTSIDE
+            the project root is NOT hard-denied (proving the anchoring, not a
+            leaky pattern): it falls through to the shared no_match_fallback
+            resolution instead, which is 'ask' by default (TOO-15); the
+            hard_deny enforcement itself (the security-relevant assertion) is
+            unaffected and stays 'deny'
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -447,14 +452,20 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
                     inside_decision, _, _ = resolve_file_path_permission_detailed(
                         "Edit", inside, config
                     )
-                    # Outside the project root the anchored hard_deny must NOT match;
-                    # with no allow match either, it is a normal fail-closed deny --
-                    # but crucially not via the hard_deny path.
+                    # Outside the project root the anchored hard_deny must NOT
+                    # match; with no allow match either, it falls through to the
+                    # shared no_match_fallback ('ask' by default) -- but
+                    # crucially not via the hard_deny path.
                     outside_decision, outside_reason, _ = (
                         resolve_file_path_permission_detailed("Edit", outside, config)
                     )
+            # Security-relevant assertion: the hard_deny match itself (inside
+            # the project root) still denies, unoverridably.
             self.assertEqual(inside_decision, "deny")
-            self.assertEqual(outside_decision, "deny")
+            # Anchoring assertion: outside the project root, the pattern does
+            # not leak into a hard-deny match -- it resolves via the ordinary
+            # (non-hard-deny) no_match_fallback path.
+            self.assertEqual(outside_decision, "ask")
             self.assertNotIn("hard_deny", outside_reason)
 
     def test_no_hard_deny_leaves_file_path_cascade_unchanged(self):

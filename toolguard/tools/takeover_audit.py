@@ -27,9 +27,11 @@ Invariants checked
    and bypasses the real-gatekeeper role.
 
 4. **MEDIUM / loose-no-match-fallback**: ``no_match_fallback`` is set to
-   ``'warn_deny'`` or anything other than ``'deny'``.  Looser fallbacks mean that
-   commands not matching any rule are warned but not blocked -- weakening the
-   fail-closed guarantee.
+   anything other than ``'deny'`` (e.g. the TOO-15 default ``'ask'``,
+   ``'allow_with_warning'``, or its deprecated legacy alias ``'warn_deny'``).
+   Looser fallbacks mean that commands not matching any rule are prompted or
+   allowed-with-a-warning rather than blocked -- weakening the fail-closed
+   guarantee.
 
 Design
 ------

@@ -398,10 +398,10 @@ def _resolve_event(
     tooling.  Delegating (rather than re-copying the file-vs-command dispatch and
     the ``[hard_deny]`` handling) makes the ``--eval`` verdict identical to the live
     hook's by construction.  No logging, divergence checks, or auto-migration
-    happen here.  ``no_match_fallback`` (including the TOO-15 ``warn_deny``
-    auto-allow) is resolved entirely inside :func:`~toolguard.tools.decision.decide`
-    via the shared config layer -- there is no separate reason-rewrite step here or
-    in :func:`main` to keep in sync.
+    happen here.  ``no_match_fallback`` (including the TOO-15 ``allow_with_warning``
+    auto-allow, whose deprecated legacy alias is ``warn_deny``) is resolved entirely
+    inside :func:`~toolguard.tools.decision.decide` via the shared config layer --
+    there is no separate reason-rewrite step here or in :func:`main` to keep in sync.
 
     Args:
         tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
@@ -732,7 +732,8 @@ def main() -> None:
         # permission patterns. No early "no allow configured" short-circuit here
         # (TOO-15): an entirely unconfigured Bash resolves to 'ask' and a
         # configured-but-non-matching Bash resolves per no_match_fallback (default
-        # 'deny'; 'warn_deny' auto-allows) -- both decided centrally inside
+        # 'ask'; 'deny' fails closed; 'allow_with_warning' -- or its deprecated
+        # 'warn_deny' alias -- auto-allows) -- both decided centrally inside
         # resolve_bash_permission_detailed / Configuration.resolve_permission_detailed
         # so the hook and toolguard.tools.decision.decide() cannot drift apart.
         # Resolve via more-specific-wins: each sub-command of a compound command

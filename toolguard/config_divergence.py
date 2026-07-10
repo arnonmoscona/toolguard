@@ -9,9 +9,10 @@ import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 from toolguard.config import is_tool_wrapper, load_configuration
+from toolguard.config_validation import extract_tool_name
 from toolguard.error_log import log_warning
 
 
@@ -165,6 +166,7 @@ def find_divergent_patterns(
     native: Dict[str, List[str]],
     toolguard: Dict[str, List[str]],
     ignored_patterns: List[str],
+    governed_tools: Optional[Set[str]] = None,
 ) -> Dict[str, List[str]]:
     """
     Find patterns in native config that are not in toolguard config.
@@ -176,6 +178,14 @@ def find_divergent_patterns(
         native: Native permissions from settings.local.json
         toolguard: Toolguard permissions from toolguard_hook files
         ignored_patterns: Patterns to ignore (from takeover_mode.ignored_allow_patterns)
+        governed_tools: When provided, restrict the result to patterns whose tool is
+            in this set (compared via :func:`extract_tool_name`). A pattern for a tool
+            toolguard does NOT govern (e.g. ``WebFetch(...)``, ``Skill(...)``) must not
+            be reported divergent -- migrating it would move it out of
+            ``settings.local.json`` and leave it enforced by neither toolguard nor
+            native Claude (issue #1). The set is the config's live governed-tools list,
+            so this tracks changes over time (e.g. WebFetch becoming governed) with no
+            code change here. When ``None``, no tool filtering is applied.
 
     Returns:
         Dictionary with keys 'allow', 'deny', 'ask', each containing divergent patterns
@@ -194,6 +204,15 @@ def find_divergent_patterns(
         # Filter out ignored patterns (only for 'allow' type in takeover mode)
         if perm_type == "allow":
             divergent = divergent - ignored_set
+
+        # Restrict to governed tools when a set was supplied, so rules for
+        # ungoverned tools are never treated as migratable divergences.
+        if governed_tools is not None:
+            divergent = {
+                pattern
+                for pattern in divergent
+                if extract_tool_name(pattern) in governed_tools
+            }
 
         result[perm_type] = sorted(list(divergent))
 
@@ -241,7 +260,12 @@ def check_and_warn_divergence(
             "additional_ignored_patterns", []
         )
 
-    divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)
+    divergent = find_divergent_patterns(
+        native_perms,
+        toolguard_perms,
+        ignored_patterns,
+        governed_tools=set(config.governed_tools()),
+    )
 
     # Collect all divergent patterns
     all_divergent = []

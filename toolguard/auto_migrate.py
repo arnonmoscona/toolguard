@@ -204,8 +204,14 @@ def run_auto_migration(
             "ignored_allow_patterns", []
         ) + takeover_config.get("additional_ignored_patterns", [])
 
-    # Find divergent patterns
-    divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)
+    # Find divergent patterns (governed tools only: never auto-migrate a rule for a
+    # tool toolguard does not govern -- it would become inert; issue #1).
+    divergent = find_divergent_patterns(
+        native_perms,
+        toolguard_perms,
+        ignored_patterns,
+        governed_tools=set(config.governed_tools()),
+    )
     total_divergent = sum(len(patterns) for patterns in divergent.values())
 
     if total_divergent == 0:

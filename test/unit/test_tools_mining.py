@@ -101,14 +101,17 @@ class TestSignalClassification(unittest.TestCase):
 
     def test_deny_then_executed_is_allow_candidate(self):
         """
-        Given a deny-by-default config and a corpus entry that EXECUTED anyway
+        Given an ask-by-default config (TOO-15) and a corpus entry that
+            EXECUTED anyway
         When mined
-        Then it is an allow-candidate with current_verdict 'deny'.
+        Then it is an allow-candidate with current_verdict 'ask' (_classify
+            treats 'ask' and 'deny' identically for the EXECUTED-anyway
+            allow-candidate signal -- see test_classify_signal_mappings).
         """
-        config = _config(_layer(allow=["ls:*"]))  # everything else denies
+        config = _config(_layer(allow=["ls:*"]))  # everything else asks
         report = mine_rule_candidates(config, [_entry("Bash", "whoami", "EXECUTED")])
         self.assertEqual(len(report.allow_candidates), 1)
-        self.assertEqual(report.allow_candidates[0].current_verdict, "deny")
+        self.assertEqual(report.allow_candidates[0].current_verdict, "ask")
 
     def test_refused_is_declined(self):
         """
@@ -123,11 +126,26 @@ class TestSignalClassification(unittest.TestCase):
 
     def test_denied_without_execution_is_denied(self):
         """
-        Given a deny-by-default config and a command observed only as UNKNOWN
+        Given a config with no_match_fallback EXPLICITLY set to 'deny' (this
+            test specifically exercises the SIGNAL_DENIED classification
+            bucket, which requires an actual 'deny' verdict -- TOO-15's new
+            'ask' default would instead classify as SIGNAL_ASKED, already
+            covered by test_classify_signal_mappings) and a command observed
+            only as UNKNOWN
         When mined
         Then it is classified 'denied' (not an allow-candidate).
         """
-        config = _config(_layer(allow=["ls:*"]))
+        content = MappingProxyType(
+            {
+                "no_match_fallback": "deny",
+                "permissions": {
+                    "allow": ["Bash(ls:*)"],
+                    "deny": [],
+                    "ask": [],
+                },
+            }
+        )
+        config = _config(ConfigLayer(provenance=_prov(), content=content))
         report = mine_rule_candidates(config, [_entry("Bash", "curl evil.test", "UNKNOWN")])
         self.assertEqual(len(report.allow_candidates), 0)
         self.assertEqual(len(report.by_signal("denied")), 1)

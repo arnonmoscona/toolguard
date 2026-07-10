@@ -3,175 +3,120 @@ title: Coder Latest Implementation Report
 type: note
 permalink: toolguard/implementation/coder-latest-implementation-report
 tags:
-- TOO-17
+- TOO-15
+- task-memory
 - implementation-report
-- refactor
 ---
-
-# Implementation Report: TOO-15/TOO-11 Permission Provenance
-
-## Summary
-Surfaced permission provenance through the shared resolver layer for both Bash and
-file-path tools. Fixed a regression where normal (non-conflict) file allows returned
-`provenance=None` in `Decision`. Added per-sub-command provenance records (`SubMatch`)
-for Bash commands.
-
-## Phase Timing
-- Phase 1 (Planning/Inventory): ~10m, estimated $0.30
-- Phase 2 (Implementation): ~6m, estimated $0.20
-- Phase 3 (Self-Review + Tests): ~3m, estimated $0.10
-- Total: ~19m, estimated $0.60
-
-## Files Modified
-
-### toolguard/resolve.py
-- Added `SubMatch`, `BashResolution`, `FileResolution` dataclasses
-- `FileResolution.__iter__` and `BashResolution.__iter__` for backwards-compat 3-tuple unpacking
-- `resolve_file_path_permission_detailed`: now returns `FileResolution` (carries `.provenance`)
-- `resolve_bash_permission_detailed`: now returns `BashResolution` (carries `.sub_matches`)
-
-### toolguard/tools/decision.py
-- `Decision`: added `sub_matches: Optional[List[SubMatch]] = None`
-- `_decide_bash`: populates `sub_matches`; selects `provenance` from deciding sub-command
-- `_decide_file_path`: REGRESSION FIX - uses `result.provenance` not `override.winning_provenance`
-
-### toolguard/hook.py
-- Updated both resolver call sites to attribute access; all behavior IDENTICAL
-
-### test/unit/test_resolve.py
-- Updated per task instructions to use new return types
-
-### test/unit/test_tools_decision.py
-- Added `TestProvenanceRegression` with 6 new BDD-docstring tests
-
-## Test Results
-- 925 tests pass (was 919; +6 new provenance regression tests)
-- ruff check clean
-
-## Permalink
-implementation/coder-latest-implementation-report
-
----
-
-# Coder Latest Implementation Report
-
-## Task
-TOO-17 Stage 1: Readability Refactor of `command_extractor.py`
 
 ## Summary
 
-Introduced a typed Abstract Command Model (IR) in `toolguard/parser/command_model.py`
-and rewrote `toolguard/parser/command_extractor.py` to operate exclusively on the IR.
+TOO-15 permission-fallback semantics + naming change: changed `no_match_fallback`'s
+default from `deny` to `ask` (both takeover and non-takeover modes) and renamed its
+values to `ask`/`deny`/`allow_with_warning`, retiring `warn_deny` as a deprecated but
+still-accepted input alias that normalizes to `allow_with_warning`. Implemented via
+strict RED-GREEN with two coordinator checkpoints (approved RED state; approved
+extension after an unplanned 20-test gap was found and traced in GREEN).
 
-All 724 tests pass in both test environments. ruff format + ruff check: clean.
+## Files changed
 
-## Files Created
-- `/home/arnon/projects/toolguard/toolguard/parser/command_model.py` (NEW -- 530 lines)
+Production (2 functional, 4 comment-only):
+- `toolguard/config.py` -- the only file with a functional change (see below).
+- `toolguard/permissions.py`, `toolguard/hook.py`, `toolguard/resolve.py`,
+  `toolguard/tools/takeover_audit.py` -- terminology-only docstring/comment updates
+  (warn_deny -> allow_with_warning as canonical, warn_deny kept as documented
+  deprecated alias). No functional change in these four.
 
-## Files Modified
-- `/home/arnon/projects/toolguard/toolguard/parser/command_extractor.py` (MODIFIED)
+Tests (12 files):
+- `test/unit/test_configuration.py`, `test/unit/test_resolve.py`, `test/unit/test_hook.py`,
+  `test/unit/test_hook_eval.py` -- RED-phase edits (approved checkpoint 1): new/renamed
+  tests for default-is-ask, deny explicit, allow_with_warning, warn_deny legacy alias,
+  and a dedicated --eval-vs-live-hook anti-drift test across all five fallback values.
+- `test/unit/test_ask_resolution.py`, `test/unit/test_hard_deny.py`,
+  `test/unit/test_hierarchical.py`, `test/unit/test_logging_streams.py`,
+  `test/unit/test_takeover_mode.py`, `test/unit/test_tools_decision.py`,
+  `test/unit/test_tools_mining.py`, `test/unit/test_tools_replay.py` -- GREEN-phase
+  extension (approved checkpoint 2): 20 pre-existing tests that implicitly relied on the
+  old `deny` default, discovered only after the config.py change was applied (missed by
+  the RED-phase string-based grep audit). Fixed per-test judgment (assert 'ask' where
+  incidental, add explicit `no_match_fallback='deny'` where the test's real focus
+  requires deny) plus one separately-fixed latent glob-pattern test bug.
 
-## What Was Implemented
+## Key decisions
 
-### New Module: command_model.py
-- `NodeKind` enum: single dispatcher replacing ~12 `_is_*` predicates
-- `node_kind(node)`: ONLY function doing raw Canopy `hasattr` dispatch
-- `build_ir(tree)`: ONLY entry point for raw Canopy tree access
-- IR types: `IRSimpleCmd`, `IRSubshell`, `IRProcSubst`, `IRControlStructure`, `IRPipeline`, `IRCompound`, `IRProgram`
-- `IRControlStructure` pre-computes ALL complexity flags (has_else_or_elif, body_has_nested_control, has_complex_condition) during build -- extraction layer uses flags only
-- `_build_control_structure()`: builds pre-populated IRControlStructure
+1. **Centralization confirmed, not built**: an earlier TOO-15 phase had already
+   centralized ALL decision paths (`main()`, `--eval`/`_resolve_event`,
+   `toolguard.tools.decision.decide()`) through
+   `Configuration.resolve_permission_detailed()`/`resolved_no_match_fallback()`. This
+   ticket's items #2 (keep hook/decide consistent) and #4 (--eval matches live hook) were
+   therefore structurally already satisfied; I verified this by code tracing rather than
+   assuming, and added a dedicated anti-drift test to lock it in going forward.
+2. **Alias normalization is single-sourced**: `warn_deny` -> `allow_with_warning`
+   normalization happens once in `resolved_no_match_fallback()`, covering both the
+   top-level key and the legacy `[takeover_mode]` alias through the same code path (no
+   duplicated special-casing).
+3. **`TakeoverConfig.no_match_fallback` stays RAW, unnormalized** -- it's the legacy
+   per-audit-tool field (`takeover_audit.py`'s "loose-no-match-fallback" invariant reads
+   it directly); normalization is a `resolved_no_match_fallback()`-only concern. Verified
+   the takeover audit's `!= "deny"` invariant needs no code change: it already correctly
+   flags 'ask' as "not deny" once the default flips.
+4. **20-test gap, found and fixed via a second approval gate**: my RED-phase audit
+   grepped for the literal strings `no_match_fallback`/`warn_deny`, missing 20
+   pre-existing tests that exercise the same shared fail-closed branch without
+   mentioning either string. Rather than silently patch them, I traced every one to its
+   underlying mechanism (not just grepped), found zero hidden production bugs, one
+   genuine latent test bug (a glob pattern that never actually matched, masked by the old
+   default coincidence), and reported back for explicit approval before touching any of
+   them -- per the "don't edit tests in GREEN without approval" constraint.
+5. **Per-test ask-vs-explicit-deny judgment**: for each of the 20, asserted `'ask'` when
+   the test's real focus was incidental to the fallback value (anchoring, cascade
+   mechanics, structural checks, anti-drift agreement); added an explicit
+   `no_match_fallback='deny'` to the fixture when the test's real focus specifically
+   required deny to make its point (mining's SIGNAL_DENIED bucket test, and the two
+   `TestReplayBroadening` "CRITICAL safety check" / "landmine" tests). Full per-test
+   rationale, including the two coordinator-flagged security-sensitive files
+   (`test_hard_deny.py`, `test_takeover_mode.py`), is recorded in
+   `implementation/coder-latest-task-recall.md`.
 
-### Rewritten command_extractor.py
-- `LeafCommand` and `UndecidableSegment`: changed from NamedTuple to regular classes (backward-compatible)
-- Deleted: `_extract_from_tree` (legacy god-function, ~140 lines)
-- Deleted: `_extract_compound_into` (god-function, ~160 lines)
-- Deleted: all `_is_*` predicates (~100 lines)
-- New: `extract_commands()` = IR projection via `_collect_commands_from_compound`
-- New: `extract_structured_from_grammar()` = `build_ir()` + `_structured_from_compound`
-- New: `_extract_from_do_loop_ir()`, `_extract_from_if_stmt_ir()` using pre-computed IR flags
-- One remaining raw-node access: `_extract_from_ctrl_body` (ctrl_body unnamed list -- unavoidable)
+## Deviations from the original plan
 
-## Key Decisions
-1. Used class-based `LeafCommand`/`UndecidableSegment` instead of NamedTuple -- allows adding `__slots__` for efficiency while preserving backward compat (isinstance, .text, .ask_floor, indexing, iteration all work)
-2. Pre-computed complexity flags in IRControlStructure -- extraction layer has ZERO raw-node classification logic
-3. `IRSimpleCmd.cmd_substs` captures all `$(...)` substitutions including cmd_sub_as_cmd (when `$(cmd)` is the command itself, not just an argument)
-4. `IRCompound.raw_text` captures inner compound text for cmd_substitution inner nodes, enabling `extract_commands` to emit `"ps aux | grep python"` alongside individual stages
+- Original plan (RED-phase report) said "no other production file needs a functional
+  change" -- this held true (only `config.py` changed functionally), but the RED-phase
+  audit itself was incomplete, requiring the second GREEN-phase extension described
+  above. Flagged and approved before proceeding.
+- Fixed one latent pre-existing test bug (`test_file_path_deny_pattern_blocks_path`'s
+  glob pattern) that was unrelated to TOO-15 but unmasked by it, per explicit coordinator
+  instruction to fix the pattern rather than the expected value.
 
-## Test Results
-- 724/724 PASS with `uv run python -m unittest discover -s test -t .`
-- 724/724 PASS with `env -u CLAUDE_SETTINGS_PATH uv run python ...`
-- ruff format: clean (reformatted)
-- ruff check: clean (no warnings)
-- ZERO test files modified by me (pre-existing ruff format changes in working tree)
+## Known limitations / follow-ups
 
-## Self-Review Findings
-- No async/await, no threading
-- One approved local import: `from toolguard.parser.multiline import extract_structured` (circular dependency guard, was in original code)
-- All docstrings present
-- No unused imports (ruff check confirms)
+- None identified for this slice. `docs/*.md` and `migrate_permissions` were explicitly
+  out of scope per the task instructions and were not touched.
 
-## Phase Timing
-| Phase | Time | Est. Cost |
-|-------|------|-----------|
-| Phase 1: Planning | ~20m | ~$0.15 |
-| Phase 2: Implementation | ~30m | ~$0.30 |
-| Phase 3: Debugging | ~25m | ~$0.25 |
-| Phase 4: Cleanup + report | ~15m | ~$0.15 |
-| Total | ~90m | ~$0.85 |
+## Self-review results
 
----
+- `uv run python -m unittest discover -s test -t .`: **Ran 1326 tests ... OK** (1312
+  baseline + 14 net new).
+- `uv run ruff check .`: **All checks passed!** (never ran `ruff format`).
+- Anti-pattern scan (async/await, threading, local imports) on all 17 changed `.py`
+  files: clean.
+- `uv run python -m py_compile` on all 17 changed `.py` files: clean.
+- Every new/renamed test carries a Given/When/Then BDD docstring in sync with its
+  assertion.
+- No git commits made; tree left dirty for review.
 
-# TOO-15/TOO-11: Implementation Report - Eliminate Decision Duplication (2026-06-25)
+## Elapsed time / cost estimate
 
-## Summary
-Behavior-preserving refactor creating a shared `toolguard/resolve.py` module as
-the single, canonical source of truth for pure permission resolution logic.
-`hook.py` and `tools/decision.py` now both delegate to this module, eliminating
-all drift risk.
-
-## Phase Timings
-- Phase 1 (Planning + requirements): ~8 minutes
-- Phase 2 (Implementation): ~12 minutes
-- Phase 3 (Self-review + lint fixes): ~5 minutes
-- Phase 4 (Handoff): ~3 minutes
-- **Total: ~28 minutes**
-
-## Files Created
-- `toolguard/resolve.py` (NEW) - canonical pure resolver layer
-  - `_anchor_file_pattern`, `_match_file_path_pattern`,
-    `_decide_file_path_at_level_detailed`, `_check_file_path_hard_deny`,
-    `resolve_file_path_permission_detailed`, `resolve_bash_permission_detailed`
-  - NO import cycle (does not import hook)
-
-- `coder-test/test_no_drift_resolve.py` (NEW) - 5 anti-drift tests, all pass
-
-## Files Modified
-- `toolguard/hook.py`: removed 6 moved function bodies; added resolve import;
-  private helpers re-exported via `# noqa: F401`; main() unchanged
-- `toolguard/tools/decision.py`: deleted duplicate `_decide_bash`/`_decide_file_path`
-  orchestration; replaced with pure delegation to resolve.*; docstring updated
-
-## Test Results
-- 905 tests before and after. All passing. Ruff clean.
-
-## Test Placement Note
-Anti-drift test placed in `coder-test/` not `test/unit/` per CLAUDE.md constraint.
-Arnon should port to `test/unit/test_resolve.py` if desired.
-
----
-## TOO-15/TOO-11 Report (2026-06-25)
-
-### Files Created
-- `toolguard/rule_sort.py`: canonical shared module with sort+section machinery
-
-### Files Modified
-- `toolguard/scripts/migrate_permissions.py`: removed 5 functions, added re-export import from rule_sort
-- `toolguard/tools/sorters.py`: replaced with thin delegation to rule_sort
-- `test/unit/test_tools_sorters.py`: rewritten to use canonical tool-priority ordering
-- `toolguard/tools/danger.py`: removed `secret`, `password`, `credentials` from _SECRET_PATTERNS
-
-### Results
-- Before: 910 tests green. After: 915 tests green.
-- test_migration.py: 62 tests, unchanged, green
-- ruff check: clean
-- All syntax checks pass
+- Phase 1 (Planning: requirements capture, code archaeology, ticket-scope discovery):
+  ~25 min.
+- Phase 2 (RED: test edits across 4 files, verification): ~35 min.
+- Checkpoint 1 wait (coordinator review): not counted.
+- Phase 3 (GREEN part 1: config.py production change, first full-suite run, 20-test gap
+  discovery + full investigation of every one): ~30 min.
+- Checkpoint 2 wait (coordinator review): not counted.
+- Phase 3 (GREEN part 2: 20-test extension edits, latent bug fix, comment touch-ups,
+  final verification): ~35 min.
+- Phase 4 (self-review, reports, handoff): ~10 min.
+- Total active working time: ~2h15m.
+- Estimated cost (Sonnet 5, this session's token volume -- heavy on file reads/greps for
+  code archaeology and per-test tracing, moderate on edits): roughly $3-5 USD. This is a
+  rough order-of-magnitude estimate, not a precise accounting.

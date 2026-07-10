@@ -116,8 +116,14 @@ ignored_allow_patterns = [
 # normal place to add your own (no need to re-list the defaults).
 additional_ignored_patterns = []
 
-# What to do when no allow pattern matches (default: "deny")
-# Options: "deny" or "ask"
+# What to do when a governed tool HAS rules but a command matches none of them.
+# (A tool with no rules at all always resolves to "ask".)
+# Options:
+#   "ask"                -> prompt, like Claude's default (this is the DEFAULT)
+#   "deny"               -> fail-closed; block unmatched commands
+#   "allow_with_warning" -> allow the command but log a warning (was named "warn_deny",
+#                           still accepted as a deprecated alias)
+# This example uses "deny" for a strict fail-closed takeover posture.
 no_match_fallback = "deny"
 ```
 

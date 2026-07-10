@@ -2,7 +2,9 @@
 Resolver tests for the ``ask`` permission list (regression: it was silently ignored).
 
 Toolguard's documented within-file model (see the clarity analyzer docstring) is:
-deny always wins; a broad ``ask`` with no matching allow collapses to deny;
+deny always wins; a broad ``ask`` with no matching allow is excluded from
+level-matching (it does not itself grant a prompt-match) and falls through to
+the shared ``no_match_fallback`` resolution -- 'ask' by default (TOO-15);
 otherwise more-specific-wins -- a more-specific allow bypasses the ask, a
 more-specific ask gates it; an exact tie resolves to ask (a prompt is the safe
 resolution).  Before the fix the ``ask`` list was never consulted during matching,
@@ -92,15 +94,18 @@ class TestAskResolution(unittest.TestCase):
             decide(config, "Bash", "toolguard-maintain --write").verdict, "ask"
         )
 
-    def test_blanket_ask_with_no_allow_collapses_to_deny(self):
+    def test_blanket_ask_with_no_allow_collapses_to_no_match_fallback(self):
         """
         Given only a blanket ask '*' and no allow
         When any command is evaluated
-        Then the verdict is 'deny' (a catch-all ask does not grant a prompt; it
-        collapses so it cannot punch through the fail-closed floor)
+        Then the verdict is 'ask' (a catch-all ask does not itself grant a
+        prompt-match; it is excluded from level-matching entirely, so the
+        command falls through to the shared no_match_fallback resolution --
+        the same TOO-15 default as any other unmatched command, not a
+        separate hardcoded floor)
         """
         config = _config(_layer(ask=["*"]))
-        self.assertEqual(decide(config, "Bash", "rm -rf /").verdict, "deny")
+        self.assertEqual(decide(config, "Bash", "rm -rf /").verdict, "ask")
 
     def test_more_specific_ask_gates_a_broad_allow(self):
         """
@@ -252,14 +257,16 @@ class TestFilePathAskResolution(unittest.TestCase):
         cfg = _config(_file_layer(tool="Read", ask=["/secrets/**"]))
         self.assertEqual(decide(cfg, "Read", "/secrets/key.txt").verdict, "ask")
 
-    def test_blanket_file_ask_collapses_to_deny(self):
+    def test_blanket_file_ask_collapses_to_no_match_fallback(self):
         """
         Given a Read layer whose only rule is a blanket ask on * (universal)
         When an arbitrary file is read
-        Then the blanket ask is ignored and it falls through to fail-closed deny
+        Then the blanket ask is ignored (excluded from level-matching) and it
+        falls through to the shared no_match_fallback resolution, which is
+        'ask' by default (TOO-15)
         """
         cfg = _config(_file_layer(tool="Read", ask=["*"]))
-        self.assertEqual(decide(cfg, "Read", "/etc/hosts").verdict, "deny")
+        self.assertEqual(decide(cfg, "Read", "/etc/hosts").verdict, "ask")
 
     def test_more_specific_file_ask_gates_broad_allow(self):
         """

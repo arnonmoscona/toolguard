@@ -212,6 +212,26 @@ def _anchor_file_pattern(pattern: str, config, extended_syntax: bool) -> str:
     return prefix + config.resolve_config_path(body)
 
 
+def _collapse_slashes(path_or_pattern: str) -> str:
+    """
+    Collapse runs of consecutive ``/`` into a single ``/``.
+
+    Fixes patterns or paths that carry a redundant doubled slash (e.g.
+    ``//Users/x`` -- common in rules copied from Claude's ``settings.local.json``)
+    so they match the equivalent single-slash form. Only slash characters are
+    affected; ``**`` globstar segments and other glob metacharacters are untouched.
+
+    Args:
+        path_or_pattern: A file path or a GLOB path pattern.
+
+    Returns:
+        The input with every run of consecutive slashes reduced to one.
+    """
+    while "//" in path_or_pattern:
+        path_or_pattern = path_or_pattern.replace("//", "/")
+    return path_or_pattern
+
+
 def _match_file_path_pattern(
     pattern: str, expanded_path: str, extended_syntax: bool
 ) -> bool:
@@ -235,6 +255,14 @@ def _match_file_path_pattern(
     # For file paths, DEFAULT patterns use the same semantics as GLOB
     if pattern_type == PatternType.DEFAULT:
         pattern_type = PatternType.GLOB
+
+    # Collapse redundant slashes for GLOB matching so a pattern carrying a doubled
+    # slash (e.g. '//Users/...') still matches the real single-slash path. Applied
+    # to BOTH the pattern and the path so allow and deny stay consistent. Left
+    # untouched for regex/native, where the exact characters are significant.
+    if pattern_type == PatternType.GLOB:
+        actual_pattern = _collapse_slashes(actual_pattern)
+        expanded_path = _collapse_slashes(expanded_path)
 
     try:
         return match_pattern(pattern_type, actual_pattern, expanded_path)
@@ -416,7 +444,8 @@ def resolve_file_path_permission_detailed(
     _no_match_prefix = "Command does not match any allow patterns"
     if reason.startswith(_no_match_prefix):
         # Normalise the "Command"-phrased no-match reason to file-path phrasing,
-        # preserving any suffix (e.g. the TOO-15 warn_deny fallback explanation).
+        # preserving any suffix (e.g. the TOO-15 'ask' or 'allow_with_warning'
+        # no_match_fallback explanation).
         reason = "Path does not match any allow patterns" + reason[len(_no_match_prefix):]
     return FileResolution(
         decision=resolved.decision,

@@ -311,8 +311,9 @@ def is_universal_pattern(pattern: str) -> bool:
     Return True when a pattern matches EVERY input (a blanket ``*``-class rule).
 
     Handles the wrapper-free ``*`` and the ``[glob]``/``[native]`` variants.  Used
-    by the resolver's "a broad ask with no matching allow collapses to deny" rule:
-    a blanket ask does not, by itself, grant a prompt.
+    by the resolver's "a broad ask with no matching allow is excluded from
+    level-matching" rule: a blanket ask does not, by itself, grant a prompt --
+    it falls through to the shared no_match_fallback resolution instead.
     """
     body = pattern.strip()
     for marker in ("[glob]", "[native]"):

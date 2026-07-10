@@ -20,6 +20,7 @@ from toolguard.config import (
     load_config_file,
     load_configuration,
 )
+from toolguard.config_validation import extract_tool_name
 from toolguard.config_divergence import (
     find_divergent_patterns,
     get_native_permissions,
@@ -646,8 +647,34 @@ def migrate(
             takeover.additional_ignored_patterns
         )
 
-    # Find divergent patterns (patterns in native but not in toolguard)
-    divergent = find_divergent_patterns(native_perms, toolguard_perms, ignored_patterns)
+    # Find divergent patterns (patterns in native but not in toolguard). Restrict to
+    # the config's GOVERNED tools: a rule for a tool toolguard does not govern (e.g.
+    # WebFetch/Skill) must be left in settings.local.json -- moving it would leave it
+    # enforced by neither toolguard nor native Claude (issue #1). Passing the live
+    # governed set means this tracks changes over time (e.g. WebFetch becoming governed).
+    governed = set(configuration.governed_tools())
+    divergent = find_divergent_patterns(
+        native_perms, toolguard_perms, ignored_patterns, governed_tools=governed
+    )
+
+    # Note any ungoverned-tool patterns we are intentionally leaving in place, so the
+    # user knows they were not migrated (and why).
+    skipped_ungoverned = sorted(
+        {
+            pattern
+            for perm_type in ("allow", "deny", "ask")
+            for pattern in native_perms.get(perm_type, [])
+            if extract_tool_name(pattern) not in governed
+        }
+    )
+    if skipped_ungoverned:
+        print(
+            f"Leaving {len(skipped_ungoverned)} rule(s) for ungoverned tools in "
+            "settings.local.json (toolguard does not govern these; moving them would "
+            "disable them):"
+        )
+        for pattern in skipped_ungoverned:
+            print(f"  - {pattern}")
 
     # Find redundant patterns (exact duplicates or subsets)
     redundant = find_redundant_patterns(native_perms, toolguard_perms)

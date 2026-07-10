@@ -88,11 +88,13 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         self.assertEqual("Bash", decision.tool)
         self.assertEqual("ls -la", decision.target)
 
-    def test_no_allow_pattern_yields_deny(self):
+    def test_no_allow_pattern_yields_no_match_fallback(self):
         """
-        Given a config with only a deny pattern for Bash
-        When decide is called with tool='Bash' and a command not in the deny list
-        Then the verdict is 'deny' (fail-closed: no match = deny)
+        Given a config with only an allow pattern for Bash (no deny)
+        When decide is called with tool='Bash' and a command not covered by
+            the allow pattern
+        Then the verdict is 'ask' (TOO-15 default no_match_fallback: no match
+            prompts rather than silently denying)
         """
 
         config = _make_config([
@@ -104,7 +106,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             })
         ])
         decision = decide(config, "Bash", "whoami")
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("ask", decision.verdict)
 
     def test_deny_pattern_blocks_command(self):
         """
@@ -216,11 +218,14 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
         decision = decide(config, "Bash", "git status && ls -la")
         self.assertEqual("allow", decision.verdict)
 
-    def test_compound_one_denied_yields_deny(self):
+    def test_compound_one_unmatched_yields_ask(self):
         """
         Given a config that allows 'git:*' but not 'whoami'
         When decide is called with 'git status && whoami'
-        Then the verdict is 'deny' (any sub-command denied = compound denied)
+        Then the verdict is 'ask' (any sub-command not fully allowed drags the
+            whole compound down; the unmatched 'whoami' sub-command resolves
+            via the TOO-15 default no_match_fallback, and compound strictness
+            propagates that 'ask' to the overall verdict)
         """
 
         config = _make_config([
@@ -232,7 +237,7 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
             })
         ])
         decision = decide(config, "Bash", "git status && whoami")
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("ask", decision.verdict)
 
 
 class TestDecideFilePath(_IsolatedEnvTestCase):
@@ -257,11 +262,11 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         decision = decide(config, "Read", f"{home}/projects/foo/bar.py")
         self.assertEqual("allow", decision.verdict)
 
-    def test_read_denied_when_no_allow_pattern_matches(self):
+    def test_read_asks_when_no_allow_pattern_matches(self):
         """
         Given a config with Read allow pattern for ~/projects/ only
         When decide is called with tool='Read' and a path outside that directory
-        Then the verdict is 'deny' (fail-closed)
+        Then the verdict is 'ask' (TOO-15 default no_match_fallback)
         """
 
         home = str(Path.home())
@@ -274,11 +279,13 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
             })
         ])
         decision = decide(config, "Read", "/etc/passwd")
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("ask", decision.verdict)
 
     def test_file_path_deny_pattern_blocks_path(self):
         """
-        Given a config with Read allow='*' and deny='[glob]*/.env'
+        Given a config with Read allow='*' and deny='[glob]/home/*/project/.env'
+            (an ABSOLUTE glob pattern -- deliberately not anchored to a project
+            root, so it matches the target path directly and unambiguously)
         When decide is called for Read on '/home/user/project/.env'
         Then the verdict is 'deny' (deny-first within a level)
         """
@@ -287,7 +294,7 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
             ("project", "toolguard_hook", {
                 "permissions": {
                     "allow": ["Read(*)"],
-                    "deny": ["Read([glob]*/.env)"],
+                    "deny": ["Read([glob]/home/*/project/.env)"],
                 }
             })
         ])
@@ -345,9 +352,10 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
 
     def test_decide_does_not_call_sys_exit(self):
         """
-        Given a config with deny patterns
-        When decide is called with a denied command
-        Then sys.exit is never called (no process exit side effect)
+        Given a config that allows 'ls:*' only (no deny)
+        When decide is called with an unmatched command
+        Then sys.exit is never called (no process exit side effect) and the
+            decision returns normally with the TOO-15 default 'ask' verdict
         """
 
         config = _make_config([
@@ -359,7 +367,7 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
             })
         ])
         # If sys.exit were called, we'd get SystemExit -- this call should
-        # return normally with a deny decision
+        # return normally with an 'ask' decision
         original_exit = sys.exit
         exit_called = []
         sys.exit = lambda code=0: exit_called.append(code)
@@ -368,7 +376,7 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
         finally:
             sys.exit = original_exit
         self.assertEqual([], exit_called)
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("ask", decision.verdict)
 
     def test_decide_returns_decision_dataclass(self):
         """
@@ -431,11 +439,12 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         # The provenance should point at the project-level config.
         self.assertEqual("project", result.provenance.level)
 
-    def test_file_deny_provenance_is_none_for_failclosed(self):
+    def test_file_no_match_provenance_is_none(self):
         """
         Given a config that has no allow pattern covering /etc/passwd
         When decide() is called with tool='Read' and /etc/passwd
-        Then Decision.provenance is None (fail-closed deny -- no rule matched)
+        Then Decision.provenance is None (no rule matched -- resolves via the
+            TOO-15 default no_match_fallback 'ask')
         """
 
         config = _make_config([
@@ -447,8 +456,8 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             })
         ])
         result = decide(config, "Read", "/etc/passwd")
-        self.assertEqual("deny", result.verdict)
-        # No rule matched; fail-closed deny means no provenance.
+        self.assertEqual("ask", result.verdict)
+        # No rule matched; the no_match_fallback result carries no provenance.
         self.assertIsNone(result.provenance)
 
     def test_bash_single_allow_provenance_is_non_none(self):
@@ -501,12 +510,14 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             self.assertIsNotNone(sm.matched_rule, "matched_rule must be non-None for an allowed sub-command")
             self.assertIsNotNone(sm.provenance, "provenance must be non-None for an allowed sub-command")
 
-    def test_bash_compound_denied_sub_identifiable_in_sub_matches(self):
+    def test_bash_compound_unmatched_sub_identifiable_in_sub_matches(self):
         """
         Given a config that allows 'git:*' but not 'whoami'
         When decide() is called with 'git status && whoami'
-        Then Decision.verdict is 'deny', sub_matches has two entries, and the
-             second sub-command ('whoami') has decision='deny' in sub_matches
+        Then Decision.verdict is 'ask' (TOO-15 default no_match_fallback,
+             propagated from the unmatched 'whoami' sub-command), sub_matches
+             has two entries, and the second sub-command ('whoami') has
+             decision='ask' in sub_matches
         """
 
         config = _make_config([
@@ -518,7 +529,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             })
         ])
         result = decide(config, "Bash", "git status && whoami")
-        self.assertEqual("deny", result.verdict)
+        self.assertEqual("ask", result.verdict)
         self.assertIsNotNone(result.sub_matches)
         self.assertEqual(2, len(result.sub_matches))
 
@@ -528,9 +539,10 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         self.assertEqual("allow", git_match.decision)
         self.assertIn("git", git_match.sub_command)
 
-        self.assertEqual("deny", whoami_match.decision)
+        self.assertEqual("ask", whoami_match.decision)
         self.assertIn("whoami", whoami_match.sub_command)
-        # Fail-closed deny: no rule matched, so matched_rule and provenance are None.
+        # No rule matched for this sub-command, so matched_rule and
+        # provenance are None even though the no_match_fallback resolved it.
         self.assertIsNone(whoami_match.matched_rule)
         self.assertIsNone(whoami_match.provenance)
 

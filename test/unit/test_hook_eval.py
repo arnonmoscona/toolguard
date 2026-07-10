@@ -171,11 +171,15 @@ class TestEvalModeMain(unittest.TestCase):
         mock_log.assert_not_called()
         mock_mig.assert_not_called()
 
-    def test_eval_denies_floor_command(self):
+    def test_eval_asks_on_unmatched_command_by_default(self):
         """
-        Given a config that does not permit rm -rf and --eval mode
-        When main() probes 'rm -rf /'
-        Then it prints a deny verdict (the safety-floor probe's breach signal)
+        Given a config with rules configured (allows 'ls:*') but no explicit
+            no_match_fallback, and --eval mode
+        When main() probes 'rm -rf /' (matches no rule)
+        Then it prints an 'ask' verdict (TOO-15: the new default
+            no_match_fallback) -- per the security-audit skill's floor
+            classification, 'ask' on a catastrophic command IS a breach signal,
+            just not the literal string 'deny'
         """
         hook_input = {
             "tool_name": "Bash",
@@ -186,6 +190,37 @@ class TestEvalModeMain(unittest.TestCase):
         output, _mock_log, _mock_mig = self._run_eval(
             hook_input, _config(allow=["ls:*"])
         )
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "ask"
+        )
+
+    def test_eval_denies_floor_command_with_explicit_deny_fallback(self):
+        """
+        Given a config that allows 'ls:*' and explicitly sets
+            no_match_fallback='deny', and --eval mode
+        When main() probes 'rm -rf /' (matches no rule)
+        Then it prints a deny verdict (the safety-floor probe's breach signal)
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+            "cwd": None,
+            "hook_event_name": "PreToolUse",
+        }
+        cfg = _config(allow=["ls:*"])
+        # Layer content is a MappingProxyType; rebuild with the fallback added.
+        content = dict(cfg.layers[0].content)
+        content["no_match_fallback"] = "deny"
+        cfg = Configuration(
+            layers=(
+                ConfigLayer(
+                    provenance=cfg.layers[0].provenance,
+                    content=MappingProxyType(content),
+                ),
+            ),
+            start_dir=None,
+        )
+        output, _mock_log, _mock_mig = self._run_eval(hook_input, cfg)
         self.assertEqual(
             output["hookSpecificOutput"]["permissionDecision"], "deny"
         )
@@ -213,6 +248,90 @@ class TestEvalModeMain(unittest.TestCase):
         )
         mock_log.assert_not_called()
         mock_mig.assert_not_called()
+
+
+class TestEvalMatchesLiveHookUnderFallback(unittest.TestCase):
+    """
+    TOO-15: for every no_match_fallback value (including the default and the
+    deprecated 'warn_deny' alias), the read-only --eval probe and the live
+    hook (main() without --eval) must agree on an unmatched command's
+    verdict. This guards the bug where --eval used to omit the
+    no_match_fallback resolution and show a raw/deny verdict where the live
+    hook actually allowed under 'allow_with_warning' (formerly 'warn_deny').
+    """
+
+    @staticmethod
+    def _config_with_fallback(fallback_value):
+        """Build a single-layer Configuration allowing only 'ls:*' for Bash,
+        with the given no_match_fallback value (or no key at all if None)."""
+        content = {
+            "governed_tools": ["Bash"],
+            "permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []},
+        }
+        if fallback_value is not None:
+            content["no_match_fallback"] = fallback_value
+        return Configuration(
+            layers=(ConfigLayer(provenance=_prov(), content=MappingProxyType(content)),),
+            start_dir=None,
+        )
+
+    @staticmethod
+    def _run_live(hook_input, config):
+        """Drive main() WITHOUT --eval (the live hook path); return parsed stdout."""
+        with patch("sys.argv", ["toolguard"]), patch(
+            "sys.stdin", StringIO(json.dumps(hook_input))
+        ), patch("sys.stdout", new_callable=StringIO) as mock_stdout, patch(
+            "toolguard.hook.load_configuration", return_value=config
+        ), patch("toolguard.hook.log_command"), patch(
+            "toolguard.hook.identify_current_agent",
+            return_value={"agent_type": "main"},
+        ):
+            try:
+                main()
+            except SystemExit:
+                pass
+            return json.loads(mock_stdout.getvalue())
+
+    @staticmethod
+    def _run_eval(hook_input, config):
+        """Drive main() WITH --eval (the read-only probe path); return parsed stdout."""
+        with patch("sys.argv", ["toolguard", "--eval"]), patch(
+            "sys.stdin", StringIO(json.dumps(hook_input))
+        ), patch("sys.stdout", new_callable=StringIO) as mock_stdout, patch(
+            "toolguard.hook.load_configuration", return_value=config
+        ):
+            try:
+                main()
+            except SystemExit:
+                pass
+            return json.loads(mock_stdout.getvalue())
+
+    def test_eval_matches_live_hook_for_every_fallback_value(self):
+        """
+        Given a config allowing only 'ls:*' for Bash, for each of the
+            no_match_fallback values None (default), 'ask', 'deny',
+            'allow_with_warning', and the deprecated 'warn_deny' alias
+        When an unmatched command ('whoami') is resolved via --eval and via
+            the live hook (main() without --eval)
+        Then both report the identical permissionDecision -- no drift
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "cwd": None,
+            "hook_event_name": "PreToolUse",
+        }
+        for fallback_value in (None, "ask", "deny", "allow_with_warning", "warn_deny"):
+            with self.subTest(fallback=fallback_value):
+                config = self._config_with_fallback(fallback_value)
+                eval_output = self._run_eval(hook_input, config)
+                live_output = self._run_live(hook_input, config)
+                self.assertEqual(
+                    eval_output["hookSpecificOutput"]["permissionDecision"],
+                    live_output["hookSpecificOutput"]["permissionDecision"],
+                    f"--eval and live hook diverged for no_match_fallback="
+                    f"{fallback_value!r}",
+                )
 
 
 if __name__ == "__main__":

@@ -53,10 +53,14 @@ _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "Edit(*)",
     "mcp__jetbrains__execute_terminal_command(*)",
 )
-_DEFAULT_NO_MATCH_FALLBACK = "deny"
-# The recognized ``no_match_fallback`` values. Any other (typo/bad config) value is
-# normalized to the safe fail-closed default rather than propagated (TOO-15).
-_VALID_NO_MATCH_FALLBACKS = frozenset({"deny", "warn_deny"})
+_DEFAULT_NO_MATCH_FALLBACK = "ask"
+# The recognized ``no_match_fallback`` values (TOO-15). Any other (typo/bad
+# config) value is normalized to the default rather than propagated. The
+# deprecated legacy value ``warn_deny`` is intentionally excluded from this
+# set -- it is still ACCEPTED on input (top-level key or the legacy
+# ``[takeover_mode]`` alias) but always normalized to ``allow_with_warning``
+# before reaching this set (see ``Configuration.resolved_no_match_fallback``).
+_VALID_NO_MATCH_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning"})
 
 # Documented defaults for the ``config_sync`` section. Single source of truth
 # shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
@@ -661,7 +665,11 @@ class TakeoverConfig:
         enabled: Whether takeover mode is active (fail-safe ``False`` on conflict).
         ignored_allow_patterns: Blanket allow patterns suppressed from native config.
         additional_ignored_patterns: Extra user-supplied ignored patterns.
-        no_match_fallback: 'deny' or 'warn_deny'.
+        no_match_fallback: the RAW configured value (e.g. 'ask', 'deny',
+            'allow_with_warning', or the deprecated legacy 'warn_deny' alias)
+            -- not normalized at this layer; see
+            :meth:`Configuration.resolved_no_match_fallback` for the
+            normalized, alias-resolved value actually used to decide.
         conflict: A :class:`TakeoverEnabledConflict` when levels disagree on
             ``enabled``, otherwise None.
     """
@@ -878,7 +886,9 @@ class Configuration:
           UNION across all levels (de-duplicated, order-preserving most-specific
           first). The blanket defaults seed ``ignored_allow_patterns``.
         - ``no_match_fallback`` resolves MORE-SPECIFIC-WINS (first level that sets
-          it wins); defaults to ``'deny'``.
+          it wins); defaults to ``'ask'``. The RAW value is returned unchanged
+          here (including the deprecated ``'warn_deny'`` alias); normalization
+          happens in :meth:`Configuration.resolved_no_match_fallback`.
 
         Returns:
             The resolved :class:`TakeoverConfig`.
@@ -1228,8 +1238,11 @@ class Configuration:
         #   fail-closed-on-empty writes their own catch-all deny rule, which then
         #   flows through the normal matched-deny branch above.
         # - Rules ARE configured but simply did not match: governed by
-        #   no_match_fallback ('deny' by default; 'warn_deny' auto-allows with a
-        #   warning reason instead of blocking).
+        #   no_match_fallback -- 'ask' (the default), 'deny', or
+        #   'allow_with_warning' (allow, with a warning reason instead of
+        #   blocking). The deprecated legacy value 'warn_deny' is normalized to
+        #   'allow_with_warning' by resolved_no_match_fallback() before this
+        #   branch ever sees it.
         if not self.has_any_rules(tool_name):
             return ResolvedDecision(
                 "ask",
@@ -1238,11 +1251,21 @@ class Configuration:
                 None,
                 None,
             )
-        if self.resolved_no_match_fallback() == "warn_deny":
+        fallback = self.resolved_no_match_fallback()
+        if fallback == "allow_with_warning":
             return ResolvedDecision(
                 "allow",
-                "Command does not match any allow patterns; auto-allowed by "
-                "no_match_fallback=warn_deny (add an explicit rule to silence this)",
+                "Command does not match any allow patterns; allowed with a "
+                "warning by no_match_fallback=allow_with_warning (add an "
+                "explicit rule to silence this)",
+                None,
+                None,
+            )
+        if fallback == "ask":
+            return ResolvedDecision(
+                "ask",
+                "Command does not match any allow patterns; awaiting a "
+                "decision (no_match_fallback=ask)",
                 None,
                 None,
             )
@@ -1287,10 +1310,15 @@ class Configuration:
         specificity of the two settings. Applies in BOTH takeover and
         non-takeover modes (no longer gated on ``takeover_mode.enabled``).
 
+        The deprecated legacy value ``'warn_deny'`` -- whether set via the
+        top-level key or the ``[takeover_mode]`` alias -- is always normalized
+        to the canonical ``'allow_with_warning'`` before being returned.
+
         Returns:
-            ``'deny'`` or ``'warn_deny'``. The resolved value is validated against
-            the recognized set; an unset OR unrecognized value (typo/bad config)
-            resolves to the safe default ``'deny'`` and is never propagated as-is.
+            One of ``'ask'``, ``'deny'``, or ``'allow_with_warning'``. The
+            resolved value is validated against the recognized set; an unset
+            OR unrecognized value (typo/bad config) resolves to the default
+            ``'ask'`` and is never propagated as-is.
         """
         raw = None
         for layer in self.layers:
@@ -1304,11 +1332,16 @@ class Configuration:
                     break
         if raw is None:
             # No top-level key anywhere: fall back to the legacy [takeover_mode]
-            # alias (already defaults to 'deny' when unset anywhere).
+            # alias (already defaults to 'ask' when unset anywhere).
             raw = self.takeover_mode().no_match_fallback
+        # Deprecated legacy alias: always normalized to the canonical name,
+        # regardless of which mechanism (top-level key or [takeover_mode])
+        # supplied it (TOO-15).
+        if raw == "warn_deny":
+            return "allow_with_warning"
         # Validate: an unrecognized value must not propagate. Normalize to the
-        # fail-closed default rather than raising, so bad config never breaks
-        # loading (TOO-15 review suggestion).
+        # default rather than raising, so bad config never breaks loading
+        # (TOO-15 review suggestion).
         return raw if raw in _VALID_NO_MATCH_FALLBACKS else _DEFAULT_NO_MATCH_FALLBACK
 
     @staticmethod

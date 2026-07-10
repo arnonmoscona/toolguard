@@ -12,6 +12,26 @@ the `uv tool install` entry points, the hook wiring (see
 exact JSON/TOML), `migrate_permissions`, and the audit/maintenance skills. Your job is to
 sequence them, get consent, and keep a rollback record.
 
+**You do NOT need to clone this repository.** `uv` installs toolguard straight from the repo URL
+(Phase 3). Read the docs you need as raw files or from the installed package; do not `git clone`
+unless the user explicitly wants a source checkout.
+
+### Set expectations up front (say this before you start)
+
+Before the first system change, tell the user plainly what they are signing up for -- this is a
+deliberately unconventional way to install software, and they should choose it knowingly:
+
+- **It is slower** than a normal installer -- it is a step-by-step conversation, not a one-shot
+  command.
+- **But it is worth it because:** it adapts to *their* environment rather than assuming one; it
+  keeps them **fully in control** in the agent environment they already use, deciding every
+  important step; it can **work its way out of tough situations** and rescue itself when it hits
+  a corner; it is **very safe and transparent** -- every change is journaled, and even a partial
+  install rolls back cleanly, leaving logs and debug traces behind for diagnosis; and it can
+  **auto-report installation problems as GitHub issues** so bugs get fixed.
+
+Get a "yes, go ahead" before proceeding.
+
 ## Principles (follow these throughout)
 
 - **Consent before every system-modifying action.** Installing a tool, editing
@@ -20,6 +40,12 @@ sequence them, get consent, and keep a rollback record.
   changes.
 - **Do it for them.** Prefer taking the action yourself (with consent) over telling the user
   to run commands, unless they ask to drive.
+- **Important decisions are the user's -- never decide-and-go.** When a choice actually matters
+  -- what counts as the project root, which rules to migrate, removing a rule an audit flagged,
+  enabling takeover, tightening the fallback -- **surface it and let the user decide**, even when
+  you have a confident default. Do NOT silently auto-classify, auto-remove, or auto-tighten. A
+  confident recommendation is welcome; acting on it without asking is not. This is slower on
+  purpose; keeping the user in control is the whole point.
 - **Right info, right time.** Explain a choice only when it is being made. Do not dump the
   whole design on them up front.
 - **Stop anytime, resume anytime.** After each phase, the user may stop. The install journal
@@ -161,10 +187,13 @@ briefly, and use their answer.
   maintenance pass (Phase 9) -- **Phase 10 enables takeover** as they chose. We never seed an
   allow-list we invented to paper over the gap; we install safe, add rules with the user, then
   tighten.
-- **`no_match_fallback` -- decided at Phase 10, not now.** When takeover is switched on it starts
-  at the gentle `warn_deny` (unmatched commands are allowed but flagged, so nothing breaks while
-  rules are still thin), and the user can tighten it to fail-closed `deny` once they are
-  confident. Phase 10 walks this; there is nothing to set here.
+- **`no_match_fallback` -- decided at Phase 10, not now.** With takeover off, an unmatched
+  command prompts (`ask`) by default -- nothing is blocked, matching Claude's own behavior. When
+  takeover is switched on (Phase 10) it starts at the gentle `allow_with_warning` (unmatched
+  commands are allowed but flagged, so nothing breaks while rules are still thin), and the user
+  can tighten it to fail-closed `deny` once confident. The values are `ask` (prompt) /
+  `allow_with_warning` (allow + warn) / `deny` (fail-closed). Phase 10 walks this; nothing to set
+  here.
 
 So Phase 4 writes the base config with takeover **disabled** regardless of their choice; Phase 10
 enables it (with the self-permissions it needs) if they chose takeover. Keep the base config
@@ -252,6 +281,12 @@ from this repo for the initial passes. **Ask the user which they want:**
   `skills/toolguard-maintenance/` into `~/.claude/skills/` so `/toolguard-security-audit` and
   `/toolguard-maintenance` work in every project from now on. Journal each (reverse: remove the
   installed skill directory). Use this if they expect to curate/audit toolguard regularly.
+  - **Do NOT hand-roll a bespoke fetch script for this** (a past attempt wrote an ad-hoc shell
+    loop that created a malformed directory). If you installed from a local checkout, copy the
+    two skill directories directly. If you installed from the repo URL (no checkout), fetch the
+    skill files cleanly from the repo at the installed commit (raw files, exact paths) into the
+    target directory -- one straightforward copy per file, no clever shell. (A standard
+    `toolguard-install-skills` helper is planned to remove this step entirely.)
 - **Run from the repo for now:** skip persistent install. The initial audit and maintenance
   below will run by following this repo's `skills/*/SKILL.md` files directly (you are already
   pointed at the repo). Persistent skill installation can be done later.
@@ -325,6 +360,22 @@ uv run python -m toolguard.scripts.migrate_permissions             # applies; wr
 Apply creates a timestamped backup automatically. Journal each applied migration (reverse:
 restore that backup). See [config-sync.md](config-sync.md) for the full behavior.
 
+**Confirm where the rules will land -- do not let project-root detection decide silently.**
+toolguard finds a project root by walking up for a `.git`/`pyproject.toml` marker. A directory
+without such a marker (a bare `~/projects` holding many repos is a common case) is NOT treated as
+a project, so its migrated rules cascade to the **user level** (`~/.claude/toolguard_hook.toml`)
+instead of a project `.claude/`. That may not be what the user expects -- user-level rules apply
+everywhere. Before applying, tell the user which level each project's rules will migrate to, and
+if a directory was classified as "not a project," say so and let them confirm or point you at the
+real root. This is an important decision (see Principles); don't auto-classify and proceed.
+
+**Only governed tools migrate.** Migration moves rules for the governed/built-in tools
+(`Bash`/`Read`/`Write`/`Edit` and any `additional_supported_tools`). Rules for ungoverned tools
+(e.g. `WebFetch`, `Skill`) are left in `settings.local.json` untouched -- moving them would make
+them inert (toolguard does not govern them and native Claude no longer sees them). If you see a
+dry-run proposing to move ungoverned-tool rules, that is a bug -- do not apply it; leave those
+rules where they are.
+
 If they decline the whole step, note that migration can be done anytime later, the same way.
 
 ---
@@ -333,8 +384,17 @@ If they decline the whole step, note that migration can be done anytime later, t
 
 Ask: "Want me to security-check your permissions now?" If yes, run the security-audit skill --
 via `/toolguard-security-audit` if it was installed in Phase 5, otherwise by following this
-repo's `skills/toolguard-security-audit/SKILL.md` directly. Present the findings and, for
-anything risky, the suggested fixes. This is read-only.
+repo's `skills/toolguard-security-audit/SKILL.md` directly. The audit itself is read-only:
+present the findings and, for anything risky, the suggested fix.
+
+**Do NOT act on a finding without explicit approval -- above all, never silently remove a rule
+the audit flagged.** A CRITICAL finding (e.g. an `arbitrary-exec-allow` rule that a migration
+pulled in) is exactly the kind of thing to *show the user and let them decide*, not to quietly
+delete. For each fix you propose: name the rule, explain why the audit flagged it and what
+removing/changing it does, and apply it only after the user says yes. Removing a rule the user
+approved earlier -- even a dangerous-looking one -- is an important decision that belongs to
+them (see Principles). If a migrated rule is clearly one-off session noise, still *ask* before
+dropping it.
 
 ---
 
@@ -379,11 +439,11 @@ good moment to add `[hard_deny]` protections for credentials (e.g. `Read(**/.env
 them silently.
 
 **10.3 Enable takeover, starting gentle.** Edit `toolguard_hook.toml` to set
-`[takeover_mode] enabled = true` with `no_match_fallback = "warn_deny"` -- unmatched commands are
-allowed but flagged, so nothing breaks while the rule set is still thin. Explain that once they
-are confident the rules cover their workflow, they (or a maintenance pass) can tighten it to
-`no_match_fallback = "deny"` for a fully fail-closed posture. Back up the file first and journal
-the change (reverse: restore the backup / set `enabled = false`).
+`[takeover_mode] enabled = true` with `no_match_fallback = "allow_with_warning"` -- unmatched
+commands are allowed but flagged, so nothing breaks while the rule set is still thin. Explain that
+once they are confident the rules cover their workflow, they (or a maintenance pass) can tighten
+it to `no_match_fallback = "deny"` for a fully fail-closed posture. Back up the file first and
+journal the change (reverse: restore the backup / set `enabled = false`).
 
 **10.4 Re-validate under takeover.** Re-run `toolguard-audit --with-context --format json` and
 confirm top-level `takeover_active` is now **true**, `sources` are as expected, and the
@@ -397,8 +457,9 @@ if available and address any findings (e.g. an uncovered blanket allow). Report 
 Summarize what was done (scope, install method, whether takeover was enabled and at what
 `no_match_fallback`, whether skills were installed, any migrations). Tell the user:
 
-- Their setup is validated and active. If takeover was enabled, note it started at `warn_deny`
-  (nothing blocked, unmatched commands flagged) and how to tighten it to `deny` later.
+- Their setup is validated and active. If takeover was enabled, note it started at
+  `allow_with_warning` (nothing blocked, unmatched commands flagged) and how to tighten it to
+  `deny` later.
 - The full record is in `~/.toolguard/install-journal.md`, and `~/.toolguard/README.txt`
   explains the directory. Both are kept indefinitely -- even after an uninstall.
 - They can re-run any offered step (migration, audit, maintenance, or enabling takeover)
@@ -464,6 +525,9 @@ toolguard itself misbehaved, the issue report -- see Phase T.
 **Offer a session-trace dump at the end** -- always after a rollback or any toolguard
 misbehavior, and it is reasonable to offer it after a clean install too. Users often need an
 auditable record of what happened, to reproduce a problem or to send to the toolguard author.
+**If ANY toolguard problem surfaced during the install, proactively offer the dump at the very
+end -- do not wait for the user to ask.** (A real miss: an install hit bugs, finished, and never
+offered the dump; the user had to request it.)
 
 **T.1 Offer the trace dump.** Offer to write a focused, auditable markdown record of the session
 to a file the user chooses (e.g. `~/toolguard-install-trace-<date>.md`). Build it **from the
@@ -486,9 +550,18 @@ and the T.1 trace dump. Before opening anything:
   GitHub search UI/API. **Show the user any that look related.**
 - **Let the user judge:** are any of these the same problem (then add a comment with your trace,
   or just point them at it), or is this genuinely new?
+- **`gh` vs the browser -- offer the choice, don't just install `gh`.** If `gh` is not present,
+  do NOT silently install it: tell the user you can either install `gh` (a general-purpose tool
+  they may want anyway) **or** they can open the issue in their browser -- let them pick. If `gh`
+  is present but unauthenticated, or the user prefers the browser, hand them the prepared
+  title + body to paste into the web "New issue" form rather than failing silently.
 - **Open a new issue only with the user's explicit go-ahead.** Title it by the symptom; body = a
-  short summary + environment/versions + the trace dump (linked or pasted). Keep it ASCII. If
-  `gh` is not authenticated, hand the user the prepared title+body to paste into the web "New
-  issue" form rather than failing silently.
+  short summary + environment/versions. Keep it ASCII.
+- **Always attach the T.1 trace dump to the issue.** `gh` cannot attach a file, so paste the
+  trace dump's contents into the issue body or a follow-up comment (or upload it as a gist and
+  link it) -- an issue without the trace is much harder to act on.
+- **Attach the dump to every issue this session touched.** If you opened issues *earlier* in the
+  session (before the dump existed), go back and add the dump to them as a comment now. If you
+  open issues *after* writing the dump, attach it at creation. The trace should be on all of them.
 
 Never file an issue, or comment on one, without the user's consent.

@@ -212,8 +212,11 @@ class TestReplayTightening(unittest.TestCase):
     def test_removing_allow_rule_tightens_decisions(self):
         """
         Given config A that allows 'ls:*' and config B that does NOT allow it
+            (no explicit no_match_fallback set -- TOO-15 default is 'ask')
         When replay is called with a corpus containing 'ls -la'
-        Then the 'ls -la' entry is classified as 'tightened' (A=allow, B=deny)
+        Then the 'ls -la' entry is classified as 'tightened' (A=allow, B=ask
+            -- 'allow -> ask' is still stricter, per replay's documented
+            allow > ask > deny ordering)
         """
         from toolguard.tools.replay import replay
 
@@ -243,7 +246,7 @@ class TestReplayTightening(unittest.TestCase):
         self.assertEqual(1, len(tightened))
         self.assertEqual("ls -la", tightened[0].entry.command)
         self.assertEqual("allow", tightened[0].decision_a.verdict)
-        self.assertEqual("deny", tightened[0].decision_b.verdict)
+        self.assertEqual("ask", tightened[0].decision_b.verdict)
         self.assertEqual("tightened", tightened[0].classification)
 
     def test_adding_deny_rule_tightens_decisions(self):
@@ -293,6 +296,10 @@ class TestReplayBroadening(unittest.TestCase):
     def test_adding_allow_rule_broadens_decisions(self):
         """
         Given config A that does NOT allow 'whoami' and config B that adds 'whoami' to allow
+            (both EXPLICITLY set no_match_fallback='deny' -- this is the
+            CRITICAL safety check class, so the fixture preserves a strict
+            fail-closed posture regardless of TOO-15's new 'ask' default, to
+            keep demonstrating the deny->allow broadening it names)
         When replay is called with 'whoami' in the corpus
         Then that entry is classified as 'broadened' (A=deny, B=allow)
         """
@@ -300,6 +307,7 @@ class TestReplayBroadening(unittest.TestCase):
 
         config_a = _make_config([
             ("project", "toolguard_hook", {
+                "no_match_fallback": "deny",
                 "permissions": {
                     "allow": ["Bash(git:*)"],
                     "deny": [],
@@ -308,6 +316,7 @@ class TestReplayBroadening(unittest.TestCase):
         ])
         config_b = _make_config([
             ("project", "toolguard_hook", {
+                "no_match_fallback": "deny",
                 "permissions": {
                     "allow": ["Bash(git:*)", "Bash(whoami)"],  # whoami added
                     "deny": [],
@@ -330,7 +339,12 @@ class TestReplayBroadening(unittest.TestCase):
     def test_alembic_landmine_broadening_detected(self):
         """
         Given config A where 'uv run alembic <sub>:*' specific commands are in allow
-        and 'uv run alembic:*' is in ask (the alembic landmine pattern)
+        and 'uv run alembic:*' is in ask (the alembic landmine pattern), with
+        no_match_fallback EXPLICITLY set to 'deny' in both configs (this is the
+        CRITICAL safety check class, so the fixture preserves a strict
+        fail-closed posture regardless of TOO-15's new 'ask' default -- the
+        landmine narrative below specifically requires config A to DENY the
+        unmatched dangerous command, not merely ask about it)
         And config B that 'consolidates' all alembic allows into 'uv run alembic:*' allow
         When replay is called with alembic commands in the corpus
         Then the previously-ask entries are classified as 'broadened' (ask -> allow)
@@ -363,6 +377,7 @@ class TestReplayBroadening(unittest.TestCase):
 
         config_a = _make_config([
             ("project", "toolguard_hook", {
+                "no_match_fallback": "deny",
                 "permissions": {
                     "allow": [
                         "Bash(uv run alembic upgrade head:*)",
@@ -376,6 +391,7 @@ class TestReplayBroadening(unittest.TestCase):
         # Config B "consolidates" into a single broad pattern -- the landmine
         config_b = _make_config([
             ("project", "toolguard_hook", {
+                "no_match_fallback": "deny",
                 "permissions": {
                     "allow": [
                         "Bash(uv run alembic:*)",  # consolidation: now allows ALL alembic

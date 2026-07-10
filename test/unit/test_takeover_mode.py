@@ -38,7 +38,9 @@ class TestTakeoverModeConfig(unittest.TestCase):
         Given a project with no toolguard_hook config files at all
         When load_configuration(...).takeover_mode() resolves the configuration
         Then takeover is disabled, the default blanket ignored patterns are
-            present in ignored_allow_patterns, and no_match_fallback is 'deny'
+            present in ignored_allow_patterns, and no_match_fallback is 'ask'
+            (the TOO-15 default, unrelated to takeover.enabled which is False
+            here regardless)
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "project"
@@ -58,7 +60,7 @@ class TestTakeoverModeConfig(unittest.TestCase):
             self.assertIn("Write(*)", tc.ignored_allow_patterns)
             self.assertIn("Edit(*)", tc.ignored_allow_patterns)
             self.assertEqual(tc.additional_ignored_patterns, ())
-            self.assertEqual(tc.no_match_fallback, "deny")
+            self.assertEqual(tc.no_match_fallback, "ask")
 
     def test_takeover_mode_not_loaded_from_claude_settings(self):
         """

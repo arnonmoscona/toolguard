@@ -127,10 +127,15 @@ def _fake_config(
                     return ResolvedDecision(decision, reason, None, None)
                 # Rules ARE configured for this tool but none matched this
                 # specific command/path (TOO-15 case 4): default no_match_fallback
-                # is 'deny'. The fake does not model a configurable warn_deny
-                # fallback -- tests that need that exercise a real Configuration.
+                # is 'ask'. The fake does not model a configurable deny/
+                # allow_with_warning fallback -- tests that need those exercise
+                # a real Configuration (see TestNoMatchFallbackThroughMain).
                 return ResolvedDecision(
-                    "deny", "Command does not match any allow patterns", None, None
+                    "ask",
+                    "Command does not match any allow patterns; "
+                    "no_match_fallback=ask",
+                    None,
+                    None,
                 )
             # No allow/deny configured at all for this tool anywhere (and the
             # fake models no hard_deny/ask patterns either): TOO-15 case 3 --
@@ -887,11 +892,14 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 "allow",
                             )
 
-    def test_write_tool_denied(self):
+    def test_write_tool_asks_on_no_match_by_default(self):
         """
-        Given Write is governed and patterns only allow '/tmp/**'
+        Given Write is governed and patterns only allow '/tmp/**' (rules ARE
+            configured, but none matches the target path)
         When main() processes a Write to '/etc/passwd'
-        Then the decision is 'deny'
+        Then the decision is 'ask' (TOO-15: the new default no_match_fallback
+            -- a rule set that simply does not cover this path prompts rather
+            than silently denying)
         """
         hook_input = {
             "tool_name": "Write",
@@ -919,7 +927,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
                             output = json.loads(mock_stdout.getvalue())
                             self.assertEqual(
                                 output["hookSpecificOutput"]["permissionDecision"],
-                                "deny",
+                                "ask",
                             )
 
     def test_edit_tool_with_deny_pattern(self):
@@ -1091,8 +1099,10 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
     TOO-15 end-to-end: main() driven with a REAL Configuration (not the hand
     rolled _FakeConfig double), so the actual centralized no_match_fallback
     resolution in toolguard.config/toolguard.resolve is exercised exactly as
-    it runs in production. Covers: warn_deny actually ALLOWS (the bug fix),
-    and takeover mode with an explicit 'deny' fallback stays fail-closed.
+    it runs in production. Covers: the default no_match_fallback is 'ask' (in
+    both non-takeover and takeover mode); 'allow_with_warning' actually
+    ALLOWS, with the deprecated 'warn_deny' alias behaving identically; and
+    takeover mode with an explicit 'deny' fallback stays fail-closed.
     """
 
     @staticmethod
@@ -1105,13 +1115,159 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
             MappingProxyType(content),
         )
 
-    def test_bash_warn_deny_fallback_allows_via_main(self):
+    def test_bash_default_no_match_fallback_asks_via_main(self):
         """
         Given a real Configuration governing Bash, allowing only 'git *', with
-            the top-level no_match_fallback set to 'warn_deny'
+            NO no_match_fallback set at all (relying on the default)
         When main() processes a 'whoami' Bash invocation (matches no rule)
-        Then the decision is 'allow' (the fix: warn_deny must actually allow,
-             not just reword a deny) and the reason mentions warn_deny
+        Then the decision is 'ask' (TOO-15: the new default no_match_fallback)
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "ask",
+                            )
+
+    def test_bash_takeover_enabled_default_no_match_fallback_asks_via_main(self):
+        """
+        Given a real Configuration with takeover_mode enabled and NO
+            no_match_fallback set at all (relying on the default), allowing
+            only 'git *' for Bash
+        When main() processes a 'whoami' Bash invocation (matches no rule)
+        Then the decision is 'ask' (TOO-15: the default change to 'ask'
+            applies in takeover mode too, not just non-takeover mode)
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "takeover_mode": {"enabled": True},
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch(
+                        "toolguard.hook.get_env_config",
+                        return_value={"log_dir": Path("/fake/logs")},
+                    ):
+                        with patch("toolguard.hook.log_command"):
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                output = json.loads(mock_stdout.getvalue())
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "ask",
+                                )
+
+    def test_bash_allow_with_warning_fallback_allows_via_main(self):
+        """
+        Given a real Configuration governing Bash, allowing only 'git *', with
+            the top-level no_match_fallback set to the canonical
+            'allow_with_warning'
+        When main() processes a 'whoami' Bash invocation (matches no rule)
+        Then the decision is 'allow' and the reason mentions allow_with_warning
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "allow",
+                            )
+                            self.assertIn(
+                                "allow_with_warning",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
+                            )
+
+    def test_bash_warn_deny_legacy_alias_allows_via_main(self):
+        """
+        Given a real Configuration governing Bash, allowing only 'git *', with
+            the top-level no_match_fallback set to the DEPRECATED legacy value
+            'warn_deny'
+        When main() processes a 'whoami' Bash invocation (matches no rule)
+        Then the decision is 'allow' (the legacy alias still allows, exactly
+             like 'allow_with_warning') and the reason mentions
+             allow_with_warning (not the old 'warn_deny' name)
         """
         config = Configuration(
             layers=(
@@ -1150,7 +1306,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                 "allow",
                             )
                             self.assertIn(
-                                "warn_deny",
+                                "allow_with_warning",
                                 output["hookSpecificOutput"][
                                     "permissionDecisionReason"
                                 ],
@@ -1289,6 +1445,58 @@ class TestSettingsPathOverrideWarning(unittest.TestCase):
             os.environ.pop("CLAUDE_SETTINGS_PATH", None)
             stderr = self._run_main_capture_stderr()
         self.assertNotIn("CLAUDE_SETTINGS_PATH is set", stderr)
+
+
+class TestDoubleSlashNormalization(unittest.TestCase):
+    """
+    Redundant leading/embedded slashes in file-path patterns (e.g. `//Users/...`,
+    common in patterns copied from Claude's settings.local.json) must match the
+    corresponding real single-slash path. Normalization is applied consistently to
+    both the pattern and the path, so allow AND deny keep working (issue: the `//`
+    double-slash bug that made a migrated allow rule silently deny).
+    """
+
+    def test_double_slash_allow_matches_real_path(self):
+        """
+        Given an allow pattern with a doubled leading slash `//Users/x/**`
+        When a real single-slash path `/Users/x/foo` is evaluated
+        Then it is allowed (the `//` is normalized to `/` before matching)
+        """
+        decision, _ = check_file_path_permission(
+            "/Users/x/foo", ["//Users/x/**"], []
+        )
+        self.assertEqual(decision, "allow")
+
+    def test_double_slash_deny_still_denies(self):
+        """
+        Given a matching absolute allow `/secrets/**` AND a doubled-slash deny
+            `//secrets/**` for the same tree
+        When `/secrets/passwd` is evaluated
+        Then it is DENIED -- the `//` deny normalizes and wins over the allow, so
+            normalization must not weaken deny matching
+        """
+        decision, _ = check_file_path_permission(
+            "/secrets/passwd", ["/secrets/**"], ["//secrets/**"]
+        )
+        self.assertEqual(decision, "deny")
+
+    def test_double_slash_preserves_globstar(self):
+        """
+        Given a doubled-slash allow with a globstar `//a/**`
+        When a deep path `/a/b/c` is evaluated
+        Then it matches (collapsing duplicate slashes does not disturb `**`)
+        """
+        decision, _ = check_file_path_permission("/a/b/c", ["//a/**"], [])
+        self.assertEqual(decision, "allow")
+
+    def test_single_slash_unaffected(self):
+        """
+        Given an ordinary single-slash allow `/tmp/**` (regression guard)
+        When `/tmp/foo` is evaluated
+        Then it still matches -- normalization is a no-op on well-formed paths
+        """
+        decision, _ = check_file_path_permission("/tmp/foo", ["/tmp/**"], [])
+        self.assertEqual(decision, "allow")
 
 
 class TestStartupValidation(unittest.TestCase):

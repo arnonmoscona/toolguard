@@ -159,11 +159,12 @@ class TestProvenanceInReasons(unittest.TestCase):
         self.assertTrue(extracted.startswith("git *"))
         self.assertIsNotNone(resolved.provenance)
 
-    def test_default_deny_has_no_provenance(self):
+    def test_default_no_match_fallback_has_no_provenance(self):
         """
         Given a level that matches nothing
-        When a non-matching command resolves
-        Then the fail-closed deny carries no provenance and the legacy reason
+        When a non-matching command resolves via the default no_match_fallback
+        Then the result ('ask', TOO-15's default) carries no provenance and the
+            expected reason text
         """
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
@@ -171,9 +172,13 @@ class TestProvenanceInReasons(unittest.TestCase):
         resolved = config.resolve_permission_detailed(
             "Bash", _detailed_decider("rm -rf /")
         )
-        self.assertEqual(resolved.decision, "deny")
+        self.assertEqual(resolved.decision, "ask")
         self.assertIsNone(resolved.provenance)
-        self.assertEqual(resolved.reason, "Command does not match any allow patterns")
+        self.assertEqual(
+            resolved.reason,
+            "Command does not match any allow patterns; awaiting a decision "
+            "(no_match_fallback=ask)",
+        )
 
 
 class TestConflictDetection(unittest.TestCase):

@@ -1081,7 +1081,10 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
     ``no_match_fallback`` key, with the legacy ``[takeover_mode].no_match_fallback``
     honoured as a backwards-compatible alias when no layer sets the top-level
     key. The top-level key wins when both are set. Applies regardless of
-    takeover_mode.enabled. Defaults to 'deny'.
+    takeover_mode.enabled. Defaults to 'ask'. The recognized values are 'ask',
+    'deny', and 'allow_with_warning'; the deprecated legacy value 'warn_deny'
+    (whether set via the top-level key or the ``[takeover_mode]`` alias) is
+    normalized to 'allow_with_warning'.
     """
 
     @staticmethod
@@ -1098,31 +1101,68 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
             MappingProxyType(content),
         )
 
-    def test_defaults_to_deny_when_nothing_set(self):
+    def test_defaults_to_ask_when_nothing_set(self):
         """
         Given no layer sets either the top-level key or the legacy alias
         When Configuration.resolved_no_match_fallback() resolves
-        Then it returns 'deny'
+        Then it returns 'ask' (TOO-15: the new default, so a fresh install with
+            rules configured but an unmatched command is never silently
+            bricked -- it prompts instead)
         """
         config = Configuration(layers=(self._hook_layer("project", {}),))
-        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
     def test_top_level_key_honored(self):
         """
-        Given a hook layer setting the top-level 'no_match_fallback' key to 'warn_deny'
+        Given a hook layer setting the top-level 'no_match_fallback' key to
+            'allow_with_warning' (the canonical, non-legacy value)
         When Configuration.resolved_no_match_fallback() resolves
-        Then it returns 'warn_deny'
+        Then it returns 'allow_with_warning' unchanged
+        """
+        layers = (
+            self._hook_layer("project", {"no_match_fallback": "allow_with_warning"}),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "allow_with_warning")
+
+    def test_value_ask_explicit_is_returned_as_is(self):
+        """
+        Given a hook layer explicitly setting the top-level 'no_match_fallback'
+            key to 'ask' (not merely relying on the default)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it returns 'ask'
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": "ask"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
+
+    def test_value_deny_is_returned_as_is(self):
+        """
+        Given a hook layer setting the top-level 'no_match_fallback' key to 'deny'
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it returns 'deny'
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": "deny"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_legacy_alias_warn_deny_via_top_level_key_normalizes(self):
+        """
+        Given a hook layer setting the top-level 'no_match_fallback' key to the
+            deprecated legacy value 'warn_deny' (not under [takeover_mode])
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it is normalized to the canonical 'allow_with_warning'
         """
         layers = (self._hook_layer("project", {"no_match_fallback": "warn_deny"}),)
         config = Configuration(layers=layers)
-        self.assertEqual(config.resolved_no_match_fallback(), "warn_deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "allow_with_warning")
 
     def test_legacy_takeover_alias_honored_when_no_top_level_key(self):
         """
-        Given only the legacy [takeover_mode].no_match_fallback is set (no
-            top-level key anywhere)
+        Given only the legacy [takeover_mode].no_match_fallback is set to
+            'warn_deny' (no top-level key anywhere)
         When Configuration.resolved_no_match_fallback() resolves
-        Then the legacy alias value is used
+        Then the legacy alias value is used and normalized to 'allow_with_warning'
         """
         layers = (
             self._hook_layer(
@@ -1130,7 +1170,7 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
             ),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.resolved_no_match_fallback(), "warn_deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "allow_with_warning")
 
     def test_top_level_wins_over_legacy_alias_when_both_set(self):
         """
@@ -1174,46 +1214,48 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
         Given two layers both set the top-level key, project='warn_deny' and
             user='deny'
         When Configuration.resolved_no_match_fallback() resolves
-        Then the more-specific (project) value ('warn_deny') wins
+        Then the more-specific (project) value wins and is normalized to
+            'allow_with_warning' (the deprecated 'warn_deny' alias)
         """
         layers = (
             self._hook_layer("project", {"no_match_fallback": "warn_deny"}, 0),
             self._hook_layer("user", {"no_match_fallback": "deny"}, 1),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.resolved_no_match_fallback(), "warn_deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "allow_with_warning")
 
     def test_native_layer_top_level_key_ignored(self):
         """
         Given ONLY a native ('claude') layer sets a top-level 'no_match_fallback'
             key (toolguard extensions are never read from native settings)
         When Configuration.resolved_no_match_fallback() resolves
-        Then the native value is ignored and the default 'deny' is returned
+        Then the native value is ignored and the default 'ask' is returned
         """
         native_layer = ConfigLayer(
             Provenance("project", "claude", "json", Path("/p/settings.json"), 0),
             MappingProxyType({"no_match_fallback": "warn_deny"}),
         )
         config = Configuration(layers=(native_layer,))
-        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
-    def test_invalid_top_level_value_falls_back_to_deny(self):
+    def test_invalid_top_level_value_falls_back_to_ask(self):
         """
         Given a layer sets the top-level 'no_match_fallback' to an unrecognized
-            value (a typo / bad config, e.g. 'ask' or 'nonsense')
+            value (a typo / bad config, e.g. 'nonsense' -- note 'ask' is now a
+            valid value, not an example of an invalid one)
         When Configuration.resolved_no_match_fallback() resolves
-        Then the value is not propagated; it normalizes to the safe default 'deny'
+        Then the value is not propagated; it normalizes to the default 'ask'
         """
         layers = (self._hook_layer("project", {"no_match_fallback": "nonsense"}),)
         config = Configuration(layers=layers)
-        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
-    def test_invalid_legacy_alias_value_falls_back_to_deny(self):
+    def test_invalid_legacy_alias_value_falls_back_to_ask(self):
         """
         Given only the legacy [takeover_mode].no_match_fallback is set, to an
             unrecognized value (no top-level key anywhere)
         When Configuration.resolved_no_match_fallback() resolves
-        Then the bad legacy value normalizes to the safe default 'deny'
+        Then the bad legacy value normalizes to the default 'ask'
         """
         layers = (
             self._hook_layer(
@@ -1221,7 +1263,7 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
             ),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
 
 class TestProvenanceAndIntrospection(unittest.TestCase):

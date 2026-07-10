@@ -469,7 +469,10 @@ ignored_allow_patterns = [
 # your own additions; no need to re-list the defaults).
 additional_ignored_patterns = []
 
-# Fallback when no pattern matches: "deny" or "ask" (default: "deny")
+# What to do when a governed tool HAS rules but a command matches none (a tool with no
+# rules at all always resolves to "ask"). Options:
+#   "ask" (prompt; DEFAULT), "deny" (fail-closed), "allow_with_warning" (allow + log a warning;
+#   "warn_deny" is a deprecated alias for it). This example uses "deny" for a fail-closed posture.
 no_match_fallback = "deny"
 
 # ============================================================================

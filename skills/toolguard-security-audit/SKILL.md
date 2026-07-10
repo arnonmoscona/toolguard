@@ -242,7 +242,7 @@ That JSON is the Pass-1 payload plus an additive top-level `context` block:
                "layer_count": int, ... },
   "takeover": {
     "enabled": bool,                       // the DETERMINISTIC takeover verdict -- trust it
-    "no_match_fallback": "deny" | "warn_deny",
+    "no_match_fallback": "ask" | "deny" | "allow_with_warning",  // "warn_deny" = deprecated alias for allow_with_warning
     "ignored_allow_patterns": [...],       // native blanket allows takeover suppresses
     "additional_ignored_patterns": [...],
     "conflict": str | null,                // cross-level takeover disagreement, if any
