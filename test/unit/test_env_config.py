@@ -104,6 +104,75 @@ class TestFindProjectRoot(unittest.TestCase):
                 result = find_project_root(test_dir)
                 self.assertIsNone(result)
 
+    def test_finds_claude_directory_alone(self):
+        """
+        Given a project directory containing only a .claude directory (no .git,
+            no pyproject.toml)
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root (TOO-15: .claude is a
+            strong project anchor, same tier as .git)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".claude").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+            self.assertEqual(result, project_dir)
+
+    def test_finds_claude_md_file_alone(self):
+        """
+        Given a project directory containing only a bare CLAUDE.md file
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root (TOO-15: CLAUDE.md is
+            a strong project anchor, same tier as .git)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / "CLAUDE.md").touch()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+            self.assertEqual(result, project_dir)
+
+    def test_finds_hg_directory_alone(self):
+        """
+        Given a project directory containing only a .hg directory (Mercurial)
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root (TOO-15: .hg is now a
+            recognised anchor, matching the migration gate's VCS tier)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".hg").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+            self.assertEqual(result, project_dir)
+
+    def test_finds_jj_directory_alone(self):
+        """
+        Given a project directory containing only a .jj directory (Jujutsu)
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root (TOO-15: .jj is now a
+            recognised anchor, matching the migration gate's VCS tier)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".jj").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+            self.assertEqual(result, project_dir)
+
 
 class TestLoadEnvFile(unittest.TestCase):
     """Test .env file loading."""

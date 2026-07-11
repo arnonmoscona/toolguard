@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.config import discover_config_files
+from toolguard.config import discover_config_files, find_project_root
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 
 
@@ -178,6 +178,137 @@ class TestConfigDiscovery(unittest.TestCase):
                 i for i, p in enumerate(config_paths) if p.name == "settings.json"
             )
             self.assertLess(local_idx, regular_idx)
+
+
+class TestFindProjectRoot(unittest.TestCase):
+    """
+    Real (unmocked) tests of toolguard.config.find_project_root's marker walk.
+
+    TOO-15: consolidates config.py's walk-up with env_config.py's onto a shared
+    "strong project anchor" tier (.git/.hg/.jj/.claude/CLAUDE.md) plus
+    pyproject.toml. These tests exercise the real function directly, since every
+    other test in this file mocks it (see discover_config_files tests above).
+    """
+
+    def test_finds_git_directory(self):
+        """
+        Given a project directory containing a .git directory and a nested subdir
+        When find_project_root is called from the subdir
+        Then the project directory is returned as the root
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".git").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+
+            self.assertEqual(result, project_dir)
+
+    def test_finds_pyproject_toml(self):
+        """
+        Given a project directory containing only pyproject.toml
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / "pyproject.toml").touch()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+
+            self.assertEqual(result, project_dir)
+
+    def test_finds_claude_directory_alone(self):
+        """
+        Given a project directory containing only a .claude directory (no .git,
+            no pyproject.toml)
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root (does not raise)
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".claude").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+
+            self.assertEqual(result, project_dir)
+
+    def test_finds_claude_md_file_alone(self):
+        """
+        Given a project directory containing only a bare CLAUDE.md file
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root (does not raise)
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / "CLAUDE.md").touch()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+
+            self.assertEqual(result, project_dir)
+
+    def test_finds_hg_directory_alone(self):
+        """
+        Given a project directory containing only a .hg directory (Mercurial)
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".hg").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+
+            self.assertEqual(result, project_dir)
+
+    def test_finds_jj_directory_alone(self):
+        """
+        Given a project directory containing only a .jj directory (Jujutsu)
+        When find_project_root is called from a nested subdir
+        Then the project directory is returned as the root
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".jj").mkdir()
+            subdir = project_dir / "subdir"
+            subdir.mkdir()
+
+            result = find_project_root(subdir)
+
+            self.assertEqual(result, project_dir)
+
+    def test_raises_when_nothing_found(self):
+        """
+        Given a directory tree with no project markers, and home mocked to bound
+            the walk-up within the isolated tree
+        When find_project_root is called
+        Then RuntimeError is raised
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_dir = Path(tmpdir) / "no_project"
+            test_dir.mkdir()
+
+            with patch("pathlib.Path.home") as mock_home:
+                mock_home.return_value = Path(tmpdir)
+
+                with self.assertRaises(RuntimeError):
+                    find_project_root(test_dir)
 
 
 if __name__ == "__main__":

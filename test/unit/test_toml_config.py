@@ -5,6 +5,7 @@ Tests TOML loading, config file discovery with TOML precedence,
 and permission validation.
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,6 +128,48 @@ invalid toml [
         """
         with self.assertRaises(FileNotFoundError):
             load_config_file(Path("/nonexistent/file.toml"), "toml")
+
+
+class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
+    """
+    load_config_file() memoizes parses keyed on the file's stat info. A rewrite that
+    lands within the same mtime tick (a real risk: fast successive writes, or a
+    coarse filesystem mtime resolution) must still invalidate the cache -- otherwise
+    a caller that reads-modifies-writes a config in quick succession (e.g. the
+    installer's seed-self-perms, or migrate_permissions merging patterns) can merge
+    against a stale, smaller parse and silently drop rules that are actually on disk.
+    """
+
+    def test_rewrite_within_same_mtime_tick_is_not_served_stale(self):
+        """
+        Given a TOML file is read once, then rewritten with new content while its
+            st_mtime_ns happens to be unchanged (simulating a same-tick rewrite)
+        When load_config_file reads it again
+        Then the SECOND read returns the NEW content, not a stale cached parse
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "toolguard_hook.toml"
+            path.write_text('governed_tools = ["Bash"]\n')
+
+            first = load_config_file(path, "toml")
+            self.assertNotIn("permissions", first)
+
+            original_mtime_ns = path.stat().st_mtime_ns
+            new_content = (
+                'governed_tools = ["Bash"]\n\n'
+                "[permissions]\n"
+                'allow = ["Bash(ls:*)"]\n'
+            )
+            path.write_text(new_content)
+            # Force the mtime to collide with the first read's, reproducing a
+            # same-tick rewrite regardless of this filesystem's real clock
+            # resolution -- this is the exact condition that must not go stale.
+            os.utime(path, ns=(original_mtime_ns, original_mtime_ns))
+            self.assertEqual(path.stat().st_mtime_ns, original_mtime_ns)
+
+            second = load_config_file(path, "toml")
+            self.assertIn("permissions", second)
+            self.assertEqual(second["permissions"]["allow"], ["Bash(ls:*)"])
 
 
 class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):

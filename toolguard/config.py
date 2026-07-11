@@ -34,7 +34,7 @@ from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from toolguard.config_validation import validate_permissions
-from toolguard.path_utils import find_nearest_marker
+from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 
 # Structural matcher for a ``Tool(inner)`` permission wrapper. An identifier made
 # of word characters followed by a parenthesised body. ``.*`` (greedy, DOTALL via
@@ -96,20 +96,28 @@ def _parse_config_file(path_str: str, file_format: str) -> dict:
 
 
 @functools.lru_cache(maxsize=None)
-def _parse_config_file_cached(path_str: str, file_format: str, mtime_ns: int) -> dict:
+def _parse_config_file_cached(
+    path_str: str, file_format: str, mtime_ns: int, size: int
+) -> dict:
     """
-    Parse a single config file, memoized on (path, format, mtime).
+    Parse a single config file, memoized on (path, format, mtime, size).
 
     This is the cache layer behind :func:`load_config_file`. ``mtime_ns`` is part of
     the cache key so that rewriting a file (which changes its modification time)
     transparently invalidates the cached parse -- caching on path alone would return
-    stale content. ``path_str`` is a string (not :class:`Path`) so the key is hashable
-    and stable.
+    stale content. ``size`` is ALSO part of the key: two rewrites landing within the
+    same mtime tick (fast successive writes, or a filesystem with coarse mtime
+    resolution) would otherwise collide on an unchanged ``mtime_ns`` and serve a
+    stale, wrong-sized parse -- a real risk for a read-modify-write caller (e.g. the
+    installer seeding self-permissions, or ``migrate_permissions`` merging patterns)
+    that could then silently drop rules that are genuinely on disk. ``path_str`` is a
+    string (not :class:`Path`) so the key is hashable and stable.
 
     Args:
         path_str: Filesystem path to the config file, as a string.
         file_format: Either ``'toml'`` or ``'json'``.
         mtime_ns: The file's ``st_mtime_ns`` at the time of the call (cache key only).
+        size: The file's ``st_size`` at the time of the call (cache key only).
 
     Returns:
         The parsed config dictionary.
@@ -123,9 +131,11 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
 
     This is the single internal config-file loader: it replaces the per-site
     ``if file_format == 'toml': tomllib.load(...) else: json.load(...)`` branches and
-    memoizes parsing keyed on ``(path, st_mtime_ns)`` so that the same file discovered
-    by multiple entry points in one invocation is parsed at most once, while a rewrite
-    of the file is still picked up (the mtime changes).
+    memoizes parsing keyed on ``(path, st_mtime_ns, st_size)`` so that the same file
+    discovered by multiple entry points in one invocation is parsed at most once,
+    while a rewrite of the file is still picked up. ``st_size`` is included alongside
+    ``st_mtime_ns`` because two rewrites landing within the same mtime tick would
+    otherwise collide on the key and serve a stale parse.
 
     When the path cannot be ``stat``-ed (e.g. it does not exist), the cache is bypassed
     and the parse is attempted directly so that ``open``'s own ``FileNotFoundError``
@@ -134,7 +144,8 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
 
     Tests that rewrite the SAME path within one process can reset the memo with
     ``_parse_config_file_cached.cache_clear()`` if ever needed (no current caller needs
-    it because the mtime component of the key already invalidates rewritten files).
+    it because the mtime+size components of the key already invalidate rewritten
+    files in practice).
 
     This loader RAISES on any failure (missing file, malformed content). Callers are
     responsible for their own error-handling policy (strict vs. lenient) by wrapping the
@@ -153,19 +164,25 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
         json.JSONDecodeError: If a JSON file is malformed.
     """
     try:
-        mtime_ns = path.stat().st_mtime_ns
+        stat_result = path.stat()
     except OSError:
         # Unstattable (typically missing): skip the cache and let open() raise.
         return _parse_config_file(str(path), file_format)
-    return _parse_config_file_cached(str(path), file_format, mtime_ns)
+    return _parse_config_file_cached(
+        str(path), file_format, stat_result.st_mtime_ns, stat_result.st_size
+    )
 
 
 def find_project_root(start_dir: Path = None) -> Path:
     """
-    Find the project root by searching for pyproject.toml or .git directory.
+    Find the project root by searching for a project anchor or pyproject.toml.
 
-    Climbs up from start_dir (or current directory) until finding a marker file/directory,
-    stopping at home directory or filesystem root.
+    Climbs up from start_dir (or current directory) until finding the nearest
+    marker (a strong project anchor -- ``.git``/``.hg``/``.jj``/``.claude``/
+    ``CLAUDE.md`` -- or ``pyproject.toml``), stopping at the home directory or
+    filesystem root. This is a thin wrapper around the shared
+    :func:`toolguard.path_utils.resolve_project_root` primitive in its
+    ``strict=True`` ("nearest marker of any kind wins") shape (TOO-15).
 
     Args:
         start_dir: Directory to start searching from. Defaults to current working directory.
@@ -177,13 +194,15 @@ def find_project_root(start_dir: Path = None) -> Path:
         RuntimeError: If project root cannot be found
     """
     start = Path(start_dir) if start_dir else Path.cwd()
-    root = find_nearest_marker(start, ("pyproject.toml", ".git"))
-    if root is None:
+    resolution = resolve_project_root(
+        start, strict=True, indicators=CONFIG_ROOT_INDICATORS
+    )
+    if resolution.root is None:
         raise RuntimeError(
             "Project root not found. Searched for pyproject.toml or .git directory "
             f"from {start} up to {Path.home()}. Something is badly wrong."
         )
-    return root
+    return resolution.root
 
 
 def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]:

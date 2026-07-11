@@ -68,22 +68,53 @@ Get a "yes, go ahead" before proceeding.
 
 ---
 
+## Install checklist (work through it; do not skip a box)
+
+Keep this list in front of you and tick each item as you finish it. Steps marked **(MUST)** have
+been forgotten in real installs -- do not end the session without them. The phases below expand
+each item.
+
+- [ ] **Phase 0** preflight (READ-ONLY -- no writes yet): detect environment; **check
+      `CLAUDE_SETTINGS_PATH`**; detect any existing install
+- [ ] Set expectations (unconventional + slower, but adaptable / user-in-control / self-rescuing /
+      safe+rollbackable / auto-reports issues) and **get a go-ahead**
+- [ ] **Phase 1** scope (user vs project)
+- [ ] **Phase 2** options (governed_tools; takeover decided now, enabled late)
+- [ ] **Phase 3** install the package (`uv tool install`) -- puts `toolguard-install` on PATH --
+      then `toolguard-install init-state` (creates `~/.toolguard/` + journal) and journal the install
+- [ ] Pre-approve `Bash(toolguard-install:*)` once to cut prompt noise (see the helper section)
+- [ ] **Phase 4** write the base config (`write-config`), then **register hooks LAST**
+      (`register-hooks` = go-live)
+- [ ] **Phase 5** skills (ask)
+- [ ] **Phase 6** validate
+- [ ] **Phase 7** migration (optional) -- this is the "**move** your rules" step; be takeover-aware;
+      confirm the project list and where rules land
+- [ ] **Phase 8** security audit (optional) -- **never remove a flagged rule without consent**
+- [ ] **Phase 9** maintenance pass (optional) -- this is the separate "**review / clean up**" step
+- [ ] **Phase 10** enable takeover (only if chosen) -- seed self-permissions (`seed-self-perms`);
+      then `enable-takeover` starting gentle; describe the posture in plain language; do not push `deny`
+- [ ] **Wrap-up** summary
+- [ ] **(MUST)** Offer the **session-trace dump** (Phase T.1) -- even on a clean install; do not end
+      the conversation without having offered it
+- [ ] **(MUST, if any toolguard problem occurred)** Offer to file/append a **GitHub issue** with the
+      trace (Phase T.2)
+
+---
+
 ## Phase 0 -- Preflight
 
-**0.1 Start the journal (and explain the directory).** Ensure `~/.toolguard/` exists and open
-(create if absent) `~/.toolguard/install-journal.md`. If it already exists, read it first -- a
-prior session may have done some steps; continue from where it left off rather than repeating.
-Append a session header (date/time, "guided install started").
+**0.1 Preflight is READ-ONLY; the state directory is created after the package install.** Do not
+write anything during Phase 0 -- it only inspects. You will create `~/.toolguard/` (its journal,
+`README.txt`, and `backups/`+`stage/` directories) in one step right after installing the package
+in Phase 3, with `toolguard-install init-state --source <where-you-installed-from>` (see "The
+`toolguard-install` helper" below). That one command writes the journal and a README explaining
+that `~/.toolguard/` holds toolguard's per-user state (the install journal and config/settings
+backups), where toolguard was installed from, and that it is **intentionally NOT deleted on
+uninstall**.
 
-At the same time, create `~/.toolguard/README.txt` (if absent) so the directory is
-self-explanatory to anyone who finds it later. It should state, in plain ASCII: what
-`~/.toolguard/` is (toolguard's per-user state: the install journal, config/settings backups,
-and the decision ledger); where toolguard was installed from (fill in the actual source --
-e.g. `git+https://github.com/<owner>/toolguard` or a local path); and that **this directory is
-intentionally NOT deleted on uninstall** -- it is kept for auditability and problem resolution,
-holds nothing executable, and the user may delete it by hand at any time. Record its creation
-in the journal -- there is nothing to reverse, since (like the rest of `~/.toolguard/`)
-`README.txt` is deliberately left in place on uninstall.
+If `~/.toolguard/install-journal.md` **already exists** from a prior session, read it first and
+continue from where it left off rather than repeating steps (running `init-state` again is safe --
+it never clobbers an existing journal or README, it just appends a new session header).
 
 **0.2 Detect the environment.** Note the OS/shell, whether Claude Code is present
 (`~/.claude/` exists), whether `uv` is on PATH (`uv --version`), and whether `toolguard` is
@@ -240,35 +271,85 @@ the journal and in `~/.toolguard/README.txt` (Phase 0.1).
 Confirm the entry point exists (`command -v toolguard`, or `uv tool dir --bin`). Note the
 absolute path if `~` is not expanded in hook commands.
 
+**Now that the package is on PATH, initialize state and cut the prompt noise -- before any config
+changes:**
+
+1. **Create the state directory + journal in one command:**
+   `toolguard-install init-state --source "<the exact source you installed from>"`. This makes
+   `~/.toolguard/` with its journal, `README.txt`, `backups/`, and `stage/`. From here on the
+   mechanical steps are each a single `toolguard-install` subcommand that journals itself -- read
+   each subcommand's `--help` first and fall back to a manual edit if it does not fit (see the
+   helper section).
+2. **Journal the package install** (the helper cannot journal its own installation):
+   `toolguard-install journal --action "installed toolguard via uv tool install (vX.Y.Z)" --reverse "uv tool uninstall toolguard"`
+   -- and if you installed `uv`, journal that separately with its reverse.
+3. **Pre-approve the helper once, to stop the per-edit prompts:** propose adding
+   `Bash(toolguard-install:*)` to the native allow list so the remaining `toolguard-install ...`
+   calls run without prompting. Journal it (reverse: remove that allow rule; uninstall removes it).
+
+---
+
+## The `toolguard-install` helper (use it to cut prompt noise)
+
+Once the package is installed (Phase 3), a **`toolguard-install`** console script is on PATH. It
+exists to do the mechanical, deterministic install steps -- create `~/.toolguard`, write
+`toolguard_hook.toml`, register the hooks, seed self-permissions, enable takeover, and journal --
+as **single commands**, so you do not make many separate Read/Write/Edit tool calls (each of
+which prompts the user). Because the script does its file writes *inside its own process*, those
+edits never reach Claude Code's permission layer at all; **only the `Bash(toolguard-install ...)`
+call does.** It is an agent-facing tool (its top-level `--help` says as much) -- not for direct
+human use.
+
+How to use it well:
+
+- **Cut the noise once.** Early on, propose adding the single allow rule `Bash(toolguard-install:*)`
+  (and re-grant narrow patterns at later checkpoints -- e.g. specific project paths after Phase 7
+  discovery). Journal it; uninstall removes it. After that one approval, the mechanical steps run
+  quietly.
+- **Read the subcommand `--help` BEFORE you run it.** Each subcommand's `--help` is written for
+  *you*: it states exactly which files it reads / writes / backs up, the journal entry it will
+  append (its action and the reverse), its preconditions, and what it **refuses** or does **not**
+  do. Confirm it will do **exactly** what this phase needs. **If it does not fit, fall back to the
+  conversational/manual steps for that phase** -- the script is an accelerator, not a straitjacket.
+  Treat each `--help` as the authoritative spec for that step (this doc describes intent; the help
+  describes the exact behavior of the installed version).
+- **Trust its output over your assumptions.** Every run prints exactly what it did -- the files it
+  wrote and backed up (with paths) and the journal index it added -- and says plainly when it did
+  **not** do something (e.g. "refused: config already exists; no changes made"). Read that summary
+  and update your understanding of the state from it, rather than assuming the command did what you
+  intended.
+
+Where a phase below says "write the config", "register the hooks", "seed self-permissions", or
+"enable takeover", prefer the matching `toolguard-install` subcommand (after checking its `--help`),
+and fall back to the manual edit only when the helper does not fit.
+
 ---
 
 ## Phase 4 -- Write the base config, then register the hook (go-live LAST)
 
-Use the exact hook JSON and `toolguard_hook.toml` shape from
-[agent-guides.md](agent-guides.md#recipe-install-and-register-toolguard-from-scratch); do not
-reinvent them. Put them at the scope chosen in Phase 1 (`~/.claude/` for user level, the
-project's `.claude/` for a single project). **Order matters:** registering the hook is the
-instant toolguard goes live and starts governing your own tool calls, so do it **last**, after
-the config it will read is already on disk. Stage the file writes as one script (per the
-atomic-groups principle) and apply it; register the hooks as a separate final step.
+Do these with the `toolguard-install` helper -- it backs up and journals each step for you. Read
+each subcommand's `--help` first and fall back to a hand edit only if it does not fit. Use the
+scope chosen in Phase 1 (`--scope user`, or `--scope project --project-dir <path>`). **Order
+matters:** registering the hook is the instant toolguard goes live and starts governing your own
+tool calls, so do it **last**, after the config it will read is already on disk.
 
-1. **Back up first.** Copy any file you are about to edit (`settings.json` /
-   `settings.local.json`) to a timestamped backup under `~/.toolguard/backups/`, and journal the
-   backup path (reverse: restore the backup).
-2. **Write the config (group 1 -- while toolguard is still dormant).** Write `toolguard_hook.toml`
-   with `governed_tools` (and `additional_supported_tools` for any custom MCP command tool) from
-   Phase 2, and **takeover disabled** for now -- either omit the `[takeover_mode]` section or
-   write `enabled = false`. Do NOT enable takeover here even if the user chose it: Phase 10 does
-   that once rules exist (see Phase 2). Stage this (plus any other non-hook file writes) into one
-   script under `~/.toolguard/stage/`, apply it once, and journal it (reverse: delete the file,
-   or restore its prior version if one existed). Nothing is governing yet, so this cannot lock
-   you out.
-3. **Register the hooks LAST (go-live).** Only now edit `settings.json` / `settings.local.json`
-   to add one PreToolUse matcher per governed tool + the SessionStart alert, pointing at the
-   installed `toolguard` / `toolguard-session-start` entry points. This is the step that makes
-   toolguard live -- and because the config from step 2 is already on disk (and takeover is off,
-   so unmatched calls resolve to `ask`, never a hard deny), it will not lock the session out.
-   Journal the exact edit (reverse: restore the backup, or remove the added hook block).
+1. **Write the base config (while toolguard is still dormant):**
+   `toolguard-install write-config --scope <user|project> [--project-dir <path>] --governed-tools Bash,Read,Write,Edit [--additional-supported-tools <mcp tool>]`.
+   This writes `toolguard_hook.toml` with takeover **disabled** (Phase 10 enables it later once
+   rules exist), refuses to overwrite an existing config without `--force` (backing it up first),
+   and journals the write with its reverse. Nothing is governing yet, so this cannot lock you out.
+2. **Register the hooks LAST (go-live):**
+   `toolguard-install register-hooks --scope <user|project> [--project-dir <path>] --binary <path-to-toolguard> --governed-tools Bash,Read,Write,Edit`.
+   This backs up the settings file, MERGES one PreToolUse matcher per governed tool + the
+   SessionStart alert into it (never clobbering existing hooks, skipping any already present), and
+   journals it. This is the step that makes toolguard live -- and because the config from step 1 is
+   already on disk (and, with takeover off, an unmatched call resolves to `ask`, never a hard
+   deny), it will not lock the session out.
+
+If the helper does not fit (an unusual settings layout, a manager other than `uv`, hand-off mode),
+fall back to editing the files by hand using the exact hook JSON / `toolguard_hook.toml` shape from
+[agent-guides.md](agent-guides.md#recipe-install-and-register-toolguard-from-scratch) -- back up
+first and record it with `toolguard-install journal --action ... --reverse ...`.
 
 ---
 
@@ -314,6 +395,14 @@ Prove the install works before offering anything else:
 
 ## Phase 7 -- Offer an initial migration (optional)
 
+**Say plainly what "migration" is, and how it differs from the later "maintenance pass"** -- a new
+user cannot consent to something they cannot name. In one breath: *"Migration just **moves** the
+permission rules you already approved in Claude Code (in `settings.local.json`) into toolguard's
+own config, so toolguard enforces them -- it does not change or judge them. Later, a separate
+**maintenance pass** (Phase 9) is where we **review, clean up, and consolidate** those rules. Right
+now I'm only offering the move."* Use those words ("move" vs "review/clean up") consistently so the
+user always knows which one you are doing.
+
 Ask: "Do you want me to move your existing Claude Code permissions into toolguard now?" Many
 users have accumulated allow rules in `settings.local.json`. If yes, do NOT ask them to name
 projects from memory -- **discover the candidates, then confirm the list with them.**
@@ -338,6 +427,16 @@ Then reconcile into a clean candidate list:
   actually contains permission rules. Skip ones with nothing to migrate.
 - **Flag, do not skip, projects that already have a `toolguard_hook.toml`** -- migrating again
   is usually a no-op but the user should know which are already set up.
+- **Recognize takeover-configured projects -- do NOT misread their blanket allows.** A project
+  that already runs toolguard in **takeover mode** deliberately keeps broad `Bash(*)` / `Read(*)`
+  / `Write(*)` / `Edit(*)` allows in its `settings.local.json` **on purpose**: those are the
+  native blanket allows that the project's own `takeover_mode.ignored_allow_patterns` neutralizes,
+  and its real rules live in its `toolguard_hook.toml`. These blanket allows are **not** stray
+  standalone permissions to migrate -- presenting them that way to the user is wrong and alarming.
+  Before analyzing a candidate's `settings.local.json`, check whether it has a `toolguard_hook.toml`
+  with `[takeover_mode] enabled = true`; if so, say plainly that it is an existing takeover setup
+  whose blanket allows are intentional, and leave them alone. (The migration tool is already
+  takeover-aware and ignores them; your *conversational analysis* must be too.)
 
 ### 7.2 Confirm the list with the user
 
@@ -347,7 +446,17 @@ want touched, and add any project the discovery missed (a brand-new repo Claude 
 yet will not appear). Migrate only the projects they confirm. This keeps the user in control and
 never touches a project silently.
 
-### 7.3 Migrate each confirmed project
+### 7.3 Cut the noise for this batch, then migrate each confirmed project
+
+**Checkpoint: a new permission group just became known -- ask for it once, not per project.**
+Once the list is confirmed (7.2), you know exactly which projects you are about to run the
+migrator against. Rather than letting each project's dry-run and apply calls prompt separately,
+propose one allow rule that covers the whole confirmed batch up front, e.g.
+`Bash(uv run python -m toolguard.scripts.migrate_permissions:*)` (or scoped further per the
+user's preference). Journal it like any other rule (reverse: remove it; uninstall removes it).
+This is the same "pre-approve once, cut the noise" principle as the `toolguard-install` allow
+rule in Phase 3 -- just applied at the checkpoint where migration's own permission needs become
+known, rather than guessed at the start of the install.
 
 For each project on the confirmed list, **dry-run first** so the user can review, then apply:
 
@@ -430,7 +539,10 @@ explicitly, explain each, and add them only with consent**, at the chosen scope:
 
 These come from toolguard's single source of truth for self-permissions
 (`toolguard.tools.self_permission`); if a skill is installed you can also let it compute exactly
-which are missing. Journal each rule added (reverse: remove that rule).
+which are missing. Once the user consents, add them in one command:
+`toolguard-install seed-self-perms --scope <user|project> [--project-dir <path>]` -- it reads that
+same source of truth, adds exactly those rules (idempotently -- a second run is a no-op), backs up
+the config first, and journals the change with its reverse.
 
 **10.2 Offer recommended secret protections (optional, with consent).** A fail-closed setup is a
 good moment to add `[hard_deny]` protections for credentials (e.g. `Read(**/.env)`,
@@ -438,12 +550,19 @@ good moment to add `[hard_deny]` protections for credentials (e.g. `Read(**/.env
 [agent-guides.md](agent-guides.md#recipe-block-a-command-no-matter-what). Offer them; do not add
 them silently.
 
-**10.3 Enable takeover, starting gentle.** Edit `toolguard_hook.toml` to set
-`[takeover_mode] enabled = true` with `no_match_fallback = "allow_with_warning"` -- unmatched
-commands are allowed but flagged, so nothing breaks while the rule set is still thin. Explain that
-once they are confident the rules cover their workflow, they (or a maintenance pass) can tighten
-it to `no_match_fallback = "deny"` for a fully fail-closed posture. Back up the file first and
-journal the change (reverse: restore the backup / set `enabled = false`).
+**10.3 Enable takeover, starting gentle.** Turn it on in one command:
+`toolguard-install enable-takeover --scope <user|project> [--project-dir <path>] --no-match-fallback allow_with_warning`
+(this backs up the config and journals with its reverse). Describe the result to the user in
+**plain language, not config tokens** -- e.g. "right now, a command that matches none of your rules
+is *allowed but logged with a warning*, so nothing breaks while your rule set is still thin."
+
+Tightening to `deny` is a **preference, not a requirement** -- present it that way. Explain: with
+`deny`, an unmatched command is *blocked* (fully fail-closed), which is **stricter than Claude
+Code's own default** (Claude *prompts* -- "ask" -- on anything it has no rule for). A fail-closed
+setup is the safest but can feel restrictive day to day. So recommend `deny` only if they
+specifically want maximum strictness and are comfortable with the extra friction; otherwise
+leaving it at allowed-but-warned (or moving to prompt-on-unmatched) is perfectly reasonable. It is
+their call about how tight they want to be.
 
 **10.4 Re-validate under takeover.** Re-run `toolguard-audit --with-context --format json` and
 confirm top-level `takeover_active` is now **true**, `sources` are as expected, and the
@@ -457,9 +576,11 @@ if available and address any findings (e.g. an uncovered blanket allow). Report 
 Summarize what was done (scope, install method, whether takeover was enabled and at what
 `no_match_fallback`, whether skills were installed, any migrations). Tell the user:
 
-- Their setup is validated and active. If takeover was enabled, note it started at
-  `allow_with_warning` (nothing blocked, unmatched commands flagged) and how to tighten it to
-  `deny` later.
+- Their setup is validated and active. If takeover was enabled, describe the current posture in
+  **plain language** -- e.g. "a command that matches none of your rules is currently allowed but
+  logged with a warning" -- not the raw `allow_with_warning` token. If they might tighten it
+  later, frame `deny` as an optional preference (stricter than Claude's own prompt-on-unmatched
+  default), per Phase 10.3 -- do not push it.
 - The full record is in `~/.toolguard/install-journal.md`, and `~/.toolguard/README.txt`
   explains the directory. Both are kept indefinitely -- even after an uninstall.
 - They can re-run any offered step (migration, audit, maintenance, or enabling takeover)
@@ -468,9 +589,12 @@ Summarize what was done (scope, install method, whether takeover was enabled and
   [docs/uninstall.md](uninstall.md) and you will roll everything back reliably from the
   journal** -- they will not have to reverse-engineer what was changed.
 
-Then **offer the session-trace dump** (Phase T.1) -- useful even for a clean install. If
-anything about toolguard itself misbehaved along the way, also offer to file an issue (Phase
-T.2).
+**MANDATORY final step -- do not skip it.** Before you consider the install (or a rollback)
+finished, you MUST **offer the session-trace dump** (Phase T.1) -- it is useful even for a clean
+install and essential when anything went wrong. This has been missed repeatedly; treat "offered
+the trace dump" as part of the definition of done, and if any toolguard problem surfaced during
+the session, also offer to file an issue (Phase T.2). Do not end the conversation without having
+made the offer.
 
 ---
 
@@ -530,7 +654,7 @@ end -- do not wait for the user to ask.** (A real miss: an install hit bugs, fin
 offered the dump; the user had to request it.)
 
 **T.1 Offer the trace dump.** Offer to write a focused, auditable markdown record of the session
-to a file the user chooses (e.g. `~/toolguard-install-trace-<date>.md`). Build it **from the
+to a file the user chooses (e.g. `~/toolguard-install-trace-<datetime>.md`). Build it **from the
 session transcript, not your working memory**; fill obvious gaps from working memory only where
 the transcript clearly missed something, and label such notes `[inferred]`. Include: the
 environment and toolguard version/commit; the ordered timeline of user messages and every tool

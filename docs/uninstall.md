@@ -80,6 +80,15 @@ directory says the same.
 (If you want a clean marker, you may append a final "uninstalled" entry to the journal noting
 what was removed and when -- but never delete or rewrite earlier entries.)
 
+**Do not conflate "clear my memories / clean slate" with wiping `~/.toolguard`.** A request to
+reset agent *memory*, start fresh, or "prep a clean slate for testing" is about the AGENT's
+notes -- it is NOT permission to delete `~/.toolguard/` (the journal, backups, ledger, README).
+Those are the user's audit trail and are exactly what you would need if a re-test goes wrong.
+Even when explicitly prepping for another test run, **leave `~/.toolguard/` intact unless the
+user names that directory specifically and says to delete it.** If a "clean slate" request is
+ambiguous, ask before removing anything under `~/.toolguard/`. (An install started later does
+not blindly "continue from" an old journal anyway -- it reads it and reconciles.)
+
 ---
 
 ## Step 3b -- Keep the logs (do NOT delete them by default)

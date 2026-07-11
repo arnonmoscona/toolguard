@@ -16,13 +16,13 @@ from toolguard.tools.working_tree import WorkingTreeStatus
 _GATE = "toolguard.tools.migration_gate"
 
 
-def _resolved_vcs(root: str = "/repo") -> ProjectRootResolution:
-    """A RESOLVED_VCS resolution rooted at ``root``."""
+def _resolved_anchor(root: str = "/repo") -> ProjectRootResolution:
+    """A RESOLVED_ANCHOR resolution rooted at ``root``."""
     return ProjectRootResolution(
-        status=RootStatus.RESOLVED_VCS,
+        status=RootStatus.RESOLVED_ANCHOR,
         root=Path(root),
         candidates=(),
-        reason="vcs root found",
+        reason="anchor root found",
     )
 
 
@@ -41,12 +41,12 @@ class TestMigrationPreflight(unittest.TestCase):
 
     def test_resolved_root_and_clean_tree_is_safe(self):
         """
-        Given a resolved VCS root and a clean working tree
+        Given a resolved anchor root and a clean working tree
         When migration_preflight runs
         Then it is safe with no blockers.
         """
         clean = WorkingTreeStatus(is_git_repo=True, is_clean=True, dirty_paths=())
-        with mock.patch(f"{_GATE}.resolve_project_root", return_value=_resolved_vcs()):
+        with mock.patch(f"{_GATE}.resolve_project_root", return_value=_resolved_anchor()):
             with mock.patch(f"{_GATE}.working_tree_status", return_value=clean):
                 result = migration_preflight(Path("/repo/pkg"))
         self.assertIsInstance(result, MigrationPreflight)
@@ -55,14 +55,14 @@ class TestMigrationPreflight(unittest.TestCase):
 
     def test_resolved_root_but_dirty_tree_is_blocked(self):
         """
-        Given a resolved VCS root but a dirty working tree
+        Given a resolved anchor root but a dirty working tree
         When migration_preflight runs
         Then it is not safe and the blocker names uncommitted changes.
         """
         dirty = WorkingTreeStatus(
             is_git_repo=True, is_clean=False, dirty_paths=("a.py", "b.py")
         )
-        with mock.patch(f"{_GATE}.resolve_project_root", return_value=_resolved_vcs()):
+        with mock.patch(f"{_GATE}.resolve_project_root", return_value=_resolved_anchor()):
             with mock.patch(f"{_GATE}.working_tree_status", return_value=dirty):
                 result = migration_preflight(Path("/repo"))
         self.assertFalse(result.is_safe)

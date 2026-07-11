@@ -9,15 +9,19 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional
 
-from toolguard.path_utils import find_nearest_marker
+from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 
 
 def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
     """
-    Find the project root by searching for .git or pyproject.toml.
+    Find the project root by searching for a project anchor or pyproject.toml.
 
-    Climbs up from start_dir (or current directory) until finding a marker,
-    stopping at home directory or filesystem root.
+    Climbs up from start_dir (or current directory) until finding the nearest
+    marker (a strong project anchor -- ``.git``/``.hg``/``.jj``/``.claude``/
+    ``CLAUDE.md`` -- or ``pyproject.toml``), stopping at the home directory or
+    filesystem root. This is a thin wrapper around the shared
+    :func:`toolguard.path_utils.resolve_project_root` primitive in its
+    ``strict=True`` ("nearest marker of any kind wins") shape (TOO-15).
 
     Args:
         start_dir: Starting directory for search (defaults to current directory)
@@ -26,7 +30,10 @@ def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
         Path to project root, or None if not found
     """
     start = start_dir if start_dir else Path.cwd()
-    return find_nearest_marker(start, (".git", "pyproject.toml"))
+    resolution = resolve_project_root(
+        start, strict=True, indicators=CONFIG_ROOT_INDICATORS
+    )
+    return resolution.root
 
 
 def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:
