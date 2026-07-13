@@ -4,6 +4,7 @@ Unit tests for permission migration script.
 
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -107,6 +108,105 @@ class TestBackupCreation(unittest.TestCase):
 
             with self.assertRaises(FileNotFoundError):
                 create_backup(source_file, backup_dir)
+
+    def test_colliding_timestamp_does_not_overwrite_earlier_backup(self):
+        """
+        Given create_backup is called twice for the same source file, with
+        datetime.now() forced to return the identical second-granularity
+        timestamp both times (simulating two backups landing in the same
+        wall-clock second)
+        When the second call runs
+        Then it writes to a DISTINCT backup file rather than overwriting the
+        first, and the first backup's original content survives untouched
+        (this is the actual data-loss regression: a naive implementation
+        would silently clobber the first backup's bytes)
+        """
+        fixed_now = datetime(2026, 2, 5, 14, 30, 22)
+        with TemporaryDirectory() as tmpdir:
+            source_file = Path(tmpdir) / "settings.local.json"
+            backup_dir = Path(tmpdir) / "backups"
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.datetime"
+            ) as mock_datetime:
+                mock_datetime.now.return_value = fixed_now
+
+                source_file.write_text('{"version": 1}')
+                first_backup = create_backup(source_file, backup_dir)
+
+                source_file.write_text('{"version": 2}')
+                second_backup = create_backup(source_file, backup_dir)
+
+            # Two distinct files on disk -- the second call must not reuse
+            # the first call's path.
+            self.assertNotEqual(first_backup, second_backup)
+            self.assertTrue(first_backup.exists())
+            self.assertTrue(second_backup.exists())
+
+            # The first backup's content must be exactly what it was at the
+            # time it was created -- proof the second write did not clobber it.
+            self.assertEqual(first_backup.read_text(), '{"version": 1}')
+            self.assertEqual(second_backup.read_text(), '{"version": 2}')
+
+    def test_third_collision_on_same_timestamp_gets_its_own_file(self):
+        """
+        Given two backups already exist for the same colliding timestamp
+        When a third create_backup call happens with datetime.now() forced to
+        the same timestamp again
+        Then a third, distinct backup file is created (proving the
+        disambiguator keeps incrementing rather than only handling exactly
+        two collisions) and all three earlier backups remain intact
+        """
+        fixed_now = datetime(2026, 2, 5, 14, 30, 22)
+        with TemporaryDirectory() as tmpdir:
+            source_file = Path(tmpdir) / "settings.local.json"
+            backup_dir = Path(tmpdir) / "backups"
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.datetime"
+            ) as mock_datetime:
+                mock_datetime.now.return_value = fixed_now
+
+                source_file.write_text('{"version": 1}')
+                first_backup = create_backup(source_file, backup_dir)
+
+                source_file.write_text('{"version": 2}')
+                second_backup = create_backup(source_file, backup_dir)
+
+                source_file.write_text('{"version": 3}')
+                third_backup = create_backup(source_file, backup_dir)
+
+            all_backups = {first_backup, second_backup, third_backup}
+            self.assertEqual(len(all_backups), 3, "all three paths must be distinct")
+
+            self.assertEqual(first_backup.read_text(), '{"version": 1}')
+            self.assertEqual(second_backup.read_text(), '{"version": 2}')
+            self.assertEqual(third_backup.read_text(), '{"version": 3}')
+
+    def test_no_collision_case_keeps_current_filename_shape(self):
+        """
+        Given a single create_backup call with no pre-existing file at the
+        candidate backup path (the common, non-colliding case)
+        When create_backup runs
+        Then the backup filename is exactly the plain
+        '{stem}.{timestamp}{suffix}' shape, with no disambiguator suffix
+        appended (no regression in the common path)
+        """
+        fixed_now = datetime(2026, 2, 5, 14, 30, 22)
+        with TemporaryDirectory() as tmpdir:
+            source_file = Path(tmpdir) / "settings.local.json"
+            source_file.write_text('{"test": true}')
+            backup_dir = Path(tmpdir) / "backups"
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.datetime"
+            ) as mock_datetime:
+                mock_datetime.now.return_value = fixed_now
+                backup_path = create_backup(source_file, backup_dir)
+
+            self.assertEqual(
+                backup_path.name, "settings.local.2026-02-05-143022.json"
+            )
 
 
 class TestPatternKeyExtraction(unittest.TestCase):

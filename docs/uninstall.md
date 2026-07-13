@@ -37,6 +37,17 @@ user a short plain-English summary of what will be undone, in order, before doin
 by hand), fall back to a best-effort manual uninstall -- see "Fallback" below -- and tell the
 user it is best-effort because there is no recorded history.
 
+**Note on backup filenames -- do not guess which one to restore.** `~/.toolguard/backups/`
+commonly holds *several* backups of the same original file: each mutating install action makes
+its own (e.g. `toolguard_hook.toml` is typically backed up more than once, once per Phase 4/10
+step that edited it). If two backups of the same file happen to land in the same wall-clock
+second, the second one gets a `-2`, `-3`, ... suffix instead of overwriting the first (e.g.
+`toolguard_hook.2026-07-11-125502.toml`, then `toolguard_hook.2026-07-11-125502-2.toml`) -- the
+suffix means "another backup, same second," not an ordering or ranking. **Always restore the
+exact path named in that entry's `backup:` field -- never infer which file to use by listing the
+directory or picking the newest-looking name.** With several same-named candidates for one
+original file, a guess can silently restore the wrong point in its history.
+
 ---
 
 ## Step 2 -- Replay the reverses, in reverse order
@@ -60,13 +71,20 @@ For each: confirm, back up if you are overwriting/restoring, perform the recorde
 note completion. If a reverse action does not apply cleanly (a file already changed by the
 user since install), stop and explain rather than forcing it.
 
+**Never execute a recorded reverse that deletes or empties `~/.toolguard/` itself, even if a
+journal entry says to.** Step 3 below is the permanent policy and overrides any individual
+entry -- a buggy or hand-written entry (e.g. one mistakenly attached to `init-state`) may say
+otherwise. If you find one, skip just that part of the reverse, tell the user their journal
+contains a stale/incorrect entry, and proceed with the rest of the rollback normally.
+
 ---
 
 ## Step 3 -- Leave `~/.toolguard/` in place (do NOT delete it)
 
 **Do not remove `~/.toolguard/` or anything in it.** It holds only non-executable records --
 the install journal, the config/settings backups the install and uninstall made, the decision
-ledger (`decisions.json`), and `README.txt`. Toolguard no longer runs anything from here, so
+ledger (`decisions.json`), any captured crash reports in `errors/` (see Step 5), and
+`README.txt`. Toolguard no longer runs anything from here, so
 keeping it costs nothing and preserves a full, auditable history of what was installed and
 removed -- invaluable if the user hit problems (the reason they may be uninstalling) or later
 wants to reinstall or understand what happened.
@@ -128,7 +146,9 @@ Follow **[install.md](install.md#phase-t----trace-dump-and-issue-reporting-offer
 
 - **Offer a session-trace dump** (Phase T.1) built from the transcript -- the environment,
   timeline, verbatim allow/deny/warning strings, the reproduction, and the final state. Together
-  with the kept logs (Step 3b) and the journal, this is a complete record.
+  with the kept logs (Step 3b) and the journal, this is a complete record. **Check
+  `~/.toolguard/errors/` and quote any crash reports there in full** -- a user reaching for
+  uninstall often hit exactly the kind of unexpected exception this directory captures.
 - **If the trouble looks like a toolguard defect** (not the environment or an agent mistake),
   **offer to file a GitHub issue** on the user's behalf (Phase T.2): search existing issues
   first, show the user any that match, ask whether it is the same or new, and open one only with
@@ -138,7 +158,13 @@ Follow **[install.md](install.md#phase-t----trace-dump-and-issue-reporting-offer
 
 ## Fallback -- no journal available
 
-If there is no usable journal, do a careful best-effort removal, confirming each step:
+If there is no usable journal, do a careful best-effort removal, confirming each step. **If you
+need to restore from `~/.toolguard/backups/` without a journal entry pointing at the exact file,
+do not guess.** A single original file (e.g. `settings.json`) may have several backups from
+different points in time, including same-second collisions disambiguated with a `-2`, `-3`, ...
+suffix (see the note in Step 1) -- list every candidate for that filename's stem, sorted by their
+embedded timestamp, and show the **full list** to the user so they pick the right one, rather
+than silently restoring "the newest" or "the first one found."
 
 1. `uv tool uninstall toolguard` (or check `pipx list` / `pip show toolguard` / a project
    `.venv` for how it was installed).

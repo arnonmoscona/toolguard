@@ -92,6 +92,15 @@ def create_backup(file_path: Path, backup_dir: Path) -> Path:
     Backup filename format: basename.YYYY-MM-DD-HHMMSS.extension
     Example: settings.local.2026-02-05-143022.json
 
+    Timestamps have second granularity, so two backups of the same file within the
+    same wall-clock second would otherwise collide on an identical filename. To avoid
+    silently overwriting (and thereby destroying) an earlier backup, a colliding
+    candidate filename gets a monotonically increasing "-2", "-3", ... suffix appended
+    until a filename that does not already exist is found. Example:
+    settings.local.2026-02-05-143022.json,
+    settings.local.2026-02-05-143022-2.json,
+    settings.local.2026-02-05-143022-3.json, ...
+
     Args:
         file_path: Path to file to backup
         backup_dir: Directory where backup should be stored
@@ -116,12 +125,20 @@ def create_backup(file_path: Path, backup_dir: Path) -> Path:
         # Has extension: name.ext -> name.TIMESTAMP.ext
         stem = file_path.stem
         suffix = file_path.suffix
-        backup_name = f"{stem}.{timestamp}{suffix}"
+        base_name = f"{stem}.{timestamp}"
     else:
         # No extension: name -> name.TIMESTAMP
-        backup_name = f"{file_path.name}.{timestamp}"
+        suffix = ""
+        base_name = f"{file_path.name}.{timestamp}"
 
-    backup_path = backup_dir / backup_name
+    # Disambiguate collisions (two backups landing in the same second) with a
+    # monotonically increasing sequence number, so an earlier backup is never
+    # silently overwritten.
+    backup_path = backup_dir / f"{base_name}{suffix}"
+    sequence = 2
+    while backup_path.exists():
+        backup_path = backup_dir / f"{base_name}-{sequence}{suffix}"
+        sequence += 1
 
     # Copy file to backup location
     backup_path.write_bytes(file_path.read_bytes())

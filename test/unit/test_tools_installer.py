@@ -999,6 +999,53 @@ class TestSummaryOutput(InstallerTestCase):
             "already" in lowered or "no changes" in lowered or "nothing to add" in lowered
         )
 
+    def test_register_hooks_reminds_of_remaining_checklist_phases(self):
+        """
+        Given register-hooks completes successfully (go-live step)
+        When its summary output is printed
+        Then it ends with a reminder naming the checklist phases still ahead
+        (skills, validation, phases 7-10 + wrap-up) and flags the session-trace
+        dump offer (Phase T.1) as MANDATORY, so an agent following docs/install.md
+        does not silently stop after this step
+        """
+        code, out = self.run_cli(
+            [
+                "register-hooks",
+                "--scope",
+                "user",
+                "--binary",
+                "/fake/toolguard",
+                "--governed-tools",
+                "Bash",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        lowered = out.lower()
+        self.assertIn("docs/install.md", out)
+        self.assertIn("mandatory", lowered)
+        self.assertIn("trace", lowered)
+
+    def test_enable_takeover_reminds_of_remaining_checklist_phases(self):
+        """
+        Given enable-takeover completes successfully (the last mechanical step
+        of a takeover install)
+        When its summary output is printed
+        Then it ends with a reminder naming the checklist steps still ahead
+        (10.4 re-validation, wrap-up) and flags the session-trace dump offer
+        (Phase T.1) as MANDATORY, so an agent does not stop before the runbook's
+        remaining steps
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+
+        code, out = self.run_cli(["enable-takeover", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        lowered = out.lower()
+        self.assertIn("docs/install.md", out)
+        self.assertIn("mandatory", lowered)
+        self.assertIn("trace", lowered)
+
 
 if __name__ == "__main__":
     unittest.main()

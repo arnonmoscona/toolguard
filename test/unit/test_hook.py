@@ -10,6 +10,7 @@ import os
 import unittest
 from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import patch
 
@@ -1849,6 +1850,133 @@ class TestHookArgparseAndIsatty(unittest.TestCase):
 
         output = json.loads(mock_stdout.getvalue())
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+
+
+class TestHookCrashCapture(unittest.TestCase):
+    """
+    TOO-15: an unhandled exception hitting any of main()'s three except clauses
+    (json.JSONDecodeError, ValueError, generic Exception) must -- in addition to
+    the existing deny-and-continue stdout/stderr behavior -- write a full crash
+    report (exception type, message, traceback, in-flight context) to
+    ~/.toolguard/errors/ via toolguard.error_log.log_crash.
+    """
+
+    def test_unexpected_exception_writes_crash_report(self):
+        """
+        Given a governed Bash event that reaches permission resolution, and
+        resolve_bash_permission_detailed forced to raise an unexpected
+        RuntimeError
+        When main() runs and the exception falls through to the generic
+        `except Exception` clause
+        Then main() still denies and exits 0 as before, AND a crash report file
+        appears under ~/.toolguard/errors/ describing the RuntimeError with a
+        full traceback
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+        config = _fake_config(governed=["Bash"], bash=(["git *"], []))
+
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with (
+                patch("sys.stdin", StringIO(json.dumps(hook_input))),
+                patch("sys.stdin.isatty", return_value=False),
+                patch("sys.stdout", new_callable=StringIO),
+                patch("sys.stderr", new_callable=StringIO) as mock_stderr,
+                patch("toolguard.hook.load_configuration", return_value=config),
+                patch(
+                    "toolguard.hook.resolve_bash_permission_detailed",
+                    side_effect=RuntimeError("boom from resolver"),
+                ),
+                patch("pathlib.Path.home", return_value=home),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            # The exception path prints its JSON decision to stderr (not
+            # stdout) -- the first JSON line on stderr is create_hook_output's
+            # deny decision.
+            first_stderr_line = mock_stderr.getvalue().splitlines()[0]
+            output = json.loads(first_stderr_line)
+            self.assertEqual(
+                output["hookSpecificOutput"]["permissionDecision"], "deny"
+            )
+
+            errors_dir = home / ".toolguard" / "errors"
+            self.assertTrue(errors_dir.is_dir())
+            crash_files = list(errors_dir.glob("toolguard-error-*.md"))
+            self.assertEqual(len(crash_files), 1)
+            content = crash_files[0].read_text()
+            self.assertIn("RuntimeError", content)
+            self.assertIn("boom from resolver", content)
+            self.assertIn("Traceback", content)
+
+    def test_json_decode_error_writes_crash_report(self):
+        """
+        Given stdin contains text that is not valid JSON
+        When main() runs and parse_hook_input's json.JSONDecodeError falls
+        through to the `except json.JSONDecodeError` clause
+        Then main() still denies and exits 0 as before, AND a crash report file
+        appears under ~/.toolguard/errors/ describing the parse failure
+        """
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with (
+                patch("sys.stdin", StringIO("not valid json {")),
+                patch("sys.stdin.isatty", return_value=False),
+                patch("sys.stdout", new_callable=StringIO),
+                patch("sys.stderr", new_callable=StringIO),
+                patch("pathlib.Path.home", return_value=home),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            errors_dir = home / ".toolguard" / "errors"
+            self.assertTrue(errors_dir.is_dir())
+            crash_files = list(errors_dir.glob("toolguard-error-*.md"))
+            self.assertEqual(len(crash_files), 1)
+            content = crash_files[0].read_text()
+            self.assertIn("JSONDecodeError", content)
+
+    def test_value_error_missing_field_writes_crash_report(self):
+        """
+        Given valid JSON on stdin that is missing a required field
+        (hook_event_name)
+        When main() runs and parse_hook_input's ValueError falls through to the
+        `except ValueError` clause
+        Then main() still denies and exits 0 as before, AND a crash report file
+        appears under ~/.toolguard/errors/ describing the missing field
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            # hook_event_name intentionally omitted
+        }
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with (
+                patch("sys.stdin", StringIO(json.dumps(hook_input))),
+                patch("sys.stdin.isatty", return_value=False),
+                patch("sys.stdout", new_callable=StringIO),
+                patch("sys.stderr", new_callable=StringIO),
+                patch("pathlib.Path.home", return_value=home),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            errors_dir = home / ".toolguard" / "errors"
+            self.assertTrue(errors_dir.is_dir())
+            crash_files = list(errors_dir.glob("toolguard-error-*.md"))
+            self.assertEqual(len(crash_files), 1)
+            content = crash_files[0].read_text()
+            self.assertIn("ValueError", content)
+            self.assertIn("Missing required field", content)
 
 
 if __name__ == "__main__":

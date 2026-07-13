@@ -74,6 +74,19 @@ Keep this list in front of you and tick each item as you finish it. Steps marked
 been forgotten in real installs -- do not end the session without them. The phases below expand
 each item.
 
+**Re-check this list out loud after every phase, not just at the start.** In real installs,
+phases have been silently skipped -- Phase 8/9's offers went unmade, the trace dump was never
+raised until the user asked for it directly. Silently completing "enough" and stopping is the
+failure mode: after each phase, briefly state which boxes are now checked and which remain,
+including the **(MUST)** ones, before moving on or ending the conversation.
+
+**A narrower mid-flight request from the user does not erase the rest of the checklist.** If the
+user says something like "now migrate this project" or "roll back and give me a dump," treat it
+as scoping *that* request, not as permission to skip the MUST items still open (trace dump,
+`~/.toolguard/` retention, offering audit/maintenance if not yet declined). Re-orient against
+this checklist before ending the session, even when the conversation's shape suggests something
+narrower was asked for.
+
 - [ ] **Phase 0** preflight (READ-ONLY -- no writes yet): detect environment; **check
       `CLAUDE_SETTINGS_PATH`**; detect any existing install
 - [ ] Set expectations (unconventional + slower, but adaptable / user-in-control / self-rescuing /
@@ -280,9 +293,24 @@ changes:**
    mechanical steps are each a single `toolguard-install` subcommand that journals itself -- read
    each subcommand's `--help` first and fall back to a manual edit if it does not fit (see the
    helper section).
+   **`init-state` itself has no reverse and needs no journal entry -- do not invent one.**
+   `~/.toolguard/` is permanent: uninstall never deletes it (see
+   [uninstall.md](uninstall.md#step-3----leave-toolguard-in-place-do-not-delete-it)). A real
+   mistake to avoid: an agent once bundled `init-state` into a hand-written journal note and
+   invented a reverse of "remove `~/.toolguard/`" for it -- then a later uninstall dutifully
+   followed that bad entry and deleted the whole audit trail. If you ever journal `init-state` as
+   part of a bundled manual note, its reverse is "(none -- `~/.toolguard/` is kept forever)",
+   never a deletion.
 2. **Journal the package install** (the helper cannot journal its own installation):
    `toolguard-install journal --action "installed toolguard via uv tool install (vX.Y.Z)" --reverse "uv tool uninstall toolguard"`
-   -- and if you installed `uv`, journal that separately with its reverse.
+   -- and if you installed `uv`, journal that separately with its reverse. **Always record this
+   through the `journal` subcommand (one call per distinct action), never by hand-editing
+   `install-journal.md`.** A hand edit is an `Edit` tool call the Phase 3 pre-approval below does
+   not cover (it only pre-approves `Bash(toolguard-install:*)`), so it re-introduces the very
+   per-edit prompts this helper exists to cut -- and it produces an ad hoc entry instead of a
+   properly numbered one. If several small actions belong together (e.g. the package install plus
+   `uv tool update-shell`), call `journal` once per action rather than merging them into one
+   free-form entry.
 3. **Pre-approve the helper once, to stop the per-edit prompts:** propose adding
    `Bash(toolguard-install:*)` to the native allow list so the remaining `toolguard-install ...`
    calls run without prompting. Journal it (reverse: remove that allow rule; uninstall removes it).
@@ -406,6 +434,14 @@ user always knows which one you are doing.
 Ask: "Do you want me to move your existing Claude Code permissions into toolguard now?" Many
 users have accumulated allow rules in `settings.local.json`. If yes, do NOT ask them to name
 projects from memory -- **discover the candidates, then confirm the list with them.**
+
+**Also ask the scope explicitly: every known project, or just the one you're in right now?**
+Do not silently narrow this yourself. If the user is mid-conversation in a specific project and
+says something like "migrate this," confirm whether that means *only* this project or whether
+they also want the fleet-wide discovery below -- a real install once migrated only the current
+project without ever running 7.1/7.2, leaving every other known project un-migrated and never
+mentioned. If they want just the current project, skip 7.1/7.2 and go straight to 7.3 for it;
+otherwise run the full discovery.
 
 ### 7.1 Discover candidate projects
 
@@ -662,6 +698,15 @@ call with its result (allows / denies / warnings, verbatim strings); the exact r
 any problem; a clear separation of "the agent did X" vs "toolguard did Y" (so agent mistakes are
 not misread as toolguard bugs); and the final state. This is the same record that makes a good
 bug report.
+
+**Always check `~/.toolguard/errors/` and fold in anything there, verbatim.** Any unexpected
+exception in the hook (a parse failure, a config load error, anything the hook itself did not
+expect) gets a detailed crash report written there -- full traceback and the exact input that
+triggered it -- independent of whether you noticed a problem in the conversation. If a symptom
+this session was vague (e.g. something that just looked like "a parse error" with no exact text
+captured), this directory is the authoritative record; quote its contents in full rather than
+paraphrasing from memory, and say so explicitly if the directory is empty (that itself is useful
+signal -- it means the trouble was not an unhandled exception in the hook).
 
 **T.2 If toolguard ITSELF appears to have a bug, offer to file an issue.** Whenever the trouble
 looks like a defect in toolguard rather than the environment or your own mistake -- and

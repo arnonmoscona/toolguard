@@ -25,7 +25,7 @@ from toolguard.auto_migrate import run_auto_migration
 from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
-from toolguard.error_log import log_conflict, log_error, log_warning
+from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
 from toolguard.log_writer import log_command, log_discovery
 from toolguard.resolve import (
     _anchor_file_pattern,  # noqa: F401  re-exported for backwards compat
@@ -168,6 +168,31 @@ def create_hook_output(decision: str, reason: str) -> Dict[str, Any]:
             "permissionDecision": decision,
             "permissionDecisionReason": reason,
         }
+    }
+
+
+def _build_crash_context(local_vars: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract a small, readable snapshot of in-flight hook state for :func:`log_crash`.
+
+    ``main()``'s ``except`` clauses can fire before ``hook_data``/``tool_name``/
+    ``tool_input``/``cwd`` are ever assigned (e.g. a parse failure on stdin
+    itself), so this only includes whichever of those keys are actually present
+    in *local_vars* -- passing ``locals()`` from the catch site -- rather than
+    referencing them directly and risking a ``NameError`` from inside error
+    handling.
+
+    Args:
+        local_vars: The calling frame's ``locals()``, taken at the except site.
+
+    Returns:
+        A dict with whichever of ``tool_name``, ``tool_input``, ``cwd`` were
+        available; empty if none were.
+    """
+    return {
+        key: local_vars[key]
+        for key in ("tool_name", "tool_input", "cwd")
+        if key in local_vars
     }
 
 
@@ -789,6 +814,9 @@ def main() -> None:
         error_reason = f"Failed to parse hook input: {str(e)}"
         output = create_hook_output("deny", error_reason)
         print(json.dumps(output), file=sys.stderr)
+        crash_context = _build_crash_context(locals())
+        crash_context["raw_stdin"] = e.doc
+        log_crash(e, crash_context, caught_as="json.JSONDecodeError")
         sys.exit(0)
 
     except ValueError as e:
@@ -796,6 +824,7 @@ def main() -> None:
         error_reason = f"Invalid hook input: {str(e)}"
         output = create_hook_output("deny", error_reason)
         print(json.dumps(output), file=sys.stderr)
+        log_crash(e, _build_crash_context(locals()), caught_as="ValueError")
         sys.exit(0)
 
     except Exception as e:
@@ -804,6 +833,7 @@ def main() -> None:
         output = create_hook_output("deny", error_reason)
         print(json.dumps(output), file=sys.stderr)
         print(f"Error: {error_reason}", file=sys.stderr)
+        log_crash(e, _build_crash_context(locals()), caught_as="unexpected Exception")
         sys.exit(0)
 
 

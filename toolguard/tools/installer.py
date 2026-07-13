@@ -86,6 +86,8 @@ _README_TEMPLATE = (
     "  settings.json.2026-07-07-141200).\n"
     "- stage/ -- staged file writes, applied together as one atomic group during a\n"
     "  guided install (see docs/install.md in the toolguard repository).\n"
+    "- errors/ -- detailed crash reports if the hook ever hit an unexpected\n"
+    "  exception (created on demand, not by init-state).\n"
     "\n"
     "Toolguard was installed from:\n"
     "    {source}\n"
@@ -545,6 +547,11 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
     if backup_path:
         print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
+    print(
+        "  reminder: still ahead per docs/install.md -- skills (5), validate (6), and "
+        "later phases 7-10 + wrap-up; the session-trace dump offer (Phase T.1) is "
+        "MANDATORY before you end the conversation"
+    )
     return 0
 
 
@@ -752,6 +759,11 @@ def cmd_enable_takeover(args: argparse.Namespace) -> int:
     print(f"  no_match_fallback: {args.no_match_fallback}")
     print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
+    print(
+        "  reminder: still ahead per docs/install.md -- 10.4 re-validate under "
+        "takeover, then Wrap-up; the session-trace dump offer (Phase T.1) is "
+        "MANDATORY before you end the conversation"
+    )
     return 0
 
 
