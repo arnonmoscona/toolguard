@@ -108,8 +108,9 @@ narrower was asked for.
 - [ ] **Phase 8** security audit (optional) -- **never remove a flagged rule without consent**
 - [ ] **Phase 9** maintenance pass (optional) -- this is the separate "**review / clean up**" step
 - [ ] **Phase 10** enable takeover (only if chosen) -- offer secret protections
-      (`seed-hard-deny`, never hand-composed); then `enable-takeover` starting gentle; describe the
-      posture in plain language; do not push `deny`
+      (`seed-hard-deny`, never hand-composed); then `enable-takeover`, recommending `ask` as the
+      starting fallback (not `allow_with_warning`); describe the posture in plain language; present
+      `deny` as an option, don't push it
 - [ ] **Wrap-up** summary
 - [ ] **(MUST)** Offer the **session-trace dump** (Phase T.1) -- even on a clean install; do not end
       the conversation without having offered it
@@ -237,11 +238,15 @@ briefly, and use their answer.
   tighten.
 - **`no_match_fallback` -- decided at Phase 10, not now.** With takeover off, an unmatched
   command prompts (`ask`) by default -- nothing is blocked, matching Claude's own behavior. When
-  takeover is switched on (Phase 10) it starts at the gentle `allow_with_warning` (unmatched
-  commands are allowed but flagged, so nothing breaks while rules are still thin), and the user
-  can tighten it to fail-closed `deny` once confident. The values are `ask` (prompt) /
-  `allow_with_warning` (allow + warn) / `deny` (fail-closed). Phase 10 walks this; nothing to set
-  here.
+  takeover is switched on (Phase 10), **recommend keeping that same `ask` behavior** as the
+  starting point -- it is both the safer of the two non-`deny` options (it never silently executes
+  an unmatched command) and the one the user is already used to, so nothing about their day-to-day
+  experience needs to feel different just because takeover is now the real gatekeeper. The user can
+  tighten it to fail-closed `deny` once confident, or loosen it to `allow_with_warning` if they
+  find prompting too disruptive and knowingly accept the tradeoff -- but that is a choice to
+  present, not the one to steer them toward. The values are `ask` (prompt; **recommended**) /
+  `allow_with_warning` (allow + warn; available, not encouraged) / `deny` (fail-closed; optional
+  for maximum strictness). Phase 10 walks this; nothing to set here.
 
 So Phase 4 writes the base config with takeover **disabled** regardless of their choice; Phase 10
 enables it (with the self-permissions it needs) if they chose takeover. Keep the base config
@@ -570,10 +575,24 @@ If they decline the whole step, note that migration can be done anytime later, t
 
 ## Phase 8 -- Offer a security audit (optional)
 
-Ask: "Want me to security-check your permissions now?" If yes, run the security-audit skill --
-via `/toolguard-security-audit` if it was installed in Phase 5, otherwise by following this
-repo's `skills/toolguard-security-audit/SKILL.md` directly. The audit itself is read-only:
-present the findings and, for anything risky, the suggested fix.
+Ask: "Want me to security-check your permissions now?" If yes, **don't limit this to wherever you
+happen to be sitting.** Offer the same discovered candidate list Phase 7 used (re-run
+`toolguard-install discover-projects` if Phase 7 was skipped or declined) alongside the
+current/user scope, and let the user pick which to audit -- **default to "all," not just the
+current one.** Two categories are easy to miss if you only think about the project you installed
+into:
+
+- **A project that already has its own toolguard config** (e.g. one already running takeover
+  mode, like a project Phase 7.1 flagged as takeover-configured) benefits from an audit of *its*
+  config just as much as the one you just installed into -- it was never audited just because it
+  wasn't part of THIS install.
+- **A project with no toolguard config yet but with `settings.local.json` permission rules**
+  can still surface native rule-danger findings (e.g. an `arbitrary-exec-allow`) -- toolguard-audit
+  checks native settings independently of whether toolguard governs that project at all.
+
+For each confirmed target, run `toolguard-audit --dir <path> --with-context --format json` (or
+via `/toolguard-security-audit` if installed, pointed at that directory) -- read-only, never
+edits config -- and present its findings separately, labeled by project.
 
 **Do NOT act on a finding without explicit approval -- above all, never silently remove a rule
 the audit flagged.** A CRITICAL finding (e.g. an `arbitrary-exec-allow` rule that a migration
@@ -588,11 +607,15 @@ dropping it.
 
 ## Phase 9 -- Offer an initial maintenance pass (optional)
 
-Ask: "Want me to organize your new toolguard setup?" If yes, run the maintenance skill --
-via `/toolguard-maintenance` if installed, otherwise by following
-`skills/toolguard-maintenance/SKILL.md` directly. This is the first run, so it will walk the
-whole config with them and apply only what they approve. See [skills.md](skills.md) for what to
-expect.
+Ask: "Want me to organize your new toolguard setup?" If yes, **offer the same discovered project
+list as Phase 8, not just the current scope** -- a project running its own toolguard config
+benefits from a maintenance pass over *its* rules too, exactly as with the audit. `toolguard-maintain`
+is read-only by default (it only edits config when `--apply --write` is given), so running it in
+report mode across several confirmed projects needs no extra per-project consent beyond the
+initial "yes, run maintenance" -- only an actual apply step does. For each confirmed target, run
+`toolguard-maintain --dir <path> --format markdown` (or via `/toolguard-maintenance` if
+installed, pointed at that directory) and walk the findings with them, applying only what they
+approve. See [skills.md](skills.md) for what to expect.
 
 ---
 
@@ -619,19 +642,34 @@ it reads the same canonical secret-file pattern list documented in [security.md]
 writes), adds exactly those to `[hard_deny]` idempotently, backs up the config first, and
 journals the change with its reverse. **Offer it; do not add it silently.**
 
-**10.2 Enable takeover, starting gentle.** Turn it on in one command:
-`toolguard-install enable-takeover --scope <user|project> [--project-dir <path>] --no-match-fallback allow_with_warning`
+**10.2 Enable takeover, defaulting to `ask` on anything unmatched.** Turn it on in one command:
+`toolguard-install enable-takeover --scope <user|project> [--project-dir <path>] --no-match-fallback ask`
 (this backs up the config and journals with its reverse). Describe the result to the user in
-**plain language, not config tokens** -- e.g. "right now, a command that matches none of your rules
-is *allowed but logged with a warning*, so nothing breaks while your rule set is still thin."
+**plain language, not config tokens** -- e.g. "right now, a command that matches none of your
+rules will prompt you for approval, same as Claude's own normal behavior -- nothing runs without
+you seeing it first, and nothing about your day-to-day experience changes just because takeover
+is on."
 
-Tightening to `deny` is a **preference, not a requirement** -- present it that way. Explain: with
-`deny`, an unmatched command is *blocked* (fully fail-closed), which is **stricter than Claude
-Code's own default** (Claude *prompts* -- "ask" -- on anything it has no rule for). A fail-closed
-setup is the safest but can feel restrictive day to day. So recommend `deny` only if they
-specifically want maximum strictness and are comfortable with the extra friction; otherwise
-leaving it at allowed-but-warned (or moving to prompt-on-unmatched) is perfectly reasonable. It is
-their call about how tight they want to be.
+**Present all three fallback values, but recommend `ask` -- do not default the conversation
+toward `allow_with_warning`.** All three are legitimate choices and the user should hear about
+each, but they are not equally worth recommending:
+
+- **`ask` (recommended).** Prompts on anything unmatched, exactly like Claude Code's own native
+  behavior. It is the safer of the two non-`deny` options -- it never lets an unrecognized command
+  run without a human seeing it -- and it asks nothing new of the user, since it is the behavior
+  they already know. Suggest this as the default unless they have a specific reason to want
+  something else.
+- **`allow_with_warning`.** An available option, not a recommendation. Unmatched commands execute
+  *silently* (only a log entry records it) -- looser than `ask` in a real, not just theoretical,
+  way. Offer it for someone who finds prompting too disruptive and knowingly accepts that
+  tradeoff; do not steer them toward it as the easy/default choice.
+- **`deny`.** A **preference, not a requirement**, for someone who specifically wants maximum
+  strictness. With `deny`, an unmatched command is *blocked* (fully fail-closed) -- **stricter
+  than Claude Code's own default** -- and can feel restrictive day to day. Recommend it only if
+  they say they want maximum strictness and are comfortable with the extra friction.
+
+It is their call how tight they want to be -- your job is to make sure they understand the
+tradeoff between the three, not to push them toward whichever feels quietest in the moment.
 
 **10.3 Re-validate under takeover.** Re-run `toolguard-audit --with-context --format json` and
 confirm top-level `takeover_active` is now **true**, `sources` are as expected, and the
@@ -646,10 +684,11 @@ Summarize what was done (scope, install method, whether takeover was enabled and
 `no_match_fallback`, whether skills were installed, any migrations). Tell the user:
 
 - Their setup is validated and active. If takeover was enabled, describe the current posture in
-  **plain language** -- e.g. "a command that matches none of your rules is currently allowed but
-  logged with a warning" -- not the raw `allow_with_warning` token. If they might tighten it
-  later, frame `deny` as an optional preference (stricter than Claude's own prompt-on-unmatched
-  default), per Phase 10.3 -- do not push it.
+  **plain language** -- e.g. "a command that matches none of your rules currently prompts you,
+  same as Claude's own normal behavior" (or, if they chose `allow_with_warning` instead of the
+  recommended `ask`, "...is currently allowed but logged with a warning") -- not the raw config
+  token. If they might tighten it later, frame `deny` as an optional preference (stricter than
+  Claude's own prompt-on-unmatched default), per Phase 10.2 -- do not push it.
 - The full record is in `~/.toolguard/install-journal.md`, and `~/.toolguard/README.txt`
   explains the directory. Both are kept indefinitely -- even after an uninstall.
 - They can re-run any offered step (migration, audit, maintenance, or enabling takeover)

@@ -677,9 +677,10 @@ toolguard_hook.toml.
 Writes/replaces only the [takeover_mode] section of toolguard_hook.toml at
 the chosen scope -- governed_tools and every other section are left
 untouched. --no-match-fallback chooses what an unmatched command resolves to
-when the tool HAS rules but none match; the default is the gentle
-"allow_with_warning" (allow, but flagged) so nothing breaks while rules are
-still thin -- "deny" (fail-closed) and "ask" are also accepted.
+when the tool HAS rules but none match; the default is "ask" (prompts,
+matching Claude Code's own native behavior for anything unmatched) --
+"allow_with_warning" (allow, but flagged) and "deny" (fail-closed) are also
+accepted.
 
 Precondition: toolguard_hook.toml must already exist at the chosen scope (run
 write-config first) -- refuses otherwise.
@@ -1468,9 +1469,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-match-fallback",
         choices=("ask", "deny", "allow_with_warning"),
-        default="allow_with_warning",
+        default="ask",
         help="what an unmatched command resolves to when the tool has rules but "
-        "none match (default: allow_with_warning)",
+        "none match (default: ask)",
     )
     p.set_defaults(func=cmd_enable_takeover)
 

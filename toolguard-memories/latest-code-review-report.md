@@ -1,155 +1,154 @@
 ---
 title: latest-code-review-report.md
-date: 2026-06-26
+date: 2026-07-14
 tags:
 - code-review
-- TOO-15
 permalink: toolguard/latest-code-review-report
 ---
 
-# Code Review Report -- TOO-15
+# Toolguard Code Review Report
 
-Date: 2026-06-26  
-Scope: toolguard/tools/config_access.py, toolguard/tools/danger.py, toolguard/tools/security_audit.py, test/unit/test_tools_config_access.py, test/unit/test_tools_security_audit.py, skills/toolguard-security-audit/SKILL.md  
-Files reviewed: 6  
-Tests run: 89 (all passing)  
-Total time: ~12 minutes  
+Date: 2026-07-14 (generated 10:10 local)
+Scope: whole-tree review of `toolguard/` and `test/` (not a diff).
+Excluded: `toolguard/parser/bash_parser.py` (canopy-generated), everything outside `toolguard/`+`test/`.
+External analysis: `uvx pyscn analyze --json --skip-deps toolguard` (v1.24.3) incorporated below.
 
 ## Summary
 
-The three production modules show clean architecture -- good separation between the config facade (config_access.py), the rule-danger detector (danger.py), and the unified aggregator (security_audit.py). The test suites are thorough, well-structured with BDD docstrings, and all 89 tests pass. Two real bugs were confirmed by running the code: the `exec` command is not detected by the `arbitrary-exec-allow` detector despite being listed in the module docstring, and the CLI `main()` bypasses the env-override protection that `load_config()` provides. A severity mismatch in the module docstring for `blanket-allow-outside-takeover` (documented as LOW, fires as CRITICAL) is a silent trap for future maintainers.
+The codebase is in strong shape for a security-critical permission tool. The decision core
+is well-factored: a single pure resolver layer (`toolguard/resolve.py`) backs BOTH the live
+hook and the `--eval`/tooling path via `tools/decision.decide()`, so I verified there is no
+eval-vs-live drift by construction. Fail-closed defaults are sound (unconfigured tool -> ask;
+configured-no-match -> `no_match_fallback`; hard-deny pooled and checked first). Test quality
+is exemplary: all 1431 tests pass and every one carries a Given/When/Then docstring. The main
+issues are (1) a real quoting bypass in the Bash path-component matcher, (2) genuine triplicated
+"daily marker file" logic across three modules, and (3) a handful of high-complexity functions
+flagged by pyscn.
 
----
+Verification performed this run:
+- `except A, B:` (resolve.py:269, patterns.py:94, normalization.py, auto_migrate.py:100) is
+  NOT a Python 2 bug: PEP 758 (Python 3.14) makes parenthesis-free `except` tuples valid; I
+  confirmed at runtime it catches BOTH types and correctly lets others escape. Intentional and
+  correct on this 3.14-pinned project. No action.
+- Full suite: `Ran 1431 tests ... OK`.
+- Quoting bypass reproduced directly against `match_command` (see Major #1).
 
-## MAJOR
+## Critical
 
-### M1 -- exec command undetected in arbitrary-exec-allow detector
-**File**: toolguard/tools/danger.py, lines 225-295  
-**Verified**: `_is_arbitrary_exec('Bash', 'exec /bin/bash', PatternType.DEFAULT)` returns False; same for `exec:*`, `exec /bin/sh`, bare `exec`.
+None. No bypass defeats the tool's primary/recommended protection path, eval/live parity holds,
+and defaults fail closed.
 
-The module docstring (line 27) explicitly lists `exec` as a covered interpreter. It is NOT detected for any DEFAULT or GLOB pattern form.
+## Major
 
-Root cause: `"exec "` and `"exec:"` in `_ARBITRARY_EXEC_PREFIXES` do not match real-world bodies. `_body_fnmatch_matches_any` checks `startswith(prefix + " ")`, so prefix `"exec "` requires `"exec  "` (double space) to match. `"exec"` is also absent from `_ARBITRARY_EXEC_BARE`. The REGEX path also has no `exec` entry.
+### M1 (SECURITY) - Quoted args bypass Bash path-component deny patterns
+`toolguard/permissions.py:62` `contains_path_component` (used by `match_command` for DEFAULT
+patterns of the form `**/x/**`, e.g. the `**/.env/**` deny advertised in `match_command`'s own
+docstring at permissions.py:106). It splits each arg on whitespace and `/` but never strips shell
+quotes, so:
+- `cat .env`      -> MATCH (denied)
+- `cat './.env'` / `cat '.env'` -> MISS (allowed)  <-- bypass
+- `cat ".env"`    -> MISS (allowed) <-- bypass
+Reproduced directly against `match_command(..., ['**/.env/**'])`.
 
-**Fix**: Add `"exec"` to `_ARBITRARY_EXEC_BARE`. Remove the now-redundant `"exec "` and `"exec:"` from `_ARBITRARY_EXEC_PREFIXES`.
+Mitigation that lowers (but does not eliminate) severity: the tool's *recommended* .env defense
+(`tools/recommended_protections.py`) uses `Read(**/.env)`/`Write(**/.env)`/`Edit(**/.env)` on the
+file tools, which go through the GLOB matcher (`PurePath.full_match`), NOT `contains_path_component`,
+and are not quote-bypassable. So a canonical install is protected. But any user who hand-writes a
+`Bash(**/.env/**)`-style deny (a documented, advertised feature) gets a rule that a quote trivially
+evades.
 
----
+Recommended fix: strip a single layer of surrounding quotes from each arg token in
+`contains_path_component` before the `/`-split (and ideally apply the same in
+`normalize_path_in_command`). Add regression tests for quoted, double-quoted, and mixed forms.
+Longer term this is another symptom of hand-rolled `.split()` command parsing (see m3).
 
-### M2 -- CLI main() bypasses CLAUDE_SETTINGS_PATH env-override protection
-**File**: toolguard/tools/security_audit.py, line 470
+### M2 (DRY / reimplementation) - Triplicated "daily marker file" logic across 3 modules
+`toolguard/auto_migrate.py`, `toolguard/config_divergence.py`, and `toolguard/session_warnings.py`
+each independently define the SAME four functions -- `get_marker_file_path`, `marker_exists_for_today`,
+`create_marker_file`, `cleanup_old_markers` -- differing ONLY in the filename prefix
+(`.toolguard-migration-`, `.toolguard-divergence-warned-`, `.toolguard-warned-`). pyscn flags the
+whole cluster (auto_migrate 21-35/52-73/76-105 <=> config_divergence 19-33/50-71/74-103 <=>
+session_warnings 14-28/45-69/72-104, sim ~0.85 cross-file). Textbook accidental duplication.
+Recommended fix: extract one parameterized helper, e.g. `DailyMarker(prefix: str)` (or module
+functions taking `prefix`) in a small shared module (path_utils or a new `daily_marker.py`), and have
+all three call it. Consolidate the three near-identical test suites accordingly.
 
-`main()` calls `load_configuration(Path(args.dir))` directly. The `load_config()` wrapper in config_access.py adds `ignore_env_override=True` to prevent a stale `CLAUDE_SETTINGS_PATH` from diverting the hierarchy walk. The CLI therefore behaves differently from programmatic use of `load_config()` when that env var is set.
+### M3 (complexity) - High-cyclomatic functions (pyscn)
+pyscn: 17 high-risk functions; avg cyclomatic 8.3, max 44. Worst offenders:
+- `scripts/migrate_permissions.py:614 migrate` -- cx=44, cognitive=113 (critical). CLI script,
+  lower blast radius than the decision path, but should be decomposed (per-phase helpers: backup,
+  add, remove, report). Guard-clause + extract-function.
+- `hook.py:501 main` -- cx=28, cog=56. The file-tool branch and the command-tool branch (each ~70
+  lines incl. logging) are natural `_handle_file_tool()` / `_handle_command_tool()` extractions;
+  the once-per-session setup block (discovery/validation/takeover/divergence) is another.
+- `config.py:1525 Configuration.validation_issues` -- cx=22, cog=52. Extract per-issue-kind detectors.
+- `log_writer.py:16 log_command` -- cx=20; `permissions.py:98 match_command` -- cx=18/cog=67;
+  `rule_sort.py:119 parse_permissions_section_with_comments` -- cx=18; `patterns.py:64 match_pattern`
+  -- cx=15 (dispatch table by PatternType instead of if/elif chain).
+Maintainability, not correctness; `match_command`/`match_pattern` sit on the hot decision path and
+would benefit most from clarity (dispatch table by PatternType).
 
-**Fix**: Import `load_config` from `toolguard.tools.config_access` and replace line 470 with `config = load_config(Path(args.dir))`.
+## Minor
 
----
+### m1 - "Reason string as a data channel" fragility
+Several places recover structured data by re-parsing human-readable reason strings:
+- `resolve.py:511-553` extracts `matched_rule` by slicing hard-deny/allow/deny/ask reason text and
+  stripping the ` [provenance]` suffix.
+- `hook.py:306 _parse_compound_match_details` regex-parses "All N sub-commands allowed: [...]".
+- Many `reason.split(": ", 1)[1]` idioms in hook.py.
+If any reason wording changes, provenance/sub-match/logging extraction silently degrades (the
+`match_command` docstring at permissions.py:130 already warns about a related coupling). Prefer
+threading matched pattern/provenance as structured fields rather than re-deriving from prose.
 
-### M3 -- Severity documented as LOW, implemented as CRITICAL
-**File**: toolguard/tools/danger.py, lines 49 and 641
+### m2 - `normalize_path` does filesystem I/O in the matching hot path
+`normalization.py:45-53` calls `Path.exists()`, `is_symlink()`, `resolve()` during normalization,
+which runs for every governed command: (a) makes matching depend on live FS state (mild TOCTOU
+surface: symlink swap between normalize and execution), and (b) adds syscalls to the hot path. Also
+the comment "Only resolve if the path ... not its parent directories" doesn't match `resolve()`,
+which canonicalizes the whole path. Behaviour is the safer direction; reconcile comment/behaviour and
+reconsider whether symlink resolution belongs in a permission matcher.
 
-Module docstring (line 49) lists `blanket-allow-outside-takeover` as severity LOW. Implementation (line 641) fires it as `Severity.CRITICAL`. Any engineer reading the docstring will have a wrong mental model, which matters when writing severity-filtering logic or evaluating findings.
+### m3 - Hand-rolled `.split()` command parsing (recurring anti-pattern)
+`permissions.normalize_path_in_command` and `contains_path_component` tokenize commands with plain
+`str.split()` rather than the PEG-derived structure. They operate on already-extracted sub-commands so
+blast radius is limited, but M1 is a direct consequence. Flagged per CLAUDE.md's noted tendency.
 
-**Fix**: Update the module docstring entry from LOW to CRITICAL and add a brief rationale (e.g., "A live blanket allow is a complete governance bypass, hence CRITICAL").
-
----
-
-## MINOR
-
-### m1 -- Dead entries in _ARBITRARY_EXEC_PREFIXES
-**File**: toolguard/tools/danger.py, lines 228-243
-
-Entries with trailing spaces (`"python "`, `"python3 "`, `"node "`, `"ruby "`, `"perl "`) never match because `_body_fnmatch_matches_any` checks `startswith(prefix + " ")` -- so prefix `"python "` would require `"python  "` (double space). Detection of `"python script.py"` and `"python:*"` is actually done by `_ARBITRARY_EXEC_BARE`. The colon-suffixed entries (`"python:"`, etc.) also fail to catch `"python:*"` for the same structural reason.
-
-The comment on line 236 says "handle toolguard pattern form python:*" but `_ARBITRARY_EXEC_BARE` is what handles it, not these entries.
-
-**Fix**: Remove trailing-space and colon-suffix entries for python/python3/node/ruby/perl from `_ARBITRARY_EXEC_PREFIXES`. Move the "toolguard pattern form" comment to the `_ARBITRARY_EXEC_BARE` loop.
-
----
-
-### m2 -- Local imports inside test methods (convention violation)
-**File**: test/unit/test_tools_config_access.py, ~28 test methods
-
-Every test method in this file imports from `toolguard.tools.config_access` inside the function body (e.g., `from toolguard.tools.config_access import load_config`). Per rules/python.md, local imports inside functions are prohibited unless a circular dependency is documented and approved. No circular dependency applies.
-
-Note: test_tools_security_audit.py does NOT have this problem -- all its imports are at module level.
-
-**Fix**: Move all `config_access` imports to module level in test_tools_config_access.py.
-
----
-
-### m3 -- Dead code in test_json_with_context_is_ascii_safe
-**File**: test/unit/test_tools_security_audit.py, lines 1200-1203
-
-```python
-data_str, _ = (
-    lambda: (
-        io.StringIO(),
-        None,
-    )
-)()
-```
-
-This creates a lambda, calls it immediately, assigns `data_str` to an `io.StringIO()`, then never uses `data_str`. The actual output capture happens on the `captured = io.StringIO()` line that follows.
-
-**Fix**: Delete lines 1200-1203 entirely.
-
----
-
-### m4 -- load_config type annotation missing Optional
-**File**: toolguard/tools/config_access.py, line 77
-
-`def load_config(start_dir: Path = None)` -- the default value is `None` but the annotation says `Path`, not `Optional[Path]`. The `Optional` alias is already imported on line 16.
-
-**Fix**: Change to `def load_config(start_dir: Optional[Path] = None)`.
-
----
-
-### m5 -- Duplicate one-liner wrappers with inconsistent names
-**Files**: toolguard/tools/config_access.py line 152, toolguard/tools/takeover_audit.py line 459
-
-`effective_takeover(config)` and `effective_takeover_state(config)` are both one-line wrappers over `config.takeover_mode()`. They do the same thing under different names in different modules with no cross-reference.
-
-**Fix**: Add a docstring cross-reference in each pointing to the other.
-
----
-
-### m6 -- _audit_tool iterates lr.allow twice (parse_pattern called twice per pattern)
-**File**: toolguard/tools/danger.py, lines 586 and 631
-
-Two separate `for pattern in lr.allow:` loops both call `parse_pattern` and `_is_blanket_allow`, doubling parse work per pattern. For realistic configs the impact is negligible, but the structure is unnecessarily redundant.
-
-**Fix**: Integrate blanket-allow detection into the first loop using a deferred findings list or accumulator set for blanket patterns.
-
----
-
-### m7 -- SKILL.md argument-hint omits key CLI options
-**File**: skills/toolguard-security-audit/SKILL.md, line 12
-
-Current: `"[directory (default: current project)] [--strict]"`  
-The CLI also accepts `--format json|markdown|text` and `--with-context`, which the skill itself uses (Pass 1 and Pass 2 respectively). A user following the hint would not discover these.
-
-**Fix**: Update to `"[--dir DIR] [--format json|markdown|text] [--strict] [--with-context]"`.
-
----
+### m4 - `config_validation.py:84-109` near-duplicate warning-dict blocks (pyscn sim=1.0)
+The "unsupported tool" and "ungoverned tool" loops build near-identical warning dicts. Small local
+extraction (`_tool_warning(level, message, corrective_steps)`), low priority.
 
 ## Suggestions
 
-### S1 -- Document single-finding-per-pattern rule in _audit_tool
-**File**: toolguard/tools/danger.py, line 626
+- CBO: `Configuration` depends on 10 classes (pyscn "critical coupling"); it mixes discovery, parsing,
+  and resolution (god-object tendency). A future split (discovery/IO layer vs a pure resolution layer
+  over already-loaded layers) would reduce coupling and aid testing.
+- `patterns.match_pattern` and `permissions.match_command`: replace `if/elif` chains on `PatternType`
+  with a dispatch dict of small handlers.
+- pyscn intra-file clones in `tools/danger.py`, `tools/installer.py`, `tools/consolidate.py`,
+  `tools/clarity.py`, `update_check.py`, `parser/command_model.py`, `parser/command_extractor.py`
+  are candidates for small parameterized extractions; opportunistic, none pressing.
+- BENIGN pyscn false positives (no action): `error_log.py` "clones" are thin one-line wrappers over
+  `_log_entry`; `replay.py`<=>`self_permission.py` similarity is two loops that both correctly reuse
+  `decide()` (structural, not logic duplication).
 
-The `break` after a detector fires means one pattern gets at most one finding (highest-severity wins because detectors are ordered highest-severity first). This is a deliberate design choice not documented in the function docstring. A future maintainer adding a new detector may not understand why ordering matters.
+## Positives (keep doing)
 
-### S2 -- Consider shared test fixture module
-**Files**: test/unit/test_tools_config_access.py, test/unit/test_tools_security_audit.py
+- Single pure resolver (`resolve.py`) shared by hook + tooling => eval and live cannot drift.
+- Fail-closed, well-documented defaults (unconfigured->ask, hard-deny pooled+first, no_match_fallback).
+- Exemplary tests: 1431/1431 pass, every one has a Given/When/Then docstring (0 missing, 0 partial).
+- Clean dead-code (pyscn: 0 findings) and no dependency cycles (0 modules in cycles).
+- Strong module/function docstrings and clear provenance threading.
 
-`_prov`, `_native_layer`, and `_make_config` have minor structural duplication. A shared `test/unit/helpers.py` would reduce future drift. The `_toolguard_layer` signatures intentionally differ between files.
+## pyscn metrics snapshot
+- Files analyzed 55; functions 159; avg cyclomatic 8.26; max 44; high-risk 17; medium 22.
+- Clones: 99 clones / 64 pairs / 39 groups; avg similarity 0.82.
+- Dead code: 0 findings. Dependency cycles: 0. Max depth: 0.
+- Report JSON: `.pyscn/reports/analyze_20260714_100302.json`.
 
----
-
-## Issue Counts
-
-| Severity | Count |
-|----------|-------|
-| Major    | 3     |
-| Minor    | 7     |
-| Suggestion | 2   |
+## Review meta
+- Files reviewed in depth: resolve.py, permissions.py, patterns.py, normalization.py, path_utils.py,
+  compound.py, hook.py, tools/decision.py, config.py (core methods), parser/multiline.py (head),
+  config_validation.py, auto_migrate.py + the two marker siblings, error_log.py, recommended_protections.py;
+  plus structural scan of all 55 source + 53 test files and full pyscn report.
+- Elapsed: ~9 minutes. Includes full suite run, pyscn run, and targeted empirical checks
+  (except-tuple semantics, quoting bypass).

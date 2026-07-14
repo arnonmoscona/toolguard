@@ -816,7 +816,7 @@ class TestEnableTakeover(InstallerTestCase):
         Given a base config already exists
         When enable-takeover is run without --no-match-fallback
         Then [takeover_mode] enabled = true and no_match_fallback defaults to
-        'allow_with_warning'
+        'ask'
         """
         self._write_base_config()
 
@@ -826,7 +826,7 @@ class TestEnableTakeover(InstallerTestCase):
         text = (self.home / ".claude" / "toolguard_hook.toml").read_text()
         self.assertIn("[takeover_mode]", text)
         self.assertIn("enabled = true", text)
-        self.assertIn('no_match_fallback = "allow_with_warning"', text)
+        self.assertIn('no_match_fallback = "ask"', text)
 
     def test_sets_explicit_fallback(self):
         """

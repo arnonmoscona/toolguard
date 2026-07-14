@@ -6,7 +6,7 @@ Tests verify:
 - Missing hook registration yields CRITICAL finding
 - Takeover conflict + blanket allows yields HIGH finding
 - Uncovered blanket allow when takeover ON yields HIGH finding
-- Loose no_match_fallback yields MEDIUM finding
+- Loose no_match_fallback yields LOW finding
 - effective_takeover_state() convenience wrapper
 """
 
@@ -537,18 +537,18 @@ class TestUncoveredBlanketAllow(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Loose-no-match-fallback (MEDIUM)
+# Loose-no-match-fallback (LOW)
 # ---------------------------------------------------------------------------
 
 
 class TestLooseNoMatchFallback(unittest.TestCase):
-    """Tests for the loose-no-match-fallback MEDIUM invariant."""
+    """Tests for the loose-no-match-fallback LOW invariant."""
 
     def test_warn_deny_fallback_flagged(self):
         """
         Given no_match_fallback is 'warn_deny' instead of 'deny'
         When audit_takeover() is called
-        Then a MEDIUM 'loose-no-match-fallback' finding is returned
+        Then a LOW 'loose-no-match-fallback' finding is returned
         """
         tg_layer = _toolguard_layer(
             governed_tools=["Bash"],
@@ -564,7 +564,7 @@ class TestLooseNoMatchFallback(unittest.TestCase):
         findings = audit_takeover(config)
         fallback_findings = [f for f in findings if f.finding_id == "loose-no-match-fallback"]
         self.assertEqual(len(fallback_findings), 1)
-        self.assertEqual(fallback_findings[0].severity, AuditSeverity.MEDIUM)
+        self.assertEqual(fallback_findings[0].severity, AuditSeverity.LOW)
 
     def test_deny_fallback_not_flagged(self):
         """

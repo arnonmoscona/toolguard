@@ -26,7 +26,7 @@ Invariants checked
    Toolguard strips the ignored patterns; an uncovered blanket allow remains live
    and bypasses the real-gatekeeper role.
 
-4. **MEDIUM / loose-no-match-fallback**: ``no_match_fallback`` is set to
+4. **LOW / loose-no-match-fallback**: ``no_match_fallback`` is set to
    anything other than ``'deny'`` (e.g. the TOO-15 default ``'ask'``,
    ``'allow_with_warning'``, or its deprecated legacy alias ``'warn_deny'``).
    Looser fallbacks mean that commands not matching any rule are prompted or
@@ -421,13 +421,13 @@ def audit_takeover(
                 )
             )
 
-    # Invariant 4: Loose no_match_fallback (MEDIUM)
+    # Invariant 4: Loose no_match_fallback (LOW)
     expected_fallback = "deny"
     if takeover.no_match_fallback != expected_fallback:
         findings.append(
             AuditFinding(
                 finding_id="loose-no-match-fallback",
-                severity=AuditSeverity.MEDIUM,
+                severity=AuditSeverity.LOW,
                 tool=None,
                 provenance=None,
                 description=(
