@@ -5,7 +5,8 @@ This console script exists to be driven by an AI coding agent following the guid
 install runbook at ``docs/install.md`` in the toolguard repository. Each subcommand
 performs one mechanical, journaled, reversible step -- writing the base config,
 registering hooks, seeding toolguard's own self-permission rules, enabling takeover
-mode, or appending a journal entry -- so the agent issues ONE approvable
+mode, discovering migration candidates, installing skills, seeding hard-deny
+protections, or appending a journal entry -- so the agent issues ONE approvable
 ``Bash(toolguard-install ...)`` command per step instead of several separate
 Read/Write/Edit tool calls (each of which would otherwise trigger its own Claude Code
 permission prompt). Because the file writes happen inside this process, they never hit
@@ -38,15 +39,21 @@ Design notes
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 import tomllib
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from re import MULTILINE, compile as re_compile
+from tempfile import TemporaryDirectory
 from typing import List, Optional, Sequence, Tuple
 
+from toolguard.config import load_config_file
 from toolguard.rule_sort import find_section_boundaries
 from toolguard.scripts.migrate_permissions import create_backup, write_toml_config
+from toolguard.tools.recommended_protections import required_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 
 
@@ -88,6 +95,9 @@ _README_TEMPLATE = (
     "  guided install (see docs/install.md in the toolguard repository).\n"
     "- errors/ -- detailed crash reports if the hook ever hit an unexpected\n"
     "  exception (created on demand, not by init-state).\n"
+    "- traces/ -- session-trace dumps written by the guided install/uninstall\n"
+    "  runbooks (see docs/install.md Phase T.1), created on demand, not by\n"
+    "  init-state.\n"
     "\n"
     "Toolguard was installed from:\n"
     "    {source}\n"
@@ -571,8 +581,8 @@ Adds, to the [permissions] section:
     (the journal and its backups) stays readable/writable
 
 Consent for these specific rules is ASSUMED to already have been obtained by
-the calling agent (per docs/install.md Phase 10.1) -- this subcommand does not
-itself prompt for consent.
+the calling agent (per docs/install.md Phase 4, step 3) -- this subcommand
+does not itself prompt for consent.
 
 Precondition: toolguard_hook.toml must already exist at the chosen scope (run
 write-config first) -- refuses otherwise, without creating a partial config.
@@ -760,7 +770,7 @@ def cmd_enable_takeover(args: argparse.Namespace) -> int:
     print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
     print(
-        "  reminder: still ahead per docs/install.md -- 10.4 re-validate under "
+        "  reminder: still ahead per docs/install.md -- 10.3 re-validate under "
         "takeover, then Wrap-up; the session-trace dump offer (Phase T.1) is "
         "MANDATORY before you end the conversation"
     )
@@ -797,6 +807,545 @@ def cmd_journal(args: argparse.Namespace) -> int:
     """
     index = _append_journal_entry(action=args.action, reverse=args.reverse, backup=args.backup)
     print(f"appended journal entry [{index}] to {_journal_path()}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# discover-projects
+# ---------------------------------------------------------------------------
+
+_DISCOVER_PROJECTS_HELP = """\
+Discover candidate projects for permission migration (docs/install.md Phase 7.1).
+READ-ONLY: makes no backup and appends no journal entry.
+
+Sources (never trusted blindly):
+  - ~/.claude.json: its top-level "projects" object is keyed by the absolute path of
+    every project Claude has worked in -- the primary/authoritative source.
+  - ~/.claude/projects/: one directory per project, named by encoding the absolute
+    path (the leading "/" and every "/" become "-"). This encoding is LOSSY (a real
+    "-" in a path is indistinguishable from an encoded "/"), so a decoded candidate
+    is only ever accepted if it verifiably exists on disk as a directory.
+
+Filtered to candidates that: still exist as a directory, AND have a
+.claude/settings.local.json that parses and contains at least one non-empty
+permission list (allow/deny/ask). Directories that no longer exist, or have nothing
+worth migrating, are left out.
+
+Each surviving candidate is annotated with whether it already has a toolguard config
+(toolguard_hook.toml or .json) and whether that config has
+[takeover_mode] enabled = true, plus a rough count of permission patterns that would
+be candidates for migration.
+
+--format text (default) prints a human-readable list; --format json prints a JSON
+array of objects with the fields: path, has_toolguard_config, takeover_enabled,
+pattern_count. Output is sorted by path for determinism. Zero candidates prints a
+plain statement rather than an empty table.
+
+This is discovery only -- the actual migration (moving patterns into a toolguard
+config) is a separate step: toolguard.scripts.migrate_permissions
+(docs/install.md Phase 7.3).
+"""
+
+
+def _decode_transcript_dir_name(name: str) -> str:
+    """
+    Best-effort, LOSSY decode of a ``~/.claude/projects/`` directory name to a path.
+
+    The encoding (leading ``/`` and every ``/`` replaced with ``-``) is decoded here
+    by simply reversing that single substitution. This is ambiguous whenever the
+    original path itself contained a literal ``-`` -- callers MUST verify the decoded
+    path actually exists as a directory before trusting it; this function performs no
+    such verification.
+
+    Args:
+        name: A directory name found under ``~/.claude/projects/``.
+
+    Returns:
+        The best-effort decoded absolute path string.
+    """
+    return name.replace("-", "/")
+
+
+def _load_claude_json_projects(claude_json_path: Path) -> List[str]:
+    """
+    Return the absolute project paths listed in ``~/.claude.json``'s ``projects`` key.
+
+    Best-effort: returns an empty list if the file is absent, unreadable, not valid
+    JSON, or lacks the expected shape -- this source augments, but is not required
+    for, discovery to proceed.
+
+    Args:
+        claude_json_path: Path to ``~/.claude.json``.
+
+    Returns:
+        A list of absolute project path strings (possibly empty).
+    """
+    if not claude_json_path.exists():
+        return []
+    try:
+        data = json.loads(claude_json_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return []
+    return [str(p) for p in projects.keys()]
+
+
+def _load_transcript_dir_projects(transcripts_root: Path) -> List[str]:
+    """
+    Recover candidate project paths from ``~/.claude/projects/`` subdirectory names.
+
+    Only decoded candidates that verifiably exist as a directory on disk are
+    returned (see :func:`_decode_transcript_dir_name` for why the lossy encoding
+    cannot be trusted blindly).
+
+    Args:
+        transcripts_root: Path to ``~/.claude/projects/``.
+
+    Returns:
+        A list of absolute project path strings (possibly empty).
+    """
+    if not transcripts_root.is_dir():
+        return []
+    candidates: List[str] = []
+    for entry in transcripts_root.iterdir():
+        if not entry.is_dir():
+            continue
+        decoded = _decode_transcript_dir_name(entry.name)
+        if Path(decoded).is_dir():
+            candidates.append(decoded)
+    return candidates
+
+
+def _count_permission_patterns(permissions: dict) -> int:
+    """Return the total pattern count across the allow/deny/ask lists of *permissions*."""
+    total = 0
+    for list_type in ("allow", "deny", "ask"):
+        value = permissions.get(list_type, [])
+        if isinstance(value, list):
+            total += len(value)
+    return total
+
+
+def _find_toolguard_config(claude_dir: Path) -> Optional[Tuple[Path, str]]:
+    """Return ``(path, file_format)`` for an existing toolguard_hook.toml/json, else None."""
+    toml_path = claude_dir / "toolguard_hook.toml"
+    if toml_path.exists():
+        return toml_path, "toml"
+    json_path = claude_dir / "toolguard_hook.json"
+    if json_path.exists():
+        return json_path, "json"
+    return None
+
+
+def _discover_project_candidate(project_path_str: str) -> Optional[dict]:
+    """
+    Evaluate one candidate project path, returning its discovery record or ``None``.
+
+    A candidate is dropped (returns ``None``) unless its directory still exists AND
+    it has a ``.claude/settings.local.json`` that parses and has at least one
+    non-empty permission list.
+
+    Args:
+        project_path_str: Absolute project path to evaluate.
+
+    Returns:
+        A dict with ``path``/``has_toolguard_config``/``takeover_enabled``/
+        ``pattern_count`` keys, or ``None`` if the candidate does not qualify.
+    """
+    project_dir = Path(project_path_str)
+    if not project_dir.is_dir():
+        return None
+    claude_dir = project_dir / ".claude"
+    settings_path = claude_dir / "settings.local.json"
+    if not settings_path.exists():
+        return None
+    try:
+        settings_data = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    permissions = settings_data.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return None
+    pattern_count = _count_permission_patterns(permissions)
+    if pattern_count == 0:
+        return None
+
+    takeover_enabled = False
+    found_config = _find_toolguard_config(claude_dir)
+    has_toolguard_config = found_config is not None
+    if found_config is not None:
+        config_path, file_format = found_config
+        try:
+            content = load_config_file(config_path, file_format)
+        except (OSError, ValueError):
+            content = {}
+        takeover_section = content.get("takeover_mode", {})
+        if isinstance(takeover_section, dict):
+            takeover_enabled = bool(takeover_section.get("enabled", False))
+
+    return {
+        "path": str(project_dir),
+        "has_toolguard_config": has_toolguard_config,
+        "takeover_enabled": takeover_enabled,
+        "pattern_count": pattern_count,
+    }
+
+
+def cmd_discover_projects(args: argparse.Namespace) -> int:
+    """
+    Handle the ``discover-projects`` subcommand: list migration candidates. READ-ONLY.
+
+    Args:
+        args: Parsed CLI arguments; must have ``format``.
+
+    Returns:
+        ``0`` always (read-only, best-effort discovery never fails structurally).
+    """
+    home = Path.home()
+    seen: "dict[str, None]" = {}
+    for project_path_str in _load_claude_json_projects(home / ".claude.json"):
+        seen.setdefault(str(Path(project_path_str)), None)
+    for project_path_str in _load_transcript_dir_projects(
+        home / ".claude" / "projects"
+    ):
+        seen.setdefault(str(Path(project_path_str)), None)
+
+    candidates = []
+    for project_path_str in seen:
+        record = _discover_project_candidate(project_path_str)
+        if record is not None:
+            candidates.append(record)
+    candidates.sort(key=lambda entry: entry["path"])
+
+    if args.format == "json":
+        print(json.dumps(candidates, indent=2))
+        return 0
+
+    if not candidates:
+        print("no candidate projects found (nothing to migrate).")
+        return 0
+
+    print(f"found {len(candidates)} candidate project(s):")
+    for record in candidates:
+        config_note = (
+            "toolguard config present"
+            if record["has_toolguard_config"]
+            else "no toolguard config yet"
+        )
+        takeover_note = (
+            " (takeover ENABLED -- its blanket allows are intentional, do not "
+            "migrate them)"
+            if record["takeover_enabled"]
+            else ""
+        )
+        print(
+            f"  {record['path']}  -- {config_note}{takeover_note}; "
+            f"~{record['pattern_count']} pattern(s) candidate for migration"
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# install-skills
+# ---------------------------------------------------------------------------
+
+_INSTALL_SKILLS_HELP = """\
+Install toolguard's bundled skills (toolguard-security-audit, toolguard-maintenance)
+into the chosen scope, in ONE step (docs/install.md Phase 5).
+
+Writes:
+  ~/.claude/skills/<skill-name>/                        (--scope user)
+  <project-dir>/.claude/skills/<skill-name>/             (--scope project)
+
+--source is either an existing local checkout directory (its
+skills/<skill-name>/ subdirectories are copied directly) or a git remote URL
+(shallow-cloned with 'git clone --depth 1' into a throwaway temp directory, then
+copied from there; no new package dependency -- this shells out to whatever 'git'
+is on PATH). Do NOT hand-roll this with a bespoke fetch/clone/copy sequence of your
+own.
+
+Idempotent: a skill directory that already exists at the target is left untouched
+and reported as "already installed, unchanged", UNLESS --force is given, in which
+case the existing directory is backed up first (whole-tree copy into
+~/.toolguard/backups/<skill-name>-<timestamp>/, mirroring the file-backup timestamp
+format and its same-second collision '-2', '-3', ... suffixing) before being
+replaced.
+
+Journals one entry PER skill actually installed or replaced (never one bundled entry
+for both); its reverse is "remove <target skill dir>" for a fresh install, or
+"restore the backup over <target skill dir>" for a --force overwrite.
+
+Refuses (raises an error, installs nothing) if --source is neither an existing local
+path nor a working git remote.
+"""
+
+_BUNDLED_SKILL_NAMES: Tuple[str, ...] = (
+    "toolguard-security-audit",
+    "toolguard-maintenance",
+)
+
+
+def _backup_directory(source_dir: Path, backups_dir: Path, name_prefix: str) -> Path:
+    """
+    Copy *source_dir* whole-tree into ``~/.toolguard/backups/<name_prefix>-<timestamp>/``.
+
+    Mirrors :func:`toolguard.scripts.migrate_permissions.create_backup`'s timestamp
+    format and same-second collision handling, generalized to a directory backup
+    (``create_backup`` only handles single files).
+
+    Args:
+        source_dir: The directory to back up (must exist).
+        backups_dir: ``~/.toolguard/backups``.
+        name_prefix: A short label for the backed-up thing (e.g. a skill name).
+
+    Returns:
+        The path the directory was copied to.
+    """
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    base_name = f"{name_prefix}-{timestamp}"
+    backup_path = backups_dir / base_name
+    sequence = 2
+    while backup_path.exists():
+        backup_path = backups_dir / f"{base_name}-{sequence}"
+        sequence += 1
+    shutil.copytree(source_dir, backup_path)
+    return backup_path
+
+
+@contextmanager
+def _resolve_skills_source(source: str):
+    """
+    Yield a directory containing a ``skills/<skill-name>/`` layout for *source*.
+
+    If *source* is an existing local directory, it is yielded directly (no copy, no
+    cleanup). Otherwise *source* is treated as a git remote URL and shallow-cloned
+    (``git clone --depth 1``) into a throwaway temporary directory that is yielded
+    and then cleaned up when the context exits.
+
+    Args:
+        source: Either a local filesystem path or a git remote URL.
+
+    Yields:
+        A directory containing a ``skills/`` subdirectory to copy from.
+
+    Raises:
+        InstallerError: If *source* is a git URL and the clone fails.
+    """
+    local_path = Path(source)
+    if local_path.is_dir():
+        yield local_path
+        return
+
+    with TemporaryDirectory() as tmp_dir_name:
+        dest = Path(tmp_dir_name)
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", source, str(dest)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise InstallerError(
+                f"could not clone {source!r} (git exited {result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
+        yield dest
+
+
+def cmd_install_skills(args: argparse.Namespace) -> int:
+    """
+    Handle the ``install-skills`` subcommand: install toolguard's bundled skills.
+
+    Args:
+        args: Parsed CLI arguments; must have ``scope``, ``project_dir``, ``source``,
+            ``force``.
+
+    Returns:
+        ``0`` on success (including the all-already-installed no-op case).
+
+    Raises:
+        InstallerError: If ``--source`` is neither an existing local path nor a
+            working git remote, or lacks the expected ``skills/<name>`` layout.
+    """
+    _ensure_state()
+    skills_dir = _claude_dir(args.scope, args.project_dir) / "skills"
+
+    installed: List[str] = []
+    unchanged: List[str] = []
+    backups: List[Tuple[str, Path]] = []
+
+    with _resolve_skills_source(args.source) as source_root:
+        source_skills_dir = source_root / "skills"
+        for skill_name in _BUNDLED_SKILL_NAMES:
+            src = source_skills_dir / skill_name
+            if not src.is_dir():
+                raise InstallerError(
+                    f"{args.source} has no skills/{skill_name} directory -- "
+                    "nothing to install"
+                )
+            dst = skills_dir / skill_name
+            if dst.exists():
+                if not args.force:
+                    unchanged.append(skill_name)
+                    continue
+                backup_path = _backup_directory(dst, _backups_dir(), skill_name)
+                shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+                backups.append((skill_name, backup_path))
+                installed.append(skill_name)
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst)
+                installed.append(skill_name)
+
+    backup_by_skill = dict(backups)
+    indices: List[int] = []
+    for skill_name in installed:
+        dst = skills_dir / skill_name
+        backup_path = backup_by_skill.get(skill_name)
+        reverse = (
+            f"restore the backup at {backup_path} over {dst}"
+            if backup_path
+            else f"remove {dst}"
+        )
+        index = _append_journal_entry(
+            action=(
+                f"installed skill {skill_name} at {args.scope} scope from "
+                f"{args.source}: {dst}"
+            ),
+            reverse=reverse,
+            backup=str(backup_path) if backup_path else None,
+        )
+        indices.append(index)
+
+    print(f"install-skills: {skills_dir}")
+    if installed:
+        print(f"  installed/replaced: {', '.join(installed)}")
+    if unchanged:
+        print(f"  already installed, unchanged: {', '.join(unchanged)}")
+    for skill_name, backup_path in backups:
+        print(f"  backup of previous {skill_name}: {backup_path}")
+    if indices:
+        print(f"  journal: appended entries {indices}")
+    else:
+        print("  journal: no changes to record")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# seed-hard-deny
+# ---------------------------------------------------------------------------
+
+_SEED_HARD_DENY_HELP = """\
+Add the canonical "Sensitive files" [hard_deny] protections to the chosen scope's
+toolguard_hook.toml (docs/install.md Phase 10.1).
+
+Adds, to the [hard_deny] section's deny list, exactly the patterns from
+toolguard.tools.recommended_protections.required_hard_deny_patterns() -- the single
+source of truth for this fixed, curated set (mirrors docs/security.md "Recommended
+deny patterns" -> "Sensitive files": .env/.env.*/.aws/**/.ssh/** reads and writes).
+This subcommand does NOT compose [hard_deny] TOML freehand and does not invent or
+extend the set -- change recommended_protections.py (and docs/security.md) instead.
+
+Any pre-existing [hard_deny] content (an 'allow' carve-out list, or unrelated 'deny'
+entries) is preserved, not clobbered -- only the canonical patterns missing from
+'deny' are appended.
+
+Consent for these specific patterns is ASSUMED to already have been obtained by the
+calling agent (per docs/install.md Phase 10.1: "Offer it; do not add it silently.")
+-- this subcommand does not itself prompt for consent.
+
+Precondition: toolguard_hook.toml must already exist at the chosen scope (run
+write-config first) -- refuses otherwise, without creating a partial config.
+
+Idempotent: a pattern already present is left alone; if nothing needs to change, no
+backup or journal entry is made and the summary says so explicitly. Otherwise backs
+up the pre-edit config into ~/.toolguard/backups/ and journals one entry listing
+exactly what was added.
+"""
+
+
+def _render_hard_deny_section(
+    deny_patterns: Sequence[str], allow_patterns: Sequence[str]
+) -> str:
+    """Render a ``[hard_deny]`` section body with the given deny/allow lists."""
+    lines = ["[hard_deny]"]
+    if deny_patterns:
+        lines.append("deny = [")
+        for pattern in deny_patterns:
+            escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'    "{escaped}",')
+        lines.append("]")
+    if allow_patterns:
+        lines.append("allow = [")
+        for pattern in allow_patterns:
+            escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'    "{escaped}",')
+        lines.append("]")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
+    """
+    Handle the ``seed-hard-deny`` subcommand: add the canonical [hard_deny] protections.
+
+    Args:
+        args: Parsed CLI arguments; must have ``scope``, ``project_dir``.
+
+    Returns:
+        ``0`` on success (including the no-op case).
+
+    Raises:
+        InstallerError: If no ``toolguard_hook.toml`` exists yet at this scope.
+    """
+    _ensure_state()
+    config_path = _config_path(args.scope, args.project_dir)
+    if not config_path.exists():
+        raise InstallerError(f"{config_path} does not exist -- run 'write-config' first.")
+
+    original = config_path.read_text()
+    current = tomllib.loads(original)
+    current_hard_deny = current.get("hard_deny", {})
+    deny_patterns = list(current_hard_deny.get("deny", []))
+    allow_patterns = list(current_hard_deny.get("allow", []))
+
+    added: List[str] = []
+    already_present: List[str] = []
+    for protection in required_hard_deny_patterns():
+        if protection.pattern in deny_patterns:
+            already_present.append(protection.pattern)
+        else:
+            deny_patterns.append(protection.pattern)
+            added.append(protection.pattern)
+
+    print(f"seeded hard-deny protections: {config_path}")
+    if not added:
+        print("  already present, no changes needed:")
+        for pattern in already_present:
+            print(f"    {pattern}")
+        return 0
+
+    backup_path = create_backup(config_path, _backups_dir())
+    new_section = _render_hard_deny_section(deny_patterns, allow_patterns)
+    new_text = _replace_or_append_toml_section(original, "hard_deny", new_section)
+    _atomic_write_text(config_path, new_text)
+
+    index = _append_journal_entry(
+        action=(f"seeded hard-deny protections into {config_path}: " + "; ".join(added)),
+        reverse=f"restore backup {backup_path} over {config_path}",
+        backup=str(backup_path),
+    )
+
+    for pattern in added:
+        print(f"  added: {pattern}")
+    if already_present:
+        print("  already present, unchanged:")
+        for pattern in already_present:
+            print(f"    {pattern}")
+    print(f"  backup of previous file: {backup_path}")
+    print(f"  journal: appended entry [{index}]")
     return 0
 
 
@@ -838,7 +1387,7 @@ def _add_scope_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the ``toolguard-install`` argument parser and its six subcommands."""
+    """Build the ``toolguard-install`` argument parser and its nine subcommands."""
     parser = argparse.ArgumentParser(
         prog="toolguard-install",
         description=_TOP_LEVEL_DESCRIPTION,
@@ -939,6 +1488,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help="path to a backup file made for this change, if any",
     )
     p.set_defaults(func=cmd_journal)
+
+    p = subparsers.add_parser(
+        "discover-projects",
+        description=_DISCOVER_PROJECTS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="list migration candidate projects (read-only)",
+    )
+    p.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default: text)",
+    )
+    p.set_defaults(func=cmd_discover_projects)
+
+    p = subparsers.add_parser(
+        "install-skills",
+        description=_INSTALL_SKILLS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="install toolguard's bundled skills into the chosen scope",
+    )
+    _add_scope_args(p)
+    p.add_argument(
+        "--source",
+        required=True,
+        help="local checkout directory or git remote URL to install skills from",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an already-installed skill (backs it up first)",
+    )
+    p.set_defaults(func=cmd_install_skills)
+
+    p = subparsers.add_parser(
+        "seed-hard-deny",
+        description=_SEED_HARD_DENY_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="add the canonical [hard_deny] sensitive-file protections",
+    )
+    _add_scope_args(p)
+    p.set_defaults(func=cmd_seed_hard_deny)
 
     return parser
 

@@ -295,7 +295,7 @@ deny = [
     "Bash(sudo:*)",
     "Bash(su:*)",
 
-    # Sensitive files
+    # Sensitive files -- within whatever project is active (see the anchoring note below)
     "Read(**/.env)",
     "Read(**/.env.*)",
     "Read(**/.aws/**)",
@@ -305,6 +305,17 @@ deny = [
     "Write(**/.ssh/**)",
     "Edit(**/.env)",
 
+    # The same sensitive files, home-anchored -- protects them regardless of which
+    # project is active (see the anchoring note below)
+    "Read(~/.env)",
+    "Read(~/.env.*)",
+    "Read(~/.aws/**)",
+    "Read(~/.ssh/**)",
+    "Write(~/.env)",
+    "Write(~/.aws/**)",
+    "Write(~/.ssh/**)",
+    "Edit(~/.env)",
+
     # System directories
     "Write(/etc/**)",
     "Write(/usr/**)",
@@ -313,6 +324,19 @@ deny = [
 ]
 ```
 
+**Why both forms of the sensitive-file patterns are needed.** A relative pattern (`**/.ssh/**`,
+not starting with `/` or `~`) is anchored to the *active project's root* before matching -- it
+only protects a `.ssh`/`.env`/`.aws` path that lives **inside the current project's directory
+tree**. It does **not** protect `~/.ssh/id_rsa` while you are working in some other project
+elsewhere on disk. A home-anchored pattern (`~/.ssh/**`) is left unmodified and always resolves
+to the real home directory, so it protects those paths **no matter which project is active**.
+For real protection of your actual secrets -- not just a copy of them that happens to live inside
+whatever repo you're in -- include both forms, especially at the user level where "whatever
+project is active" varies session to session. (This was found the hard way: an install once
+added only the relative patterns at user scope and `~/.ssh/id_rsa` was not denied until the
+home-anchored patterns were added by hand.)
+
 For the strongest protection, mirror the most critical of these into
 [`[hard_deny]`](configuration.md#configuration-reference) at the user level so no project can
-weaken them.
+weaken them. `toolguard-install seed-hard-deny` (see the guided install runbook) adds exactly
+this canonical set -- both forms -- to `[hard_deny]` for you.

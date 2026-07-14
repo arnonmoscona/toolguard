@@ -18,9 +18,11 @@ import re
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from toolguard.tools import installer as installer_module
 from toolguard.tools.installer import main
 from toolguard.tools.self_permission import required_self_permissions
 
@@ -125,7 +127,7 @@ class TestTopLevelHelp(InstallerTestCase):
         """
         Given the installer CLI
         When invoked with --help
-        Then all six subcommands are named so an agent can discover the surface
+        Then all nine subcommands are named so an agent can discover the surface
         """
         text = self.run_help(["--help"])
         for subcommand in (
@@ -135,6 +137,9 @@ class TestTopLevelHelp(InstallerTestCase):
             "seed-self-perms",
             "enable-takeover",
             "journal",
+            "discover-projects",
+            "install-skills",
+            "seed-hard-deny",
         ):
             self.assertIn(subcommand, text)
 
@@ -230,6 +235,51 @@ class TestSubcommandHelp(InstallerTestCase):
         self.assertIn("--action", text)
         self.assertIn("--reverse", text)
         self.assertIn("--backup", text)
+
+    def test_discover_projects_help_names_sources_and_readonly(self):
+        """
+        Given the discover-projects subcommand
+        When invoked with --help
+        Then the help text names ~/.claude.json and ~/.claude/projects as its sources,
+        states it is read-only (no backup/journal), and names --format
+        """
+        text = self.run_help(["discover-projects", "--help"])
+        self.assertIn(".claude.json", text)
+        self.assertIn(".claude/projects", text)
+        self.assertIn("--format", text)
+        lowered = text.lower()
+        self.assertIn("read-only", lowered)
+
+    def test_install_skills_help_names_targets_and_idempotency(self):
+        """
+        Given the install-skills subcommand
+        When invoked with --help
+        Then the help text names the two skill directories, states installation is
+        idempotent unless --force is given, and states backup + journal behavior
+        """
+        text = self.run_help(["install-skills", "--help"])
+        self.assertIn("toolguard-security-audit", text)
+        self.assertIn("toolguard-maintenance", text)
+        self.assertIn("--force", text)
+        lowered = text.lower()
+        self.assertIn("idempotent", lowered)
+        self.assertIn("backup", lowered)
+        self.assertIn("journal", lowered)
+
+    def test_seed_hard_deny_help_names_source_of_truth_and_precondition(self):
+        """
+        Given the seed-hard-deny subcommand
+        When invoked with --help
+        Then the help text names toolguard_hook.toml, [hard_deny], states its
+        precondition (a base config must already exist), and states it does not
+        itself ask for consent (consent is assumed to already have been given)
+        """
+        text = self.run_help(["seed-hard-deny", "--help"])
+        self.assertIn("toolguard_hook.toml", text)
+        self.assertIn("hard_deny", text)
+        lowered = text.lower()
+        self.assertIn("journal", lowered)
+        self.assertIn("consent", lowered)
 
 
 # ---------------------------------------------------------------------------
@@ -1045,6 +1095,543 @@ class TestSummaryOutput(InstallerTestCase):
         self.assertIn("docs/install.md", out)
         self.assertIn("mandatory", lowered)
         self.assertIn("trace", lowered)
+
+
+# ---------------------------------------------------------------------------
+# discover-projects
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverProjects(InstallerTestCase):
+    """
+    Behavior of the discover-projects subcommand (Phase 7.1 encapsulation).
+
+    READ-ONLY: no backup, no journal entry, no init-state precondition. Uses a
+    throwaway "projects root" directory (separate from the fake HOME) to hold real
+    fake project directories, since a candidate's own directory must genuinely exist
+    on disk to survive discovery's existence filter.
+    """
+
+    def setUp(self):
+        """Extend the shared fixture with a throwaway root for fake project dirs."""
+        super().setUp()
+        self._projects_root_ctx = TemporaryDirectory()
+        self.addCleanup(self._projects_root_ctx.cleanup)
+        self.projects_root = Path(self._projects_root_ctx.name)
+
+    def _make_project_dir(
+        self,
+        name,
+        permissions=None,
+        write_settings=True,
+        takeover_enabled=None,
+    ):
+        """
+        Create a real fake project directory, optionally with settings.local.json
+        and/or a toolguard_hook.toml carrying a [takeover_mode] section.
+
+        Args:
+            name: Subdirectory name under the throwaway projects root (avoid '-' in
+                the name for tests relying on lossy-encoding round-trips).
+            permissions: Dict with 'allow'/'deny'/'ask' lists for settings.local.json;
+                defaults to a single allow rule when write_settings is True.
+            write_settings: Whether to write .claude/settings.local.json at all.
+            takeover_enabled: If not None, writes .claude/toolguard_hook.toml with
+                [takeover_mode] enabled = <bool>.
+
+        Returns:
+            The created project directory Path.
+        """
+        proj_dir = self.projects_root / name
+        claude_dir = proj_dir / ".claude"
+        claude_dir.mkdir(parents=True)
+        if write_settings:
+            perms = (
+                permissions
+                if permissions is not None
+                else {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
+            )
+            (claude_dir / "settings.local.json").write_text(
+                json.dumps({"permissions": perms})
+            )
+        if takeover_enabled is not None:
+            (claude_dir / "toolguard_hook.toml").write_text(
+                'governed_tools = ["Bash"]\n\n'
+                "[takeover_mode]\n"
+                f"enabled = {'true' if takeover_enabled else 'false'}\n"
+            )
+        return proj_dir
+
+    def _write_claude_json(self, project_dirs):
+        """Write a fake ~/.claude.json with a 'projects' dict keyed by the given paths."""
+        data = {"projects": {str(p): {} for p in project_dirs}}
+        (self.home / ".claude.json").write_text(json.dumps(data))
+
+    def _write_encoded_transcript_dir(self, project_dir):
+        """Create ~/.claude/projects/<encoded> for the given project path (empty dir)."""
+        encoded = str(project_dir).replace("/", "-")
+        transcripts_root = self.home / ".claude" / "projects"
+        transcripts_root.mkdir(parents=True, exist_ok=True)
+        (transcripts_root / encoded).mkdir()
+
+    def test_dedupes_project_present_in_both_sources(self):
+        """
+        Given a project listed both in ~/.claude.json and (via its lossy encoding) in
+        ~/.claude/projects/
+        When discover-projects runs
+        Then it appears exactly once in the output
+        """
+        proj = self._make_project_dir("alpha")
+        self._write_claude_json([proj])
+        self._write_encoded_transcript_dir(proj)
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        paths = [entry["path"] for entry in data]
+        self.assertEqual(paths.count(str(proj)), 1)
+
+    def test_lossy_encoded_project_included_when_decoded_path_exists(self):
+        """
+        Given a project known ONLY via its lossy ~/.claude/projects/ encoding (not in
+        ~/.claude.json), and the decoded path exists on disk with real permission rules
+        When discover-projects runs
+        Then it is still included
+        """
+        proj = self._make_project_dir("bravo")
+        self._write_encoded_transcript_dir(proj)
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertIn(str(proj), [entry["path"] for entry in data])
+
+    def test_lossy_encoded_project_excluded_when_decoded_path_does_not_exist(self):
+        """
+        Given an encoded directory name under ~/.claude/projects/ whose naively decoded
+        path does not exist on disk (the encoding is lossy and cannot be trusted blindly)
+        When discover-projects runs
+        Then no candidate is produced for it, and discovery does not crash
+        """
+        transcripts_root = self.home / ".claude" / "projects"
+        transcripts_root.mkdir(parents=True)
+        (transcripts_root / "-nonexistent-fake-project-path").mkdir()
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+
+    def test_excludes_project_whose_directory_no_longer_exists(self):
+        """
+        Given ~/.claude.json lists a project path that no longer exists on disk
+        When discover-projects runs
+        Then it is excluded from the candidate list
+        """
+        gone = self.projects_root / "deleted-project"
+        self._write_claude_json([gone])
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+
+    def test_excludes_project_with_empty_or_missing_settings_local_json(self):
+        """
+        Given one project with no settings.local.json at all and another whose
+        settings.local.json has only empty allow/deny/ask lists
+        When discover-projects runs
+        Then both are excluded (nothing worth migrating)
+        """
+        no_settings = self._make_project_dir("no-settings", write_settings=False)
+        empty_settings = self._make_project_dir(
+            "empty-settings", permissions={"allow": [], "deny": [], "ask": []}
+        )
+        self._write_claude_json([no_settings, empty_settings])
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+
+    def test_flags_takeover_enabled_project(self):
+        """
+        Given a candidate project whose toolguard_hook.toml has
+        [takeover_mode] enabled = true
+        When discover-projects runs
+        Then its entry is flagged takeover_enabled = true, and a candidate with a
+        toolguard config but takeover disabled is flagged false (both still report
+        has_toolguard_config = true)
+        """
+        active = self._make_project_dir("takeoveron", takeover_enabled=True)
+        inactive = self._make_project_dir("takeoveroff", takeover_enabled=False)
+        self._write_claude_json([active, inactive])
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        by_path = {entry["path"]: entry for entry in json.loads(out)}
+        self.assertTrue(by_path[str(active)]["takeover_enabled"])
+        self.assertTrue(by_path[str(active)]["has_toolguard_config"])
+        self.assertFalse(by_path[str(inactive)]["takeover_enabled"])
+        self.assertTrue(by_path[str(inactive)]["has_toolguard_config"])
+
+    def test_zero_candidates_prints_plain_message(self):
+        """
+        Given no ~/.claude.json and no ~/.claude/projects/ (nothing discoverable)
+        When discover-projects runs with the default text format
+        Then it prints a plain statement that nothing was found, not an empty table
+        """
+        code, out = self.run_cli(["discover-projects"])
+        self.assertEqual(code, 0)
+        lowered = out.lower()
+        self.assertTrue("no candidate" in lowered or "nothing found" in lowered)
+
+    def test_format_json_is_valid_and_has_expected_fields(self):
+        """
+        Given one discoverable candidate project
+        When discover-projects runs with --format json
+        Then stdout is valid JSON: a list of objects each with path,
+        has_toolguard_config, takeover_enabled, and pattern_count fields
+        """
+        proj = self._make_project_dir(
+            "gamma",
+            permissions={"allow": ["Bash(git:*)", "Bash(uv:*)"], "deny": [], "ask": []},
+        )
+        self._write_claude_json([proj])
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(len(data), 1)
+        entry = data[0]
+        self.assertEqual(entry["path"], str(proj))
+        self.assertIn("has_toolguard_config", entry)
+        self.assertIn("takeover_enabled", entry)
+        self.assertEqual(entry["pattern_count"], 2)
+
+    def test_output_sorted_by_path(self):
+        """
+        Given multiple candidate projects discovered in a non-alphabetical order
+        When discover-projects runs
+        Then the output is sorted by path for determinism
+        """
+        zeta = self._make_project_dir("zeta")
+        alpha = self._make_project_dir("alpha")
+        self._write_claude_json([zeta, alpha])
+
+        code, out = self.run_cli(["discover-projects", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        paths = [entry["path"] for entry in json.loads(out)]
+        self.assertEqual(paths, sorted(paths))
+
+
+# ---------------------------------------------------------------------------
+# install-skills
+# ---------------------------------------------------------------------------
+
+
+class TestInstallSkills(InstallerTestCase):
+    """Behavior of the install-skills subcommand (Phase 5 encapsulation)."""
+
+    def _make_source_repo(self, content_suffix=""):
+        """
+        Build a throwaway local 'source repo' with skills/toolguard-security-audit/
+        and skills/toolguard-maintenance/, each holding a distinguishable SKILL.md.
+
+        Args:
+            content_suffix: Appended to each SKILL.md's content, so two calls with
+                different suffixes produce distinguishable "versions" of the source.
+
+        Returns:
+            The source repo root Path (cleanup registered via addCleanup).
+        """
+        ctx = TemporaryDirectory()
+        self.addCleanup(ctx.cleanup)
+        root = Path(ctx.name)
+        for skill in ("toolguard-security-audit", "toolguard-maintenance"):
+            skill_dir = root / "skills" / skill
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(f"# {skill}{content_suffix}\n")
+        return root
+
+    def test_local_source_copies_both_skills_and_journals_two_entries(self):
+        """
+        Given --source is an existing local checkout directory
+        When install-skills is run for user scope
+        Then both skill directories are copied into ~/.claude/skills/, and the journal
+        gains exactly two new entries (one per skill installed)
+        """
+        source = self._make_source_repo()
+        self.run_cli(["init-state", "--source", "local checkout"])
+        before = self.journal_indices()
+
+        code, out = self.run_cli(
+            ["install-skills", "--scope", "user", "--source", str(source)]
+        )
+
+        self.assertEqual(code, 0)
+        for skill in ("toolguard-security-audit", "toolguard-maintenance"):
+            dest = self.home / ".claude" / "skills" / skill / "SKILL.md"
+            self.assertTrue(dest.exists())
+            self.assertEqual(
+                dest.read_text(), (source / "skills" / skill / "SKILL.md").read_text()
+            )
+        after = self.journal_indices()
+        self.assertEqual(len(after), len(before) + 2)
+
+    def test_rerun_without_force_is_noop(self):
+        """
+        Given install-skills has already installed both skills
+        When it is run again without --force (even against a changed source)
+        Then the target skill directories are left untouched, the summary reports them
+        already installed, and no new journal entry is appended
+        """
+        source = self._make_source_repo()
+        self.run_cli(["install-skills", "--scope", "user", "--source", str(source)])
+        before = self.journal_indices()
+        target = self.home / ".claude" / "skills" / "toolguard-maintenance" / "SKILL.md"
+        original = target.read_text()
+
+        changed_source = self._make_source_repo(content_suffix=" (changed)")
+        code, out = self.run_cli(
+            ["install-skills", "--scope", "user", "--source", str(changed_source)]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(target.read_text(), original)
+        self.assertEqual(self.journal_indices(), before)
+        self.assertIn("already installed", out.lower())
+
+    def test_force_backs_up_old_content_before_replacing(self):
+        """
+        Given install-skills has already installed both skills
+        When it is run again with --force against a changed source
+        Then the OLD content is backed up before being overwritten, the target now has
+        the NEW content, and the change is journaled
+        """
+        source = self._make_source_repo()
+        self.run_cli(["install-skills", "--scope", "user", "--source", str(source)])
+        target = self.home / ".claude" / "skills" / "toolguard-maintenance" / "SKILL.md"
+        original = target.read_text()
+        before = self.journal_indices()
+
+        changed_source = self._make_source_repo(content_suffix=" (changed)")
+        code, out = self.run_cli(
+            [
+                "install-skills",
+                "--scope",
+                "user",
+                "--source",
+                str(changed_source),
+                "--force",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertNotEqual(target.read_text(), original)
+        self.assertIn("(changed)", target.read_text())
+        backups_dir = self.home / ".toolguard" / "backups"
+        backup_dirs = [
+            p for p in backups_dir.glob("toolguard-maintenance-*") if p.is_dir()
+        ]
+        self.assertEqual(len(backup_dirs), 1)
+        self.assertEqual((backup_dirs[0] / "SKILL.md").read_text(), original)
+        after = self.journal_indices()
+        self.assertGreater(len(after), len(before))
+
+    def test_git_source_clones_and_copies_skills(self):
+        """
+        Given --source is a git remote URL (not an existing local path)
+        When install-skills runs
+        Then it shallow-clones into a throwaway temp dir (subprocess.run mocked -- no
+        real network call) and copies both skill directories from the clone
+        """
+
+        def fake_git_clone(cmd, *args, **kwargs):
+            dest = Path(cmd[-1])
+            for skill in ("toolguard-security-audit", "toolguard-maintenance"):
+                skill_dir = dest / "skills" / skill
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text(f"# {skill}\n")
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(installer_module.subprocess, "run", side_effect=fake_git_clone):
+            code, out = self.run_cli(
+                [
+                    "install-skills",
+                    "--scope",
+                    "user",
+                    "--source",
+                    "https://example.com/toolguard.git",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        for skill in ("toolguard-security-audit", "toolguard-maintenance"):
+            self.assertTrue(
+                (self.home / ".claude" / "skills" / skill / "SKILL.md").exists()
+            )
+
+    def test_invalid_source_raises_installer_error(self):
+        """
+        Given --source is neither an existing local path nor a working git remote
+        (git clone mocked to fail, simulating an unreachable/nonexistent repo)
+        When install-skills runs
+        Then it raises an error with a clear message and installs nothing
+        """
+
+        def fake_git_clone_failure(cmd, *args, **kwargs):
+            return CompletedProcess(
+                cmd, 128, stdout="", stderr="fatal: repository not found"
+            )
+
+        with patch.object(
+            installer_module.subprocess, "run", side_effect=fake_git_clone_failure
+        ):
+            code, out = self.run_cli(
+                [
+                    "install-skills",
+                    "--scope",
+                    "user",
+                    "--source",
+                    "https://example.com/does-not-exist.git",
+                ]
+            )
+
+        self.assertNotEqual(code, 0)
+        self.assertFalse((self.home / ".claude" / "skills").exists())
+
+
+# ---------------------------------------------------------------------------
+# seed-hard-deny
+# ---------------------------------------------------------------------------
+
+# Duplicated here (rather than imported) so this test module's collection does not
+# depend on the not-yet-implemented toolguard.tools.recommended_protections module --
+# see test_recommended_protections.py for direct coverage of that module itself.
+# Includes both the relative (project-anchored) forms and their home-anchored (~/...)
+# siblings; see docs/security.md's "Why both forms of the sensitive-file patterns are
+# needed" for the rationale.
+_EXPECTED_HARD_DENY_PATTERNS = (
+    "Read(**/.env)",
+    "Read(**/.env.*)",
+    "Read(**/.aws/**)",
+    "Read(**/.ssh/**)",
+    "Write(**/.env)",
+    "Write(**/.aws/**)",
+    "Write(**/.ssh/**)",
+    "Edit(**/.env)",
+    "Read(~/.env)",
+    "Read(~/.env.*)",
+    "Read(~/.aws/**)",
+    "Read(~/.ssh/**)",
+    "Write(~/.env)",
+    "Write(~/.aws/**)",
+    "Write(~/.ssh/**)",
+    "Edit(~/.env)",
+)
+
+
+class TestSeedHardDeny(InstallerTestCase):
+    """
+    Behavior of the seed-hard-deny subcommand (Phase 10.1 encapsulation).
+
+    Architecturally mirrors seed-self-perms (see TestSeedSelfPerms) but targets
+    [hard_deny].deny with the canonical patterns from
+    toolguard.tools.recommended_protections.
+    """
+
+    def _write_base_config(self):
+        """Write a minimal base toolguard_hook.toml via the CLI under test."""
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+
+    def test_adds_full_canonical_list_in_one_call(self):
+        """
+        Given a base config already exists
+        When seed-hard-deny is run
+        Then [hard_deny].deny contains exactly the 16 canonical sensitive-file
+        patterns, and the change is journaled
+        """
+        self._write_base_config()
+        before = self.journal_indices()
+
+        code, out = self.run_cli(["seed-hard-deny", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        text = (self.home / ".claude" / "toolguard_hook.toml").read_text()
+        self.assertIn("[hard_deny]", text)
+        for pattern in _EXPECTED_HARD_DENY_PATTERNS:
+            self.assertIn(pattern, text)
+        after = self.journal_indices()
+        self.assertEqual(len(after), len(before) + 1)
+
+    def test_running_twice_is_idempotent_noop(self):
+        """
+        Given seed-hard-deny has already been run once
+        When it is run again
+        Then it is a no-op: no new backup, no new journal entry, and the summary
+        says explicitly that nothing needed to change (mirrors seed-self-perms)
+        """
+        self._write_base_config()
+        self.run_cli(["seed-hard-deny", "--scope", "user"])
+        before = self.journal_indices()
+        backups_before = list((self.home / ".toolguard" / "backups").iterdir())
+
+        code, out = self.run_cli(["seed-hard-deny", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.journal_indices(), before)
+        backups_after = list((self.home / ".toolguard" / "backups").iterdir())
+        self.assertEqual(len(backups_after), len(backups_before))
+        lowered = out.lower()
+        self.assertTrue(
+            "already" in lowered
+            or "no changes" in lowered
+            or "nothing to add" in lowered
+        )
+
+    def test_preserves_preexisting_hard_deny_content(self):
+        """
+        Given a base config with a hand-added [hard_deny] section containing an
+        unrelated deny entry and an allow carve-out
+        When seed-hard-deny is run
+        Then the canonical patterns are added, and the pre-existing allow carve-out
+        and unrelated deny entry are preserved unchanged
+        """
+        self._write_base_config()
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        existing = config_path.read_text()
+        config_path.write_text(
+            existing
+            + "\n[hard_deny]\n"
+            + 'deny = [\n    "Read(**/custom-secret.key)",\n]\n'
+            + 'allow = [\n    "Read(**/.env.example)",\n]\n'
+        )
+
+        code, out = self.run_cli(["seed-hard-deny", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        text = config_path.read_text()
+        self.assertIn("Read(**/custom-secret.key)", text)
+        self.assertIn("Read(**/.env.example)", text)
+        for pattern in _EXPECTED_HARD_DENY_PATTERNS:
+            self.assertIn(pattern, text)
+
+    def test_missing_base_config_is_rejected(self):
+        """
+        Given no toolguard_hook.toml exists yet at the target scope
+        When seed-hard-deny is run
+        Then it fails with a non-zero exit and a message explaining the precondition,
+        exactly like seed-self-perms, rather than creating a partial config
+        """
+        code, out = self.run_cli(["seed-hard-deny", "--scope", "user"])
+        self.assertNotEqual(code, 0)
+        self.assertFalse((self.home / ".claude" / "toolguard_hook.toml").exists())
 
 
 if __name__ == "__main__":

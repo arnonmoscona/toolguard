@@ -46,19 +46,26 @@ never replace your judgment.
 
 ## Manual migration
 
-Toolguard includes a migration script to detect and migrate permissions.
+Toolguard includes a migration script to detect and migrate permissions, exposed as the
+`toolguard-migrate` console script (installed alongside `toolguard`/`toolguard-audit`/etc. by
+`uv tool install`).
 
 **Dry run** (see what would change):
 
 ```bash
-uv run python -m toolguard.scripts.migrate_permissions --dry-run
+toolguard-migrate --dry-run
 ```
 
 **Execute migration**:
 
 ```bash
-uv run python -m toolguard.scripts.migrate_permissions
+toolguard-migrate
 ```
+
+**If you have a local checkout instead of an installed package**, run it as a module from the
+repo root: `uv run python -m toolguard.scripts.migrate_permissions --dry-run`. Note this only
+works from *inside* a checkout that has toolguard's own source on its path -- after a normal
+`uv tool install`, always use `toolguard-migrate` instead, from any project.
 
 **What the migration does**:
 

@@ -14,6 +14,7 @@ toolguard-update-check = "toolguard.update_check:main"
 toolguard-audit = "toolguard.tools.security_audit:main"
 toolguard-maintain = "toolguard.tools.maintenance:main"
 toolguard-install = "toolguard.tools.installer:main"
+toolguard-migrate = "toolguard.scripts.migrate_permissions:main"
 
 [dependency-groups]
 dev = [

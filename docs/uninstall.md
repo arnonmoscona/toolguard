@@ -83,8 +83,8 @@ contains a stale/incorrect entry, and proceed with the rest of the rollback norm
 
 **Do not remove `~/.toolguard/` or anything in it.** It holds only non-executable records --
 the install journal, the config/settings backups the install and uninstall made, the decision
-ledger (`decisions.json`), any captured crash reports in `errors/` (see Step 5), and
-`README.txt`. Toolguard no longer runs anything from here, so
+ledger (`decisions.json`), any captured crash reports in `errors/`, any session-trace dumps in
+`traces/` (see Step 5), and `README.txt`. Toolguard no longer runs anything from here, so
 keeping it costs nothing and preserves a full, auditable history of what was installed and
 removed -- invaluable if the user hit problems (the reason they may be uninstalling) or later
 wants to reinstall or understand what happened.
@@ -144,11 +144,13 @@ Report what was removed and what (if anything) was intentionally kept.
 A user reaching uninstall often hit a problem, so this matters here even more than at install.
 Follow **[install.md](install.md#phase-t----trace-dump-and-issue-reporting-offer-this) Phase T**:
 
-- **Offer a session-trace dump** (Phase T.1) built from the transcript -- the environment,
-  timeline, verbatim allow/deny/warning strings, the reproduction, and the final state. Together
-  with the kept logs (Step 3b) and the journal, this is a complete record. **Check
-  `~/.toolguard/errors/` and quote any crash reports there in full** -- a user reaching for
-  uninstall often hit exactly the kind of unexpected exception this directory captures.
+- **Offer a session-trace dump** (Phase T.1), by default written to
+  `~/.toolguard/traces/toolguard-install-trace-<datetime>.md` (not `$HOME` directly) -- built
+  from the transcript, the environment, timeline, verbatim allow/deny/warning strings, the
+  reproduction, and the final state. Together with the kept logs (Step 3b) and the journal, this
+  is a complete record. **Check `~/.toolguard/errors/` and quote any crash reports there in
+  full** -- a user reaching for uninstall often hit exactly the kind of unexpected exception this
+  directory captures.
 - **If the trouble looks like a toolguard defect** (not the environment or an agent mistake),
   **offer to file a GitHub issue** on the user's behalf (Phase T.2): search existing issues
   first, show the user any that match, ask whether it is the same or new, and open one only with
