@@ -54,6 +54,7 @@ from toolguard.config import load_config_file
 from toolguard.rule_sort import find_section_boundaries
 from toolguard.scripts.migrate_permissions import create_backup, write_toml_config
 from toolguard.tools.recommended_protections import required_hard_deny_patterns
+from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
 
@@ -559,9 +560,10 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
         print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
     print(
-        "  reminder: still ahead per docs/install.md -- skills (5), validate (6), and "
-        "later phases 7-10 + wrap-up; the session-trace dump offer (Phase T.1) is "
-        "MANDATORY before you end the conversation"
+        "  reminder: still ahead per docs/install.md -- skills (5), validate (6), "
+        "migration (7), security audit (8), maintenance (9), takeover (10) + "
+        "wrap-up; the session-trace dump offer (Phase T.1) is MANDATORY before you "
+        "end the conversation"
     )
     return 0
 
@@ -570,9 +572,30 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
 # seed-self-perms
 # ---------------------------------------------------------------------------
 
+# A governed Bash tool call's shell state does not persist across separate
+# invocations (only cwd does), so an agent invoking toolguard's own console
+# scripts by bare name (rather than a full absolute path) has to defensively
+# re-export PATH="$HOME/.local/bin:$PATH" before EVERY call -- uv tool
+# update-shell's PATH registration (shell RC files) never takes effect for
+# Claude Code's own non-interactive Bash invocations. This has been happening
+# since early TOO-15 install rounds (confirmed unrelated to any particular
+# Claude Code version or platform -- observed identically across multiple
+# rounds and machines); it only became VISIBLE as an interactive prompt once
+# the recommended no_match_fallback default changed from allow_with_warning
+# (silently executed with a log warning) to ask (an actual prompt, every
+# time, since no rule covers a bare `export`). This ONE narrowly-scoped
+# pattern allows ONLY that exact safe operation -- prepending the well-known
+# uv tool bin dir to PATH -- never an arbitrary PATH value (which would be a
+# real hijacking vector: `export PATH="/malicious:$PATH"` could make a later
+# command silently resolve to a planted binary). Anchored start-to-end so
+# nothing else can be appended to the same export statement.
+_UV_BIN_PATH_PREPEND_ALLOW = r'Bash([regex]^export PATH=.?\$HOME/\.local/bin:\$PATH.?$)'
+
+
 _SEED_SELF_PERMS_HELP = """\
 Add the allow/ask rules toolguard's own skills -- and a later uninstall --
-need to keep working, at the chosen scope's toolguard_hook.toml.
+need to keep working, plus one self-integrity hard_deny protection, at the
+chosen scope's toolguard_hook.toml.
 
 Adds, to the [permissions] section:
   - one rule per entry in toolguard.tools.self_permission.required_self_permissions()
@@ -580,12 +603,25 @@ Adds, to the [permissions] section:
     Bash(toolguard-maintain:*) => ask)
   - Read/Write/Edit(~/.toolguard/**) => allow, so toolguard's own state directory
     (the journal and its backups) stays readable/writable
+  - Bash([regex]^export PATH=...$HOME/.local/bin...$PATH...$) => allow, a narrowly
+    scoped rule covering ONLY prepending the uv tool bin dir to PATH (never an
+    arbitrary PATH value), so the defensive `export PATH=...` an agent runs before
+    nearly every toolguard console-script invocation stops prompting
   - one rule per entry in
     toolguard.tools.uninstall_readiness.required_uninstall_readiness_permissions()
-    (the single source of truth -- Bash(cd:*) => allow, plus ask rules for
-    restoring native settings and removing toolguard's own config/skill files),
-    so a LATER uninstall never hits a hard block under takeover and always
-    reaches a prompt instead -- seeded now, before takeover is ever enabled
+    (the single source of truth -- ALL allow: cd navigation, restoring native
+    settings, running uv tool uninstall, and removing toolguard's own config/
+    skill files), so a LATER uninstall always completes -- seeded now, before
+    takeover is ever enabled
+
+Adds, to the [hard_deny] section's deny list:
+  - one pattern per entry in
+    toolguard.tools.self_integrity.required_self_integrity_hard_deny_patterns()
+    (the single source of truth -- blocks any rm/find -delete command
+    referencing ~/.toolguard), so ~/.toolguard can never be deleted by a Bash
+    command, even one the agent decides to run unprompted -- unconditional on
+    takeover choice, since this protects toolguard's own operational
+    integrity, not the user's files
 
 Consent for these specific rules is ASSUMED to already have been obtained by
 the calling agent (per docs/install.md Phase 4, step 3) -- this subcommand
@@ -620,8 +656,9 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
         raise InstallerError(f"{config_path} does not exist -- run 'write-config' first.")
 
     # Read the raw TOML directly: we need the true, unfiltered [permissions]
-    # section to detect which self-permission rules are already present.
-    current = tomllib.loads(config_path.read_text())
+    # and [hard_deny] sections to detect which rules are already present.
+    original_text = config_path.read_text()
+    current = tomllib.loads(original_text)
     current_permissions = current.get("permissions", {})
     permissions = {
         "allow": list(current_permissions.get("allow", [])),
@@ -633,6 +670,7 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
         (f"Bash({p.pattern})", p.list_type) for p in required_self_permissions()
     ]
     candidates += [(f"{tool}(~/.toolguard/**)", "allow") for tool in ("Read", "Write", "Edit")]
+    candidates.append((_UV_BIN_PATH_PREPEND_ALLOW, "allow"))
 
     claude_dir = _claude_dir(args.scope, args.project_dir)
     settings_path = _settings_path(args.scope, args.project_dir)
@@ -650,20 +688,49 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
             permissions[list_type].append(pattern)
             added.append((pattern, list_type))
 
+    # Self-integrity hard_deny: stop ~/.toolguard from ever being deleted by a
+    # Bash rm/find command, regardless of takeover choice -- seeded here,
+    # unconditionally, alongside the self/uninstall-readiness permissions
+    # above, not gated behind the optional Phase 10.1 secret-protection flow.
+    current_hard_deny = current.get("hard_deny", {})
+    hard_deny_patterns = list(current_hard_deny.get("deny", []))
+    hard_deny_allow_patterns = list(current_hard_deny.get("allow", []))
+    hard_deny_added: List[str] = []
+    hard_deny_already_present: List[str] = []
+    for protection in required_self_integrity_hard_deny_patterns():
+        if protection.pattern in hard_deny_patterns:
+            hard_deny_already_present.append(protection.pattern)
+        else:
+            hard_deny_patterns.append(protection.pattern)
+            hard_deny_added.append(protection.pattern)
+
     print(f"seeded self-permissions: {config_path}")
-    if not added:
+    if not added and not hard_deny_added:
         print("  already present, no changes needed:")
         for pattern, list_type in already_present:
             print(f"    {pattern} -> {list_type}")
+        for pattern in hard_deny_already_present:
+            print(f"    {pattern} -> hard_deny")
         return 0
 
     backup_path = create_backup(config_path, _backups_dir())
-    write_toml_config(config_path, permissions, auto_sort=True)
+    if added:
+        write_toml_config(config_path, permissions, auto_sort=True)
+    if hard_deny_added:
+        new_hard_deny_section = _render_hard_deny_section(
+            hard_deny_patterns, hard_deny_allow_patterns
+        )
+        updated_text = _replace_or_append_toml_section(
+            config_path.read_text(), "hard_deny", new_hard_deny_section
+        )
+        _atomic_write_text(config_path, updated_text)
 
+    action_parts = [f"{p} -> {t}" for p, t in added]
+    action_parts += [f"{p} -> hard_deny" for p in hard_deny_added]
     index = _append_journal_entry(
         action=(
             f"seeded self-permission rules into {config_path}: "
-            + "; ".join(f"{p} -> {t}" for p, t in added)
+            + "; ".join(action_parts)
         ),
         reverse=f"restore backup {backup_path} over {config_path}",
         backup=str(backup_path),
@@ -671,10 +738,14 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
 
     for pattern, list_type in added:
         print(f"  added: {pattern} -> {list_type}")
-    if already_present:
+    for pattern in hard_deny_added:
+        print(f"  added: {pattern} -> hard_deny")
+    if already_present or hard_deny_already_present:
         print("  already present, unchanged:")
         for pattern, list_type in already_present:
             print(f"    {pattern} -> {list_type}")
+        for pattern in hard_deny_already_present:
+            print(f"    {pattern} -> hard_deny")
     print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
     return 0
@@ -784,6 +855,13 @@ def cmd_enable_takeover(args: argparse.Namespace) -> int:
     print(f"  no_match_fallback: {args.no_match_fallback}")
     print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
+    print(
+        "  reminder: BEFORE going further, confirm out loud that Phase 8 (security "
+        "audit offer) and Phase 9 (maintenance offer) were ALREADY made earlier in "
+        "this conversation -- this is the last checkpoint that reliably runs, and a "
+        "real install skipped both silently despite the checklist. If either was not "
+        "actually offered, go back and offer it now, THEN continue."
+    )
     print(
         "  reminder: still ahead per docs/install.md -- 10.3 re-validate under "
         "takeover, then Wrap-up; the session-trace dump offer (Phase T.1) is "
@@ -1081,6 +1159,11 @@ copied from there; no new package dependency -- this shells out to whatever 'git
 is on PATH). Do NOT hand-roll this with a bespoke fetch/clone/copy sequence of your
 own.
 
+Accepts the SAME --source string that worked for 'uv tool install' in Phase 3,
+including uv's own 'git+https://host/owner/repo@ref' form -- the 'git+' prefix is
+stripped and a trailing '@ref' becomes 'git clone --branch ref', so branch pinning
+is preserved. A plain 'https://host/owner/repo' URL (no branch control) also works.
+
 Idempotent: a skill directory that already exists at the target is left untouched
 and reported as "already installed, unchanged", UNLESS --force is given, in which
 case the existing directory is backed up first (whole-tree copy into
@@ -1130,15 +1213,54 @@ def _backup_directory(source_dir: Path, backups_dir: Path, name_prefix: str) -> 
     return backup_path
 
 
+def _parse_git_source(source: str) -> Tuple[str, Optional[str]]:
+    """
+    Parse a possibly uv-style VCS source into a plain ``git clone`` URL and an
+    optional ref (branch/tag/commit).
+
+    ``uv tool install`` accepts (and this project's docs recommend) the
+    ``git+https://host/owner/repo@ref`` form -- but that literal string is NOT
+    a valid ``git clone`` argument (``git+https`` is a pip/uv pseudo-scheme,
+    not a real git transport; ``git clone git+https://...`` fails with
+    ``git: 'remote-git+https' is not a git command``). This strips the
+    ``git+`` prefix (if present) and splits off a trailing ``@ref`` into a
+    separate ref, so branch pinning survives the same ``--source`` string
+    that worked for ``uv tool install`` in Phase 3.
+
+    A plain URL with no ``git+`` prefix is returned unchanged with no ref --
+    this function only recognizes ``@ref`` when the uv-style prefix is
+    present, so an ssh URL's ``user@host`` (e.g. ``git@github.com:owner/repo``)
+    is never mistaken for a ref split. As a second guard, even under the
+    ``git+`` prefix, an ``@`` is only treated as a ref split when the text
+    after it contains no ``/`` -- a real ref (branch/tag/commit) never does.
+
+    Args:
+        source: The ``--source`` value as given (local path, plain git URL,
+            or uv-style ``git+<scheme>://...[@ref]``).
+
+    Returns:
+        ``(clone_url, ref)`` -- ``ref`` is ``None`` when no ref was given.
+    """
+    if not source.startswith("git+"):
+        return source, None
+    url = source[len("git+") :]
+    at_index = url.rfind("@")
+    if at_index == -1 or "/" in url[at_index + 1 :]:
+        return url, None
+    return url[:at_index], url[at_index + 1 :]
+
+
 @contextmanager
 def _resolve_skills_source(source: str):
     """
     Yield a directory containing a ``skills/<skill-name>/`` layout for *source*.
 
     If *source* is an existing local directory, it is yielded directly (no copy, no
-    cleanup). Otherwise *source* is treated as a git remote URL and shallow-cloned
-    (``git clone --depth 1``) into a throwaway temporary directory that is yielded
-    and then cleaned up when the context exits.
+    cleanup). Otherwise *source* is treated as a git remote URL (accepting both a
+    plain URL and uv's ``git+<scheme>://...[@ref]`` form, see
+    :func:`_parse_git_source`) and shallow-cloned (``git clone --depth 1``,
+    ``--branch <ref>`` when a ref was given) into a throwaway temporary directory
+    that is yielded and then cleaned up when the context exits.
 
     Args:
         source: Either a local filesystem path or a git remote URL.
@@ -1154,13 +1276,14 @@ def _resolve_skills_source(source: str):
         yield local_path
         return
 
+    clone_url, ref = _parse_git_source(source)
     with TemporaryDirectory() as tmp_dir_name:
         dest = Path(tmp_dir_name)
-        result = subprocess.run(
-            ["git", "clone", "--depth", "1", source, str(dest)],
-            capture_output=True,
-            text=True,
-        )
+        cmd = ["git", "clone", "--depth", "1"]
+        if ref:
+            cmd += ["--branch", ref]
+        cmd += [clone_url, str(dest)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise InstallerError(
                 f"could not clone {source!r} (git exited {result.returncode}): "

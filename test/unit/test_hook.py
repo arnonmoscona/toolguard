@@ -2089,6 +2089,38 @@ class TestHookCrashCapture(unittest.TestCase):
             self.assertIn("ValueError", content)
             self.assertIn("Missing required field", content)
 
+    def test_empty_stdin_does_not_write_a_crash_report(self):
+        """
+        Given stdin is non-interactive (not a TTY) but was read and found
+        completely empty -- e.g. a stray `toolguard --version` an agent ran
+        to probe the installed version, which argparse silently discards as
+        an unrecognized flag, leaving nothing on stdin to read (TOO-15,
+        observed twice on real installs: this produced a misleading crash
+        report that looked like a hook defect but was just a manual probe)
+        When main() runs
+        Then it exits 0 with the friendly "not a standalone command" message
+        on stderr, and NO crash report is written -- this is treated as a
+        stray invocation, not an unexpected internal error
+        """
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with (
+                patch("sys.stdin", StringIO("")),
+                patch("sys.stdin.isatty", return_value=False),
+                patch("sys.stdout", new_callable=StringIO),
+                patch("sys.stderr", new_callable=StringIO) as mock_stderr,
+                patch("pathlib.Path.home", return_value=home),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            self.assertIn(
+                "not a standalone command", mock_stderr.getvalue()
+            )
+            errors_dir = home / ".toolguard" / "errors"
+            self.assertFalse(errors_dir.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

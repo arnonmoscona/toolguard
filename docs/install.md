@@ -413,15 +413,25 @@ tool calls, so do it **last**, after the config it will read is already on disk.
      `allow` is immune to that failure mode, and every pattern here is a literal, single-purpose
      command or exact file path (not a wildcard) -- by the time any of them would fire, the user has
      already given explicit consent by starting the uninstall conversation in the first place.
+   - **A self-integrity `[hard_deny]` protection**, so `~/.toolguard/` itself can never be deleted
+     by a Bash `rm`/`find -delete` command -- not gated behind takeover, not even overridable by an
+     explicit allow rule (that is the whole point of `[hard_deny]`). A real install had its
+     `~/.toolguard/` wiped when the installing agent decided, unprompted, to "go further for a true
+     clean slate" during uninstall and ran `rm -rf ~/.toolguard` -- directly contradicting
+     [uninstall.md](uninstall.md#step-3----leave-toolguard-in-place-do-not-delete-it)'s explicit,
+     repeated "do not delete `~/.toolguard/`" policy. Prose warnings alone did not prevent this;
+     this pattern makes it a technical guarantee instead. It only blocks deletion -- reading,
+     writing, or editing files under `~/.toolguard/` (the journal, backups, traces) is unaffected.
 
    These come from toolguard's single source of truth for self-permissions
-   (`toolguard.tools.self_permission` and `toolguard.tools.uninstall_readiness`); if a skill is
-   installed you can also let it compute exactly which are missing. **Propose them explicitly,
-   explain each, and add them only with consent** -- they are not invented user allow-rules, just
-   the minimum for toolguard's own tooling (and its own later removal) to keep working. Once the
+   (`toolguard.tools.self_permission`, `toolguard.tools.uninstall_readiness`, and
+   `toolguard.tools.self_integrity`); if a skill is installed you can also let it compute exactly
+   which are missing. **Propose them explicitly, explain each, and add them only with consent** --
+   they are not invented user allow-rules, just the minimum for toolguard's own tooling (and its
+   own later removal) to keep working. Once the
    user consents, add them all in one command:
    `toolguard-install seed-self-perms --scope <user|project> [--project-dir <path>]` -- it reads
-   both sources of truth, adds exactly those rules (idempotently -- a second run is a no-op),
+   all three sources of truth, adds exactly those rules (idempotently -- a second run is a no-op),
    backs up the config first, and journals the change with its reverse.
 
 If the helper does not fit (an unusual settings layout, a manager other than `uv`, hand-off mode),

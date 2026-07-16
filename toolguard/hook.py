@@ -107,6 +107,20 @@ def _run_startup_validation(
             log_warning(issue.message, issue.corrective_steps, log_dir)
 
 
+class EmptyStdinError(ValueError):
+    """
+    Raised when stdin was read but contained no data.
+
+    A DISTINCT subclass, not a bare ``ValueError``, so ``main()`` can treat it
+    like the TTY guard (a stray manual/probing invocation -- e.g. a `toolguard
+    --version` an agent ran to check the installed version, an unrecognized
+    flag silently discarded by argparse, or any other non-hook invocation)
+    rather than an unexpected internal error worth a crash report. A real
+    install hit this twice: the crash report it produced was a red herring
+    that looked like a hook defect but was really just a manual probe.
+    """
+
+
 def parse_hook_input() -> Dict[str, Any]:
     """
     Parse hook input from stdin.
@@ -130,12 +144,13 @@ def parse_hook_input() -> Dict[str, Any]:
 
     Raises:
         json.JSONDecodeError: If input is not valid JSON
-        ValueError: If required fields are missing
+        EmptyStdinError: If stdin was read but contained no data.
+        ValueError: If required fields are missing.
     """
     try:
         input_data = sys.stdin.read()
         if not input_data.strip():
-            raise ValueError("Empty input from stdin")
+            raise EmptyStdinError("Empty input from stdin")
 
         data = json.loads(input_data)
 
@@ -506,6 +521,18 @@ def _run_eval_mode() -> None:
         print(json.dumps(output), file=sys.stderr)
 
 
+def _print_not_a_standalone_command_message() -> None:
+    """Print the friendly explanation for a stray manual/probing invocation."""
+    print(
+        "toolguard: this is a Claude Code PreToolUse hook, not a standalone command.\n"
+        "It reads a JSON hook event on stdin and is invoked automatically by Claude.\n"
+        "To smoke-test: "
+        'printf \'{"tool_name":"Bash","tool_input":{"command":"ls -la"},'
+        '"hook_event_name":"PreToolUse"}\' | toolguard',
+        file=sys.stderr,
+    )
+
+
 def main() -> None:
     """
     Main hook entry point.
@@ -542,14 +569,7 @@ def main() -> None:
     # (no piped stdin) shows the message instead of hanging on stdin.read().
     # Exit code 0: informational, not an error (Arnon: change to non-zero if preferred).
     if sys.stdin.isatty():
-        print(
-            "toolguard: this is a Claude Code PreToolUse hook, not a standalone command.\n"
-            "It reads a JSON hook event on stdin and is invoked automatically by Claude.\n"
-            "To smoke-test: "
-            'printf \'{"tool_name":"Bash","tool_input":{"command":"ls -la"},'
-            '"hook_event_name":"PreToolUse"}\' | toolguard',
-            file=sys.stderr,
-        )
+        _print_not_a_standalone_command_message()
         sys.exit(0)
 
     # Read-only evaluation mode (--eval): resolve one piped event and print the
@@ -829,6 +849,15 @@ def main() -> None:
         # Create and output decision
         output = create_hook_output(decision, reason)
         print(json.dumps(output))
+        sys.exit(0)
+
+    except EmptyStdinError:
+        # A stray manual/probing invocation (e.g. a bare `toolguard --version`
+        # an agent ran to check the installed version), not a real hook call
+        # from Claude Code (which always pipes real JSON) and not an
+        # unexpected internal error -- treat it exactly like the TTY guard:
+        # a friendly explanation, no crash report (TOO-15, recurred twice).
+        _print_not_a_standalone_command_message()
         sys.exit(0)
 
     except json.JSONDecodeError as e:

@@ -15,15 +15,20 @@ project-scope cases, a separate temporary project directory. The real ``~/.claud
 import io
 import json
 import re
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 from unittest.mock import patch
 
+from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools import installer as installer_module
+from toolguard.tools.decision import decide
 from toolguard.tools.installer import main
+from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
 
@@ -867,6 +872,108 @@ class TestSeedSelfPerms(InstallerTestCase):
             pattern = f"Bash({permission.pattern})"
             self.assertEqual(text.count(pattern), 1)
 
+    def test_adds_the_self_integrity_hard_deny_patterns(self):
+        """
+        Given a base config already exists
+        When seed-self-perms is run
+        Then the config's [hard_deny] deny list contains every pattern from
+        toolguard.tools.self_integrity.required_self_integrity_hard_deny_patterns()
+        -- seeded unconditionally, alongside the self/uninstall-readiness
+        permissions, not gated behind the optional Phase 10.1 secret-protection
+        flow
+        """
+        self._write_base_config()
+
+        code, out = self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        deny_list = tomllib.loads(config_path.read_text())["hard_deny"]["deny"]
+        for protection in required_self_integrity_hard_deny_patterns():
+            self.assertIn(protection.pattern, deny_list)
+
+    def test_self_integrity_hard_deny_blocks_rm_of_toolguard_state_dir(self):
+        """
+        Given seed-self-perms has been run (self-integrity hard_deny seeded)
+        When the resulting config is loaded and a Bash `rm -rf ~/.toolguard`
+        command is evaluated through the real decision engine
+        Then it is hard-denied -- this is the actual regression the fix
+        exists to prevent: a real install had ~/.toolguard deleted by an
+        agent that decided, unprompted, to "go further for a clean slate"
+        """
+        self._write_base_config()
+        self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        content = tomllib.loads(config_path.read_text())
+        layer = ConfigLayer(
+            Provenance("user", "toolguard_hook", "toml", config_path, 0),
+            MappingProxyType(content),
+        )
+        configuration = Configuration(layers=(layer,))
+        decision = decide(configuration, "Bash", "rm -rf ~/.toolguard")
+        self.assertEqual(decision.verdict, "deny")
+
+    def test_running_twice_does_not_duplicate_hard_deny_patterns(self):
+        """
+        Given seed-self-perms has already been run
+        When it is run again
+        Then the resulting [hard_deny] deny list still contains each
+        self-integrity pattern exactly once
+        """
+        self._write_base_config()
+        self.run_cli(["seed-self-perms", "--scope", "user"])
+        code, out = self.run_cli(["seed-self-perms", "--scope", "user"])
+        self.assertEqual(code, 0)
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        deny_list = tomllib.loads(config_path.read_text())["hard_deny"]["deny"]
+        for protection in required_self_integrity_hard_deny_patterns():
+            self.assertEqual(deny_list.count(protection.pattern), 1)
+
+    def test_uv_bin_path_prepend_rule_allows_only_the_safe_form(self):
+        """
+        Given seed-self-perms has been run (the PATH-prepend rule seeded)
+        When the resulting config is loaded and evaluated through the real
+        decision engine
+        Then `export PATH="$HOME/.local/bin:$PATH"` (in any common quoting)
+        resolves to allow -- the defensive export an agent runs before nearly
+        every toolguard console-script invocation -- but a PATH value
+        pointing anywhere else (a hijacking attempt) does NOT match, and
+        stays gated by the normal ask fallback
+        """
+        self._write_base_config()
+        self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        content = tomllib.loads(config_path.read_text())
+        layer = ConfigLayer(
+            Provenance("user", "toolguard_hook", "toml", config_path, 0),
+            MappingProxyType(content),
+        )
+        configuration = Configuration(layers=(layer,))
+
+        safe_forms = [
+            'export PATH="$HOME/.local/bin:$PATH"',
+            "export PATH='$HOME/.local/bin:$PATH'",
+            "export PATH=$HOME/.local/bin:$PATH",
+        ]
+        for command in safe_forms:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    decide(configuration, "Bash", command).verdict, "allow"
+                )
+
+        unsafe_forms = [
+            'export PATH="/tmp/evil:$PATH"',
+            'export PATH="$HOME/.local/bin:$PATH:/tmp/evil"',
+            'export PATH="$HOME/.local/bin:$PATH" FOO=bar',
+        ]
+        for command in unsafe_forms:
+            with self.subTest(command=command):
+                self.assertNotEqual(
+                    decide(configuration, "Bash", command).verdict, "allow"
+                )
+
 
 # ---------------------------------------------------------------------------
 # enable-takeover
@@ -1153,7 +1260,10 @@ class TestSummaryOutput(InstallerTestCase):
         Then it ends with a reminder naming the checklist steps still ahead
         (10.4 re-validation, wrap-up) and flags the session-trace dump offer
         (Phase T.1) as MANDATORY, so an agent does not stop before the runbook's
-        remaining steps
+        remaining steps -- AND it also prompts the agent to confirm Phase 8
+        (security audit) and Phase 9 (maintenance) were already offered, since
+        this is the last checkpoint reliably reached and a real install skipped
+        both silently
         """
         self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
 
@@ -1164,6 +1274,10 @@ class TestSummaryOutput(InstallerTestCase):
         self.assertIn("docs/install.md", out)
         self.assertIn("mandatory", lowered)
         self.assertIn("trace", lowered)
+        self.assertIn("phase 8", lowered)
+        self.assertIn("phase 9", lowered)
+        self.assertIn("security audit", lowered)
+        self.assertIn("maintenance", lowered)
 
 
 # ---------------------------------------------------------------------------
@@ -1404,6 +1518,74 @@ class TestDiscoverProjects(InstallerTestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestParseGitSource(unittest.TestCase):
+    """Unit-level coverage of _parse_git_source's URL/ref splitting."""
+
+    def test_uv_style_url_with_ref_splits_into_url_and_ref(self):
+        """
+        Given a uv-style 'git+https://host/owner/repo@ref' source
+        When parsed
+        Then the git+ prefix is stripped and the ref is split off separately
+        """
+        url, ref = installer_module._parse_git_source(
+            "git+https://github.com/arnonmoscona/toolguard@master"
+        )
+        self.assertEqual(url, "https://github.com/arnonmoscona/toolguard")
+        self.assertEqual(ref, "master")
+
+    def test_uv_style_url_without_ref_has_no_ref(self):
+        """
+        Given a uv-style 'git+https://host/owner/repo' source with no @ref
+        When parsed
+        Then the git+ prefix is stripped and ref is None
+        """
+        url, ref = installer_module._parse_git_source(
+            "git+https://github.com/arnonmoscona/toolguard"
+        )
+        self.assertEqual(url, "https://github.com/arnonmoscona/toolguard")
+        self.assertIsNone(ref)
+
+    def test_plain_url_is_returned_unchanged_with_no_ref(self):
+        """
+        Given a plain https URL with no git+ prefix
+        When parsed
+        Then it is returned unchanged, and no @ suffix is ever split off (only
+        the uv-style prefix triggers ref recognition)
+        """
+        url, ref = installer_module._parse_git_source(
+            "https://github.com/arnonmoscona/toolguard"
+        )
+        self.assertEqual(url, "https://github.com/arnonmoscona/toolguard")
+        self.assertIsNone(ref)
+
+    def test_ssh_user_at_host_is_not_mistaken_for_a_ref(self):
+        """
+        Given a uv-style ssh source whose URL itself contains 'user@host'
+        (git+ssh://git@github.com/owner/repo.git) with no actual ref
+        When parsed
+        Then the user@host is NOT split off as a ref, because the text after
+        the last @ contains a '/' (a real ref never does)
+        """
+        url, ref = installer_module._parse_git_source(
+            "git+ssh://git@github.com/arnonmoscona/toolguard.git"
+        )
+        self.assertEqual(url, "ssh://git@github.com/arnonmoscona/toolguard.git")
+        self.assertIsNone(ref)
+
+    def test_ssh_user_at_host_with_a_real_ref_splits_correctly(self):
+        """
+        Given a uv-style ssh source with BOTH user@host in the URL and a
+        trailing @ref (git+ssh://git@github.com/owner/repo@v1.2.3)
+        When parsed
+        Then only the trailing ref is split off; user@host stays part of the URL
+        """
+        url, ref = installer_module._parse_git_source(
+            "git+ssh://git@github.com/arnonmoscona/toolguard@v1.2.3"
+        )
+        self.assertEqual(url, "ssh://git@github.com/arnonmoscona/toolguard")
+        self.assertEqual(ref, "v1.2.3")
+
+
 class TestInstallSkills(InstallerTestCase):
     """Behavior of the install-skills subcommand (Phase 5 encapsulation)."""
 
@@ -1545,6 +1727,46 @@ class TestInstallSkills(InstallerTestCase):
             self.assertTrue(
                 (self.home / ".claude" / "skills" / skill / "SKILL.md").exists()
             )
+
+    def test_uv_style_git_plus_source_is_parsed_into_url_and_branch(self):
+        """
+        Given --source is a uv-style 'git+https://host/owner/repo@ref' URL (the
+        SAME string that works for 'uv tool install' in Phase 3 -- a real
+        install hit exactly this: it worked for the package install but
+        install-skills rejected it, forcing a fallback to a plain URL that
+        lost branch pinning)
+        When install-skills runs
+        Then git clone is invoked with the 'git+' prefix stripped from the URL
+        and '--branch <ref>' added, NOT the literal unparsed source string
+        """
+        captured_cmd = {}
+
+        def fake_git_clone(cmd, *args, **kwargs):
+            captured_cmd["cmd"] = cmd
+            dest = Path(cmd[-1])
+            for skill in ("toolguard-security-audit", "toolguard-maintenance"):
+                skill_dir = dest / "skills" / skill
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text(f"# {skill}\n")
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(installer_module.subprocess, "run", side_effect=fake_git_clone):
+            code, out = self.run_cli(
+                [
+                    "install-skills",
+                    "--scope",
+                    "user",
+                    "--source",
+                    "git+https://github.com/arnonmoscona/toolguard@master",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        cmd = captured_cmd["cmd"]
+        self.assertIn("https://github.com/arnonmoscona/toolguard", cmd)
+        self.assertIn("--branch", cmd)
+        self.assertIn("master", cmd)
+        self.assertNotIn("git+https://github.com/arnonmoscona/toolguard@master", cmd)
 
     def test_invalid_source_raises_installer_error(self):
         """
