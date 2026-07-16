@@ -25,6 +25,7 @@ from unittest.mock import patch
 from toolguard.tools import installer as installer_module
 from toolguard.tools.installer import main
 from toolguard.tools.self_permission import required_self_permissions
+from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
 
 # Numbered journal entry header, e.g. "## [3] 2026-07-07 14:12 local -- register hooks".
 _JOURNAL_HEADER_RE = re.compile(
@@ -738,9 +739,10 @@ class TestSeedSelfPerms(InstallerTestCase):
         """
         Given a base config already exists
         When seed-self-perms is run
-        Then the config's [permissions] section contains exactly the Bash rules from
-        toolguard.tools.self_permission (allow/ask per its own list_type) plus
-        Read/Write/Edit allow rules scoped to ~/.toolguard/**, and nothing else divergent
+        Then the config's [permissions] section contains the Bash rules from
+        toolguard.tools.self_permission (allow/ask per its own list_type) and
+        Read/Write/Edit allow rules scoped to ~/.toolguard/** (uninstall-readiness
+        rules are covered separately, see test_adds_the_uninstall_readiness_rules)
         """
         self._write_base_config()
 
@@ -754,6 +756,73 @@ class TestSeedSelfPerms(InstallerTestCase):
             self.assertIn(pattern, text)
         for tool in ("Read", "Write", "Edit"):
             self.assertIn(f"{tool}(~/.toolguard/**)", text)
+
+    def test_adds_the_uninstall_readiness_rules(self):
+        """
+        Given a base config already exists at user scope
+        When seed-self-perms is run
+        Then the config's [permissions] section also contains every rule from
+        toolguard.tools.uninstall_readiness, scoped to the fake HOME's own
+        ~/.claude directory and settings.json -- seeded now (Phase 4, before
+        takeover is ever enabled) so a later uninstall never hits a hard block
+        """
+        self._write_base_config()
+
+        code, out = self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        text = config_path.read_text()
+        claude_dir = self.home / ".claude"
+        settings_path = claude_dir / "settings.json"
+        for permission in required_uninstall_readiness_permissions(
+            claude_dir, settings_path
+        ):
+            pattern = f"{permission.tool}({permission.pattern})"
+            self.assertIn(pattern, text)
+
+    def test_uninstall_readiness_rules_are_scope_aware_for_project_scope(self):
+        """
+        Given a base config already exists at PROJECT scope
+        When seed-self-perms is run at that scope
+        Then the seeded uninstall-readiness rules reference the project's own
+        .claude/settings.local.json and .claude/toolguard_hook.toml paths, not
+        the user-level ~/.claude equivalents
+        """
+        self.run_cli(
+            [
+                "write-config",
+                "--scope",
+                "project",
+                "--project-dir",
+                str(self.project_dir),
+                "--governed-tools",
+                "Bash",
+            ]
+        )
+
+        code, out = self.run_cli(
+            [
+                "seed-self-perms",
+                "--scope",
+                "project",
+                "--project-dir",
+                str(self.project_dir),
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        config_path = self.project_dir / ".claude" / "toolguard_hook.toml"
+        text = config_path.read_text()
+        project_claude_dir = self.project_dir / ".claude"
+        project_settings_path = project_claude_dir / "settings.local.json"
+        self.assertIn(f"Write({project_settings_path})", text)
+        self.assertIn(f"Edit({project_settings_path})", text)
+        self.assertIn(
+            f"rm {project_claude_dir / 'toolguard_hook.toml'}:*", text
+        )
+        # Must NOT contain the user-level equivalents.
+        self.assertNotIn(f"Write({self.home / '.claude' / 'settings.json'})", text)
 
     def test_missing_base_config_is_rejected(self):
         """

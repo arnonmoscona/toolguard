@@ -55,6 +55,7 @@ from toolguard.rule_sort import find_section_boundaries
 from toolguard.scripts.migrate_permissions import create_backup, write_toml_config
 from toolguard.tools.recommended_protections import required_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
+from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
 
 
 class InstallerError(Exception):
@@ -570,8 +571,8 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 _SEED_SELF_PERMS_HELP = """\
-Add the allow/ask rules toolguard's own skills need to keep working, at the
-chosen scope's toolguard_hook.toml.
+Add the allow/ask rules toolguard's own skills -- and a later uninstall --
+need to keep working, at the chosen scope's toolguard_hook.toml.
 
 Adds, to the [permissions] section:
   - one rule per entry in toolguard.tools.self_permission.required_self_permissions()
@@ -579,6 +580,12 @@ Adds, to the [permissions] section:
     Bash(toolguard-maintain:*) => ask)
   - Read/Write/Edit(~/.toolguard/**) => allow, so toolguard's own state directory
     (the journal and its backups) stays readable/writable
+  - one rule per entry in
+    toolguard.tools.uninstall_readiness.required_uninstall_readiness_permissions()
+    (the single source of truth -- Bash(cd:*) => allow, plus ask rules for
+    restoring native settings and removing toolguard's own config/skill files),
+    so a LATER uninstall never hits a hard block under takeover and always
+    reaches a prompt instead -- seeded now, before takeover is ever enabled
 
 Consent for these specific rules is ASSUMED to already have been obtained by
 the calling agent (per docs/install.md Phase 4, step 3) -- this subcommand
@@ -626,6 +633,13 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
         (f"Bash({p.pattern})", p.list_type) for p in required_self_permissions()
     ]
     candidates += [(f"{tool}(~/.toolguard/**)", "allow") for tool in ("Read", "Write", "Edit")]
+
+    claude_dir = _claude_dir(args.scope, args.project_dir)
+    settings_path = _settings_path(args.scope, args.project_dir)
+    candidates += [
+        (f"{p.tool}({p.pattern})", p.list_type)
+        for p in required_uninstall_readiness_permissions(claude_dir, settings_path)
+    ]
 
     added: List[Tuple[str, str]] = []
     already_present: List[Tuple[str, str]] = []

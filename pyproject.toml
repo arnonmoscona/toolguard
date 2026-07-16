@@ -1,7 +1,7 @@
 [project]
 name = "toolguard"
-version = "0.3.1"
-description = "Pre-tool-use hook permission system for Claude Code"
+version = "0.4.0"
+description = "Pre-tool-use hook permission system and security audit for Claude Code"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = []

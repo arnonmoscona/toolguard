@@ -9,6 +9,11 @@ might have here -- pick the right entry point.
 > `https://raw.githubusercontent.com/<owner>/toolguard/HEAD/docs/install.md`. Better still,
 > once you have run `uv tool install`, read the installed package source as ground truth rather
 > than trusting a web summary (which can paraphrase JSON/TOML shapes incorrectly).
+>
+> **If a `WebFetch` of that raw URL hangs or is rejected**, do not keep retrying it blindly --
+> ask the user to fetch it themselves (`curl -fsSL <raw-url> -o install.md` or `wget <raw-url>`,
+> a plain download that does not depend on the fetch/summarizer path) and read the local file
+> instead. This is a normal, expected fallback, not a sign anything is broken.
 
 ## Helping a user adopt or configure toolguard
 

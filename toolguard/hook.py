@@ -19,7 +19,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from toolguard.auto_migrate import run_auto_migration
 from toolguard.config import load_configuration
@@ -330,7 +330,11 @@ def _parse_compound_match_details(reason: str):
 
 
 def _log_allowed_command(
-    command: str, reason: str, agent_info: str, env_config: dict
+    command: str,
+    reason: str,
+    agent_info: str,
+    env_config: dict,
+    permission_mode: Optional[str] = None,
 ) -> None:
     """
     Log an allowed command, handling compound commands by logging each sub-command separately.
@@ -344,6 +348,8 @@ def _log_allowed_command(
         reason: The allow reason from permission checking
         agent_info: Agent identification string
         env_config: Environment configuration dict
+        permission_mode: Claude Code's own ``permission_mode`` from the hook input,
+            if present -- recorded for diagnosis only, see ``log_command``.
     """
     compound_details = _parse_compound_match_details(reason)
     if compound_details:
@@ -355,6 +361,7 @@ def _log_allowed_command(
                 matched_rule=matched_rule,
                 extra_info=agent_info,
                 config=env_config,
+                permission_mode=permission_mode,
             )
     else:
         # Simple command: extract matched rule from reason
@@ -365,6 +372,7 @@ def _log_allowed_command(
             matched_rule=matched_rule,
             extra_info=agent_info,
             config=env_config,
+            permission_mode=permission_mode,
         )
 
 
@@ -668,6 +676,11 @@ def main() -> None:
             else "main"
         )
 
+        # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
+        # mode) is recorded alongside the decision, purely for diagnosis -- it
+        # never affects the verdict itself. See log_command's docstring.
+        permission_mode = hook_data.get("permission_mode")
+
         # Handle file path tools (Read, Write, Edit)
         if tool_name in FILE_PATH_TOOLS:
             file_path = tool_input.get("file_path", "")
@@ -681,6 +694,7 @@ def main() -> None:
                     ["no file_path provided"],
                     extra_info=agent_info,
                     config=env_config,
+                    permission_mode=permission_mode,
                 )
                 print(json.dumps(output))
                 sys.exit(0)
@@ -714,6 +728,7 @@ def main() -> None:
                     matched_rule=matched_rule,
                     extra_info=agent_info,
                     config=env_config,
+                    permission_mode=permission_mode,
                 )
             elif decision == "ask":
                 log_command(
@@ -722,6 +737,7 @@ def main() -> None:
                     note=reason,
                     extra_info=agent_info,
                     config=env_config,
+                    permission_mode=permission_mode,
                 )
             else:
                 violated_rules = [
@@ -733,6 +749,7 @@ def main() -> None:
                     violated_rules,
                     extra_info=agent_info,
                     config=env_config,
+                    permission_mode=permission_mode,
                 )
 
             output = create_hook_output(decision, reason)
@@ -749,6 +766,7 @@ def main() -> None:
                 ["no command provided"],
                 extra_info=agent_info,
                 config=env_config,
+                permission_mode=permission_mode,
             )
             print(json.dumps(output))
             sys.exit(0)
@@ -784,7 +802,9 @@ def main() -> None:
             conflict_log_dir = env_config.get("log_dir")
             for sub_command, override in bash_overrides:
                 _log_conflict_override(sub_command, override, conflict_log_dir)
-            _log_allowed_command(command, reason, agent_info, env_config)
+            _log_allowed_command(
+                command, reason, agent_info, env_config, permission_mode
+            )
         elif decision == "ask":
             log_command(
                 command,
@@ -792,6 +812,7 @@ def main() -> None:
                 note=reason,
                 extra_info=agent_info,
                 config=env_config,
+                permission_mode=permission_mode,
             )
         else:
             # Extract violated rule from reason for logging
@@ -802,6 +823,7 @@ def main() -> None:
                 violated_rules,
                 extra_info=agent_info,
                 config=env_config,
+                permission_mode=permission_mode,
             )
 
         # Create and output decision

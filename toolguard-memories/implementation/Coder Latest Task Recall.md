@@ -8,6 +8,113 @@ tags:
 - implementation
 ---
 
+> **NOTE: The content below this line, up to the "--- ARCHIVED (stale, prior task) ---" marker,
+> is the CURRENT ACTIVE task recall. Everything after that marker is a STALE recall from a
+> previous, unrelated TOO-15 sub-task (project-root marker consolidation) and should be
+> ignored for the current work.**
+
+# Coder Latest Task Recall (TOO-15: migrate() target-level bug, RED phase only)
+
+Started: 2026-07-16 14:41 EDT
+
+## Ticket / context
+TOO-15 install-runbook hardening. Real-machine repro (2026-07-16): running
+`toolguard-migrate --dry-run` inside the toolguard repo's own checkout (which has
+`.git` + `pyproject.toml`, so `find_project_root()` correctly resolves it as a
+project root) proposed writing to `~/.claude/toolguard_hook.toml` instead of
+creating `<project_root>/.claude/toolguard_hook.toml`.
+
+## The bug
+`toolguard/scripts/migrate_permissions.py`, function `migrate()`, around
+line 743-762 (search "Find target config file (prefer TOML, create if none exists)"):
+
+```python
+target_config_path = None
+target_format = None
+
+for file_path, source_type, file_format in config_files:
+    if source_type == "toolguard_hook":
+        target_config_path = file_path
+        target_format = file_format
+        break
+
+if target_config_path is None:
+    target_config_path = project_root / ".claude" / "toolguard_hook.toml"
+    target_format = "toml"
+    print(f"No toolguard config found. Will create: {target_config_path}")
+else:
+    ...
+```
+
+`config_files` = `discover_config_files(project_root)` (toolguard/config.py) which
+mixes PROJECT-level and USER-level entries in ONE priority-ordered list (project
+toolguard_hook.local/settings.local/toolguard_hook/settings, THEN same 4 at user
+level `~/.claude/`), only including files that exist on disk.
+
+Bug: loop scans the WHOLE list (project + user) for first existing
+`source_type == "toolguard_hook"` file. If project_root has no toolguard_hook
+config of its own but `~/.claude/toolguard_hook.toml` exists (e.g. user-scope
+install), the loop silently picks the USER file as migration target -> project's
+rules get added to the GLOBAL user config instead of creating a project-level one.
+
+## Correct behavior
+Migration should ALWAYS target project_root's own `.claude` dir:
+- If `project_root/.claude` already has an existing toolguard_hook config
+  (`.local.toml`/`.local.json` preferred over `toolguard_hook.toml`/`.json`, TOML
+  over JSON at same base name - same precedence discover_config_files already
+  encodes for one level) -> migrate into THAT file.
+- If not -> CREATE `project_root/.claude/toolguard_hook.toml`. Never fall through
+  to an existing file at a DIFFERENT directory (ancestor or home), even if
+  discover_config_files returned one.
+- When project_root itself resolves to Path.home() (find_project_root() fallback,
+  e.g. no project markers above cwd), project_root/.claude IS ~/.claude, so
+  existing/create logic naturally does the right thing - no special-casing needed.
+
+Fix (NOT to be done in this RED phase): restrict the "search for existing
+toolguard_hook file" loop in migrate() to ONLY config_files entries whose
+containing directory is `project_root / ".claude"`. Do NOT change
+discover_config_files() itself (config.py) - used elsewhere intentionally for
+multi-level priority (read/merge for evaluation).
+
+## Scope: RED PHASE ONLY
+- Write/extend tests in test/unit/test_migration.py pinning down correct behavior.
+- Do NOT touch toolguard/scripts/migrate_permissions.py or toolguard/config.py.
+- Confirm: full suite green except new bug-exposing test(s), which must fail with
+  an assertion mismatch (wrong path chosen), not an exception.
+
+## Scenarios required (class TestMigrationTargetLevel or similar)
+1. project has own existing toolguard_hook.toml AND different user-level one also
+   exists -> migrate targets PROJECT's own file. (Guard - likely already passes.)
+2. project has NO toolguard_hook config of its own, but user-level
+   ~/.claude/toolguard_hook.toml exists -> migrate should CREATE
+   project_root/.claude/toolguard_hook.toml, NOT target user file.
+   **THIS IS THE BUG - must FAIL against current code.**
+3. project_root resolves to home dir itself (find_project_root fallback), user-level
+   toolguard_hook.toml exists there -> migrate targets that existing file (project
+   == user collapses correctly). Guard - likely already passes.
+4. Neither project nor user toolguard_hook config exists anywhere -> migrate
+   creates project_root/.claude/toolguard_hook.toml. Guard - likely already passes.
+
+## Fixture guidance
+- Reuse existing end-to-end migrate() invocation pattern already in
+  test/unit/test_migration.py (large file, 1600+ lines) - look at
+  TestBackupCreation and any existing migrate()-level integration tests first.
+- migrate() signature per migrate_permissions.py::main(): (project_root, dry_run,
+  auto_sort, backup_dir).
+- Need to patch Path.home() to point at a separate temp "home" dir distinct from
+  project_root temp dir - check how test_migration.py / test_config.py already
+  mock/patch home directory resolution.
+
+## Success criteria
+- Full suite run: `uv run python -m unittest discover -s test -t .`
+- All pre-existing tests pass.
+- Only new bug-exposing test (scenario 2) fails, with clear assertion diff showing
+  wrong target path chosen (not an exception).
+- Report back which tests are new/failed/why, wait for explicit approval before
+  GREEN phase.
+
+--- ARCHIVED (stale, prior task) ---
+
 # Coder Latest Task Recall (TOO-15: project-root marker consolidation)
 
 Started: 2026-07-11 08:19
@@ -65,3 +172,51 @@ When done (green): basic-memory report (project 'toolguard', tag TOO-15) with fi
 
 ## Baseline
 Full suite before starting: 1377 tests, OK (2026-07-11 08:19).
+
+
+## RED phase result (2026-07-16, completed)
+
+Added `TestMigrationTargetLevel` class (4 new tests) to
+`test/unit/test_migration.py`, appended before the `if __name__ == "__main__"`
+block, right after `TestMigrationWithRedundantPatterns`. No production code
+touched (`toolguard/scripts/migrate_permissions.py`, `toolguard/config.py`
+untouched).
+
+Tests added (all patch `pathlib.Path.home` to an isolated temp dir, distinct
+from `project_root`, to avoid leaking the real dev machine's `~/.claude`):
+
+1. `test_migration_targets_project_own_existing_config_not_user_level` - PASSES
+   (guard). Project has own toolguard_hook.toml + different user-level one exists
+   -> migrate targets project's own file, user file untouched.
+2. `test_migration_creates_project_config_instead_of_using_user_level` -
+   **FAILS against current code (the bug)**. Project has no toolguard_hook of its
+   own; user-level `~/.claude/toolguard_hook.toml` exists -> current code writes
+   into the user file instead of creating
+   `project_root/.claude/toolguard_hook.toml`. Failure:
+   `AssertionError: False is not true : migrate() must create a project-level
+   toolguard_hook.toml rather than silently writing into the user-level config`
+   -- clean assertion mismatch, not an exception.
+3. `test_migration_project_root_equal_to_home_targets_the_shared_config` - PASSES
+   (guard). project_root == home dir (single shared .claude) -> targets that file.
+4. `test_migration_creates_project_config_when_neither_level_has_one` - PASSES
+   (guard). Neither level has a config -> creates project-level file.
+
+Full suite verification (baseline vs with new tests, via file-copy compare, NOT
+git stash -- git write ops are prohibited for the agent):
+- Baseline (original test_migration.py, restored via `git show HEAD:...` copy,
+  no git write commands used): 1431 tests, OK.
+- With new tests: 1435 tests, 1 failure (exactly test #2 above), rest pass.
+
+`uv run ruff check test/unit/test_migration.py` and
+`uv run python -m py_compile test/unit/test_migration.py` both clean. No
+async/threading/local-import anti-patterns introduced.
+
+Only file changed by this task: `test/unit/test_migration.py` (+193 lines, pure
+addition). Other dirty files in the tree (AGENTS.md, docs/*, pyproject.toml,
+uv.lock, docs/gh-cli-rules-example.toml) were already modified before this task
+started (per session's initial git status) and were not touched.
+
+STATUS: RED phase complete. Awaiting explicit approval before GREEN phase
+(implementing the fix in migrate_permissions.py, scoping the existing-file
+search loop to only `config_files` entries whose containing directory is
+`project_root / ".claude"`).

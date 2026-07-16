@@ -1159,6 +1159,99 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                 "ask",
                             )
 
+    def test_permission_mode_from_hook_input_is_recorded_on_the_logged_decision(self):
+        """
+        Given a real Configuration and a hook input that includes Claude
+        Code's own 'permission_mode' field
+        When main() processes an unmatched Bash invocation (resolves to 'ask')
+        Then log_command is called with that exact permission_mode value --
+        recorded for diagnosis only, it must not change the verdict itself
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /tmp"},
+            "hook_event_name": "PreToolUse",
+            "permission_mode": "default",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command") as mock_log:
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "ask",
+                            )
+                            mock_log.assert_called_once()
+                            self.assertEqual(
+                                mock_log.call_args.kwargs["permission_mode"],
+                                "default",
+                            )
+
+    def test_missing_permission_mode_in_hook_input_logs_none(self):
+        """
+        Given a hook input with NO 'permission_mode' field at all (older
+        Claude Code versions may omit it)
+        When main() processes an unmatched Bash invocation
+        Then log_command is called with permission_mode=None rather than
+        raising -- the field is optional, never required
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /tmp"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO):
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command") as mock_log:
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            mock_log.assert_called_once()
+                            self.assertIsNone(
+                                mock_log.call_args.kwargs["permission_mode"]
+                            )
+
     def test_bash_takeover_enabled_default_no_match_fallback_asks_via_main(self):
         """
         Given a real Configuration with takeover_mode enabled and NO
@@ -1727,7 +1820,12 @@ class TestLogAllowedCommand(unittest.TestCase):
             "git status", "Command matches allow pattern: git *", "main", {}
         )
         mock_log.assert_called_once_with(
-            "git status", "executed", matched_rule="git *", extra_info="main", config={}
+            "git status",
+            "executed",
+            matched_rule="git *",
+            extra_info="main",
+            config={},
+            permission_mode=None,
         )
 
     @patch("toolguard.hook.log_command")
@@ -1741,10 +1839,20 @@ class TestLogAllowedCommand(unittest.TestCase):
         _log_allowed_command("git status && git log", reason, "main", {})
         self.assertEqual(mock_log.call_count, 2)
         mock_log.assert_any_call(
-            "git status", "executed", matched_rule="git *", extra_info="main", config={}
+            "git status",
+            "executed",
+            matched_rule="git *",
+            extra_info="main",
+            config={},
+            permission_mode=None,
         )
         mock_log.assert_any_call(
-            "git log", "executed", matched_rule="git *", extra_info="main", config={}
+            "git log",
+            "executed",
+            matched_rule="git *",
+            extra_info="main",
+            config={},
+            permission_mode=None,
         )
 
     @patch("toolguard.hook.log_command")
@@ -1765,6 +1873,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             matched_rule="git *",
             extra_info="sub-agent",
             config={},
+            permission_mode=None,
         )
         mock_log.assert_any_call(
             "cat file",
@@ -1772,6 +1881,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             matched_rule="cat *",
             extra_info="sub-agent",
             config={},
+            permission_mode=None,
         )
         mock_log.assert_any_call(
             "grep pat",
@@ -1779,6 +1889,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             matched_rule="grep *",
             extra_info="sub-agent",
             config={},
+            permission_mode=None,
         )
 
 

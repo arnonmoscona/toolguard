@@ -22,6 +22,7 @@ def log_command(
     config: Optional[dict] = None,
     matched_rule: Optional[str] = None,
     note: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> None:
     """
     Log command execution to file if logging is enabled.
@@ -44,6 +45,13 @@ def log_command(
             'ask' verdict was reached). Rendered under its own field, distinct
             from ``violated_rules``, so an 'ask' outcome is never mislabeled as
             a rule violation.
+        permission_mode: Claude Code's own ``permission_mode`` field from the hook
+            input (e.g. ``'default'``, ``'plan'``, ``'auto'``/similar), when present.
+            Toolguard's ``ask``/``allow``/``deny`` verdict is independent of this --
+            it never changes the decision -- but recording it makes it possible to
+            later tell whether Claude Code's own mode (e.g. an auto-mode override of
+            a hook ``ask``, see anthropics/claude-code changelog v2.1.211) was a
+            factor in what actually happened to a command after toolguard decided.
     """
     # Check if logging is enabled (backward compatibility with CHECKED_BASH_LOGGING_ON)
     if config is not None:
@@ -132,6 +140,8 @@ def log_command(
                     entry["note"] = note
                 if extra_info:
                     entry["extra_info"] = extra_info
+                if permission_mode:
+                    entry["permission_mode"] = permission_mode
                 f.write(json.dumps(entry) + "\n\n")
             else:
                 # Markdown format (default)
@@ -144,6 +154,8 @@ def log_command(
                     f.write(
                         f"- **Violated Rules**: {', '.join(f'`{rule}`' for rule in violated_rules)}\n"
                     )
+                if permission_mode:
+                    f.write(f"- **Permission Mode**: `{permission_mode}`\n")
                 if note:
                     # A non-violation note (e.g. WHY an 'ask' verdict was
                     # reached) -- deliberately rendered under its own field,

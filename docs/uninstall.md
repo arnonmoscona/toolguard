@@ -52,6 +52,28 @@ original file, a guess can silently restore the wrong point in its history.
 
 ## Step 2 -- Replay the reverses, in reverse order
 
+**Check this FIRST, before attempting any reverse: is takeover currently active?** If so, expect
+these specific teardown actions to run WITHOUT a prompt -- installs from this runbook seed a fixed
+set of uninstall-readiness `allow` rules in Phase 4 (`cd` navigation, restoring native settings,
+running `uv tool uninstall`, and removing toolguard's own config/skill files), specifically so
+these actions are never hard-blocked and always complete. This is deliberate: these are narrow,
+single-purpose, literal patterns, seeded as `allow` (not `ask`) rather than gated behind a prompt,
+because by the time you are running this file the user has already given consent by asking for the
+uninstall in the first place -- and an `ask` verdict was observed NOT reliably reaching a prompt in
+a real install, so `ask` alone could not actually guarantee completion.
+
+**If instead your own governed tool calls are hard-BLOCKED for editing `~/.claude/settings.json`,
+deleting `toolguard_hook.toml`, or running `uv tool uninstall toolguard`**, the install you are
+tearing down likely predates the uninstall-readiness seeding (an older install, or one where Phase
+4 step 3 was skipped) -- check `toolguard-audit`'s self-permission section to confirm which rules
+are actually missing. This is not a bug; it is the same fail-closed behavior takeover mode is
+supposed to have when nothing permits an action. Do not thrash trying each reverse and discovering
+the block ad hoc. Instead, tell the user up front that teardown needs a **hand-off**: ask them to
+run the remaining reverses themselves (e.g. via the `!` prefix in Claude Code, which executes
+outside your governed tool layer), or walk them through running the commands directly. Once the
+hook registration itself is reversed (restoring the pre-takeover `settings.json`), governance drops
+and your own tools work normally again for anything left in the list.
+
 Work top-down through the reverses (most recent action undone first). The typical order:
 
 1. **Installed skills** -- remove `~/.claude/skills/toolguard-security-audit/` and
@@ -135,6 +157,18 @@ Confirm toolguard no longer governs:
   the logs; if takeover was on, commands are once again handled by Claude's native
   permissions).
 
+**Diff the final `settings.json`/`settings.local.json` against the EARLIEST backup in
+`~/.toolguard/backups/`, not just against "the hooks are gone."** The earliest backup (lowest
+timestamp for that filename, made in Phase 3 before any toolguard edit) is the true pristine
+state. Restoring "a" backup is not the same as restoring "the first" one -- several backups of
+the same file can exist (see the Step 1 note on backup naming), and any native allow rule added
+along the way (e.g. `Bash(toolguard-install:*)`, `Bash(toolguard-migrate:*)`, or any other
+pre-approval added mid-session) must not survive into the final file. Compare the two files; if
+anything present in the final file is NOT in that earliest backup, it is leftover from this
+session and should be removed, not left behind as silent scope creep. If you already restored the
+earliest backup directly (rather than hand-editing), this check should trivially pass -- treat a
+mismatch as a sign a later step overwrote the restore, and investigate rather than ignore it.
+
 Report what was removed and what (if anything) was intentionally kept.
 
 ---
@@ -160,9 +194,10 @@ Follow **[install.md](install.md#phase-t----trace-dump-and-issue-reporting-offer
 
 ## Fallback -- no journal available
 
-If there is no usable journal, do a careful best-effort removal, confirming each step. **If you
-need to restore from `~/.toolguard/backups/` without a journal entry pointing at the exact file,
-do not guess.** A single original file (e.g. `settings.json`) may have several backups from
+If there is no usable journal, do a careful best-effort removal, confirming each step. **The same
+takeover hand-off note from Step 2 applies here too** -- check whether takeover is active before
+assuming your own tools can perform these steps. **If you need to restore from
+`~/.toolguard/backups/` without a journal entry pointing at the exact file, do not guess.** A single original file (e.g. `settings.json`) may have several backups from
 different points in time, including same-second collisions disambiguated with a `-2`, `-3`, ...
 suffix (see the note in Step 1) -- list every candidate for that filename's stem, sorted by their
 embedded timestamp, and show the **full list** to the user so they pick the right one, rather

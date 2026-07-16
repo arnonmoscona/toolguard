@@ -52,16 +52,21 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 Examples:
   # Preview changes without making them
-  uv run python -m toolguard.scripts.migrate_permissions --dry-run
+  toolguard-migrate --dry-run
 
   # Migrate with default settings
-  uv run python -m toolguard.scripts.migrate_permissions
+  toolguard-migrate
 
   # Migrate without auto-sorting
-  uv run python -m toolguard.scripts.migrate_permissions --no-sort
+  toolguard-migrate --no-sort
 
   # Use custom backup directory
-  uv run python -m toolguard.scripts.migrate_permissions --backup-dir /tmp/backups
+  toolguard-migrate --backup-dir /tmp/backups
+
+Note: this module can also be run as `uv run python -m
+toolguard.scripts.migrate_permissions`, but only from inside a local toolguard
+checkout -- after `uv tool install`, prefer the `toolguard-migrate` console
+script shown above, which works from any directory.
         """,
     )
 
@@ -740,20 +745,43 @@ def migrate(
                     print(f"    - {pattern}")
                 print()
 
-    # Find target config file (prefer TOML, create if none exists)
+    # Find target config file (prefer TOML, create if none exists). The write
+    # target must always be project_root's OWN .claude directory -- never an
+    # existing toolguard_hook file discovered at a different level (e.g. an
+    # ancestor project or the user's home ~/.claude). config_files mixes
+    # project- and user-level entries in one priority-ordered list (see
+    # discover_config_files), so scanning it unfiltered would silently widen
+    # migration scope from "this project" to "the user's global config" when
+    # the project has no toolguard_hook config of its own yet (TOO-15).
     target_config_path = None
     target_format = None
+    project_claude_dir = project_root / ".claude"
+    # discover_config_files() internally re-resolves the project root (see
+    # find_project_root -> resolve_project_root), so entries it returns carry
+    # a *resolved* directory even when the project_root passed into migrate()
+    # here is not (e.g. through a symlinked tmp path). Compare resolved forms
+    # so the scoping check is correct regardless of that discrepancy.
+    resolved_project_claude_dir = project_claude_dir.resolve()
 
-    # Check for existing toolguard config files
+    # Check for an existing toolguard config file, restricted to project_root's
+    # own .claude directory. Entries from any other directory (ancestor or
+    # user-level) are ignored here -- discover_config_files() itself is left
+    # untouched since it is relied on elsewhere for its intentional
+    # multi-level (project + ancestor + user) priority behaviour.
     for file_path, source_type, file_format in config_files:
-        if source_type == "toolguard_hook":
-            target_config_path = file_path
-            target_format = file_format
-            break
+        if source_type != "toolguard_hook":
+            continue
+        if file_path.parent.resolve() != resolved_project_claude_dir:
+            continue
+        target_config_path = file_path
+        target_format = file_format
+        break
 
-    # If no toolguard config exists, create .claude/toolguard_hook.toml
+    # If no toolguard config exists at the project level, create
+    # project_root/.claude/toolguard_hook.toml -- never fall back to an
+    # existing file at a different directory.
     if target_config_path is None:
-        target_config_path = project_root / ".claude" / "toolguard_hook.toml"
+        target_config_path = project_claude_dir / "toolguard_hook.toml"
         target_format = "toml"
         print(f"No toolguard config found. Will create: {target_config_path}")
     else:

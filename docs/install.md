@@ -98,7 +98,8 @@ narrower was asked for.
 - [ ] Pre-approve `Bash(toolguard-install:*)` once to cut prompt noise (see the helper section)
 - [ ] **Phase 4** write the base config (`write-config`), **register hooks** (`register-hooks` =
       go-live), then immediately **seed self-permissions** (`seed-self-perms`) -- unconditional on
-      takeover choice; toolguard-audit/toolguard-maintain get invoked from Phase 6 onward
+      takeover choice; toolguard-audit/toolguard-maintain get invoked from Phase 6 onward; this
+      same step also seeds the uninstall-readiness rules so a later uninstall never hard-blocks
 - [ ] **Phase 5** skills (ask) -- persistent install uses `install-skills`, not an ad hoc clone/copy
 - [ ] **Phase 6** validate
 - [ ] **Phase 7** migration (optional) -- this is the "**move** your rules" step; discover
@@ -110,7 +111,8 @@ narrower was asked for.
 - [ ] **Phase 10** enable takeover (only if chosen) -- offer secret protections
       (`seed-hard-deny`, never hand-composed); then `enable-takeover`, recommending `ask` as the
       starting fallback (not `allow_with_warning`); describe the posture in plain language; present
-      `deny` as an option, don't push it
+      `deny` as an option, don't push it; remind the user that new rules should go into toolguard's
+      own config from now on (10.4)
 - [ ] **Wrap-up** summary
 - [ ] **(MUST)** Offer the **session-trace dump** (Phase T.1) -- even on a clean install; do not end
       the conversation without having offered it
@@ -396,14 +398,30 @@ tool calls, so do it **last**, after the config it will read is already on disk.
      a blanket allow, so the model cannot silently mutate the security config).
    - Read/Write/Edit access to `~/.toolguard/**` (the install journal and the decision ledger
      live there).
+   - **Uninstall-readiness rules**, so a LATER uninstall never hits a hard block: `Bash(cd:*)` ->
+     **allow** (harmless navigation -- `cd` cannot execute code, and toolguard's parser already
+     checks any command substitution embedded in its argument on its own merits); plus **allow**
+     rules for restoring the native settings file (`Write`/`Edit` on its exact path), running
+     `uv tool uninstall toolguard`, and removing toolguard's own config and skill files. A real
+     install hit exactly this: with takeover active and none of these rules yet in place, the
+     agent's own teardown tool calls were hard-blocked, forcing an out-of-band hand-off instead of
+     a prompt. Seeding these now -- before takeover is ever enabled -- guarantees uninstall always
+     completes, regardless of the `no_match_fallback` chosen later in Phase 10. **These are `allow`,
+     not `ask`** -- a deliberate exception to the "mutating tool -> ask" principle above, because an
+     `ask` verdict was observed NOT reliably reaching a prompt during a real install (root cause
+     still under investigation), so `ask` alone cannot actually guarantee uninstall completes.
+     `allow` is immune to that failure mode, and every pattern here is a literal, single-purpose
+     command or exact file path (not a wildcard) -- by the time any of them would fire, the user has
+     already given explicit consent by starting the uninstall conversation in the first place.
 
    These come from toolguard's single source of truth for self-permissions
-   (`toolguard.tools.self_permission`); if a skill is installed you can also let it compute
-   exactly which are missing. **Propose them explicitly, explain each, and add them only with
-   consent** -- they are not invented user allow-rules, just the minimum for toolguard's own
-   tooling to keep working. Once the user consents, add them in one command:
+   (`toolguard.tools.self_permission` and `toolguard.tools.uninstall_readiness`); if a skill is
+   installed you can also let it compute exactly which are missing. **Propose them explicitly,
+   explain each, and add them only with consent** -- they are not invented user allow-rules, just
+   the minimum for toolguard's own tooling (and its own later removal) to keep working. Once the
+   user consents, add them all in one command:
    `toolguard-install seed-self-perms --scope <user|project> [--project-dir <path>]` -- it reads
-   that same source of truth, adds exactly those rules (idempotently -- a second run is a no-op),
+   both sources of truth, adds exactly those rules (idempotently -- a second run is a no-op),
    backs up the config first, and journals the change with its reverse.
 
 If the helper does not fit (an unusual settings layout, a manager other than `uv`, hand-off mode),
@@ -554,10 +572,14 @@ Apply creates a timestamped backup automatically. Journal each applied migration
 restore that backup). See [config-sync.md](config-sync.md) for the full behavior.
 
 **Confirm where the rules will land -- do not let project-root detection decide silently.**
-toolguard finds a project root by walking up for a `.git`/`pyproject.toml` marker. A directory
-without such a marker (a bare `~/projects` holding many repos is a common case) is NOT treated as
-a project, so its migrated rules cascade to the **user level** (`~/.claude/toolguard_hook.toml`)
-instead of a project `.claude/`. That may not be what the user expects -- user-level rules apply
+`toolguard-migrate` always targets the resolved project's own `.claude` directory -- creating a
+project-level `toolguard_hook.toml` there if one does not exist yet, never an existing file at a
+different level (e.g. an ancestor project's or the user's `~/.claude`), even if one already
+exists elsewhere. The one case where this legitimately lands at **user level** is when
+`toolguard` itself finds no project marker (`.git`/`pyproject.toml`/`.claude/CLAUDE.md`) above the
+target directory -- a bare `~/projects` holding many repos is a common case -- so project-root
+resolution falls back to the home directory itself, and "the project's own `.claude`" and
+"`~/.claude`" are the same place. That may not be what the user expects -- user-level rules apply
 everywhere. Before applying, tell the user which level each project's rules will migrate to, and
 if a directory was classified as "not a project," say so and let them confirm or point you at the
 real root. This is an important decision (see Principles); don't auto-classify and proceed.
@@ -570,6 +592,36 @@ dry-run proposing to move ungoverned-tool rules, that is a bug -- do not apply i
 rules where they are.
 
 If they decline the whole step, note that migration can be done anytime later, the same way.
+
+**Avoid `cd`-ing into the toolguard source checkout, or into ANY directory with its own,
+unrelated toolguard governance, and be aware `cd` changes persist across Bash calls.** If you ever
+run a command from inside a local toolguard checkout (`git clone`d for inspection, not the normal
+`uv tool install` path), the Bash tool's working directory stays there for every subsequent call
+in the session -- and running an installed console script (`toolguard-audit`, `toolguard-migrate`,
+...) from inside that checkout can shadow the `uv tool install`-managed package with the
+checkout's own `toolguard/` directory, producing a confusing `ModuleNotFoundError: No module named
+'toolguard.tools'` that has nothing to do with the install itself. **A second, separate risk of
+the same `cd`:** if that directory (or ANY directory you `cd` into) happens to have its own,
+unrelated, more specific project-level `toolguard_hook.toml` -- e.g. a user's separate real
+development checkout of a project they already govern with toolguard -- that config silently wins
+over the install/uninstall session's own config the moment cwd shifts there, since project-level
+is always more specific than user-level. A command that behaves correctly at the user level can
+then be denied (or otherwise resolve differently) for reasons that have nothing to do with the
+install you are working on. Prefer `(cd <dir> && command)` in a subshell, or pass an absolute path
+to the console script's own `--dir`/similar flag, over a bare `cd` that leaves the shell's working
+directory changed for later calls -- and if a command behaves unexpectedly right after a `cd`,
+check whether you have wandered into a directory with its own separate governance before assuming
+a toolguard defect.
+
+**Plain `cd` navigation itself is pre-permitted by default from Phase 4 onward** (part of the
+uninstall-readiness rules seeded in Phase 4, step 3) -- `cd` cannot execute code on its own, and
+toolguard's parser independently extracts and checks any command substitution embedded in its
+argument (e.g. `cd $(...)`), so this does not weaken enforcement. If a bare `cd` is still denied
+despite that, do not assume a toolguard bug -- it is more likely one of the two things above
+(shadowing by an unrelated governance layer, or an install predating the uninstall-readiness
+seeding); check `toolguard-audit`'s self-permission section and the actual `logs/toolguard-*.md`
+entry for that command (its recorded status -- `executed`/`ask`/`refused` -- is authoritative,
+never guess from a paraphrased transcript) before concluding anything.
 
 ---
 
@@ -676,6 +728,16 @@ confirm top-level `takeover_active` is now **true**, `sources` are as expected, 
 self-permission probes resolve as intended (audit allowed, maintain ask). Run the takeover audit
 if available and address any findings (e.g. an uncovered blanket allow). Report the result.
 
+**10.4 Recommend where future rules should go.** Now that takeover is active, tell the user: from
+here on, new permission rules should go into toolguard's own config (`toolguard_hook.toml` /
+`.local.toml`), not hand-added to Claude's native `settings.json` / `settings.local.json`. Be
+precise about *why*, since both technically still work -- toolguard reads native settings.json as
+one of its config sources regardless of takeover, so a rule added there is still honored. The
+reason to prefer toolguard's own file going forward is **consistency and maintainability**: one
+place to look, and toolguard's regex/glob/native pattern extensions are only available there.
+Frame this as a recommendation, not a restriction -- do not tell them native edits are unsafe or
+will stop working, because they will not.
+
 ---
 
 ## Wrap-up
@@ -689,6 +751,9 @@ Summarize what was done (scope, install method, whether takeover was enabled and
   recommended `ask`, "...is currently allowed but logged with a warning") -- not the raw config
   token. If they might tighten it later, frame `deny` as an optional preference (stricter than
   Claude's own prompt-on-unmatched default), per Phase 10.2 -- do not push it.
+- If takeover was enabled, remind them (per Phase 10.4): new rules from now on should go into
+  toolguard's own config, not hand-added to Claude's native settings -- both still work, but one
+  place is easier to keep consistent.
 - The full record is in `~/.toolguard/install-journal.md`, and `~/.toolguard/README.txt`
   explains the directory. Both are kept indefinitely -- even after an uninstall.
 - They can re-run any offered step (migration, audit, maintenance, or enabling takeover)
@@ -774,6 +839,14 @@ call with its result (allows / denies / warnings, verbatim strings); the exact r
 any problem; a clear separation of "the agent did X" vs "toolguard did Y" (so agent mistakes are
 not misread as toolguard bugs); and the final state. This is the same record that makes a good
 bug report.
+
+**List every individual permission/consent prompt separately, not just as a phase summary.** If
+the session felt noisy (more confirmation dialogs than expected), a phase-level summary ("Phase 4
+ran") hides exactly the detail needed to diagnose it. Include a short ordered list of each
+distinct prompt/consent moment (native Claude permission dialog, `AskUserQuestion`, or a toolguard
+`ask` verdict) with the exact command/action it was for -- so a later reviewer can tell which ones
+were deliberate checkpoints (by design) versus avoidable repeats of something already covered by
+an earlier allow rule.
 
 **Always check `~/.toolguard/errors/` and fold in anything there, verbatim.** Any unexpected
 exception in the hook (a parse failure, a config load error, anything the hook itself did not

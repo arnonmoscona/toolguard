@@ -424,5 +424,110 @@ class TestMatchedRuleLogging(unittest.TestCase):
             )
 
 
+class TestPermissionModeLogging(unittest.TestCase):
+    """
+    Test the permission_mode parameter in log entries (TOO-15: recorded so a
+    later investigation can tell whether Claude Code's own mode was a factor
+    in what happened to a command after toolguard decided -- never affects
+    the decision itself).
+    """
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        """Clean up after tests."""
+        self.env_patcher.stop()
+
+    def test_permission_mode_in_markdown_format(self):
+        """
+        Given a command logged with a permission_mode
+        When the markdown log is written
+        Then it contains a Permission Mode field showing the mode as inline code
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "cd /tmp", "ask", note="no match", log_dir=log_dir, permission_mode="default"
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn("**Permission Mode**", content)
+            self.assertIn("`default`", content)
+
+    def test_permission_mode_in_jsonlines_format(self):
+        """
+        Given jsonlines format and a command logged with a permission_mode
+        When the entry is parsed
+        Then its permission_mode field equals the supplied mode
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
+                log_command(
+                    "cd /tmp",
+                    "ask",
+                    note="no match",
+                    log_dir=log_dir,
+                    permission_mode="default",
+                )
+
+                expected_filename = (
+                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+                )
+                content = (log_dir / expected_filename).read_text().strip()
+                lines = [line for line in content.split("\n") if line.strip()]
+                entry = json.loads(lines[0])
+
+                self.assertEqual(entry["permission_mode"], "default")
+
+    def test_no_permission_mode_when_not_provided(self):
+        """
+        Given a command logged without a permission_mode
+        When the markdown log is written
+        Then it contains no Permission Mode field
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command("git status", "executed", log_dir=log_dir)
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertNotIn("Permission Mode", content)
+
+    def test_no_permission_mode_in_jsonlines_when_not_provided(self):
+        """
+        Given jsonlines format and a command logged without a permission_mode
+        When the entry is parsed
+        Then it has no permission_mode key
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
+                log_command("git status", "executed", log_dir=log_dir)
+
+                expected_filename = (
+                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+                )
+                content = (log_dir / expected_filename).read_text().strip()
+                lines = [line for line in content.split("\n") if line.strip()]
+                entry = json.loads(lines[0])
+
+                self.assertNotIn("permission_mode", entry)
+
+
 if __name__ == "__main__":
     unittest.main()

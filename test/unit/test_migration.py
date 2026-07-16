@@ -1758,5 +1758,198 @@ deny = []
             self.assertEqual(exit_code, 0)
 
 
+class TestMigrationTargetLevel(unittest.TestCase):
+    """
+    Test that migrate() always writes to the resolved project_root's OWN
+    ``.claude`` directory, never silently falling through to an existing
+    toolguard_hook file at a DIFFERENT directory (e.g. the user's home
+    ``~/.claude``) just because ``discover_config_files`` happened to return
+    one from a less-specific level (TOO-15, real-machine repro 2026-07-16).
+
+    Every test here patches ``pathlib.Path.home`` to an isolated temporary
+    directory, distinct from ``project_root``, so the real developer machine's
+    ``~/.claude`` (which may itself have toolguard configs, per the project's
+    own dogfooded global install) can never leak into these assertions.
+    """
+
+    def test_migration_targets_project_own_existing_config_not_user_level(self):
+        """
+        Given a project with its OWN existing toolguard_hook.toml AND a DIFFERENT,
+        distinct user-level toolguard_hook.toml also present
+        When migrate runs
+        Then the new pattern is added to the PROJECT's own toolguard_hook.toml and the
+        user-level file is left completely unchanged
+        """
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as home_dir:
+            project_root = Path(tmpdir)
+            (project_root / ".git").mkdir()
+            claude_dir = project_root / ".claude"
+            claude_dir.mkdir()
+
+            project_toml_path = claude_dir / "toolguard_hook.toml"
+            project_toml_path.write_text(
+                '[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n'
+            )
+
+            home_claude_dir = Path(home_dir) / ".claude"
+            home_claude_dir.mkdir()
+            user_toml_path = home_claude_dir / "toolguard_hook.toml"
+            user_toml_original = (
+                '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+            )
+            user_toml_path.write_text(user_toml_original)
+
+            settings_path = claude_dir / "settings.local.json"
+            settings = {
+                "permissions": {
+                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                    "deny": [],
+                    "ask": [],
+                }
+            }
+            with open(settings_path, "w") as f:
+                json.dump(settings, f)
+
+            with patch("pathlib.Path.home", return_value=Path(home_dir)):
+                exit_code = migrate(project_root)
+
+            project_content = project_toml_path.read_text()
+            self.assertIn("Bash(ls:*)", project_content)
+
+            user_content = user_toml_path.read_text()
+            self.assertNotIn("Bash(ls:*)", user_content)
+            self.assertEqual(user_content, user_toml_original)
+
+            self.assertEqual(exit_code, 0)
+
+    def test_migration_creates_project_config_instead_of_using_user_level(self):
+        """
+        Given a project with NO toolguard_hook config of its own, but a user-level
+        ~/.claude/toolguard_hook.toml DOES exist
+        When migrate runs
+        Then it CREATES project_root/.claude/toolguard_hook.toml and adds the new
+        pattern there, WITHOUT touching the existing user-level file
+
+        This pins down the actual bug: migrate() must not scan the whole,
+        multi-level discover_config_files() list for the first existing
+        toolguard_hook file -- it must restrict target selection to
+        project_root's own .claude directory.
+        """
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as home_dir:
+            project_root = Path(tmpdir)
+            (project_root / ".git").mkdir()
+            claude_dir = project_root / ".claude"
+            claude_dir.mkdir()
+
+            home_claude_dir = Path(home_dir) / ".claude"
+            home_claude_dir.mkdir()
+            user_toml_path = home_claude_dir / "toolguard_hook.toml"
+            user_toml_original = (
+                '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+            )
+            user_toml_path.write_text(user_toml_original)
+
+            settings_path = claude_dir / "settings.local.json"
+            settings = {
+                "permissions": {
+                    "allow": ["Bash(ls:*)"],
+                    "deny": [],
+                    "ask": [],
+                }
+            }
+            with open(settings_path, "w") as f:
+                json.dump(settings, f)
+
+            with patch("pathlib.Path.home", return_value=Path(home_dir)):
+                exit_code = migrate(project_root)
+
+            project_toml_path = claude_dir / "toolguard_hook.toml"
+            self.assertTrue(
+                project_toml_path.exists(),
+                "migrate() must create a project-level toolguard_hook.toml "
+                "rather than silently writing into the user-level config",
+            )
+            project_content = project_toml_path.read_text()
+            self.assertIn("Bash(ls:*)", project_content)
+
+            user_content = user_toml_path.read_text()
+            self.assertNotIn("Bash(ls:*)", user_content)
+            self.assertEqual(user_content, user_toml_original)
+
+            self.assertEqual(exit_code, 0)
+
+    def test_migration_project_root_equal_to_home_targets_the_shared_config(self):
+        """
+        Given project_root itself resolves to the home directory (project and user
+        level collapse to the same .claude directory), with an existing
+        toolguard_hook.toml there
+        When migrate runs
+        Then the new pattern is added to that single shared toolguard_hook.toml (the
+        project-vs-user distinction naturally collapses, no special-casing needed)
+        """
+        with TemporaryDirectory() as home_dir:
+            project_root = Path(home_dir)
+            claude_dir = project_root / ".claude"
+            claude_dir.mkdir()
+
+            toml_path = claude_dir / "toolguard_hook.toml"
+            toml_path.write_text(
+                '[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n'
+            )
+
+            settings_path = claude_dir / "settings.local.json"
+            settings = {
+                "permissions": {
+                    "allow": ["Bash(ls:*)"],
+                    "deny": [],
+                    "ask": [],
+                }
+            }
+            with open(settings_path, "w") as f:
+                json.dump(settings, f)
+
+            with patch("pathlib.Path.home", return_value=Path(home_dir)):
+                exit_code = migrate(project_root)
+
+            content = toml_path.read_text()
+            self.assertIn("Bash(ls:*)", content)
+
+            self.assertEqual(exit_code, 0)
+
+    def test_migration_creates_project_config_when_neither_level_has_one(self):
+        """
+        Given neither the project nor the user level has an existing toolguard_hook
+        config anywhere
+        When migrate runs
+        Then it creates project_root/.claude/toolguard_hook.toml with the new pattern
+        """
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as home_dir:
+            project_root = Path(tmpdir)
+            (project_root / ".git").mkdir()
+            claude_dir = project_root / ".claude"
+            claude_dir.mkdir()
+
+            settings_path = claude_dir / "settings.local.json"
+            settings = {
+                "permissions": {
+                    "allow": ["Bash(ls:*)"],
+                    "deny": [],
+                    "ask": [],
+                }
+            }
+            with open(settings_path, "w") as f:
+                json.dump(settings, f)
+
+            with patch("pathlib.Path.home", return_value=Path(home_dir)):
+                exit_code = migrate(project_root)
+
+            project_toml_path = claude_dir / "toolguard_hook.toml"
+            self.assertTrue(project_toml_path.exists())
+            content = project_toml_path.read_text()
+            self.assertIn("Bash(ls:*)", content)
+
+            self.assertEqual(exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

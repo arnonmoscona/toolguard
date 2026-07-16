@@ -286,7 +286,7 @@ def check_and_warn_divergence(
         warning_lines.append(f"  ... and {len(all_divergent) - 10} more")
 
     warning_message = "\n".join(warning_lines)
-    corrective_steps = "Consider migrating to toolguard config. Run: uv run python -m toolguard.scripts.migrate_permissions"
+    corrective_steps = "Consider migrating to toolguard config. Run: toolguard-migrate"
 
     # Write to stdout
     print(warning_message, file=sys.stderr)
