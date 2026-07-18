@@ -57,6 +57,7 @@ New to toolguard? Start with the quick-start, then dip into the topic guides as 
 | [Configuration](docs/configuration.md) | Full configuration reference: hook matchers, governed tools, permission patterns, environment variables, the hierarchy/resolution model, and the annotated config template. |
 | [Permission Patterns](docs/permission-patterns.md) | Pattern types (DEFAULT/REGEX/GLOB/NATIVE), file-path patterns, path normalization, and compound / multi-line / heredoc handling (incl. the `__HEREDOC_TO_<sink>__` sentinel). |
 | [Takeover Mode](docs/takeover-mode.md) | The "blanket-allow + toolguard-enforces" mode, its risks, and a complete example. |
+| [Auto-mode with toolguard](docs/auto-mode.md) | Running toolguard underneath Claude Code's own auto-accept / bypass-permissions modes: what still gets enforced, the `allow_with_warning` fallback tradeoff, and how this differs from Takeover Mode. |
 | [Config Sync & Migration](docs/config-sync.md) | Detecting config divergence, migrating patterns into `toolguard_hook.toml`, backups, and session warnings. |
 | [Security Best Practices](docs/security.md) | Blanket-allow risks, recommended deny patterns, backups, and verifying toolguard is actually running. |
 | [Maintenance & Audit Skills](docs/skills.md) | The `toolguard-security-audit` and `toolguard-maintenance` skills: audit your config for risk, and clean up / consolidate / promote rules with per-item consent. |

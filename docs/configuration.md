@@ -318,6 +318,49 @@ All three prefixes work for both command tools (`Bash(...)`,
 `Write(...)`, `Edit(...)`). See [Permission Patterns](permission-patterns.md) for detailed syntax
 and examples.
 
+## No-match fallback
+
+`no_match_fallback` controls what happens when a **governed tool has rules, but a specific
+command or path matches none of them.** (A governed tool with no rules at all always
+resolves to `ask`, regardless of this setting.)
+
+Set it as a **top-level** key in `toolguard_hook.toml` -- not nested inside `[takeover_mode]`
+or any other section:
+
+```toml
+no_match_fallback = "ask"   # "ask" (default) | "deny" | "allow_with_warning"
+```
+
+Recognized values:
+
+- `"ask"` -- prompt, the same as Claude Code's own default. **This is the default** if the
+  key is unset anywhere in the hierarchy.
+- `"deny"` -- fail-closed; block anything that doesn't match an explicit rule.
+- `"allow_with_warning"` -- allow the command but log a warning (`"warn_deny"` is a
+  deprecated alias for this value, still accepted). See
+  [Auto-mode with toolguard](auto-mode.md) for the one case this is actually recommended
+  for -- it is not a general recommendation.
+
+An unrecognized value (a typo, or anything outside the three above) is never propagated as
+configuration -- it silently resolves to the default `"ask"` rather than breaking config
+loading.
+
+**Resolution**: more-specific-wins across the
+[configuration hierarchy](#configuration-hierarchy) -- the first level (most specific) that
+sets the top-level key wins. This applies in **both** takeover and non-takeover modes; it is
+not gated on `takeover_mode.enabled`.
+
+**Legacy alias**: `[takeover_mode].no_match_fallback` (nested inside the takeover-mode
+section) is an older form of the same setting, still accepted for backwards compatibility.
+It is honored **only when no level sets the top-level key anywhere**. If both the top-level
+key and the nested alias are set at any level, **the top-level key wins outright**,
+regardless of which one is more specific. Write new configs with the top-level key.
+
+*(Current caveat: `toolguard-install enable-takeover` -- the subcommand the guided install
+runbook uses to enable takeover mode -- currently writes the nested `[takeover_mode]` form,
+not the preferred top-level key. It still works correctly via the legacy-alias path
+described above; this is noted here for accuracy, not as something you need to work around.)*
+
 ## Verifying configuration
 
 After configuration, restart Claude Code and check the logs:
@@ -445,6 +488,14 @@ additional_supported_tools = [
 # Read ONLY from the project-level config.
 hierarchical_configuration = true
 
+# What to do when a governed tool HAS rules but a command matches none (a tool with no
+# rules at all always resolves to "ask"). A TOP-LEVEL key -- not nested inside
+# [takeover_mode] -- applies in BOTH takeover and non-takeover modes. Options:
+#   "ask" (prompt; DEFAULT), "deny" (fail-closed), "allow_with_warning" (allow + log a
+#   warning; "warn_deny" is a deprecated alias for it). See "No-match fallback" below
+#   for the full explanation, including the legacy [takeover_mode] alias.
+no_match_fallback = "ask"
+
 # ============================================================================
 # TAKEOVER MODE - Claude sees blanket allows, toolguard enforces real rules
 # ============================================================================
@@ -469,11 +520,10 @@ ignored_allow_patterns = [
 # your own additions; no need to re-list the defaults).
 additional_ignored_patterns = []
 
-# What to do when a governed tool HAS rules but a command matches none (a tool with no
-# rules at all always resolves to "ask"). Options:
-#   "ask" (prompt; DEFAULT), "deny" (fail-closed), "allow_with_warning" (allow + log a warning;
-#   "warn_deny" is a deprecated alias for it). This example uses "deny" for a fail-closed posture.
-no_match_fallback = "deny"
+# LEGACY ALIAS for the top-level no_match_fallback key above -- only honored when
+# no level sets the top-level key anywhere. Prefer the top-level key in new
+# configs. See "No-match fallback" below.
+# no_match_fallback = "deny"
 
 # ============================================================================
 # CONFIG SYNC - Automatic migration from settings.local.json

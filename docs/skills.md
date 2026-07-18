@@ -57,11 +57,26 @@ It is deliberately a **conversation, not a one-click cleanup**, because the righ
 the right level for a rule, and whether a "confusing" overlap is actually a bug all
 depend on what *you* intended -- which the tool cannot infer.
 
+Beyond that core clean-up conversation, the skill has real depth worth knowing about: it
+can reason from your **actual usage** (logs and Claude Code transcripts) instead of just
+the rules on paper, **validate a candidate config against that usage before you commit to
+it**, and keep a **persistent decision ledger** so a periodic run stays quiet about anything
+you already settled instead of re-litigating it. Each is covered below, where it fits into
+the flow.
+
 ### What a run looks like
+
+Before any of that: a quick **pre-flight check** runs first, read-only -- is toolguard's own
+install up to date, and are both bundled skills actually present at the scope(s) you use?
+If not, it offers to fix that (`uv tool upgrade`, or installing the missing skill at a scope
+you choose) before continuing. You approve or skip each offer; nothing installs itself.
 
 1. **Gather & analyze.** The skill runs the analyzer and a security audit for evidence,
    then groups every rule -- across `allow`/`ask`/`deny` -- into **command families**
-   (all your `git` rules together, all your `mkdir` rules, and so on).
+   (all your `git` rules together, all your `mkdir` rules, and so on). **Add `--corpus`**
+   and it also harvests real usage evidence from your daily logs and Claude Code
+   transcripts -- what you've actually run, not just what your rules say -- so proposals
+   are grounded in your real workflow rather than guesswork.
 2. **Understand.** It presents an *understanding view*: each family with its rules
    marked `no-change` / `edit` / `consolidate` / `remove` / `new` / `promote`, a plain
    before-and-after, and a short paragraph explaining what it is proposing and why.
@@ -70,7 +85,11 @@ depend on what *you* intended -- which the tool cannot infer.
    that would *broaden* what is allowed, a promotion opportunity) for you to decide.
 3. **Certify.** Before you touch anything, it assembles the resulting config and runs it
    back through the tool -- it must parse, pass the security audit with no new findings,
-   and not change the verdict on commands you have actually run.
+   and not change the verdict on commands you have actually run. You can also certify a
+   candidate config **on its own**, outside a full run -- e.g. one drafted by hand, by
+   another agent, or pulled from source control -- with
+   `toolguard-maintain --replay-candidate DIR`, which replays it against your corpus
+   before you ever adopt it.
 4. **Decide & apply.** It walks the proposal with you family by family -- accept, reject,
    or modify each -- and enacts only what you approve. You can also say "just apply it
    all" if you want to, but that is always your explicit choice, never the default.
@@ -108,7 +127,10 @@ them back next time:
 - Decisions with no rule to attach to (e.g. "don't ever suggest merging this family",
   "don't promote these") are recorded in a small **decision ledger** -- a project one in
   `.claude/toolguard_decisions.json` and a user one in `~/.toolguard/decisions.json`. A
-  periodic run reads it and stays quiet about anything you already declined.
+  periodic run reads it and stays quiet about anything you already declined. You can also
+  inspect or seed the ledger directly, outside a full run: `toolguard-maintain
+  --ledger-show` prints the settled decisions, `--record-decision <file>` appends one, and
+  `--ledger-level user` targets the user-level ledger instead of the project one.
 
 ### `#NOSECURITY`: accepting a risk on purpose
 
@@ -123,7 +145,11 @@ allows -- it is a standing exception the tooling cannot vet for you.
 `toolguard-maintain` prints findings by default (read-only). Its write modes
 (`--apply --write` to enact approved consolidations, `--annotate --write` to add the
 `# toolguard:` comments) refuse to run on a dirty working tree, so a change always stays
-reviewable. Most people never need the CLI directly -- the skill drives it for you.
+reviewable. `--corpus` opts into the usage-evidence harvesting described above;
+`--replay-candidate DIR` validates a staged config on its own; `--ledger-show` /
+`--record-decision` / `--ledger-level` manage the decision ledger directly. Most people
+never need any of this directly -- the skill drives it for you in conversation -- but it's
+there for scripting, or when you want one specific piece without the full conversation.
 
 ---
 

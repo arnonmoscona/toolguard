@@ -111,7 +111,7 @@ command is assembled.
 
    ```bash
    # Dry run first
-   uv run python -m toolguard.scripts.migrate_permissions --dry-run
+   toolguard-migrate --dry-run
 
    # Migration creates an automatic backup, but a manual backup doesn't hurt
    cp .claude/toolguard_hook.toml logs/manual-backup-$(date +%Y-%m-%d).toml
@@ -130,7 +130,7 @@ command is assembled.
 
 ```bash
 # Step 1: See what would change
-uv run python -m toolguard.scripts.migrate_permissions --dry-run
+toolguard-migrate --dry-run
 
 # Step 2: Review output carefully
 # - Are the patterns correct?
@@ -138,7 +138,7 @@ uv run python -m toolguard.scripts.migrate_permissions --dry-run
 # - Similar patterns that should be consolidated?
 
 # Step 3: Execute only if dry-run looks good
-uv run python -m toolguard.scripts.migrate_permissions
+toolguard-migrate
 
 # Step 4: Verify the result
 diff .claude/toolguard_hook.toml logs/config-backups/toolguard_hook-*.toml
@@ -179,17 +179,26 @@ running, the blanket allows are fully exposed.
 
 Toolguard enforces your rules, but a permission system is only as good as the attention you
 give it. Set a routine to review what it logged, what it warned about, what drifted, and
-whether the rules still make sense. The supporting automation (below) cuts the effort -- but,
-as in any security workflow, it assists your review rather than replacing it.
+whether the rules still make sense.
+
+**The fastest way to do this: ask Claude to run the [security-audit](skills.md#security-audit)
+skill.** It runs a deterministic analyzer over your whole config hierarchy -- over-broad allows,
+brittle secret-file protections, unanchored regexes, takeover-mode misconfiguration -- ranked
+by severity, then optionally offers a deeper, judgement-based AI-assisted pass on top. It is
+read-only and does exactly the "rules themselves" and "error & warning" review below in one
+pass, with evidence instead of a raw log dump. The manual facilities in the table are still
+there for scripting, spot-checking a specific log, or when you want the raw signal instead of
+the skill's synthesis -- as in any security workflow, automation assists your review, it does
+not replace your judgment.
 
 | Review (suggested cadence) | What to look for | Where / supporting facility |
 |----------------------------|------------------|-----------------------------|
 | **Resolution log** -- after busy sessions / daily | Unexpected allows or refusals; which level and file authorized each command (the matched rule is logged with its `[level: path]` provenance) | `logs/toolguard-YYYY-MM-DD.md` (or `.jsonlines` for scripting) -- see [logging](architecture.md#logging) |
-| **Error & warning logs** -- regularly | Config errors (e.g. a non-boolean `takeover_mode.enabled`), ungoverned or unsupported tools, both-format (`.toml`+`.json`) conflicts | `logs/toolguard-error-*.md`, `logs/toolguard-warning-*.md`; also surfaced once per session on stderr via [session warnings](config-sync.md#session-warnings) |
-| **Conflicts & divergence** -- every session / periodically | Cross-level allow-over-deny overrides, `takeover_mode.enabled` disagreements, and rules that have drifted into native `settings.local.json` | `logs/toolguard-conflict-*.md` + the **SessionStart conflict-alert hook** (re-reports until resolved); drift via `migrate_permissions --dry-run` -- see [Config Sync](config-sync.md) |
-| **The rules themselves** -- periodically (e.g. monthly) | Over-broad or blanket allows, stale / duplicate / superseded rules, gaps in `[hard_deny]` coverage | `migrate_permissions --dry-run` (duplicate / superset / similarity detection); `auto_sort_on_migrate` for readability; promote critical denies to [`[hard_deny]`](configuration.md#configuration-reference) |
+| **Error & warning logs** -- regularly | Config errors (e.g. a non-boolean `takeover_mode.enabled`), ungoverned or unsupported tools, both-format (`.toml`+`.json`) conflicts | `logs/toolguard-error-*.md`, `logs/toolguard-warning-*.md`; also surfaced once per session on stderr via [session warnings](config-sync.md#session-warnings); the [security-audit skill](skills.md#security-audit) flags config errors too |
+| **Conflicts & divergence** -- every session / periodically | Cross-level allow-over-deny overrides, `takeover_mode.enabled` disagreements, and rules that have drifted into native `settings.local.json` | `logs/toolguard-conflict-*.md` + the **SessionStart conflict-alert hook** (re-reports until resolved); drift via `toolguard-migrate --dry-run` -- see [Config Sync](config-sync.md) |
+| **The rules themselves** -- periodically (e.g. monthly) | Over-broad or blanket allows, stale / duplicate / superseded rules, gaps in `[hard_deny]` coverage | The **[security-audit](skills.md#security-audit)** skill for risk findings; the **[maintenance](skills.md#maintenance)** skill for duplicate/consolidation/promotion proposals (family-grouped, certified before you approve anything); `toolguard-migrate --dry-run` for a lighter-weight duplicate/superset/similarity check; promote critical denies to [`[hard_deny]`](configuration.md#configuration-reference) |
 
-A quick periodic pass:
+A quick periodic pass, if you want the raw signal instead of running the skills:
 
 ```bash
 # What ran / was refused today, with the rule + level that decided each
@@ -201,7 +210,7 @@ tail -n 50 logs/toolguard-warning-$(date +%Y-%m-%d).md
 tail -n 50 logs/toolguard-conflict-$(date +%Y-%m-%d).md
 
 # Rules that drifted into native settings, plus redundant / over-broad rules
-uv run python -m toolguard.scripts.migrate_permissions --dry-run
+toolguard-migrate --dry-run
 ```
 
 **What is automated vs. on you:**
@@ -210,9 +219,11 @@ uv run python -m toolguard.scripts.migrate_permissions --dry-run
   you fix them; configuration problems are written to the error/warning logs and shown once
   per session on stderr; every decision is logged with its matched-rule provenance; conflicts
   are recorded to the conflict log; `auto_migrate` (if enabled) folds drift back on startup.
-- **On you** -- actually reading those logs, running the dry-run review, and deciding whether
-  each accumulated rule should stay, be narrowed, be removed, or be promoted to `[hard_deny]`.
-  No automation makes those judgment calls for you.
+- **Assisted** -- the security-audit and maintenance skills do the analytical work of spotting
+  risky, duplicate, or promotable rules and present it as an evidence-backed proposal.
+- **On you** -- the final call on each finding: accept, narrow, remove, or promote to
+  `[hard_deny]`. Neither skill applies anything without your explicit, per-item approval --
+  no automation makes that judgment call for you.
 
 More automation is planned over time to tighten this loop further; until then, a short
 recurring review is the reliable safeguard.
@@ -229,9 +240,13 @@ read are rules you cannot confidently audit.
   edit.
 - **Consolidate similar rules into fewer regex/glob rules.** A long run of near-identical
   entries (`Bash(git status:*)`, `Bash(git log:*)`, `Bash(git diff:*)`, ...) is better
-  expressed as one anchored pattern, e.g. `Bash([regex]^git (status|log|diff|branch)\b)`. The
-  `migrate_permissions --dry-run` output flags duplicates, supersets, and similar clusters as
-  consolidation candidates (see [Config Sync](config-sync.md#similarity-detection-and-duplicate-removal)).
+  expressed as one anchored pattern, e.g. `Bash([regex]^git (status|log|diff|branch)\b)`. Ask
+  Claude to run the **[maintenance skill](skills.md#maintenance)** for this -- it groups rules
+  into command families, proposes consolidations with a plain before/after, and certifies each
+  proposal (parses, passes the audit, replays cleanly against your own history) before you
+  approve anything. `toolguard-migrate --dry-run` also flags duplicates, supersets, and similar
+  clusters as a lighter-weight check (see
+  [Config Sync](config-sync.md#similarity-detection-and-duplicate-removal)).
   **Consolidate scope, not breadth:** replace several narrow rules with one rule that covers
   exactly the same commands -- do not collapse them into something broader (e.g. `Bash(git:*)`,
   which would also allow `git push` and `git reset --hard`). See
@@ -247,17 +262,21 @@ read are rules you cannot confidently audit.
   project-specific. More-specific-wins still lets a project override a user-level rule when it
   truly needs to (see [the hierarchy](configuration.md#configuration-hierarchy)). A lean,
   project-focused config is easier to review and means fewer places to update a shared rule.
-- **Let Claude help review the rules.** Claude is good at spotting over-broad allows,
-  duplicates, risky patterns, and missing safety denies, and at proposing regex/glob
-  consolidations. Ask it directly, e.g. *"Review `.claude/toolguard_hook.toml`: flag any
-  over-broad or unnecessary allows, duplicates, and missing safety denies, and suggest
-  consolidations -- do not edit, just report."* Treat its output as a second opinion: you make
-  the final call, because the rules are **your** security policy.
+- **Let the security-audit skill review the rules, not just an ad hoc prompt.** Ask Claude to
+  run the **[security-audit skill](skills.md#security-audit)** rather than freehand "review my
+  config" -- it runs a deterministic analyzer first (over-broad allows, duplicates, risky
+  patterns, missing safety denies, ranked by severity), then optionally a deeper judgement-based
+  pass on top, so you get mechanical findings and AI judgement clearly separated instead of one
+  undifferentiated opinion. Treat its output as informed advice, not an automatic fix: you make
+  the final call, because the rules are **your** security policy. A finding you've deliberately
+  accepted can be marked `#NOSECURITY: <reason>` so the audit stops re-flagging it (see
+  [Maintenance & Audit Skills](skills.md)).
 - **Watch for stray rules from hasty permission answers.** A quick "Yes, and don't ask again"
   during a flow can add an allow that is broader than you intended (or that you would not have
   approved on reflection). These land in `settings.local.json` exactly like any other
-  divergence, so when you run `migrate_permissions --dry-run`, scan the newly accumulated
-  allows specifically and drop any you did not mean to grant before folding the rest in.
+  divergence, so when you run `toolguard-migrate --dry-run` (or the maintenance skill), scan the
+  newly accumulated allows specifically and drop any you did not mean to grant before folding
+  the rest in.
 - **Comment your rules to record intent.** TOML supports comments -- use them to note *why* a
   rule exists (and when it was added), especially for `[regex]` patterns and `[hard_deny]`
   entries whose purpose is not obvious from the pattern alone. A rule whose reason has been

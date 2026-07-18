@@ -114,6 +114,13 @@ Claude does the mechanical work:
   lets Claude force-push, and every secret-file path is denied" -- and have it assess your
   actual configuration against that, not just generic rules of thumb.
 
+That's the two-sentence version. **[Maintenance & Audit Skills](skills.md) is a short page
+and worth actually reading** -- there's more to both skills than fits here, including
+reasoning from your *real* usage history (logs and transcripts) instead of just the rules on
+paper, validating a candidate config before you adopt it, and a persistent decision ledger so
+repeat runs stop re-asking things you've already settled. Five minutes there pays for itself
+the first time either skill saves you from hand-authoring a rule set yourself.
+
 ## Keep settings.local.json and toolguard_hook.toml in sync
 
 Rule drift is normal, not a mistake: every time Claude Code prompts and you answer "yes,

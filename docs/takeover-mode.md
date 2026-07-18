@@ -115,27 +115,33 @@ ignored_allow_patterns = [
 # Extra blanket allows to strip, ON TOP OF the defaults above. This is the
 # normal place to add your own (no need to re-list the defaults).
 additional_ignored_patterns = []
-
-# What to do when a governed tool HAS rules but a command matches none of them.
-# (A tool with no rules at all always resolves to "ask".)
-# Options:
-#   "ask"                -> prompt, like Claude's default (this is the DEFAULT)
-#   "deny"               -> fail-closed; block unmatched commands
-#   "allow_with_warning" -> allow the command but log a warning (was named "warn_deny",
-#                           still accepted as a deprecated alias)
-# This example uses "deny" for a strict fail-closed takeover posture.
-no_match_fallback = "deny"
 ```
+
+**`no_match_fallback`** (what happens when a governed tool has rules but a command matches
+none of them) is a **top-level** `toolguard_hook.toml` key, not part of `[takeover_mode]` --
+and it applies whether or not takeover mode is on. A nested `[takeover_mode].no_match_fallback`
+form is still accepted as a legacy alias, but new configs should set it at the top level:
+
+```toml
+no_match_fallback = "deny"   # strict fail-closed posture, e.g. for a takeover setup
+
+[takeover_mode]
+enabled = true
+```
+
+See [Configuration: No-match fallback](configuration.md#no-match-fallback) for the full
+explanation (all three values, resolution order, and the legacy-alias precedence rule).
 
 **Example with custom patterns**:
 
 ```toml
+no_match_fallback = "ask"  # prompt instead of deny on no match
+
 [takeover_mode]
 enabled = true
 additional_ignored_patterns = [
     "Bash(~/projects/**)",  # Ignore overly broad project access
 ]
-no_match_fallback = "ask"  # Prompt instead of deny on no match
 ```
 
 ### Ignored allow patterns
@@ -250,10 +256,10 @@ A complete takeover mode setup:
 
 ```toml
 governed_tools = ["Bash", "Read", "Write", "Edit"]
+no_match_fallback = "deny"
 
 [takeover_mode]
 enabled = true
-no_match_fallback = "deny"
 
 [permissions]
 allow = [

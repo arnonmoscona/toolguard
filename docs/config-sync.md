@@ -62,6 +62,14 @@ toolguard-migrate --dry-run
 toolguard-migrate
 ```
 
+**Other flags**:
+
+- `--no-sort` -- skip the auto-sort step (sorting is on by default; see
+  [Auto-migration](#auto-migration)'s `auto_sort_on_migrate`, which controls the same
+  behavior for automatic runs).
+- `--backup-dir DIR` -- write the pre-migration backup somewhere other than the default
+  `logs/config-backups/` (overrides `[config_sync] backup_dir` for this one run).
+
 **If you have a local checkout instead of an installed package**, run it as a module from the
 repo root: `uv run python -m toolguard.scripts.migrate_permissions --dry-run`. Note this only
 works from *inside* a checkout that has toolguard's own source on its path -- after a normal
@@ -193,14 +201,6 @@ Similar patterns (top 3 by similarity):
   'Bash(uv run ruff format:*)' similar to 'Bash(uv run ruff:*)' (0.85) [SUPERSET]
 ```
 
-**Configuration**: control similarity detection with the `max_similar_matches` setting:
-
-```toml
-[config_sync]
-# Maximum similar patterns to show (default: 3)
-max_similar_matches = 3
-```
-
 **Notes**:
 
 - Extended syntax patterns (`[regex]`, `[glob]`, `[native]`) are skipped for superset
@@ -208,6 +208,8 @@ max_similar_matches = 3
 - If too many patterns share the same prefix, they are not flagged as similar (not
   discriminating).
 - Similarity uses a 0.7 cutoff threshold to balance precision and recall.
+- Up to 3 similar matches are shown per pattern. This is currently a fixed constant, not a
+  `toolguard_hook.toml` setting -- there is no `[config_sync]` key that controls it.
 
 ## Session warnings
 
