@@ -57,6 +57,12 @@ from toolguard.tools.recommended_protections import required_hard_deny_patterns
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
+from toolguard.update_check import (
+    InstallKind,
+    detect_install,
+    local_remote_head,
+    remote_head,
+)
 
 
 class InstallerError(Exception):
@@ -250,7 +256,9 @@ def _append_journal_entry(
         InstallerError: If ``~/.toolguard`` does not exist yet.
     """
     if not _state_dir().is_dir():
-        raise InstallerError(f"{_state_dir()} does not exist -- run 'init-state' first.")
+        raise InstallerError(
+            f"{_state_dir()} does not exist -- run 'init-state' first."
+        )
     journal_path = _journal_path()
     existing = journal_path.read_text() if journal_path.exists() else _JOURNAL_TITLE
     index = _next_journal_index(existing)
@@ -653,7 +661,9 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
     _ensure_state()
     config_path = _config_path(args.scope, args.project_dir)
     if not config_path.exists():
-        raise InstallerError(f"{config_path} does not exist -- run 'write-config' first.")
+        raise InstallerError(
+            f"{config_path} does not exist -- run 'write-config' first."
+        )
 
     # Read the raw TOML directly: we need the true, unfiltered [permissions]
     # and [hard_deny] sections to detect which rules are already present.
@@ -669,7 +679,9 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
     candidates: List[Tuple[str, str]] = [
         (f"Bash({p.pattern})", p.list_type) for p in required_self_permissions()
     ]
-    candidates += [(f"{tool}(~/.toolguard/**)", "allow") for tool in ("Read", "Write", "Edit")]
+    candidates += [
+        (f"{tool}(~/.toolguard/**)", "allow") for tool in ("Read", "Write", "Edit")
+    ]
     candidates.append((_UV_BIN_PATH_PREPEND_ALLOW, "allow"))
 
     claude_dir = _claude_dir(args.scope, args.project_dir)
@@ -780,9 +792,7 @@ always changes), and journals one entry; its reverse is "restore the backup
 def _render_takeover_section(no_match_fallback: str) -> str:
     """Render a ``[takeover_mode]`` section body with takeover enabled."""
     return (
-        "[takeover_mode]\n"
-        "enabled = true\n"
-        f'no_match_fallback = "{no_match_fallback}"\n'
+        f'[takeover_mode]\nenabled = true\nno_match_fallback = "{no_match_fallback}"\n'
     )
 
 
@@ -833,7 +843,9 @@ def cmd_enable_takeover(args: argparse.Namespace) -> int:
     _ensure_state()
     config_path = _config_path(args.scope, args.project_dir)
     if not config_path.exists():
-        raise InstallerError(f"{config_path} does not exist -- run 'write-config' first.")
+        raise InstallerError(
+            f"{config_path} does not exist -- run 'write-config' first."
+        )
 
     original = config_path.read_text()
     backup_path = create_backup(config_path, _backups_dir())
@@ -898,7 +910,9 @@ def cmd_journal(args: argparse.Namespace) -> int:
     Returns:
         ``0`` on success.
     """
-    index = _append_journal_entry(action=args.action, reverse=args.reverse, backup=args.backup)
+    index = _append_journal_entry(
+        action=args.action, reverse=args.reverse, backup=args.backup
+    )
     print(f"appended journal entry [{index}] to {_journal_path()}")
     return 0
 
@@ -977,7 +991,7 @@ def _load_claude_json_projects(claude_json_path: Path) -> List[str]:
         return []
     try:
         data = json.loads(claude_json_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return []
     projects = data.get("projects")
     if not isinstance(projects, dict):
@@ -1056,7 +1070,7 @@ def _discover_project_candidate(project_path_str: str) -> Optional[dict]:
         return None
     try:
         settings_data = json.loads(settings_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return None
     permissions = settings_data.get("permissions", {})
     if not isinstance(permissions, dict):
@@ -1072,7 +1086,7 @@ def _discover_project_candidate(project_path_str: str) -> Optional[dict]:
         config_path, file_format = found_config
         try:
             content = load_config_file(config_path, file_format)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             content = {}
         takeover_section = content.get("takeover_mode", {})
         if isinstance(takeover_section, dict):
@@ -1441,7 +1455,9 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
     _ensure_state()
     config_path = _config_path(args.scope, args.project_dir)
     if not config_path.exists():
-        raise InstallerError(f"{config_path} does not exist -- run 'write-config' first.")
+        raise InstallerError(
+            f"{config_path} does not exist -- run 'write-config' first."
+        )
 
     original = config_path.read_text()
     current = tomllib.loads(original)
@@ -1471,7 +1487,9 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
     _atomic_write_text(config_path, new_text)
 
     index = _append_journal_entry(
-        action=(f"seeded hard-deny protections into {config_path}: " + "; ".join(added)),
+        action=(
+            f"seeded hard-deny protections into {config_path}: " + "; ".join(added)
+        ),
         reverse=f"restore backup {backup_path} over {config_path}",
         backup=str(backup_path),
     )
@@ -1484,6 +1502,210 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
             print(f"    {pattern}")
     print(f"  backup of previous file: {backup_path}")
     print(f"  journal: appended entry [{index}]")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# skills-status
+# ---------------------------------------------------------------------------
+
+_SKILLS_STATUS_HELP = """\
+Report toolguard's own installation freshness (TOO-15 completion-gate check).
+READ-ONLY: makes no backup and appends no journal entry.
+
+Reports two things, side by side:
+  - binary install status: the install kind (git/local/unknown), via
+    toolguard.update_check.detect_install(), and whether a newer commit is
+    available upstream. A network-unreachable or undeterminable remote is
+    reported plainly as "unknown" -- this subcommand never hangs or fails
+    just because the remote could not be reached.
+  - bundled skill install status: for each name in _BUNDLED_SKILL_NAMES, at
+    BOTH the user scope (~/.claude/skills/<name>) and the project scope
+    (<project-dir>/.claude/skills/<name>), one of:
+      missing   -- the path does not exist. This correctly covers a broken/
+                   dangling symlink (Path.exists() reports False for one),
+                   the footgun this check exists to catch.
+      installed -- a directory (real, or a symlink resolving to a real
+                   directory) containing a SKILL.md file.
+      invalid   -- something exists at the path but is not a valid skill
+                   directory (e.g. an empty directory, or a plain file) -- a
+                   distinct, reportable state from missing.
+
+--project-dir defaults to the current working directory, so running this
+from inside the project you care about needs no flag.
+
+--format text (default) prints a human-readable summary; --format json
+prints a JSON object with "binary" and "skills" keys.
+
+Exit code is always 0 -- this is a diagnostic, never a pass/fail gate. It
+only raises an error for a genuine filesystem/permissions failure, never for
+any of the missing/invalid/stale states themselves (those are normal,
+expected, reportable outcomes, not errors).
+"""
+
+
+def _classify_skill_dir(path: Path) -> str:
+    """
+    Classify a bundled-skill install path as ``'missing'``, ``'installed'``, or
+    ``'invalid'``.
+
+    Args:
+        path: The candidate skill directory, e.g.
+            ``~/.claude/skills/toolguard-maintenance``.
+
+    Returns:
+        ``'missing'`` when *path* does not exist -- this correctly reports a
+        broken/dangling symlink as missing, since :meth:`Path.exists` follows
+        symlinks and returns ``False`` when the target is absent.
+        ``'installed'`` when *path* is a directory (real, or a symlink
+        resolving to a real directory) containing a ``SKILL.md`` file.
+        ``'invalid'`` for anything else that exists at *path* (e.g. an empty
+        directory, or a plain file) -- a distinct, reportable state from
+        ``'missing'``.
+    """
+    if not path.exists():
+        return "missing"
+    if path.is_dir() and (path / "SKILL.md").is_file():
+        return "installed"
+    return "invalid"
+
+
+def _binary_status() -> dict:
+    """
+    Summarize toolguard's own binary install freshness.
+
+    Reuses :func:`toolguard.update_check.detect_install` for install-kind
+    detection and :func:`toolguard.update_check.remote_head` /
+    :func:`toolguard.update_check.local_remote_head` for the remote
+    comparison -- no git/network logic is reimplemented here, only the same
+    up-to-date comparison ``toolguard-update-check`` itself performs.
+
+    Returns:
+        A dict with ``kind`` (``'git'``/``'local'``/``'unknown'``),
+        ``installed_commit``, ``remote_commit``, ``update_available``
+        (``True``/``False``, or ``None`` when undeterminable), and ``note``
+        (a human-readable explanation, set whenever the state is anything
+        but a clean up-to-date/behind determination).
+    """
+    info = detect_install()
+
+    if info.kind == InstallKind.GIT:
+        remote = remote_head(info.url) if info.url else None
+        if remote is None:
+            return {
+                "kind": "git",
+                "installed_commit": info.installed_commit,
+                "remote_commit": None,
+                "update_available": None,
+                "note": "could not reach the toolguard remote (offline, or git unavailable)",
+            }
+        return {
+            "kind": "git",
+            "installed_commit": info.installed_commit,
+            "remote_commit": remote,
+            "update_available": info.installed_commit != remote,
+            "note": None,
+        }
+
+    if info.kind == InstallKind.LOCAL:
+        if info.repo_path is None or info.installed_commit is None:
+            return {
+                "kind": "local",
+                "installed_commit": info.installed_commit,
+                "remote_commit": None,
+                "update_available": None,
+                "note": f"could not read HEAD from local checkout {info.repo_path}",
+            }
+        remote = local_remote_head(info.repo_path)
+        if remote is None:
+            return {
+                "kind": "local",
+                "installed_commit": info.installed_commit,
+                "remote_commit": None,
+                "update_available": None,
+                "note": (
+                    f"could not reach the toolguard remote from {info.repo_path} "
+                    "(offline, or no 'origin' remote?)"
+                ),
+            }
+        return {
+            "kind": "local",
+            "installed_commit": info.installed_commit,
+            "remote_commit": remote,
+            "update_available": info.installed_commit != remote,
+            "note": None,
+        }
+
+    return {
+        "kind": "unknown",
+        "installed_commit": None,
+        "remote_commit": None,
+        "update_available": None,
+        "note": "could not determine toolguard's install type",
+    }
+
+
+def cmd_skills_status(args: argparse.Namespace) -> int:
+    """
+    Handle the ``skills-status`` subcommand: report install freshness. READ-ONLY.
+
+    Args:
+        args: Parsed CLI arguments; must have ``project_dir``, ``format``.
+
+    Returns:
+        ``0`` always (diagnostic only; never a pass/fail gate).
+
+    Raises:
+        InstallerError: If a genuine filesystem/permissions failure prevents
+            reading one of the checked paths. Never raised for a missing or
+            invalid skill, or an undeterminable binary status -- those are
+            normal, reportable outcomes, not errors.
+    """
+    project_dir = args.project_dir or str(Path.cwd())
+    scoped_claude_dirs = (
+        ("user", _claude_dir("user", None)),
+        ("project", _claude_dir("project", project_dir)),
+    )
+
+    try:
+        skills = [
+            {
+                "skill": skill_name,
+                "scope": scope,
+                "path": str(claude_dir / "skills" / skill_name),
+                "status": _classify_skill_dir(claude_dir / "skills" / skill_name),
+            }
+            for skill_name in _BUNDLED_SKILL_NAMES
+            for scope, claude_dir in scoped_claude_dirs
+        ]
+        binary = _binary_status()
+    except OSError as exc:
+        raise InstallerError(f"could not read installation state: {exc}") from exc
+
+    if args.format == "json":
+        print(json.dumps({"binary": binary, "skills": skills}, indent=2))
+        return 0
+
+    print("binary install status:")
+    print(f"  kind: {binary['kind']}")
+    if binary["installed_commit"]:
+        print(f"  installed commit: {binary['installed_commit']}")
+    if binary["remote_commit"]:
+        print(f"  remote commit: {binary['remote_commit']}")
+    if binary["update_available"] is None:
+        print(f"  update status: unknown ({binary['note']})")
+    elif binary["update_available"]:
+        print("  update status: UPDATE AVAILABLE -- run: uv tool upgrade toolguard")
+    else:
+        print("  update status: up to date")
+
+    print(f"\nbundled skills (project dir: {project_dir}):")
+    for skill_name in _BUNDLED_SKILL_NAMES:
+        print(f"  {skill_name}:")
+        for entry in skills:
+            if entry["skill"] != skill_name:
+                continue
+            print(f"    {entry['scope']} ({entry['path']}): {entry['status']}")
     return 0
 
 
@@ -1668,6 +1890,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_scope_args(p)
     p.set_defaults(func=cmd_seed_hard_deny)
+
+    p = subparsers.add_parser(
+        "skills-status",
+        description=_SKILLS_STATUS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="report toolguard binary/skills install freshness (read-only)",
+    )
+    p.add_argument(
+        "--project-dir",
+        default=None,
+        help="project root to check for project-scope skills "
+        "(default: current working directory)",
+    )
+    p.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default: text)",
+    )
+    p.set_defaults(func=cmd_skills_status)
 
     return parser
 

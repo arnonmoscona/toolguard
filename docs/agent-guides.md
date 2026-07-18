@@ -45,7 +45,7 @@ matter (not just `Bash`).
    stdin, not a bare command) and checking for a JSON `permissionDecision`:
    `printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"hook_event_name":"PreToolUse"}' | ~/.local/bin/toolguard`
    To keep a git install current, see
-   [Keeping toolguard up to date](quickstart.md#keeping-toolguard-up-to-date)
+   [Keeping toolguard up to date](configuration.md#keeping-toolguard-up-to-date)
    (`uv tool upgrade toolguard`, or the `toolguard-update-check` helper).
 
 2. **Register hooks** -- one PreToolUse matcher per governed tool, plus the SessionStart
@@ -109,8 +109,8 @@ matter (not just `Bash`).
 - A tool is enforced only if it is in **both** the hook matchers and `governed_tools` --
   always set up both. Omit a tool from both if the user does not use it.
 - Editable-install setups point the hooks at the entry points in the project's virtualenv
-  instead -- `<checkout>/.venv/bin/toolguard` and `<checkout>/.venv/bin/toolguard-session-start`.
-  See the [Quick Start](quickstart.md#1-register-the-hooks).
+  instead -- `<checkout>/.venv/bin/toolguard` and `<checkout>/.venv/bin/toolguard-session-start`
+  -- with matcher blocks for the other governed tools set up exactly as in the example above.
 - For wiring details and the full supported-tool table, see
   [Configuration](configuration.md#step-1-register-hook-matchers).
 

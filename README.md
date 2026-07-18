@@ -96,19 +96,20 @@ granted -- which can stall an unattended session. Toolguard addresses these gaps
 
 ## Installation
 
-Making toolguard work takes three steps. The [Quick Start](docs/quickstart.md) has the full
-detail (commands, settings blocks, per-project vs. global setup) -- this is just the map:
+The easiest path is to ask Claude to install toolguard for you -- see the
+[Quick Start](docs/quickstart.md) for the one-line request and what to expect. Making
+toolguard work takes three steps under the hood, which the guided install handles for you:
 
 1. **Base installation** -- install the package so its hook entry points (`toolguard`,
-   `toolguard-session-start`) exist on your PATH. See
-   [Quick Start: Install](docs/quickstart.md#0-install-toolguard).
+   `toolguard-session-start`) exist on your PATH.
 2. **Hook configuration** -- register the PreToolUse permission hook (required) and the
    SessionStart conflict-alert hook (recommended) in your Claude Code settings, either for a
-   single project or globally for all projects. See
-   [Quick Start: Register the hooks](docs/quickstart.md#1-register-the-hooks).
+   single project or globally for all projects.
 3. **Governed-tools config** -- create a `toolguard_hook.toml` declaring which tools
-   toolguard checks. See
-   [Quick Start: Declare the governed tools](docs/quickstart.md#2-declare-the-governed-tools).
+   toolguard checks.
+
+For the exact commands and settings blocks behind each step (manual or scripted install), see
+[Agent Guides: install and register toolguard from scratch](docs/agent-guides.md#recipe-install-and-register-toolguard-from-scratch).
 
 Installing the package alone does nothing -- toolguard only acts once the hooks are
 registered (step 2) and the tools are governed (step 3).

@@ -14,6 +14,7 @@ project-scope cases, a separate temporary project directory. The real ``~/.claud
 
 import io
 import json
+import os
 import re
 import tomllib
 import unittest
@@ -31,6 +32,7 @@ from toolguard.tools.installer import main
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
+from toolguard.update_check import InstallInfo, InstallKind
 
 # Numbered journal entry header, e.g. "## [3] 2026-07-07 14:12 local -- register hooks".
 _JOURNAL_HEADER_RE = re.compile(
@@ -598,9 +600,7 @@ class TestRegisterHooks(InstallerTestCase):
             ]
         )
         self.assertEqual(code, 0)
-        self.assertTrue(
-            (self.project_dir / ".claude" / "settings.local.json").exists()
-        )
+        self.assertTrue((self.project_dir / ".claude" / "settings.local.json").exists())
         self.assertFalse((self.project_dir / ".claude" / "settings.json").exists())
 
     def test_merges_without_clobbering_existing_session_end_hook(self):
@@ -643,9 +643,7 @@ class TestRegisterHooks(InstallerTestCase):
         self.assertEqual(code, 0)
         data = json.loads(settings_path.read_text())
         self.assertEqual(data["hooks"]["SessionEnd"], existing["hooks"]["SessionEnd"])
-        self.assertEqual(
-            data["hooks"]["PostToolUse"], existing["hooks"]["PostToolUse"]
-        )
+        self.assertEqual(data["hooks"]["PostToolUse"], existing["hooks"]["PostToolUse"])
         matchers = {h["matcher"] for h in data["hooks"]["PreToolUse"]}
         self.assertIn("Bash", matchers)
 
@@ -823,9 +821,7 @@ class TestSeedSelfPerms(InstallerTestCase):
         project_settings_path = project_claude_dir / "settings.local.json"
         self.assertIn(f"Write({project_settings_path})", text)
         self.assertIn(f"Edit({project_settings_path})", text)
-        self.assertIn(
-            f"rm {project_claude_dir / 'toolguard_hook.toml'}:*", text
-        )
+        self.assertIn(f"rm {project_claude_dir / 'toolguard_hook.toml'}:*", text)
         # Must NOT contain the user-level equivalents.
         self.assertNotIn(f"Write({self.home / '.claude' / 'settings.json'})", text)
 
@@ -1121,9 +1117,7 @@ class TestJournalSubcommand(InstallerTestCase):
                 "/fake/backups/settings.json.20260101-000000",
             ]
         )
-        self.run_cli(
-            ["journal", "--action", "no backup case", "--reverse", "n/a"]
-        )
+        self.run_cli(["journal", "--action", "no backup case", "--reverse", "n/a"])
 
         text = self.journal_path.read_text()
         self.assertIn("/fake/backups/settings.json.20260101-000000", text)
@@ -1137,9 +1131,7 @@ class TestJournalSubcommand(InstallerTestCase):
         """
         self.run_cli(["init-state", "--source", "local checkout"])
         for i in range(3):
-            self.run_cli(
-                ["journal", "--action", f"step {i}", "--reverse", f"undo {i}"]
-            )
+            self.run_cli(["journal", "--action", f"step {i}", "--reverse", f"undo {i}"])
         self.assertEqual(self.journal_indices(), [1, 2, 3])
 
     def test_indices_increment_across_mixed_subcommands(self):
@@ -1163,9 +1155,7 @@ class TestJournalSubcommand(InstallerTestCase):
         Then it fails with a non-zero exit rather than silently creating a bare journal
         with no README/backups/stage scaffolding
         """
-        code, out = self.run_cli(
-            ["journal", "--action", "x", "--reverse", "y"]
-        )
+        code, out = self.run_cli(["journal", "--action", "x", "--reverse", "y"])
         self.assertNotEqual(code, 0)
         self.assertFalse(self.journal_path.exists())
 
@@ -1222,7 +1212,9 @@ class TestSummaryOutput(InstallerTestCase):
         self.assertEqual(code, 0)
         lowered = out.lower()
         self.assertTrue(
-            "already" in lowered or "no changes" in lowered or "nothing to add" in lowered
+            "already" in lowered
+            or "no changes" in lowered
+            or "nothing to add" in lowered
         )
 
     def test_register_hooks_reminds_of_remaining_checklist_phases(self):
@@ -1711,7 +1703,9 @@ class TestInstallSkills(InstallerTestCase):
                 (skill_dir / "SKILL.md").write_text(f"# {skill}\n")
             return CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        with patch.object(installer_module.subprocess, "run", side_effect=fake_git_clone):
+        with patch.object(
+            installer_module.subprocess, "run", side_effect=fake_git_clone
+        ):
             code, out = self.run_cli(
                 [
                     "install-skills",
@@ -1750,7 +1744,9 @@ class TestInstallSkills(InstallerTestCase):
                 (skill_dir / "SKILL.md").write_text(f"# {skill}\n")
             return CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        with patch.object(installer_module.subprocess, "run", side_effect=fake_git_clone):
+        with patch.object(
+            installer_module.subprocess, "run", side_effect=fake_git_clone
+        ):
             code, out = self.run_cli(
                 [
                     "install-skills",
@@ -1923,6 +1919,377 @@ class TestSeedHardDeny(InstallerTestCase):
         code, out = self.run_cli(["seed-hard-deny", "--scope", "user"])
         self.assertNotEqual(code, 0)
         self.assertFalse((self.home / ".claude" / "toolguard_hook.toml").exists())
+
+
+# ---------------------------------------------------------------------------
+# skills-status
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsStatus(InstallerTestCase):
+    """
+    Behavior of the skills-status subcommand (TOO-15 completion-gate check).
+
+    READ-ONLY: no backup, no journal entry, no init-state precondition. Covers
+    both the bundled-skill classification (missing/installed/invalid, including
+    the broken-symlink footgun) and the binary-install status block (mocked --
+    no real git/network calls).
+    """
+
+    def setUp(self):
+        """Extend the shared fixture with a throwaway dir for real skill sources."""
+        super().setUp()
+        self._elsewhere_ctx = TemporaryDirectory()
+        self.addCleanup(self._elsewhere_ctx.cleanup)
+        self.elsewhere = Path(self._elsewhere_ctx.name)
+
+    def _write_skill(self, claude_dir, skill_name, with_skill_md=True):
+        """Create a real ``<claude_dir>/skills/<skill_name>`` directory."""
+        skill_dir = claude_dir / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        if with_skill_md:
+            (skill_dir / "SKILL.md").write_text(f"# {skill_name}\n")
+        return skill_dir
+
+    def _symlink_skill(self, claude_dir, skill_name, target):
+        """Create ``<claude_dir>/skills/<skill_name>`` as a symlink to *target*."""
+        skills_dir = claude_dir / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, skills_dir / skill_name)
+
+    def _mock_git_up_to_date(self):
+        """
+        Patch detect_install/remote_head for a GIT install with no update pending.
+
+        Started immediately and torn down via addCleanup, so callers just invoke
+        this in setup code (no ``with`` block needed) -- avoids real git/network
+        calls in every test that does not care about the binary-status block
+        itself.
+        """
+        info = InstallInfo(
+            kind=InstallKind.GIT, url="https://example.com/x", installed_commit="abc123"
+        )
+        patcher_detect = patch.object(
+            installer_module, "detect_install", return_value=info
+        )
+        patcher_remote = patch.object(
+            installer_module, "remote_head", return_value="abc123"
+        )
+        self.addCleanup(patcher_detect.stop)
+        self.addCleanup(patcher_remote.stop)
+        patcher_detect.start()
+        patcher_remote.start()
+
+    def test_fresh_state_both_skills_missing_both_scopes(self):
+        """
+        Given neither bundled skill is installed anywhere
+        When skills-status runs
+        Then every skill/scope combination is reported 'missing'
+        """
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        statuses = {(e["skill"], e["scope"]): e["status"] for e in data["skills"]}
+        self.assertEqual(len(statuses), 4)
+        self.assertTrue(all(status == "missing" for status in statuses.values()))
+
+    def test_both_skills_fully_installed_both_scopes(self):
+        """
+        Given both bundled skills are real directories with SKILL.md at both scopes
+        When skills-status runs
+        Then every skill/scope combination is reported 'installed'
+        """
+        user_claude_dir = self.home / ".claude"
+        project_claude_dir = self.project_dir / ".claude"
+        for skill_name in installer_module._BUNDLED_SKILL_NAMES:
+            self._write_skill(user_claude_dir, skill_name)
+            self._write_skill(project_claude_dir, skill_name)
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        statuses = {(e["skill"], e["scope"]): e["status"] for e in data["skills"]}
+        self.assertTrue(all(status == "installed" for status in statuses.values()))
+
+    def test_symlink_to_real_valid_skill_dir_reports_installed(self):
+        """
+        Given a skill scope is a symlink pointing at a REAL, valid skill directory
+        elsewhere on disk (this project's own dogfooding install pattern)
+        When skills-status runs
+        Then that scope is reported 'installed', not 'missing'
+        """
+        real_dir = self.elsewhere / "toolguard-maintenance"
+        real_dir.mkdir()
+        (real_dir / "SKILL.md").write_text("# toolguard-maintenance\n")
+        user_claude_dir = self.home / ".claude"
+        self._symlink_skill(user_claude_dir, "toolguard-maintenance", real_dir)
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        entry = next(
+            e
+            for e in data["skills"]
+            if e["skill"] == "toolguard-maintenance" and e["scope"] == "user"
+        )
+        self.assertEqual(entry["status"], "installed")
+
+    def test_broken_dangling_symlink_reports_missing_without_crashing(self):
+        """
+        Given a skill scope is a BROKEN/dangling symlink (its target does not exist)
+        When skills-status runs
+        Then that scope is reported 'missing' (not 'installed'), and the command
+        does not crash -- this is the specific footgun this check exists to catch
+        """
+        user_claude_dir = self.home / ".claude"
+        nonexistent_target = self.elsewhere / "does-not-exist" / "toolguard-maintenance"
+        self._symlink_skill(
+            user_claude_dir, "toolguard-maintenance", nonexistent_target
+        )
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        entry = next(
+            e
+            for e in data["skills"]
+            if e["skill"] == "toolguard-maintenance" and e["scope"] == "user"
+        )
+        self.assertEqual(entry["status"], "missing")
+
+    def test_directory_without_skill_md_reports_invalid(self):
+        """
+        Given a skill scope is a real directory but has no SKILL.md inside it
+        When skills-status runs
+        Then that scope is reported 'invalid' -- distinct from 'missing'
+        """
+        user_claude_dir = self.home / ".claude"
+        self._write_skill(
+            user_claude_dir, "toolguard-security-audit", with_skill_md=False
+        )
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        entry = next(
+            e
+            for e in data["skills"]
+            if e["skill"] == "toolguard-security-audit" and e["scope"] == "user"
+        )
+        self.assertEqual(entry["status"], "invalid")
+
+    def test_binary_status_git_update_available(self):
+        """
+        Given a mocked GIT install whose installed commit differs from remote HEAD
+        When skills-status runs
+        Then the binary block reports update_available=true with both commits
+        """
+        info = InstallInfo(
+            kind=InstallKind.GIT, url="https://example.com/x", installed_commit="old111"
+        )
+        with (
+            patch.object(installer_module, "detect_install", return_value=info),
+            patch.object(installer_module, "remote_head", return_value="new222"),
+        ):
+            code, out = self.run_cli(
+                [
+                    "skills-status",
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        binary = json.loads(out)["binary"]
+        self.assertEqual(binary["kind"], "git")
+        self.assertTrue(binary["update_available"])
+        self.assertEqual(binary["installed_commit"], "old111")
+        self.assertEqual(binary["remote_commit"], "new222")
+
+    def test_binary_status_unreachable_remote_reports_unknown_not_error(self):
+        """
+        Given a mocked GIT install where the remote cannot be reached (offline)
+        When skills-status runs
+        Then it does not fail: update_available is None and a note explains why,
+        and the overall command still exits 0
+        """
+        info = InstallInfo(
+            kind=InstallKind.GIT, url="https://example.com/x", installed_commit="old111"
+        )
+        with (
+            patch.object(installer_module, "detect_install", return_value=info),
+            patch.object(installer_module, "remote_head", return_value=None),
+        ):
+            code, out = self.run_cli(
+                [
+                    "skills-status",
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        binary = json.loads(out)["binary"]
+        self.assertIsNone(binary["update_available"])
+        self.assertIsNotNone(binary["note"])
+
+    def test_binary_status_unknown_kind_reported_plainly(self):
+        """
+        Given detect_install cannot determine the install kind at all
+        When skills-status runs
+        Then the binary block reports kind='unknown' with update_available=None,
+        and the command still exits 0 rather than failing
+        """
+        with patch.object(
+            installer_module,
+            "detect_install",
+            return_value=InstallInfo(kind=InstallKind.UNKNOWN),
+        ):
+            code, out = self.run_cli(
+                [
+                    "skills-status",
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        binary = json.loads(out)["binary"]
+        self.assertEqual(binary["kind"], "unknown")
+        self.assertIsNone(binary["update_available"])
+
+    def test_default_project_dir_is_current_working_directory(self):
+        """
+        Given --project-dir is omitted
+        When skills-status runs
+        Then it uses the current working directory as the project-scope root
+        """
+        self._mock_git_up_to_date()
+        with patch("pathlib.Path.cwd", return_value=self.project_dir):
+            code, out = self.run_cli(["skills-status", "--format", "json"])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        project_paths = {e["path"] for e in data["skills"] if e["scope"] == "project"}
+        self.assertTrue(all(str(self.project_dir) in p for p in project_paths))
+
+    def test_no_journal_entry_or_backup_is_ever_written(self):
+        """
+        Given any state of skills/binary
+        When skills-status runs
+        Then it is purely read-only: no journal entry is appended and no
+        ~/.toolguard/backups content is created
+        """
+        self._mock_git_up_to_date()
+        code, _ = self.run_cli(
+            ["skills-status", "--project-dir", str(self.project_dir)]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.journal_indices(), [])
+
+    def test_format_text_is_human_readable_and_mentions_every_skill(self):
+        """
+        Given the default --format text
+        When skills-status runs
+        Then stdout is non-JSON, human-readable text mentioning every bundled
+        skill name and the binary install kind
+        """
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            ["skills-status", "--project-dir", str(self.project_dir)]
+        )
+
+        self.assertEqual(code, 0)
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(out)
+        for skill_name in installer_module._BUNDLED_SKILL_NAMES:
+            self.assertIn(skill_name, out)
+        self.assertIn("git", out)
+
+    def test_format_json_is_valid_and_has_expected_top_level_keys(self):
+        """
+        Given --format json
+        When skills-status runs
+        Then stdout is valid, parseable JSON with top-level 'binary' and
+        'skills' keys, and each skill entry has the expected fields
+        """
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertIn("binary", data)
+        self.assertIn("skills", data)
+        for entry in data["skills"]:
+            self.assertIn("skill", entry)
+            self.assertIn("scope", entry)
+            self.assertIn("path", entry)
+            self.assertIn("status", entry)
 
 
 if __name__ == "__main__":

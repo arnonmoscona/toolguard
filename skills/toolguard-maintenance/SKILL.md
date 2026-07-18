@@ -63,6 +63,30 @@ the pieces you explicitly approve. **Nothing is applied automatically, ever.**
   root) and refuse otherwise -- relay blockers, do not circumvent them.
 - **ASCII only** in anything you render for the clipboard or a commit message.
 
+## Pre-flight: install/skills freshness check
+
+Before pass 1, run one read-only check so a stale or partial toolguard install
+never silently limits the rest of this run:
+
+```bash
+toolguard-install skills-status --format json
+```
+
+(In dev mode -- see "Development mode" below -- apply the same substitution table
+to this command as to every other command in this skill.)
+
+- **Binary update available** -- tell the user, and offer to run
+  `uv tool upgrade toolguard`. **Never auto-run it** -- same no-auto-apply posture
+  as every config change this skill makes.
+- **A bundled skill is `missing` or `invalid` at a scope** -- tell the user which
+  skill(s) and at which scope(s) (`user` and/or `project`), and offer to install
+  via `toolguard-install install-skills`, asking the user to choose the scope
+  **per item**: audit/maintenance skills lean user-level (work everywhere, install
+  once); project-specific skills lean project-local. Never install anything
+  without that explicit per-item choice.
+- **Everything current and complete** -- say so briefly and move straight into
+  pass 1; do not dwell on it.
+
 ## How this skill runs -- the passes
 
 This skill executes as an ordered sequence of **passes**, each with its own
@@ -174,6 +198,7 @@ and its passes; nothing else changes:
 | --- | --- |
 | `toolguard-maintain ...` | `uv run python -m toolguard.tools.maintenance ...` |
 | `toolguard-audit ...`    | `uv run python -m toolguard.tools.security_audit ...` |
+| `toolguard-install ...`  | `uv run python -m toolguard.tools.installer ...` |
 
 This table is the **sole** place the `uv run python -m ...` form is defined. The rest
 of the skill body speaks only console scripts.

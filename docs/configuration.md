@@ -60,8 +60,8 @@ If your environment does not expand `~` in hook commands, use the absolute path.
 `SessionStart` hook pointing at `~/.local/bin/toolguard-session-start` (the conflict-alert
 hook). For an editable install the same entry points live in the project's virtualenv
 (`<checkout>/.venv/bin/toolguard` and `<checkout>/.venv/bin/toolguard-session-start`). See
-the [Quick Start](quickstart.md#0-install-toolguard) for both styles and the
-[README installation notes](../README.md#installation).
+[Agent Guides: install and register toolguard from scratch](agent-guides.md#recipe-install-and-register-toolguard-from-scratch)
+for both styles and the [README installation notes](../README.md#installation).
 
 ## Step 2: Configure governed tools
 
@@ -568,3 +568,89 @@ allow = [
   only a carve-out exception to its own `deny`, not a forced allow. `[hard_deny]` is a
   toolguard extension (read from `toolguard_hook` files only) and is pooled across all levels
   of the configuration hierarchy.
+
+## Keeping toolguard up to date
+
+Toolguard ships a `toolguard-update-check` command that works for both install kinds:
+
+- **Git install** (`uv tool install git+https://...`): uv pins the exact commit it resolved. uv
+  cannot do a *version*-tracking upgrade from a git source, so the checker compares your installed
+  commit against the remote HEAD. With `--upgrade` it runs `uv tool upgrade` automatically.
+- **Local/editable install** (`uv tool install /path/to/toolguard` or `uv pip install -e .`):
+  the checker compares your checkout's `HEAD` against the remote `origin HEAD`. Remediation is
+  manual (it prints the `git pull` command and, for non-editable installs, the reinstall step);
+  `--upgrade` prints the same manual steps without running anything (to avoid mutating your
+  working tree).
+- **Unknown**: if neither kind can be determined (no `direct_url.json` and no discoverable git
+  repo), the checker exits with code 2 and a message explaining the situation.
+
+Exit codes: `0` = up to date, `1` = update available, `2` = could not determine (offline, or
+install kind is unknown).
+
+(Once toolguard is published to a package index this whole commit-comparison becomes a plain
+version check and `uv tool upgrade` handles it natively; `toolguard-update-check` can then be
+retired.)
+
+Pick whichever of the three options below suits you.
+
+**1. Manual (simplest).**
+
+For a git install, upgrade whenever you like:
+
+```bash
+uv tool upgrade toolguard
+```
+
+For a local/editable install, pull in your checkout (and reinstall if not editable):
+
+```bash
+git -C /path/to/toolguard pull
+# non-editable only (uv tool install /path):
+uv tool install --force /path/to/toolguard
+```
+
+To check first without upgrading, run `toolguard-update-check`. For a git install it reports
+whether you are behind; for a local install it reports and prints the manual steps.
+
+**2. Throttled startup alert (recommended).** Add this to `~/.zshrc` (or `~/.bashrc`) to be
+*told* when an update exists -- at most once a day, network-free the rest of the time, and it
+never upgrades on its own:
+
+```bash
+toolguard_update_alert() {
+  local stamp="$HOME/.cache/toolguard/update-check.stamp"
+  mkdir -p "$(dirname "$stamp")"
+  # only check once per 24h
+  if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
+    touch "$stamp"
+    toolguard-update-check --quiet   # prints only when an update is available
+  fi
+}
+toolguard_update_alert
+```
+
+For a **local install**, when `toolguard-update-check --quiet` prints (meaning you are behind),
+it also prints the manual `git pull` / reinstall steps. No action is taken automatically.
+
+**3. Auto-update (opt-in, git install only).** Same once-a-day throttle, but it *installs* the
+update when one is found. This only auto-runs for a **git install**; for a local install it
+prints the manual steps instead (never auto-mutates your working tree):
+
+```bash
+toolguard_auto_update() {
+  local stamp="$HOME/.cache/toolguard/update-check.stamp"
+  mkdir -p "$(dirname "$stamp")"
+  if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
+    touch "$stamp"
+    toolguard-update-check --upgrade   # auto-upgrades git installs; prints steps for local
+  fi
+}
+toolguard_auto_update
+```
+
+> **Security caveat for auto-update.** This pulls and runs whatever is at the remote HEAD into
+> your global permission hook, with no human review at pull time. That is fine if *you* are the
+> sole author and gatekeeper of the repository you track (you reviewed it when you pushed).
+> It is riskier if you track a repository you do not control -- a malicious or broken push
+> would silently become your active permission authority. When in doubt, use option 2 (alert)
+> and upgrade by hand.

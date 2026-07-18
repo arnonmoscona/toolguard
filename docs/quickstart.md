@@ -1,291 +1,38 @@
 # Quick Start
 
-This is the shortest path to a working toolguard setup: install it, register its hooks,
-tell toolguard which tools to govern, add a handful of permission patterns, and verify it
-runs. For the full reference see [Configuration](configuration.md).
+You don't need to become a toolguard expert, and you don't need to do the setup yourself.
+Toolguard ships an automated, guided install, a security auditor, a config-tidying skill,
+and a migration tool -- Claude can drive all of them for you, explaining each decision as it
+goes. This page covers the one thing you're still likely to do by hand: writing your own
+permission rules.
 
-A working setup needs **three** things, all required:
+## Get toolguard running
 
-1. **The package installed** so its entry points exist.
-2. **Hooks registered** in Claude Code settings -- so Claude actually calls toolguard.
-3. **A governed tools list** in toolguard's own config -- so toolguard knows what to check.
+**Recommended -- let Claude install it for you.** Tell Claude, in this repo or any project
+you want governed:
 
-## 0. Install toolguard
+> Install toolguard from `<this repo's URL>` using `docs/install.md` from the `master`
+> branch.
 
-**Recommended -- install as a uv tool.** This puts toolguard's two entry points on your PATH
-so Claude Code can call them directly, with no wrapper script:
+Claude will walk you through a short conversation: what to govern, which scope (one project
+or every project), whether to enable [Takeover Mode](takeover-mode.md), and whether to
+install the [audit and maintenance skills](skills.md). Every change is journaled and
+reversible -- see [Uninstalling](#uninstalling) below.
 
-```bash
-uv tool install /path/to/toolguard        # or: uv tool install git+https://github.com/<owner>/toolguard
-uv tool update-shell                       # ensure the tool bin dir is on PATH
-```
+**Manual / scripted install.** If you'd rather do it yourself (no AI agent involved, or
+you're scripting a reproducible setup), the exact `uv tool install` commands, hook JSON, and
+`toolguard_hook.toml` are laid out step by step in
+[Agent Guides: install and register toolguard from scratch](agent-guides.md#recipe-install-and-register-toolguard-from-scratch).
+Package options (uv tool vs. editable install) and the update-check tooling are covered
+there and in [Configuration](configuration.md).
 
-This gives you two executables in uv's tool bin directory (`~/.local/bin` by default --
-confirm with `uv tool dir --bin`):
+## Write your own permission rules
 
-- `~/.local/bin/toolguard` -- the PreToolUse permission hook (**required**).
-- `~/.local/bin/toolguard-session-start` -- the SessionStart conflict-alert hook
-  (**recommended**): at the start of each session it reports any unresolved configuration
-  conflicts (cross-level allow-over-deny overrides, or disagreeing `takeover_mode.enabled`
-  values) so they do not go unnoticed. It nags every session until the conflict is fixed.
+This is the part quickstart is really for -- everything else, an agent can do for you, but
+*what you want allowed or denied* is your call to make.
 
-**Verify the install.** The hook reads a JSON PreToolUse event on stdin (not a bare command),
-writes its decision to stdout, and sends any warnings to stderr. Pipe a sample event through
-it -- you should get a JSON `permissionDecision` back (which value depends on your config; any
-decision means the hook is installed and running):
-
-```bash
-printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"hook_event_name":"PreToolUse"}' \
-  | ~/.local/bin/toolguard
-```
-
-(Feeding a bare command such as `echo ls | toolguard` is *not* a valid test -- it is not a
-hook event, so toolguard fail-closes with a `deny` and a JSON-parse reason.)
-
-Upgrade later with `uv tool upgrade toolguard` -- see
-[Keeping toolguard up to date](#keeping-toolguard-up-to-date) below.
-
-**Alternative -- editable install (for development).** To hack on toolguard itself, install
-it editable instead:
-
-```bash
-cd /path/to/toolguard
-uv pip install -e .
-```
-
-With this style the same entry points are installed into the project's virtualenv instead of
-`~/.local/bin` -- you point the hooks at `<checkout>/.venv/bin/toolguard` and
-`<checkout>/.venv/bin/toolguard-session-start`. The
-[editable-install variant](#alternative-editable-install) in step 1 shows how.
-
-## Keeping toolguard up to date
-
-Toolguard ships a `toolguard-update-check` command that works for both install kinds:
-
-- **Git install** (`uv tool install git+https://...`): uv pins the exact commit it resolved. uv
-  cannot do a *version*-tracking upgrade from a git source, so the checker compares your installed
-  commit against the remote HEAD. With `--upgrade` it runs `uv tool upgrade` automatically.
-- **Local/editable install** (`uv tool install /path/to/toolguard` or `uv pip install -e .`):
-  the checker compares your checkout's `HEAD` against the remote `origin HEAD`. Remediation is
-  manual (it prints the `git pull` command and, for non-editable installs, the reinstall step);
-  `--upgrade` prints the same manual steps without running anything (to avoid mutating your
-  working tree).
-- **Unknown**: if neither kind can be determined (no `direct_url.json` and no discoverable git
-  repo), the checker exits with code 2 and a message explaining the situation.
-
-Exit codes: `0` = up to date, `1` = update available, `2` = could not determine (offline, or
-install kind is unknown).
-
-(Once toolguard is published to a package index this whole commit-comparison becomes a plain
-version check and `uv tool upgrade` handles it natively; `toolguard-update-check` can then be
-retired.)
-
-Pick whichever of the three options below suits you.
-
-**1. Manual (simplest).**
-
-For a git install, upgrade whenever you like:
-
-```bash
-uv tool upgrade toolguard
-```
-
-For a local/editable install, pull in your checkout (and reinstall if not editable):
-
-```bash
-git -C /path/to/toolguard pull
-# non-editable only (uv tool install /path):
-uv tool install --force /path/to/toolguard
-```
-
-To check first without upgrading, run `toolguard-update-check`. For a git install it reports
-whether you are behind; for a local install it reports and prints the manual steps.
-
-**2. Throttled startup alert (recommended).** Add this to `~/.zshrc` (or `~/.bashrc`) to be
-*told* when an update exists -- at most once a day, network-free the rest of the time, and it
-never upgrades on its own:
-
-```bash
-toolguard_update_alert() {
-  local stamp="$HOME/.cache/toolguard/update-check.stamp"
-  mkdir -p "$(dirname "$stamp")"
-  # only check once per 24h
-  if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
-    touch "$stamp"
-    toolguard-update-check --quiet   # prints only when an update is available
-  fi
-}
-toolguard_update_alert
-```
-
-For a **local install**, when `toolguard-update-check --quiet` prints (meaning you are behind),
-it also prints the manual `git pull` / reinstall steps. No action is taken automatically.
-
-**3. Auto-update (opt-in, git install only).** Same once-a-day throttle, but it *installs* the
-update when one is found. This only auto-runs for a **git install**; for a local install it
-prints the manual steps instead (never auto-mutates your working tree):
-
-```bash
-toolguard_auto_update() {
-  local stamp="$HOME/.cache/toolguard/update-check.stamp"
-  mkdir -p "$(dirname "$stamp")"
-  if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
-    touch "$stamp"
-    toolguard-update-check --upgrade   # auto-upgrades git installs; prints steps for local
-  fi
-}
-toolguard_auto_update
-```
-
-> **Security caveat for auto-update.** This pulls and runs whatever is at the remote HEAD into
-> your global permission hook, with no human review at pull time. That is fine if *you* are the
-> sole author and gatekeeper of the repository you track (you reviewed it when you pushed).
-> It is riskier if you track a repository you do not control -- a malicious or broken push
-> would silently become your active permission authority. When in doubt, use option 2 (alert)
-> and upgrade by hand.
-
-## 1. Register the hooks
-
-Register a PreToolUse matcher for **every tool you want toolguard to govern**, plus the one
-recommended `SessionStart` hook. For a useful setup, govern all the tools toolguard
-supports, not just `Bash` -- otherwise file reads/writes and your other command tools slip
-through ungoverned. The supported tools are:
-
-- **Command tools**: `Bash`, `mcp__jetbrains__execute_terminal_command` (JetBrains
-  terminal), and any other MCP tool that runs shell commands. These are named
-  `mcp__<server>__<tool>` and vary by editor/server -- for example a terminal/command MCP
-  server added in VS Code or Cursor. Run `/mcp` in Claude Code to see the exact names you
-  have.
-- **File-path tools**: `Read`, `Write`, `Edit`.
-
-Each PreToolUse block points its `command` at the same `~/.local/bin/toolguard`; the
-`SessionStart` block takes no matcher and runs once per session:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      { "matcher": "Bash",
-        "hooks": [ { "type": "command", "command": "~/.local/bin/toolguard" } ] },
-      { "matcher": "mcp__jetbrains__execute_terminal_command",
-        "hooks": [ { "type": "command", "command": "~/.local/bin/toolguard" } ] },
-      { "matcher": "Read",
-        "hooks": [ { "type": "command", "command": "~/.local/bin/toolguard" } ] },
-      { "matcher": "Write",
-        "hooks": [ { "type": "command", "command": "~/.local/bin/toolguard" } ] },
-      { "matcher": "Edit",
-        "hooks": [ { "type": "command", "command": "~/.local/bin/toolguard" } ] }
-    ],
-    "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "~/.local/bin/toolguard-session-start" } ] }
-    ]
-  }
-}
-```
-
-Drop the matcher blocks for any tool you do not use (e.g. omit
-`mcp__jetbrains__execute_terminal_command` if you do not use the JetBrains MCP), and add one
-for any other command-running MCP tool you do use. Whatever tools you keep here must also
-appear in `governed_tools` (next step) -- a tool is checked only when it is in **both**
-places.
-
-> **Path note:** if your environment does not expand `~` in hook commands, use the absolute
-> path instead (e.g. `/home/you/.local/bin/toolguard`). Run `uv tool dir --bin` to find the
-> exact directory.
-
-### One project, or all projects
-
-The `hooks` block above can live in either of two places -- the JSON is identical:
-
-- **One project**: put it in that project's `.claude/settings.local.json` (local, not shared)
-  or `.claude/settings.json` (shared/committed). Toolguard runs only in that project.
-- **All projects (global)**: put it in your user settings, `~/.claude/settings.json`. Because
-  the hook command (`~/.local/bin/toolguard`) is global, *every* Claude Code project then
-  gets toolguard automatically -- no per-project hook setup needed.
-
-Global hook registration pairs well with a user-level governed-tools config (step 2): put a
-baseline `~/.claude/toolguard_hook.toml` in place and toolguard works in every project out of
-the box, while individual projects can still add or override rules.
-
-### Alternative: editable install
-
-If you installed toolguard editable (`uv pip install -e .`) rather than as a uv tool, the
-`toolguard` and `toolguard-session-start` entry points are installed into the project's
-virtualenv. Point the hooks there instead of `~/.local/bin`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          { "type": "command", "command": "/path/to/toolguard/.venv/bin/toolguard" }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "/path/to/toolguard/.venv/bin/toolguard-session-start" }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Register matchers for the other governed tools exactly as in the main example above -- only
-the `command` path differs.
-
-## 2. Declare the governed tools
-
-Create a `toolguard_hook.toml` (TOML is preferred over JSON because it allows comments). Put
-it at the level that matches your hook setup from step 1:
-
-- **One project**: `.claude/toolguard_hook.toml` in the project root.
-- **All projects (global)**: `~/.claude/toolguard_hook.toml`. This is toolguard's least-
-  specific configuration level, so it acts as a baseline for every project; a project's own
-  `.claude/toolguard_hook.toml` is layered on top and wins on conflicts (more-specific-wins).
-  See [Configuration: hierarchy](configuration.md#configuration-hierarchy).
-
-List every tool you registered a hook for:
-
-```toml
-# Custom MCP command tools (e.g. a terminal/command MCP server you added in VS Code
-# or Cursor, named mcp__<server>__<tool>) must be declared here so toolguard
-# recognizes them -- otherwise they trigger "unsupported tool" warnings. Built-in
-# tools (Bash, Read, Write, Edit, mcp__jetbrains__execute_terminal_command) do NOT
-# need this. Uncomment and edit the line below if you have such a tool.
-additional_supported_tools = [
-    # "mcp__your_terminal_server__run_command",
-]
-
-governed_tools = [
-    "Bash",
-    "mcp__jetbrains__execute_terminal_command",
-    # "mcp__your_terminal_server__run_command",
-    "Read",
-    "Write",
-    "Edit"
-]
-```
-
-A tool is only checked if it appears in **both** the hook matchers and `governed_tools`.
-
-**`additional_supported_tools`** is needed only for custom tools toolguard does not know
-about out of the box. Toolguard ships with a known list (`Bash`, `Read`, `Write`, `Edit`,
-`mcp__jetbrains__execute_terminal_command`); any other tool you put in `governed_tools` (or
-in permission patterns) should also be listed in `additional_supported_tools`, or toolguard
-will warn that it is an unsupported tool. Declaring a tool here ("recognition") is separate
-from actually governing it -- see
-[Configuration: recognition vs. governance](configuration.md#declaring-additional-supported-tools)
-for the full distinction.
-
-## 3. Add a few permission patterns
-
-Standard patterns go in `settings.local.json` so they still work if you ever disable the
-hook:
+Standard patterns go in `settings.local.json` so they still work even with the hook
+disabled:
 
 ```json
 {
@@ -304,28 +51,114 @@ hook:
 ```
 
 All command patterns use the `Bash(...)` wrapper regardless of which command tool is being
-governed -- this gives one unified permission model across `Bash`, the JetBrains terminal,
-and any custom MCP command tools. Deny always takes precedence over allow.
+governed (Bash, a JetBrains terminal, any custom MCP command tool) -- one unified permission
+model. Deny always takes precedence over allow, and a tool is only checked if it is in
+**both** the hook matchers and `governed_tools` (both handled for you by the guided install).
 
-That is enough to start. When you want regex/glob/native matching, file-path control for
-`Read`/`Write`/`Edit`, or shared rules across projects, read on:
+That's enough to start. Toolguard also supports three extended pattern "dialects" (used in
+`toolguard_hook.toml`, not `settings.local.json`) for cases plain prefix matching can't
+express -- one minimal example of each:
 
-- [Permission Patterns](permission-patterns.md) -- the extended pattern types and how matching works.
-- [Configuration](configuration.md) -- governed tools, environment variables, the
-  multi-level config hierarchy, and the full annotated config template.
+```
+Bash([regex]^git (log|diff|status))    # regex: any of these three git subcommands, anchored
+Bash([glob]cat ~/projects/**/*.py)     # glob: true recursive ** (not just a prefix wildcard)
+Bash([native]git * origin *)           # native: word-level wildcard, e.g. git push origin main
+```
 
-## 4. Verify it runs
+The same three dialects work inside `Read(...)`/`Write(...)`/`Edit(...)` too, not just
+`Bash(...)` -- file paths default to glob matching already, but `[regex]` and `[native]` are
+available there as well when you need them, e.g. `Write([regex]^/tmp/.*\.log$)`. Full syntax,
+matching rules, and more file-path examples are in [Permission Patterns](permission-patterns.md).
 
-Restart Claude Code, run a command, then check the logs:
+### You don't have to become an expert to use any of this
 
-- Every command Claude executes should appear in `logs/toolguard-YYYY-MM-DD.md`.
-- If commands are missing, confirm the tool is in **both** the hook matchers and
-  `governed_tools`.
+You do not need to read all of toolguard's documentation, and you do not need to learn its
+pattern dialects by hand -- Claude has already read them. You can:
+
+- **Ask Claude questions** -- "what does `[native]` matching do", "why didn't my rule
+  match" -- and get an answer grounded in the real docs, not a guess.
+- **Describe the security stance you want, in plain English, and have Claude write the
+  rules.** "Let me run any read-only git and gh command, but nothing that pushes,
+  force-pushes, or changes repo settings" is enough -- Claude can turn that into a correct,
+  properly anchored rule set without you touching regex or glob syntax yourself.
+
+[`docs/gh-cli-rules-example.toml`](gh-cli-rules-example.toml) is a real worked example of
+exactly this: a full, carefully-reasoned rule set governing the `gh` CLI (61 rules, generated
+from `gh`'s own manual against a stated disposition -- read-only allowed, anything that
+modifies GitHub-side state denied, with a couple of explicit exceptions). Point Claude at a
+tool's own docs and ask for the same treatment.
+
+**This solves a real, common problem.** Plenty of tools people run every day -- the AWS CLI,
+`kubectl`, the Terraform CLI, and many more -- are enormously powerful and carry real risk in
+careless or compromised hands, with dozens of subcommands and flags that each deserve a
+different trust level. Hand-writing a good rule set for a tool like that is impractical, and
+doing it with Claude Code's *native* permission system alone is not just impractical but
+genuinely impossible -- native patterns are prefix-only, with no way to express "any of these
+subcommands, but never with this flag" or similar shape-aware distinctions. Toolguard's
+regex/glob/native dialects can express that; Claude, working from toolguard's own
+documentation and a tool's own docs, can generate it correctly from a plain-English security
+stance. That combination gets you real, meaningful protection on tools that would otherwise
+be all-or-nothing.
+
+Two more skills round this out, and both are conversational -- you describe what you want,
+Claude does the mechanical work:
+
+- **[Maintenance](skills.md#maintenance) streamlines your rule set as it grows.** Every
+  "yes, and don't ask again" adds a rule; over time you end up with duplicates, near-
+  duplicates, and rules that could be one broader rule instead. Ask Claude to run it and it
+  proposes consolidations family-by-family (all your `git` rules together, and so on) --
+  nothing is merged or removed without your explicit, per-item approval.
+- **[Security audit](skills.md#security-audit) checks that your rules stay safe.** Beyond
+  its deterministic checks (over-broad allows, unanchored regexes, takeover-mode
+  misconfiguration), you can hand it a stance in plain English -- "make sure nothing here
+  lets Claude force-push, and every secret-file path is denied" -- and have it assess your
+  actual configuration against that, not just generic rules of thumb.
+
+## Keep settings.local.json and toolguard_hook.toml in sync
+
+Rule drift is normal, not a mistake: every time Claude Code prompts and you answer "yes,
+and don't ask again," it writes a new allow rule into its own `settings.local.json` --
+Claude Code has no idea `toolguard_hook.toml` exists. Left alone, your permissions end up
+split across two files.
+
+`toolguard-migrate` folds those native rules back into `toolguard_hook.toml` (dry-run first
+to preview, then apply -- it backs up before writing and removes exact/subset duplicates
+from `settings.local.json` as it goes). To have this happen automatically instead of running
+it by hand, set in `toolguard_hook.toml`:
+
+```toml
+[config_sync]
+auto_migrate = true   # fold settings.local.json rules in on every hook startup
+```
+
+Off by default -- turn it on once you trust your rule set (dry-run first), and keep it off
+if you would rather review each migration before it lands. See
+[Config Sync & Migration](config-sync.md) for the full detail, including backup handling and
+similarity/duplicate detection.
+
+## Verify it runs
+
+There is no need to restart Claude Code as once the hook is setup it goes live immediately.
+The agent guided install would have verified already that the installation was successful and 
+that toolguard is functioning. If you want to make sure yourself, run a command, then check the logs:
 
 ```bash
 tail -f logs/toolguard-$(date +%Y-%m-%d).md
 ```
 
-If nothing is logged after Claude runs commands, toolguard is not running -- see
+Every command Claude executes should appear there. If nothing is logged after Claude runs
+commands, toolguard is not running -- see
 [Security Best Practices](security.md#verify-toolguard-is-running) before relying on it,
 especially before enabling [Takeover Mode](takeover-mode.md).
+
+## Running unattended (Claude Code auto-mode)
+
+If you also run Claude Code itself in an auto-accept / bypass-permissions mode, see
+[Auto-mode with toolguard](auto-mode.md) -- toolguard is still worth registering in that
+setup, but the honest tradeoffs are different enough to deserve their own page.
+
+## Uninstalling
+
+**Tell Claude to follow [`docs/uninstall.md`](uninstall.md)** -- the guided, journal-driven
+rollback owns the whole teardown (config, hooks, skills, package) end to end. No separate
+manual steps to remember here.
