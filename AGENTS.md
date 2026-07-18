@@ -31,7 +31,10 @@ on an existing setup -- **read [docs/agent-guides.md](docs/agent-guides.md)**. I
 task-oriented version of the documentation and is usually enough on its own. The two
 operator skills (audit, maintenance) are described in [docs/skills.md](docs/skills.md). Open
 the other guides under [docs/](docs/) only when a task needs the detail; [llms.txt](llms.txt)
-is a map of all the docs.
+is a file-level map of all the docs, and [docs/agent-map.md](docs/agent-map.md) goes one
+level deeper -- every doc's headings, plus a question-and-pointer list for common lookups
+("where does `no_match_fallback` go", "is it OK to delete `~/.toolguard`", etc.) -- reach for
+it when you have a specific question rather than a task to execute.
 
 What toolguard is, in one line: a Claude Code PreToolUse hook that replaces the native
 permission system for Bash/Read/Write/Edit with regex/glob/native pattern matching,

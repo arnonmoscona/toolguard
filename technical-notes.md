@@ -1,5 +1,77 @@
 # Toolguard Technical Notes
 
+**Audience: primarily AI agents working on toolguard's own codebase, secondarily human
+toolguard maintainers/developers digging into design rationale.** If you're a toolguard
+*user* looking for how to configure or run it, you want the [docs/](docs/) guides instead --
+start from [README.md](README.md#documentation). This file is deep design rationale: why a
+decision was made, what alternatives were rejected and why, and low-level implementation
+detail that doesn't belong in user-facing docs.
+
+Sections are grouped by the ticket that did the work (`TOO-8`, `TOO-15`, `TOO-17`, ...),
+most of which map to a specific subsystem -- use the table of contents below to jump straight
+to a topic; you don't need the ticket history to use it, the ticket ID is just there for
+anyone cross-referencing against the project's own tracker.
+
+## Table of contents
+
+- [Subagent Identification Workaround](#subagent-identification-workaround)
+  - [The Problem](#the-problem)
+  - [What Doesn't Work](#what-doesnt-work)
+  - [The Solution: Transcript Parsing](#the-solution-transcript-parsing)
+  - [Implementation Details](#implementation-details)
+  - [Concurrency Considerations](#concurrency-considerations)
+  - [Limitations](#limitations)
+  - [Future Considerations](#future-considerations)
+  - [Related Issues](#related-issues)
+- [Hierarchical Configuration and Resolution (TOO-8 Phase 2)](#hierarchical-configuration-and-resolution-too-8-phase-2)
+  - [Discovery hierarchy](#discovery-hierarchy)
+  - [More-specific-wins permission resolution](#more-specific-wins-permission-resolution)
+  - [Project-root-relative paths](#project-root-relative-paths)
+  - [Hard-deny safety valve (TOO-8 Phase 3)](#hard-deny-safety-valve-too-8-phase-3)
+- [Logging streams, conflict logging, and provenance (TOO-8 Phase 4)](#logging-streams-conflict-logging-and-provenance-too-8-phase-4)
+  - [Four separate log streams (one file per concern)](#four-separate-log-streams-one-file-per-concern)
+  - [Conflict logging -- allow-over-deny overrides only](#conflict-logging----allow-over-deny-overrides-only)
+  - [Provenance threaded into resolution reasons](#provenance-threaded-into-resolution-reasons)
+  - [Once-per-session discovery diagnostic (M2)](#once-per-session-discovery-diagnostic-m2)
+  - [Single source of truth for the both-formats warning (M1)](#single-source-of-truth-for-the-both-formats-warning-m1)
+  - [Single source of truth for tool-wrapper stripping](#single-source-of-truth-for-tool-wrapper-stripping)
+- [Non-permission cross-level resolution (TOO-8 Phase 5)](#non-permission-cross-level-resolution-too-8-phase-5)
+  - [Scalars and `no_match_fallback` -- more-specific-wins](#scalars-and-nomatchfallback----more-specific-wins)
+  - [`governed_tools` and takeover pattern lists -- UNION across all levels](#governedtools-and-takeover-pattern-lists----union-across-all-levels)
+  - [`takeover_mode.enabled` -- single-owner with fail-safe-on-conflict](#takeovermodeenabled----single-owner-with-fail-safe-on-conflict)
+- [SessionStart conflict alerting (TOO-8 Phase 6)](#sessionstart-conflict-alerting-too-8-phase-6)
+  - [Separate entry point](#separate-entry-point)
+  - [Two detection sources](#two-detection-sources)
+  - [Why dynamic conflicts come from the log](#why-dynamic-conflicts-come-from-the-log)
+  - [Nag-every-session semantics](#nag-every-session-semantics)
+  - [Stdout as session context](#stdout-as-session-context)
+  - [Output format](#output-format)
+  - [Resilience](#resilience)
+- [Multi-line Bash decomposition (TOO-17)](#multi-line-bash-decomposition-too-17)
+  - [The defect](#the-defect)
+  - [Governing principle: when in doubt, ASK](#governing-principle-when-in-doubt-ask)
+  - [Grammar-first, with a light AST -- no hand-rolled parsing](#grammar-first-with-a-light-ast----no-hand-rolled-parsing)
+  - [How deep we go -- and why not deeper](#how-deep-we-go----and-why-not-deeper)
+  - [Lexical pre-pass vs. grammar](#lexical-pre-pass-vs-grammar)
+  - [Heredocs, the sink sentinel, and executor classification](#heredocs-the-sink-sentinel-and-executor-classification)
+  - [Command substitution: validated, but no placeholder (yet)](#command-substitution-validated-but-no-placeholder-yet)
+  - [Flagged defaults (open to revisit)](#flagged-defaults-open-to-revisit)
+- [Maintenance and audit tooling (TOO-15 Phase 2)](#maintenance-and-audit-tooling-too-15-phase-2)
+  - [Library-first, thin-skill seam](#library-first-thin-skill-seam)
+  - [Corpus harvesting is opt-in, not automatic](#corpus-harvesting-is-opt-in-not-automatic)
+  - [One report, two audiences -- `--format json` is the agent sidecar](#one-report-two-audiences------format-json-is-the-agent-sidecar)
+  - [Structured remediation is a conservative, mechanical fix](#structured-remediation-is-a-conservative-mechanical-fix)
+  - [The shared EditProposal model, and one edit primitive](#the-shared-editproposal-model-and-one-edit-primitive)
+  - [As-if-enacted review: `--edits` vs `--migrations`](#as-if-enacted-review---edits-vs---migrations)
+  - [Apply is preview-first and gated](#apply-is-preview-first-and-gated)
+  - [Flagged gap (open) -- cross-project blast radius](#flagged-gap-open----cross-project-blast-radius)
+  - [Multi-pass maintenance: SKILL.md orchestrator + `passes/` + a JSON state artifact](#multi-pass-maintenance-skillmd-orchestrator-passes-a-json-state-artifact)
+  - [Certify-by-staging: author by AI, certify by tool](#certify-by-staging-author-by-ai-certify-by-tool)
+  - [Corpus-replay candidate validation (`--replay-candidate`)](#corpus-replay-candidate-validation---replay-candidate)
+  - [Prior-decision ledger (`decision_ledger.py`)](#prior-decision-ledger-decisionledgerpy)
+  - [Layer promotion certified by a live two-level HOME-staged audit](#layer-promotion-certified-by-a-live-two-level-home-staged-audit)
+  - [CLI mode summary](#cli-mode-summary)
+
 ## Subagent Identification Workaround
 
 ### The Problem

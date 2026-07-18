@@ -144,6 +144,7 @@ When we're about to wrap up a ticket, and it seems that I am ready to push a set
 * Do we need any release notes?
 * Run `pyscn analyze toolguard` to find issues, read the report, and discuss what to fix, what to defer, and what to ignore
 * Consider running the toolguard maintenance skill to keep the toolguard configuration constantly curated. A push is a good checkpoint for this.
+* If any doc under `docs/`, README.md, AGENTS.md, or llms.txt changed since the last push, run `/documentation-review` (`.claude/commands/documentation-review.md`). This is the main defense against documentation drift -- `docs/agent-map.md` in particular summarizes every other doc and has no other mechanism keeping it in sync, so it is the single most likely thing to go stale silently. Don't skip this just because a change looks small; several of this project's own past doc bugs were introduced by small, individually-reasonable edits.
 
 ## Running toolguard's own skills in this repo: pass `--dev`
 

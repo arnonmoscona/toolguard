@@ -26,6 +26,29 @@ you're scripting a reproducible setup), the exact `uv tool install` commands, ho
 Package options (uv tool vs. editable install) and the update-check tooling are covered
 there and in [Configuration](configuration.md).
 
+**On this page:**
+
+- [Verify it runs](#verify-it-runs)
+- [Write your own permission rules](#write-your-own-permission-rules)
+- [Keep settings.local.json and toolguard_hook.toml in sync](#keep-settingslocaljson-and-toolguard_hooktoml-in-sync)
+- [Running unattended (Claude Code auto-mode)](#running-unattended-claude-code-auto-mode)
+- [Uninstalling](#uninstalling)
+
+## Verify it runs
+
+There is no need to restart Claude Code as once the hook is setup it goes live immediately.
+The agent guided install would have verified already that the installation was successful and 
+that toolguard is functioning. If you want to make sure yourself, run a command, then check the logs:
+
+```bash
+tail -f logs/toolguard-$(date +%Y-%m-%d).md
+```
+
+Every command Claude executes should appear there. If nothing is logged after Claude runs
+commands, toolguard is not running -- see
+[Security Best Practices](security.md#verify-toolguard-is-running) before relying on it,
+especially before enabling [Takeover Mode](takeover-mode.md).
+
 ## Write your own permission rules
 
 This is the part quickstart is really for -- everything else, an agent can do for you, but
@@ -142,21 +165,6 @@ Off by default -- turn it on once you trust your rule set (dry-run first), and k
 if you would rather review each migration before it lands. See
 [Config Sync & Migration](config-sync.md) for the full detail, including backup handling and
 similarity/duplicate detection.
-
-## Verify it runs
-
-There is no need to restart Claude Code as once the hook is setup it goes live immediately.
-The agent guided install would have verified already that the installation was successful and 
-that toolguard is functioning. If you want to make sure yourself, run a command, then check the logs:
-
-```bash
-tail -f logs/toolguard-$(date +%Y-%m-%d).md
-```
-
-Every command Claude executes should appear there. If nothing is logged after Claude runs
-commands, toolguard is not running -- see
-[Security Best Practices](security.md#verify-toolguard-is-running) before relying on it,
-especially before enabling [Takeover Mode](takeover-mode.md).
 
 ## Running unattended (Claude Code auto-mode)
 

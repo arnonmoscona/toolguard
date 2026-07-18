@@ -15,6 +15,9 @@ extended capabilities, and works around several long-standing bugs in the native
 > records every step so it can be cleanly undone. Prefer this over improvising; the runbook has
 > the exact, current commands.
 
+> **Prefer to read it yourself?** See the [Quick Start](docs/quickstart.md) -- a short,
+> self-contained page to get running and start writing your own rules.
+
 ## Why Toolguard?
 
 Key advantages over the native Claude Code permission system:
@@ -46,7 +49,9 @@ Key advantages over the native Claude Code permission system:
 > **AI agents start here:** read **[docs/agent-guides.md](docs/agent-guides.md)** first. It
 > is the terse, task-oriented version of everything below (install, register hooks, write
 > rules, diagnose denials) and is usually enough on its own. Only open the other guides when
-> a task needs the detail -- they are verbose and human-oriented.
+> a task needs the detail -- they are verbose and human-oriented. For a full index of every
+> doc's headings plus pointers to answers for common questions, see
+> **[docs/agent-map.md](docs/agent-map.md)**.
 
 New to toolguard? Start with the quick-start, then dip into the topic guides as needed.
 

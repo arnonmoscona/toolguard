@@ -8,7 +8,9 @@
 Agents: read [docs/agent-guides.md](docs/agent-guides.md) first. It is the terse,
 task-oriented version of the documentation (install, register hooks, write rules, diagnose
 denials) and is usually sufficient on its own. Open the other guides only when a task needs
-the detail -- they are verbose and human-oriented.
+the detail -- they are verbose and human-oriented. For a heading-level index of every doc
+below plus a question-and-pointer list for common lookups, see
+[docs/agent-map.md](docs/agent-map.md).
 
 ## Agent docs (read first)
 
@@ -19,6 +21,10 @@ the detail -- they are verbose and human-oriented.
 - [Agent guides](docs/agent-guides.md): few-shot recipes for setting up and configuring
   toolguard on a user's behalf -- installation, registering hooks for every governed tool,
   governed_tools / additional_supported_tools, writing rules, and diagnosing denials.
+- [Agent map](docs/agent-map.md): heading-level index of every doc, plus a
+  question-and-pointer list of recurring questions ("where does `no_match_fallback` go",
+  "is it OK to delete `~/.toolguard`", etc.) with one-line answers and links to the full
+  detail.
 - [Maintenance & audit skills](docs/skills.md): the toolguard-security-audit and
   toolguard-maintenance skills -- audit config for risk, and clean up / consolidate / promote
   rules with per-item consent.
@@ -34,6 +40,9 @@ the detail -- they are verbose and human-oriented.
   patterns, path normalization, compound commands.
 - [Takeover mode](docs/takeover-mode.md): blanket-allow + toolguard-enforces mode, its
   risks, and a complete example.
+- [Auto-mode with toolguard](docs/auto-mode.md): running toolguard underneath Claude Code's
+  own auto-accept / bypass-permissions modes -- what still gets enforced, the
+  `allow_with_warning` fallback tradeoff, and how this differs from takeover mode.
 - [Config sync & migration](docs/config-sync.md): divergence detection, migrating patterns,
   backups, and session warnings.
 - [Security best practices](docs/security.md): blanket-allow risks, recommended deny

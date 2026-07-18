@@ -3,7 +3,9 @@
 Task-oriented, few-shot recipes for AI coding agents configuring toolguard on a user's
 behalf. Each recipe states the goal, the decision rules, and a concrete before/after so the
 edit can be applied directly. For full syntax see [Permission Patterns](permission-patterns.md) and
-[Configuration](configuration.md).
+[Configuration](configuration.md). Have a specific question rather than a task to execute?
+See [Agent Map](agent-map.md) -- a heading-level index of every doc plus a
+question-and-pointer list for common lookups.
 
 ## Ground rules (read first)
 
@@ -18,6 +20,21 @@ edit can be applied directly. For full syntax see [Permission Patterns](permissi
   levels; `[hard_deny]` beats everything.
 - Prefer the narrowest pattern that satisfies the request. Do not widen an existing rule to
   cover a new case if a second specific rule will do.
+- **Task involves enabling Takeover Mode?** Read [Takeover Mode](takeover-mode.md) first --
+  do not freehand a takeover config from memory. It has real security warnings (a
+  misconfigured `no_match_fallback` or a missed blanket-allow pattern can silently expose
+  everything) and a full worked example; no recipe for it lives in this file on purpose, to
+  avoid a second, driftable copy of security-sensitive config.
+- **Task involves Claude Code's own auto-accept / bypass-permissions mode?** Read
+  [Auto-mode with toolguard](auto-mode.md) first. `no_match_fallback = "allow_with_warning"`
+  is the right answer *only* for that specific unattended case -- it is not a general
+  recommendation, and setting it as a default elsewhere would weaken protection.
+- **Task is "clean up my rules" or "is my config safe" beyond simple drift?** See
+  [Maintenance & Audit Skills](skills.md) -- the `toolguard-security-audit` and
+  `toolguard-maintenance` skills do this more thoroughly (evidence-backed, family-grouped,
+  certified before anything applies) than a migration dry-run alone. The "clean up
+  accumulated permissions" recipe below covers only the narrower settings.local.json drift
+  case.
 
 ## Recipe: install and register toolguard from scratch
 
@@ -246,11 +263,13 @@ first; it also detects duplicates and supersets.
 
 ```bash
 # Show what would move, with duplicate/superset detection -- review before applying
-uv run python -m toolguard.scripts.migrate_permissions --dry-run
+toolguard-migrate --dry-run
 
 # Apply (creates a timestamped backup automatically)
-uv run python -m toolguard.scripts.migrate_permissions
+toolguard-migrate
 ```
 
 See [Config Sync & Migration](config-sync.md) for the full behavior, including
-similarity ranking and backup handling.
+similarity ranking and backup handling. For a broader pass -- over-broad allows, duplicates,
+mis-levelled rules, promotion opportunities, not just settings.local.json drift -- see
+[Maintenance & Audit Skills](skills.md) instead.
