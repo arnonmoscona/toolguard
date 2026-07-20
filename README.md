@@ -22,6 +22,8 @@ extended capabilities, and works around several long-standing bugs in the native
 
 ## Why Toolguard?
 
+The quick answer: read [this deck](https://arnonmoscona.github.io/toolguard-pages/#1)
+
 Key advantages over the native Claude Code permission system:
 
 - **Reliability** -- works around reported, long-unfixed bugs in the native permission
