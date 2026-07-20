@@ -134,18 +134,6 @@ See the global memory management guidelines (loaded via `~/.claude/common-memory
 When creating memories in the context of a specific ticket, add the ticket ID as a tag
 (e.g., `TOO-14`).
 
-## pre-push checks
-
-When we're about to wrap up a ticket, and it seems that I am ready to push a set of changes to github, check the following and remind me:
-
-* Have we verified that out code coverage is good enough?
-* Did we do necessary documentation updates (you would know, as you participate)
-* Should I bump the version in `pyproject.toml`
-* Do we need any release notes?
-* Run `pyscn analyze toolguard` to find issues, read the report, and discuss what to fix, what to defer, and what to ignore
-* Consider running the toolguard maintenance skill to keep the toolguard configuration constantly curated. A push is a good checkpoint for this.
-* If any doc under `docs/`, README.md, AGENTS.md, or llms.txt changed since the last push, run `/documentation-review` (`.claude/commands/documentation-review.md`). This is the main defense against documentation drift -- `docs/agent-map.md` in particular summarizes every other doc and has no other mechanism keeping it in sync, so it is the single most likely thing to go stale silently. Don't skip this just because a change looks small; several of this project's own past doc bugs were introduced by small, individually-reasonable edits.
-
 ## Running toolguard's own skills in this repo: pass `--dev`
 
 The `toolguard-maintenance` and `toolguard-security-audit` skills default to the

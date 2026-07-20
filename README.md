@@ -1,5 +1,7 @@
 # Toolguard
 
+![toolguard-logo](img/toolguard-logo-128.jpg)  
+
 A pre-tool-use hook for Claude Code that provides comprehensive permission checking for
 bash commands, file operations, and other tools. It supports multiple tool types, extended
 pattern syntax, a hierarchical (multi-level) configuration model, and detailed logging.
