@@ -10,9 +10,11 @@ tags:
 
 The task currently being worked on:
 
-- [[TOO-15 Toolguard Skills and Config Tooling - Requirements and Plan]]
+- [[TOO-30 XDG rules directory - Requirements and Plan]]
 
 ## History
+- 2026-07-23: switched from TOO-15 (toolguard skills + config tooling; wrapped up) to TOO-30
+  (XDG `~/.config/toolguard/rules/` split-file user-level config directory).
 - 2026-06-23: switched from TOO-8 (wrapped up: hierarchical config + TOO-17 multi-line fix +
   follow-ups; final follow-up commit pending Arnon) to TOO-16 (uv tool distribution;
   mostly spot-testing + run_hook.sh retirement).

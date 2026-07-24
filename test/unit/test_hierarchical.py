@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import _discover_levels, load_configuration
 from toolguard.permissions import decide_command_at_level_detailed
@@ -32,27 +33,7 @@ def _write(claude_dir: Path, filename: str, content: str) -> None:
     (claude_dir / filename).write_text(content)
 
 
-class _IsolatedEnvTestCase(unittest.TestCase):
-    """
-    Base class that isolates ``CLAUDE_SETTINGS_PATH`` for hierarchy tests.
-
-    These tests patch the project-root/home discovery to a temp hierarchy. If the
-    ambient shell exports ``CLAUDE_SETTINGS_PATH`` (the Claude Code hook does),
-    ``load_configuration`` would honour that single-file override and bypass the
-    patched hierarchy, pulling in an unrelated project's config. Popping the var
-    in setUp makes these tests independent of the ambient environment, mirroring
-    the pattern used in ``test_configuration.py``.
-    """
-
-    def setUp(self):
-        """Remove CLAUDE_SETTINGS_PATH for the duration of each test."""
-        self._env_patch = patch.dict(os.environ, {}, clear=False)
-        self._env_patch.start()
-        os.environ.pop("CLAUDE_SETTINGS_PATH", None)
-        self.addCleanup(self._env_patch.stop)
-
-
-class TestHierarchicalTraversal(_IsolatedEnvTestCase):
+class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
     """Test hierarchical config-file discovery across directory levels."""
 
     def test_walk_collects_multiple_ancestor_levels(self):
@@ -63,30 +44,21 @@ class TestHierarchicalTraversal(_IsolatedEnvTestCase):
         Then all three levels are discovered with increasing specificity
             (project most specific, ~ least specific)
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "b" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        home, project = self.isolate_config_environment(project_under_home="a/b/proj")
+        _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        _write(home / "a" / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
 
-            _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-            _write(home / "a" / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-            _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        levels = _discover_levels(project)
 
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    levels = _discover_levels(project)
-
-            specs = {
-                path.parent.parent.name: spec for path, _stype, _fmt, spec in levels
-            }
-            # project (.claude under 'proj') is most specific
-            self.assertEqual(specs["proj"], 0)
-            # intermediate ancestor 'a' is between project and user
-            self.assertGreater(specs["a"], 0)
-            # ~ is least specific (largest index)
-            home_spec = max(spec for _p, _s, _f, spec in levels)
-            self.assertEqual(specs[home.name], home_spec)
+        specs = {path.parent.parent.name: spec for path, _stype, _fmt, spec in levels}
+        # project (.claude under 'proj') is most specific
+        self.assertEqual(specs["proj"], 0)
+        # intermediate ancestor 'a' is between project and user
+        self.assertGreater(specs["a"], 0)
+        # ~ is least specific (largest index)
+        home_spec = max(spec for _p, _s, _f, spec in levels)
+        self.assertEqual(specs[home.name], home_spec)
 
     def test_toggle_off_uses_only_project_and_user(self):
         """
@@ -96,28 +68,21 @@ class TestHierarchicalTraversal(_IsolatedEnvTestCase):
         Then only the project and user levels are collected (the intermediate
             ancestor is skipped), matching the pre-Phase-2 two-level behavior
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "b" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        home, project = self.isolate_config_environment(project_under_home="a/b/proj")
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            "hierarchical_configuration = false\npermissions = {}\n",
+        )
+        _write(home / "a" / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
 
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                "hierarchical_configuration = false\npermissions = {}\n",
-            )
-            _write(home / "a" / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-            _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        levels = _discover_levels(project)
 
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    levels = _discover_levels(project)
-
-            dirs = {path.parent.parent.name for path, _s, _f, _spec in levels}
-            self.assertIn("proj", dirs)
-            self.assertIn(home.name, dirs)
-            self.assertNotIn("a", dirs)
+        dirs = {path.parent.parent.name for path, _s, _f, _spec in levels}
+        self.assertIn("proj", dirs)
+        self.assertIn(home.name, dirs)
+        self.assertNotIn("a", dirs)
 
     def test_toggle_on_explicit_walks_full_hierarchy(self):
         """
@@ -125,25 +90,18 @@ class TestHierarchicalTraversal(_IsolatedEnvTestCase):
         When _discover_levels runs with an intermediate ancestor present
         Then the intermediate ancestor level is included in the walk
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "b" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        home, project = self.isolate_config_environment(project_under_home="a/b/proj")
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            "hierarchical_configuration = true\npermissions = {}\n",
+        )
+        _write(home / "a" / ".claude", "toolguard_hook.toml", "permissions = {}\n")
 
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                "hierarchical_configuration = true\npermissions = {}\n",
-            )
-            _write(home / "a" / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        levels = _discover_levels(project)
 
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    levels = _discover_levels(project)
-
-            dirs = {path.parent.parent.name for path, _s, _f, _spec in levels}
-            self.assertIn("a", dirs)
+        dirs = {path.parent.parent.name for path, _s, _f, _spec in levels}
+        self.assertIn("a", dirs)
 
     def test_project_outside_home_still_includes_user(self):
         """
@@ -152,31 +110,21 @@ class TestHierarchicalTraversal(_IsolatedEnvTestCase):
         Then the project level is collected AND ~/.claude is always included as
             the least-specific level
         """
-        with tempfile.TemporaryDirectory() as home_dir:
-            with tempfile.TemporaryDirectory() as other_dir:
-                home = Path(home_dir)
-                project = Path(other_dir) / "proj"
-                project.mkdir(parents=True)
-                (project / ".git").mkdir()
+        home, project = self.isolate_config_environment()
+        _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
 
-                _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-                _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
+        levels = _discover_levels(project)
 
-                with patch("toolguard.config.find_project_root", return_value=project):
-                    with patch("toolguard.config.Path.home", return_value=home):
-                        levels = _discover_levels(project)
-
-                paths = [str(path) for path, _s, _f, _spec in levels]
-                self.assertTrue(any(str(project) in p for p in paths))
-                self.assertTrue(any(str(home / ".claude") in p for p in paths))
-                # User level is least specific (largest specificity index).
-                user_specs = [
-                    spec
-                    for path, _s, _f, spec in levels
-                    if str(home / ".claude") in str(path)
-                ]
-                max_spec = max(spec for _p, _s, _f, spec in levels)
-                self.assertEqual(user_specs[0], max_spec)
+        paths = [str(path) for path, _s, _f, _spec in levels]
+        self.assertTrue(any(str(project) in p for p in paths))
+        self.assertTrue(any(str(home / ".claude") in p for p in paths))
+        # User level is least specific (largest specificity index).
+        user_specs = [
+            spec for path, _s, _f, spec in levels if str(home / ".claude") in str(path)
+        ]
+        max_spec = max(spec for _p, _s, _f, spec in levels)
+        self.assertEqual(user_specs[0], max_spec)
 
     def test_walk_stops_at_home(self):
         """
@@ -184,6 +132,13 @@ class TestHierarchicalTraversal(_IsolatedEnvTestCase):
         When _discover_levels walks upward
         Then the walk never ascends above ~ (no level above home is collected)
         """
+        # ConfigIsolationMixin creates `home` as the top of the isolated tree, so
+        # it structurally cannot represent something ABOVE home -- this is the
+        # one genuinely irreducible hand-rolled case in this file. Clears
+        # CLAUDE_SETTINGS_PATH itself (rather than relying on a shared base
+        # class) since load_configuration() would otherwise honour an ambient
+        # one and bypass the patched hierarchy entirely.
+        self.enterContext(patch.dict(os.environ, {}, clear=True))
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             home = root / "home" / "user"
@@ -213,30 +168,22 @@ class TestHierarchicalTraversal(_IsolatedEnvTestCase):
         When _discover_levels collects that level
         Then the TOML file is used and the JSON is not (within-level TOML wins)
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            cl = project / ".claude"
-            _write(cl, "toolguard_hook.toml", "permissions = {}\n")
-            _write(cl, "toolguard_hook.json", '{"permissions": {}}')
+        _home, project = self.isolate_config_environment()
+        cl = project / ".claude"
+        _write(cl, "toolguard_hook.toml", "permissions = {}\n")
+        _write(cl, "toolguard_hook.json", '{"permissions": {}}')
 
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    levels = _discover_levels(project)
+        levels = _discover_levels(project)
 
-            hook_files = [
-                (path, fmt)
-                for path, stype, fmt, _spec in levels
-                if stype == "toolguard_hook"
-            ]
-            project_hook = [(p, f) for p, f in hook_files if str(project) in str(p)]
-            self.assertEqual(len(project_hook), 1)
-            self.assertEqual(project_hook[0][1], "toml")
+        hook_files = [
+            (path, fmt) for path, stype, fmt, _spec in levels if stype == "toolguard_hook"
+        ]
+        project_hook = [(p, f) for p, f in hook_files if str(project) in str(p)]
+        self.assertEqual(len(project_hook), 1)
+        self.assertEqual(project_hook[0][1], "toml")
 
 
-class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
+class TestMoreSpecificWinsResolution(unittest.TestCase):
     """Test the more-specific-wins permission resolution cascade."""
 
     def _config(self, *level_specs):
@@ -415,20 +362,15 @@ class TestMoreSpecificWinsResolution(_IsolatedEnvTestCase):
         self.assertEqual(decision, "allow")
 
 
-class TestProjectRootRelativePaths(_IsolatedEnvTestCase):
+class TestProjectRootRelativePaths(ConfigIsolationMixin, unittest.TestCase):
     """Test that relative config paths resolve against the project root."""
 
-    def _config_with_backup_dir(self, level_dir_name, backup_dir, tmp_home):
+    def _config_with_backup_dir(self, level_dir_name, backup_dir, home, project):
         """
-        Build a real Configuration with a toolguard_hook.toml declaring a
-        relative backup_dir at the requested level (project / intermediate / user).
-        Returns (config, project_root).
+        Populate a toolguard_hook.toml declaring a relative backup_dir at the
+        requested level (project / intermediate / user), under the given
+        already-isolated home/project.
         """
-        home = Path(tmp_home)
-        project = home / "a" / "b" / "proj"
-        project.mkdir(parents=True)
-        (project / ".git").mkdir()
-
         target = {
             "project": project / ".claude",
             "intermediate": home / "a" / ".claude",
@@ -442,21 +384,14 @@ class TestProjectRootRelativePaths(_IsolatedEnvTestCase):
         # Ensure project always has a hook file so the toggle reads as default-on.
         if level_dir_name != "project":
             _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-        return project, home
 
     def _resolve_backup(self, level_name):
         """Resolve config_sync.backup_dir declared at the given level."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project, home = self._config_with_backup_dir(
-                level_name, "my-backups", tmpdir
-            )
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    resolved = config.resolve_config_path(
-                        config.scalar("config_sync.backup_dir")
-                    )
-            return resolved, project
+        home, project = self.isolate_config_environment(project_under_home="a/b/proj")
+        self._config_with_backup_dir(level_name, "my-backups", home, project)
+        config = load_configuration(project)
+        resolved = config.resolve_config_path(config.scalar("config_sync.backup_dir"))
+        return resolved, project
 
     def test_relative_backup_dir_at_project_level(self):
         """
@@ -491,15 +426,9 @@ class TestProjectRootRelativePaths(_IsolatedEnvTestCase):
         When resolve_config_path runs
         Then the path is returned unchanged
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                self.assertEqual(
-                    config.resolve_config_path("/var/backups"), "/var/backups"
-                )
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        self.assertEqual(config.resolve_config_path("/var/backups"), "/var/backups")
 
     def test_tilde_path_unchanged(self):
         """
@@ -507,16 +436,12 @@ class TestProjectRootRelativePaths(_IsolatedEnvTestCase):
         When resolve_config_path runs
         Then the path is returned unchanged (tilde expansion happens downstream)
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                self.assertEqual(config.resolve_config_path("~/backups"), "~/backups")
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        self.assertEqual(config.resolve_config_path("~/backups"), "~/backups")
 
 
-class TestRelativeFilePathPatterns(_IsolatedEnvTestCase):
+class TestRelativeFilePathPatterns(ConfigIsolationMixin, unittest.TestCase):
     """Test that relative Read/Write/Edit patterns anchor to the project root."""
 
     def _resolve_read(self, level_name):
@@ -527,35 +452,26 @@ class TestRelativeFilePathPatterns(_IsolatedEnvTestCase):
         """
         from toolguard.hook import resolve_file_path_permission_detailed
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "b" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        home, project = self.isolate_config_environment(project_under_home="a/b/proj")
+        target = {
+            "project": project / ".claude",
+            "intermediate": home / "a" / ".claude",
+            "user": home / ".claude",
+        }[level_name]
+        _write(
+            target,
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Read(src/**)"]\n',
+        )
+        if level_name != "project":
+            _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
 
-            target = {
-                "project": project / ".claude",
-                "intermediate": home / "a" / ".claude",
-                "user": home / ".claude",
-            }[level_name]
-            _write(
-                target,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Read(src/**)"]\n',
-            )
-            if level_name != "project":
-                _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-
-            target_file = str(project / "src" / "x.py")
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    decision, _reason, _override = (
-                        resolve_file_path_permission_detailed(
-                            "Read", target_file, config
-                        )
-                    )
-            return decision
+        target_file = str(project / "src" / "x.py")
+        config = load_configuration(project)
+        decision, _reason, _override = resolve_file_path_permission_detailed(
+            "Read", target_file, config
+        )
+        return decision
 
     def test_relative_read_pattern_at_project_level(self):
         """
@@ -582,7 +498,7 @@ class TestRelativeFilePathPatterns(_IsolatedEnvTestCase):
         self.assertEqual(self._resolve_read("user"), "allow")
 
 
-class TestAnchorFilePattern(_IsolatedEnvTestCase):
+class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
     """Test extended-syntax handling in project-root pattern anchoring."""
 
     def test_glob_prefix_relative_body_is_anchored(self):
@@ -594,16 +510,10 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         """
         from toolguard.hook import _anchor_file_pattern
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                result = _anchor_file_pattern(
-                    "[glob]src/**", config, extended_syntax=True
-                )
-                self.assertEqual(result, f"[glob]{project / 'src/**'}")
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        result = _anchor_file_pattern("[glob]src/**", config, extended_syntax=True)
+        self.assertEqual(result, f"[glob]{project / 'src/**'}")
 
     def test_regex_prefix_left_untouched(self):
         """
@@ -613,16 +523,10 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         """
         from toolguard.hook import _anchor_file_pattern
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                result = _anchor_file_pattern(
-                    "[regex]^src/.*", config, extended_syntax=True
-                )
-                self.assertEqual(result, "[regex]^src/.*")
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        result = _anchor_file_pattern("[regex]^src/.*", config, extended_syntax=True)
+        self.assertEqual(result, "[regex]^src/.*")
 
     def test_absolute_pattern_left_untouched(self):
         """
@@ -632,14 +536,10 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         """
         from toolguard.hook import _anchor_file_pattern
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                result = _anchor_file_pattern("/etc/**", config, extended_syntax=True)
-                self.assertEqual(result, "/etc/**")
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        result = _anchor_file_pattern("/etc/**", config, extended_syntax=True)
+        self.assertEqual(result, "/etc/**")
 
     def test_tilde_pattern_left_untouched(self):
         """
@@ -650,16 +550,10 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         """
         from toolguard.hook import _anchor_file_pattern
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                result = _anchor_file_pattern(
-                    "~/secrets/**", config, extended_syntax=True
-                )
-                self.assertEqual(result, "~/secrets/**")
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        result = _anchor_file_pattern("~/secrets/**", config, extended_syntax=True)
+        self.assertEqual(result, "~/secrets/**")
 
     def test_relative_pattern_does_not_match_same_name_outside_project(self):
         """
@@ -672,31 +566,23 @@ class TestAnchorFilePattern(_IsolatedEnvTestCase):
         """
         from toolguard.hook import resolve_file_path_permission_detailed
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "b" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Read(src/**)"]\n',
-            )
+        home, project = self.isolate_config_environment(project_under_home="a/b/proj")
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Read(src/**)"]\n',
+        )
 
-            # A path named src/x.py but OUTSIDE the project root (in an ancestor).
-            outside_file = str(home / "a" / "src" / "x.py")
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    decision, _reason, _override = (
-                        resolve_file_path_permission_detailed(
-                            "Read", outside_file, config
-                        )
-                    )
-            self.assertEqual(decision, "ask")
+        # A path named src/x.py but OUTSIDE the project root (in an ancestor).
+        outside_file = str(home / "a" / "src" / "x.py")
+        config = load_configuration(project)
+        decision, _reason, _override = resolve_file_path_permission_detailed(
+            "Read", outside_file, config
+        )
+        self.assertEqual(decision, "ask")
 
 
-class TestConfigLayerSpecificity(_IsolatedEnvTestCase):
+class TestConfigLayerSpecificity(ConfigIsolationMixin, unittest.TestCase):
     """Test the ConfigLayer specificity convenience accessor."""
 
     def test_specificity_reflects_provenance(self):
@@ -722,16 +608,12 @@ class TestConfigLayerSpecificity(_IsolatedEnvTestCase):
         When resolve_config_path runs
         Then it returns the empty string unchanged
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project = Path(tmpdir) / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            with patch("toolguard.config.find_project_root", return_value=project):
-                config = load_configuration(project)
-                self.assertEqual(config.resolve_config_path(""), "")
+        _home, project = self.isolate_config_environment()
+        config = load_configuration(project)
+        self.assertEqual(config.resolve_config_path(""), "")
 
 
-class TestResolveCompoundEdgeCases(_IsolatedEnvTestCase):
+class TestResolveCompoundEdgeCases(unittest.TestCase):
     """Test edge cases of the per-sub-command compound resolver."""
 
     def test_empty_command_is_denied(self):
@@ -763,7 +645,7 @@ class TestResolveCompoundEdgeCases(_IsolatedEnvTestCase):
         self.assertIn("requiring approval", reason)
 
 
-class TestMigrationIgnoresEnvOverride(unittest.TestCase):
+class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
     """
     Pin that the migration/divergence READ path ignores CLAUDE_SETTINGS_PATH.
 
@@ -772,8 +654,9 @@ class TestMigrationIgnoresEnvOverride(unittest.TestCase):
     ignore_env_override=True). A stale CLAUDE_SETTINGS_PATH pointing at an
     unrelated project must NOT leak into the analysis.
 
-    This class intentionally does NOT inherit the env-isolating base: it sets
-    CLAUDE_SETTINGS_PATH itself to prove the override is ignored.
+    These tests set CLAUDE_SETTINGS_PATH themselves (on top of the isolated,
+    cleared environment ConfigIsolationMixin provides) to prove the override
+    is ignored.
     """
 
     def test_load_configuration_ignores_env_override_when_requested(self):
@@ -786,38 +669,34 @@ class TestMigrationIgnoresEnvOverride(unittest.TestCase):
         """
         from toolguard.config_divergence import get_toolguard_permissions
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
+        home, project = self.isolate_config_environment()
 
-            # Unrelated project that CLAUDE_SETTINGS_PATH points at.
-            other = home / "other"
-            other.mkdir()
-            (other / ".git").mkdir()
-            other_claude = other / ".claude"
-            other_claude.mkdir()
-            other_settings = other_claude / "settings.local.json"
-            other_settings.write_text(
-                '{"permissions": {"allow": ["Bash(env-leak:*)"], "deny": [], "ask": []}}'
-            )
+        # Unrelated project that CLAUDE_SETTINGS_PATH points at.
+        other = home / "other"
+        other.mkdir()
+        (other / ".git").mkdir()
+        other_claude = other / ".claude"
+        other_claude.mkdir()
+        other_settings = other_claude / "settings.local.json"
+        other_settings.write_text(
+            '{"permissions": {"allow": ["Bash(env-leak:*)"], "deny": [], "ask": []}}'
+        )
 
-            # The project actually being migrated/analysed.
-            project = home / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(project-only:*)"]\n',
-            )
+        # The project actually being migrated/analysed.
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(project-only:*)"]\n',
+        )
 
-            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(other_settings)}):
-                with patch("toolguard.config.find_project_root", return_value=project):
-                    with patch("toolguard.config.Path.home", return_value=home):
-                        config = load_configuration(project, ignore_env_override=True)
-                        perms = get_toolguard_permissions(config)
+        self.enterContext(
+            patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(other_settings)})
+        )
+        config = load_configuration(project, ignore_env_override=True)
+        perms = get_toolguard_permissions(config)
 
-            self.assertIn("Bash(project-only:*)", perms["allow"])
-            self.assertNotIn("Bash(env-leak:*)", perms["allow"])
+        self.assertIn("Bash(project-only:*)", perms["allow"])
+        self.assertNotIn("Bash(env-leak:*)", perms["allow"])
 
     def test_load_configuration_honours_env_override_by_default(self):
         """
@@ -826,40 +705,34 @@ class TestMigrationIgnoresEnvOverride(unittest.TestCase):
             default)
         Then the single-file override is honoured (project hierarchy is bypassed)
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            env_claude = home / "env" / ".claude"
-            env_claude.mkdir(parents=True)
-            env_settings = env_claude / "settings.local.json"
-            env_settings.write_text(
-                '{"permissions": {"allow": [], "deny": [], "ask": []}}'
-            )
-            # Adjacent toolguard_hook with a distinctive permission.
-            _write(
-                env_claude,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(env-only:*)"]\n',
-            )
+        home, project = self.isolate_config_environment()
+        env_claude = home / "env" / ".claude"
+        env_claude.mkdir(parents=True)
+        env_settings = env_claude / "settings.local.json"
+        env_settings.write_text('{"permissions": {"allow": [], "deny": [], "ask": []}}')
+        # Adjacent toolguard_hook with a distinctive permission.
+        _write(
+            env_claude,
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(env-only:*)"]\n',
+        )
 
-            project = home / "proj"
-            project.mkdir()
-            (project / ".git").mkdir()
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(project-only:*)"]\n',
-            )
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(project-only:*)"]\n',
+        )
 
-            from toolguard.config_divergence import get_toolguard_permissions
+        from toolguard.config_divergence import get_toolguard_permissions
 
-            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(env_settings)}):
-                with patch("toolguard.config.find_project_root", return_value=project):
-                    with patch("toolguard.config.Path.home", return_value=home):
-                        config = load_configuration(project)
-                        perms = get_toolguard_permissions(config)
+        self.enterContext(
+            patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(env_settings)})
+        )
+        config = load_configuration(project)
+        perms = get_toolguard_permissions(config)
 
-            self.assertIn("Bash(env-only:*)", perms["allow"])
-            self.assertNotIn("Bash(project-only:*)", perms["allow"])
+        self.assertIn("Bash(env-only:*)", perms["allow"])
+        self.assertNotIn("Bash(project-only:*)", perms["allow"])
 
 
 if __name__ == "__main__":

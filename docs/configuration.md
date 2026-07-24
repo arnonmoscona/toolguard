@@ -383,6 +383,7 @@ in a `.env` file in your project root.
 | `TOOLGUARD_SOURCE_ROOT` | path | (empty) | Relative path from project root to source root |
 | `TOOLGUARD_CREATE_LOG_DIR` | bool | `false` | Auto-create log directory if missing |
 | `CLAUDE_SETTINGS_PATH` | path | (unset) | Forces single-file mode against the named settings file, bypassing the config hierarchy (see [the hierarchy section](#configuration-hierarchy)) |
+| `XDG_CONFIG_HOME` | path | `~/.config` | Base directory for the optional split rules directory -- see [Split user-level rules directory](#configuration-hierarchy) below |
 
 ### Boolean values
 
@@ -452,9 +453,53 @@ are never rewritten.
 `toolguard_hook.toml` and `toolguard_hook.json`), the TOML file takes precedence and a
 warning is logged.
 
+**Split user-level rules directory**: In addition to the fixed `~/.claude/` files above,
+toolguard also scans `$XDG_CONFIG_HOME/toolguard/rules/` (defaulting to
+`~/.config/toolguard/rules/` when `XDG_CONFIG_HOME` is unset or empty) for any number of
+`*.toml`/`*.json` files. This directory is entirely optional -- if it doesn't exist, or
+exists but is empty, discovery is a no-op. It exists so a large, self-contained concern
+(e.g. \~60 rules for the `gh` CLI) can live in its own file instead of being mixed into one
+big `toolguard_hook.toml`.
+
+- The scan is **flat and non-recursive**: subdirectories and files with other extensions are
+  ignored.
+- Every file found merges into the **user level** (the least-specific tier) -- it does not
+  introduce a new hierarchy tier of its own. Normal more-specific-wins / deny-wins-within-a-
+  level resolution applies across the combined user-level rule set exactly as it does today.
+- Files are consulted in **lexicographic order by filename stem**, appended after the four
+  primary `~/.claude` candidates, so merge order and log provenance are reproducible run to
+  run.
+- The same **TOML-over-JSON precedence** applies per stem within the directory (e.g. `gh.toml`
+  and `gh.json` both present -> only `gh.toml` is used, with the same "both formats" warning
+  emitted for the single-file case).
+- Each file may only contain `[permissions]` and `[hard_deny]` sections -- not
+  scalar/singleton settings such as `governed_tools`, `no_match_fallback`,
+  `hierarchical_configuration`, `[takeover_mode]`, or `[config_sync]`. There's no natural way
+  to merge those across an arbitrary number of files, so they remain the sole responsibility
+  of the primary `~/.claude/toolguard_hook.toml`. An unexpected top-level key in a
+  rules-directory file is reported as an error-level configuration issue (naming the specific
+  file and key) but does NOT block the file's valid `[permissions]`/`[hard_deny]` content from
+  loading.
+- `[regex]`/`[glob]`/`[native]` extended patterns work identically inside rules-directory
+  files, since they use the same `toolguard_hook.toml`/`.json` schema.
+
+**Worked example**: [`docs/gh-cli-rules-example.toml`](gh-cli-rules-example.toml) is a
+self-contained, \~60-rule `[permissions]` block covering the `gh` CLI. Rather than pasting it
+into the main `toolguard_hook.toml`, drop it in as its own file:
+
+```bash
+mkdir -p ~/.config/toolguard/rules
+cp docs/gh-cli-rules-example.toml ~/.config/toolguard/rules/gh.toml
+```
+
+It is then discovered automatically as a user-level source, and a matched rule from it is
+logged with its own provenance, e.g. `[user: ~/.config/toolguard/rules/gh.toml]` -- see
+[architecture.md](architecture.md#logging) for the provenance format.
+
 **Single-file override**: Setting the `CLAUDE_SETTINGS_PATH` environment variable forces
-toolguard to read only that one settings file and bypass the hierarchy entirely. The
-migration/divergence tooling deliberately ignores this override so it stays project-scoped.
+toolguard to read only that one settings file and bypass the hierarchy entirely -- including
+the rules directory, which is never scanned in this mode. The migration/divergence tooling
+deliberately ignores this override so it stays project-scoped.
 
 Extended patterns (`[regex]`, `[glob]`, `[native]`) are only supported in
 `toolguard_hook.toml` or `toolguard_hook.json` files, to avoid polluting native Claude

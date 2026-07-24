@@ -9,8 +9,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config_validation import (
     KNOWN_SUPPORTED_TOOLS,
     extract_tool_name,
@@ -172,7 +172,7 @@ class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
             self.assertEqual(second["permissions"]["allow"], ["Bash(ls:*)"])
 
 
-class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):
+class TestConfigDiscoveryTomlPrecedence(ConfigIsolationMixin, unittest.TestCase):
     """Test that TOML files take precedence over JSON."""
 
     def test_toml_takes_precedence_over_json(self):
@@ -181,35 +181,29 @@ class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):
         When discover_config_files runs
         Then the TOML hook file is included and the JSON one is excluded
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / "project"
-            project_dir.mkdir()
-            (project_dir / ".git").mkdir()
-            claude_dir = project_dir / ".claude"
-            claude_dir.mkdir()
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
 
-            # Create both TOML and JSON files
-            (claude_dir / "toolguard_hook.toml").write_text('governed_tools = ["Bash"]')
-            (claude_dir / "toolguard_hook.json").write_text(
-                '{"governed_tools": ["Read"]}'
-            )
+        # Create both TOML and JSON files
+        (claude_dir / "toolguard_hook.toml").write_text('governed_tools = ["Bash"]')
+        (claude_dir / "toolguard_hook.json").write_text('{"governed_tools": ["Read"]}')
 
-            with patch("toolguard.config.find_project_root", return_value=project_dir):
-                configs = discover_config_files()
+        configs = discover_config_files()
 
-            # Find toolguard_hook config entries
-            hook_configs = [
-                (p, t, f)
-                for p, t, f in configs
-                if t == "toolguard_hook" and "local" not in p.name
-            ]
+        # Find toolguard_hook config entries
+        hook_configs = [
+            (p, t, f)
+            for p, t, f in configs
+            if t == "toolguard_hook" and "local" not in p.name
+        ]
 
-            # Should have TOML, not JSON
-            self.assertTrue(any(f == "toml" for _, _, f in hook_configs))
-            # The JSON should not be in the list (TOML takes precedence)
-            hook_paths = [str(p) for p, _, _ in hook_configs]
-            self.assertIn(str(claude_dir / "toolguard_hook.toml"), hook_paths)
-            self.assertNotIn(str(claude_dir / "toolguard_hook.json"), hook_paths)
+        # Should have TOML, not JSON
+        self.assertTrue(any(f == "toml" for _, _, f in hook_configs))
+        # The JSON should not be in the list (TOML takes precedence)
+        hook_paths = [str(p) for p, _, _ in hook_configs]
+        self.assertIn(str(claude_dir / "toolguard_hook.toml"), hook_paths)
+        self.assertNotIn(str(claude_dir / "toolguard_hook.json"), hook_paths)
 
     def test_json_used_when_no_toml(self):
         """
@@ -217,30 +211,24 @@ class TestConfigDiscoveryTomlPrecedence(unittest.TestCase):
         When discover_config_files runs
         Then the JSON hook file is included
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / "project"
-            project_dir.mkdir()
-            (project_dir / ".git").mkdir()
-            claude_dir = project_dir / ".claude"
-            claude_dir.mkdir()
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
 
-            # Create only JSON file
-            (claude_dir / "toolguard_hook.json").write_text(
-                '{"governed_tools": ["Bash"]}'
-            )
+        # Create only JSON file
+        (claude_dir / "toolguard_hook.json").write_text('{"governed_tools": ["Bash"]}')
 
-            with patch("toolguard.config.find_project_root", return_value=project_dir):
-                configs = discover_config_files()
+        configs = discover_config_files()
 
-            # Find toolguard_hook config entries
-            hook_configs = [
-                (p, t, f)
-                for p, t, f in configs
-                if t == "toolguard_hook" and "local" not in p.name
-            ]
+        # Find toolguard_hook config entries
+        hook_configs = [
+            (p, t, f)
+            for p, t, f in configs
+            if t == "toolguard_hook" and "local" not in p.name
+        ]
 
-            # Should have JSON
-            self.assertTrue(any(f == "json" for _, _, f in hook_configs))
+        # Should have JSON
+        self.assertTrue(any(f == "json" for _, _, f in hook_configs))
 
 
 class TestExtractToolName(unittest.TestCase):

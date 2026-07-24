@@ -151,6 +151,13 @@ prefer the explicit `--dev` -- it is unambiguous and does not depend on detectio
 Never bake the `uv run python -m ...` form into a self-permission rule or into the
 skill body; the dev-form lives only in each skill's "Development mode" section.
 
+## Additional pre-push checklist items
+
+* Check whether code changes in this change set require changes to the maintenance skill or the security audit skill
+* Check whether changes in this change set require changes to install.md
+* Do we need release notes?
+* *After push* ask whether we should update the toolguard installation using `uv tool upgrade`
+
 ## Technical notes
 
 Additional project-specific notes can be found in [technical-notes.md](technical-notes.md),
@@ -159,49 +166,12 @@ if the file exists.
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
-**IMPORTANT: This project has a knowledge graph.** For structural and
-symbol-shaped questions it is often the best first stop -- faster, cheaper
-(fewer tokens), and it gives structural context (callers, dependents, impact,
-architecture) that file scanning cannot. It does **not** replace the global
-search guidance in `~/.claude/common-search.md`; it is a third lane alongside
-`ag`/`ack` and the JetBrains MCP. Reach for any of those three before defaulting
-to Grep/Glob/Read -- see "How this fits the global search directives" below for
-the division of labor.
-
-### When to use graph tools FIRST
-
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of
-- **Finding a function's tests**: `query_graph` pattern="callers_of" and keep the
-  `is_test:true` results -- **NOT** `tests_for` (see caveats below)
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
-
-When the graph doesn't fit, choose the next lane by the rules below -- not
-automatically Grep.
-
-### How this fits the global search directives (don't bury them)
-
-The global guidance in `~/.claude/common-search.md` still governs. This graph is a
-**third lane**, not a replacement. Decision order for this repo:
-
-- **Text-anchored** (string literal, comment, log message, config value, TODO, or any
-  gitignored / just-created file): **`ag`/`ack`** -- the graph indexes structure, not
-  arbitrary text, and `ag` sees the live filesystem (immune to graph drift and
-  IDE-index lag).
-- **Symbol / relationship / architecture-anchored**: prefer a semantic tool over grep,
-  choosing by need --
-  - **code-review-graph** for token-cheap breadth: exploration, `get_impact_radius`,
-    `detect_changes` / review context, `get_architecture_overview` / communities. Its
-    wins are token cost and structural reach.
-  - **JetBrains MCP** (`search_symbol`, `analyze_calls`, `get_symbol_info`) for
-    live-accurate precision on a specific symbol: aliases, overloads, just-edited code,
-    or whenever the graph's enrichment may be **stale** (see the drift note below).
-  - Tiebreak: graph first to map the territory cheaply; JetBrains MCP to confirm or
-    disambiguate an exact symbol, or when the graph looks stale.
-- **Grep/Glob**: genuinely last resort -- only when none of the above fits. (Noted
-  because the default reflex is to reach for grep first; resist it.)
+This project has `code-review-graph` installed. For general usage guidance (when it beats
+`ag`/JetBrains MCP for searching, which capabilities matter most for code review and why),
+see the global guidance: `~/.claude/common-search.md` (search lane selection),
+`~/.claude/code-review-graph-search.md`, and `~/.claude/code-review-graph-review.md`. Do not
+duplicate that guidance here -- only this project's own deviations from it are recorded
+below.
 
 ### Project-specific caveats (verified 2026-06-29)
 
@@ -254,24 +224,3 @@ know exists is missing), force a full structural pass with
 
 These commands are local, offline, and write only to the gitignored
 `.code-review-graph/`.
-
-### Key Tools
-
-| Tool | Use when |
-| ------ | ---------- |
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
-| `get_impact_radius` | Understanding blast radius of a change |
-| `get_affected_flows` | Finding which execution paths are impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
-| `refactor_tool` | Planning renames, finding dead code |
-
-### Workflow
-
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. To check a function's test coverage, use `query_graph` pattern="callers_of"
-   and keep `is_test:true` results (`tests_for` is unreliable here -- see caveats).
