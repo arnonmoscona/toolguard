@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config import discover_config_files, find_project_root
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 
@@ -104,7 +105,7 @@ class TestPatternMatching(unittest.TestCase):
         self.assertFalse(match_pattern(PatternType.REGEX, "[invalid(regex", "test"))
 
 
-class TestConfigDiscovery(unittest.TestCase):
+class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
     """Test config file discovery in hierarchy."""
 
     def test_discover_with_project_configs(self):
@@ -113,26 +114,23 @@ class TestConfigDiscovery(unittest.TestCase):
         When discover_config_files runs with the project root resolved
         Then both project config files appear in the discovered config paths
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a project structure
-            project_dir = Path(tmpdir) / "project"
-            project_dir.mkdir()
-            (project_dir / ".git").mkdir()
-            claude_dir = project_dir / ".claude"
-            claude_dir.mkdir()
+        # discover_config_files() also reads Path.home() / ".claude" for the
+        # user level -- isolate it so a real dogfooded ~/.claude cannot leak
+        # into the discovered list.
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
 
-            # Create some config files
-            (claude_dir / "settings.local.json").write_text("{}")
-            (claude_dir / "toolguard_hook.json").write_text("{}")
+        # Create some config files
+        (claude_dir / "settings.local.json").write_text("{}")
+        (claude_dir / "toolguard_hook.json").write_text("{}")
 
-            # Mock find_project_root to return our temp project
-            with patch("toolguard.config.find_project_root", return_value=project_dir):
-                configs = discover_config_files()
+        configs = discover_config_files()
 
-            # Should find project configs
-            config_paths = [str(path) for path, _, _ in configs]
-            self.assertIn(str(claude_dir / "settings.local.json"), config_paths)
-            self.assertIn(str(claude_dir / "toolguard_hook.json"), config_paths)
+        # Should find project configs
+        config_paths = [str(path) for path, _, _ in configs]
+        self.assertIn(str(claude_dir / "settings.local.json"), config_paths)
+        self.assertIn(str(claude_dir / "toolguard_hook.json"), config_paths)
 
     def test_discover_without_project_root(self):
         """
@@ -140,13 +138,14 @@ class TestConfigDiscovery(unittest.TestCase):
         When discover_config_files runs
         Then it does not crash and returns a list (only user-level configs, if any)
         """
+        self.isolate_config_environment()
         with patch(
             "toolguard.config.find_project_root", side_effect=RuntimeError("No project")
         ):
             configs = discover_config_files()
-            # Should only find user-level configs (if they exist)
-            # Since we're in a test environment, user configs may or may not exist
-            # Just verify it doesn't crash
+            # Should only find user-level configs (if they exist) -- the isolated
+            # fake home has none, but this assertion stays deliberately loose
+            # (unchanged from before isolation): just verify it doesn't crash.
             self.assertIsInstance(configs, list)
 
     def test_discover_prioritizes_local_over_regular(self):
@@ -155,32 +154,28 @@ class TestConfigDiscovery(unittest.TestCase):
         When discover_config_files runs
         Then settings.local.json appears before settings.json in the ordering
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            project_dir = Path(tmpdir) / "project"
-            project_dir.mkdir()
-            (project_dir / ".git").mkdir()
-            claude_dir = project_dir / ".claude"
-            claude_dir.mkdir()
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
 
-            # Create both local and regular files
-            (claude_dir / "settings.local.json").write_text("{}")
-            (claude_dir / "settings.json").write_text("{}")
+        # Create both local and regular files
+        (claude_dir / "settings.local.json").write_text("{}")
+        (claude_dir / "settings.json").write_text("{}")
 
-            with patch("toolguard.config.find_project_root", return_value=project_dir):
-                configs = discover_config_files()
+        configs = discover_config_files()
 
-            config_paths = [path for path, _, _ in configs]
-            # settings.local.json should come before settings.json
-            local_idx = next(
-                i for i, p in enumerate(config_paths) if p.name == "settings.local.json"
-            )
-            regular_idx = next(
-                i for i, p in enumerate(config_paths) if p.name == "settings.json"
-            )
-            self.assertLess(local_idx, regular_idx)
+        config_paths = [path for path, _, _ in configs]
+        # settings.local.json should come before settings.json
+        local_idx = next(
+            i for i, p in enumerate(config_paths) if p.name == "settings.local.json"
+        )
+        regular_idx = next(
+            i for i, p in enumerate(config_paths) if p.name == "settings.json"
+        )
+        self.assertLess(local_idx, regular_idx)
 
 
-class TestFindProjectRoot(unittest.TestCase):
+class TestFindProjectRoot(ConfigIsolationMixin, unittest.TestCase):
     """
     Real (unmocked) tests of toolguard.config.find_project_root's marker walk.
 
@@ -300,15 +295,12 @@ class TestFindProjectRoot(unittest.TestCase):
         When find_project_root is called
         Then RuntimeError is raised
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            test_dir = Path(tmpdir) / "no_project"
-            test_dir.mkdir()
+        home, _project = self.isolate_config_environment()
+        test_dir = home / "no_project"
+        test_dir.mkdir()
 
-            with patch("pathlib.Path.home") as mock_home:
-                mock_home.return_value = Path(tmpdir)
-
-                with self.assertRaises(RuntimeError):
-                    find_project_root(test_dir)
+        with self.assertRaises(RuntimeError):
+            find_project_root(test_dir)
 
 
 if __name__ == "__main__":

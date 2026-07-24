@@ -24,6 +24,7 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config import (
     ConfigLayer,
     Configuration,
@@ -506,7 +507,7 @@ class TestHookConflictLogging(unittest.TestCase):
             self.assertIn("REFUSED", resolution_files[0].read_text())
 
 
-class TestM1SingleSourceWarning(unittest.TestCase):
+class TestM1SingleSourceWarning(ConfigIsolationMixin, unittest.TestCase):
     """M1: the both-formats warning is emitted exactly once, to the warning stream."""
 
     def test_both_formats_warning_once_to_warning_stream(self):
@@ -519,34 +520,32 @@ class TestM1SingleSourceWarning(unittest.TestCase):
         from toolguard import hook as hook_mod
         from toolguard.config import load_configuration
 
-        with TemporaryDirectory() as proj:
-            proj_root = Path(proj)
-            claude = proj_root / ".claude"
-            claude.mkdir()
-            (proj_root / "pyproject.toml").write_text('[project]\nname="x"\n')
-            (claude / "toolguard_hook.toml").write_text(
-                'governed_tools = ["Bash"]\n[permissions]\nallow=["Bash(git *)"]\n'
-            )
-            (claude / "toolguard_hook.json").write_text(
-                '{"permissions": {"allow": ["Bash(ls *)"]}}'
-            )
+        _home, proj_root = self.isolate_config_environment()
+        claude = proj_root / ".claude"
+        claude.mkdir()
+        (claude / "toolguard_hook.toml").write_text(
+            'governed_tools = ["Bash"]\n[permissions]\nallow=["Bash(git *)"]\n'
+        )
+        (claude / "toolguard_hook.json").write_text(
+            '{"permissions": {"allow": ["Bash(ls *)"]}}'
+        )
 
-            log_dir = proj_root / "logs"
-            env_config = {"log_dir": log_dir}
-            config = load_configuration(proj_root, ignore_env_override=True)
+        log_dir = proj_root / "logs"
+        env_config = {"log_dir": log_dir}
+        config = load_configuration(proj_root, ignore_env_override=True)
 
-            # Reset the once-per-session guard so validation runs here.
-            hook_mod._validation_done = False
-            hook_mod._run_startup_validation(env_config, str(proj_root), config)
+        # Reset the once-per-session guard so validation runs here.
+        hook_mod._validation_done = False
+        hook_mod._run_startup_validation(env_config, str(proj_root), config)
 
-            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
-            self.assertEqual(len(warning_files), 1)
-            text = warning_files[0].read_text()
-            occurrences = text.count("Both toolguard_hook.toml and toolguard_hook.json")
-            self.assertEqual(occurrences, 1)
-            # Not routed to error/conflict streams.
-            self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
-            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
+        warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+        self.assertEqual(len(warning_files), 1)
+        text = warning_files[0].read_text()
+        occurrences = text.count("Both toolguard_hook.toml and toolguard_hook.json")
+        self.assertEqual(occurrences, 1)
+        # Not routed to error/conflict streams.
+        self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
+        self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
 
 class TestValidationIssueRoutingByLevel(unittest.TestCase):

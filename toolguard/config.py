@@ -299,6 +299,95 @@ _LEVEL_CANDIDATES: Tuple[Tuple[str, str, bool], ...] = (
     ("settings", "claude", False),
 )
 
+# Top-level sections a rules-directory file (see _rules_dir()) is allowed to
+# contain. Scalars/singletons (governed_tools, no_match_fallback,
+# [takeover_mode], [config_sync], etc.) have no natural multi-file merge rule
+# and remain the sole responsibility of the primary toolguard_hook.toml (TOO-30).
+_RULES_FILE_ALLOWED_SECTIONS = frozenset({"permissions", "hard_deny"})
+
+
+def _rules_dir() -> Path:
+    """
+    Resolve the XDG-style user rules directory for split toolguard_hook files.
+
+    Returns ``$XDG_CONFIG_HOME/toolguard/rules`` when ``XDG_CONFIG_HOME`` is set
+    in the environment to a non-empty string, per the XDG Base Directory
+    Specification (an empty string is treated as unset, not as a literal
+    empty-string base). Otherwise defaults to ``~/.config/toolguard/rules``.
+
+    The directory is optional and may not exist on disk; callers that need to
+    scan it use :func:`_discover_rules_files`, which tolerates a missing or
+    empty directory.
+
+    Returns:
+        The resolved rules directory path.
+    """
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home) / "toolguard" / "rules"
+    return Path.home() / ".config" / "toolguard" / "rules"
+
+
+def _group_rules_files_by_stem(rules_dir: Path) -> Dict[str, Dict[str, Path]]:
+    """
+    Flat scan of a rules directory, grouping ``*.toml``/``*.json`` files by stem.
+
+    Shared building block behind :func:`_discover_rules_files` (which resolves
+    each group down to a single TOML-over-JSON winner) and the duplicate-format
+    detection in ``load_configuration()`` (which needs to know, while the
+    directory still exists, whether a stem had BOTH formats present -- so that
+    fact can be recorded on the resulting layer rather than re-checked against
+    disk later, when the directory may no longer exist).
+
+    Args:
+        rules_dir: The directory to scan.
+
+    Returns:
+        Mapping of filename stem to a ``{'.toml': path, '.json': path}``
+        sub-mapping of whichever suffixes are present for that stem. Empty
+        when ``rules_dir`` is missing or not a directory.
+    """
+    if not rules_dir.is_dir():
+        return {}
+    by_stem: Dict[str, Dict[str, Path]] = {}
+    for path in rules_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix in (".toml", ".json"):
+            by_stem.setdefault(path.stem, {})[path.suffix] = path
+    return by_stem
+
+
+def _discover_rules_files(rules_dir: Path) -> List[Tuple[Path, str]]:
+    """
+    Flat, non-recursive scan of a rules directory for ``*.toml``/``*.json`` files.
+
+    A missing or empty directory is a no-op (returns an empty list, never an
+    error). Subdirectories and files with other extensions are ignored --
+    scanning is intentionally flat for v1 (TOO-30). When both ``<stem>.toml``
+    and ``<stem>.json`` exist for the same stem, only the TOML entry is
+    returned, mirroring the TOML-over-JSON precedence used elsewhere in the
+    hierarchy. Results are sorted lexicographically by filename stem so merge
+    order and log provenance are reproducible run-to-run.
+
+    Args:
+        rules_dir: The directory to scan (typically the result of
+            :func:`_rules_dir`).
+
+    Returns:
+        List of ``(path, format)`` pairs, ``format`` being ``'toml'`` or
+        ``'json'``, sorted ascending by filename stem.
+    """
+    by_stem = _group_rules_files_by_stem(rules_dir)
+    result: List[Tuple[Path, str]] = []
+    for stem in sorted(by_stem):
+        formats = by_stem[stem]
+        if ".toml" in formats:
+            result.append((formats[".toml"], "toml"))
+        elif ".json" in formats:
+            result.append((formats[".json"], "json"))
+    return result
+
 
 def _discover_in_dir(claude_dir: Path) -> List[Tuple[Path, str, str]]:
     """
@@ -381,12 +470,20 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
     ``hierarchical_configuration`` toggle (read from the project level only) is
     False, only the project and user levels are collected -- today's behaviour.
 
+    After the primary ``.claude`` candidates, any files discovered in the
+    optional XDG rules directory (see :func:`_rules_dir` /
+    :func:`_discover_rules_files`, TOO-30) are appended with
+    ``source_type='toolguard_hook_rules'`` at the SAME (least-specific, user)
+    specificity as ``~/.claude`` -- they merge into the user level rather than
+    introducing a new hierarchy tier.
+
     Args:
         start_dir: Directory to start project-root discovery from. Defaults to cwd.
 
     Returns:
         List of (path, source_type, format, specificity) tuples, ordered
-        most-specific first then by within-level priority.
+        most-specific first then by within-level priority, with any
+        rules-directory files appended last.
     """
     home = Path.home()
     user_claude_dir = home / ".claude"
@@ -433,6 +530,16 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
             continue
         for path, source_type, file_format in _discover_in_dir(claude_dir):
             results.append((path, source_type, file_format, specificity))
+
+    # Optional XDG rules directory (TOO-30): flat *.toml/*.json files that merge
+    # into the USER level (least-specific tier, index len(level_dirs) - 1, which
+    # is stable even when ~/.claude itself has no files). Appended after the
+    # primary ~/.claude candidates so those remain the highest-priority
+    # user-level source when duplicate patterns exist.
+    user_specificity = len(level_dirs) - 1
+    for path, file_format in _discover_rules_files(_rules_dir()):
+        results.append((path, "toolguard_hook_rules", file_format, user_specificity))
+
     return results
 
 
@@ -591,10 +698,28 @@ class ConfigLayer:
     Attributes:
         provenance: Display-only origin of this layer.
         content: Read-only view of the parsed config dict for this source.
+        unexpected_keys: Top-level keys present in the raw source file that are
+            NOT permitted for this layer's source type and were stripped from
+            ``content`` before it was built. Always empty for ``~/.claude``
+            sources (which permit any toolguard_hook key). Non-empty only for
+            ``toolguard_hook_rules`` (XDG rules-directory, TOO-30) layers, which
+            are restricted to ``[permissions]``/``[hard_deny]``;
+            :meth:`Configuration.validation_issues` reports these as errors.
+            Defaults to ``()`` so existing direct-construction call sites are
+            unaffected.
+        duplicate_format: True when discovery found a same-stem sibling in the
+            other format (TOML+JSON both present) that lost the TOML-over-JSON
+            precedence and so does NOT get its own layer. Recorded at discovery
+            time -- while the source directory is known to exist -- so
+            :meth:`Configuration.validation_issues` can report the "both
+            formats" warning without re-touching the filesystem later (relevant
+            for ``toolguard_hook_rules`` layers, TOO-30). Defaults to False.
     """
 
     provenance: Provenance
     content: Mapping = field(default_factory=lambda: MappingProxyType({}))
+    unexpected_keys: Tuple[str, ...] = ()
+    duplicate_format: bool = False
 
     @property
     def source_type(self) -> str:
@@ -1530,6 +1655,9 @@ class Configuration:
         Detects:
 
         - Both a TOML and a JSON config file present at the same level/base.
+        - A non-boolean ``takeover_mode.enabled``.
+        - A rules-directory file (TOO-30) defining a top-level key outside
+          ``[permissions]``/``[hard_deny]``.
         - Unsupported tools referenced in toolguard_hook permissions.
         - Tools referenced in permissions but absent from governed_tools.
 
@@ -1563,6 +1691,12 @@ class Configuration:
                 for fmt, suffix in (("toml", ".toml"), ("json", ".json")):
                     if (parent / f"{base_name}{suffix}").exists():
                         seen_formats[key].add(fmt)
+            if layer.duplicate_format:
+                # Recorded at discovery time (see load_configuration); does not
+                # depend on the source directory still existing on disk, unlike
+                # the on-disk check above (needed for rules-dir layers, TOO-30).
+                seen_formats[key].add("toml")
+                seen_formats[key].add("json")
             seen_formats[key].add(layer.provenance.file_format)
 
         for parent_str, base_name in order:
@@ -1602,7 +1736,36 @@ class Configuration:
                     )
                 )
 
-        # 3) Permission validation over the merged toolguard_hook content only.
+        # 3) Rules-directory layers (TOO-30) may only define [permissions] and
+        #    [hard_deny]. Any other top-level key found in the raw file was
+        #    stripped before the layer's content was built (load_configuration)
+        #    and recorded on unexpected_keys -- surface it here as an error so
+        #    the misconfiguration is visible (fail loud) rather than silently
+        #    dropped. This does NOT block the layer's valid permissions/hard_deny
+        #    content, which still resolves normally.
+        for layer in self.layers:
+            if not layer.unexpected_keys:
+                continue
+            keys_str = ", ".join(layer.unexpected_keys)
+            issues.append(
+                Issue(
+                    level="error",
+                    message=(
+                        f"{layer.provenance.describe_brief()} defines unsupported "
+                        f"top-level key(s) for a rules-directory file: {keys_str}"
+                    ),
+                    corrective_steps=(
+                        "Rules-directory files (~/.config/toolguard/rules/*.toml "
+                        "or *.json) may only contain [permissions] and "
+                        "[hard_deny] sections. Move scalar/singleton settings "
+                        "(governed_tools, no_match_fallback, [takeover_mode], "
+                        "[config_sync], etc.) to the primary "
+                        "~/.claude/toolguard_hook.toml."
+                    ),
+                )
+            )
+
+        # 4) Permission validation over the merged toolguard_hook content only.
         merged_config: Dict = {
             "governed_tools": [],
             "additional_supported_tools": [],
@@ -1659,15 +1822,29 @@ def _parse_source(path: Path, file_format: str) -> Optional[dict]:
     """
     Parse a single config source file, returning its dict or None on failure.
 
+    A syntactically valid file whose top level is not an object/table (e.g. a
+    bare JSON array) is treated the same as an unparseable file -- skipped
+    with a warning -- rather than propagating a raw ``AttributeError``/
+    ``TypeError`` out of ``load_configuration()`` and crashing the whole hook.
+    This matters most for TOO-30's rules-directory files, which are more
+    numerous and hand-authored than the single primary ``toolguard_hook.toml``,
+    so a shape mistake in any one of them must not take down every command.
+
     Args:
         path: Path to the config file.
         file_format: 'json' or 'toml'.
 
     Returns:
-        Parsed dict, or None if the file cannot be read/parsed.
+        Parsed dict, or None if the file cannot be read/parsed, or its
+        top level is not an object/table.
     """
     try:
-        return load_config_file(path, file_format)
+        content = load_config_file(path, file_format)
+        if not isinstance(content, dict):
+            raise TypeError(
+                f"expected a top-level object/table, got {type(content).__name__}"
+            )
+        return content
     except Exception as e:  # noqa: BLE001 - tolerate any unreadable source
         print(f"Warning: Failed to load {path}: {e}", file=sys.stderr)
         return None
@@ -1681,15 +1858,19 @@ def _level_for_path(path: Path) -> str:
         path: Path to the source file.
 
     Returns:
-        'user' if the path is under the user's ~/.claude directory, otherwise
+        'user' if the path is under the user's ~/.claude directory OR under the
+        XDG rules directory (see :func:`_rules_dir`, TOO-30 -- rules-directory
+        files merge into the user level, not a level of their own), otherwise
         'project'.
     """
-    user_claude = Path.home() / ".claude"
-    try:
-        path.resolve().relative_to(user_claude.resolve())
-        return "user"
-    except ValueError:
-        return "project"
+    resolved = path.resolve()
+    for anchor in (Path.home() / ".claude", _rules_dir()):
+        try:
+            resolved.relative_to(anchor.resolve())
+            return "user"
+        except ValueError:
+            continue
+    return "project"
 
 
 def load_configuration(
@@ -1764,17 +1945,53 @@ def load_configuration(
                 )
         return Configuration(layers=tuple(layers), start_dir=start_dir)
 
+    # Lazily computed (at most once) if/when a rules-dir layer is encountered
+    # below: the set of filename stems that have BOTH a .toml and .json file in
+    # the rules directory. Computed while the directory is known to exist (this
+    # same discovery pass just scanned it), so ConfigLayer.duplicate_format can
+    # be recorded once here rather than re-checked against the filesystem later
+    # by validation_issues() -- which must work even if the source directory no
+    # longer exists by the time it runs (e.g. an isolated test's tempdir).
+    rules_duplicate_stems: Optional[frozenset] = None
+
     for path, source_type, file_format, specificity in _discover_levels(start_dir):
         content = _parse_source(path, file_format)
         if content is None:
             continue
         level = _level_for_path(path)
+        unexpected_keys: Tuple[str, ...] = ()
+        duplicate_format = False
+        if source_type == "toolguard_hook_rules":
+            # Rules-directory files are restricted to [permissions]/[hard_deny]
+            # (TOO-30). Any other top-level key is recorded for
+            # Configuration.validation_issues() to report as an error, and
+            # stripped from the content the rest of the module sees -- so
+            # governed_tools()/scalar()/takeover_mode()/etc. never observe it.
+            unexpected_keys = tuple(
+                key for key in content if key not in _RULES_FILE_ALLOWED_SECTIONS
+            )
+            content = {
+                key: value
+                for key, value in content.items()
+                if key in _RULES_FILE_ALLOWED_SECTIONS
+            }
+            if rules_duplicate_stems is None:
+                rules_duplicate_stems = frozenset(
+                    stem
+                    for stem, formats in _group_rules_files_by_stem(
+                        _rules_dir()
+                    ).items()
+                    if len(formats) > 1
+                )
+            duplicate_format = path.stem in rules_duplicate_stems
         layers.append(
             ConfigLayer(
                 provenance=Provenance(
                     level, source_type, file_format, path, specificity
                 ),
                 content=MappingProxyType(content),
+                unexpected_keys=unexpected_keys,
+                duplicate_format=duplicate_format,
             )
         )
 

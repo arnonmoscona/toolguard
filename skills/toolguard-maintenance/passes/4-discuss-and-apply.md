@@ -69,6 +69,13 @@ Enact only what the user approved, by the narrowest mechanism that fits:
   user-level setup go together. For a promoted allow, restate the cross-context
   broadening caveat before the user commits. If the user declines the promotion, record
   it (Step 3) as a `reject-promotion` ledger entry so a periodic run stays quiet.
+  **The promotion destination is always `~/.claude/toolguard_hook.toml` specifically --
+  deliberately, not an oversight.** The optional `~/.config/toolguard/rules/` split-file
+  directory (see `configuration.md#configuration-hierarchy`) is also part of the user
+  level, but it is manually curated by the user and must NEVER be offered or chosen as
+  a promotion destination on the agent's own initiative. If the user wants a promoted
+  rule to land in one of those files instead, that must be their explicit instruction,
+  not a suggestion this skill makes.
 - **Inline clarity annotations:** after presenting clarity interactions, offer
   `toolguard-maintain --annotate` to write `# toolguard:` comments so the config
   self-documents (comment-only, same write pre-flight; show the `--annotate` preview

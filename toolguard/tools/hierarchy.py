@@ -14,6 +14,21 @@ broader / user-level), most-specific-wins.  Two hierarchy operations live here:
    contexts the broader layer governs -- is outside any single corpus and is
    surfaced as a scope note for the human to weigh.
 
+   Not currently wired into any live auto-apply path: today's only user-facing
+   promotion flow (the ``toolguard-maintenance`` skill, pass 4) hand-applies
+   promotions as a two-file paste, always to ``~/.claude/toolguard_hook.toml``
+   specifically. If/when this module's ``to_provenance`` is ever wired to an
+   automated target-selection step, it MUST NEVER select a layer whose
+   ``source_type`` is ``"toolguard_hook_rules"`` (the optional
+   ``~/.config/toolguard/rules/`` split-file directory, TOO-30) as a promotion
+   destination. That directory is manually curated by the user; moving a rule
+   into one of its files must only ever happen on the user's explicit
+   instruction, never as something toolguard decides on its own. The "broader
+   user layer" a promotion targets means the primary
+   ``~/.claude/toolguard_hook.toml`` (or an equivalent single, canonical
+   user-level file the user has designated) -- not any arbitrary layer that
+   happens to share the user specificity.
+
 2. **Cross-layer redundancy** -- a rule in a more-specific layer that is
    normalised-equal to a rule already present in a broader layer is redundant:
    the broader copy already covers it, so the specific copy can be dropped with
@@ -52,7 +67,11 @@ class HierarchyMigration:
         list_type: Permission list (``'allow'`` in this slice).
         pattern: Wrapper-free pattern body to move (e.g. ``'git status:*'``).
         from_provenance: The layer the rule currently lives in.
-        to_provenance: The layer to move it to.
+        to_provenance: The layer to move it to. MUST NOT be a
+            ``source_type == "toolguard_hook_rules"`` layer (the user-maintained
+            ``~/.config/toolguard/rules/`` split-file directory) -- see the module
+            docstring. Any code that constructs this value automatically must
+            filter those out first.
         rationale: Human-readable reason for the move.
     """
 

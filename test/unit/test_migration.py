@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.scripts.migrate_permissions import (
     create_backup,
     detect_similar_patterns,
@@ -654,8 +655,19 @@ class TestSettingsFileUpdate(unittest.TestCase):
             self.assertEqual(updated["permissions"]["ask"], [])
 
 
-class TestMigration(unittest.TestCase):
-    """Test full migration process."""
+class TestMigration(ConfigIsolationMixin, unittest.TestCase):
+    """
+    Test full migration process.
+
+    Every test isolates Path.home() (via ConfigIsolationMixin), even though
+    migrate()'s target-selection logic itself already filters discovered
+    config files down to project_root's own .claude directory (TOO-15): an
+    unpatched Path.home() would still leak this repo's real, dogfooded
+    ~/.claude/toolguard_hook.toml into load_configuration()'s aggregated
+    toolguard_perms (used for divergent/redundant pattern detection), which
+    could silently change which patterns a test observes as "divergent" vs
+    "already present" depending on the real machine's config.
+    """
 
     def test_dry_run_mode(self):
         """
@@ -663,38 +675,32 @@ class TestMigration(unittest.TestCase):
         When migrate runs with dry_run=True
         Then no files are changed, no TOML config is created, and it exits 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create settings.local.json with patterns
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)", "Bash(git:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json with patterns
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)", "Bash(git:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            # Run dry-run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root, dry_run=True)
+        # Run dry-run migration
+        exit_code = migrate(project_root, dry_run=True)
 
-            # Check no changes were made
-            with open(settings_path, "r") as f:
-                after_settings = json.load(f)
+        # Check no changes were made
+        with open(settings_path, "r") as f:
+            after_settings = json.load(f)
 
-            self.assertEqual(after_settings, settings)
-            self.assertFalse((claude_dir / "toolguard_hook.toml").exists())
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(after_settings, settings)
+        self.assertFalse((claude_dir / "toolguard_hook.toml").exists())
+        self.assertEqual(exit_code, 0)
 
     def test_migration_creates_new_toml_config(self):
         """
@@ -703,46 +709,40 @@ class TestMigration(unittest.TestCase):
         Then a new toolguard_hook.toml is created with the patterns, the settings allow list is
         emptied, and it exits 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create settings.local.json
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)", "Bash(git:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)", "Bash(git:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            # Run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root)
+        # Run migration
+        exit_code = migrate(project_root)
 
-            # Check that toolguard_hook.toml was created
-            toml_path = claude_dir / "toolguard_hook.toml"
-            self.assertTrue(toml_path.exists())
+        # Check that toolguard_hook.toml was created
+        toml_path = claude_dir / "toolguard_hook.toml"
+        self.assertTrue(toml_path.exists())
 
-            # Check content
-            content = toml_path.read_text()
-            self.assertIn("Bash(ls:*)", content)
-            self.assertIn("Bash(git:*)", content)
+        # Check content
+        content = toml_path.read_text()
+        self.assertIn("Bash(ls:*)", content)
+        self.assertIn("Bash(git:*)", content)
 
-            # Check settings.local.json was updated
-            with open(settings_path, "r") as f:
-                updated_settings = json.load(f)
+        # Check settings.local.json was updated
+        with open(settings_path, "r") as f:
+            updated_settings = json.load(f)
 
-            self.assertEqual(updated_settings["permissions"]["allow"], [])
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(updated_settings["permissions"]["allow"], [])
+        self.assertEqual(exit_code, 0)
 
     def test_migration_adds_to_existing_toml(self):
         """
@@ -751,17 +751,15 @@ class TestMigration(unittest.TestCase):
         Then the new patterns are added to the TOML and all settings patterns (migrated or
         redundant) are removed, exiting 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create existing toolguard_hook.toml. Governs Bash AND Read so the
-            # Read pattern below is eligible to migrate (migration only moves rules
-            # for governed tools -- issue #1).
-            toml_path = claude_dir / "toolguard_hook.toml"
-            toml_content = """governed_tools = ["Bash", "Read"]
+        # Create existing toolguard_hook.toml. Governs Bash AND Read so the
+        # Read pattern below is eligible to migrate (migration only moves rules
+        # for governed tools -- issue #1).
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_content = """governed_tools = ["Bash", "Read"]
 
 [permissions]
 allow = [
@@ -769,42 +767,38 @@ allow = [
 ]
 deny = []
 """
-            toml_path.write_text(toml_content)
+        toml_path.write_text(toml_content)
 
-            # Create settings.local.json with new patterns
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)", "Bash(git:*)", "Read(/tmp/*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json with new patterns
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)", "Bash(git:*)", "Read(/tmp/*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            # Run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root)
+        # Run migration
+        exit_code = migrate(project_root)
 
-            # Check that new patterns were added
-            content = toml_path.read_text()
-            self.assertIn("Bash(ls:*)", content)
-            self.assertIn("Bash(git:*)", content)
-            self.assertIn("Read(/tmp/*)", content)
+        # Check that new patterns were added
+        content = toml_path.read_text()
+        self.assertIn("Bash(ls:*)", content)
+        self.assertIn("Bash(git:*)", content)
+        self.assertIn("Read(/tmp/*)", content)
 
-            # Check settings.local.json
-            with open(settings_path, "r") as f:
-                updated_settings = json.load(f)
+        # Check settings.local.json
+        with open(settings_path, "r") as f:
+            updated_settings = json.load(f)
 
-            # All patterns should be removed:
-            # - Bash(ls:*) is redundant (exact duplicate in toolguard)
-            # - Bash(git:*) and Read(/tmp/*) were migrated
-            self.assertEqual(updated_settings["permissions"]["allow"], [])
-            self.assertEqual(exit_code, 0)
+        # All patterns should be removed:
+        # - Bash(ls:*) is redundant (exact duplicate in toolguard)
+        # - Bash(git:*) and Read(/tmp/*) were migrated
+        self.assertEqual(updated_settings["permissions"]["allow"], [])
+        self.assertEqual(exit_code, 0)
 
     def test_migration_skips_identical_patterns(self):
         """
@@ -812,48 +806,42 @@ deny = []
         When migrate runs
         Then the shared pattern appears only once in the TOML (no duplication), exiting 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create toolguard config with existing pattern
-            toml_path = claude_dir / "toolguard_hook.toml"
-            toml_content = """[permissions]
+        # Create toolguard config with existing pattern
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_content = """[permissions]
 allow = [
   "Bash(ls:*)",
 ]
 deny = []
 """
-            toml_path.write_text(toml_content)
+        toml_path.write_text(toml_content)
 
-            # Create settings.local.json with same pattern
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json with same pattern
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            # Run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root)
+        # Run migration
+        exit_code = migrate(project_root)
 
-            # Read config and count occurrences
-            content = toml_path.read_text()
-            occurrences = content.count("Bash(ls:*)")
+        # Read config and count occurrences
+        content = toml_path.read_text()
+        occurrences = content.count("Bash(ls:*)")
 
-            # Should appear only once (not duplicated)
-            self.assertEqual(occurrences, 1)
-            self.assertEqual(exit_code, 0)
+        # Should appear only once (not duplicated)
+        self.assertEqual(occurrences, 1)
+        self.assertEqual(exit_code, 0)
 
     def test_no_migration_when_no_new_patterns(self):
         """
@@ -861,43 +849,37 @@ deny = []
         When migrate runs with nothing new to migrate
         Then it reports success and exits 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create toolguard config
-            toml_path = claude_dir / "toolguard_hook.toml"
-            toml_content = """[permissions]
+        # Create toolguard config
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_content = """[permissions]
 allow = [
   "Bash(ls:*)",
 ]
 deny = []
 """
-            toml_path.write_text(toml_content)
+        toml_path.write_text(toml_content)
 
-            # Create settings.local.json with same patterns
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json with same patterns
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            # Run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root)
+        # Run migration
+        exit_code = migrate(project_root)
 
-            # Should return success with no changes
-            self.assertEqual(exit_code, 0)
+        # Should return success with no changes
+        self.assertEqual(exit_code, 0)
 
     def test_migration_creates_backups(self):
         """
@@ -905,45 +887,39 @@ deny = []
         When migrate runs with that backup_dir
         Then a single timestamped settings.local.*.json backup is created and it exits 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create settings.local.json
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(git:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            backup_dir = project_root / "logs" / "config-backups"
+        backup_dir = project_root / "logs" / "config-backups"
 
-            # Run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root, backup_dir=backup_dir)
+        # Run migration
+        exit_code = migrate(project_root, backup_dir=backup_dir)
 
-            # Check backups were created
-            self.assertTrue(backup_dir.exists())
+        # Check backups were created
+        self.assertTrue(backup_dir.exists())
 
-            backups = list(backup_dir.glob("settings.local.*.json"))
-            self.assertEqual(len(backups), 1)
+        backups = list(backup_dir.glob("settings.local.*.json"))
+        self.assertEqual(len(backups), 1)
 
-            # Check backup naming format
-            backup_name = backups[0].name
-            self.assertTrue(backup_name.startswith("settings.local."))
-            self.assertTrue(backup_name.endswith(".json"))
+        # Check backup naming format
+        backup_name = backups[0].name
+        self.assertTrue(backup_name.startswith("settings.local."))
+        self.assertTrue(backup_name.endswith(".json"))
 
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0)
 
 
 class TestSupersetDetection(unittest.TestCase):
@@ -1685,7 +1661,7 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertLessEqual(len(similar), 2)
 
 
-class TestMigrationWithRedundantPatterns(unittest.TestCase):
+class TestMigrationWithRedundantPatterns(ConfigIsolationMixin, unittest.TestCase):
     """Test full migration flow with redundant pattern removal."""
 
     def test_migration_removes_redundant_patterns(self):
@@ -1696,69 +1672,61 @@ class TestMigrationWithRedundantPatterns(unittest.TestCase):
         Then all redundant and migrated patterns are removed from settings, the new pattern is
         added to the toolguard config, and it exits 0
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            # Create toolguard config with existing patterns
-            toml_path = claude_dir / "toolguard_hook.toml"
-            toml_content = """[permissions]
+        # Create toolguard config with existing patterns
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_content = """[permissions]
 allow = [
   "Bash(git:*)",
   "Bash(uv run ruff:*)",
 ]
 deny = []
 """
-            toml_path.write_text(toml_content)
+        toml_path.write_text(toml_content)
 
-            # Create settings.local.json with duplicates and subsets
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": [
-                        "Bash(git:*)",  # Exact duplicate
-                        "Bash(git push:*)",  # Subset of git:*
-                        "Bash(uv run ruff format:*)",  # Subset of uv run ruff:*
-                        "Bash(ls:*)",  # New pattern to migrate
-                    ],
-                    "deny": [],
-                    "ask": [],
-                }
+        # Create settings.local.json with duplicates and subsets
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": [
+                    "Bash(git:*)",  # Exact duplicate
+                    "Bash(git push:*)",  # Subset of git:*
+                    "Bash(uv run ruff format:*)",  # Subset of uv run ruff:*
+                    "Bash(ls:*)",  # New pattern to migrate
+                ],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            # Run migration
-            with patch(
-                "toolguard.scripts.migrate_permissions.find_project_root",
-                return_value=project_root,
-            ):
-                exit_code = migrate(project_root)
+        # Run migration
+        exit_code = migrate(project_root)
 
-            # Check that redundant patterns were removed
-            with open(settings_path, "r") as f:
-                updated_settings = json.load(f)
+        # Check that redundant patterns were removed
+        with open(settings_path, "r") as f:
+            updated_settings = json.load(f)
 
-            # Should keep only Bash(ls:*) which was migrated (but not redundant before migration)
-            # All redundant patterns should be removed
-            remaining = updated_settings["permissions"]["allow"]
-            self.assertNotIn("Bash(git:*)", remaining)  # Exact duplicate - removed
-            self.assertNotIn("Bash(git push:*)", remaining)  # Subset - removed
-            self.assertNotIn(
-                "Bash(uv run ruff format:*)", remaining
-            )  # Subset - removed
-            self.assertNotIn("Bash(ls:*)", remaining)  # Migrated - removed
+        # Should keep only Bash(ls:*) which was migrated (but not redundant before migration)
+        # All redundant patterns should be removed
+        remaining = updated_settings["permissions"]["allow"]
+        self.assertNotIn("Bash(git:*)", remaining)  # Exact duplicate - removed
+        self.assertNotIn("Bash(git push:*)", remaining)  # Subset - removed
+        self.assertNotIn("Bash(uv run ruff format:*)", remaining)  # Subset - removed
+        self.assertNotIn("Bash(ls:*)", remaining)  # Migrated - removed
 
-            # Verify patterns were added to toolguard config
-            content = toml_path.read_text()
-            self.assertIn("Bash(ls:*)", content)
+        # Verify patterns were added to toolguard config
+        content = toml_path.read_text()
+        self.assertIn("Bash(ls:*)", content)
 
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0)
 
 
-class TestMigrationTargetLevel(unittest.TestCase):
+class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
     """
     Test that migrate() always writes to the resolved project_root's OWN
     ``.claude`` directory, never silently falling through to an existing
@@ -1766,10 +1734,18 @@ class TestMigrationTargetLevel(unittest.TestCase):
     ``~/.claude``) just because ``discover_config_files`` happened to return
     one from a less-specific level (TOO-15, real-machine repro 2026-07-16).
 
-    Every test here patches ``pathlib.Path.home`` to an isolated temporary
+    Every test here isolates ``Path.home()`` to an isolated temporary
     directory, distinct from ``project_root``, so the real developer machine's
     ``~/.claude`` (which may itself have toolguard configs, per the project's
     own dogfooded global install) can never leak into these assertions.
+
+    ``migrate()`` receives ``project_root`` directly (it does not call
+    ``find_project_root()`` itself), but internally calls
+    ``discover_config_files(project_root)``, which DOES re-resolve the project
+    root via ``find_project_root()``. So ``project_root`` here is always the
+    mixin's own isolated ``project`` (the same directory the mixin's
+    ``find_project_root`` patch returns) rather than an independently-created
+    directory, keeping the two consistent.
     """
 
     def test_migration_targets_project_own_existing_config_not_user_level(self):
@@ -1780,47 +1756,42 @@ class TestMigrationTargetLevel(unittest.TestCase):
         Then the new pattern is added to the PROJECT's own toolguard_hook.toml and the
         user-level file is left completely unchanged
         """
-        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as home_dir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            project_toml_path = claude_dir / "toolguard_hook.toml"
-            project_toml_path.write_text(
-                '[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n'
-            )
+        project_toml_path = claude_dir / "toolguard_hook.toml"
+        project_toml_path.write_text(
+            '[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n'
+        )
 
-            home_claude_dir = Path(home_dir) / ".claude"
-            home_claude_dir.mkdir()
-            user_toml_path = home_claude_dir / "toolguard_hook.toml"
-            user_toml_original = (
-                '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
-            )
-            user_toml_path.write_text(user_toml_original)
+        home_claude_dir = home / ".claude"
+        home_claude_dir.mkdir()
+        user_toml_path = home_claude_dir / "toolguard_hook.toml"
+        user_toml_original = '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+        user_toml_path.write_text(user_toml_original)
 
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            with patch("pathlib.Path.home", return_value=Path(home_dir)):
-                exit_code = migrate(project_root)
+        exit_code = migrate(project_root)
 
-            project_content = project_toml_path.read_text()
-            self.assertIn("Bash(ls:*)", project_content)
+        project_content = project_toml_path.read_text()
+        self.assertIn("Bash(ls:*)", project_content)
 
-            user_content = user_toml_path.read_text()
-            self.assertNotIn("Bash(ls:*)", user_content)
-            self.assertEqual(user_content, user_toml_original)
+        user_content = user_toml_path.read_text()
+        self.assertNotIn("Bash(ls:*)", user_content)
+        self.assertEqual(user_content, user_toml_original)
 
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0)
 
     def test_migration_creates_project_config_instead_of_using_user_level(self):
         """
@@ -1835,48 +1806,43 @@ class TestMigrationTargetLevel(unittest.TestCase):
         toolguard_hook file -- it must restrict target selection to
         project_root's own .claude directory.
         """
-        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as home_dir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            home_claude_dir = Path(home_dir) / ".claude"
-            home_claude_dir.mkdir()
-            user_toml_path = home_claude_dir / "toolguard_hook.toml"
-            user_toml_original = (
-                '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
-            )
-            user_toml_path.write_text(user_toml_original)
+        home_claude_dir = home / ".claude"
+        home_claude_dir.mkdir()
+        user_toml_path = home_claude_dir / "toolguard_hook.toml"
+        user_toml_original = '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+        user_toml_path.write_text(user_toml_original)
 
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            with patch("pathlib.Path.home", return_value=Path(home_dir)):
-                exit_code = migrate(project_root)
+        exit_code = migrate(project_root)
 
-            project_toml_path = claude_dir / "toolguard_hook.toml"
-            self.assertTrue(
-                project_toml_path.exists(),
-                "migrate() must create a project-level toolguard_hook.toml "
-                "rather than silently writing into the user-level config",
-            )
-            project_content = project_toml_path.read_text()
-            self.assertIn("Bash(ls:*)", project_content)
+        project_toml_path = claude_dir / "toolguard_hook.toml"
+        self.assertTrue(
+            project_toml_path.exists(),
+            "migrate() must create a project-level toolguard_hook.toml "
+            "rather than silently writing into the user-level config",
+        )
+        project_content = project_toml_path.read_text()
+        self.assertIn("Bash(ls:*)", project_content)
 
-            user_content = user_toml_path.read_text()
-            self.assertNotIn("Bash(ls:*)", user_content)
-            self.assertEqual(user_content, user_toml_original)
+        user_content = user_toml_path.read_text()
+        self.assertNotIn("Bash(ls:*)", user_content)
+        self.assertEqual(user_content, user_toml_original)
 
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0)
 
     def test_migration_project_root_equal_to_home_targets_the_shared_config(self):
         """
@@ -1887,34 +1853,37 @@ class TestMigrationTargetLevel(unittest.TestCase):
         Then the new pattern is added to that single shared toolguard_hook.toml (the
         project-vs-user distinction naturally collapses, no special-casing needed)
         """
-        with TemporaryDirectory() as home_dir:
-            project_root = Path(home_dir)
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        home, _project = self.isolate_config_environment()
+        project_root = home
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            toml_path = claude_dir / "toolguard_hook.toml"
-            toml_path.write_text(
-                '[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n'
-            )
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_path.write_text('[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n')
 
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            with patch("pathlib.Path.home", return_value=Path(home_dir)):
-                exit_code = migrate(project_root)
+        # project_root here IS home (the collapsed case), which differs from
+        # the mixin's default (project_root separate from home) -- re-point
+        # find_project_root at project_root specifically for this test.
+        self.enterContext(
+            patch("toolguard.config.find_project_root", return_value=project_root)
+        )
+        exit_code = migrate(project_root)
 
-            content = toml_path.read_text()
-            self.assertIn("Bash(ls:*)", content)
+        content = toml_path.read_text()
+        self.assertIn("Bash(ls:*)", content)
 
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0)
 
     def test_migration_creates_project_config_when_neither_level_has_one(self):
         """
@@ -1923,32 +1892,29 @@ class TestMigrationTargetLevel(unittest.TestCase):
         When migrate runs
         Then it creates project_root/.claude/toolguard_hook.toml with the new pattern
         """
-        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as home_dir:
-            project_root = Path(tmpdir)
-            (project_root / ".git").mkdir()
-            claude_dir = project_root / ".claude"
-            claude_dir.mkdir()
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
 
-            settings_path = claude_dir / "settings.local.json"
-            settings = {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                    "ask": [],
-                }
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(ls:*)"],
+                "deny": [],
+                "ask": [],
             }
-            with open(settings_path, "w") as f:
-                json.dump(settings, f)
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
 
-            with patch("pathlib.Path.home", return_value=Path(home_dir)):
-                exit_code = migrate(project_root)
+        exit_code = migrate(project_root)
 
-            project_toml_path = claude_dir / "toolguard_hook.toml"
-            self.assertTrue(project_toml_path.exists())
-            content = project_toml_path.read_text()
-            self.assertIn("Bash(ls:*)", content)
+        project_toml_path = claude_dir / "toolguard_hook.toml"
+        self.assertTrue(project_toml_path.exists())
+        content = project_toml_path.read_text()
+        self.assertIn("Bash(ls:*)", content)
 
-            self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 **Audience: agents (AI coding assistants configuring or using toolguard).** Human-readable,
 but written for fast lookup, not for reading start to end -- if you're a human wanting a
-guided tour, start with [README.md](../README.md) or [quickstart.md](../quickstart.md)
+guided tour, start with [README.md](../README.md) or [quickstart.md](quickstart.md)
 instead.
 
 **What this is:** two things in one page --
@@ -52,6 +52,12 @@ entry over letting it silently go stale.
 - **Q: How do I keep the toolguard binary itself up to date?**
   A: `toolguard-update-check` (or the throttled shell-alert / auto-update snippets). See
   [configuration.md#keeping-toolguard-up-to-date](configuration.md#keeping-toolguard-up-to-date).
+- **Q: Can I split my user-level rules into multiple files instead of one big
+  `toolguard_hook.toml`?**
+  A: Yes -- drop any number of `*.toml`/`*.json` files into
+  `~/.config/toolguard/rules/` (or `$XDG_CONFIG_HOME/toolguard/rules/`). Each merges into the
+  same user level automatically; flat/non-recursive, `[permissions]`/`[hard_deny]` only. See
+  [configuration.md#configuration-hierarchy](configuration.md#configuration-hierarchy).
 - **Q: What are `toolguard-install`'s subcommands, and what does each do?**
   A: It's self-documenting and agent-facing -- run `toolguard-install --help` and
   `toolguard-install <subcommand> --help` rather than relying on a doc summary; the guided
@@ -176,7 +182,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 
 **`docs/auto-mode.md`**
 - [The honest tradeoff](auto-mode.md#the-honest-tradeoff)
-- [Why `no_match_fallback = "ask"` (the normal default) doesn't work here](auto-mode.md#why-nomatchfallback-ask-the-normal-default-doesnt-work-here)
+- [Why `no_match_fallback = "ask"` (the normal default) doesn't work here](auto-mode.md#why-no_match_fallback-ask-the-normal-default-doesnt-work-here)
 - [The recommended configuration for this specific case](auto-mode.md#the-recommended-configuration-for-this-specific-case)
 - [Recommended checklist before you turn this on](auto-mode.md#recommended-checklist-before-you-turn-this-on)
 - [How this differs from Takeover Mode](auto-mode.md#how-this-differs-from-takeover-mode)
@@ -202,7 +208,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Recommended tools to govern](configuration.md#recommended-tools-to-govern)
 - [Step 3: Configure permission patterns](configuration.md#step-3-configure-permission-patterns)
   - [Standard patterns (in settings.local.json)](configuration.md#standard-patterns-in-settingslocaljson)
-  - [Extended patterns (in toolguard_hook.toml or toolguard_hook.json)](configuration.md#extended-patterns-in-toolguardhooktoml-or-toolguardhookjson)
+  - [Extended patterns (in toolguard_hook.toml or toolguard_hook.json)](configuration.md#extended-patterns-in-toolguard_hooktoml-or-toolguard_hookjson)
 - [No-match fallback](configuration.md#no-match-fallback)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)
@@ -252,7 +258,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Operators](permission-patterns.md#operators)
   - [Multi-line commands and scripts](permission-patterns.md#multi-line-commands-and-scripts)
   - [Command substitution and subshells](permission-patterns.md#command-substitution-and-subshells)
-  - [Heredocs and the `__HEREDOC_TO_<sink>__` sentinel](permission-patterns.md#heredocs-and-the-heredoctosink-sentinel)
+  - [Heredocs and the `__HEREDOC_TO_<sink>__` sentinel](permission-patterns.md#heredocs-and-the-__heredoc_to_sink__-sentinel)
   - [Inline interpreter code (`-c` / `-e` / `-r`)](permission-patterns.md#inline-interpreter-code--c--e--r)
   - [Control structures](permission-patterns.md#control-structures)
   - [Process substitution](permission-patterns.md#process-substitution)
@@ -263,7 +269,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Verify it runs](quickstart.md#verify-it-runs)
 - [Write your own permission rules](quickstart.md#write-your-own-permission-rules)
   - [You don't have to become an expert to use any of this](quickstart.md#you-dont-have-to-become-an-expert-to-use-any-of-this)
-- [Keep settings.local.json and toolguard_hook.toml in sync](quickstart.md#keep-settingslocaljson-and-toolguardhooktoml-in-sync)
+- [Keep settings.local.json and toolguard_hook.toml in sync](quickstart.md#keep-settingslocaljson-and-toolguard_hooktoml-in-sync)
 - [Running unattended (Claude Code auto-mode)](quickstart.md#running-unattended-claude-code-auto-mode)
 - [Uninstalling](quickstart.md#uninstalling)
 

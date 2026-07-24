@@ -226,6 +226,13 @@ Example resolution entries (markdown format):
 - **Matched Rule**: `git *  [project: .claude/toolguard_hook.toml]`
 - **Agent**: main
 
+## 2026-01-14 10:15:45
+
+- **Status**: EXECUTED
+- **Command**: `gh pr view`
+- **Matched Rule**: `gh pr view*  [user: ~/.config/toolguard/rules/gh.toml]`
+- **Agent**: main
+
 ## 2026-01-14 10:16:02
 
 - **Status**: REFUSED
@@ -233,6 +240,14 @@ Example resolution entries (markdown format):
 - **Violated Rules**: `Path does not match any allow patterns`
 - **Agent**: main
 ```
+
+The second entry shows a rule sourced from the optional split-file
+`~/.config/toolguard/rules/` directory (see
+[configuration.md](configuration.md#configuration-hierarchy)): it names the specific file
+that matched, distinct from -- but merged into the same user level as --
+`~/.claude/toolguard_hook.toml`. (Paths above are abbreviated for readability, matching the
+first entry's `.claude/toolguard_hook.toml` -- the actual provenance is always the full
+absolute path, e.g. `/home/alice/.config/toolguard/rules/gh.toml`.)
 
 Example (JSONLines format):
 

@@ -1,154 +1,120 @@
 ---
-title: latest-code-review-report.md
-date: 2026-07-14
+title: latest-code-review-report
+type: report
+permalink: toolguard/latest-code-review-report
 tags:
 - code-review
-permalink: toolguard/latest-code-review-report
+- TOO-30
 ---
 
-# Toolguard Code Review Report
+Date: 2026-07-23
+Scope: changed (branch too-30, TOO-30 -- XDG rules directory)
 
-Date: 2026-07-14 (generated 10:10 local)
-Scope: whole-tree review of `toolguard/` and `test/` (not a diff).
-Excluded: `toolguard/parser/bash_parser.py` (canopy-generated), everything outside `toolguard/`+`test/`.
-External analysis: `uvx pyscn analyze --json --skip-deps toolguard` (v1.24.3) incorporated below.
+## Note on how this report was produced
+
+The `/code-review` skill was invoked twice against this scope. Both subagent runs
+could not persist their own report (`mcp__basic-memory__write_note` was unavailable in
+that subagent context) and returned findings directly instead. The two runs
+disagreed on one point -- the first found and reproduced a crash bug that the
+second's summary did not mention. The main agent (not a subagent) independently
+verified the crash claim by reproducing it, then fixed it and added regression
+tests before writing this consolidated report. Both runs otherwise converged:
+no other correctness or security issues, only minor/suggestion-level points.
 
 ## Summary
 
-The codebase is in strong shape for a security-critical permission tool. The decision core
-is well-factored: a single pure resolver layer (`toolguard/resolve.py`) backs BOTH the live
-hook and the `--eval`/tooling path via `tools/decision.decide()`, so I verified there is no
-eval-vs-live drift by construction. Fail-closed defaults are sound (unconfigured tool -> ask;
-configured-no-match -> `no_match_fallback`; hard-deny pooled and checked first). Test quality
-is exemplary: all 1431 tests pass and every one carries a Given/When/Then docstring. The main
-issues are (1) a real quoting bypass in the Bash path-component matcher, (2) genuine triplicated
-"daily marker file" logic across three modules, and (3) a handful of high-complexity functions
-flagged by pyscn.
+TOO-30's implementation (the optional `$XDG_CONFIG_HOME/toolguard/rules/` split-file
+user-level config directory) is clean and well-integrated: new rules layers reuse the
+existing layer/specificity model and flow through the generic `self.layers`
+iterations (hard_deny pooling, migrate-dedup detection, provenance, extended-syntax
+patterns) with no per-consumer special-casing needed, while content-filtering keeps
+disallowed scalars out of the resolvers. One real bug was found and fixed during this
+review (a crash on a malformed rules file); everything else is minor/suggestion-level.
 
-Verification performed this run:
-- `except A, B:` (resolve.py:269, patterns.py:94, normalization.py, auto_migrate.py:100) is
-  NOT a Python 2 bug: PEP 758 (Python 3.14) makes parenthesis-free `except` tuples valid; I
-  confirmed at runtime it catches BOTH types and correctly lets others escape. Intentional and
-  correct on this 3.14-pinned project. No action.
-- Full suite: `Ran 1431 tests ... OK`.
-- Quoting bypass reproduced directly against `match_command` (see Major #1).
+## Findings
 
-## Critical
+### Major (found and FIXED during this review)
 
-None. No bypass defeats the tool's primary/recommended protection path, eval/live parity holds,
-and defaults fail closed.
+**A syntactically-valid-but-wrong-shape config file crashed the entire hook.**
+`toolguard/config.py`, `_parse_source()` (now ~line 1821). A `.json` file whose top
+level is an array/scalar instead of an object (e.g. `[1, 2, 3]`) parsed successfully
+via `json.load`, but the caller's dict-only logic then raised an uncaught
+`AttributeError` (`'list' object has no attribute 'items'`) inside the
+`toolguard_hook_rules` content-filtering branch of `load_configuration()` --
+propagating out of `load_configuration()` and crashing permission resolution for
+every command in the session, not just skipping the one bad file. The pre-existing
+`~/.claude/toolguard_hook.json` path shared the identical latent fragility (crashes
+one line later at `MappingProxyType(list)`), but TOO-30 extends it to a
+higher-risk surface: the whole point of the rules directory is inviting *more*,
+smaller, hand-authored files, raising the odds of a shape mistake.
 
-## Major
+Reproduced independently before fixing (see conversation). **Fix applied**:
+`_parse_source()` now validates `isinstance(content, dict)` after parsing and raises
+inside the existing try/except, so a wrong-shape file is treated exactly like an
+unparseable one -- skipped with a `Warning: Failed to load ...` stderr message,
+non-fatal, matching the already-tested `test_unparseable_file_skipped` behavior.
+Fixes both the rules-dir case and the pre-existing `~/.claude` fragility in one
+change. Two regression tests added:
+`TestLoadConfigurationHierarchy.test_non_dict_top_level_json_skipped_not_crashed` and
+`TestRulesDirectoryDiscovery.test_rules_dir_non_dict_top_level_skipped_not_crashed`
+(`test/unit/test_configuration.py`). Full suite verified green after the fix: 1513
+tests (was 1511), 0 failures; `ruff check` clean.
 
-### M1 (SECURITY) - Quoted args bypass Bash path-component deny patterns
-`toolguard/permissions.py:62` `contains_path_component` (used by `match_command` for DEFAULT
-patterns of the form `**/x/**`, e.g. the `**/.env/**` deny advertised in `match_command`'s own
-docstring at permissions.py:106). It splits each arg on whitespace and `/` but never strips shell
-quotes, so:
-- `cat .env`      -> MATCH (denied)
-- `cat './.env'` / `cat '.env'` -> MISS (allowed)  <-- bypass
-- `cat ".env"`    -> MISS (allowed) <-- bypass
-Reproduced directly against `match_command(..., ['**/.env/**'])`.
+### Minor
 
-Mitigation that lowers (but does not eliminate) severity: the tool's *recommended* .env defense
-(`tools/recommended_protections.py`) uses `Read(**/.env)`/`Write(**/.env)`/`Edit(**/.env)` on the
-file tools, which go through the GLOB matcher (`PurePath.full_match`), NOT `contains_path_component`,
-and are not quote-bypassable. So a canonical install is protected. But any user who hand-writes a
-`Bash(**/.env/**)`-style deny (a documented, advertised feature) gets a rule that a quote trivially
-evades.
+- **`load_configuration()`'s per-layer loop body has grown busy**
+  (`toolguard/config.py`, the `source_type == "toolguard_hook_rules"` branch, ~1948-1975).
+  Stripping unexpected keys, computing `unexpected_keys`, and lazily computing
+  `duplicate_format` all live inline in the discovery loop. Consider extracting a
+  helper (e.g. `_rules_layer_fields(content, path, dup_stems) -> (content,
+  unexpected_keys, duplicate_format)`) to keep the loop flat. Not acted on this pass
+  -- pure readability, no behavior change, low risk to defer.
 
-Recommended fix: strip a single layer of surrounding quotes from each arg token in
-`contains_path_component` before the `/`-split (and ideally apply the same in
-`normalize_path_in_command`). Add regression tests for quoted, double-quoted, and mixed forms.
-Longer term this is another symptom of hand-rolled `.split()` command parsing (see m3).
+### Suggestions (not acted on -- low impact / consistent with existing convention)
 
-### M2 (DRY / reimplementation) - Triplicated "daily marker file" logic across 3 modules
-`toolguard/auto_migrate.py`, `toolguard/config_divergence.py`, and `toolguard/session_warnings.py`
-each independently define the SAME four functions -- `get_marker_file_path`, `marker_exists_for_today`,
-`create_marker_file`, `cleanup_old_markers` -- differing ONLY in the filename prefix
-(`.toolguard-migration-`, `.toolguard-divergence-warned-`, `.toolguard-warned-`). pyscn flags the
-whole cluster (auto_migrate 21-35/52-73/76-105 <=> config_divergence 19-33/50-71/74-103 <=>
-session_warnings 14-28/45-69/72-104, sim ~0.85 cross-file). Textbook accidental duplication.
-Recommended fix: extract one parameterized helper, e.g. `DailyMarker(prefix: str)` (or module
-functions taking `prefix`) in a small shared module (path_utils or a new `daily_marker.py`), and have
-all three call it. Consolidate the three near-identical test suites accordingly.
+- The rules directory is walked twice per load: once by `_discover_rules_files`
+  (via `_discover_levels`), once by `_group_rules_files_by_stem` for duplicate-stem
+  detection, plus `validation_issues()`'s existing per-layer on-disk `.exists()`
+  checks. Negligible I/O for a directory of hand-authored rule files; the
+  already-computed `by_stem` mapping could be threaded through to avoid the second
+  scan if this ever becomes a hot path.
+- Docs show `~`-abbreviated example paths while `Provenance.describe_brief()` emits
+  absolute paths at runtime -- consistent with the existing convention elsewhere in
+  the docs, no action needed.
+- The flat rules-dir scan picks up dotfiles matching `*.toml`/`*.json` (e.g. a stray
+  `.gh.toml`). Low impact, arguably correct (any `*.toml`/`*.json` file should be
+  eligible), not flagged as a defect.
 
-### M3 (complexity) - High-cyclomatic functions (pyscn)
-pyscn: 17 high-risk functions; avg cyclomatic 8.3, max 44. Worst offenders:
-- `scripts/migrate_permissions.py:614 migrate` -- cx=44, cognitive=113 (critical). CLI script,
-  lower blast radius than the decision path, but should be decomposed (per-phase helpers: backup,
-  add, remove, report). Guard-clause + extract-function.
-- `hook.py:501 main` -- cx=28, cog=56. The file-tool branch and the command-tool branch (each ~70
-  lines incl. logging) are natural `_handle_file_tool()` / `_handle_command_tool()` extractions;
-  the once-per-session setup block (discovery/validation/takeover/divergence) is another.
-- `config.py:1525 Configuration.validation_issues` -- cx=22, cog=52. Extract per-issue-kind detectors.
-- `log_writer.py:16 log_command` -- cx=20; `permissions.py:98 match_command` -- cx=18/cog=67;
-  `rule_sort.py:119 parse_permissions_section_with_comments` -- cx=18; `patterns.py:64 match_pattern`
-  -- cx=15 (dispatch table by PatternType instead of if/elif chain).
-Maintainability, not correctness; `match_command`/`match_pattern` sit on the hot decision path and
-would benefit most from clarity (dispatch table by PatternType).
+### Design point -- CONFIRMED intentional, not a defect
 
-## Minor
+A rules file with an unexpected top-level key alongside a valid
+`[permissions]`/`[hard_deny]` block has its valid sections applied normally while the
+unexpected key is reported as an error-level `Issue` -- the file is NOT wholly
+rejected. Both review runs flagged this as worth confirming was intended (an operator
+might expect an "error"-flagged file to be inert). This was an explicit, deliberate
+design decision made earlier in this ticket's development (see basic-memory
+project='toolguard', "TOO-30 XDG rules directory - Requirements and Plan", decision
+#1): matches the precedent already set for a non-boolean `takeover_mode.enabled`
+elsewhere in the same module. No change needed.
 
-### m1 - "Reason string as a data channel" fragility
-Several places recover structured data by re-parsing human-readable reason strings:
-- `resolve.py:511-553` extracts `matched_rule` by slicing hard-deny/allow/deny/ask reason text and
-  stripping the ` [provenance]` suffix.
-- `hook.py:306 _parse_compound_match_details` regex-parses "All N sub-commands allowed: [...]".
-- Many `reason.split(": ", 1)[1]` idioms in hook.py.
-If any reason wording changes, provenance/sub-match/logging extraction silently degrades (the
-`match_command` docstring at permissions.py:130 already warns about a related coupling). Prefer
-threading matched pattern/provenance as structured fields rather than re-deriving from prose.
+### Verified positives (both runs independently confirmed)
 
-### m2 - `normalize_path` does filesystem I/O in the matching hot path
-`normalization.py:45-53` calls `Path.exists()`, `is_symlink()`, `resolve()` during normalization,
-which runs for every governed command: (a) makes matching depend on live FS state (mild TOCTOU
-surface: symlink swap between normalize and execution), and (b) adds syscalls to the hot path. Also
-the comment "Only resolve if the path ... not its parent directories" doesn't match `resolve()`,
-which canonicalizes the whole path. Behaviour is the safer direction; reconcile comment/behaviour and
-reconsider whether symlink resolution belongs in a permission matcher.
-
-### m3 - Hand-rolled `.split()` command parsing (recurring anti-pattern)
-`permissions.normalize_path_in_command` and `contains_path_component` tokenize commands with plain
-`str.split()` rather than the PEG-derived structure. They operate on already-extracted sub-commands so
-blast radius is limited, but M1 is a direct consequence. Flagged per CLAUDE.md's noted tendency.
-
-### m4 - `config_validation.py:84-109` near-duplicate warning-dict blocks (pyscn sim=1.0)
-The "unsupported tool" and "ungoverned tool" loops build near-identical warning dicts. Small local
-extraction (`_tool_warning(level, message, corrective_steps)`), low priority.
-
-## Suggestions
-
-- CBO: `Configuration` depends on 10 classes (pyscn "critical coupling"); it mixes discovery, parsing,
-  and resolution (god-object tendency). A future split (discovery/IO layer vs a pure resolution layer
-  over already-loaded layers) would reduce coupling and aid testing.
-- `patterns.match_pattern` and `permissions.match_command`: replace `if/elif` chains on `PatternType`
-  with a dispatch dict of small handlers.
-- pyscn intra-file clones in `tools/danger.py`, `tools/installer.py`, `tools/consolidate.py`,
-  `tools/clarity.py`, `update_check.py`, `parser/command_model.py`, `parser/command_extractor.py`
-  are candidates for small parameterized extractions; opportunistic, none pressing.
-- BENIGN pyscn false positives (no action): `error_log.py` "clones" are thin one-line wrappers over
-  `_log_entry`; `replay.py`<=>`self_permission.py` similarity is two loops that both correctly reuse
-  `decide()` (structural, not logic duplication).
-
-## Positives (keep doing)
-
-- Single pure resolver (`resolve.py`) shared by hook + tooling => eval and live cannot drift.
-- Fail-closed, well-documented defaults (unconfigured->ask, hard-deny pooled+first, no_match_fallback).
-- Exemplary tests: 1431/1431 pass, every one has a Given/When/Then docstring (0 missing, 0 partial).
-- Clean dead-code (pyscn: 0 findings) and no dependency cycles (0 modules in cycles).
-- Strong module/function docstrings and clear provenance threading.
-
-## pyscn metrics snapshot
-- Files analyzed 55; functions 159; avg cyclomatic 8.26; max 44; high-risk 17; medium 22.
-- Clones: 99 clones / 64 pairs / 39 groups; avg similarity 0.82.
-- Dead code: 0 findings. Dependency cycles: 0. Max depth: 0.
-- Report JSON: `.pyscn/reports/analyze_20260714_100302.json`.
-
-## Review meta
-- Files reviewed in depth: resolve.py, permissions.py, patterns.py, normalization.py, path_utils.py,
-  compound.py, hook.py, tools/decision.py, config.py (core methods), parser/multiline.py (head),
-  config_validation.py, auto_migrate.py + the two marker siblings, error_log.py, recommended_protections.py;
-  plus structural scan of all 55 source + 53 test files and full pyscn report.
-- Elapsed: ~9 minutes. Includes full suite run, pyscn run, and targeted empirical checks
-  (except-tuple semantics, quoting bypass).
+- `hard_deny()` pooling, `Configuration.toolguard_permissions()` (feeding
+  `migrate --dry-run`'s duplicate/superset detection), and provenance
+  (`describe_brief()` naming the specific rules file) all work correctly with zero
+  changes needed in those methods -- they already iterate `self.layers` generically.
+- `migrate_permissions.py`'s target-*write*-selection filter
+  (`source_type != "toolguard_hook"`) correctly excludes rules-dir layers from ever
+  being a migration write target -- matches the ticket's explicit out-of-scope item
+  (no project-level / auto-write into the rules dir for v1).
+- User-level specificity (`len(level_dirs) - 1`) is stable even when `~/.claude`
+  itself has no files.
+- `CLAUDE_SETTINGS_PATH` correctly bypasses the rules directory scan entirely (the
+  explicit-mode branch returns before `_discover_levels()` is ever called).
+- `ConfigLayer.duplicate_format`, recorded at discovery time rather than re-checked
+  against disk later, correctly handles `validation_issues()` running after a test's
+  tempdir has been torn down.
+- The test-isolation retrofit (`ConfigIsolationMixin` +
+  `test/unit/CLAUDE.md`) is a genuine improvement, consolidating ad hoc
+  `Path.home()`/`find_project_root`/env patching that had already caused two real,
+  machine-state-dependent test failures.

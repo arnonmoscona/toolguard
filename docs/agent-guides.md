@@ -230,6 +230,13 @@ unbreakable. Nothing else is needed -- discovery is automatic.
   `hierarchical_configuration = false` in that project's `toolguard_hook.toml` (project +
   user levels only).
 
+**A large, self-contained rule set** (e.g. ~60 rules just for the `gh` CLI) doesn't have to
+live inside `~/.claude/toolguard_hook.toml` at all -- drop it in its own file under
+`~/.config/toolguard/rules/*.toml` (or `.json`) instead. Every file there merges into the
+same user level automatically (flat, non-recursive; `[permissions]`/`[hard_deny]` only). See
+[Split user-level rules directory](configuration.md#configuration-hierarchy) for the full
+details and a worked example.
+
 ## Recipe: diagnose "my command was denied"
 
 Work through this in order:

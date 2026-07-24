@@ -19,12 +19,12 @@ Given/When/Then docstring describing the scenario and expected outcome.
 """
 
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
 from toolguard.hook import resolve_file_path_permission_detailed
@@ -326,7 +326,7 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         )
 
 
-class TestHardDenyFilePath(_IsolatedEnvTestCase):
+class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for Read/Write/Edit."""
 
     def _build_config(self, home, project, target_level, hard_deny_toml, project_allow):
@@ -353,32 +353,25 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         When a Read of <project>/.env is resolved
         Then the hard_deny wins and the read is denied (unoverridable)
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "b" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        home, project = self.isolate_config_environment()
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Read(**)"]\n',
+        )
+        _write(
+            home / ".claude",
+            "toolguard_hook.toml",
+            '[hard_deny]\ndeny = ["Read(**/.env)"]\n',
+        )
 
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Read(**)"]\n',
-            )
-            _write(
-                home / ".claude",
-                "toolguard_hook.toml",
-                '[hard_deny]\ndeny = ["Read(**/.env)"]\n',
-            )
-
-            target_file = str(project / ".env")
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    decision, reason, _override = resolve_file_path_permission_detailed(
-                        "Read", target_file, config
-                    )
-            self.assertEqual(decision, "deny")
-            self.assertIn("hard_deny", reason)
+        target_file = str(project / ".env")
+        config = load_configuration(project)
+        decision, reason, _override = resolve_file_path_permission_detailed(
+            "Read", target_file, config
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("hard_deny", reason)
 
     def test_write_hard_deny_allow_carveout(self):
         """
@@ -387,32 +380,25 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         When a Write of <project>/scratch/x is resolved
         Then the carve-out exempts it and the normal allow permits the write
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        _home, project = self.isolate_config_environment()
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Write(**)"]\n'
+            '[hard_deny]\ndeny = ["Write(**)"]\nallow = ["Write(**/scratch/**)"]\n',
+        )
 
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Write(**)"]\n'
-                '[hard_deny]\ndeny = ["Write(**)"]\nallow = ["Write(**/scratch/**)"]\n',
-            )
-
-            allowed_file = str(project / "scratch" / "x.txt")
-            denied_file = str(project / "src" / "y.txt")
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    allow_decision, _, _ = resolve_file_path_permission_detailed(
-                        "Write", allowed_file, config
-                    )
-                    deny_decision, _, _ = resolve_file_path_permission_detailed(
-                        "Write", denied_file, config
-                    )
-            self.assertEqual(allow_decision, "allow")
-            self.assertEqual(deny_decision, "deny")
+        allowed_file = str(project / "scratch" / "x.txt")
+        denied_file = str(project / "src" / "y.txt")
+        config = load_configuration(project)
+        allow_decision, _, _ = resolve_file_path_permission_detailed(
+            "Write", allowed_file, config
+        )
+        deny_decision, _, _ = resolve_file_path_permission_detailed(
+            "Write", denied_file, config
+        )
+        self.assertEqual(allow_decision, "allow")
+        self.assertEqual(deny_decision, "deny")
 
     def test_edit_hard_deny_relative_pattern_anchors_to_project_root(self):
         """
@@ -427,46 +413,39 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
             hard_deny enforcement itself (the security-relevant assertion) is
             unaffected and stays 'deny'
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "a" / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
+        home, project = self.isolate_config_environment()
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Edit(**)"]\n',
+        )
+        _write(
+            home / ".claude",
+            "toolguard_hook.toml",
+            '[hard_deny]\ndeny = ["Edit(secrets/**)"]\n',
+        )
 
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Edit(**)"]\n',
-            )
-            _write(
-                home / ".claude",
-                "toolguard_hook.toml",
-                '[hard_deny]\ndeny = ["Edit(secrets/**)"]\n',
-            )
-
-            inside = str(project / "secrets" / "key.txt")
-            outside = str(home / "secrets" / "key.txt")
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    inside_decision, _, _ = resolve_file_path_permission_detailed(
-                        "Edit", inside, config
-                    )
-                    # Outside the project root the anchored hard_deny must NOT
-                    # match; with no allow match either, it falls through to the
-                    # shared no_match_fallback ('ask' by default) -- but
-                    # crucially not via the hard_deny path.
-                    outside_decision, outside_reason, _ = (
-                        resolve_file_path_permission_detailed("Edit", outside, config)
-                    )
-            # Security-relevant assertion: the hard_deny match itself (inside
-            # the project root) still denies, unoverridably.
-            self.assertEqual(inside_decision, "deny")
-            # Anchoring assertion: outside the project root, the pattern does
-            # not leak into a hard-deny match -- it resolves via the ordinary
-            # (non-hard-deny) no_match_fallback path.
-            self.assertEqual(outside_decision, "ask")
-            self.assertNotIn("hard_deny", outside_reason)
+        inside = str(project / "secrets" / "key.txt")
+        outside = str(home / "secrets" / "key.txt")
+        config = load_configuration(project)
+        inside_decision, _, _ = resolve_file_path_permission_detailed(
+            "Edit", inside, config
+        )
+        # Outside the project root the anchored hard_deny must NOT
+        # match; with no allow match either, it falls through to the
+        # shared no_match_fallback ('ask' by default) -- but
+        # crucially not via the hard_deny path.
+        outside_decision, outside_reason, _ = resolve_file_path_permission_detailed(
+            "Edit", outside, config
+        )
+        # Security-relevant assertion: the hard_deny match itself (inside
+        # the project root) still denies, unoverridably.
+        self.assertEqual(inside_decision, "deny")
+        # Anchoring assertion: outside the project root, the pattern does
+        # not leak into a hard-deny match -- it resolves via the ordinary
+        # (non-hard-deny) no_match_fallback path.
+        self.assertEqual(outside_decision, "ask")
+        self.assertNotIn("hard_deny", outside_reason)
 
     def test_no_hard_deny_leaves_file_path_cascade_unchanged(self):
         """
@@ -474,27 +453,21 @@ class TestHardDenyFilePath(_IsolatedEnvTestCase):
         When a Read of <project>/src/x.py is resolved
         Then Phase 2 file-path behaviour is unchanged: the read is allowed
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Read(src/**)"]\n',
-            )
-            target_file = str(project / "src" / "x.py")
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    config = load_configuration(project)
-                    decision, _, _ = resolve_file_path_permission_detailed(
-                        "Read", target_file, config
-                    )
-            self.assertEqual(decision, "allow")
+        _home, project = self.isolate_config_environment()
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Read(src/**)"]\n',
+        )
+        target_file = str(project / "src" / "x.py")
+        config = load_configuration(project)
+        decision, _, _ = resolve_file_path_permission_detailed(
+            "Read", target_file, config
+        )
+        self.assertEqual(decision, "allow")
 
 
-class TestHardDenyThroughMain(_IsolatedEnvTestCase):
+class TestHardDenyThroughMain(ConfigIsolationMixin, _IsolatedEnvTestCase):
     """End-to-end test of hard_deny via the hook main() entry point for Bash."""
 
     def test_main_bash_hard_deny_denies_despite_project_allow(self):
@@ -509,43 +482,37 @@ class TestHardDenyThroughMain(_IsolatedEnvTestCase):
 
         from toolguard.hook import main
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir)
-            project = home / "proj"
-            project.mkdir(parents=True)
-            (project / ".git").mkdir()
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                'governed_tools = ["Bash"]\n[permissions]\nallow = ["Bash(curl *)"]\n',
-            )
-            _write(
-                home / ".claude",
-                "toolguard_hook.toml",
-                '[hard_deny]\ndeny = ["Bash(curl *)"]\n',
-            )
+        home, project = self.isolate_config_environment()
+        _write(
+            project / ".claude",
+            "toolguard_hook.toml",
+            'governed_tools = ["Bash"]\n[permissions]\nallow = ["Bash(curl *)"]\n',
+        )
+        _write(
+            home / ".claude",
+            "toolguard_hook.toml",
+            '[hard_deny]\ndeny = ["Bash(curl *)"]\n',
+        )
 
-            hook_input = {
-                "tool_name": "Bash",
-                "tool_input": {"command": "curl http://x"},
-                "hook_event_name": "PreToolUse",
-                "cwd": str(project),
-            }
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "curl http://x"},
+            "hook_event_name": "PreToolUse",
+            "cwd": str(project),
+        }
 
-            with patch("toolguard.config.find_project_root", return_value=project):
-                with patch("toolguard.config.Path.home", return_value=home):
-                    with patch("sys.stdin", StringIO(_json.dumps(hook_input))):
-                        with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
-                            with patch("toolguard.hook.log_command"):
-                                with patch(
-                                    "toolguard.hook.check_and_warn_divergence",
-                                    return_value=[],
-                                ):
-                                    try:
-                                        main()
-                                    except SystemExit:
-                                        pass
-                            output = _json.loads(mock_stdout.getvalue())
+        with patch("sys.stdin", StringIO(_json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.log_command"):
+                    with patch(
+                        "toolguard.hook.check_and_warn_divergence",
+                        return_value=[],
+                    ):
+                        try:
+                            main()
+                        except SystemExit:
+                            pass
+                output = _json.loads(mock_stdout.getvalue())
 
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn(
