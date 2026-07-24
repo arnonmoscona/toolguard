@@ -156,7 +156,7 @@ skill body; the dev-form lives only in each skill's "Development mode" section.
 * Check whether code changes in this change set require changes to the maintenance skill or the security audit skill
 * Check whether changes in this change set require changes to install.md
 * Do we need release notes?
-* *After push* ask whether we should update the toolguard installation using `uv tool upgrade`
+* *After push* ask whether we should update the toolguard installation using `uv tool upgrade toolguard`
 
 ## Technical notes
 
