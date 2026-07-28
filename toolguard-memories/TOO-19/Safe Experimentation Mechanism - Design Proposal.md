@@ -212,16 +212,325 @@ Why this answers every objection:
 - **Cheap.** A few hashes of small files per tool call.
 - **Covers subagents for free** (see open question 5).
 
-### Scope decision (Arnon, 2026-07-28)
+### Scope decision -- REVISED 2026-07-28 (supersedes the "personal instrument" call)
 
-- **Implement at USER level, here, as a personal instrument.**
-- **NOT a toolguard product feature.** Arnon is deliberately clamping down on new features
-  while driving toward a promotable 1.0. If, after living with it, it suggests a genuine
-  product capability, that is a *later* conversation and its own ticket.
+Arnon: *"the PostToolUse for tamper evidence hook should really be a documented, but
+unwired feature of toolguard to start with. Therefore it should be configurable about what
+is being tracked (directories, files)."*
 
-Implementation notes: attribute changes correctly for subagents (their transcripts live in a
-separate directory); keep the snapshot directory pruned; and make the diff output
-unmistakable in a scrolling transcript.
+So it becomes **a first-class toolguard feature that ships wired to nothing**:
+
+| Ships | Does NOT ship |
+| --- | --- |
+| The module, fully unit tested | Any entry in anyone's `settings.json` |
+| A console-script entry point | Any installer step that wires it |
+| A `[tamper_evidence]` config section (absent = inert) | Any default-on behaviour |
+| `docs/tamper-evidence.md`, linked from the doc graph | A migration that adds the section |
+
+**Why this is better than the personal-instrument version**, and why the reversal is right:
+a personal script has no tests, no docs, one user, and dies at the next machine rebuild --
+yet it would still have carried all the design risk below (baseline lifecycle, de-listing,
+snapshot secrecy). Shipping it unwired costs the same design work, adds test and doc cost
+only, and buys correctness plus a second pair of eyes. The 1.0-scope worry is really about
+*surface area users must understand*, and an absent config section has none.
+
+**The honest cost**, so it is chosen with open eyes: an unwired feature is still a
+maintenance obligation and still appears in the docs, the audit surface, and the config
+schema. It is not free -- it is just much cheaper than it looks, because the expensive part
+(getting the semantics right) is not optional either way.
+
+### Module layout (respects the layering DAG enforced by `test_architecture.py`)
+
+- **`toolguard/tamper_evidence.py`** -- pure leaf, **stdlib only, no toolguard imports**:
+  hashing, the baseline manifest, snapshot write/prune, diff rendering. Every interesting
+  decision lives here, so nearly all tests are plain function tests with a `tmp_path`.
+- **`toolguard/tools/tamper_check.py`** -- the adapter: resolves the watchlist from
+  `Configuration`, parses the PostToolUse stdin payload, emits output. Thin by design.
+- **`toolguard-tamper-check`** console script -> `toolguard.tools.tamper_check:main`.
+
+Deliberately **not** imported by `toolguard/hook.py`. The PreToolUse hot path stays
+untouched; this runs as its own process on the PostToolUse event.
+
+### Configuration
+
+A new `[tamper_evidence]` table in `toolguard_hook.toml` (TOML only -- this is a toolguard
+extension and has no native equivalent, so it must never be written into
+`settings.json`; add it to the `config_sync` / `config_divergence` exclusions and to
+`config_validation`'s known-section set, or it will be reported as an unknown key).
+
+```toml
+[tamper_evidence]
+enabled = true
+
+# What to watch. Absolute paths, ~ expansion, and globs. Two placeholders:
+#   {project} -> the resolved project root
+#   {home}    -> Path.home()
+watch = [
+    "{home}/.claude/settings.json",
+    "{home}/.toolguard/**/*.toml",
+    "{home}/.config/toolguard/rules/**",
+    "{project}/.claude/toolguard_hook.toml",
+    "{project}/.claude/settings*.json",
+]
+
+# Subtracted from the expanded watch set (editor scratch, backups, the snapshot dir).
+ignore = ["**/*.bak", "**/*~"]
+
+snapshot_dir = "{home}/.toolguard/tamper"   # default
+max_file_bytes = 262144                      # refuse to snapshot larger; report size-only
+max_versions   = 20                          # per watched file
+max_age_days    = 90
+report = "both"                              # "message" | "context" | "both" | "silent"
+```
+
+**Directories vs files**: a watch entry naming a directory is treated as `dir/**`. This is
+what makes "track a directory" work without a separate key -- and it is the case that
+matters most, because the `~/.toolguard` wipes were *deletions of a whole tree*.
+
+**Merge semantics across the hierarchy -- security-monotonic, mirroring `hard_deny`:**
+
+- `watch` and `ignore`: **union** across levels. A project level can ADD to what the user
+  level watches; it can never shrink it. (An `ignore` union does technically let a project
+  subtract -- so `ignore` is applied only to entries contributed *at or below* the level
+  that declared it. Without that rule, "ignore = ["**"]" in a project config silently
+  disables the user's watchlist, which is exactly the attack this feature exists to catch.)
+- `enabled`: true if ANY level sets it true. A lower level cannot switch it off.
+- The scalar knobs (`snapshot_dir`, retention, `report`): **most-specific wins**, consistent
+  with the rest of the config system. These are not security-relevant.
+
+**Default when `enabled = true` but `watch` is absent**: derive the watchlist from
+`discover_config_files()` plus `_rules_dirs()` -- i.e. *every file toolguard already reads
+to make decisions*, which is precisely the set whose tampering matters. This is the
+ergonomic default and should be the documented recommendation; an explicit `watch` is for
+widening (e.g. `~/.claude/agents/**`, `~/.claude/skills/**`) or for non-toolguard files.
+
+### Lifecycle -- and a correction to draft 2
+
+Draft 2 said *"on change, snapshot to `~/.toolguard/config-backups/`"*. **That is wrong for
+recovery and must not be built as written.** PostToolUse runs *after* the write, so the
+only thing available at detection time is the damaged content. Snapshotting on change
+preserves the damage and loses the original.
+
+Correct lifecycle:
+
+1. **First sight of a watched file -> snapshot it immediately** (this is the baseline, and
+   the thing you actually restore from), and record `path -> (sha256, size, mtime)` in
+   `{snapshot_dir}/manifest.json`.
+2. **Every subsequent run**: re-hash. Unchanged -> do nothing, no I/O beyond the hash.
+3. **Changed** -> the *existing* snapshot is the pre-change content. Emit a diff of
+   snapshot-vs-current, then snapshot the new content as the next baseline.
+4. **Disappeared** -> report loudly and **keep the last snapshot**; do not re-baseline to
+   "absent". This is the `~/.toolguard`-wipe case, and the snapshot is the only artifact
+   that makes it recoverable.
+5. **Newly appeared** -> report as new (a new rules file arriving unannounced is
+   security-relevant), then baseline it.
+
+Retention prunes by `max_versions` then `max_age_days`, but **never prunes a file's only
+remaining snapshot** -- otherwise retention itself destroys the recovery artifact for a file
+that has been quiet for 90 days, which describes most permission config.
+
+### The de-listing hole (found while writing this up)
+
+If the watchlist lives in `toolguard_hook.toml`, an agent that edits that file can remove a
+path from `watch` -- or set `enabled = false` -- in the *same* write. PostToolUse then reads
+the NEW config, computes the NEW watchlist, and correctly reports nothing.
+
+Fix: **the effective watch set is the union of the current watchlist and the previous run's
+watchlist**, which is already persisted in `manifest.json`. Any config file that ever
+contributed a `[tamper_evidence]` section is itself permanently watched. De-listing then
+shows up as a diff of the config file that did the de-listing -- the loudest possible
+signal. Cheap, and it closes the obvious self-referential bypass. Needs an explicit unit
+test with a BDD name that says so.
+
+### Paired Pre/Post checks -- attribution (Arnon, 2026-07-28)
+
+Arnon: *"it may be best implemented as two hooks: one PreToolUse that would capture
+signatures before the tool use and one PostToolUse that would capture after. This would
+make it more robust and would overcome some of the limits (not truly concurrent changes)."*
+
+**Accepted.** It converts the vague "changed since last check" into three distinct,
+separately actionable classifications:
+
+| Where the hash changed | Classification | What it means |
+| --- | --- | --- |
+| `Pre(t)` -> `Post(t)` | **attributed** | THIS tool call changed the file. Sub-second window; a near-certain claim. |
+| `Post(t-1)` -> `Pre(t)` | **external** | A human editor, `git checkout`, another session, or a crashed tool. |
+| no `Pre(t)` record | **unattributed** | Fall back to draft-2 wording. |
+
+The **external** class is not a consolation prize -- it is a signal the single-hook design
+could not produce at all, and it is the one that would have caught the `~/.toolguard` wipes
+attributed to the wrong actor. And **attributed** is what makes the report safe to word
+strongly, which challenge 2 below said we could not do.
+
+Note what this does **not** improve: **recovery is unchanged.** The snapshot store already
+held the pre-change content in both designs. The entire gain is classification. Worth being
+clear about, so the extra complexity is bought for the thing it actually delivers.
+
+#### Correctness details that must be built, not discovered
+
+1. **PostToolUse does not always run.** A toolguard `deny`, a user rejection at the prompt, a
+   tool error, or a session kill all leave a `Pre` record with no `Post`. **Dangling pre-
+   records are the normal case, not the exception** -- the state machine must treat them as
+   ordinary and simply let the next `Pre` supersede them. A design that assumes pairing will
+   misreport constantly.
+2. **Correlation.** Prefer an id carried in both payloads if one exists; otherwise key on
+   `session_id` + `tool_name` + a hash of `tool_input`. **Verify against current Claude Code
+   docs** along with the output contract -- same open item.
+3. **Concurrency across sessions.** Two Claude sessions interleave their records. Use
+   **per-session state files** (`{snapshot_dir}/sessions/{session_id}.json`) rather than one
+   mutable manifest, and atomic `os.replace` writes. Prune session files on age. The shared
+   `manifest.json` stays the single baseline record and is only written on actual change.
+4. **`Pre` runs on toolguard's own hot path** -- an extra process spawn (~50-80ms of
+   interpreter startup) before every qualifying tool call. Do the cheap and obvious things:
+   **stat-first (size+mtime), hash only on mismatch, never read content unless a hash
+   differs**; the narrow `Edit|Write|Bash` matcher; and a **`pre_check = true|false`** knob so
+   single-hook mode stays available. Default `true` when enabled. **Do not optimise beyond
+   that** -- see the latency principle below.
+5. **The `Pre` hook MUST NEVER BLOCK.** Arnon, unambiguous: *"this should never block, I
+   think."* Not a posture, a hard requirement. Wrap `main()` in a blanket
+   `except BaseException` -> error log -> `exit(0)`; never emit a decision-shaped JSON body on
+   the pre phase at all, so there is no code path that *could* deny. Unit-test that an
+   exception inside the core still exits 0 with empty stdout. A tamper-*evidence* feature
+   that can deny a tool call has become a tamper-*prevention* feature by accident, which is
+   precisely the design that was rejected in Part 2.
+
+#### Latency principle (Arnon, 2026-07-28)
+
+*"The overhead in execution is anyway an explicit user choice. You pay with latency for more
+security (but not paying with friction -- as per 'more security, less friction')."*
+
+**Latency is not friction.** Friction is being asked, interrupted, or blocked; latency is a
+tax the user opted into by wiring the hook and choosing a broad watchlist. So the perf story
+does not need to be clever -- it needs to be *honest and documented* (broad globs cost more,
+here is roughly how much) rather than optimised. This meaningfully lowers the priority of
+challenge 3 and rules out speculative optimisation work.
+
+#### Deferred idea: external `b3sum` -- RECORDED, probably not worth pursuing
+
+Arnon raised BLAKE3 via a `b3sum` binary for the directory case, with his own caveats
+(provenance tracking of *how* each hash was computed, tool discovery, extra testing) and his
+own conclusion: *"probably not worth pursuing for now."* Agreed, and there are two further
+reasons it is likely the wrong optimisation:
+
+1. **It would probably be SLOWER for the actual workload.** Per-file `subprocess` spawn is
+   ~1-5ms; hashing a 4 KB TOML file in-process is microseconds. Shelling out per file is a
+   straight loss. It could only win by hashing an entire tree in **one** spawn -- so if this
+   is ever revisited, the design is "one `b3sum` invocation over the whole watch tree",
+   not a drop-in hash swap. That is a different feature, not a tweak.
+2. **The bottleneck is not hash throughput.** For the big-directory case the cost is
+   thousands of `stat` calls, which BLAKE3 does not help with. And with stat-first, most runs
+   never hash anything at all.
+3. **If hash speed ever does matter, the answer is `hashlib.blake2b`** -- stdlib since 3.6,
+   substantially faster than SHA-256 on large inputs, no discovery, no external binary, no
+   provenance field, and it preserves the zero-runtime-dependency property that is a
+   deliberate security posture in this project. An optional external hasher would put a
+   third-party binary on toolguard's trust path, which is a poor trade for a feature whose
+   whole job is integrity.
+
+Recorded here rather than in the ticket so it is findable if the directory case ever gets
+painful; not planned.
+
+### Output contract
+
+PostToolUse hooks can return JSON on stdout; the exact key set for surfacing text to the
+user vs to the model must be **verified against current Claude Code docs before coding**, not
+recalled -- this is the one part of the design I cannot ground from this repo. The `report`
+knob exists precisely so the choice is configurable rather than baked in. Whatever the
+mechanism, the diff must be unmistakable in a scrolling transcript (banner, path, verdict
+count) and truncated to a bounded number of lines, with the snapshot path printed so the
+full content is one command away.
+
+**Failure posture: never block.** A tamper-evidence hook that errors must exit 0 and stay
+silent about its own failure except in the toolguard error log. It is an observer; taking
+down the user's session because a snapshot directory is unwritable would be a worse bug than
+the one it watches for.
+
+**Snapshot secrecy**: `settings.json` can contain tokens and environment values, so the
+snapshot tree is created `0700` and files `0600`. Worth stating in the doc, since the
+feature's effect is "quietly accumulate copies of your most sensitive local files".
+
+### Testing plan (all offline, all `tmp_path`, no live config -- see Part 1's principle)
+
+Core (`tamper_evidence.py`): first-sight baseline; unchanged is a no-op; change produces a
+diff against the *pre-change* content; deletion reported without re-baselining; appearance
+reported; retention prunes by count and by age but never the last copy; oversize file
+reported by size without snapshotting; symlinked watch target resolves once and is not
+double-reported (ties into Part 4); manifest survives a corrupt/absent file (rebuild, do not
+crash); snapshot dir permissions.
+
+Adapter (`tools/tamper_check.py`): watch-set union across levels; project `ignore` cannot
+subtract a user-level entry; `enabled` cannot be switched off by a lower level; the
+de-listing test above; directory entry expands to `dir/**`; absent section -> completely
+inert (assert zero filesystem writes); malformed section -> inert plus an error-log line,
+exit 0.
+
+Pre/Post pairing: change between pre and post -> **attributed**, and the report says so;
+change between the previous post and this pre -> **external**; a pre-record with no post
+(denied/rejected/errored tool) is superseded by the next pre without any report; two
+interleaved session ids do not corrupt each other's state; `pre_check = false` degrades
+cleanly to single-hook behaviour; **an exception raised inside the core still exits 0 with
+empty stdout** (the load-bearing test -- on `PreToolUse` a nonzero exit could block the
+user's tool call).
+
+### Documentation
+
+New **`docs/tamper-evidence.md`**: what it is (evidence, not prevention), why it is
+channel-independent, the config schema, the lifecycle, how to wire it, how to restore from a
+snapshot, and an explicit "this is off by default and wires to nothing" statement. Linked
+from:
+
+- `docs/agent-map.md` -- **mandatory**; it summarises every doc and is the single most
+  drift-prone file in the repo.
+- `docs/security.md` -- as the detective control alongside the ASK floor and `hard_deny`
+  (both preventive). The contrast is the clearest way to explain it.
+- `docs/configuration.md` -- the `[tamper_evidence]` section, next to the other tables.
+- `README.md` feature list and `llms.txt`.
+- `docs/install.md` -- one line only, under optional extras: it is deliberately not part of
+  the install flow.
+
+### Wiring planned for THIS project
+
+Unwired everywhere by default; wired here by hand, as the first real user:
+
+1. `~/.claude/settings.json` gets **both** a `PreToolUse` and a `PostToolUse` matcher
+   covering `Edit|Write|Bash` (not `*` -- `Read`, `Grep`, `Glob` and the MCP tools cannot
+   change a file), running `toolguard-tamper-check --phase pre` / `--phase post`. The
+   `PreToolUse` entry sits alongside toolguard's own permission hook; order does not matter,
+   since tamper-check never blocks and a denied tool simply leaves a dangling pre-record.
+2. `~/.claude/toolguard_hook.toml` gets `[tamper_evidence] enabled = true` and an explicit
+   `watch` that adds `{home}/.claude/agents/**` and `{home}/.claude/skills/**` to the
+   default set -- agents and skills are executable instructions to Claude, so tampering
+   there is as consequential as tampering with rules, and this ticket already involved
+   editing three agent/skill files.
+3. This repo's `.claude/toolguard_hook.toml` adds `{project}/.claude/**` (it is untracked
+   today -- see Part 4, which is the durable fix; this hook covers the window until then and
+   any machine where that fix is not present).
+4. After a week of living with it: decide whether the installer should *offer* to wire it.
+   That decision is explicitly out of scope now.
+
+### Challenges to this plan, stated plainly
+
+1. **Detective controls only work if someone reads the output.** Under auto-mode -- the very
+   condition that produced the incident -- Arnon is by definition not watching the
+   transcript. The diff lands in a scrolling log nobody reads until after the damage. The
+   snapshot still makes it *recoverable*, which is the larger half of the value, but the
+   "loud diff" half is weaker than it sounds. This is a real argument that **Part 5
+   (auto-mode `deny`) is the load-bearing control and this is the safety net**, not the
+   reverse. Worth reflecting in how hard we work on the output formatting.
+2. ~~**A PostToolUse hook cannot attribute a change.**~~ **Largely resolved** by the paired
+   Pre/Post design above: changes now classify as attributed / external / unattributed.
+   **Residual, accepted by Arnon:** a change made by a third party *during* the tool's own
+   execution is indistinguishable from one the tool made. That window is sub-second and the
+   misattribution is conservative (it over-blames the session rather than missing the
+   change), so it is a documentation item, not a design problem. The report wording must
+   still be honest per class -- "this tool call changed it" only for **attributed**.
+3. ~~**It runs on every qualifying tool call, now twice.**~~ **Downgraded** by the latency
+   principle above: the cost is an explicit user choice, and latency is not friction. Do the
+   cheap mitigations (stat-first, narrow matcher, `pre_check` opt-out), **document** that
+   broad globs cost more, and stop there. No speculative optimisation.
+4. **Unwired features rot.** Nothing exercises the wiring path in CI, so the config schema
+   and the docs drift from the code. The unit tests cover the module, not the integration.
+   Partial mitigation: wiring it in this project (step 2 above) makes Arnon the canary.
 
 ---
 
@@ -311,9 +620,12 @@ and **TOO-38**, both queued next:
 
 ## Sequencing
 
-1. **Arnon commits the current Phase 0 work** (after reverting the 39 formatting-only files,
-   so the diff is clean).
-2. Implement the `PostToolUse` tamper-evidence hook at user level.
+1. ~~**Arnon commits the current Phase 0 work**~~ -- DONE, `5dc4816`.
+2. Implement tamper-evidence **as a shipped-but-unwired toolguard feature** (revised scope
+   above): `tamper_evidence.py` core -> `tools/tamper_check.py` adapter -> console script ->
+   unit tests -> `docs/tamper-evidence.md` + the five link sites -> hand-wire it in this
+   project. Verify the PostToolUse output contract against current Claude Code docs before
+   writing the adapter.
 3. Implement `toolguard/testing/sandbox.py` + CLI + tripwire tests (incl. the two rules
    directories).
 4. Add the project CLAUDE.md checklist.

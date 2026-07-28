@@ -116,6 +116,61 @@ a build artifact -- add it to `.gitignore` (or write to a temp dir).
 branch coverage) and is slower than `coverage.py`; for finding untested lines in this
 project that is sufficient.
 
+## Announce intent before inline code and scratch scripts
+
+Heredocs into an interpreter, `python -c` / `node -e` style inline code, and executing a
+scratch script are the cases where what actually runs is least visible in the transcript --
+and they are exactly the cases where the permission decision is hardest to make after the
+fact.
+
+**When this applies.** The test is not how long the command is -- it is whether the real
+work lives in code the hook cannot see:
+
+- **Announce**: heredocs into an interpreter; `python -c` / `node -e` / `perl -e` and
+  friends; and **running a script written for the current action** (`uv run python
+  tmp/probe.py`, `bash /tmp/fix.sh`, `node scratch.js`). These last ones are one-liners, but
+  toolguard sees only a path -- the code itself never reaches the log or the prompt, which
+  makes them the *most* important case, not an exception to it.
+- **Do not announce**: ordinary one-liners whose full effect is visible in the command text
+  (`grep`, `ls`, `git diff`, `uv run ruff check .`, `uv run python -m unittest ...`), and
+  running a committed, reviewed script that is part of the project (`tools/coverage_stdlib.py`).
+  The command already says what it does; a preamble adds noise without adding information.
+
+When it applies, state your intent **as a Bash comment on the line(s) immediately before the
+invocation**, so it travels with the command itself:
+
+```bash
+# INTENT: <what the code does, in plain language -- not a restatement of the code>
+# TOUCHES: reads <paths>; writes <paths>  (say "writes nothing" when it writes nothing)
+# INLINE BECAUSE: <why this is not a file you could have been asked to run>
+uv run python - <<'PY'
+...
+PY
+```
+
+- [ ] **What** the code will do, in plain language (not a restatement of the code).
+- [ ] **What it touches** -- which files or directories it reads, and which it writes.
+- [ ] **Why** it is inline rather than a file you could have been asked to run.
+
+**Use the comment form, not just prose in the terminal.** The comment is part of the
+command text, so it reaches all three places that matter: the permission prompt (where
+Arnon decides), the session transcript, and the toolguard log (`logs/toolguard-*.md`),
+which otherwise records the command with no reasoning attached. A prose announcement in
+the terminal reaches only the transcript. Add prose as well when the explanation needs more
+room than a few comment lines, but never *instead* of the comment.
+
+Verified 2026-07-28: a leading comment does not affect rule matching. `grep -c ... ` and
+`# INTENT: ...` + `grep -c ...` both matched `Bash(grep *)` -- the PEG parser discards the
+comment and matches the real leaf command -- and the log recorded the comment text.
+
+This is not a request for permission and does not replace one. Arnon reads these when
+deciding whether to keep or remove friction in the permission rules, so an accurate,
+specific announcement is worth more than a short one.
+
+If the honest answer to the third point is "no good reason", write the script to a file and
+run `uv run python <file>` instead. That is a plain leaf command, it is allowed, it is
+reviewable, and it matches this project's "no Bash for file operations" rule.
+
 ## Ticket tracking
 
 Tickets for this project are prefixed by `TOO-`. Example: `TOO-123`.

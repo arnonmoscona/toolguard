@@ -30,10 +30,17 @@ Design is agreed and written up in
 [[Safe Experimentation Mechanism - Design Proposal]] (revision 2). Implementation order
 from that memo:
 
-1. `PostToolUse` tamper-evidence hook — hash the permission-config files after every tool
-   call; on change, snapshot to `~/.toolguard/config-backups/` and print a loud diff.
-   **User level, personal instrument, deliberately NOT a toolguard feature** (Arnon is
-   clamping down on new features ahead of a promotable 1.0).
+1. Tamper evidence — **REVISED 2026-07-28: a shipped-but-unwired toolguard FEATURE**, no
+   longer a personal user-level script. Configurable `[tamper_evidence]` section (files and
+   directories), `tamper_evidence.py` core + `tools/tamper_check.py` adapter + console
+   script, fully unit tested, `docs/tamper-evidence.md` linked from agent-map / security /
+   configuration / README / llms.txt. Ships wired to nothing; hand-wired in this project
+   only. Three design corrections captured in the memo: snapshot on FIRST SIGHT (snapshotting
+   on change preserves the damage and loses the original); the effective watch set is
+   the union with the previous run's, or an agent de-lists itself in the same write; and
+   **paired Pre/Post hooks** (Arnon) so changes classify as attributed / external /
+   unattributed instead of being blamed on whatever tool ran next. The Pre half lands on the
+   latency path and can block a tool if it crashes -- stat-first, and always exit 0.
 2. `toolguard/testing/sandbox.py` + CLI + tripwire tests, including explicit tests naming
    `~/.toolguard/rules/` and `~/.config/toolguard/rules/`.
 3. Project CLAUDE.md checklist (project level only, not global).
