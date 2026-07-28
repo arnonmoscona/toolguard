@@ -11,6 +11,7 @@ tags:
 The task currently being worked on:
 
 - [[TOO-19 Structured Rule Entries - Rule-Match Enrichment]]
+  (on resume read first: [[TOO-19 RESUME HERE - state after Phase 0 commit]])
 
 ## History
 - 2026-07-24: switched from TOO-30 (XDG rules directory; landed) to TOO-19 (structured
