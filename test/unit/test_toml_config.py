@@ -5,10 +5,12 @@ Tests TOML loading, config file discovery with TOML precedence,
 and permission validation.
 """
 
+import io
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config_validation import (
@@ -17,7 +19,8 @@ from toolguard.config_validation import (
     validate_permissions,
 )
 from toolguard.error_log import log_warning, log_error
-from toolguard.config import discover_config_files, load_config_file
+from toolguard.config import _parse_source, discover_config_files, load_config_file
+from toolguard.issues import Issue
 
 
 class TestTomlConfigLoader(unittest.TestCase):
@@ -130,6 +133,64 @@ invalid toml [
             load_config_file(Path("/nonexistent/file.toml"), "toml")
 
 
+class TestParseSourceTomlDiagnostics(unittest.TestCase):
+    """
+    _parse_source()'s TOML-failure warning message: an upgraded, actionable
+    message when the cause is a multi-line structured entry (TOO-19
+    corrective change), unchanged for any other TOML error.
+    """
+
+    def test_multiline_structured_entry_gets_actionable_message(self):
+        """
+        Given a toolguard_hook.toml whose only content is a structured entry
+            written across multiple physical lines (not valid TOML 1.0)
+        When _parse_source() parses it
+        Then it returns None (fail-open, unchanged) and prints a message
+            naming the file, the offending line, and the single-line fix --
+            not tomllib's own cryptic "Invalid initial character..." wording
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(
+                "[permissions]\n"
+                "allow = [\n"
+                "  {\n"
+                '    match = "Bash(git status)",\n'
+                "  },\n"
+                "]\n"
+            )
+            with patch("sys.stderr", new_callable=io.StringIO) as captured:
+                result = _parse_source(path, "toml")
+
+        self.assertIsNone(result)
+        message = captured.getvalue()
+        self.assertIn(str(path), message)
+        self.assertIn("line 3", message)  # the entry's own opening "{"
+        self.assertIn("single", message)
+        self.assertNotIn("Invalid initial character", message)
+
+    def test_unrelated_toml_error_keeps_generic_tomllib_message(self):
+        """
+        Given a toolguard_hook.toml with a genuinely malformed TOML syntax
+            error that has NOTHING to do with a multi-line structured entry
+            (an unterminated array)
+        When _parse_source() parses it
+        Then it returns None (fail-open, unchanged) and the printed message
+            is tomllib's own original message, unmodified -- detection must
+            not misattribute an unrelated error to the multi-line cause
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text("[permissions]\nallow = [\n")
+            with patch("sys.stderr", new_callable=io.StringIO) as captured:
+                result = _parse_source(path, "toml")
+
+        self.assertIsNone(result)
+        message = captured.getvalue()
+        self.assertIn(str(path), message)
+        self.assertNotIn("single", message)
+
+
 class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
     """
     load_config_file() memoizes parses keyed on the file's stat info. A rewrite that
@@ -156,9 +217,7 @@ class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
 
             original_mtime_ns = path.stat().st_mtime_ns
             new_content = (
-                'governed_tools = ["Bash"]\n\n'
-                "[permissions]\n"
-                'allow = ["Bash(ls:*)"]\n'
+                'governed_tools = ["Bash"]\n\n[permissions]\nallow = ["Bash(ls:*)"]\n'
             )
             path.write_text(new_content)
             # Force the mtime to collide with the first read's, reproducing a
@@ -284,13 +343,21 @@ class TestExtractToolName(unittest.TestCase):
 
 
 class TestValidatePermissions(unittest.TestCase):
-    """Test permission validation."""
+    """Test permission validation.
+
+    TOO-19 Phase 0a, increment 4: validate_permissions now returns a
+    ``Tuple[Issue, ...]`` (not ``List[Dict[str, str]]``), and routes every
+    permission entry through ``normalize_entry`` -- including structured
+    ``{match = "...", ...}`` table entries, which used to be silently
+    skipped by an ``isinstance(perm, str)`` filter (the 4th silent-drop
+    site this ticket phase exists to eliminate).
+    """
 
     def test_validate_no_warnings_for_valid_config(self):
         """
         Given a config whose permissions reference only governed, supported tools
         When validate_permissions runs
-        Then it produces no warnings
+        Then it produces an empty tuple of issues
         """
         config = {
             "governed_tools": ["Bash", "Read"],
@@ -299,14 +366,14 @@ class TestValidatePermissions(unittest.TestCase):
                 "deny": ["Bash(rm -rf:*)"],
             },
         }
-        warnings = validate_permissions(config)
-        self.assertEqual(warnings, [])
+        issues = validate_permissions(config)
+        self.assertEqual(issues, ())
 
     def test_warning_for_unsupported_tool(self):
         """
         Given permissions that reference unsupported tools (WebSearch, WebFetch)
         When validate_permissions runs
-        Then warnings are produced naming each unsupported tool
+        Then Issues are produced naming each unsupported tool
         """
         config = {
             "governed_tools": ["Bash"],
@@ -314,18 +381,18 @@ class TestValidatePermissions(unittest.TestCase):
                 "allow": ["Bash(ls:*)", "WebSearch", "WebFetch(domain:example.com)"],
             },
         }
-        warnings = validate_permissions(config)
+        issues = validate_permissions(config)
 
-        # Should have warnings for WebSearch and WebFetch
-        warning_messages = [w["message"] for w in warnings]
-        self.assertTrue(any("WebSearch" in msg for msg in warning_messages))
-        self.assertTrue(any("WebFetch" in msg for msg in warning_messages))
+        # Should have issues for WebSearch and WebFetch
+        messages = [issue.message for issue in issues]
+        self.assertTrue(any("WebSearch" in msg for msg in messages))
+        self.assertTrue(any("WebFetch" in msg for msg in messages))
 
     def test_warning_for_ungoverned_tool(self):
         """
         Given a permission for Read while only Bash is in governed_tools
         When validate_permissions runs
-        Then a warning notes that Read is not in governed_tools
+        Then an Issue notes that Read is not in governed_tools
         """
         config = {
             "governed_tools": ["Bash"],  # Read is not governed
@@ -333,19 +400,19 @@ class TestValidatePermissions(unittest.TestCase):
                 "allow": ["Bash(ls:*)", "Read(/tmp/**)"],
             },
         }
-        warnings = validate_permissions(config)
+        issues = validate_permissions(config)
 
-        # Should have warning for Read being ungoverned
-        warning_messages = [w["message"] for w in warnings]
+        # Should have an issue for Read being ungoverned
+        messages = [issue.message for issue in issues]
         self.assertTrue(
-            any("Read" in msg and "governed_tools" in msg for msg in warning_messages)
+            any("Read" in msg and "governed_tools" in msg for msg in messages)
         )
 
     def test_additional_supported_tools_no_warning(self):
         """
         Given a custom tool declared in additional_supported_tools and governed
         When validate_permissions runs on permissions using it
-        Then no warnings are produced
+        Then no issues are produced
         """
         config = {
             "governed_tools": ["Bash", "mcp__custom__tool"],
@@ -354,16 +421,16 @@ class TestValidatePermissions(unittest.TestCase):
                 "allow": ["Bash(ls:*)", "mcp__custom__tool(*)"],
             },
         }
-        warnings = validate_permissions(config)
+        issues = validate_permissions(config)
 
-        # Should have no warnings - custom tool is declared as supported
-        self.assertEqual(warnings, [])
+        # Should have no issues - custom tool is declared as supported
+        self.assertEqual(issues, ())
 
     def test_warnings_include_corrective_steps(self):
         """
-        Given a config that produces at least one warning
+        Given a config that produces at least one issue
         When validate_permissions runs
-        Then every warning includes a non-empty corrective_steps field
+        Then every Issue has a non-empty corrective_steps field
         """
         config = {
             "governed_tools": ["Bash"],
@@ -371,22 +438,163 @@ class TestValidatePermissions(unittest.TestCase):
                 "allow": ["WebSearch"],
             },
         }
-        warnings = validate_permissions(config)
+        issues = validate_permissions(config)
 
-        self.assertTrue(len(warnings) > 0)
-        for warning in warnings:
-            self.assertIn("corrective_steps", warning)
-            self.assertTrue(len(warning["corrective_steps"]) > 0)
+        self.assertTrue(len(issues) > 0)
+        for issue in issues:
+            self.assertIsInstance(issue, Issue)
+            self.assertTrue(len(issue.corrective_steps) > 0)
 
     def test_empty_config_no_warnings(self):
         """
         Given an empty config dict
         When validate_permissions runs
-        Then it produces no warnings
+        Then it produces an empty tuple of issues
         """
         config = {}
-        warnings = validate_permissions(config)
-        self.assertEqual(warnings, [])
+        issues = validate_permissions(config)
+        self.assertEqual(issues, ())
+
+    def test_structured_entry_unsupported_tool_is_flagged(self):
+        """
+        Given an allow list holding a structured entry for an unsupported tool
+        When validate_permissions runs
+        Then it flags the unsupported tool exactly as it would for a plain string
+
+        This is the bug fix: previously the 'isinstance(perm, str)' filter
+        silently skipped structured entries, so an unsupported tool named
+        only inside a {match = ...} table was never reported.
+        """
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [{"match": "WebSearch()", "additionalContext": "why"}],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertTrue(any("WebSearch" in issue.message for issue in issues))
+
+    def test_structured_entry_ungoverned_tool_is_flagged(self):
+        """
+        Given a structured entry for a supported tool absent from governed_tools
+        When validate_permissions runs
+        Then it flags the tool as supported-but-ungoverned, same as a plain string
+        """
+        config = {
+            "governed_tools": ["Bash"],  # Read is not governed
+            "permissions": {
+                "allow": [{"match": "Read(/tmp/**)"}],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertTrue(
+            any(
+                "Read" in issue.message and "governed_tools" in issue.message
+                for issue in issues
+            )
+        )
+
+    def test_malformed_dict_entry_produces_error_issue(self):
+        """
+        Given a structured entry dict with no 'match' key
+        When validate_permissions runs
+        Then it produces an error-level Issue rather than vanishing
+        """
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [{"additionalContext": "no match key here"}],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertTrue(len(issues) > 0)
+        self.assertTrue(any(issue.level == "error" for issue in issues))
+
+    def test_bare_int_entry_produces_error_issue(self):
+        """
+        Given a permission entry that is a bare int (not a str or dict)
+        When validate_permissions runs
+        Then it produces an error-level Issue rather than vanishing
+        """
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [42],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertTrue(len(issues) > 0)
+        self.assertTrue(any(issue.level == "error" for issue in issues))
+
+    def test_duplicate_malformed_entries_deduplicated(self):
+        """
+        Given the exact same malformed entry repeated twice in an allow list
+        When validate_permissions runs
+        Then only one Issue with that message is produced, not two
+        """
+        malformed = {"additionalContext": "still no match key"}
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [malformed, dict(malformed)],
+            },
+        }
+        issues = validate_permissions(config)
+        error_issues = [issue for issue in issues if issue.level == "error"]
+        self.assertEqual(len(error_issues), 1)
+
+    def test_unknown_enrichment_key_warns_without_suppressing_tool_check(self):
+        """
+        Given a structured entry with an unknown enrichment key naming an
+        unsupported tool
+        When validate_permissions runs
+        Then it produces a warning Issue about the unknown key AND still
+        flags the unsupported tool -- the unknown key must not swallow the
+        entry's other checks
+        """
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [{"match": "WebSearch()", "totallyMadeUpKey": "x"}],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertTrue(any("totallyMadeUpKey" in issue.message for issue in issues))
+        self.assertTrue(any("WebSearch" in issue.message for issue in issues))
+
+    def test_valid_structured_entry_governed_supported_tool_no_issue(self):
+        """
+        Given a structured entry for a governed, supported tool with no
+        unknown enrichment keys
+        When validate_permissions runs
+        Then no issues are produced
+        """
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [{"match": "Bash(git status)"}],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertEqual(issues, ())
+
+    def test_returned_issues_are_issue_instances_not_dicts(self):
+        """
+        Given a config that produces issues from both plain and structured entries
+        When validate_permissions runs
+        Then the return value is a tuple of Issue instances, not dicts
+        """
+        config = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": ["WebSearch", {"match": "WebFetch()"}],
+            },
+        }
+        issues = validate_permissions(config)
+        self.assertIsInstance(issues, tuple)
+        self.assertTrue(len(issues) > 0)
+        for issue in issues:
+            self.assertIsInstance(issue, Issue)
 
     def test_known_supported_tools_constant(self):
         """

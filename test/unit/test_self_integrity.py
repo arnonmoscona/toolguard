@@ -31,12 +31,20 @@ def _config_with_hard_deny(deny_patterns):
     """Build a single-layer Configuration governing Bash with the given hard_deny set."""
     layer = ConfigLayer(
         Provenance(
-            "user", "toolguard_hook", "toml", Path("/home/x/.claude/toolguard_hook.toml"), 0
+            "user",
+            "toolguard_hook",
+            "toml",
+            Path("/home/x/.claude/toolguard_hook.toml"),
+            0,
         ),
         MappingProxyType(
             {
                 "governed_tools": ["Bash"],
-                "permissions": {"allow": ["Bash(rm:*)", "Bash(find:*)"], "deny": [], "ask": []},
+                "permissions": {
+                    "allow": ["Bash(rm:*)", "Bash(find:*)"],
+                    "deny": [],
+                    "ask": [],
+                },
                 "hard_deny": {"deny": list(deny_patterns)},
             }
         ),

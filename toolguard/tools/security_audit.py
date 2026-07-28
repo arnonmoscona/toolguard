@@ -36,7 +36,11 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from toolguard.config import Configuration, TakeoverConfig
 from toolguard.constants import GOVERNED_TOOLS
 from toolguard.tools.clarity import find_confusing_interactions
-from toolguard.tools.config_access import audit_context, load_config, nosecurity_reason_for
+from toolguard.tools.config_access import (
+    audit_context,
+    load_config,
+    nosecurity_reason_for,
+)
 from toolguard.tools.danger import DangerFinding, Severity, danger
 from toolguard.tools.edit_proposal import (
     ACTION_REMOVE,
@@ -219,7 +223,7 @@ def _danger_proposal(df: DangerFinding) -> Optional[EditProposal]:
     if df.remediation_kind == "anchor":
         if not df.pattern.startswith(_REGEX_MARKER):
             return None
-        body = df.pattern[len(_REGEX_MARKER):]
+        body = df.pattern[len(_REGEX_MARKER) :]
         if body.startswith("^"):
             return None  # already anchored; nothing to change
         anchored = f"{_REGEX_MARKER}^{body}"
@@ -294,7 +298,9 @@ def security_audit(
                 pattern=df.pattern,
                 summary=df.rationale,
                 impact="",
-                remediation=Remediation(text=df.remediation, proposal=_danger_proposal(df)),
+                remediation=Remediation(
+                    text=df.remediation, proposal=_danger_proposal(df)
+                ),
                 takeover_active=df.takeover_active,
                 acknowledged=reason is not None,
                 acknowledgement=reason,
@@ -355,7 +361,13 @@ def security_audit(
     # Sort: acknowledged LAST (#NOSECURITY findings are de-prioritized but never
     # dropped), then severity DESC, source, tool (None -> ""), finding_id.
     ranked.sort(
-        key=lambda f: (f.acknowledged, -f.severity_value, f.source, f.tool or "", f.finding_id)
+        key=lambda f: (
+            f.acknowledged,
+            -f.severity_value,
+            f.source,
+            f.tool or "",
+            f.finding_id,
+        )
     )
 
     findings_tuple: Tuple[RankedFinding, ...] = tuple(ranked)
@@ -598,9 +610,7 @@ def _finding_summary(f: RankedFinding) -> Dict[str, object]:
     }
 
 
-def _finding_delta(
-    base: SecurityReport, proposed: SecurityReport
-) -> Dict[str, object]:
+def _finding_delta(base: SecurityReport, proposed: SecurityReport) -> Dict[str, object]:
     """
     Compute which findings the proposed edits introduce or resolve.
 
@@ -615,14 +625,16 @@ def _finding_delta(
     """
     base_map = {_finding_key(f): f for f in base.findings}
     proposed_map = {_finding_key(f): f for f in proposed.findings}
-    introduced = [_finding_summary(proposed_map[k]) for k in proposed_map if k not in base_map]
-    resolved = [_finding_summary(base_map[k]) for k in base_map if k not in proposed_map]
+    introduced = [
+        _finding_summary(proposed_map[k]) for k in proposed_map if k not in base_map
+    ]
+    resolved = [
+        _finding_summary(base_map[k]) for k in base_map if k not in proposed_map
+    ]
     return {"introduced": introduced, "resolved": resolved}
 
 
-def _render_edit_banner(
-    proposals: List[EditProposal], delta: Dict[str, object]
-) -> str:
+def _render_edit_banner(proposals: List[EditProposal], delta: Dict[str, object]) -> str:
     """
     Render a human banner for an as-if-enacted (--edits) audit.
 
@@ -644,9 +656,13 @@ def _render_edit_banner(
         f"Findings resolved by the edits:   {len(resolved)}",
     ]
     for item in introduced:
-        lines.append(f"  + INTRODUCED {item['finding_id']} ({item['severity_label']}) {item['pattern'] or ''}")
+        lines.append(
+            f"  + INTRODUCED {item['finding_id']} ({item['severity_label']}) {item['pattern'] or ''}"
+        )
     for item in resolved:
-        lines.append(f"  - resolved   {item['finding_id']} ({item['severity_label']}) {item['pattern'] or ''}")
+        lines.append(
+            f"  - resolved   {item['finding_id']} ({item['severity_label']}) {item['pattern'] or ''}"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -827,8 +843,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tc = ctx.takeover
             context = {
                 "summary": {
-                    "start_dir": str(ctx.summary.start_dir) if ctx.summary.start_dir is not None else None,
-                    "project_root": str(ctx.summary.project_root) if ctx.summary.project_root is not None else None,
+                    "start_dir": str(ctx.summary.start_dir)
+                    if ctx.summary.start_dir is not None
+                    else None,
+                    "project_root": str(ctx.summary.project_root)
+                    if ctx.summary.project_root is not None
+                    else None,
                     "sources": list(ctx.summary.sources),
                     "governed_tools": list(ctx.summary.governed_tools),
                     "layer_count": ctx.summary.layer_count,

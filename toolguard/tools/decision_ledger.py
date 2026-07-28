@@ -174,13 +174,17 @@ def new_decision(
 def _validate_enums(kind: str, decision: str, level: str) -> None:
     """Raise :class:`LedgerError` if any enum-valued field is unrecognised."""
     if kind not in VALID_KINDS:
-        raise LedgerError(f"unknown decision kind {kind!r}; expected one of {sorted(VALID_KINDS)}")
+        raise LedgerError(
+            f"unknown decision kind {kind!r}; expected one of {sorted(VALID_KINDS)}"
+        )
     if decision not in VALID_DECISIONS:
         raise LedgerError(
             f"unknown decision {decision!r}; expected one of {sorted(VALID_DECISIONS)}"
         )
     if level not in VALID_LEVELS:
-        raise LedgerError(f"unknown level {level!r}; expected one of {sorted(VALID_LEVELS)}")
+        raise LedgerError(
+            f"unknown level {level!r}; expected one of {sorted(VALID_LEVELS)}"
+        )
 
 
 def decision_to_dict(decision: LedgerDecision) -> dict:
@@ -277,7 +281,9 @@ def ledger_path_for_level(level: str, project_dir: Path) -> Path:
         return USER_LEDGER_PATH
     if level == "project":
         return project_ledger_path(project_dir)
-    raise LedgerError(f"unknown level {level!r}; expected one of {sorted(VALID_LEVELS)}")
+    raise LedgerError(
+        f"unknown level {level!r}; expected one of {sorted(VALID_LEVELS)}"
+    )
 
 
 def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
@@ -370,7 +376,9 @@ def record_decision(project_dir: Path, decision: LedgerDecision) -> Path:
         LedgerError: If the target ledger exists but is malformed.
     """
     path = ledger_path_for_level(decision.level, Path(project_dir))
-    existing: List[LedgerDecision] = [d for d in load_ledger(path) if d.id != decision.id]
+    existing: List[LedgerDecision] = [
+        d for d in load_ledger(path) if d.id != decision.id
+    ]
     existing.append(decision)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

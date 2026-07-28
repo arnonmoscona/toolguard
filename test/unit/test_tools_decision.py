@@ -48,9 +48,7 @@ def _make_config(layers_content):
             path=Path(f"/fake/{level}/{source_type}"),
             specificity=i,
         )
-        layers.append(
-            ConfigLayer(provenance=prov, content=MappingProxyType(content))
-        )
+        layers.append(ConfigLayer(provenance=prov, content=MappingProxyType(content)))
     return Configuration(layers=tuple(layers), start_dir=None)
 
 
@@ -75,14 +73,20 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         Then the verdict is 'allow'
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "ls -la")
         self.assertEqual("allow", decision.verdict)
         self.assertEqual("Bash", decision.tool)
@@ -97,14 +101,20 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             prompts rather than silently denying)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "whoami")
         self.assertEqual("ask", decision.verdict)
 
@@ -115,14 +125,20 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         Then the verdict is 'deny' (deny checked first within a level)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(rm:*)"],
-                    "deny": ["Bash(rm -rf:*)"],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(rm:*)"],
+                            "deny": ["Bash(rm -rf:*)"],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "rm -rf /tmp/foo")
         self.assertEqual("deny", decision.verdict)
 
@@ -134,20 +150,30 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         Then the verdict is 'allow' (more-specific-wins: project beats user)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git push:*)"],
-                    "deny": [],
-                }
-            }),
-            ("user", "toolguard_hook", {
-                "permissions": {
-                    "allow": [],
-                    "deny": ["Bash(git push:*)"],
-                }
-            }),
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git push:*)"],
+                            "deny": [],
+                        }
+                    },
+                ),
+                (
+                    "user",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [],
+                            "deny": ["Bash(git push:*)"],
+                        }
+                    },
+                ),
+            ]
+        )
         decision = decide(config, "Bash", "git push origin main")
         self.assertEqual("allow", decision.verdict)
 
@@ -158,18 +184,24 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         Then the verdict is 'deny' (hard-deny cannot be overridden by any allow)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(rm:*)"],
-                    "deny": [],
-                },
-                "hard_deny": {
-                    "deny": ["Bash(rm -rf:*)"],
-                    "allow": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(rm:*)"],
+                            "deny": [],
+                        },
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf:*)"],
+                            "allow": [],
+                        },
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "rm -rf /")
         self.assertEqual("deny", decision.verdict)
 
@@ -181,18 +213,24 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         Then the verdict is 'allow' (hard-deny carve-out exempts the path)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(rm:*)"],
-                    "deny": [],
-                },
-                "hard_deny": {
-                    "deny": ["Bash(rm -rf:*)"],
-                    "allow": ["Bash(rm -rf /tmp:*)"],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(rm:*)"],
+                            "deny": [],
+                        },
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf:*)"],
+                            "allow": ["Bash(rm -rf /tmp:*)"],
+                        },
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "rm -rf /tmp/foo")
         self.assertEqual("allow", decision.verdict)
 
@@ -207,14 +245,20 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
         Then the verdict is 'allow' (both sub-commands are allowed)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "git status && ls -la")
         self.assertEqual("allow", decision.verdict)
 
@@ -228,14 +272,20 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
             propagates that 'ask' to the overall verdict)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Bash", "git status && whoami")
         self.assertEqual("ask", decision.verdict)
 
@@ -251,14 +301,20 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         """
 
         home = str(Path.home())
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": [f"Read([glob]{home}/projects/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [f"Read([glob]{home}/projects/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Read", f"{home}/projects/foo/bar.py")
         self.assertEqual("allow", decision.verdict)
 
@@ -270,14 +326,20 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         """
 
         home = str(Path.home())
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": [f"Read([glob]{home}/projects/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [f"Read([glob]{home}/projects/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Read", "/etc/passwd")
         self.assertEqual("ask", decision.verdict)
 
@@ -290,14 +352,20 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         Then the verdict is 'deny' (deny-first within a level)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Read(*)"],
-                    "deny": ["Read([glob]/home/*/project/.env)"],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read(*)"],
+                            "deny": ["Read([glob]/home/*/project/.env)"],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Read", "/home/user/project/.env")
         self.assertEqual("deny", decision.verdict)
 
@@ -309,14 +377,20 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         """
 
         home = str(Path.home())
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": [f"Edit([glob]{home}/projects/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [f"Edit([glob]{home}/projects/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         decision = decide(config, "Edit", f"{home}/projects/myfile.py")
         self.assertEqual("allow", decision.verdict)
 
@@ -331,14 +405,20 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
         Then no log files are written (no side effects from the decision primitive)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
             initial_files = set(logs_dir.iterdir())
@@ -358,14 +438,20 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
             decision returns normally with the TOO-15 default 'ask' verdict
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         # If sys.exit were called, we'd get SystemExit -- this call should
         # return normally with an 'ask' decision
         original_exit = sys.exit
@@ -385,14 +471,20 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
         Then it returns a Decision instance with tool, target, verdict, and reason fields
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         result = decide(config, "Bash", "git status")
         self.assertIsInstance(result, Decision)
         self.assertEqual("Bash", result.tool)
@@ -422,14 +514,20 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         allows, silently discarding the provenance already present in the resolver.
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         result = decide(config, "Read", "/tmp/some/file.txt")
         self.assertEqual("allow", result.verdict)
         self.assertIsNotNone(
@@ -447,14 +545,20 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             TOO-15 default no_match_fallback 'ask')
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         result = decide(config, "Read", "/etc/passwd")
         self.assertEqual("ask", result.verdict)
         # No rule matched; the no_match_fallback result carries no provenance.
@@ -467,14 +571,20 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         Then Decision.provenance is non-None and identifies the project layer
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         result = decide(config, "Bash", "git status")
         self.assertEqual("allow", result.verdict)
         self.assertIsNotNone(
@@ -491,14 +601,20 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
              each with a non-None matched_rule and provenance
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         result = decide(config, "Bash", "git status && ls -la")
         self.assertEqual("allow", result.verdict)
         self.assertIsNotNone(result.sub_matches)
@@ -507,8 +623,13 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         for sm in result.sub_matches:
             self.assertIsInstance(sm, SubMatch)
             self.assertEqual("allow", sm.decision)
-            self.assertIsNotNone(sm.matched_rule, "matched_rule must be non-None for an allowed sub-command")
-            self.assertIsNotNone(sm.provenance, "provenance must be non-None for an allowed sub-command")
+            self.assertIsNotNone(
+                sm.matched_rule,
+                "matched_rule must be non-None for an allowed sub-command",
+            )
+            self.assertIsNotNone(
+                sm.provenance, "provenance must be non-None for an allowed sub-command"
+            )
 
     def test_bash_compound_unmatched_sub_identifiable_in_sub_matches(self):
         """
@@ -520,14 +641,20 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
              decision='ask' in sub_matches
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         result = decide(config, "Bash", "git status && whoami")
         self.assertEqual("ask", result.verdict)
         self.assertIsNotNone(result.sub_matches)
@@ -554,18 +681,24 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
              and sub_matches[0].provenance is None (hard-deny is pooled)
         """
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(rm:*)"],
-                    "deny": [],
-                },
-                "hard_deny": {
-                    "deny": ["Bash(rm -rf:*)"],
-                    "allow": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(rm:*)"],
+                            "deny": [],
+                        },
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf:*)"],
+                            "allow": [],
+                        },
+                    },
+                )
+            ]
+        )
         result = decide(config, "Bash", "rm -rf /")
         self.assertEqual("deny", result.verdict)
         self.assertIsNotNone(result.sub_matches)

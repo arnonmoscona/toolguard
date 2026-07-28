@@ -141,7 +141,9 @@ def _hooks_for(*tools: str) -> dict:
     return {"PreToolUse": pre}
 
 
-def _danger_allow_layer(tool: str, allow: List[str], specificity: int = 0) -> ConfigLayer:
+def _danger_allow_layer(
+    tool: str, allow: List[str], specificity: int = 0
+) -> ConfigLayer:
     """
     Build a toolguard_hook layer with dangerous allow patterns for ``tool``.
 
@@ -275,7 +277,7 @@ def _locus_config() -> Configuration:
         ignored_allow_patterns=[],
     )
     native_layer = _native_layer(
-        allow=["mcp__custom__tool(*)"],   # blanket allow NOT in ignored set
+        allow=["mcp__custom__tool(*)"],  # blanket allow NOT in ignored set
         hooks=_hooks_for("mcp__custom__tool"),
     )
     return _make_config(tg_layer, native_layer)
@@ -382,7 +384,9 @@ class TestSecurityAuditDangerOnly(unittest.TestCase):
         Then the RankedFinding.pattern field is set (not None)
         """
         for f in self.report.findings:
-            self.assertIsNotNone(f.pattern, msg=f"Expected pattern set, got None in {f!r}")
+            self.assertIsNotNone(
+                f.pattern, msg=f"Expected pattern set, got None in {f!r}"
+            )
 
     def test_impact_empty_for_rule_findings(self):
         """
@@ -391,7 +395,9 @@ class TestSecurityAuditDangerOnly(unittest.TestCase):
         Then impact is an empty string (danger findings embed impact in rationale)
         """
         for f in self.report.findings:
-            self.assertEqual(f.impact, "", msg=f"Expected empty impact for rule finding {f!r}")
+            self.assertEqual(
+                f.impact, "", msg=f"Expected empty impact for rule finding {f!r}"
+            )
 
     def test_severity_value_and_label_consistent(self):
         """
@@ -478,7 +484,9 @@ class TestSecurityAuditTakeoverOnly(unittest.TestCase):
         """
         for f in self.report.findings:
             self.assertIsInstance(f.impact, str)
-            self.assertGreater(len(f.impact), 0, msg=f"Expected non-empty impact in {f!r}")
+            self.assertGreater(
+                len(f.impact), 0, msg=f"Expected non-empty impact in {f!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +805,14 @@ class TestRenderJson(unittest.TestCase):
                     mock_load.return_value = MagicMock()
                     mock_sa.return_value = self._make_report()
                     out, _ = self._capture_main(
-                        ["--dir", ".", "--format", "json", "--migrations", str(mig_path)]
+                        [
+                            "--dir",
+                            ".",
+                            "--format",
+                            "json",
+                            "--migrations",
+                            str(mig_path),
+                        ]
                     )
         data = json.loads(out)
         self.assertIn("context", data)
@@ -815,7 +830,14 @@ class TestRenderJson(unittest.TestCase):
                 mock_sa.return_value = self._make_report()
                 with self.assertRaises(SystemExit):
                     self._capture_main(
-                        ["--dir", ".", "--format", "json", "--migrations", "/no/such/file.json"]
+                        [
+                            "--dir",
+                            ".",
+                            "--format",
+                            "json",
+                            "--migrations",
+                            "/no/such/file.json",
+                        ]
                     )
 
     def test_json_findings_list_with_required_fields(self):
@@ -852,9 +874,18 @@ class TestRenderJson(unittest.TestCase):
         self.assertEqual(len(data["findings"]), 1)
         fd = data["findings"][0]
         expected_fields = [
-            "source", "finding_id", "severity_value", "severity_label",
-            "tool", "locus", "pattern", "summary", "impact",
-            "remediation", "remediation_proposal", "takeover_active",
+            "source",
+            "finding_id",
+            "severity_value",
+            "severity_label",
+            "tool",
+            "locus",
+            "pattern",
+            "summary",
+            "impact",
+            "remediation",
+            "remediation_proposal",
+            "takeover_active",
         ]
         for field in expected_fields:
             self.assertIn(field, fd, msg=f"Missing field in JSON finding: {field}")
@@ -1015,7 +1046,9 @@ class TestLocusFromProvenance(unittest.TestCase):
         uncovered = [
             f for f in report.findings if f.finding_id == "uncovered-blanket-allow"
         ]
-        self.assertGreater(len(uncovered), 0, "Expected uncovered-blanket-allow finding")
+        self.assertGreater(
+            len(uncovered), 0, "Expected uncovered-blanket-allow finding"
+        )
         # Native layer provenance: level="project", path="/fake/.claude/settings.local.json"
         expected_locus = "project: /fake/.claude/settings.local.json"
         for f in uncovered:
@@ -1035,7 +1068,9 @@ class TestLocusFromProvenance(unittest.TestCase):
         hook_findings = [
             f for f in report.findings if f.finding_id == "hook-not-registered"
         ]
-        self.assertGreater(len(hook_findings), 0, "Expected hook-not-registered finding")
+        self.assertGreater(
+            len(hook_findings), 0, "Expected hook-not-registered finding"
+        )
         for f in hook_findings:
             self.assertIsNone(
                 f.locus,
@@ -1095,7 +1130,9 @@ class TestWithContextFlag(unittest.TestCase):
         Then the JSON output contains a top-level 'context' key
         """
         data = self._run_with_context_json(config_fn=_clean_config)
-        self.assertIn("context", data, "Expected 'context' key in JSON with --with-context")
+        self.assertIn(
+            "context", data, "Expected 'context' key in JSON with --with-context"
+        )
 
     def test_context_has_summary_key(self):
         """
@@ -1198,7 +1235,9 @@ class TestWithContextFlag(unittest.TestCase):
         """
         data = self._run_with_context_json(config_fn=_clean_config)
         for key in ("takeover_active", "highest_severity", "counts", "findings"):
-            self.assertIn(key, data, f"Existing key '{key}' is missing with --with-context")
+            self.assertIn(
+                key, data, f"Existing key '{key}' is missing with --with-context"
+            )
 
     def test_with_context_markdown_does_not_error(self):
         """
@@ -1262,7 +1301,9 @@ class TestWithContextFlag(unittest.TestCase):
                 main(["--dir", ".", "--format", "json", "--with-context"])
         out = captured.getvalue()
         non_ascii = [c for c in out if ord(c) >= 128]
-        self.assertEqual(non_ascii, [], "Expected ASCII-only output with --with-context")
+        self.assertEqual(
+            non_ascii, [], "Expected ASCII-only output with --with-context"
+        )
 
 
 class TestSecurityAuditClarity(unittest.TestCase):
@@ -1342,8 +1383,10 @@ class TestStructuredRemediation(unittest.TestCase):
             specificity=0,
         )
         df = _danger_finding(
-            "arbitrary-exec-allow", "uv run python:*",
-            remediation_kind="remove", provenance=prov,
+            "arbitrary-exec-allow",
+            "uv run python:*",
+            remediation_kind="remove",
+            provenance=prov,
         )
         proposal = _danger_proposal(df)
         self.assertEqual(proposal.action, "remove")
@@ -1354,7 +1397,13 @@ class TestStructuredRemediation(unittest.TestCase):
         layer = ConfigLayer(
             provenance=prov,
             content=MappingProxyType(
-                {"permissions": {"allow": ["Bash(uv run python:*)"], "deny": [], "ask": []}}
+                {
+                    "permissions": {
+                        "allow": ["Bash(uv run python:*)"],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
             ),
         )
         config = Configuration(layers=(layer,), start_dir=None)
@@ -1437,7 +1486,13 @@ class TestStructuredRemediation(unittest.TestCase):
         layer = ConfigLayer(
             provenance=prov,
             content=MappingProxyType(
-                {"permissions": {"allow": ["Bash(uv run python:*)"], "deny": [], "ask": []}}
+                {
+                    "permissions": {
+                        "allow": ["Bash(uv run python:*)"],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
             ),
         )
         config = Configuration(layers=(layer,), start_dir=None)
@@ -1463,7 +1518,13 @@ class TestEditsReview(unittest.TestCase):
         layer = ConfigLayer(
             provenance=prov,
             content=MappingProxyType(
-                {"permissions": {"allow": ["Bash(uv run python:*)"], "deny": [], "ask": []}}
+                {
+                    "permissions": {
+                        "allow": ["Bash(uv run python:*)"],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
             ),
         )
         return Configuration(layers=(layer,), start_dir=None)
@@ -1483,7 +1544,9 @@ class TestEditsReview(unittest.TestCase):
         """
         config = self._dangerous_config()
         base = security_audit(config)
-        removal = [f.remediation.proposal for f in base.findings if f.remediation.proposal][0]
+        removal = [
+            f.remediation.proposal for f in base.findings if f.remediation.proposal
+        ][0]
         proposed = security_audit(apply_edits(config, [removal]))
         delta = _finding_delta(base, proposed)
         self.assertIn(
@@ -1501,11 +1564,15 @@ class TestEditsReview(unittest.TestCase):
         """
         config = self._dangerous_config()
         base = security_audit(config)
-        removal = [f.remediation.proposal for f in base.findings if f.remediation.proposal][0]
+        removal = [
+            f.remediation.proposal for f in base.findings if f.remediation.proposal
+        ][0]
         with tempfile.TemporaryDirectory() as tmp:
             edits_path = Path(tmp) / "edits.json"
             edits_path.write_text(json.dumps([edit_proposal_to_dict(removal)]))
-            with patch("toolguard.tools.security_audit.load_config", return_value=config):
+            with patch(
+                "toolguard.tools.security_audit.load_config", return_value=config
+            ):
                 out, code = self._capture_main(
                     ["--dir", ".", "--format", "json", "--edits", str(edits_path)]
                 )
@@ -1528,7 +1595,9 @@ class TestEditsReview(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "bad.json"
             bad.write_text("{not json")
-            with patch("toolguard.tools.security_audit.load_config", return_value=config):
+            with patch(
+                "toolguard.tools.security_audit.load_config", return_value=config
+            ):
                 with self.assertRaises(SystemExit):
                     self._capture_main(["--dir", ".", "--edits", str(bad)])
 
@@ -1624,9 +1693,7 @@ class TestNoSecurityAcknowledgement(unittest.TestCase):
             report = security_audit(_make_config(layer))
             ack = [f for f in report.findings if f.acknowledged]
             unack_rule = [
-                f
-                for f in report.findings
-                if f.source == "rule" and not f.acknowledged
+                f for f in report.findings if f.source == "rule" and not f.acknowledged
             ]
             self.assertTrue(ack, "acknowledged CRITICAL should still be present")
             self.assertTrue(unack_rule, "un-acknowledged MEDIUM should be present")
@@ -1799,7 +1866,9 @@ class TestFindingDeltaAndBanner(unittest.TestCase):
         base = self._report(_ranked("A", pattern="a:*"))
         proposed = self._report(_ranked("B", pattern="b:*"))
         delta = _finding_delta(base, proposed)
-        proposals = [EditProposal(action="replace", tool="Bash", rationale="r", edits=())]
+        proposals = [
+            EditProposal(action="replace", tool="Bash", rationale="r", edits=())
+        ]
         banner = _render_edit_banner(proposals, delta)
         self.assertIn("AS-IF-ENACTED REVIEW", banner)
         self.assertIn("as if 1 proposed edit(s)", banner)

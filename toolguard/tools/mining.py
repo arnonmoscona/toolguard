@@ -302,15 +302,13 @@ def evaluate_added_allow_rule(
     Returns:
         An :class:`AddRuleEffect` with the newly-allowed commands and change counts.
     """
-    config_b = with_layer_allow_replaced(config, tool, target_provenance, set(), [pattern])
+    config_b = with_layer_allow_replaced(
+        config, tool, target_provenance, set(), [pattern]
+    )
     diff = replay(corpus, config, config_b)
 
     newly_allowed = sorted(
-        {
-            d.entry.command
-            for d in diff.broadened()
-            if d.decision_b.verdict == "allow"
-        }
+        {d.entry.command for d in diff.broadened() if d.decision_b.verdict == "allow"}
     )
 
     return AddRuleEffect(

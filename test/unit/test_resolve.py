@@ -64,29 +64,41 @@ class TestNoDrift(unittest.TestCase):
 
     def _bash_config(self):
         """Return a config with allow=git/ls and hard-deny rm -rf."""
-        return _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": [],
-                },
-                "hard_deny": {
-                    "deny": ["Bash(rm -rf:*)"],
-                    "allow": [],
-                },
-            })
-        ])
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": [],
+                        },
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf:*)"],
+                            "allow": [],
+                        },
+                    },
+                )
+            ]
+        )
 
     def _read_config(self):
         """Return a config that allows Read under /tmp only."""
-        return _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
 
     def test_simple_bash_allow_no_drift(self):
         """
@@ -108,9 +120,12 @@ class TestNoDrift(unittest.TestCase):
         self.assertIsInstance(bash_result, BashResolution)
         resolve_verdict = bash_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Bash allow: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Bash allow: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("allow", decision_verdict)
 
     def test_compound_bash_all_allowed_no_drift(self):
@@ -133,9 +148,12 @@ class TestNoDrift(unittest.TestCase):
         self.assertIsInstance(bash_result, BashResolution)
         resolve_verdict = bash_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for compound Bash allow: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for compound Bash allow: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("allow", decision_verdict)
 
     def test_bash_hard_deny_no_drift(self):
@@ -157,9 +175,12 @@ class TestNoDrift(unittest.TestCase):
         self.assertIsInstance(bash_result, BashResolution)
         resolve_verdict = bash_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for hard-deny Bash: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for hard-deny Bash: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("deny", decision_verdict)
 
     def test_read_allow_no_drift(self):
@@ -181,9 +202,12 @@ class TestNoDrift(unittest.TestCase):
         self.assertIsInstance(file_result, FileResolution)
         resolve_verdict = file_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Read allow: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Read allow: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("allow", decision_verdict)
 
     def test_read_no_match_no_drift(self):
@@ -206,9 +230,12 @@ class TestNoDrift(unittest.TestCase):
         self.assertIsInstance(file_result, FileResolution)
         resolve_verdict = file_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Read no-match: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Read no-match: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("ask", decision_verdict)
 
 
@@ -231,25 +258,37 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
     def _bash_configured_no_match_config(self):
         """Return a config that allows only 'git:*' for Bash (no hard_deny)."""
-        return _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
 
     def _read_configured_no_match_config(self):
         """Return a config that allows Read only under /tmp/** (no hard_deny)."""
-        return _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
 
     def test_bash_fully_unconfigured_resolves_to_ask_no_drift(self):
         """
@@ -269,9 +308,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         )
         resolve_verdict = bash_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for unconfigured Bash: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for unconfigured Bash: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("ask", decision_verdict)
 
     def test_read_fully_unconfigured_resolves_to_ask_no_drift(self):
@@ -291,9 +333,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         )
         resolve_verdict = file_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for unconfigured Read: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for unconfigured Read: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("ask", decision_verdict)
 
     def test_bash_rules_exist_no_match_asks_by_default_no_drift(self):
@@ -318,9 +363,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         )
         resolve_verdict = bash_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Bash no-match: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Bash no-match: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("ask", decision_verdict)
 
     def test_read_rules_exist_no_match_asks_by_default_no_drift(self):
@@ -343,9 +391,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         )
         resolve_verdict = file_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Read no-match: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Read no-match: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("ask", decision_verdict)
 
     def test_bash_rules_exist_no_match_denies_with_explicit_deny_no_drift(self):
@@ -356,15 +407,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             (does not match any rule)
         Then both agree the verdict is 'deny'
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -376,9 +433,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         )
         resolve_verdict = bash_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Bash explicit deny: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Bash explicit deny: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("deny", decision_verdict)
 
     def test_read_rules_exist_no_match_denies_with_explicit_deny_no_drift(self):
@@ -389,15 +449,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             '/etc/passwd' (does not match any rule)
         Then both agree the verdict is 'deny'
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         file_path = "/etc/passwd"
         extended_syntax = True
 
@@ -408,9 +474,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         )
         resolve_verdict = file_result.decision
 
-        self.assertEqual(resolve_verdict, decision_verdict,
-                         f"Drift detected for Read explicit deny: resolve={resolve_verdict}, "
-                         f"decide={decision_verdict}")
+        self.assertEqual(
+            resolve_verdict,
+            decision_verdict,
+            f"Drift detected for Read explicit deny: resolve={resolve_verdict}, "
+            f"decide={decision_verdict}",
+        )
         self.assertEqual("deny", decision_verdict)
 
     def test_bash_allow_with_warning_fallback_allows_no_drift(self):
@@ -422,15 +491,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'allow' (auto-allowed with a warning
             reason naming 'allow_with_warning')
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "allow_with_warning",
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -441,9 +516,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict,
-                         f"Drift detected for Bash allow_with_warning: "
-                         f"resolve={bash_result.decision}, decide={decision.verdict}")
+        self.assertEqual(
+            bash_result.decision,
+            decision.verdict,
+            f"Drift detected for Bash allow_with_warning: "
+            f"resolve={bash_result.decision}, decide={decision.verdict}",
+        )
         self.assertEqual("allow", decision.verdict)
         self.assertIn("allow_with_warning", bash_result.reason)
 
@@ -456,15 +534,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'allow' (auto-allowed with a warning
             reason naming 'allow_with_warning')
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "allow_with_warning",
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         file_path = "/etc/passwd"
         extended_syntax = True
 
@@ -474,9 +558,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             "Read", file_path, config, extended_syntax
         )
 
-        self.assertEqual(file_result.decision, decision.verdict,
-                         f"Drift detected for Read allow_with_warning: "
-                         f"resolve={file_result.decision}, decide={decision.verdict}")
+        self.assertEqual(
+            file_result.decision,
+            decision.verdict,
+            f"Drift detected for Read allow_with_warning: "
+            f"resolve={file_result.decision}, decide={decision.verdict}",
+        )
         self.assertEqual("allow", decision.verdict)
         self.assertIn("allow_with_warning", file_result.reason)
 
@@ -489,15 +576,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'allow' (the legacy alias behaves
             identically to 'allow_with_warning', including in the reason text)
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "warn_deny",
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "warn_deny",
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -508,9 +601,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict,
-                         f"Drift detected for Bash warn_deny alias: "
-                         f"resolve={bash_result.decision}, decide={decision.verdict}")
+        self.assertEqual(
+            bash_result.decision,
+            decision.verdict,
+            f"Drift detected for Bash warn_deny alias: "
+            f"resolve={bash_result.decision}, decide={decision.verdict}",
+        )
         self.assertEqual("allow", decision.verdict)
         self.assertIn("allow_with_warning", bash_result.reason)
 
@@ -523,15 +619,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'allow' (the legacy alias behaves
             identically to 'allow_with_warning', including in the reason text)
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "warn_deny",
-                "permissions": {
-                    "allow": ["Read([glob]/tmp/**)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "warn_deny",
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         file_path = "/etc/passwd"
         extended_syntax = True
 
@@ -541,9 +643,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             "Read", file_path, config, extended_syntax
         )
 
-        self.assertEqual(file_result.decision, decision.verdict,
-                         f"Drift detected for Read warn_deny alias: "
-                         f"resolve={file_result.decision}, decide={decision.verdict}")
+        self.assertEqual(
+            file_result.decision,
+            decision.verdict,
+            f"Drift detected for Read warn_deny alias: "
+            f"resolve={file_result.decision}, decide={decision.verdict}",
+        )
         self.assertEqual("allow", decision.verdict)
         self.assertIn("allow_with_warning", file_result.reason)
 
@@ -555,15 +660,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'allow' (legacy alias still honoured,
             normalized to 'allow_with_warning' in the reason)
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "takeover_mode": {"no_match_fallback": "warn_deny"},
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "takeover_mode": {"no_match_fallback": "warn_deny"},
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -586,16 +697,22 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         When decide() and resolve_bash_permission_detailed() evaluate 'ls -la'
         Then both agree the verdict is 'deny' (top-level wins over the legacy alias)
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "takeover_mode": {"no_match_fallback": "warn_deny"},
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "takeover_mode": {"no_match_fallback": "warn_deny"},
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -618,15 +735,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is still 'deny' (fail-closed is preserved
             when takeover mode is on and the fallback is explicitly 'deny')
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "takeover_mode": {"enabled": True, "no_match_fallback": "deny"},
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "takeover_mode": {"enabled": True, "no_match_fallback": "deny"},
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -649,15 +772,21 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'ask' (TOO-15: the default change to
             'ask' applies in takeover mode too, not just non-takeover mode)
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "takeover_mode": {"enabled": True},
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "takeover_mode": {"enabled": True},
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 
@@ -668,9 +797,12 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict,
-                         f"Drift detected for takeover-enabled default: "
-                         f"resolve={bash_result.decision}, decide={decision.verdict}")
+        self.assertEqual(
+            bash_result.decision,
+            decision.verdict,
+            f"Drift detected for takeover-enabled default: "
+            f"resolve={bash_result.decision}, decide={decision.verdict}",
+        )
         self.assertEqual("ask", decision.verdict)
 
     def test_takeover_enabled_allow_with_warning_no_drift(self):
@@ -682,18 +814,24 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         Then both agree the verdict is 'allow' (takeover mode does not change
             the allow_with_warning semantics)
         """
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "takeover_mode": {
-                    "enabled": True,
-                    "no_match_fallback": "allow_with_warning",
-                },
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                },
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "takeover_mode": {
+                            "enabled": True,
+                            "no_match_fallback": "allow_with_warning",
+                        },
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         command = "ls -la"
         extended_syntax = True
 

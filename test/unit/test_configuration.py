@@ -9,6 +9,7 @@ Run with:
     uv run python -m unittest discover -s test -t .
 """
 
+import io
 import json
 import os
 import tempfile
@@ -30,6 +31,7 @@ from toolguard.config import (
     config_sync_settings_from_sources,
     load_configuration,
 )
+from toolguard.rule_entry import _strip_tool_wrapper
 
 
 class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
@@ -104,6 +106,44 @@ class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
         config = load_configuration()
         allow, _ = config.allow_deny_for("Bash")
         self.assertIn("git *", allow)
+
+    def test_multiline_structured_entry_skipped_with_actionable_diagnostic(self):
+        """
+        Given a toolguard_hook.toml whose allow list has a structured entry
+            written across multiple physical lines -- not valid TOML 1.0 (an
+            inline table must sit on one physical line) -- alongside a valid
+            settings.local.json
+        When load_configuration runs
+        Then the malformed file is skipped (same fail-open behaviour as any
+            other unparseable file -- unchanged, out of this change's scope)
+            but the printed warning names the file, the offending line, and
+            the actual fix ("single ... line"), not tomllib's cryptic raw
+            "Invalid initial character..." message, and the valid layer's
+            rules are still available
+        """
+        _home, project = self.isolate_config_environment()
+        claude_dir = project / ".claude"
+        claude_dir.mkdir()
+        hook_path = claude_dir / "toolguard_hook.toml"
+        hook_path.write_text(
+            '[permissions]\nallow = [\n  {\n    match = "Bash(git status)",\n  },\n]\n'
+        )
+        (claude_dir / "settings.local.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(git *)"]}})
+        )
+
+        with patch("sys.stderr", new_callable=io.StringIO) as captured_stderr:
+            config = load_configuration()
+
+        allow, _ = config.allow_deny_for("Bash")
+        self.assertIn("git *", allow)
+        self.assertNotIn("git status", allow)  # the skipped file's own rule
+
+        stderr_output = captured_stderr.getvalue()
+        self.assertIn(str(hook_path), stderr_output)
+        self.assertIn("single", stderr_output)
+        self.assertIn("line", stderr_output)
+        self.assertNotIn("Invalid initial character", stderr_output)
 
     def test_claude_settings_path_single_file(self):
         """
@@ -305,6 +345,223 @@ class TestPermissionLayers(unittest.TestCase):
         self.assertEqual(allow, ())
         self.assertEqual(deny, ())
 
+    def test_structured_entry_appears_in_deny_not_silently_dropped(self):
+        """
+        Given a toolguard hook layer with a plain string and a structured-entry table in deny
+        When permission_layers('Bash') is computed
+        Then both the plain and structured patterns appear in .deny -- this pins the fix for
+        the silent-drop bug, which was most dangerous on the deny side
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": [],
+                            "deny": [
+                                "Bash(rm -rf /)",
+                                {"match": "Bash(git push --force*)"},
+                            ],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            per_layer = config.permission_layers("Bash")
+        self.assertEqual(per_layer[0].deny, ("rm -rf /", "git push --force*"))
+
+    def test_mixed_plain_and_structured_allow_entries_populated(self):
+        """
+        Given an allow list mixing a plain string and a structured entry with metadata
+        When permission_layers('Bash') is computed
+        Then allow_entries holds both RuleEntry objects in the same order as allow, and
+        each allow[i] is the wrapper-stripped form of allow_entries[i].pattern (the
+        index invariant later increments rely on)
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": [
+                                "Bash(git *)",
+                                {
+                                    "match": "Bash(ls *)",
+                                    "additionalContext": "read-only listing",
+                                },
+                            ],
+                            "deny": [],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            per_layer = config.permission_layers("Bash")
+        layer = per_layer[0]
+        self.assertEqual(layer.allow, ("git *", "ls *"))
+        self.assertEqual(len(layer.allow), len(layer.allow_entries))
+        for pattern, entry in zip(layer.allow, layer.allow_entries):
+            self.assertEqual(_strip_tool_wrapper(entry.pattern), pattern)
+        self.assertEqual(
+            dict(layer.allow_entries[1].metadata),
+            {"additionalContext": "read-only listing"},
+        )
+
+    def test_structured_entry_in_native_layer_ignored(self):
+        """
+        Given a NATIVE (claude) layer whose allow list contains a structured-entry table
+        When permission_layers('Bash') is computed
+        Then the structured entry is rejected (structured entries are a toolguard
+        extension, never interpreted from native settings) and only the plain string
+        survives, in both .allow and .allow_entries
+        """
+        layers = (
+            ConfigLayer(
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": [
+                                "Bash(git *)",
+                                {"match": "Bash(ls *)"},
+                            ],
+                            "deny": [],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            per_layer = config.permission_layers("Bash")
+        layer = per_layer[0]
+        self.assertEqual(layer.allow, ("git *",))
+        self.assertEqual(len(layer.allow_entries), 1)
+
+    def test_takeover_filters_native_allow_entries_too(self):
+        """
+        Given a native layer allowing a blanket pattern that takeover ignores
+        When permission_layers('Read') is computed under takeover mode
+        Then the blanket pattern is removed from BOTH .allow and .allow_entries,
+        preserving the index invariant between them
+        """
+        layers = (
+            ConfigLayer(
+                Provenance("project", "claude", "json", Path("/p/settings.json")),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": ["Read(*)", "Read(/tmp/**)"],
+                            "deny": [],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        takeover = TakeoverConfig(True, ("Read(*)",), (), "deny")
+        with patch.object(Configuration, "takeover_mode", return_value=takeover):
+            per_layer = config.permission_layers("Read")
+        layer = per_layer[0]
+        self.assertEqual(layer.allow, ("/tmp/**",))
+        self.assertEqual(len(layer.allow_entries), 1)
+        self.assertEqual(layer.allow_entries[0].pattern, "Read(/tmp/**)")
+
+    def test_entries_scoped_to_requested_tool_only(self):
+        """
+        Given an allow list with structured entries for two different tools
+        When permission_layers('Read') is computed
+        Then only the Read-scoped structured entry survives; Bash's is excluded from
+        both .allow and .allow_entries
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": [
+                                {"match": "Read(/tmp/**)"},
+                                {"match": "Bash(git *)"},
+                            ],
+                            "deny": [],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            per_layer = config.permission_layers("Read")
+        layer = per_layer[0]
+        self.assertEqual(layer.allow, ("/tmp/**",))
+        self.assertEqual(len(layer.allow_entries), 1)
+
+    def test_malformed_entries_do_not_raise_and_are_excluded(self):
+        """
+        Given an allow list with a malformed structured entry (missing 'match') and a bare int
+        When permission_layers('Bash') is computed
+        Then no exception is raised and neither malformed element appears in .allow or
+        .allow_entries
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": [
+                                "Bash(git *)",
+                                {"no_match_key": 1},
+                                42,
+                            ],
+                            "deny": [],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            per_layer = config.permission_layers("Bash")
+        layer = per_layer[0]
+        self.assertEqual(layer.allow, ("git *",))
+        self.assertEqual(len(layer.allow_entries), 1)
+
 
 class TestScalarsAndConfigSync(unittest.TestCase):
     """scalar() resolution and config_sync_settings()."""
@@ -432,7 +689,12 @@ class TestToolguardPermissions(unittest.TestCase):
         """
         Given a native layer and a hook layer with allow/deny/ask permissions
         When toolguard_permissions() aggregates them
-        Then the hook patterns are returned with their tool wrappers intact and the native pattern is skipped
+        Then the hook patterns are returned as RuleEntry with tool wrappers intact
+             and the native pattern is skipped
+
+        TOO-19 Phase 0a increment 8: toolguard_permissions()'s return type widened
+        from plain pattern strings to RuleEntry (see the method's docstring for
+        why), so this test compares `.pattern` rather than the tuple directly.
         """
         layers = (
             ConfigLayer(
@@ -456,10 +718,46 @@ class TestToolguardPermissions(unittest.TestCase):
         )
         config = Configuration(layers=layers)
         perms = config.toolguard_permissions()
-        self.assertEqual(perms["allow"], ("Bash(git *)",))
-        self.assertEqual(perms["deny"], ("Bash(rm *)",))
+        self.assertEqual([e.pattern for e in perms["allow"]], ["Bash(git *)"])
+        self.assertEqual([e.pattern for e in perms["deny"]], ["Bash(rm *)"])
         self.assertEqual(perms["ask"], ())
-        self.assertNotIn("Bash(should-skip)", perms["allow"])
+        self.assertNotIn("Bash(should-skip)", [e.pattern for e in perms["allow"]])
+
+    def test_structured_entry_is_not_silently_dropped(self):
+        """
+        Given a hook layer whose allow list holds a structured (dict) entry
+        When toolguard_permissions() aggregates it
+        Then the entry is preserved as a RuleEntry with its metadata intact
+             (regression guard for the W1 defect: the old isinstance(perm, str)
+             filter silently dropped every structured entry here)
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml")
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Bash(git *)",
+                                    "additionalContext": "review carefully",
+                                }
+                            ],
+                            "deny": [],
+                            "ask": [],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        perms = config.toolguard_permissions()
+        self.assertEqual(len(perms["allow"]), 1)
+        entry = perms["allow"][0]
+        self.assertEqual(entry.pattern, "Bash(git *)")
+        self.assertEqual(entry.metadata["additionalContext"], "review carefully")
 
 
 class TestValidationIssues(unittest.TestCase):
@@ -528,6 +826,42 @@ class TestValidationIssues(unittest.TestCase):
         messages = " ".join(i.message for i in config.validation_issues())
         self.assertIn("WebSearch", messages)  # unsupported
         self.assertIn("Read", messages)  # supported but ungoverned
+
+    def test_structured_entry_unsupported_tool_reaches_validation_issues(self):
+        """
+        Given a hook layer allowing a structured {match = ...} entry for an
+        unsupported tool
+        When validation_issues() runs
+        Then the structured entry's tool is flagged, end-to-end, exactly as a
+        plain-string entry would be (TOO-19 Phase 0a, increment 4 bug fix:
+        structured entries used to be silently skipped by
+        validate_permissions, not just at the lower layers)
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "json",
+                    Path("/p/.claude/toolguard_hook.json"),
+                ),
+                MappingProxyType(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {
+                            "allow": [
+                                {"match": "WebSearch()", "additionalContext": "why"}
+                            ]
+                        },
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        issues = config.validation_issues()
+        self.assertTrue(any("WebSearch" in i.message for i in issues))
+        for i in issues:
+            self.assertIsInstance(i, Issue)
 
     def test_native_layers_not_validated(self):
         """
@@ -996,9 +1330,7 @@ class TestHasAnyRules(unittest.TestCase):
         Then it returns True
         """
         layers = (
-            self._hook_layer(
-                "project", {"permissions": {"allow": ["Bash(git *)"]}}
-            ),
+            self._hook_layer("project", {"permissions": {"allow": ["Bash(git *)"]}}),
         )
         config = Configuration(layers=layers)
         self.assertTrue(config.has_any_rules("Bash"))
@@ -1010,9 +1342,7 @@ class TestHasAnyRules(unittest.TestCase):
         Then it returns True
         """
         layers = (
-            self._hook_layer(
-                "project", {"permissions": {"deny": ["Bash(rm *)"]}}
-            ),
+            self._hook_layer("project", {"permissions": {"deny": ["Bash(rm *)"]}}),
         )
         config = Configuration(layers=layers)
         self.assertTrue(config.has_any_rules("Bash"))
@@ -1024,9 +1354,7 @@ class TestHasAnyRules(unittest.TestCase):
         Then it returns True
         """
         layers = (
-            self._hook_layer(
-                "project", {"permissions": {"ask": ["Bash(curl *)"]}}
-            ),
+            self._hook_layer("project", {"permissions": {"ask": ["Bash(curl *)"]}}),
         )
         config = Configuration(layers=layers)
         self.assertTrue(config.has_any_rules("Bash"))
@@ -1039,9 +1367,7 @@ class TestHasAnyRules(unittest.TestCase):
         Then it returns True (hard_deny counts as a configured rule)
         """
         layers = (
-            self._hook_layer(
-                "project", {"hard_deny": {"deny": ["Bash(rm -rf *)"]}}
-            ),
+            self._hook_layer("project", {"hard_deny": {"deny": ["Bash(rm -rf *)"]}}),
         )
         config = Configuration(layers=layers)
         self.assertTrue(config.has_any_rules("Bash"))
@@ -1053,9 +1379,7 @@ class TestHasAnyRules(unittest.TestCase):
         Then it is True for 'Read' and False for 'Bash'
         """
         layers = (
-            self._hook_layer(
-                "project", {"permissions": {"allow": ["Read(/tmp/**)"]}}
-            ),
+            self._hook_layer("project", {"permissions": {"allow": ["Read(/tmp/**)"]}}),
         )
         config = Configuration(layers=layers)
         self.assertTrue(config.has_any_rules("Read"))
@@ -1387,6 +1711,22 @@ class TestExplicitModeAdjacentToml(unittest.TestCase):
 #   - toolguard.config.load_configuration()        (existing, filters rules-dir content)
 #   - toolguard.config.Configuration.validation_issues() (existing, new unexpected_keys check)
 #
+# TOO-19 follow-up (also RED-phase for this increment): a second, pre-existing
+# candidate rules directory, ~/.toolguard/rules, was never scanned -- a real
+# ruleset placed there was silently unenforced. Added on top of the above:
+#
+#   - toolguard.config._rules_dirs()                  (replaces _rules_dir();
+#     returns BOTH candidate directories, XDG first)
+#   - toolguard.config._merged_rules_by_stem()         (new, private;
+#     first-directory-wins per stem across candidate dirs)
+#   - toolguard.config._discover_rules_files_multi()   (new, private; multi-dir
+#     discovery wrapper used by _discover_levels())
+#   - toolguard.config._shadowed_rules_stems()         (new, private; detects a
+#     stem present in more than one candidate directory)
+#   - toolguard.config.ConfigLayer.shadowed_path       (new field, default None)
+#   - toolguard.config.Configuration.validation_issues() (new shadowing-warning
+#     check, alongside the existing "both formats" check)
+#
 # Per this file's test-hygiene convention (see module docstring/CLAUDE.md), the
 # not-yet-existing private names are referenced ONLY inside test method bodies via
 # ``config_module.<name>`` (imported once, at the top of this file, alongside the
@@ -1418,41 +1758,70 @@ def _toml_permissions_block(allow=(), deny=(), ask=()):
 
 
 class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
-    """_rules_dir(), _discover_rules_files(), and end-to-end discovery via
-    load_configuration() into the user level."""
+    """_rules_dirs(), _discover_rules_files(), and end-to-end discovery via
+    load_configuration() into the user level (TOO-30, extended by TOO-19 for
+    the second ~/.toolguard/rules candidate directory)."""
 
-    # -- _rules_dir() (white-box, no I/O) -----------------------------------
+    # -- _rules_dirs() (white-box, no I/O) ------------------------------------
+    #
+    # TOO-19: _rules_dir() (single directory) was replaced by _rules_dirs(),
+    # returning BOTH candidate directories in precedence order (XDG first,
+    # then the legacy ~/.toolguard/rules). Like the old _rules_dir() tests
+    # these compare against a live Path.home() call rather than mocking it --
+    # pure path arithmetic with no filesystem I/O, so no isolation is needed
+    # per test/unit/CLAUDE.md's first checklist question.
 
-    def test_rules_dir_uses_xdg_config_home_when_set(self):
+    def test_rules_dirs_uses_xdg_config_home_when_set(self):
         """
         Given XDG_CONFIG_HOME set to a custom path
-        When _rules_dir() resolves the rules directory
-        Then it returns <XDG_CONFIG_HOME>/toolguard/rules
+        When _rules_dirs() resolves the candidate rules directories
+        Then it returns (<XDG_CONFIG_HOME>/toolguard/rules, ~/.toolguard/rules),
+        XDG first
         """
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/custom/xdg"}, clear=True):
-            result = config_module._rules_dir()
-        self.assertEqual(result, Path("/custom/xdg") / "toolguard" / "rules")
+            result = config_module._rules_dirs()
+        self.assertEqual(
+            result,
+            (
+                Path("/custom/xdg") / "toolguard" / "rules",
+                Path.home() / ".toolguard" / "rules",
+            ),
+        )
 
-    def test_rules_dir_defaults_to_home_config_when_xdg_unset(self):
+    def test_rules_dirs_defaults_to_home_config_when_xdg_unset(self):
         """
         Given XDG_CONFIG_HOME is not set in the environment
-        When _rules_dir() resolves the rules directory
-        Then it defaults to ~/.config/toolguard/rules
+        When _rules_dirs() resolves the candidate rules directories
+        Then the first entry defaults to ~/.config/toolguard/rules and the
+        second entry is ~/.toolguard/rules
         """
         with patch.dict(os.environ, {}, clear=True):
-            result = config_module._rules_dir()
-        self.assertEqual(result, Path.home() / ".config" / "toolguard" / "rules")
+            result = config_module._rules_dirs()
+        self.assertEqual(
+            result,
+            (
+                Path.home() / ".config" / "toolguard" / "rules",
+                Path.home() / ".toolguard" / "rules",
+            ),
+        )
 
-    def test_rules_dir_falls_back_to_default_when_xdg_config_home_is_empty(self):
+    def test_rules_dirs_falls_back_to_default_when_xdg_config_home_is_empty(self):
         """
         Given XDG_CONFIG_HOME is set but to an empty string
-        When _rules_dir() resolves the rules directory
-        Then it falls back to the ~/.config/toolguard/rules default (empty is
-        treated as unset, not as a literal empty-string base)
+        When _rules_dirs() resolves the candidate rules directories
+        Then the first entry falls back to the ~/.config/toolguard/rules
+        default (empty is treated as unset, not as a literal empty-string
+        base); the second entry is still ~/.toolguard/rules
         """
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}, clear=True):
-            result = config_module._rules_dir()
-        self.assertEqual(result, Path.home() / ".config" / "toolguard" / "rules")
+            result = config_module._rules_dirs()
+        self.assertEqual(
+            result,
+            (
+                Path.home() / ".config" / "toolguard" / "rules",
+                Path.home() / ".toolguard" / "rules",
+            ),
+        )
 
     # -- _discover_rules_files() (white-box, flat scan of a real tmp dir) ---
 
@@ -1529,6 +1898,65 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             (rules_dir / "gh.toml").write_text("[permissions]\n")
             result = config_module._discover_rules_files(rules_dir)
         self.assertEqual([path.name for path, _fmt in result], ["gh.toml"])
+
+    # -- _shadowed_rules_stems() (white-box, direct temp dirs, no Path.home()) -
+
+    def test_shadowed_rules_stems_reports_distinct_real_files(self):
+        """
+        Given the same stem 'gh.toml' present in both candidate directories as
+        two genuinely distinct real files (not a symlink of one to the other)
+        When _shadowed_rules_stems() compares them
+        Then the stem is reported, mapped to the second (legacy) directory's path
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg_dir = Path(tmp) / "xdg"
+            xdg_dir.mkdir()
+            legacy_dir = Path(tmp) / "legacy"
+            legacy_dir.mkdir()
+            (xdg_dir / "gh.toml").write_text("[permissions]\nallow = []\n")
+            legacy_file = legacy_dir / "gh.toml"
+            legacy_file.write_text("[permissions]\nallow = []\n")
+            result = config_module._shadowed_rules_stems((xdg_dir, legacy_dir))
+        self.assertEqual(result, {"gh": legacy_file})
+
+    def test_shadowed_rules_stems_excludes_stem_resolving_to_same_real_file(self):
+        """
+        Given the same stem 'gh.toml' present in both candidate directories,
+        where the XDG directory's entry is a SYMLINK pointing at the legacy
+        directory's real file (one rules directory symlinked into the other --
+        the actual TOO-19 stopgap workaround, and a natural migration move any
+        user might make)
+        When _shadowed_rules_stems() compares them via Path.resolve()
+        Then the stem is NOT reported as shadowed, since both entries are the
+        same real file and nothing is actually being ignored
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg_dir = Path(tmp) / "xdg"
+            xdg_dir.mkdir()
+            legacy_dir = Path(tmp) / "legacy"
+            legacy_dir.mkdir()
+            real_file = legacy_dir / "gh.toml"
+            real_file.write_text("[permissions]\nallow = []\n")
+            (xdg_dir / "gh.toml").symlink_to(real_file)
+            result = config_module._shadowed_rules_stems((xdg_dir, legacy_dir))
+        self.assertEqual(result, {})
+
+    def test_shadowed_rules_stems_stem_only_in_legacy_dir_not_reported(self):
+        """
+        Given a stem present ONLY in the legacy directory (not in the XDG
+        directory at all)
+        When _shadowed_rules_stems() compares the two directories
+        Then the stem is not reported as shadowed (it is simply promoted
+        normally -- no collision, nothing ignored)
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg_dir = Path(tmp) / "xdg"
+            xdg_dir.mkdir()
+            legacy_dir = Path(tmp) / "legacy"
+            legacy_dir.mkdir()
+            (legacy_dir / "gh.toml").write_text("[permissions]\nallow = []\n")
+            result = config_module._shadowed_rules_stems((xdg_dir, legacy_dir))
+        self.assertEqual(result, {})
 
     # -- end-to-end via load_configuration() --------------------------------
 
@@ -1612,7 +2040,9 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             self.isolate_config_environment(xdg_config_home=xdg)
             config = load_configuration()
         rules_layers = [
-            layer for layer in config.layers if layer.provenance.path.parent == rules_dir
+            layer
+            for layer in config.layers
+            if layer.provenance.path.parent == rules_dir
         ]
         self.assertEqual(
             [layer.provenance.path.name for layer in rules_layers],
@@ -1668,19 +2098,276 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             xdg = Path(tmp) / "xdg"
             rules_dir = xdg / "toolguard" / "rules"
             rules_dir.mkdir(parents=True)
-            (rules_dir / "gh.toml").write_text(_toml_permissions_block(allow=["Bash(gh *)"]))
+            (rules_dir / "gh.toml").write_text(
+                _toml_permissions_block(allow=["Bash(gh *)"])
+            )
             (rules_dir / "gh.json").write_text(
                 json.dumps({"permissions": {"allow": ["Bash(gh-json *)"]}})
             )
             self.isolate_config_environment(xdg_config_home=xdg)
             config = load_configuration()
         rules_layers = [
-            layer for layer in config.layers if layer.provenance.path.parent == rules_dir
+            layer
+            for layer in config.layers
+            if layer.provenance.path.parent == rules_dir
         ]
         self.assertEqual(len(rules_layers), 1)
         self.assertEqual(rules_layers[0].provenance.file_format, "toml")
         messages = " ".join(issue.message for issue in config.validation_issues())
         self.assertIn("Both gh.toml and gh.json", messages)
+
+    # -- TOO-19: second candidate rules directory (~/.toolguard/rules) ------
+
+    def test_legacy_toolguard_dir_file_discovered_end_to_end(self):
+        """
+        Given a rules file that exists ONLY under the legacy ~/.toolguard/rules
+        directory (not under the XDG directory) -- the originally reported
+        TOO-19 bug, where such a file was silently never enforced
+        When load_configuration() runs
+        Then it becomes a 'toolguard_hook_rules' layer at the 'user' level and
+        its permissions resolve normally
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            fake_home, _project = self.isolate_config_environment(xdg_config_home=xdg)
+            legacy_rules_dir = fake_home / ".toolguard" / "rules"
+            legacy_rules_dir.mkdir(parents=True)
+            (legacy_rules_dir / "gh.toml").write_text(
+                _toml_permissions_block(allow=["Bash(gh *)"])
+            )
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(len(rules_layers), 1)
+        self.assertEqual(rules_layers[0].provenance.level, "user")
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            allow, _deny = config.allow_deny_for("Bash")
+        self.assertIn("gh *", allow)
+
+    def test_different_stems_in_both_dirs_both_load(self):
+        """
+        Given distinct stems 'alpha' (XDG dir) and 'beta' (legacy
+        ~/.toolguard/rules dir)
+        When load_configuration() runs
+        Then both become 'toolguard_hook_rules' layers and both patterns resolve
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            xdg_rules_dir = xdg / "toolguard" / "rules"
+            xdg_rules_dir.mkdir(parents=True)
+            (xdg_rules_dir / "alpha.toml").write_text(
+                _toml_permissions_block(allow=["Bash(alpha *)"])
+            )
+            fake_home, _project = self.isolate_config_environment(xdg_config_home=xdg)
+            legacy_rules_dir = fake_home / ".toolguard" / "rules"
+            legacy_rules_dir.mkdir(parents=True)
+            (legacy_rules_dir / "beta.toml").write_text(
+                _toml_permissions_block(allow=["Bash(beta *)"])
+            )
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(
+            sorted(layer.provenance.path.name for layer in rules_layers),
+            ["alpha.toml", "beta.toml"],
+        )
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            allow, _deny = config.allow_deny_for("Bash")
+        self.assertIn("alpha *", allow)
+        self.assertIn("beta *", allow)
+
+    def test_same_stem_in_both_dirs_xdg_wins_and_shadow_warning_emitted(self):
+        """
+        Given a 'gh.toml' file present in BOTH the XDG rules directory and the
+        legacy ~/.toolguard/rules directory, as two GENUINELY DISTINCT real
+        files (not a symlink of one to the other) with different allow
+        patterns
+        When load_configuration() runs
+        Then only the XDG file becomes a layer (its pattern resolves; the
+        legacy file's pattern does not) AND validation_issues() reports a
+        warning naming both the winning XDG path and the shadowed legacy path
+        (regression guard: the resolve()-based same-real-file exclusion added
+        to fix the symlink false-positive must not over-suppress a genuine
+        shadowing case)
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            xdg_rules_dir = xdg / "toolguard" / "rules"
+            xdg_rules_dir.mkdir(parents=True)
+            xdg_gh = xdg_rules_dir / "gh.toml"
+            xdg_gh.write_text(_toml_permissions_block(allow=["Bash(gh-xdg *)"]))
+            fake_home, _project = self.isolate_config_environment(xdg_config_home=xdg)
+            legacy_rules_dir = fake_home / ".toolguard" / "rules"
+            legacy_rules_dir.mkdir(parents=True)
+            legacy_gh = legacy_rules_dir / "gh.toml"
+            legacy_gh.write_text(_toml_permissions_block(allow=["Bash(gh-legacy *)"]))
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(len(rules_layers), 1)
+        self.assertEqual(rules_layers[0].provenance.path, xdg_gh)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            allow, _deny = config.allow_deny_for("Bash")
+        self.assertIn("gh-xdg *", allow)
+        self.assertNotIn("gh-legacy *", allow)
+        messages = " ".join(issue.message for issue in config.validation_issues())
+        self.assertIn(str(xdg_gh), messages)
+        self.assertIn(str(legacy_gh), messages)
+
+    def test_symlinked_same_file_across_dirs_is_not_reported_as_shadowed(self):
+        """
+        Given a 'gh.toml' rules file that physically exists ONLY under the
+        legacy ~/.toolguard/rules directory, with the XDG rules directory's
+        entry for the same stem being a SYMLINK to that same real file (the
+        actual stopgap workaround that motivated TOO-19: one rules directory
+        symlinked into the other is a natural migration/compatibility move,
+        not an accident)
+        When load_configuration() runs
+        Then exactly one 'toolguard_hook_rules' layer is produced for that
+        stem -- the file is discovered and enforced exactly once, not twice
+        -- AND validation_issues() reports NO shadowing warning, since both
+        directory entries resolve to the same real file and nothing is
+        actually being ignored
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            xdg_rules_dir = xdg / "toolguard" / "rules"
+            xdg_rules_dir.mkdir(parents=True)
+            fake_home, _project = self.isolate_config_environment(xdg_config_home=xdg)
+            legacy_rules_dir = fake_home / ".toolguard" / "rules"
+            legacy_rules_dir.mkdir(parents=True)
+            real_file = legacy_rules_dir / "gh.toml"
+            real_file.write_text(_toml_permissions_block(allow=["Bash(gh *)"]))
+            symlinked_path = xdg_rules_dir / "gh.toml"
+            symlinked_path.symlink_to(real_file)
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(len(rules_layers), 1)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            allow, _deny = config.allow_deny_for("Bash")
+        self.assertEqual(allow.count("gh *"), 1)
+        messages = " ".join(issue.message for issue in config.validation_issues())
+        self.assertNotIn("shadows", messages)
+
+    def test_cross_dir_format_mismatch_is_shadowing_not_duplicate_format(self):
+        """
+        Given 'gh.toml' in the XDG rules directory and 'gh.json' (a different
+        format for the same stem) in the legacy ~/.toolguard/rules directory
+        When load_configuration() runs
+        Then the winning XDG layer's duplicate_format is False (no TOML+JSON
+        pair exists WITHIN the winning directory) and validation_issues()
+        reports the cross-directory shadowing warning naming both files
+        instead of the "both formats" warning
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            xdg_rules_dir = xdg / "toolguard" / "rules"
+            xdg_rules_dir.mkdir(parents=True)
+            xdg_gh = xdg_rules_dir / "gh.toml"
+            xdg_gh.write_text(_toml_permissions_block(allow=["Bash(gh-xdg *)"]))
+            fake_home, _project = self.isolate_config_environment(xdg_config_home=xdg)
+            legacy_rules_dir = fake_home / ".toolguard" / "rules"
+            legacy_rules_dir.mkdir(parents=True)
+            legacy_gh = legacy_rules_dir / "gh.json"
+            legacy_gh.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(gh-legacy *)"]}})
+            )
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(len(rules_layers), 1)
+        self.assertFalse(rules_layers[0].duplicate_format)
+        messages = [issue.message for issue in config.validation_issues()]
+        self.assertFalse(any("Both gh.toml and gh.json" in m for m in messages))
+        self.assertTrue(any(str(xdg_gh) in m and str(legacy_gh) in m for m in messages))
+
+    def test_missing_legacy_toolguard_dir_is_a_no_op(self):
+        """
+        Given the XDG rules directory has a file but ~/.toolguard/rules does
+        not exist on disk at all
+        When load_configuration() runs
+        Then discovery proceeds normally with only the XDG file's layer, and
+        no shadowing warning is produced
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            xdg_rules_dir = xdg / "toolguard" / "rules"
+            xdg_rules_dir.mkdir(parents=True)
+            (xdg_rules_dir / "alpha.toml").write_text(
+                _toml_permissions_block(allow=["Bash(alpha *)"])
+            )
+            self.isolate_config_environment(xdg_config_home=xdg)
+            # NOTE: ~/.toolguard/rules is deliberately left absent (not created).
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(len(rules_layers), 1)
+        self.assertEqual(rules_layers[0].provenance.path.name, "alpha.toml")
+        messages = " ".join(issue.message for issue in config.validation_issues())
+        self.assertNotIn("shadows", messages)
+
+    def test_empty_legacy_toolguard_dir_is_a_no_op(self):
+        """
+        Given ~/.toolguard/rules exists but is empty, alongside a populated
+        XDG rules directory
+        When load_configuration() runs
+        Then only the XDG file's layer is produced; the empty legacy
+        directory contributes nothing and produces no shadowing warning
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "xdg"
+            xdg_rules_dir = xdg / "toolguard" / "rules"
+            xdg_rules_dir.mkdir(parents=True)
+            (xdg_rules_dir / "alpha.toml").write_text(
+                _toml_permissions_block(allow=["Bash(alpha *)"])
+            )
+            fake_home, _project = self.isolate_config_environment(xdg_config_home=xdg)
+            (fake_home / ".toolguard" / "rules").mkdir(parents=True)
+            config = load_configuration()
+        rules_layers = [
+            layer
+            for layer in config.layers
+            if layer.provenance.source_type == "toolguard_hook_rules"
+        ]
+        self.assertEqual(len(rules_layers), 1)
+        self.assertEqual(rules_layers[0].provenance.path.name, "alpha.toml")
+        messages = " ".join(issue.message for issue in config.validation_issues())
+        self.assertNotIn("shadows", messages)
 
 
 class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
@@ -1760,9 +2447,15 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         layers = (
             ConfigLayer(
                 Provenance(
-                    "project", "toolguard_hook", "toml", Path("/p/.claude/toolguard_hook.toml"), 0
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                    0,
                 ),
-                MappingProxyType({"permissions": {"allow": [], "deny": ["Bash(gh *)"]}}),
+                MappingProxyType(
+                    {"permissions": {"allow": [], "deny": ["Bash(gh *)"]}}
+                ),
             ),
             self._rules_layer(
                 {"permissions": {"allow": ["Bash(gh *)"], "deny": []}}, specificity=1
@@ -1886,6 +2579,9 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         Given a rules-dir layer with a Bash allow pattern
         When toolguard_permissions() aggregates raw permissions
         Then the rules-dir pattern (tool wrapper intact) is included
+
+        TOO-19 Phase 0a increment 8: compares `.pattern` since
+        toolguard_permissions() now returns RuleEntry, not plain strings.
         """
         layers = (
             self._rules_layer(
@@ -1895,7 +2591,7 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         )
         config = Configuration(layers=layers)
         perms = config.toolguard_permissions()
-        self.assertIn("Bash(gh *)", perms["allow"])
+        self.assertIn("Bash(gh *)", [e.pattern for e in perms["allow"]])
 
     def test_extended_regex_pattern_passes_through_from_rules_dir_layer(self):
         """
@@ -1920,7 +2616,9 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         self.assertIn("[regex]^git .*", allow)
 
 
-class TestRulesDirectoryValidationAndProvenance(ConfigIsolationMixin, unittest.TestCase):
+class TestRulesDirectoryValidationAndProvenance(
+    ConfigIsolationMixin, unittest.TestCase
+):
     """ConfigLayer.unexpected_keys, the new validation_issues() check,
     _level_for_path()'s rules-dir case, and provenance formatting."""
 
@@ -1961,6 +2659,23 @@ class TestRulesDirectoryValidationAndProvenance(ConfigIsolationMixin, unittest.T
         )
         self.assertEqual(layer.unexpected_keys, ("governed_tools",))
 
+    def test_config_layer_shadowed_path_defaults_to_none(self):
+        """
+        Given a ConfigLayer constructed without a shadowed_path argument
+        When its shadowed_path attribute is read
+        Then it defaults to None (backward compatible with existing
+        direct-construction call sites; TOO-19)
+        """
+        prov = Provenance(
+            "user",
+            "toolguard_hook_rules",
+            "toml",
+            Path("/u/.config/toolguard/rules/gh.toml"),
+            1,
+        )
+        layer = ConfigLayer(prov, MappingProxyType({"permissions": {"allow": []}}))
+        self.assertIsNone(layer.shadowed_path)
+
     def test_level_for_path_returns_user_for_rules_dir_path(self):
         """
         Given a file path under the (isolated, default-location) rules directory
@@ -1985,6 +2700,45 @@ class TestRulesDirectoryValidationAndProvenance(ConfigIsolationMixin, unittest.T
             Path("/some/project/.claude/toolguard_hook.toml")
         )
         self.assertEqual(level, "project")
+
+    def test_level_for_path_returns_user_for_legacy_toolguard_dir_path(self):
+        """
+        Given a file path under the (isolated) legacy ~/.toolguard/rules
+        directory (real path, not symlinked)
+        When _level_for_path() determines its conceptual level
+        Then it returns 'user' (TOO-19: the second candidate rules directory
+        is now a recognised user-level anchor)
+        """
+        fake_home, _project = self.isolate_config_environment()
+        legacy_rules_dir = fake_home / ".toolguard" / "rules"
+        legacy_rules_dir.mkdir(parents=True)
+        gh_path = legacy_rules_dir / "gh.toml"
+        level = config_module._level_for_path(gh_path)
+        self.assertEqual(level, "user")
+
+    def test_level_for_path_returns_user_for_symlinked_legacy_toolguard_dir_path(self):
+        """
+        Given a rules file that physically lives under ~/.toolguard/rules (the
+        legacy directory), symlinked INTO the XDG rules directory -- the
+        originally reported TOO-19 mislabelling scenario (this exact shape was
+        in place as a real stopgap workaround): Path.resolve() on the
+        discovered (XDG-side) symlink path follows it to the real path under
+        ~/.toolguard/rules, which pre-fix matched neither anchor
+        When _level_for_path() determines its conceptual level
+        Then it still returns 'user', not 'project', because the resolved
+        real path now matches the legacy-directory anchor
+        """
+        fake_home, _project = self.isolate_config_environment()
+        legacy_rules_dir = fake_home / ".toolguard" / "rules"
+        legacy_rules_dir.mkdir(parents=True)
+        real_file = legacy_rules_dir / "gh.rules.toml"
+        real_file.write_text("[permissions]\n")
+        xdg_rules_dir = fake_home / ".config" / "toolguard" / "rules"
+        xdg_rules_dir.mkdir(parents=True)
+        symlinked_path = xdg_rules_dir / "gh.rules.toml"
+        symlinked_path.symlink_to(real_file)
+        level = config_module._level_for_path(symlinked_path)
+        self.assertEqual(level, "user")
 
     def test_unexpected_key_reported_as_error_and_permissions_still_resolve_end_to_end(
         self,
@@ -2035,7 +2789,8 @@ class TestRulesDirectoryValidationAndProvenance(ConfigIsolationMixin, unittest.T
         rules_path = Path("/home/u/.config/toolguard/rules/gh.toml")
         prov = Provenance("user", "toolguard_hook_rules", "toml", rules_path, 1)
         layer = ConfigLayer(
-            prov, MappingProxyType({"permissions": {"allow": ["Bash(gh *)"], "deny": []}})
+            prov,
+            MappingProxyType({"permissions": {"allow": ["Bash(gh *)"], "deny": []}}),
         )
         config = Configuration(layers=(layer,))
 
@@ -2083,6 +2838,325 @@ class TestRulesDirectoryExplicitModeBypass(ConfigIsolationMixin, unittest.TestCa
         for layer in config.layers:
             self.assertNotEqual(layer.provenance.path.parent, rules_dir)
             self.assertNotEqual(layer.provenance.source_type, "toolguard_hook_rules")
+
+
+class TestParseFailureAskFloor(unittest.TestCase):
+    """
+    TOO-19 fail-open fix: Configuration.resolve_permission_detailed() clamps
+    every decision to 'ask' when Configuration.parse_failures is non-empty (a
+    governed config file failed to parse), mirroring the ASK floor already
+    implemented for foreign inline code in toolguard/compound.py:65-71 -- an
+    explicit 'deny' (including hard_deny, which never reaches this method --
+    see resolve.py, checked before resolve_permission_detailed is called) is
+    preserved unchanged; 'allow' and 'ask' are clamped to 'ask' with a reason
+    naming the broken file(s). Closes the hole where a single TOML syntax
+    error silently dropped every rule (including deny/hard_deny) in that
+    file, with only an easy-to-miss stderr warning as evidence.
+
+    These tests build Configuration directly from hand-constructed
+    ConfigLayer/Provenance objects with zero file I/O, so no ConfigIsolationMixin
+    is needed (per test/unit/CLAUDE.md's checklist).
+    """
+
+    @staticmethod
+    def _config(*, allow=(), deny=(), parse_failures=()):
+        """Build a single-layer project-level Bash Configuration.
+
+        allow/deny are given as bare patterns; wrapped in Bash(...) here
+        since permission_layers() strips that wrapper during extraction.
+        """
+        prov = Provenance(
+            "project", "toolguard_hook", "toml", Path("/p/.claude/toolguard_hook.toml")
+        )
+        layer = ConfigLayer(
+            prov,
+            MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": [f"Bash({p})" for p in allow],
+                        "deny": [f"Bash({p})" for p in deny],
+                    }
+                }
+            ),
+        )
+        return Configuration(layers=(layer,), parse_failures=parse_failures)
+
+    @staticmethod
+    def _decide_allow_git(allow, deny, ask):
+        """A decide_detailed closure that allows 'git *' when configured."""
+        if "git *" in allow:
+            return ("allow", "Command matches allow pattern: git *", "git *")
+        return None
+
+    @staticmethod
+    def _decide_deny_rm(allow, deny, ask):
+        """A decide_detailed closure that denies 'rm -rf /' when configured."""
+        if "rm -rf /" in deny:
+            return ("deny", "Command matches deny pattern: rm -rf /", "rm -rf /")
+        return None
+
+    def test_allow_clamped_to_ask_when_config_broken(self):
+        """
+        Given a config whose Bash allow pattern matches the command AND a
+            recorded parse_failures entry for a broken file
+        When resolve_permission_detailed('Bash', ...) resolves the command
+        Then the decision is 'ask' (not 'allow') and the reason names the
+            broken file and its parse error, not the original allow reason
+        """
+        broken = Path("/p/.claude/toolguard_hook.local.toml")
+        config = self._config(
+            allow=["git *"], parse_failures=((broken, "unexpected character"),)
+        )
+
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            resolved = config.resolve_permission_detailed(
+                "Bash", self._decide_allow_git
+            )
+
+        self.assertEqual(resolved.decision, "ask")
+        self.assertIn(str(broken), resolved.reason)
+        self.assertIn("unexpected character", resolved.reason)
+        self.assertNotIn("Command matches allow pattern", resolved.reason)
+
+    def test_ask_reason_rewritten_to_name_broken_file(self):
+        """
+        Given a config with NO matching rule (falls through to the default
+            'ask' no-match-fallback) AND a recorded parse failure
+        When resolve_permission_detailed('Bash', ...) resolves the command
+        Then the decision is 'ask' and the reason is the ASK-floor message
+            naming the broken file -- not the generic no-match reason --
+            mirroring compound.py's floor, which always rewrites the reason
+            for a non-deny decision rather than only rewriting on 'allow'
+        """
+        broken = Path("/p/.claude/toolguard_hook.toml")
+        config = self._config(parse_failures=((broken, "bad TOML"),))
+
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            resolved = config.resolve_permission_detailed(
+                "Bash", self._decide_allow_git
+            )
+
+        self.assertEqual(resolved.decision, "ask")
+        self.assertIn(str(broken), resolved.reason)
+        self.assertNotIn("Command does not match any allow patterns", resolved.reason)
+
+    def test_explicit_deny_not_weakened_when_config_broken(self):
+        """
+        Given a config whose Bash deny pattern matches the command AND a
+            recorded parse failure for a DIFFERENT file
+        When resolve_permission_detailed('Bash', ...) resolves the command
+        Then the decision is still 'deny' -- a deny is never weakened by the
+            ASK floor -- and the reason is the ORIGINAL deny reason, not the
+            broken-file ASK-floor message
+        """
+        broken = Path("/p/.claude/toolguard_hook.local.toml")
+        config = self._config(deny=["rm -rf /"], parse_failures=((broken, "boom"),))
+
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            resolved = config.resolve_permission_detailed("Bash", self._decide_deny_rm)
+
+        self.assertEqual(resolved.decision, "deny")
+        self.assertIn("Command matches deny pattern: rm -rf /", resolved.reason)
+        self.assertNotIn(str(broken), resolved.reason)
+
+    def test_valid_config_unaffected_no_parse_failures(self):
+        """
+        Given a config with NO recorded parse failures (the default/normal
+            case -- Configuration.parse_failures defaults to ())
+        When resolve_permission_detailed('Bash', ...) resolves an allow match
+        Then the decision is 'allow', unchanged -- this is the most important
+            regression guard: the overwhelming majority of the 1691-test
+            baseline builds Configuration this way and must see zero change
+        """
+        config = self._config(allow=["git *"])
+
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            resolved = config.resolve_permission_detailed(
+                "Bash", self._decide_allow_git
+            )
+
+        self.assertEqual(resolved.decision, "allow")
+        self.assertIn("Command matches allow pattern: git *", resolved.reason)
+
+
+class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
+    """
+    load_configuration() records genuinely broken (exists-but-unparseable)
+    config files into Configuration.parse_failures, but never for files that
+    are merely absent or a valid-but-differently-shaped sibling (TOO-19 scope
+    note: "broken" means the file existed and failed to parse/was not a
+    table -- not "absent").
+    """
+
+    def test_broken_rules_dir_file_recorded_alongside_valid_layer(self):
+        """
+        Given a broken (unparseable) TOML file in the candidate rules
+            directory alongside a separately valid toolguard_hook.toml
+        When load_configuration() runs
+        Then Configuration.parse_failures has exactly one entry naming the
+            broken file, while the valid file's rules are still available
+        """
+        home, project = self.isolate_config_environment(
+            xdg_config_home="/nonexistent-xdg"
+        )
+        claude_dir = project / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "toolguard_hook.toml").write_text(
+            '[permissions]\nallow = ["Bash(git *)"]\n'
+        )
+        rules_dir = home / ".toolguard" / "rules"
+        rules_dir.mkdir(parents=True)
+        broken_path = rules_dir / "gh.toml"
+        broken_path.write_text("[permissions]\nallow = [\n")  # unterminated array
+
+        with patch("sys.stderr", new_callable=io.StringIO):
+            config = load_configuration()
+
+        self.assertEqual(len(config.parse_failures), 1)
+        recorded_path, message = config.parse_failures[0]
+        self.assertEqual(recorded_path, broken_path)
+        self.assertTrue(message)
+
+        allow, _deny = config.allow_deny_for("Bash")
+        self.assertIn("git *", allow)
+
+    def test_valid_config_has_no_parse_failures(self):
+        """
+        Given a completely valid, well-formed configuration
+        When load_configuration() runs
+        Then Configuration.parse_failures is empty -- the primary regression
+            guard for the "no existing behaviour changes" requirement
+        """
+        _home, project = self.isolate_config_environment()
+        claude_dir = project / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "toolguard_hook.toml").write_text(
+            '[permissions]\nallow = ["Bash(git *)"]\n'
+        )
+
+        config = load_configuration()
+
+        self.assertEqual(config.parse_failures, ())
+
+    def test_top_level_not_a_table_is_a_parse_failure(self):
+        """
+        Given a syntactically valid JSON file whose top level is a bare array
+            (not an object/table) -- _parse_source's other None-return case
+        When load_configuration() runs
+        Then it is recorded in Configuration.parse_failures too: the same
+            silent-information-loss reasoning applies (every rule in the file
+            is dropped with only a stderr warning), so it counts as "broken"
+        """
+        _home, project = self.isolate_config_environment()
+        claude_dir = project / ".claude"
+        claude_dir.mkdir()
+        bad_path = claude_dir / "settings.local.json"
+        bad_path.write_text(json.dumps([1, 2, 3]))
+
+        with patch("sys.stderr", new_callable=io.StringIO):
+            config = load_configuration()
+
+        self.assertEqual(len(config.parse_failures), 1)
+        recorded_path, message = config.parse_failures[0]
+        self.assertEqual(recorded_path, bad_path)
+        self.assertIn("table", message)
+
+    def test_claude_settings_path_missing_file_is_not_a_parse_failure(self):
+        """
+        Given CLAUDE_SETTINGS_PATH points at a file that does not exist on
+            disk at all
+        When load_configuration() runs
+        Then Configuration.parse_failures is empty -- absence is not
+            "broken" (scope note: only exists-but-unparseable files count),
+            even though the pre-existing stderr warning for a missing file
+            is still printed unchanged
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist.json"
+            self.isolate_config_environment(
+                extra_env={"CLAUDE_SETTINGS_PATH": str(missing)}
+            )
+            with patch("sys.stderr", new_callable=io.StringIO) as captured:
+                config = load_configuration()
+
+        self.assertEqual(config.parse_failures, ())
+        self.assertIn(str(missing), captured.getvalue())
+
+    def test_claude_settings_path_broken_file_is_a_parse_failure(self):
+        """
+        Given CLAUDE_SETTINGS_PATH points at a file that exists but fails to
+            parse (malformed JSON)
+        When load_configuration() runs
+        Then Configuration.parse_failures has one entry for it -- the
+            explicit single-file branch feeds load_configuration's returned
+            Configuration just like the hierarchy-discovery branch, so it
+            must propagate too
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / "settings.json"
+            broken.write_text("{not valid json")
+            self.isolate_config_environment(
+                extra_env={"CLAUDE_SETTINGS_PATH": str(broken)}
+            )
+            with patch("sys.stderr", new_callable=io.StringIO):
+                config = load_configuration()
+
+        self.assertEqual(len(config.parse_failures), 1)
+        recorded_path, _message = config.parse_failures[0]
+        self.assertEqual(recorded_path, broken)
+
+
+class TestValidationIssuesParseFailures(unittest.TestCase):
+    """validation_issues() reports each recorded parse failure as an 'error'."""
+
+    def test_reports_error_issue_per_broken_file(self):
+        """
+        Given a Configuration with two recorded parse_failures entries
+        When validation_issues() is called
+        Then it returns one 'error'-level Issue per broken file, each
+            naming that file's path
+        """
+        broken_a = Path("/p/.claude/toolguard_hook.toml")
+        broken_b = Path("/p/.claude/toolguard_hook.local.toml")
+        config = Configuration(
+            layers=(),
+            parse_failures=((broken_a, "bad TOML"), (broken_b, "also bad")),
+        )
+
+        issues = config.validation_issues()
+        error_issues = [i for i in issues if i.level == "error"]
+        messages = [i.message for i in error_issues]
+
+        self.assertTrue(any(str(broken_a) in m for m in messages))
+        self.assertTrue(any(str(broken_b) in m for m in messages))
+
+    def test_no_issues_when_no_parse_failures(self):
+        """
+        Given a Configuration with an empty parse_failures (the default)
+        When validation_issues() is called
+        Then no parse-failure-related error issue is produced
+        """
+        config = Configuration(layers=())
+
+        issues = config.validation_issues()
+
+        self.assertEqual(issues, ())
 
 
 if __name__ == "__main__":

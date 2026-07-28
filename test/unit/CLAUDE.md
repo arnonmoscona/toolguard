@@ -5,17 +5,20 @@ Supplements the project root `CLAUDE.md`. Applies to everything under `test/unit
 ## Why this file exists
 
 This repo dogfoods toolguard on itself: a real `~/.claude/toolguard_hook.toml` (and,
-since TOO-30, potentially a real `~/.config/toolguard/rules/`) genuinely exists on any
-machine that develops toolguard. `toolguard/config.py`'s discovery machinery reads real
-filesystem state from exactly three controllable anchors -- `Path.home()`,
+since TOO-30, potentially a real `~/.config/toolguard/rules/`, plus -- since TOO-19 --
+`~/.toolguard/rules/`, a second, pre-existing candidate rules directory) genuinely exists
+on any machine that develops toolguard. `toolguard/config.py`'s discovery machinery reads
+real filesystem state from exactly three controllable anchors -- `Path.home()`,
 `toolguard.config.find_project_root()`, and the `XDG_CONFIG_HOME`/`CLAUDE_SETTINGS_PATH`
-environment variables. A test that doesn't redirect all three it touches can silently
-depend on -- or be broken by -- whatever real config happens to exist on the machine
-running the suite. This already caused 2 real, confirmed test failures (`test_takeover_mode.py`,
-found 2026-07-23) before the shared isolation facility below existed. See
-basic-memory (project='toolguard'): "TOO-30 pre-push follow-up: suite-wide test
-isolation cleanup" for the full investigation and "TOO-30 Test Isolation Cleanup -
-Implementation Report" for the retrofit.
+environment variables. Both candidate rules directories are derived from `Path.home()`
+(`~/.config/toolguard/rules` by default, and `~/.toolguard/rules`), so `Path.home()`
+patching alone isolates both -- no new anchor was needed for TOO-19. A test that doesn't
+redirect all three it touches can silently depend on -- or be broken by -- whatever real
+config happens to exist on the machine running the suite. This already caused 2 real,
+confirmed test failures (`test_takeover_mode.py`, found 2026-07-23) before the shared
+isolation facility below existed. See basic-memory (project='toolguard'): "TOO-30
+pre-push follow-up: suite-wide test isolation cleanup" for the full investigation and
+"TOO-30 Test Isolation Cleanup - Implementation Report" for the retrofit.
 
 ## Writing or editing a test in this directory: work through this checklist
 

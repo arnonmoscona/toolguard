@@ -48,10 +48,20 @@ from datetime import datetime
 from pathlib import Path
 from re import MULTILINE, compile as re_compile
 from tempfile import TemporaryDirectory
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from toolguard.config import load_config_file
-from toolguard.rule_sort import find_section_boundaries
+from toolguard.config_write_guard import (
+    ConfigWriteVerificationError,
+    patterns_in_config_text,
+    verified_write_config,
+)
+from toolguard.rule_entry import RuleEntry, normalize_entries_preserving, real_patterns
+from toolguard.rule_sort import (
+    RuleEntryOrStr,
+    find_section_boundaries,
+    render_toml_entry,
+)
 from toolguard.scripts.migrate_permissions import create_backup, write_toml_config
 from toolguard.tools.recommended_protections import required_hard_deny_patterns
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
@@ -63,6 +73,29 @@ from toolguard.update_check import (
     local_remote_head,
     remote_head,
 )
+
+
+def _entry_pattern(entry: RuleEntryOrStr) -> str:
+    """
+    Return the wrapped pattern string for a permission/hard_deny entry.
+
+    Mirrors :func:`toolguard.rule_sort._pattern_of` (kept as a separate, tiny
+    local helper rather than importing that private name): this module's
+    seeding commands build ``existing_patterns`` membership sets out of lists
+    that mix normalized :class:`~toolguard.rule_entry.RuleEntry` objects
+    (from :func:`~toolguard.rule_entry.normalize_entries_preserving`) with
+    freshly-appended plain ``str`` candidates in the SAME list, across
+    multiple loop iterations (TOO-19 review fix M3) -- a bare ``.pattern``
+    access on every element crashes as soon as one candidate from an earlier
+    iteration was appended as a plain ``str``.
+
+    Args:
+        entry: A pattern ``str``, or a :class:`RuleEntry`.
+
+    Returns:
+        The wrapped pattern string, e.g. ``"Bash(git:*)"``.
+    """
+    return entry.pattern if isinstance(entry, RuleEntry) else entry
 
 
 class InstallerError(Exception):
@@ -168,9 +201,7 @@ def _claude_dir(scope: str, project_dir: Optional[str]) -> Path:
     """
     if scope == "project":
         if not project_dir:
-            raise InstallerError(
-                "--project-dir is required when --scope is 'project'"
-            )
+            raise InstallerError("--project-dir is required when --scope is 'project'")
         return Path(project_dir) / ".claude"
     if project_dir:
         raise InstallerError("--project-dir is only valid with --scope project")
@@ -204,6 +235,15 @@ def _atomic_write_text(path: Path, content: str) -> None:
     then calling :meth:`Path.replace` guarantees a reader never observes a
     half-written file, and that a failure partway through never corrupts the
     original.
+
+    For files this project's own configuration (``toolguard_hook.toml`` /
+    ``.json``), do NOT call this directly -- use
+    :func:`~toolguard.config_write_guard.verified_write_config` instead, which
+    parses the candidate text (and, when given ``expected_patterns``, checks
+    for silently-dropped rules) before delegating to an equivalent atomic
+    write. This helper remains the right tool for non-config files this
+    module also writes atomically: the install journal and the state-dir
+    README, neither of which is parseable, rule-bearing config.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
@@ -419,7 +459,11 @@ def cmd_write_config(args: argparse.Namespace) -> int:
         backup_path = create_backup(config_path, _backups_dir())
 
     content = _render_config_toml(governed_tools, additional)
-    _atomic_write_text(config_path, content)
+    # No expected_patterns: this always renders a fresh, minimal file with no
+    # [permissions]/[hard_deny] rules at all (even on --force overwrite, per
+    # this subcommand's documented "base config" contract) -- there is no
+    # pre-existing rule set this write is supposed to preserve.
+    verified_write_config(config_path, content, "toml")
 
     reverse = (
         f"restore backup {backup_path} over {config_path}"
@@ -493,6 +537,7 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
     session_start_binary = f"{binary}-session-start"
 
     backup_path: Optional[Path] = None
+    original_text: Optional[str] = None
     if settings_path.exists():
         original_text = settings_path.read_text()
         try:
@@ -532,7 +577,29 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
             {"hooks": [{"type": "command", "command": session_start_binary}]}
         )
 
-    _atomic_write_text(settings_path, json.dumps(data, indent=2) + "\n")
+    # expected_patterns (TOO-19 review fix M2): Claude's settings.json CAN carry
+    # its own native `permissions.allow/deny/ask` alongside the hooks/matchers
+    # this function edits, and this write rewrites the WHOLE file -- a merge
+    # bug here could silently drop the user's native permission rules with no
+    # guard to catch it. patterns_in_config_text already supports
+    # file_format="json" generically (it just reads permissions/hard_deny keys,
+    # ignoring "hooks" and everything else), so there is no reason to skip it.
+    # When the file is brand new or empty (original_text falsy/blank) there
+    # are no prior patterns to preserve, so expected_patterns stays None
+    # rather than an empty set that would otherwise mask a real drop --
+    # and passing blank text to patterns_in_config_text would itself raise
+    # (empty string is not valid JSON).
+    expected_patterns = (
+        patterns_in_config_text(original_text, "json")
+        if original_text is not None and original_text.strip()
+        else None
+    )
+    verified_write_config(
+        settings_path,
+        json.dumps(data, indent=2) + "\n",
+        "json",
+        expected_patterns=expected_patterns,
+    )
 
     reverse = (
         f"restore backup {backup_path} over {settings_path}"
@@ -597,7 +664,7 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
 # real hijacking vector: `export PATH="/malicious:$PATH"` could make a later
 # command silently resolve to a planted binary). Anchored start-to-end so
 # nothing else can be appended to the same export statement.
-_UV_BIN_PATH_PREPEND_ALLOW = r'Bash([regex]^export PATH=.?\$HOME/\.local/bin:\$PATH.?$)'
+_UV_BIN_PATH_PREPEND_ALLOW = r"Bash([regex]^export PATH=.?\$HOME/\.local/bin:\$PATH.?$)"
 
 
 _SEED_SELF_PERMS_HELP = """\
@@ -667,13 +734,39 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
 
     # Read the raw TOML directly: we need the true, unfiltered [permissions]
     # and [hard_deny] sections to detect which rules are already present.
+    #
+    # Every raw element is normalized into a RuleEntry via
+    # normalize_entries_preserving (is_native=False -- a toolguard config
+    # file, never Claude native settings) rather than assigned straight
+    # through (TOO-19 review fix M3): a raw structured (dict) entry fed
+    # straight into write_toml_config -> sort_patterns -> get_tool_priority
+    # crashed with "TypeError: cannot use 'dict' as a dict key (unhashable
+    # type: 'dict')" (confirmed repro), and separately made the
+    # `pattern in permissions[list_type]` membership test below silently miss
+    # a self-permission already present in structured form, re-adding it as a
+    # duplicate bare string on every run. normalize_entries_preserving never
+    # drops an element (even one that fails to normalize is preserved
+    # verbatim), matching migrate_permissions._build_merged_permissions and
+    # rule_apply._read_raw_permissions, which fixed this same defect class.
     original_text = config_path.read_text()
     current = tomllib.loads(original_text)
     current_permissions = current.get("permissions", {})
-    permissions = {
-        "allow": list(current_permissions.get("allow", [])),
-        "deny": list(current_permissions.get("deny", [])),
-        "ask": list(current_permissions.get("ask", [])),
+    permissions: Dict[str, List[RuleEntryOrStr]] = {
+        "allow": list(
+            normalize_entries_preserving(
+                current_permissions.get("allow", []), is_native=False
+            )
+        ),
+        "deny": list(
+            normalize_entries_preserving(
+                current_permissions.get("deny", []), is_native=False
+            )
+        ),
+        "ask": list(
+            normalize_entries_preserving(
+                current_permissions.get("ask", []), is_native=False
+            )
+        ),
     }
 
     candidates: List[Tuple[str, str]] = [
@@ -693,27 +786,56 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
 
     added: List[Tuple[str, str]] = []
     already_present: List[Tuple[str, str]] = []
+    # Membership by `.pattern` via `_entry_pattern`, never by raw element
+    # identity (TOO-19 review fix M3): `permissions[list_type]` mixes
+    # normalized RuleEntry objects (from the normalization above) with plain
+    # `str` candidates appended by this very loop, so `pattern in
+    # permissions[list_type]` (a bare str never equal to a RuleEntry) would
+    # ALWAYS miss an already-present structured self-permission, re-adding it
+    # as a duplicate on every run. One growing set per list_type keeps this
+    # a single pass instead of rebuilding from the whole list every iteration.
+    existing_patterns_by_list = {
+        list_type: {_entry_pattern(entry) for entry in permissions[list_type]}
+        for list_type in ("allow", "deny", "ask")
+    }
     for pattern, list_type in candidates:
-        if pattern in permissions[list_type]:
+        if pattern in existing_patterns_by_list[list_type]:
             already_present.append((pattern, list_type))
         else:
             permissions[list_type].append(pattern)
+            existing_patterns_by_list[list_type].add(pattern)
             added.append((pattern, list_type))
 
     # Self-integrity hard_deny: stop ~/.toolguard from ever being deleted by a
     # Bash rm/find command, regardless of takeover choice -- seeded here,
     # unconditionally, alongside the self/uninstall-readiness permissions
     # above, not gated behind the optional Phase 10.1 secret-protection flow.
+    #
+    # Same normalization as `permissions` above, and for the same reason:
+    # `[hard_deny]` also supports structured entries (see
+    # toolguard.config.Configuration._pool_hard_deny_entries), and
+    # _render_hard_deny_section below renders via render_toml_entry, which
+    # requires a RuleEntry or str, never a raw dict.
     current_hard_deny = current.get("hard_deny", {})
-    hard_deny_patterns = list(current_hard_deny.get("deny", []))
-    hard_deny_allow_patterns = list(current_hard_deny.get("allow", []))
+    hard_deny_patterns: List[RuleEntryOrStr] = list(
+        normalize_entries_preserving(current_hard_deny.get("deny", []), is_native=False)
+    )
+    hard_deny_allow_patterns: List[RuleEntryOrStr] = list(
+        normalize_entries_preserving(
+            current_hard_deny.get("allow", []), is_native=False
+        )
+    )
     hard_deny_added: List[str] = []
     hard_deny_already_present: List[str] = []
+    existing_hard_deny_patterns = {
+        _entry_pattern(entry) for entry in hard_deny_patterns
+    }
     for protection in required_self_integrity_hard_deny_patterns():
-        if protection.pattern in hard_deny_patterns:
+        if protection.pattern in existing_hard_deny_patterns:
             hard_deny_already_present.append(protection.pattern)
         else:
             hard_deny_patterns.append(protection.pattern)
+            existing_hard_deny_patterns.add(protection.pattern)
             hard_deny_added.append(protection.pattern)
 
     print(f"seeded self-permissions: {config_path}")
@@ -729,13 +851,36 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
     if added:
         write_toml_config(config_path, permissions, auto_sort=True)
     if hard_deny_added:
+        pre_write_text = config_path.read_text()
         new_hard_deny_section = _render_hard_deny_section(
             hard_deny_patterns, hard_deny_allow_patterns
         )
         updated_text = _replace_or_append_toml_section(
-            config_path.read_text(), "hard_deny", new_hard_deny_section
+            pre_write_text, "hard_deny", new_hard_deny_section
         )
-        _atomic_write_text(config_path, updated_text)
+        # expected_patterns: everything already in the file right before this
+        # write (permissions patterns, including any just added above, plus
+        # any pre-existing hard_deny patterns) union the full new hard_deny
+        # deny/allow lists (which already include hard_deny_already_present) --
+        # nothing this write is expected to preserve may go missing. Built via
+        # real_patterns() (TOO-19 review fix M3), never a bare `set(...)` of
+        # the entry lists themselves: those now hold RuleEntry objects (after
+        # normalize_entries_preserving above), and a synthesized-pattern entry
+        # (a malformed hard_deny element preserved verbatim) must be excluded
+        # here -- its repr()-based pattern can never appear in the text this
+        # write actually produces, so including it would wrongly look like a
+        # dropped rule and refuse an otherwise-safe write.
+        expected_patterns = (
+            patterns_in_config_text(pre_write_text, "toml")
+            | set(real_patterns(hard_deny_patterns))
+            | set(real_patterns(hard_deny_allow_patterns))
+        )
+        verified_write_config(
+            config_path,
+            updated_text,
+            "toml",
+            expected_patterns=expected_patterns,
+        )
 
     action_parts = [f"{p} -> {t}" for p, t in added]
     action_parts += [f"{p} -> hard_deny" for p in hard_deny_added]
@@ -852,7 +997,14 @@ def cmd_enable_takeover(args: argparse.Namespace) -> int:
 
     new_section = _render_takeover_section(args.no_match_fallback)
     new_text = _replace_or_append_toml_section(original, "takeover_mode", new_section)
-    _atomic_write_text(config_path, new_text)
+    # expected_patterns: this edit only touches [takeover_mode] -- every
+    # permissions/hard_deny pattern already in the file must still be there.
+    verified_write_config(
+        config_path,
+        new_text,
+        "toml",
+        expected_patterns=patterns_in_config_text(original, "toml"),
+    )
 
     index = _append_journal_entry(
         action=(
@@ -1420,21 +1572,40 @@ exactly what was added.
 
 
 def _render_hard_deny_section(
-    deny_patterns: Sequence[str], allow_patterns: Sequence[str]
+    deny_patterns: Sequence[RuleEntryOrStr], allow_patterns: Sequence[RuleEntryOrStr]
 ) -> str:
-    """Render a ``[hard_deny]`` section body with the given deny/allow lists."""
+    """
+    Render a ``[hard_deny]`` section body with the given deny/allow lists.
+
+    Renders each entry via :func:`~toolguard.rule_sort.render_toml_entry`
+    (TOO-19 review fix M3), never by assuming ``str`` and calling
+    ``.replace(...)`` directly: a ``[hard_deny]`` entry may be a structured
+    :class:`~toolguard.rule_entry.RuleEntry` (e.g. carrying
+    ``additionalContext``), and the previous ``pattern.replace(...)`` call
+    raised ``AttributeError: 'dict' object has no attribute 'replace'`` on
+    one read straight from a raw ``tomllib.loads()`` result (confirmed
+    repro). ``render_toml_entry`` also accepts a plain ``str`` unchanged, so
+    every existing plain-pattern caller keeps working.
+
+    Args:
+        deny_patterns: The ``[hard_deny] deny`` entries, plain and/or
+            structured.
+        allow_patterns: The ``[hard_deny] allow`` entries, plain and/or
+            structured.
+
+    Returns:
+        The full ``[hard_deny]`` section text, including its header.
+    """
     lines = ["[hard_deny]"]
     if deny_patterns:
         lines.append("deny = [")
-        for pattern in deny_patterns:
-            escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'    "{escaped}",')
+        for entry in deny_patterns:
+            lines.append(f"    {render_toml_entry(entry)},")
         lines.append("]")
     if allow_patterns:
         lines.append("allow = [")
-        for pattern in allow_patterns:
-            escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'    "{escaped}",')
+        for entry in allow_patterns:
+            lines.append(f"    {render_toml_entry(entry)},")
         lines.append("]")
     return "\n".join(lines) + "\n"
 
@@ -1459,19 +1630,33 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
             f"{config_path} does not exist -- run 'write-config' first."
         )
 
+    # Normalized via normalize_entries_preserving (TOO-19 review fix M3), for
+    # the same reason as cmd_seed_self_perms above: a raw structured entry
+    # read straight from tomllib.loads() would otherwise crash
+    # _render_hard_deny_section's rendering below, and a raw-element
+    # membership test would silently miss an already-present structured
+    # protection, re-adding it as a duplicate bare string on every run.
     original = config_path.read_text()
     current = tomllib.loads(original)
     current_hard_deny = current.get("hard_deny", {})
-    deny_patterns = list(current_hard_deny.get("deny", []))
-    allow_patterns = list(current_hard_deny.get("allow", []))
+    deny_patterns: List[RuleEntryOrStr] = list(
+        normalize_entries_preserving(current_hard_deny.get("deny", []), is_native=False)
+    )
+    allow_patterns: List[RuleEntryOrStr] = list(
+        normalize_entries_preserving(
+            current_hard_deny.get("allow", []), is_native=False
+        )
+    )
 
     added: List[str] = []
     already_present: List[str] = []
+    existing_deny_patterns = {_entry_pattern(entry) for entry in deny_patterns}
     for protection in required_hard_deny_patterns():
-        if protection.pattern in deny_patterns:
+        if protection.pattern in existing_deny_patterns:
             already_present.append(protection.pattern)
         else:
             deny_patterns.append(protection.pattern)
+            existing_deny_patterns.add(protection.pattern)
             added.append(protection.pattern)
 
     print(f"seeded hard-deny protections: {config_path}")
@@ -1484,7 +1669,24 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
     backup_path = create_backup(config_path, _backups_dir())
     new_section = _render_hard_deny_section(deny_patterns, allow_patterns)
     new_text = _replace_or_append_toml_section(original, "hard_deny", new_section)
-    _atomic_write_text(config_path, new_text)
+    # expected_patterns: everything already in the file before this edit
+    # (permissions patterns, untouched here, plus pre-existing hard_deny
+    # patterns) union the full new deny/allow lists (already include
+    # already_present) -- nothing may be silently dropped. Built via
+    # real_patterns() (TOO-19 review fix M3) to exclude any synthesized
+    # pattern from a malformed hard_deny element -- see the matching comment
+    # in cmd_seed_self_perms above.
+    expected_patterns = (
+        patterns_in_config_text(original, "toml")
+        | set(real_patterns(deny_patterns))
+        | set(real_patterns(allow_patterns))
+    )
+    verified_write_config(
+        config_path,
+        new_text,
+        "toml",
+        expected_patterns=expected_patterns,
+    )
 
     index = _append_journal_entry(
         action=(
@@ -1923,13 +2125,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     Returns:
         Process exit code: ``0`` on success, ``2`` on an expected
-        :class:`InstallerError` (refusal or unmet precondition).
+        :class:`InstallerError` (refusal or unmet precondition) or a
+        :class:`~toolguard.config_write_guard.ConfigWriteVerificationError`
+        (a config write was refused to avoid writing a corrupt or
+        pattern-dropping file -- the original file on disk is untouched).
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except InstallerError as exc:
+    except (InstallerError, ConfigWriteVerificationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

@@ -358,11 +358,18 @@ class TestFindDivergentPatterns(unittest.TestCase):
         Then the WebFetch pattern IS reported divergent, proving the filter tracks the
             actual governed set rather than a hardcoded Bash/Read/Write/Edit literal
         """
-        native = {"allow": ["WebFetch(domain:x)", "Skill(recall)"], "deny": [], "ask": []}
+        native = {
+            "allow": ["WebFetch(domain:x)", "Skill(recall)"],
+            "deny": [],
+            "ask": [],
+        }
         toolguard = {"allow": [], "deny": [], "ask": []}
 
         result = find_divergent_patterns(
-            native, toolguard, [], governed_tools={"Bash", "Read", "Write", "Edit", "WebFetch"}
+            native,
+            toolguard,
+            [],
+            governed_tools={"Bash", "Read", "Write", "Edit", "WebFetch"},
         )
 
         self.assertEqual(result["allow"], ["WebFetch(domain:x)"])
@@ -461,6 +468,175 @@ class TestFindDivergentPatterns(unittest.TestCase):
         result = find_divergent_patterns(native, toolguard, [])
 
         self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
+
+
+class TestDivergenceComparisonSemanticsGuard(unittest.TestCase):
+    """
+    Regression guard for TOO-19 Phase 0a increment 7.
+
+    Locks in that the divergence pipeline (get_toolguard_permissions ->
+    find_divergent_patterns) compares RuleEntry objects by ``.pattern`` ALONE
+    (comparison #1 in RuleEntry.identity()'s docstring), never by
+    ``identity()`` (which folds in metadata). An entry carrying metadata on
+    one side and none -- or different metadata -- on the other is the SAME
+    rule, not a divergence. Were this ever switched to identity(), migration
+    would re-add the "missing" native twin forever, since it would never
+    stop looking divergent.
+    """
+
+    def test_structured_toolguard_entry_does_not_raise(self):
+        """
+        Given a toolguard_hook layer with a structured ({match=..., metadata})
+            allow entry
+        When get_toolguard_permissions extracts patterns from the resolved
+            Configuration
+        Then it returns normally without raising, and the plain pattern is
+            what comes back (metadata is not part of this projection)
+        """
+        config = _config_from_layers(
+            (
+                "toolguard_hook",
+                {
+                    "permissions": {
+                        "allow": [
+                            {
+                                "match": "Bash(git status:*)",
+                                "additionalContext": "read-only",
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+
+        result = get_toolguard_permissions(config)  # must not raise
+
+        self.assertEqual(result["allow"], ["Bash(git status:*)"])
+
+    def test_structured_entry_pattern_present_w1_regression_guard(self):
+        """
+        Given a toolguard_hook layer with ONLY a structured deny entry (no
+            plain-string twin anywhere)
+        When get_toolguard_permissions extracts patterns
+        Then the structured entry's pattern IS present in the result -- the
+            W1 silent-drop regression this whole increment guards against: an
+            old isinstance(perm, str) filter would have silently dropped it,
+            making find_divergent_patterns compare against a pool missing an
+            entry it never actually lost
+        """
+        config = _config_from_layers(
+            (
+                "toolguard_hook",
+                {
+                    "permissions": {
+                        "deny": [
+                            {"match": "Bash(rm -rf:*)", "additionalContext": "danger"}
+                        ]
+                    }
+                },
+            )
+        )
+
+        result = get_toolguard_permissions(config)
+
+        self.assertIn("Bash(rm -rf:*)", result["deny"])
+
+    def test_metadata_only_on_one_side_is_not_divergent(self):
+        """
+        Given a native allow pattern present as a PLAIN string, and the same
+            pattern present on the toolguard side as a STRUCTURED entry
+            carrying metadata
+        When find_divergent_patterns compares native against
+            get_toolguard_permissions()'s projection
+        Then the pattern is NOT reported divergent -- metadata present on one
+            side only does not make it a different rule (comparison #1,
+            `.pattern` alone; not `identity()`)
+        """
+        config = _config_from_layers(
+            (
+                "toolguard_hook",
+                {
+                    "permissions": {
+                        "allow": [
+                            {
+                                "match": "Bash(git status:*)",
+                                "additionalContext": "read-only",
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+        toolguard = get_toolguard_permissions(config)
+        native = {"allow": ["Bash(git status:*)"], "deny": [], "ask": []}
+
+        result = find_divergent_patterns(native, toolguard, [])
+
+        self.assertEqual(result["allow"], [])
+
+    def test_same_pattern_different_metadata_not_divergent_different_pattern_is(self):
+        """
+        Given two toolguard_hook layers that both define allow entries for the
+            SAME pattern with DIFFERENT metadata values (a genuine
+            contradiction if fed to merge_entries), plus a second, genuinely
+            distinct pattern that only the more-specific layer defines and
+            that is absent from native
+        When get_toolguard_permissions merges the layers (comparison #1,
+            pattern-only de-dup: most-specific layer wins) and
+            find_divergent_patterns compares against a native snapshot that
+            has the shared pattern but not the distinct one
+        Then the shared, differently-annotated pattern appears exactly ONCE in
+            the merged toolguard permissions (proving the merge is keyed on
+            `.pattern`, not `identity()` -- identity() would keep both and
+            the pattern would then still reduce to one string but the
+            underlying bug this guards is a future switch to identity()-based
+            SET comparison, which would double-count or never converge) and
+            is NOT reported divergent, while the genuinely different pattern
+            (absent from native) still IS reported divergent
+        """
+        config = _config_from_layers(
+            (
+                "toolguard_hook",
+                {
+                    "permissions": {
+                        "allow": [
+                            {"match": "Bash(git status:*)", "additionalContext": "A"},
+                            {"match": "Bash(git push:*)", "additionalContext": "B"},
+                        ]
+                    }
+                },
+            ),
+            (
+                "toolguard_hook",
+                {
+                    "permissions": {
+                        "allow": [
+                            {
+                                "match": "Bash(git status:*)",
+                                "additionalContext": "different",
+                            },
+                        ]
+                    }
+                },
+            ),
+        )
+        toolguard = get_toolguard_permissions(config)
+
+        # Pattern-only de-dup: exactly one occurrence despite differing
+        # metadata across the two layers.
+        self.assertEqual(toolguard["allow"].count("Bash(git status:*)"), 1)
+
+        native = {
+            "allow": ["Bash(git status:*)", "Bash(git commit:*)"],
+            "deny": [],
+            "ask": [],
+        }
+        result = find_divergent_patterns(native, toolguard, [])
+
+        # The shared, differently-annotated pattern is not divergent...
+        self.assertNotIn("Bash(git status:*)", result["allow"])
+        # ...but a genuinely different pattern absent from toolguard still is.
+        self.assertEqual(result["allow"], ["Bash(git commit:*)"])
 
 
 class TestCheckAndWarnDivergence(unittest.TestCase):

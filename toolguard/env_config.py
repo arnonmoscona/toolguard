@@ -163,7 +163,9 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
     # event's cwd) anchors to that project and bypasses TOOLGUARD_PROJECT_ROOT, so
     # the probe cannot be diverted to the wrong project's .env.
     if start_dir is not None:
-        project_root = find_project_root(Path(start_dir)) or Path(start_dir).expanduser().resolve()
+        project_root = (
+            find_project_root(Path(start_dir)) or Path(start_dir).expanduser().resolve()
+        )
     else:
         project_root_str = os.environ.get("TOOLGUARD_PROJECT_ROOT")
         if project_root_str:

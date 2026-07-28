@@ -95,6 +95,19 @@ As always, **defense in depth**: add explicit `deny` / [`[hard_deny]`](configura
 rules for destructive commands (e.g. `Bash([regex]rm\\s+-rf)`) so they hold no matter how a
 command is assembled.
 
+## A broken config file also fails safe, not open
+
+A syntax error in any single `toolguard_hook.toml`/`.json` file (project, user, or a rules-directory
+file) does not silently disable the rules it contains -- including `deny` and `[hard_deny]`. When
+toolguard detects that a governed config file failed to parse, it clamps **every** permission
+decision to **ASK** until the file is fixed: an explicit `deny`/`hard_deny` from elsewhere in the
+hierarchy is never weakened, but anything that would otherwise have been a silent `allow` now
+prompts instead. The permission prompt itself names the broken file and its parse error, and
+`toolguard-session-start` repeats the same warning at the start of every session (Claude Code
+injects that into the session context) until it is fixed. This mirrors the ASK-safe guarantee
+above -- decompose-with-confidence-or-ASK -- applied at the config layer instead of the
+command-parsing layer.
+
 ## Backup importance
 
 **Always test changes with backups.**

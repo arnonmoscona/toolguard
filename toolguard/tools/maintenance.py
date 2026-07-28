@@ -34,12 +34,19 @@ import argparse
 import difflib
 import json
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration, Provenance
+from toolguard.config_write_guard import verified_write_config
 from toolguard.constants import GOVERNED_TOOLS
+from toolguard.rule_sort import (
+    find_section_boundaries,
+    is_synthetic_pattern,
+    parse_permissions_section_with_comments,
+)
 from toolguard.tools.annotate import annotate_config_file, clarity_annotations
 from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
 from toolguard.tools.config_access import load_config, nosecurity_reason_for
@@ -75,7 +82,11 @@ from toolguard.tools.hierarchy import (
     find_cross_layer_redundancies,
 )
 from toolguard.tools.log_harvest import LogEntry
-from toolguard.tools.mining import MiningReport, mine_rule_candidates, render_mining_report
+from toolguard.tools.mining import (
+    MiningReport,
+    mine_rule_candidates,
+    render_mining_report,
+)
 from toolguard.tools.redundancy import RedundancyFinding, find_redundancy
 from toolguard.tools.replay import EntryDiff, ReplayDiff, replay
 
@@ -729,6 +740,45 @@ def _unified_diff(path: Path, old: str, new: str) -> str:
     )
 
 
+def _permission_patterns_in_text(text: str) -> List[str]:
+    """
+    Extract every ``[permissions]`` rule pattern present in *text*.
+
+    Used to build the ``expected_patterns`` content-loss guard argument for
+    :func:`~toolguard.config_write_guard.verified_write_config` (TOO-19
+    corrective change) when annotating a config file: annotation only ever
+    INSERTS ``# toolguard:`` comment lines and must never remove a rule, so
+    every pattern present in the file BEFORE annotating must still be present
+    in the text actually written.
+
+    Excludes any :func:`~toolguard.rule_sort.is_synthetic_pattern` value
+    (TOO-19 review fix): a malformed rule entry (e.g. a structured entry
+    missing its ``match`` key) parses to a SYNTHESIZED, non-matchable
+    stand-in pattern (see :func:`~toolguard.rule_sort._rule_pattern_of_value`)
+    that can never appear in the annotated text this function's caller is
+    about to write, so including it here previously made the content-loss
+    guard wrongly refuse annotation on any file holding one such malformed
+    entry.
+
+    Args:
+        text: Full TOML file content (before or after annotation).
+
+    Returns:
+        List of every REAL rule pattern found in the file's ``[permissions]``
+        section (empty if the file has none), excluding synthesized patterns.
+    """
+    start, end = find_section_boundaries(text, "permissions")
+    if start == -1:
+        return []
+    parsed = parse_permissions_section_with_comments(text[start:end])
+    return [
+        value
+        for perm_type in ("allow", "deny", "ask")
+        for item_type, _content, value in parsed.get(perm_type, [])
+        if item_type == "rule" and not is_synthetic_pattern(value)
+    ]
+
+
 def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     """
     Execute the ``--annotate`` path: preview by default, write only with ``--write``.
@@ -737,7 +787,11 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     per file, produces the before/after text.  Without ``--write`` it is a dry run
     (nothing is touched).  With ``--write`` it runs the same safety pre-flight as
     ``--apply`` and REFUSES on blockers (dirty tree / unresolved root), leaving the
-    files untouched.
+    files untouched.  Each actual write goes through
+    :func:`~toolguard.config_write_guard.verified_write_config` (TOO-19 corrective
+    change), which additionally refuses -- also leaving the file untouched -- if
+    the annotated text would fail to parse or would drop any rule pattern that was
+    present in the file before annotating (see :func:`_permission_patterns_in_text`).
 
     Args:
         args: Parsed CLI namespace (uses ``write``, ``dir``, ``format``, ``tool``).
@@ -746,6 +800,10 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     Returns:
         Exit code: ``0`` on success (preview or write), ``2`` when ``--write`` is
         refused by the pre-flight.
+
+    Raises:
+        ConfigWriteVerificationError: A write's resulting text fails to parse or
+            would drop an existing rule pattern.
     """
     merged = _collect_annotations(config, args.tool)
 
@@ -753,7 +811,16 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     for path in sorted(merged, key=str):
         try:
             old, new = annotate_config_file(path, merged[path])
-        except OSError:
+        except OSError, tomllib.TOMLDecodeError:
+            # A malformed file (e.g. a multi-line structured entry -- not
+            # valid TOML 1.0, see toolguard.rule_sort's top-of-file
+            # docstring) is skipped here the same as an unreadable one: one
+            # bad file must not abort the whole annotate batch. In practice
+            # `config` (and therefore `merged`, which is keyed off its
+            # findings) never contains such a file's rules to begin with --
+            # toolguard.config's loader already fail-open-skips it -- but a
+            # file edited on disk between that load and this re-read is a
+            # real, if narrow, race this guards against.
             continue
         results.append((path, old, new))
     changed = [(p, o, n) for (p, o, n) in results if o != n]
@@ -773,8 +840,13 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
                 )
             )
             return 2
-        for path, _old, new in changed:
-            Path(path).write_text(new, encoding="utf-8")
+        for path, old, new in changed:
+            verified_write_config(
+                path,
+                new,
+                "toml",
+                expected_patterns=_permission_patterns_in_text(old),
+            )
 
     if args.format == "json":
         payload = {
@@ -866,13 +938,17 @@ def _render_replay(diff: ReplayDiff, corpus_size: int, fmt: str = "markdown") ->
 
     if diff.broadened_count:
         lines.append("")
-        lines.append("BROADENED -- commands the candidate would newly admit (review each):")
+        lines.append(
+            "BROADENED -- commands the candidate would newly admit (review each):"
+        )
         for d in diff.broadened():
             lines.append(f"  [{d.entry.tool}] {d.entry.command}")
             lines.append(f"      {d.decision_a.verdict} -> {d.decision_b.verdict}")
     if diff.tightened_count:
         lines.append("")
-        lines.append("TIGHTENED -- commands the candidate would newly restrict (usually fine):")
+        lines.append(
+            "TIGHTENED -- commands the candidate would newly restrict (usually fine):"
+        )
         for d in diff.tightened():
             lines.append(f"  [{d.entry.tool}] {d.entry.command}")
             lines.append(f"      {d.decision_a.verdict} -> {d.decision_b.verdict}")
@@ -1001,7 +1077,11 @@ def _run_record_decision(args: argparse.Namespace) -> int:
     """
     source = args.record_decision
     try:
-        raw = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+        raw = (
+            sys.stdin.read()
+            if source == "-"
+            else Path(source).read_text(encoding="utf-8")
+        )
     except OSError as exc:
         print(f"--record-decision: cannot read {source}: {exc}")
         return 2

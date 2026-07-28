@@ -14,6 +14,9 @@ resolves to ASK rather than a silent allow of an undecomposed blob.
 import logging
 from typing import Callable, List, Tuple
 
+from toolguard.parser.command_extractor import (
+    INLINE_FLAG_TOKEN_RE as _INLINE_FLAG_TOKEN_RE,
+)
 from toolguard.parser.command_extractor import extract_commands
 from toolguard.parser.multiline import (
     LeafCommand,
@@ -23,6 +26,18 @@ from toolguard.parser.multiline import (
 from toolguard.permissions import check_permission
 
 logger = logging.getLogger(__name__)
+
+
+#: Maximum length (in characters) of the command portion shown in the
+#: ASK-floor reason string rendered to the user's permission prompt
+#: (see :func:`_truncate_for_display` and ``compound.py`` line ~71).
+_MAX_DISPLAY_COMMAND_LEN = 120
+
+# TOO-19: the bundled/attached inline-code flag regex now lives in
+# toolguard.parser.command_extractor (imported above as _INLINE_FLAG_TOKEN_RE)
+# so this module's outer-command extraction and command_extractor's
+# ask_floor detection cannot drift apart. See that module for the full
+# docstring on the pattern.
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +82,12 @@ def _resolve_leaf(
         decision, reason = resolve_one(outer_cmd)
         if decision == "deny":
             return "deny", reason
-        # allow or ask -> clamp to ask
-        return "ask", f"ASK floor applied (inline/heredoc foreign code): {outer_cmd}"
+        # allow or ask -> clamp to ask.  Bound the command shown in the
+        # reason so an unbounded inline-code blob never reaches the
+        # permission prompt (the matching above still used the untruncated
+        # outer_cmd, so this cannot weaken deny detection).
+        display_cmd = _truncate_for_display(outer_cmd)
+        return "ask", f"ASK floor applied (inline/heredoc foreign code): {display_cmd}"
 
     # Use the PEG grammar to further split the leaf into sub-commands
     sub_commands = extract_commands(leaf.text)
@@ -107,11 +126,19 @@ def _extract_outer_command(leaf_text: str) -> str:
     """Extract the outer command from a leaf that may contain inline code.
 
     For ``<executor> -c "<code>"`` leaves, returns just the executor + flag
-    without the code (e.g., ``uv run python -c``).  For heredoc sentinel
-    leaves, returns the command up to and including the sentinel.
+    without the code (e.g., ``uv run python -c``).  This also recognizes
+    inline-code flags that are ATTACHED to their payload with no separating
+    space or quote (e.g. ``-cimport os``, ``-c'code'``) and combined short
+    flags (e.g. ``-uc``): in every case only the flag portion is kept, never
+    the attached code.  For heredoc sentinel leaves, returns the command up
+    to and including the sentinel.
 
-    This is used to check for explicit deny patterns on the outer command
-    without being confused by embedded newlines in the inline code.
+    This string is used both to check for explicit deny patterns on the
+    outer command (:func:`_resolve_leaf`) and, after a separate bounding step
+    (see :func:`_truncate_for_display`), for the user-visible ASK-floor
+    reason.  It is intentionally NOT length-truncated here: shortening it in
+    this function would risk weakening the explicit-deny check, so display
+    bounding is applied only at the point the string is rendered.
 
     Args:
         leaf_text: The leaf command text (may contain embedded newlines).
@@ -120,19 +147,56 @@ def _extract_outer_command(leaf_text: str) -> str:
         The outer command stub (no embedded newlines), suitable for
         ``match_command``.
     """
-    # Remove everything after and including the first quote that comes
-    # after a flag like -c/-e/-r.  Walk the tokens to find the inline flag.
     tokens = leaf_text.split()
     result_tokens = []
     for idx, tok in enumerate(tokens):
+        match = _INLINE_FLAG_TOKEN_RE.match(tok)
+        if match:
+            bundle, flag_letter, attached = match.groups()
+            if attached:
+                # Code is attached directly to this token (no space/quote
+                # separator) -- the flag stub ends here regardless of what
+                # follows.
+                result_tokens.append(f"-{bundle}{flag_letter}")
+                break
+            if idx + 1 < len(tokens):
+                # Bare flag (e.g. -c, -uc) with a following token expected
+                # to carry the code -- stop after the flag itself.
+                result_tokens.append(tok)
+                break
+            # Bare flag with nothing following: not a recognizable inline
+            # invocation, keep scanning like any other token.
+            result_tokens.append(tok)
+            continue
         result_tokens.append(tok)
-        # If this token is an inline flag, stop here (don't include the code arg)
-        if tok in ("-c", "-e", "-r") and idx + 1 < len(tokens):
-            break
         # If this token contains or IS the heredoc sentinel, include it and stop
         if "__HEREDOC_TO_" in tok:
             break
     return " ".join(result_tokens)
+
+
+def _truncate_for_display(cmd: str, max_len: int = _MAX_DISPLAY_COMMAND_LEN) -> str:
+    """Bound a command string for safe display in a permission-prompt reason.
+
+    Collapses any embedded whitespace (including newlines) to single spaces
+    -- defense in depth, since callers should already pass a newline-free
+    string -- and truncates to at most *max_len* characters, appending a
+    visible ellipsis marker when truncation occurs so the executor and flag
+    portion at the start of the string always remain visible.
+
+    Args:
+        cmd: The command string to bound for display.
+        max_len: Maximum number of characters to keep before the ellipsis
+            marker.
+
+    Returns:
+        A single-line, length-bounded string safe to embed in a
+        ``permissionDecisionReason``.
+    """
+    single_line = " ".join(cmd.split())
+    if len(single_line) <= max_len:
+        return single_line
+    return single_line[:max_len].rstrip() + " ...[truncated]"
 
 
 def _combine_strictest(results: List[Tuple[str, str, str]]) -> Tuple[str, str]:

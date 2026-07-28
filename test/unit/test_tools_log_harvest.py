@@ -164,9 +164,7 @@ class TestParseSingleLogFile(unittest.TestCase):
         from toolguard.tools.log_harvest import parse_log_file
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = _write_log(
-                Path(tmpdir), "toolguard-2026-06-20.md", _READ_ENTRY
-            )
+            log_path = _write_log(Path(tmpdir), "toolguard-2026-06-20.md", _READ_ENTRY)
             entries = parse_log_file(log_path)
 
         self.assertEqual(1, len(entries))
@@ -183,9 +181,7 @@ class TestParseSingleLogFile(unittest.TestCase):
         from toolguard.tools.log_harvest import parse_log_file
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = _write_log(
-                Path(tmpdir), "toolguard-2026-06-20.md", _WRITE_ENTRY
-            )
+            log_path = _write_log(Path(tmpdir), "toolguard-2026-06-20.md", _WRITE_ENTRY)
             entries = parse_log_file(log_path)
 
         self.assertEqual(1, len(entries))
@@ -203,9 +199,7 @@ class TestParseSingleLogFile(unittest.TestCase):
         from toolguard.tools.log_harvest import parse_log_file
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = _write_log(
-                Path(tmpdir), "toolguard-2026-06-20.md", _EDIT_ENTRY
-            )
+            log_path = _write_log(Path(tmpdir), "toolguard-2026-06-20.md", _EDIT_ENTRY)
             entries = parse_log_file(log_path)
 
         self.assertEqual(1, len(entries))
@@ -292,9 +286,7 @@ class TestParseSingleLogFile(unittest.TestCase):
             + _READ_ENTRY
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = _write_log(
-                Path(tmpdir), "toolguard-2026-06-20.md", content
-            )
+            log_path = _write_log(Path(tmpdir), "toolguard-2026-06-20.md", content)
             entries = parse_log_file(log_path)
 
         self.assertEqual(3, len(entries))
@@ -373,10 +365,13 @@ class TestHarvest(unittest.TestCase):
 
 """
         with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = self._setup_log_dir(tmpdir, {
-                "toolguard-2026-06-19.md": day1_content,
-                "toolguard-2026-06-20.md": day2_content,
-            })
+            logs_dir = self._setup_log_dir(
+                tmpdir,
+                {
+                    "toolguard-2026-06-19.md": day1_content,
+                    "toolguard-2026-06-20.md": day2_content,
+                },
+            )
             entries = harvest(logs_dir)
 
         self.assertEqual(2, len(entries))
@@ -411,10 +406,13 @@ class TestHarvest(unittest.TestCase):
 
 """
         with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = self._setup_log_dir(tmpdir, {
-                "toolguard-2026-06-19.md": day1_content,
-                "toolguard-2026-06-20.md": day2_content,
-            })
+            logs_dir = self._setup_log_dir(
+                tmpdir,
+                {
+                    "toolguard-2026-06-19.md": day1_content,
+                    "toolguard-2026-06-20.md": day2_content,
+                },
+            )
             entries = harvest(logs_dir, since=date(2026, 6, 20))
 
         self.assertEqual(1, len(entries))
@@ -443,10 +441,13 @@ class TestHarvest(unittest.TestCase):
 
 """
         with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = self._setup_log_dir(tmpdir, {
-                "toolguard-2026-01-01.md": _SIMPLE_EXECUTED,  # very old
-                f"toolguard-{today_str}.md": today_content,
-            })
+            logs_dir = self._setup_log_dir(
+                tmpdir,
+                {
+                    "toolguard-2026-01-01.md": _SIMPLE_EXECUTED,  # very old
+                    f"toolguard-{today_str}.md": today_content,
+                },
+            )
             entries = harvest(logs_dir, max_age_days=0)  # today only
 
         self.assertEqual(1, len(entries))
@@ -461,12 +462,15 @@ class TestHarvest(unittest.TestCase):
         from toolguard.tools.log_harvest import harvest
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = self._setup_log_dir(tmpdir, {
-                "toolguard-2026-06-20.md": _SIMPLE_EXECUTED,
-                "toolguard-error-2026-06-20.md": _SIMPLE_EXECUTED,  # should be ignored
-                "toolguard-warning-2026-06-20.md": _SIMPLE_EXECUTED,  # should be ignored
-                "some-other.log": "## Not a log\n- **Status**: EXECUTED\n- **Command**: `ls`\n",
-            })
+            logs_dir = self._setup_log_dir(
+                tmpdir,
+                {
+                    "toolguard-2026-06-20.md": _SIMPLE_EXECUTED,
+                    "toolguard-error-2026-06-20.md": _SIMPLE_EXECUTED,  # should be ignored
+                    "toolguard-warning-2026-06-20.md": _SIMPLE_EXECUTED,  # should be ignored
+                    "some-other.log": "## Not a log\n- **Status**: EXECUTED\n- **Command**: `ls`\n",
+                },
+            )
             entries = harvest(logs_dir)
 
         self.assertEqual(1, len(entries))

@@ -6,8 +6,18 @@ Tests the bash parser, command extraction, and compound permission logic.
 
 import unittest
 
-from toolguard.compound import check_compound_permission, get_command_breakdown
-from toolguard.parser.command_extractor import extract_commands, parse_command_line
+from toolguard.compound import (
+    _extract_outer_command,
+    _resolve_leaf,
+    check_compound_permission,
+    get_command_breakdown,
+)
+from toolguard.parser.command_extractor import (
+    LeafCommand,
+    extract_commands,
+    parse_command_line,
+)
+from toolguard.permissions import check_permission
 
 
 class TestBashParser(unittest.TestCase):
@@ -1657,6 +1667,244 @@ class TestParserRobustness(unittest.TestCase):
         result = extract_commands("""echo "outer 'inner' more" && ls""")
         self.assertIn('''echo "outer 'inner' more"''', result)
         self.assertIn("ls", result)
+
+
+class TestExtractOuterCommand(unittest.TestCase):
+    """Characterization tests for ``_extract_outer_command`` (TOO-19).
+
+    ``_extract_outer_command`` had zero direct test coverage before this ticket.
+    These tests pin the expected behaviour for the outer-command stub used both
+    for the explicit-deny check on ASK-floor leaves and (bounded, see
+    ``TestExtractOuterCommandDenyStillFires`` /
+    ``TestAskFloorReasonTruncation``) for the user-visible reason string.
+    """
+
+    def test_python_dash_c_with_space(self):
+        """
+        Given a leaf 'uv run python -c "print(1)"' (space between -c and code)
+        When _extract_outer_command extracts the outer command
+        Then it returns 'uv run python -c' without the inline code
+        """
+        result = _extract_outer_command('uv run python -c "print(1)"')
+        self.assertEqual(result, "uv run python -c")
+
+    def test_heredoc_sentinel_form(self):
+        """
+        Given a leaf 'cat __HEREDOC_TO_pbcopy__' (heredoc sentinel bearer)
+        When _extract_outer_command extracts the outer command
+        Then it returns the command up to and including the sentinel
+        """
+        result = _extract_outer_command("cat __HEREDOC_TO_pbcopy__")
+        self.assertEqual(result, "cat __HEREDOC_TO_pbcopy__")
+
+    def test_multiline_inline_code_has_no_embedded_newline(self):
+        """
+        Given a leaf with a multi-line -c argument (embedded newlines in the code)
+        When _extract_outer_command extracts the outer command
+        Then the result contains no embedded newline (the docstring's guarantee,
+             relied on by match_command's newline guard)
+        """
+        leaf_text = 'python -c "import os\nprint(os.getcwd())\nprint(1)"'
+        result = _extract_outer_command(leaf_text)
+        self.assertNotIn("\n", result)
+
+    def test_dash_e_flag(self):
+        """
+        Given a leaf 'ruby -e "puts 1"' (Ruby's inline-code flag)
+        When _extract_outer_command extracts the outer command
+        Then it returns 'ruby -e' without the inline code
+        """
+        result = _extract_outer_command('ruby -e "puts 1"')
+        self.assertEqual(result, "ruby -e")
+
+    def test_dash_r_flag(self):
+        """
+        Given a leaf 'node -r "./setup.js"' (a -r inline-style flag)
+        When _extract_outer_command extracts the outer command
+        Then it returns 'node -r' without the argument
+        """
+        result = _extract_outer_command('node -r "./setup.js"')
+        self.assertEqual(result, "node -r")
+
+    def test_attached_flag_single_quote_no_space(self):
+        """
+        Given a leaf "python -c'import os'" (code attached to -c with no space)
+        When _extract_outer_command extracts the outer command
+        Then it returns just 'python -c', not the attached code
+        """
+        result = _extract_outer_command("python -c'import os'")
+        self.assertEqual(result, "python -c")
+
+    def test_attached_flag_no_quote_no_space(self):
+        """
+        Given a leaf 'python -cimport os' (code attached to -c, no quotes, no space)
+        When _extract_outer_command extracts the outer command
+        Then it returns just 'python -c', not the attached code
+        """
+        result = _extract_outer_command("python -cimport os")
+        self.assertEqual(result, "python -c")
+
+    def test_combined_short_flags(self):
+        """
+        Given a leaf 'python -uc "code"' (combined short flags, -u then -c)
+        When _extract_outer_command extracts the outer command
+        Then it returns 'python -uc' without the inline code
+        """
+        result = _extract_outer_command('python -uc "code"')
+        self.assertEqual(result, "python -uc")
+
+    def test_no_inline_flag_or_sentinel(self):
+        """
+        Given a leaf 'git status --short' with no -c/-e/-r flag and no heredoc sentinel
+        When _extract_outer_command extracts the outer command
+        Then it returns a bounded stub (not the full leaf blindly echoed back for
+             arbitrarily long input) and still contains the executor
+        """
+        result = _extract_outer_command("git status --short")
+        self.assertIn("git", result)
+        self.assertNotIn("\n", result)
+
+
+class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
+    """Ensure the fix to _extract_outer_command does not weaken deny detection.
+
+    resolve_one(outer_cmd) is how an explicit deny on an ASK-floor leaf is still
+    honoured (see _resolve_leaf).  Any change that shortens outer_cmd for display
+    purposes must not stop a deny pattern from matching against the *matching*
+    string.
+    """
+
+    def _leaf(self, text, ask_floor=True):
+        return LeafCommand(text, ask_floor=ask_floor)
+
+    def test_deny_fires_for_attached_flag_form(self):
+        """
+        Given an ASK-floor leaf 'python -cimport os' and a deny rule on 'python -c*'
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'deny' (the attached-flag fix must not blind the
+             deny matcher to this form)
+        """
+
+        def resolve_one(cmd):
+            if check_permission(cmd, [], ["python -c*"], True)[0] == "deny":
+                return "deny", "matched deny pattern"
+            return "allow", "no match"
+
+        decision, _reason = _resolve_leaf(self._leaf("python -cimport os"), resolve_one)
+        self.assertEqual(decision, "deny")
+
+    def test_deny_fires_for_space_separated_form(self):
+        """
+        Given an ASK-floor leaf 'python -c "import os"' and a deny rule on 'python -c*'
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'deny'
+        """
+
+        def resolve_one(cmd):
+            if check_permission(cmd, [], ["python -c*"], True)[0] == "deny":
+                return "deny", "matched deny pattern"
+            return "allow", "no match"
+
+        decision, _reason = _resolve_leaf(
+            self._leaf('python -c "import os"'), resolve_one
+        )
+        self.assertEqual(decision, "deny")
+
+    def test_deny_fires_for_combined_short_flags(self):
+        """
+        Given an ASK-floor leaf 'python -uc "code"' and a deny rule on 'python -uc*'
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'deny'
+        """
+
+        def resolve_one(cmd):
+            if check_permission(cmd, [], ["python -uc*"], True)[0] == "deny":
+                return "deny", "matched deny pattern"
+            return "allow", "no match"
+
+        decision, _reason = _resolve_leaf(self._leaf('python -uc "code"'), resolve_one)
+        self.assertEqual(decision, "deny")
+
+    def test_allow_still_clamped_to_ask(self):
+        """
+        Given an ASK-floor leaf with no matching deny pattern
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'ask' (ASK floor clamps allow, not deny)
+        """
+
+        def resolve_one(_cmd):
+            return "allow", "no match"
+
+        decision, _reason = _resolve_leaf(
+            self._leaf('python -c "import os"'), resolve_one
+        )
+        self.assertEqual(decision, "ask")
+
+
+class TestAskFloorReasonTruncation(unittest.TestCase):
+    """Bound what reaches the user-visible ASK-floor reason string (compound.py:71).
+
+    The reason string must never dump an unbounded blob into the permission
+    prompt, but must still show enough of the command (executor + flag) for the
+    user to know what they are approving.
+    """
+
+    def test_long_inline_code_is_truncated_with_marker(self):
+        """
+        Given an ASK-floor leaf with NO recognizable inline flag or heredoc
+        sentinel (the unbounded-fallback case), where _extract_outer_command
+        returns the whole (very long) leaf text
+        When _resolve_leaf builds the ASK-floor reason (allow clamped to ask)
+        Then the reason is truncated with a visible ellipsis marker and the
+             executor remains visible, instead of dumping the full blob
+        """
+        leaf_text = "someforeigninterpreter " + " ".join(
+            f"argument_number_{i}" for i in range(60)
+        )
+
+        def resolve_one(_cmd):
+            return "allow", "no match"
+
+        _decision, reason = _resolve_leaf(self._leaf(leaf_text), resolve_one)
+        self.assertIn("...", reason)
+        self.assertIn("someforeigninterpreter", reason)
+        self.assertLess(len(reason), 300)
+
+    def test_short_command_reason_is_unchanged(self):
+        """
+        Given an ASK-floor leaf with a short inline command
+        When _resolve_leaf builds the ASK-floor reason
+        Then the full outer command is shown without an ellipsis marker
+        """
+
+        def resolve_one(_cmd):
+            return "allow", "no match"
+
+        _decision, reason = self._leaf_and_resolve('python -c "print(1)"', resolve_one)
+        self.assertNotIn("...", reason)
+        self.assertIn("python -c", reason)
+
+    def test_truncated_reason_has_no_newline(self):
+        """
+        Given an ASK-floor leaf with a long multi-line inline code payload
+        When _resolve_leaf builds the ASK-floor reason
+        Then the reason string contains no embedded newline
+        """
+        long_code = "import os\n" * 50
+
+        def resolve_one(_cmd):
+            return "allow", "no match"
+
+        _decision, reason = self._leaf_and_resolve(
+            f'python -c "{long_code}"', resolve_one
+        )
+        self.assertNotIn("\n", reason)
+
+    def _leaf(self, text, ask_floor=True):
+        return LeafCommand(text, ask_floor=ask_floor)
+
+    def _leaf_and_resolve(self, text, resolve_one):
+        return _resolve_leaf(self._leaf(text), resolve_one)
 
 
 if __name__ == "__main__":

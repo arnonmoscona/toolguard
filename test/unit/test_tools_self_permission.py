@@ -132,9 +132,7 @@ class TestSelfPermissionEvaluation(unittest.TestCase):
         Then the dict carries the nested permission, verdict, needs_action, and
         recommendation
         """
-        status = evaluate_self_permissions(
-            Configuration(layers=(), start_dir=None)
-        )[0]
+        status = evaluate_self_permissions(Configuration(layers=(), start_dir=None))[0]
         payload = self_permission_status_to_dict(status)
         self.assertEqual(payload["permission"]["command"], status.permission.command)
         self.assertEqual(payload["current_verdict"], status.current_verdict)

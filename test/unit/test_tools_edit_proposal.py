@@ -79,9 +79,7 @@ class TestWithLayerRulesReplaced(unittest.TestCase):
         """
         prov = _prov()
         config = _config(_layer(prov, ask=["curl:*", "wget:*"]))
-        result = with_layer_rules_replaced(
-            config, "Bash", prov, "ask", {"curl:*"}, []
-        )
+        result = with_layer_rules_replaced(config, "Bash", prov, "ask", {"curl:*"}, [])
         lr = per_layer_rules(result, "Bash")[0]
         self.assertEqual(lr.ask, ("wget:*",))
 
@@ -118,9 +116,158 @@ class TestWithLayerRulesReplaced(unittest.TestCase):
         """
         prov = _prov()
         config = _config(_layer(prov, allow=["git:*"]))
-        result = with_layer_allow_replaced(config, "Bash", prov, {"git:*"}, ["git status:*"])
+        result = with_layer_allow_replaced(
+            config, "Bash", prov, {"git:*"}, ["git status:*"]
+        )
         lr = per_layer_rules(result, "Bash")[0]
         self.assertEqual(lr.allow, ("git status:*",))
+
+    def test_removing_plain_pattern_preserves_untouched_structured_entry(self):
+        """
+        Given an allow list holding a plain pattern and an untouched structured entry
+        When with_layer_rules_replaced removes only the plain pattern
+        Then it does not raise, the plain pattern is gone, and the structured entry
+            survives as the IDENTICAL dict object (not rebuilt).
+        """
+        prov = _prov()
+        structured = {"match": "Bash(git push:*)", "additionalContext": "careful"}
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": ["Bash(git:*)", structured],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _config(layer)
+
+        result = with_layer_rules_replaced(config, "Bash", prov, "allow", {"git:*"}, [])
+
+        raw_allow = result.layers[0].content["permissions"]["allow"]
+        self.assertEqual(len(raw_allow), 1)
+        self.assertIs(raw_allow[0], structured)
+
+    def test_removing_structured_entry_by_pattern(self):
+        """
+        Given an allow list with a plain pattern and a structured entry
+        When with_layer_rules_replaced removes the structured entry's pattern body
+        Then the structured entry is gone and the plain pattern is untouched.
+        """
+        prov = _prov()
+        structured = {"match": "Bash(git push:*)", "additionalContext": "careful"}
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": ["Bash(git:*)", structured],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _config(layer)
+
+        result = with_layer_rules_replaced(
+            config, "Bash", prov, "allow", {"git push:*"}, []
+        )
+
+        raw_allow = result.layers[0].content["permissions"]["allow"]
+        self.assertEqual(raw_allow, ["Bash(git:*)"])
+
+    def test_adding_pattern_to_list_with_structured_entry(self):
+        """
+        Given an allow list containing only a structured entry
+        When with_layer_rules_replaced adds a new plain pattern
+        Then the new pattern is appended at the end and the structured entry is
+            unchanged and still first.
+        """
+        prov = _prov()
+        structured = {"match": "Bash(git push:*)", "additionalContext": "careful"}
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": [structured],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _config(layer)
+
+        result = with_layer_rules_replaced(
+            config, "Bash", prov, "allow", set(), ["ls:*"]
+        )
+
+        raw_allow = result.layers[0].content["permissions"]["allow"]
+        self.assertEqual(len(raw_allow), 2)
+        self.assertIs(raw_allow[0], structured)
+        self.assertEqual(raw_allow[1], "Bash(ls:*)")
+
+    def test_malformed_entry_is_preserved_not_dropped(self):
+        """
+        Given an allow list holding a malformed structured entry (no 'match' key)
+        When with_layer_rules_replaced removes an unrelated pattern
+        Then the malformed entry is preserved as-is, not silently dropped.
+        """
+        prov = _prov()
+        malformed = {"additionalContext": "orphaned, no match key"}
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": ["Bash(git:*)", malformed],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _config(layer)
+
+        result = with_layer_rules_replaced(config, "Bash", prov, "allow", {"git:*"}, [])
+
+        raw_allow = result.layers[0].content["permissions"]["allow"]
+        self.assertEqual(len(raw_allow), 1)
+        self.assertIs(raw_allow[0], malformed)
+
+    def test_layer_metadata_survives_rebuild(self):
+        """
+        Given a layer with unexpected_keys, duplicate_format, and shadowed_path set
+        When with_layer_rules_replaced modifies that layer's list
+        Then the rebuilt layer still carries those same field values (defect B).
+        """
+        prov = _prov()
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {"permissions": {"allow": ["Bash(git:*)"], "deny": [], "ask": []}}
+            ),
+            unexpected_keys=("stray_key",),
+            duplicate_format=True,
+            shadowed_path=Path("/other/.claude/toolguard_hook.toml"),
+        )
+        config = _config(layer)
+
+        result = with_layer_rules_replaced(
+            config, "Bash", prov, "allow", set(), ["ls:*"]
+        )
+
+        rebuilt = result.layers[0]
+        self.assertEqual(rebuilt.unexpected_keys, ("stray_key",))
+        self.assertTrue(rebuilt.duplicate_format)
+        self.assertEqual(
+            rebuilt.shadowed_path, Path("/other/.claude/toolguard_hook.toml")
+        )
 
 
 class TestApplyEdits(unittest.TestCase):

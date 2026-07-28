@@ -210,9 +210,7 @@ class TestUninstallReadinessEvaluation(unittest.TestCase):
         Then nothing needs action
         """
         perms = required_uninstall_readiness_permissions(_CLAUDE_DIR, _SETTINGS_PATH)
-        allow = [
-            f"{p.tool}({p.pattern})" for p in perms if p.list_type == "allow"
-        ]
+        allow = [f"{p.tool}({p.pattern})" for p in perms if p.list_type == "allow"]
         ask = [f"{p.tool}({p.pattern})" for p in perms if p.list_type == "ask"]
         config = _config(permissions={"allow": allow, "ask": ask})
         missing = missing_uninstall_readiness_permissions(
@@ -229,9 +227,7 @@ class TestUninstallReadinessEvaluation(unittest.TestCase):
         self_permission.py's mutating tools, there is no "should have been
         ask instead" caveat for this module's entries)
         """
-        config = _config(
-            permissions={"allow": ["Bash(uv tool uninstall toolguard:*)"]}
-        )
+        config = _config(permissions={"allow": ["Bash(uv tool uninstall toolguard:*)"]})
         statuses = {
             s.permission.description: s
             for s in evaluate_uninstall_readiness_permissions(

@@ -204,7 +204,7 @@ def _anchor_file_pattern(pattern: str, config, extended_syntax: bool) -> str:
         for known in ("[glob]", "[regex]", "[native]"):
             if pattern.startswith(known):
                 prefix = known
-                body = pattern[len(known):]
+                body = pattern[len(known) :]
                 break
     # A regex pattern is not a filesystem path; never path-join it.
     if prefix == "[regex]":
@@ -427,7 +427,9 @@ def resolve_file_path_permission_detailed(
     hard = _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
     if hard is not None:
         decision, reason = hard
-        return FileResolution(decision=decision, reason=reason, override=None, provenance=None)
+        return FileResolution(
+            decision=decision, reason=reason, override=None, provenance=None
+        )
 
     def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
         return _decide_file_path_at_level_detailed(
@@ -446,7 +448,9 @@ def resolve_file_path_permission_detailed(
         # Normalise the "Command"-phrased no-match reason to file-path phrasing,
         # preserving any suffix (e.g. the TOO-15 'ask' or 'allow_with_warning'
         # no_match_fallback explanation).
-        reason = "Path does not match any allow patterns" + reason[len(_no_match_prefix):]
+        reason = (
+            "Path does not match any allow patterns" + reason[len(_no_match_prefix) :]
+        )
     return FileResolution(
         decision=resolved.decision,
         reason=reason,
@@ -550,7 +554,7 @@ def resolve_bash_permission_detailed(
             "Command matches ask pattern: ",
         ):
             if reason_body.startswith(marker):
-                sub_matched_rule = reason_body[len(marker):]
+                sub_matched_rule = reason_body[len(marker) :]
                 break
 
         sub_matches.append(

@@ -36,8 +36,12 @@ class TestDecisionIdentity(unittest.TestCase):
         When their ids are compared
         Then they are equal (identity does not include the storing level)
         """
-        a = dl.new_decision("reject-promotion", "git", "promote:user", "reject", "", "project")
-        b = dl.new_decision("reject-promotion", "git", "promote:user", "reject", "", "user")
+        a = dl.new_decision(
+            "reject-promotion", "git", "promote:user", "reject", "", "project"
+        )
+        b = dl.new_decision(
+            "reject-promotion", "git", "promote:user", "reject", "", "user"
+        )
         self.assertEqual(a.id, b.id)
 
 
@@ -134,7 +138,12 @@ class TestRecordAndLoad(unittest.TestCase):
             root = Path(d)
             (root / ".git").mkdir()
             dec = dl.new_decision(
-                "reject-consolidation", "git-diff", "^git (diff|log)", "reject", "keep apart", "project"
+                "reject-consolidation",
+                "git-diff",
+                "^git (diff|log)",
+                "reject",
+                "keep apart",
+                "project",
             )
             path = dl.record_decision(root, dec)
             self.assertTrue(path.exists())
@@ -152,9 +161,13 @@ class TestRecordAndLoad(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".git").mkdir()
-            first = dl.new_decision("reject-removal", "cat-env", "keep", "reject", "v1", "project")
+            first = dl.new_decision(
+                "reject-removal", "cat-env", "keep", "reject", "v1", "project"
+            )
             dl.record_decision(root, first)
-            second = dl.new_decision("reject-removal", "cat-env", "keep", "reject", "v2", "project")
+            second = dl.new_decision(
+                "reject-removal", "cat-env", "keep", "reject", "v2", "project"
+            )
             path = dl.record_decision(root, second)
             loaded = dl.load_ledger(path)
             self.assertEqual(len(loaded), 1)
@@ -191,8 +204,12 @@ class TestQuery(unittest.TestCase):
 
     def _decisions(self):
         return [
-            dl.new_decision("reject-consolidation", "git", "^git (a|b)", "reject", "", "project"),
-            dl.new_decision("reject-promotion", "rm", "promote:user", "accept", "", "user"),
+            dl.new_decision(
+                "reject-consolidation", "git", "^git (a|b)", "reject", "", "project"
+            ),
+            dl.new_decision(
+                "reject-promotion", "rm", "promote:user", "accept", "", "user"
+            ),
         ]
 
     def test_matching_reject_is_suppressed(self):
@@ -202,7 +219,9 @@ class TestQuery(unittest.TestCase):
         Then is_suppressed returns True
         """
         self.assertTrue(
-            dl.is_suppressed(self._decisions(), "reject-consolidation", "git", "^git (a|b)")
+            dl.is_suppressed(
+                self._decisions(), "reject-consolidation", "git", "^git (a|b)"
+            )
         )
 
     def test_matching_accept_is_not_suppressed(self):
@@ -212,7 +231,9 @@ class TestQuery(unittest.TestCase):
         Then is_suppressed returns False (only a reject silences a re-raise)
         """
         self.assertFalse(
-            dl.is_suppressed(self._decisions(), "reject-promotion", "rm", "promote:user")
+            dl.is_suppressed(
+                self._decisions(), "reject-promotion", "rm", "promote:user"
+            )
         )
 
     def test_non_matching_target_is_not_suppressed(self):
@@ -271,7 +292,9 @@ class TestCorruptLedger(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "toolguard_decisions.json"
-            path.write_text(json.dumps({"schema": dl.LEDGER_SCHEMA, "level": "project"}))
+            path.write_text(
+                json.dumps({"schema": dl.LEDGER_SCHEMA, "level": "project"})
+            )
             with self.assertRaises(dl.LedgerError):
                 dl.load_ledger(path)
 
@@ -284,7 +307,9 @@ class TestCorruptLedger(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "toolguard_decisions.json"
             path.write_text(
-                json.dumps({"schema": dl.LEDGER_SCHEMA, "level": "project", "decisions": {}})
+                json.dumps(
+                    {"schema": dl.LEDGER_SCHEMA, "level": "project", "decisions": {}}
+                )
             )
             with self.assertRaises(dl.LedgerError):
                 dl.load_ledger(path)

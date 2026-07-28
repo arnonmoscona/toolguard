@@ -96,14 +96,26 @@ def clarity_annotations(
     }
 
 
-def _rule_line_patterns(section_text: str) -> Dict[str, str]:
-    """Map each rule's original line text to its full pattern, via the comment parser."""
+def _rule_first_line_patterns(section_text: str) -> Dict[str, str]:
+    """
+    Map each rule's own FIRST physical line of source text to its full pattern.
+
+    A rule's ``content`` (from :func:`parse_permissions_section_with_comments`) is
+    always a single physical line, for either a plain pattern or a structured entry
+    (TOO-19 corrective change: a structured entry spanning multiple physical lines
+    is not valid TOML 1.0, and that function now raises rather than returning one
+    -- see its own docstring). ``.split("\\n", 1)[0]`` is kept rather than using
+    ``content`` directly so this still degrades safely (keys by the first line
+    only) if that guarantee were ever loosened again -- :func:`annotate_section_text`
+    anchors its generated comment above a rule's own first line either way.
+    """
     parsed = parse_permissions_section_with_comments(section_text)
     line_to_pattern: Dict[str, str] = {}
     for perm_type in ("allow", "deny", "ask"):
         for item_type, content, value in parsed.get(perm_type, []):
             if item_type == "rule":
-                line_to_pattern[content] = value
+                first_line = content.split("\n", 1)[0]
+                line_to_pattern[first_line] = value
     return line_to_pattern
 
 
@@ -116,6 +128,12 @@ def annotate_section_text(section_text: str, annotations: Dict[str, List[str]]) 
     the rule's indentation.  All other lines (rules, human comments, blanks,
     section brackets) are preserved exactly.
 
+    Still iterates ``section_text`` one physical line at a time (marker-stripping
+    inherently needs that: an existing ``# toolguard:`` comment is always its own
+    standalone physical line). :func:`_rule_first_line_patterns` maps a rule's own
+    first (and, per TOO-19, only) physical line to its pattern, so a structured
+    entry gets exactly ONE generated comment, inserted directly above its line.
+
     Args:
         section_text: The full ``[permissions]`` section text.
         annotations: ``{ full_pattern -> [note, ...] }`` from :func:`clarity_annotations`.
@@ -123,7 +141,7 @@ def annotate_section_text(section_text: str, annotations: Dict[str, List[str]]) 
     Returns:
         The rewritten section text.
     """
-    line_to_pattern = _rule_line_patterns(section_text)
+    line_to_pattern = _rule_first_line_patterns(section_text)
     out: List[str] = []
     for line in section_text.split("\n"):
         if line.strip().startswith(TOOLGUARD_MARKER):

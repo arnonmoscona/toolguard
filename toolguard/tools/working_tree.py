@@ -72,7 +72,7 @@ def working_tree_status(root: Path) -> WorkingTreeStatus:
             text=True,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return WorkingTreeStatus(is_git_repo=False, is_clean=False, dirty_paths=())
 
     if result.returncode != 0:

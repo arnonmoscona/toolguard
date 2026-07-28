@@ -242,7 +242,9 @@ def replay_single(
     for entry in corpus:
         d = decide(config, entry.tool, entry.command, extended_syntax)
         matches = _verdict_matches_status(d.verdict, entry.status)
-        results.append(SingleDecision(entry=entry, decision=d, matches_observed=matches))
+        results.append(
+            SingleDecision(entry=entry, decision=d, matches_observed=matches)
+        )
 
     return results
 

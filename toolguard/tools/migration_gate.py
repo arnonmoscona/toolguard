@@ -57,7 +57,9 @@ class MigrationPreflight:
         if not tree.is_clean:
             preview = ", ".join(tree.dirty_paths[:5])
             extra = (
-                "" if len(tree.dirty_paths) <= 5 else f" (+{len(tree.dirty_paths) - 5} more)"
+                ""
+                if len(tree.dirty_paths) <= 5
+                else f" (+{len(tree.dirty_paths) - 5} more)"
             )
             return [
                 f"The working tree has uncommitted changes ({preview}{extra}); "

@@ -29,6 +29,7 @@ from toolguard.compound import resolve_compound_permission
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
 from toolguard.hook import resolve_file_path_permission_detailed
 from toolguard.permissions import check_hard_deny, decide_command_at_level_detailed
+from toolguard.rule_entry import _strip_tool_wrapper
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -147,6 +148,212 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
             provenance=prov, content=MappingProxyType({"hard_deny": "not-a-table"})
         )
         config = Configuration(layers=(layer,))
+        self.assertEqual(config.hard_deny("Bash"), ((), ()))
+
+
+class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
+    """
+    TOO-19 Phase 0a, increment 3: structured (``{match=..., ...}``) entries in
+    ``[hard_deny]`` must contribute their pattern, and their enrichment
+    metadata must be reachable via the new ``hard_deny_entries`` accessor.
+    """
+
+    def test_hard_deny_structured_deny_entry_contributes_pattern(self):
+        """
+        Given a hard_deny.deny list containing a STRUCTURED entry
+            ({match=..., additionalContext=...}) for Bash
+        When Configuration.hard_deny('Bash') is read
+        Then the structured entry's pattern is present in the returned deny
+            tuple -- it is no longer silently dropped (the bug this
+            increment fixes)
+        """
+        config = Configuration(
+            layers=(
+                _layer(
+                    0,
+                    hard_deny={
+                        "deny": [
+                            {
+                                "match": "Bash(curl *)",
+                                "additionalContext": "use the internal proxy instead",
+                            }
+                        ]
+                    },
+                ),
+            )
+        )
+        deny, _allow = config.hard_deny("Bash")
+        self.assertEqual(deny, ("curl *",))
+
+    def test_hard_deny_structured_allow_entry_contributes_pattern(self):
+        """
+        Given a hard_deny.allow carve-out list containing a STRUCTURED entry
+            for Bash
+        When Configuration.hard_deny('Bash') is read
+        Then the structured entry's pattern is present in the returned allow
+            tuple -- the same silent-drop bug fixed for deny also applies to
+            the allow carve-out
+        """
+        config = Configuration(
+            layers=(
+                _layer(
+                    0,
+                    hard_deny={
+                        "deny": ["Bash(curl *)"],
+                        "allow": [
+                            {
+                                "match": "Bash(curl localhost*)",
+                                "additionalContext": "internal only",
+                            }
+                        ],
+                    },
+                ),
+            )
+        )
+        _deny, allow = config.hard_deny("Bash")
+        self.assertEqual(allow, ("curl localhost*",))
+
+    def test_hard_deny_entries_returns_metadata_and_wrapper_intact_pattern(self):
+        """
+        Given a hard_deny.deny structured entry carrying additionalContext
+        When Configuration.hard_deny_entries('Bash') is read
+        Then the returned deny entry's .pattern is wrapper-INTACT
+            ('Bash(curl *)') and its .metadata carries the additionalContext
+            value
+        """
+        config = Configuration(
+            layers=(
+                _layer(
+                    0,
+                    hard_deny={
+                        "deny": [
+                            {
+                                "match": "Bash(curl *)",
+                                "additionalContext": "use the internal proxy instead",
+                            }
+                        ]
+                    },
+                ),
+            )
+        )
+        deny_entries, allow_entries = config.hard_deny_entries("Bash")
+        self.assertEqual(len(deny_entries), 1)
+        self.assertEqual(deny_entries[0].pattern, "Bash(curl *)")
+        self.assertEqual(
+            deny_entries[0].metadata["additionalContext"],
+            "use the internal proxy instead",
+        )
+        self.assertEqual(allow_entries, ())
+
+    def test_hard_deny_and_hard_deny_entries_are_index_aligned(self):
+        """
+        Given multiple hard_deny.deny patterns (plain and structured, mixed)
+            plus an allow carve-out
+        When both Configuration.hard_deny and .hard_deny_entries are read for
+            the same tool
+        Then hard_deny()[i] is the wrapper-stripped form of
+            hard_deny_entries()[i].pattern, for both deny and allow tuples
+        """
+        config = Configuration(
+            layers=(
+                _layer(
+                    0,
+                    hard_deny={
+                        "deny": [
+                            "Bash(wget *)",
+                            {"match": "Bash(curl *)", "additionalContext": "x"},
+                        ],
+                        "allow": ["Bash(curl localhost*)"],
+                    },
+                ),
+            )
+        )
+        deny, allow = config.hard_deny("Bash")
+        deny_entries, allow_entries = config.hard_deny_entries("Bash")
+        self.assertEqual(len(deny), len(deny_entries))
+        self.assertEqual(len(allow), len(allow_entries))
+        for pattern, entry in zip(deny, deny_entries):
+            self.assertEqual(pattern, _strip_tool_wrapper(entry.pattern))
+        for pattern, entry in zip(allow, allow_entries):
+            self.assertEqual(pattern, _strip_tool_wrapper(entry.pattern))
+
+    def test_hard_deny_pooling_dedup_first_occurrence_metadata_wins(self):
+        """
+        Given the SAME hard_deny.deny pattern declared at two levels, where
+            only the MORE-SPECIFIC (level 0) occurrence carries
+            additionalContext metadata and the less-specific (level 1)
+            occurrence is a plain string
+        When Configuration.hard_deny_entries('Bash') is read
+        Then the pool contains exactly one entry for that pattern, and it is
+            the metadata-carrying, most-specific occurrence (consistent with
+            today's first-occurrence-wins pooling)
+        """
+        config = Configuration(
+            layers=(
+                _layer(
+                    0,
+                    hard_deny={
+                        "deny": [
+                            {
+                                "match": "Bash(curl *)",
+                                "additionalContext": "most specific",
+                            }
+                        ]
+                    },
+                ),
+                _layer(1, hard_deny={"deny": ["Bash(curl *)"]}),
+            )
+        )
+        deny_entries, _allow_entries = config.hard_deny_entries("Bash")
+        self.assertEqual(len(deny_entries), 1)
+        self.assertEqual(deny_entries[0].metadata["additionalContext"], "most specific")
+
+    def test_hard_deny_native_layer_structured_entry_contributes_nothing(self):
+        """
+        Given a NATIVE Claude settings layer whose hard_deny.deny holds a
+            STRUCTURED entry for Bash
+        When Configuration.hard_deny_entries and .hard_deny are read
+        Then both return empty -- native layers are skipped wholesale,
+            before the structured entry is ever normalized
+        """
+        config = Configuration(
+            layers=(
+                _layer(
+                    0,
+                    hard_deny={
+                        "deny": [{"match": "Bash(curl *)", "additionalContext": "x"}]
+                    },
+                    native=True,
+                ),
+            )
+        )
+        self.assertEqual(config.hard_deny_entries("Bash"), ((), ()))
+        self.assertEqual(config.hard_deny("Bash"), ((), ()))
+
+    def test_hard_deny_malformed_entry_does_not_raise(self):
+        """
+        Given a hard_deny.deny list containing a malformed element (an int,
+            which normalize_entry rejects with an error Issue)
+        When Configuration.hard_deny and .hard_deny_entries are read
+        Then no exception is raised and the malformed element contributes
+            nothing to either pool
+        """
+        config = Configuration(
+            layers=(_layer(0, hard_deny={"deny": [123, "Bash(curl *)"]}),)
+        )
+        deny, _allow = config.hard_deny("Bash")
+        self.assertEqual(deny, ("curl *",))
+        deny_entries, _allow_entries = config.hard_deny_entries("Bash")
+        self.assertEqual(len(deny_entries), 1)
+
+    def test_hard_deny_non_list_deny_value_tolerated(self):
+        """
+        Given a hard_deny section whose 'deny' value is not a list (a
+            scalar misconfiguration)
+        When Configuration.hard_deny is read
+        Then it is tolerated as empty rather than raising
+        """
+        config = Configuration(layers=(_layer(0, hard_deny={"deny": "not-a-list"}),))
         self.assertEqual(config.hard_deny("Bash"), ((), ()))
 
 
@@ -281,6 +488,47 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         config = Configuration(layers=(_layer(0, allow=["Bash(git *)"]),))
         decision, _reason = self._resolve(config, "git status")
         self.assertEqual(decision, "allow")
+
+    def test_hard_deny_not_weakened_by_broken_config_ask_floor(self):
+        """
+        TOO-19: Given a hard_deny match for 'rm -rf /' AND a Configuration
+            recording a broken (unparseable) config file elsewhere
+        When 'rm -rf /' is resolved (hard_deny checked first, same as
+            resolve_bash_permission_detailed does in production)
+        Then the decision is still 'deny' -- the fail-open ASK floor never
+            reaches hard_deny (it is checked and returned BEFORE
+            resolve_permission_detailed is ever called), so hard_deny
+            protection is never weakened to 'ask' even while the config is
+            broken
+        """
+        broken = Path("/fake/broken.toml")
+        config = Configuration(
+            layers=(_layer(0, hard_deny={"deny": ["Bash(rm -rf *)"]}),),
+            parse_failures=((broken, "bad TOML"),),
+        )
+        decision, reason = self._resolve(config, "rm -rf /")
+        self.assertEqual(decision, "deny")
+        self.assertIn("hard_deny", reason)
+        self.assertIn("cannot be overridden", reason)
+
+    def test_non_hard_denied_command_clamped_to_ask_by_broken_config(self):
+        """
+        TOO-19: Given a normal allow for 'git *' (no hard_deny match) AND a
+            Configuration recording a broken config file
+        When 'git status' is resolved
+        Then the decision is 'ask' (clamped, not silently allowed) and the
+            reason names the broken file -- this is the actual security fix:
+            a command that would otherwise have been allowed now requires a
+            human decision while the config is broken
+        """
+        broken = Path("/fake/broken.toml")
+        config = Configuration(
+            layers=(_layer(0, allow=["Bash(git *)"]),),
+            parse_failures=((broken, "bad TOML"),),
+        )
+        decision, reason = self._resolve(config, "git status")
+        self.assertEqual(decision, "ask")
+        self.assertIn(str(broken), reason)
 
 
 class TestCheckHardDenyUnit(unittest.TestCase):

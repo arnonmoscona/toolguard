@@ -47,9 +47,7 @@ def _make_config(layers_content):
             path=Path(f"/fake/{level}/{source_type}_{i}"),
             specificity=i,
         )
-        layers.append(
-            ConfigLayer(provenance=prov, content=MappingProxyType(content))
-        )
+        layers.append(ConfigLayer(provenance=prov, content=MappingProxyType(content)))
     return Configuration(layers=tuple(layers), start_dir=None)
 
 
@@ -157,14 +155,20 @@ class TestReplayUnchanged(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": ["Bash(rm -rf:*)"],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": ["Bash(rm -rf:*)"],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_bash_entry("git status"),
             _make_bash_entry("git log"),
@@ -187,14 +191,20 @@ class TestReplayUnchanged(unittest.TestCase):
         from toolguard.tools.replay import replay
 
         home = str(Path.home())
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": [f"Read([glob]{home}/projects/**)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [f"Read([glob]{home}/projects/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_file_entry("Read", f"{home}/projects/foo/bar.py"),
             _make_file_entry("Read", "/etc/passwd"),  # denied in both
@@ -220,25 +230,37 @@ class TestReplayTightening(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],  # ls:* removed
-                    "deny": [],
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],  # ls:* removed
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_bash_entry("git status"),  # still allowed in B
-            _make_bash_entry("ls -la"),      # no longer allowed in B
+            _make_bash_entry("ls -la"),  # no longer allowed in B
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -257,24 +279,36 @@ class TestReplayTightening(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": ["Bash(git push:*)"],  # deny added
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": ["Bash(git push:*)"],  # deny added
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
-            _make_bash_entry("git status"),          # still allowed
+            _make_bash_entry("git status"),  # still allowed
             _make_bash_entry("git push origin main"),  # now denied
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
@@ -305,27 +339,39 @@ class TestReplayBroadening(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(whoami)"],  # whoami added
-                    "deny": [],
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(whoami)"],  # whoami added
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         corpus = [
-            _make_bash_entry("git status"),   # unchanged
-            _make_bash_entry("whoami"),        # broadened: A=deny, B=allow
+            _make_bash_entry("git status"),  # unchanged
+            _make_bash_entry("whoami"),  # broadened: A=deny, B=allow
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -375,31 +421,43 @@ class TestReplayBroadening(unittest.TestCase):
         # This correctly models the landmine: moving from "specific allows + deny fallback"
         # to "broad allow" is a broadening that replay must catch.
 
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "permissions": {
-                    "allow": [
-                        "Bash(uv run alembic upgrade head:*)",
-                        "Bash(uv run alembic current:*)",
-                        "Bash(uv run alembic history:*)",
-                    ],
-                    "deny": [],
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {
+                            "allow": [
+                                "Bash(uv run alembic upgrade head:*)",
+                                "Bash(uv run alembic current:*)",
+                                "Bash(uv run alembic history:*)",
+                            ],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         # Config B "consolidates" into a single broad pattern -- the landmine
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "no_match_fallback": "deny",
-                "permissions": {
-                    "allow": [
-                        "Bash(uv run alembic:*)",  # consolidation: now allows ALL alembic
-                    ],
-                    "deny": [],
-                }
-            })
-        ])
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {
+                            "allow": [
+                                "Bash(uv run alembic:*)",  # consolidation: now allows ALL alembic
+                            ],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
         corpus = [
             # These were already allowed in A
             _make_bash_entry("uv run alembic upgrade head"),
@@ -436,22 +494,38 @@ class TestReplayBroadening(unittest.TestCase):
         from toolguard.tools.replay import replay
 
         # Use 'curl *' (no colon) as the broad allow so it matches 'curl http://example.com'
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(curl *)"],   # broad allow matching 'curl <anything>'
-                    "deny": ["Bash(curl:*)"],     # but curl without specific arg is blocked
-                }
-            })
-        ])
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(curl *)"],    # same broad allow
-                    "deny": [],                    # deny removed -> curl now fully allowed
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [
+                                "Bash(curl *)"
+                            ],  # broad allow matching 'curl <anything>'
+                            "deny": [
+                                "Bash(curl:*)"
+                            ],  # but curl without specific arg is blocked
+                        }
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(curl *)"],  # same broad allow
+                            "deny": [],  # deny removed -> curl now fully allowed
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_bash_entry("curl http://example.com", status="REFUSED"),
         ]
@@ -476,27 +550,42 @@ class TestReplaySummaryAndHelpers(unittest.TestCase):
         from toolguard.tools.replay import replay
 
         # Config A: allows git and ls, denies curl
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": ["Bash(curl:*)"],
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": ["Bash(curl:*)"],
+                        }
+                    },
+                )
+            ]
+        )
         # Config B: allows git and curl (removes ls, adds curl allow)
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(curl:*)"],  # ls removed, curl added
-                    "deny": [],
-                }
-            })
-        ])
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [
+                                "Bash(git:*)",
+                                "Bash(curl:*)",
+                            ],  # ls removed, curl added
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
-            _make_bash_entry("git status"),         # unchanged: allow -> allow
-            _make_bash_entry("ls -la"),              # tightened: allow -> deny
-            _make_bash_entry("curl http://x.com"),   # broadened: deny -> allow
+            _make_bash_entry("git status"),  # unchanged: allow -> allow
+            _make_bash_entry("ls -la"),  # tightened: allow -> deny
+            _make_bash_entry("curl http://x.com"),  # broadened: deny -> allow
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -513,22 +602,34 @@ class TestReplaySummaryAndHelpers(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        config_a = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(ls:*)"],
-                    "deny": ["Bash(curl:*)"],
-                }
-            })
-        ])
-        config_b = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)", "Bash(curl:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": ["Bash(curl:*)"],
+                        }
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(curl:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_bash_entry("git status"),
             _make_bash_entry("ls -la"),
@@ -555,14 +656,20 @@ class TestReplaySingleConfig(unittest.TestCase):
         """
         from toolguard.tools.replay import replay_single
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_bash_entry("git status"),
             _make_bash_entry("git log"),
@@ -580,14 +687,20 @@ class TestReplaySingleConfig(unittest.TestCase):
         """
         from toolguard.tools.replay import replay_single
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(git:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         corpus = [
             _make_bash_entry("git status", status="EXECUTED"),
             _make_bash_entry("whoami", status="REFUSED"),
@@ -607,13 +720,19 @@ class TestReplaySingleConfig(unittest.TestCase):
         """
         from toolguard.tools.replay import replay_single
 
-        config = _make_config([
-            ("project", "toolguard_hook", {
-                "permissions": {
-                    "allow": ["Bash(ls:*)"],
-                    "deny": [],
-                }
-            })
-        ])
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
         results = replay_single([], config)
         self.assertEqual([], results)

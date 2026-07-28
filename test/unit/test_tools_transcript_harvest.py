@@ -99,7 +99,9 @@ class TestStatusDerivation(_TempDirMixin, unittest.TestCase):
             self.tmpdir,
             "s.jsonl",
             [
-                _assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"command": "ls -la"}, "t1"),
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Bash", {"command": "ls -la"}, "t1"
+                ),
                 _user_tool_result("2026-06-20T10:00:01.000Z", "t1", False, "total 0"),
             ],
         )
@@ -120,7 +122,9 @@ class TestStatusDerivation(_TempDirMixin, unittest.TestCase):
             self.tmpdir,
             "s.jsonl",
             [
-                _assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"command": "rm -rf /"}, "t1"),
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Bash", {"command": "rm -rf /"}, "t1"
+                ),
                 _user_tool_result(
                     "2026-06-20T10:00:01.000Z",
                     "t1",
@@ -144,7 +148,9 @@ class TestStatusDerivation(_TempDirMixin, unittest.TestCase):
             self.tmpdir,
             "s.jsonl",
             [
-                _assistant_tool_use("2026-06-20T10:00:00.000Z", "Write", {"file_path": "/x"}, "t1"),
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Write", {"file_path": "/x"}, "t1"
+                ),
                 _user_tool_result(
                     "2026-06-20T10:00:01.000Z",
                     "t1",
@@ -165,7 +171,11 @@ class TestStatusDerivation(_TempDirMixin, unittest.TestCase):
         path = _write_transcript(
             self.tmpdir,
             "s.jsonl",
-            [_assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1")],
+            [
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1"
+                )
+            ],
         )
         entries = harvest_transcript_file(path)
         self.assertEqual(entries[0].status, "UNKNOWN")
@@ -212,7 +222,10 @@ class TestToolExtraction(_TempDirMixin, unittest.TestCase):
             "s.jsonl",
             [
                 _assistant_tool_use(
-                    "2026-06-20T10:00:00.000Z", "mcp__basic-memory__search", {"query": "x"}, "t1"
+                    "2026-06-20T10:00:00.000Z",
+                    "mcp__basic-memory__search",
+                    {"query": "x"},
+                    "t1",
                 ),
                 _user_tool_result("2026-06-20T10:00:01.000Z", "t1", False, "ok"),
             ],
@@ -228,7 +241,11 @@ class TestToolExtraction(_TempDirMixin, unittest.TestCase):
         path = _write_transcript(
             self.tmpdir,
             "s.jsonl",
-            [_assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"description": "x"}, "t1")],
+            [
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Bash", {"description": "x"}, "t1"
+                )
+            ],
         )
         self.assertEqual(harvest_transcript_file(path), [])
 
@@ -251,7 +268,9 @@ class TestTimestampsAgentWindowing(_TempDirMixin, unittest.TestCase):
             self.tmpdir,
             "s.jsonl",
             [
-                _assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1"),
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1"
+                ),
                 _user_tool_result("2026-06-20T10:00:01.000Z", "t1", False, "ok"),
             ],
         )
@@ -270,7 +289,11 @@ class TestTimestampsAgentWindowing(_TempDirMixin, unittest.TestCase):
             "s.jsonl",
             [
                 _assistant_tool_use(
-                    "2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1", is_sidechain=True
+                    "2026-06-20T10:00:00.000Z",
+                    "Bash",
+                    {"command": "pwd"},
+                    "t1",
+                    is_sidechain=True,
                 ),
                 _user_tool_result("2026-06-20T10:00:01.000Z", "t1", False, "ok"),
             ],
@@ -287,9 +310,13 @@ class TestTimestampsAgentWindowing(_TempDirMixin, unittest.TestCase):
             self.tmpdir,
             "s.jsonl",
             [
-                _assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"command": "new"}, "t2"),
+                _assistant_tool_use(
+                    "2026-06-20T10:00:00.000Z", "Bash", {"command": "new"}, "t2"
+                ),
                 _user_tool_result("2026-06-20T10:00:01.000Z", "t2", False, "ok"),
-                _assistant_tool_use("2020-01-01T10:00:00.000Z", "Bash", {"command": "old"}, "t1"),
+                _assistant_tool_use(
+                    "2020-01-01T10:00:00.000Z", "Bash", {"command": "old"}, "t1"
+                ),
                 _user_tool_result("2020-01-01T10:00:01.000Z", "t1", False, "ok"),
             ],
         )
@@ -306,7 +333,9 @@ class TestTimestampsAgentWindowing(_TempDirMixin, unittest.TestCase):
             self.tmpdir,
             "s.jsonl",
             [
-                _assistant_tool_use("2020-01-01T10:00:00.000Z", "Bash", {"command": "old"}, "t1"),
+                _assistant_tool_use(
+                    "2020-01-01T10:00:00.000Z", "Bash", {"command": "old"}, "t1"
+                ),
                 _user_tool_result("2020-01-01T10:00:01.000Z", "t1", False, "ok"),
             ],
         )
@@ -355,9 +384,13 @@ class TestRobustnessAndHelpers(_TempDirMixin, unittest.TestCase):
         """
         path = self.tmpdir / "s.jsonl"
         good_use = json.dumps(
-            _assistant_tool_use("2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1")
+            _assistant_tool_use(
+                "2026-06-20T10:00:00.000Z", "Bash", {"command": "pwd"}, "t1"
+            )
         )
-        good_res = json.dumps(_user_tool_result("2026-06-20T10:00:01.000Z", "t1", False, "ok"))
+        good_res = json.dumps(
+            _user_tool_result("2026-06-20T10:00:01.000Z", "t1", False, "ok")
+        )
         path.write_text(good_use + "\n{ this is not json\n" + good_res + "\n")
         entries = harvest_transcript_file(path)
         self.assertEqual(len(entries), 1)
@@ -372,7 +405,9 @@ class TestRobustnessAndHelpers(_TempDirMixin, unittest.TestCase):
         result = transcript_dir_for_project(
             Path("/home/arnon/projects/toolguard"), claude_home=self.tmpdir
         )
-        self.assertEqual(result, self.tmpdir / "projects" / "-home-arnon-projects-toolguard")
+        self.assertEqual(
+            result, self.tmpdir / "projects" / "-home-arnon-projects-toolguard"
+        )
 
 
 class TestExtractText(unittest.TestCase):

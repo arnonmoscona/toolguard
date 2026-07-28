@@ -36,7 +36,9 @@ class TestResolveLogsDir(unittest.TestCase):
         with mock.patch(
             "toolguard.tools.corpus.resolve_project_root", return_value=resolution
         ):
-            self.assertEqual(resolve_logs_dir(Path("/proj/root/sub")), Path("/proj/root/logs"))
+            self.assertEqual(
+                resolve_logs_dir(Path("/proj/root/sub")), Path("/proj/root/logs")
+            )
 
     def test_falls_back_to_start_dir_when_root_unresolved(self):
         """
@@ -48,7 +50,9 @@ class TestResolveLogsDir(unittest.TestCase):
         with mock.patch(
             "toolguard.tools.corpus.resolve_project_root", return_value=resolution
         ):
-            self.assertEqual(resolve_logs_dir(Path("/somewhere")), Path("/somewhere/logs"))
+            self.assertEqual(
+                resolve_logs_dir(Path("/somewhere")), Path("/somewhere/logs")
+            )
 
 
 class TestHarvestCorpus(unittest.TestCase):
@@ -63,24 +67,28 @@ class TestHarvestCorpus(unittest.TestCase):
         log_entry = _entry("2026-06-20 10:00:00", "git status")
         transcript_entry = _entry("2026-06-19 09:00:00", "ls -la")
         resolution = mock.Mock(root=Path("/proj"))
-        with mock.patch(
-            "toolguard.tools.corpus.resolve_project_root", return_value=resolution
-        ), mock.patch(
-            "toolguard.tools.corpus.harvest", return_value=[log_entry]
-        ) as log_harvest, mock.patch(
-            "toolguard.tools.corpus.harvest_transcripts", return_value=[transcript_entry]
-        ) as transcript_harvest, mock.patch(
-            "toolguard.tools.corpus.transcript_dir_for_project",
-            return_value=Path("/home/.claude/projects/x"),
+        with (
+            mock.patch(
+                "toolguard.tools.corpus.resolve_project_root", return_value=resolution
+            ),
+            mock.patch(
+                "toolguard.tools.corpus.harvest", return_value=[log_entry]
+            ) as log_harvest,
+            mock.patch(
+                "toolguard.tools.corpus.harvest_transcripts",
+                return_value=[transcript_entry],
+            ) as transcript_harvest,
+            mock.patch(
+                "toolguard.tools.corpus.transcript_dir_for_project",
+                return_value=Path("/home/.claude/projects/x"),
+            ),
         ):
             corpus = harvest_corpus(Path("/proj"), max_age_days=30)
         self.assertEqual([e.command for e in corpus], ["ls -la", "git status"])
         # The daily logs were read from <root>/logs, transcripts from the project dir.
         self.assertEqual(log_harvest.call_args.args[0], Path("/proj/logs"))
         self.assertEqual(log_harvest.call_args.kwargs["max_age_days"], 30)
-        self.assertEqual(
-            transcript_harvest.call_args.kwargs["max_age_days"], 30
-        )
+        self.assertEqual(transcript_harvest.call_args.kwargs["max_age_days"], 30)
 
     def test_missing_sources_yield_empty_corpus(self):
         """
@@ -105,13 +113,17 @@ class TestHarvestCorpus(unittest.TestCase):
             <root>/logs or transcript-dir derivation).
         """
         resolution = mock.Mock(root=Path("/proj"))
-        with mock.patch(
-            "toolguard.tools.corpus.resolve_project_root", return_value=resolution
-        ), mock.patch(
-            "toolguard.tools.corpus.harvest", return_value=[]
-        ) as log_harvest, mock.patch(
-            "toolguard.tools.corpus.harvest_transcripts", return_value=[]
-        ) as transcript_harvest:
+        with (
+            mock.patch(
+                "toolguard.tools.corpus.resolve_project_root", return_value=resolution
+            ),
+            mock.patch(
+                "toolguard.tools.corpus.harvest", return_value=[]
+            ) as log_harvest,
+            mock.patch(
+                "toolguard.tools.corpus.harvest_transcripts", return_value=[]
+            ) as transcript_harvest,
+        ):
             harvest_corpus(
                 Path("/proj"),
                 logs_dir=Path("/custom/logs"),

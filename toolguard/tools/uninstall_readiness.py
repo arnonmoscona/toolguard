@@ -264,7 +264,9 @@ def evaluate_uninstall_readiness_permissions(
         declaration order.
     """
     statuses: List[UninstallReadinessStatus] = []
-    for permission in required_uninstall_readiness_permissions(claude_dir, settings_path):
+    for permission in required_uninstall_readiness_permissions(
+        claude_dir, settings_path
+    ):
         decision = decide(config, permission.tool, permission.probe)
         statuses.append(_status_for(permission, decision.verdict))
     return statuses
@@ -282,7 +284,9 @@ def missing_uninstall_readiness_permissions(
     """
     return [
         s
-        for s in evaluate_uninstall_readiness_permissions(config, claude_dir, settings_path)
+        for s in evaluate_uninstall_readiness_permissions(
+            config, claude_dir, settings_path
+        )
         if s.needs_action
     ]
 

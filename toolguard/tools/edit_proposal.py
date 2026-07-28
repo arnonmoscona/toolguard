@@ -90,9 +90,7 @@ class EditProposal:
     origin: str = ""
 
 
-def apply_edits(
-    config: Configuration, proposals: List[EditProposal]
-) -> Configuration:
+def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configuration:
     """
     Return the configuration that results from enacting ``proposals`` in memory.
 

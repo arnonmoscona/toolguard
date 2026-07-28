@@ -133,8 +133,7 @@ def _fake_config(
                 # a real Configuration (see TestNoMatchFallbackThroughMain).
                 return ResolvedDecision(
                     "ask",
-                    "Command does not match any allow patterns; "
-                    "no_match_fallback=ask",
+                    "Command does not match any allow patterns; no_match_fallback=ask",
                     None,
                     None,
                 )
@@ -1556,9 +1555,7 @@ class TestDoubleSlashNormalization(unittest.TestCase):
         When a real single-slash path `/Users/x/foo` is evaluated
         Then it is allowed (the `//` is normalized to `/` before matching)
         """
-        decision, _ = check_file_path_permission(
-            "/Users/x/foo", ["//Users/x/**"], []
-        )
+        decision, _ = check_file_path_permission("/Users/x/foo", ["//Users/x/**"], [])
         self.assertEqual(decision, "allow")
 
     def test_double_slash_deny_still_denies(self):
@@ -2013,9 +2010,7 @@ class TestHookCrashCapture(unittest.TestCase):
             # deny decision.
             first_stderr_line = mock_stderr.getvalue().splitlines()[0]
             output = json.loads(first_stderr_line)
-            self.assertEqual(
-                output["hookSpecificOutput"]["permissionDecision"], "deny"
-            )
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
 
             errors_dir = home / ".toolguard" / "errors"
             self.assertTrue(errors_dir.is_dir())
@@ -2115,9 +2110,7 @@ class TestHookCrashCapture(unittest.TestCase):
                     main()
 
             self.assertEqual(ctx.exception.code, 0)
-            self.assertIn(
-                "not a standalone command", mock_stderr.getvalue()
-            )
+            self.assertIn("not a standalone command", mock_stderr.getvalue())
             errors_dir = home / ".toolguard" / "errors"
             self.assertFalse(errors_dir.exists())
 

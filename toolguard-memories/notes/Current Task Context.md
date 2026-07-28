@@ -10,9 +10,12 @@ tags:
 
 The task currently being worked on:
 
-- [[TOO-30 XDG rules directory - Requirements and Plan]]
+- [[TOO-19 Structured Rule Entries - Rule-Match Enrichment]]
 
 ## History
+- 2026-07-24: switched from TOO-30 (XDG rules directory; landed) to TOO-19 (structured
+  rule entries / additionalContext injection -- still raw-idea/discussion stage, no
+  implementation yet).
 - 2026-07-23: switched from TOO-15 (toolguard skills + config tooling; wrapped up) to TOO-30
   (XDG `~/.config/toolguard/rules/` split-file user-level config directory).
 - 2026-06-23: switched from TOO-8 (wrapped up: hierarchical config + TOO-17 multi-line fix +

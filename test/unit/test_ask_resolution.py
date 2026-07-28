@@ -189,9 +189,7 @@ class TestAskResolution(unittest.TestCase):
         When the compound command is evaluated
         Then the compound verdict is 'ask' (any sub-command ask floats up)
         """
-        config = _config(
-            _layer(allow=["git status:*"], ask=["toolguard-maintain:*"])
-        )
+        config = _config(_layer(allow=["git status:*"], ask=["toolguard-maintain:*"]))
         self.assertEqual(
             decide(config, "Bash", "git status && toolguard-maintain --write").verdict,
             "ask",
@@ -204,7 +202,9 @@ class TestAskResolution(unittest.TestCase):
         Then behavior is unchanged by the ask fix (allow -> allow, deny -> deny)
         """
         self.assertEqual(
-            decide(_config(_layer(allow=["git status:*"])), "Bash", "git status").verdict,
+            decide(
+                _config(_layer(allow=["git status:*"])), "Bash", "git status"
+            ).verdict,
             "allow",
         )
         self.assertEqual(

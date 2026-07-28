@@ -431,7 +431,9 @@ class TestTakeoverConflictWithBlanketAllows(unittest.TestCase):
 
         findings = audit_takeover(config)
         conflict_findings = [
-            f for f in findings if f.finding_id == "takeover-conflict-with-blanket-allows"
+            f
+            for f in findings
+            if f.finding_id == "takeover-conflict-with-blanket-allows"
         ]
         self.assertEqual(len(conflict_findings), 1)
         self.assertEqual(conflict_findings[0].severity, AuditSeverity.HIGH)
@@ -468,7 +470,9 @@ class TestTakeoverConflictWithBlanketAllows(unittest.TestCase):
         config = _make_config(project_tg, user_tg, native_layer)
         findings = audit_takeover(config)
         conflict_findings = [
-            f for f in findings if f.finding_id == "takeover-conflict-with-blanket-allows"
+            f
+            for f in findings
+            if f.finding_id == "takeover-conflict-with-blanket-allows"
         ]
         self.assertEqual(conflict_findings, [])
 
@@ -562,7 +566,9 @@ class TestLooseNoMatchFallback(unittest.TestCase):
         )
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
-        fallback_findings = [f for f in findings if f.finding_id == "loose-no-match-fallback"]
+        fallback_findings = [
+            f for f in findings if f.finding_id == "loose-no-match-fallback"
+        ]
         self.assertEqual(len(fallback_findings), 1)
         self.assertEqual(fallback_findings[0].severity, AuditSeverity.LOW)
 
@@ -584,7 +590,9 @@ class TestLooseNoMatchFallback(unittest.TestCase):
         )
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
-        fallback_findings = [f for f in findings if f.finding_id == "loose-no-match-fallback"]
+        fallback_findings = [
+            f for f in findings if f.finding_id == "loose-no-match-fallback"
+        ]
         self.assertEqual(fallback_findings, [])
 
 
@@ -682,7 +690,9 @@ class TestHelperFunctions(unittest.TestCase):
             "PreToolUse": [
                 {
                     "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": "/usr/bin/something-else"}],
+                    "hooks": [
+                        {"type": "command", "command": "/usr/bin/something-else"}
+                    ],
                 }
             ]
         }

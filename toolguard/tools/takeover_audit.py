@@ -49,7 +49,12 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import List, Optional, Set, Tuple
 
-from toolguard.config import Configuration, Provenance, TakeoverConfig, _strip_tool_wrapper
+from toolguard.config import (
+    Configuration,
+    Provenance,
+    TakeoverConfig,
+    _strip_tool_wrapper,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +194,8 @@ def _get_blanket_allows_in_native(
     """
     # Build the set of RAW (as-authored, wrapper-preserved) ignored patterns
     raw_ignored = frozenset(
-        list(takeover.ignored_allow_patterns) + list(takeover.additional_ignored_patterns)
+        list(takeover.ignored_allow_patterns)
+        + list(takeover.additional_ignored_patterns)
     )
 
     uncovered: List[Tuple[str, Provenance]] = []
@@ -441,7 +447,7 @@ def audit_takeover(
                     "unexpected commands."
                 ),
                 remediation=(
-                    "Set no_match_fallback = \"deny\" in [takeover_mode] of your "
+                    'Set no_match_fallback = "deny" in [takeover_mode] of your '
                     "toolguard_hook.toml/json to restore fail-closed behaviour."
                 ),
             )

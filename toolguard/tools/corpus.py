@@ -52,7 +52,9 @@ def resolve_logs_dir(project_dir: Optional[Path] = None) -> Path:
         The expected daily-log directory (``<project-root>/logs``).
     """
     resolution = resolve_project_root(project_dir)
-    root = resolution.root if resolution.root is not None else (project_dir or Path("."))
+    root = (
+        resolution.root if resolution.root is not None else (project_dir or Path("."))
+    )
     return root / DEFAULT_LOGS_SUBDIR
 
 
@@ -92,7 +94,9 @@ def harvest_corpus(
         sources (may be empty).
     """
     resolution = resolve_project_root(project_dir)
-    root = resolution.root if resolution.root is not None else (project_dir or Path("."))
+    root = (
+        resolution.root if resolution.root is not None else (project_dir or Path("."))
+    )
 
     logs = logs_dir if logs_dir is not None else (root / DEFAULT_LOGS_SUBDIR)
     transcripts = (

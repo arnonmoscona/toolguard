@@ -46,7 +46,9 @@ class TestMigrationPreflight(unittest.TestCase):
         Then it is safe with no blockers.
         """
         clean = WorkingTreeStatus(is_git_repo=True, is_clean=True, dirty_paths=())
-        with mock.patch(f"{_GATE}.resolve_project_root", return_value=_resolved_anchor()):
+        with mock.patch(
+            f"{_GATE}.resolve_project_root", return_value=_resolved_anchor()
+        ):
             with mock.patch(f"{_GATE}.working_tree_status", return_value=clean):
                 result = migration_preflight(Path("/repo/pkg"))
         self.assertIsInstance(result, MigrationPreflight)
@@ -62,7 +64,9 @@ class TestMigrationPreflight(unittest.TestCase):
         dirty = WorkingTreeStatus(
             is_git_repo=True, is_clean=False, dirty_paths=("a.py", "b.py")
         )
-        with mock.patch(f"{_GATE}.resolve_project_root", return_value=_resolved_anchor()):
+        with mock.patch(
+            f"{_GATE}.resolve_project_root", return_value=_resolved_anchor()
+        ):
             with mock.patch(f"{_GATE}.working_tree_status", return_value=dirty):
                 result = migration_preflight(Path("/repo"))
         self.assertFalse(result.is_safe)

@@ -10,7 +10,9 @@ sort_layer_rules handles all three lists (allow/deny/ask) correctly.
 """
 
 import unittest
+from types import MappingProxyType
 
+from toolguard.rule_entry import RuleEntry
 from toolguard.tools.sorters import sort_patterns, sort_layer_rules, stable_rule_key
 
 
@@ -148,6 +150,44 @@ class TestSortPatterns(unittest.TestCase):
         self.assertTrue(all(p.startswith("Bash(") for p in result))
         lowered = [p.lower() for p in result]
         self.assertEqual(lowered, sorted(lowered))
+
+
+class TestSortPatternsWithRuleEntry(unittest.TestCase):
+    """
+    toolguard.tools.sorters.sort_patterns re-exports toolguard.rule_sort's
+    canonical implementation unchanged (TOO-19 Phase 0a increment 8); these
+    confirm that re-export tolerates RuleEntry the same as the source module.
+    """
+
+    def test_does_not_raise_on_structured_entry(self):
+        """
+        Given a list mixing plain string patterns and a structured RuleEntry
+        When sort_patterns() (as exported by toolguard.tools.sorters) sorts it
+        Then no exception is raised (regression guard for the confirmed
+             "TypeError: unhashable type: 'dict'" defect)
+        """
+        structured = RuleEntry(
+            pattern="Bash(git *)",
+            metadata=MappingProxyType({"additionalContext": "be careful"}),
+        )
+        result = sort_patterns(["Read(/tmp/*)", structured, "Bash(a:*)"])
+        self.assertIn(structured, result)
+
+    def test_orders_by_pattern_ignoring_metadata(self):
+        """
+        Given two RuleEntry sharing a tool bucket but differing metadata
+        When sort_patterns() orders them alongside a plain string
+        Then ordering follows each entry's .pattern only -- metadata never
+             affects the sort position
+        """
+        entry_a = RuleEntry(
+            pattern="Bash(a:*)", metadata=MappingProxyType({"additionalContext": "x"})
+        )
+        entry_b = RuleEntry(
+            pattern="Bash(b:*)", metadata=MappingProxyType({"additionalContext": "y"})
+        )
+        result = sort_patterns([entry_b, "Read(/tmp/*)", entry_a])
+        self.assertEqual(result, [entry_a, entry_b, "Read(/tmp/*)"])
 
 
 class TestSortLayerRules(unittest.TestCase):

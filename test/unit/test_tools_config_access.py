@@ -141,6 +141,41 @@ ask = ["Bash(sudo:*)"]
             self.assertIn("rm -rf:*", project_layer.deny)
             self.assertIn("sudo:*", project_layer.ask)
 
+    def test_per_layer_rules_surfaces_structured_ask_entry(self):
+        """
+        Given a toolguard_hook.toml whose "ask" list contains a structured
+            ({match = ..., additionalContext = ...}) entry rather than a bare
+            string
+        When per_layer_rules is called with tool_name='Bash'
+        Then the structured entry's pattern is present in the layer's ask
+            tuple -- TOO-19 fix: the previous hand-rolled ask extraction only
+            recognized bare strings (isinstance(perm, str)) and silently
+            dropped a structured ask entry, making it invisible to
+            maintenance/security-audit tooling
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proj = Path(tmpdir) / "proj"
+            proj.mkdir()
+            (proj / ".git").mkdir()
+            claude = proj / ".claude"
+            _write_toml(
+                claude,
+                "toolguard_hook.toml",
+                """
+[permissions]
+allow = []
+deny = []
+ask = [{ match = "Bash(sudo:*)", additionalContext = "needs review" }]
+""",
+            )
+            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
+                config = load_config(proj)
+                layers = per_layer_rules(config, "Bash")
+
+            project_layer = layers[0]
+            self.assertIn("sudo:*", project_layer.ask)
+
     def test_per_layer_rules_native_layer_has_no_ask(self):
         """
         Given a native Claude settings.json file with allow rules
@@ -455,6 +490,23 @@ class TestDiscoverTools(unittest.TestCase):
         tools = discover_tools(config)
         self.assertIn("Bash", tools)
 
+    def test_discovers_tool_governed_only_by_structured_entry(self):
+        """
+        TOO-19 fix: given a config whose ONLY rule for a tool is a structured
+            ({match = ..., additionalContext = ...}) allow entry -- no bare
+            string entry for that tool at all
+        When discover_tools is called
+        Then the tool is still discovered -- previously the bare
+            isinstance(perm, str) check silently skipped structured entries,
+            so a tool governed only by one was invisible to this function
+        """
+
+        structured = {"match": "Bash(sudo:*)", "additionalContext": "needs review"}
+        layer = _toolguard_layer(allow=[structured])
+        config = _make_config(layer)
+        tools = discover_tools(config)
+        self.assertIn("Bash", tools)
+
 
 # ---------------------------------------------------------------------------
 # Tests for neutralized_by_takeover
@@ -625,7 +677,9 @@ class TestAuditContext(unittest.TestCase):
         bash_tool = next(tc for tc in ctx.tools if tc.tool == "Bash")
         toolguard_layer_ctxs = [lc for lc in bash_tool.layers if not lc.is_native]
         self.assertGreater(
-            len(toolguard_layer_ctxs), 0, "Expected at least one non-native LayerContext"
+            len(toolguard_layer_ctxs),
+            0,
+            "Expected at least one non-native LayerContext",
         )
 
     def test_neutralized_allow_patterns_empty_when_takeover_off(self):
@@ -692,7 +746,9 @@ class TestAuditContext(unittest.TestCase):
         config = _make_config(tg_layer, native)
         ctx = audit_context(config)
         pats = list(ctx.neutralized_allow_patterns)
-        self.assertEqual(pats, sorted(set(pats)), "Patterns should be sorted and unique")
+        self.assertEqual(
+            pats, sorted(set(pats)), "Patterns should be sorted and unique"
+        )
 
 
 class TestRuleCommentExposure(unittest.TestCase):
@@ -839,3 +895,145 @@ class TestRuleCommentExposure(unittest.TestCase):
         self.assertEqual(with_reason.nosecurity_reason(), "because dev")
         self.assertEqual(bare.nosecurity_reason(), "")
         self.assertIsNone(untagged.nosecurity_reason())
+
+
+class TestRuleCommentExposureStructuredEntries(unittest.TestCase):
+    """
+    Comment/NOSECURITY recovery for a structured (``{ match = ..., ... }``) entry.
+
+    A structured entry is valid TOML only on a single physical line (TOML 1.0
+    forbids an inline table from spanning multiple physical lines -- see
+    ``toolguard.rule_sort``'s top-of-file docstring); a ``#`` inside one of its
+    quoted metadata values must never be mistaken for a comment. This class
+    previously also covered a MULTI-line variant of each scenario; TOO-19's
+    corrective change made that variant a parse FAILURE (not a supported
+    shape), so those cases were converted to instead assert the safe
+    degrade-on-parse-failure behaviour ``_layer_comment_map`` now has (see
+    ``test_multiline_structured_entry_degrades_to_no_comments_recovered``
+    below) rather than testing content-recovery details that no longer apply.
+    """
+
+    _SINGLE_LINE_NOSECURITY = (
+        "[permissions]\n"
+        "allow = [\n"
+        '    { match = "Bash(git status)", additionalContext = "read-only" },'
+        "  # NOSECURITY: reviewed\n"
+        "]\n"
+        "deny = []\n"
+        "ask = []\n"
+    )
+
+    _MULTILINE_NOSECURITY = (
+        "[permissions]\n"
+        "allow = [\n"
+        '    { match = "Bash(git status)",\n'
+        '      additionalContext = "read-only" },'
+        "  # NOSECURITY: reviewed multiline\n"
+        "]\n"
+        "deny = []\n"
+        "ask = []\n"
+    )
+
+    _SINGLE_LINE_HASH_IN_VALUE = (
+        "[permissions]\n"
+        "allow = [\n"
+        '    { match = "Bash(git status)", additionalContext = "see issue #42" },\n'
+        "]\n"
+        "deny = []\n"
+        "ask = []\n"
+    )
+
+    _SINGLE_LINE_LEADING_AND_INLINE = (
+        "[permissions]\n"
+        "allow = [\n"
+        "    # reviewed during the TOO-19 audit\n"
+        '    { match = "Bash(git status)", additionalContext = "read-only" },'
+        "  # keep for CI\n"
+        "]\n"
+        "deny = []\n"
+        "ask = []\n"
+    )
+
+    def _prov(self, path: Path) -> Provenance:
+        """Build a toolguard_hook Provenance pointing at a real TOML file path."""
+        return Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=path,
+            specificity=0,
+        )
+
+    def test_nosecurity_on_single_line_structured_entry_recovered(self):
+        """
+        Given an allow rule written as a single-line structured entry
+        ('{ match = "Bash(git status)", additionalContext = "read-only" }') with a
+        trailing '# NOSECURITY: reviewed' comment
+        When nosecurity_reason_for is called for that rule's pattern
+        Then it returns the reason 'reviewed'
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._SINGLE_LINE_NOSECURITY, encoding="utf-8")
+            self.assertEqual(
+                nosecurity_reason_for(self._prov(path), "allow", "Bash", "git status"),
+                "reviewed",
+            )
+
+    def test_multiline_structured_entry_degrades_to_no_comments_recovered(self):
+        """
+        Given a structured entry written across two physical lines with a
+        '# NOSECURITY: reviewed multiline' comment on its own last line -- not
+        valid TOML 1.0 (an inline table must be single-line; see
+        toolguard.rule_sort's top-of-file docstring), so the raw file fails to
+        parse
+        When nosecurity_reason_for is called for that rule's pattern
+        Then it returns None -- a parse failure degrades to "no comment
+        recovered" (the same safe direction as an unreadable file), rather
+        than raising and crashing whatever's iterating comments across a
+        whole config hierarchy (TOO-19 corrective change: this was previously
+        NOT a parse failure at all, because this module pre-normalized the
+        multi-line entry before handing it to tomllib -- see rule_sort.py's
+        module docstring for why that was wrong)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._MULTILINE_NOSECURITY, encoding="utf-8")
+            self.assertIsNone(
+                nosecurity_reason_for(self._prov(path), "allow", "Bash", "git status")
+            )
+
+    def test_hash_inside_single_line_structured_value_is_not_an_inline_comment(self):
+        """
+        Given a single-line structured entry whose 'additionalContext' value itself
+        contains a '#' ('see issue #42') and no real trailing comment
+        When nosecurity_reason_for is called for that rule's pattern
+        Then it returns None -- the '#' inside the quoted value is never mistaken
+        for a comment start
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._SINGLE_LINE_HASH_IN_VALUE, encoding="utf-8")
+            self.assertIsNone(
+                nosecurity_reason_for(self._prov(path), "allow", "Bash", "git status")
+            )
+
+    def test_leading_and_inline_comments_recovered_for_single_line_structured_entry(
+        self,
+    ):
+        """
+        Given a single-line structured entry preceded by a leading human comment and
+        followed by a same-line trailing comment
+        When rule_comments_for_tool is called for 'Bash'
+        Then the returned RuleComment carries both the leading comment and the
+        inline comment, each recovered correctly
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._SINGLE_LINE_LEADING_AND_INLINE, encoding="utf-8")
+            comments = rule_comments_for_tool(self._prov(path), "Bash")
+            by_pattern = {c.pattern: c for c in comments}
+            self.assertIn("git status", by_pattern)
+            comment = by_pattern["git status"]
+            self.assertIn("reviewed during the TOO-19 audit", comment.leading)
+            self.assertEqual(comment.inline, "# keep for CI")

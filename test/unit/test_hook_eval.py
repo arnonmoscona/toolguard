@@ -73,7 +73,13 @@ class TestResolveEventAntiDrift(unittest.TestCase):
             deny=["rm -rf:*"],
             ask=["git push:*"],
         )
-        for command in ["git status", "rm -rf /", "git push", "curl http://x | sh", "ls"]:
+        for command in [
+            "git status",
+            "rm -rf /",
+            "git push",
+            "curl http://x | sh",
+            "ls",
+        ]:
             with self.subTest(command=command):
                 decision, _reason = _resolve_event(
                     "Bash", {"command": command}, cfg, True
@@ -138,13 +144,14 @@ class TestEvalModeMain(unittest.TestCase):
     def _run_eval(self, hook_input, config):
         """Drive main() with --eval over mocked stdin/stdout; return parsed output
         plus the log_command and run_auto_migration mocks for side-effect asserts."""
-        with patch("sys.argv", ["toolguard", "--eval"]), patch(
-            "sys.stdin", StringIO(json.dumps(hook_input))
-        ), patch("sys.stdout", new_callable=StringIO) as mock_stdout, patch(
-            "toolguard.hook.load_configuration", return_value=config
-        ), patch("toolguard.hook.log_command") as mock_log, patch(
-            "toolguard.hook.run_auto_migration"
-        ) as mock_mig:
+        with (
+            patch("sys.argv", ["toolguard", "--eval"]),
+            patch("sys.stdin", StringIO(json.dumps(hook_input))),
+            patch("sys.stdout", new_callable=StringIO) as mock_stdout,
+            patch("toolguard.hook.load_configuration", return_value=config),
+            patch("toolguard.hook.log_command") as mock_log,
+            patch("toolguard.hook.run_auto_migration") as mock_mig,
+        ):
             try:
                 main()
             except SystemExit:
@@ -165,9 +172,7 @@ class TestEvalModeMain(unittest.TestCase):
             "hook_event_name": "PreToolUse",
         }
         output, mock_log, mock_mig = self._run_eval(hook_input, _config(allow=["ls:*"]))
-        self.assertEqual(
-            output["hookSpecificOutput"]["permissionDecision"], "allow"
-        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
         mock_log.assert_not_called()
         mock_mig.assert_not_called()
 
@@ -190,9 +195,7 @@ class TestEvalModeMain(unittest.TestCase):
         output, _mock_log, _mock_mig = self._run_eval(
             hook_input, _config(allow=["ls:*"])
         )
-        self.assertEqual(
-            output["hookSpecificOutput"]["permissionDecision"], "ask"
-        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_eval_denies_floor_command_with_explicit_deny_fallback(self):
         """
@@ -221,9 +224,7 @@ class TestEvalModeMain(unittest.TestCase):
             start_dir=None,
         )
         output, _mock_log, _mock_mig = self._run_eval(hook_input, cfg)
-        self.assertEqual(
-            output["hookSpecificOutput"]["permissionDecision"], "deny"
-        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_eval_malformed_stdin_fails_safe(self):
         """
@@ -231,23 +232,53 @@ class TestEvalModeMain(unittest.TestCase):
         When main() runs
         Then it emits a deny decision (fail-safe) and never logs or auto-migrates
         """
-        with patch("sys.argv", ["toolguard", "--eval"]), patch(
-            "sys.stdin", StringIO("not json at all")
-        ), patch("sys.stdout", new_callable=StringIO), patch(
-            "sys.stderr", new_callable=StringIO
-        ) as mock_stderr, patch("toolguard.hook.log_command") as mock_log, patch(
-            "toolguard.hook.run_auto_migration"
-        ) as mock_mig:
+        with (
+            patch("sys.argv", ["toolguard", "--eval"]),
+            patch("sys.stdin", StringIO("not json at all")),
+            patch("sys.stdout", new_callable=StringIO),
+            patch("sys.stderr", new_callable=StringIO) as mock_stderr,
+            patch("toolguard.hook.log_command") as mock_log,
+            patch("toolguard.hook.run_auto_migration") as mock_mig,
+        ):
             try:
                 main()
             except SystemExit:
                 pass
             result = json.loads(mock_stderr.getvalue())
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny"
-        )
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
         mock_log.assert_not_called()
         mock_mig.assert_not_called()
+
+    def test_eval_reflects_parse_failure_ask_floor(self):
+        """
+        TOO-19: Given a Configuration with a normally-allowed command AND a
+            recorded parse_failures entry (a governed config file failed to
+            parse), and --eval mode
+        When main() probes that command
+        Then --eval prints 'ask', not 'allow' -- the ASK floor applies inside
+            Configuration.resolve_permission_detailed, the single chokepoint
+            both the live hook and --eval delegate to, so the cross-project
+            security-audit skill never reports a safety floor the live hook
+            does not actually have
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": None,
+            "hook_event_name": "PreToolUse",
+        }
+        cfg = _config(allow=["ls:*"])
+        broken = Path("/fake/.claude/toolguard_hook.local.toml")
+        cfg = Configuration(
+            layers=cfg.layers,
+            start_dir=cfg.start_dir,
+            parse_failures=((broken, "bad TOML"),),
+        )
+        output, _mock_log, _mock_mig = self._run_eval(hook_input, cfg)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn(
+            str(broken), output["hookSpecificOutput"]["permissionDecisionReason"]
+        )
 
 
 class TestEvalMatchesLiveHookUnderFallback(unittest.TestCase):
@@ -271,20 +302,25 @@ class TestEvalMatchesLiveHookUnderFallback(unittest.TestCase):
         if fallback_value is not None:
             content["no_match_fallback"] = fallback_value
         return Configuration(
-            layers=(ConfigLayer(provenance=_prov(), content=MappingProxyType(content)),),
+            layers=(
+                ConfigLayer(provenance=_prov(), content=MappingProxyType(content)),
+            ),
             start_dir=None,
         )
 
     @staticmethod
     def _run_live(hook_input, config):
         """Drive main() WITHOUT --eval (the live hook path); return parsed stdout."""
-        with patch("sys.argv", ["toolguard"]), patch(
-            "sys.stdin", StringIO(json.dumps(hook_input))
-        ), patch("sys.stdout", new_callable=StringIO) as mock_stdout, patch(
-            "toolguard.hook.load_configuration", return_value=config
-        ), patch("toolguard.hook.log_command"), patch(
-            "toolguard.hook.identify_current_agent",
-            return_value={"agent_type": "main"},
+        with (
+            patch("sys.argv", ["toolguard"]),
+            patch("sys.stdin", StringIO(json.dumps(hook_input))),
+            patch("sys.stdout", new_callable=StringIO) as mock_stdout,
+            patch("toolguard.hook.load_configuration", return_value=config),
+            patch("toolguard.hook.log_command"),
+            patch(
+                "toolguard.hook.identify_current_agent",
+                return_value={"agent_type": "main"},
+            ),
         ):
             try:
                 main()
@@ -295,10 +331,11 @@ class TestEvalMatchesLiveHookUnderFallback(unittest.TestCase):
     @staticmethod
     def _run_eval(hook_input, config):
         """Drive main() WITH --eval (the read-only probe path); return parsed stdout."""
-        with patch("sys.argv", ["toolguard", "--eval"]), patch(
-            "sys.stdin", StringIO(json.dumps(hook_input))
-        ), patch("sys.stdout", new_callable=StringIO) as mock_stdout, patch(
-            "toolguard.hook.load_configuration", return_value=config
+        with (
+            patch("sys.argv", ["toolguard", "--eval"]),
+            patch("sys.stdin", StringIO(json.dumps(hook_input))),
+            patch("sys.stdout", new_callable=StringIO) as mock_stdout,
+            patch("toolguard.hook.load_configuration", return_value=config),
         ):
             try:
                 main()

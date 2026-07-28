@@ -452,7 +452,11 @@ class TestPermissionModeLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "cd /tmp", "ask", note="no match", log_dir=log_dir, permission_mode="default"
+                "cd /tmp",
+                "ask",
+                note="no match",
+                log_dir=log_dir,
+                permission_mode="default",
             )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"

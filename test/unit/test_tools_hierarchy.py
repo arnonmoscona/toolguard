@@ -147,7 +147,9 @@ class TestEvaluateMigration(unittest.TestCase):
             _layer(mid, deny=["whoami:*"]),
             _layer(user),
         )
-        migration = HierarchyMigration("Bash", "allow", "whoami:*", proj, user, "promote")
+        migration = HierarchyMigration(
+            "Bash", "allow", "whoami:*", proj, user, "promote"
+        )
         effect = evaluate_migration(config, migration, [_entry("whoami")])
         self.assertFalse(effect.decision_neutral)
         self.assertEqual(effect.tightened_count, 1)
@@ -160,7 +162,9 @@ class TestEvaluateMigration(unittest.TestCase):
         """
         proj, user = _prov(0, "proj"), _prov(2, "user")
         config = _config(_layer(proj), _layer(user, allow=["git status:*"]))
-        migration = HierarchyMigration("Bash", "allow", "git status:*", user, proj, "demote")
+        migration = HierarchyMigration(
+            "Bash", "allow", "git status:*", user, proj, "demote"
+        )
         effect = evaluate_migration(config, migration, [_entry("git status")])
         self.assertIn("Demotion", effect.scope_note)
 

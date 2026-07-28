@@ -46,10 +46,14 @@ def _config(
         path=Path("/fake/.claude/toolguard_hook.toml"),
         specificity=0,
     )
-    return Configuration(layers=(ConfigLayer(provenance=prov, content=content),), start_dir=None)
+    return Configuration(
+        layers=(ConfigLayer(provenance=prov, content=content),), start_dir=None
+    )
 
 
-def _finding(kind: str, guard_section: str = "deny", explanation: str = "EXPL") -> InteractionFinding:
+def _finding(
+    kind: str, guard_section: str = "deny", explanation: str = "EXPL"
+) -> InteractionFinding:
     """Build a minimal InteractionFinding for annotation-text tests."""
     prov = Provenance(
         level="project",
@@ -98,7 +102,9 @@ class TestAnnotationText(unittest.TestCase):
         When its annotation text is built
         Then it flags the extra governing section and the non-obvious verdict
         """
-        note = _annotation_text(_finding("multi-section-interaction", guard_section="deny+ask"))
+        note = _annotation_text(
+            _finding("multi-section-interaction", guard_section="deny+ask")
+        )
         self.assertIn("also governed by deny+ask", note)
         self.assertIn("non-obvious", note)
 
@@ -229,6 +235,80 @@ class TestAnnotateSectionText(unittest.TestCase):
         ann = {"Bash(git:*)": ["note one", "note two"]}
         out = annotate_section_text(_SECTION, ann)
         self.assertEqual(out.count(TOOLGUARD_MARKER), 2)
+
+
+_STRUCTURED_ENTRY_SECTION = (
+    "[permissions]\n"
+    "allow = [\n"
+    '    { match = "Bash(git status)", additionalContext = "read-only" },\n'
+    "    'Bash(ls:*)',\n"
+    "]\n"
+    "deny = [\n"
+    "    'Bash(git push:*)',\n"
+    "]\n"
+    "ask = []\n"
+)
+
+
+class TestAnnotateSectionTextStructuredEntry(unittest.TestCase):
+    """
+    A single-line structured ({ match = ..., ... }) entry is annotated like any
+    other rule.
+
+    TOO-19 corrective change: a structured entry is only ever valid TOML on a
+    single physical line (see toolguard.rule_sort's top-of-file docstring), so
+    this class now uses ONLY single-line structured entries -- it previously
+    also covered a multi-line entry, which parse_permissions_section_with_comments
+    (called transitively by annotate_section_text) now correctly rejects with
+    tomllib.TOMLDecodeError rather than accepting.
+    """
+
+    _ANN = {
+        "Bash(git status)": ["deny 'git push:*' shadows part of this allow (deny wins)"]
+    }
+
+    def test_structured_entry_gets_exactly_one_note_above_its_line(self):
+        """
+        Given a single-line structured allow entry with an annotation for its
+        pattern
+        When annotate_section_text runs
+        Then exactly one '# toolguard:' line is inserted, immediately above the
+        entry's own line, at its indentation
+        """
+        out = annotate_section_text(_STRUCTURED_ENTRY_SECTION, self._ANN)
+        self.assertEqual(out.count(TOOLGUARD_MARKER), 1)
+        lines = out.split("\n")
+        idx = next(
+            i
+            for i, ln in enumerate(lines)
+            if "match = " in ln and "Bash(git status)" in ln
+        )
+        self.assertTrue(lines[idx - 1].strip().startswith(TOOLGUARD_MARKER))
+        self.assertTrue(lines[idx - 1].startswith("    "))
+
+    def test_structured_entry_annotation_is_idempotent(self):
+        """
+        Given an already-annotated single-line structured entry
+        When annotate_section_text runs again with the same annotations
+        Then the result is unchanged (no accreted duplicate comments)
+        """
+        once = annotate_section_text(_STRUCTURED_ENTRY_SECTION, self._ANN)
+        twice = annotate_section_text(once, self._ANN)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count(TOOLGUARD_MARKER), 1)
+
+    def test_structured_entry_preserves_its_own_source_line_verbatim(self):
+        """
+        Given a single-line structured allow entry
+        When annotate_section_text runs
+        Then the entry's own line is preserved verbatim (only a new comment
+        line is inserted above it)
+        """
+        out = annotate_section_text(_STRUCTURED_ENTRY_SECTION, self._ANN)
+        self.assertIn(
+            '    { match = "Bash(git status)", additionalContext = "read-only" },',
+            out,
+        )
 
 
 class TestAnnotateConfigFile(unittest.TestCase):

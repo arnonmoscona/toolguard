@@ -205,7 +205,11 @@ def _body_fnmatch_matches_any(body: str, literal_prefixes: Tuple[str, ...]) -> b
     """
     body_lower = body.strip().lower()
     for prefix in literal_prefixes:
-        if body_lower == prefix or body_lower.startswith(prefix + " ") or body_lower.startswith(prefix + ":"):
+        if (
+            body_lower == prefix
+            or body_lower.startswith(prefix + " ")
+            or body_lower.startswith(prefix + ":")
+        ):
             return True
     return False
 
@@ -267,7 +271,7 @@ _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
     # _body_fnmatch_matches_any strips the body, so "node " could never match.
     "sh -c",
     "bash -c",
-    "python:",   # handle toolguard pattern form python:*
+    "python:",  # handle toolguard pattern form python:*
     "python3:",
     "node:",
     "ruby:",
@@ -323,7 +327,11 @@ def _is_arbitrary_exec(tool: str, body: str, ptype: PatternType) -> bool:
             return True
         # Also catch bare "python:*" / "python3:*" style (body is "python" exactly)
         for bare in _ARBITRARY_EXEC_BARE:
-            if body_lower == bare or body_lower.startswith(bare + ":") or body_lower.startswith(bare + " "):
+            if (
+                body_lower == bare
+                or body_lower.startswith(bare + ":")
+                or body_lower.startswith(bare + " ")
+            ):
                 return True
         return False
 
@@ -589,9 +597,7 @@ def danger(
         findings.extend(_audit_tool(config, tool, takeover, ignored_extracted))
 
     # Sort: severity descending, then tool, then pattern
-    findings.sort(
-        key=lambda f: (-f.severity.value, f.tool, f.pattern)
-    )
+    findings.sort(key=lambda f: (-f.severity.value, f.tool, f.pattern))
     return findings
 
 

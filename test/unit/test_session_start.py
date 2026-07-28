@@ -31,6 +31,7 @@ from toolguard.config import (
 from toolguard.session_start import (
     _check_dynamic_conflicts,
     _count_conflict_entries,
+    _detect_broken_config_files,
     _detect_conflicts,
     _format_summary,
     _parse_session_start_input,
@@ -432,9 +433,111 @@ class TestFormatSummary(unittest.TestCase):
         self.assertIn("project", summary)
         self.assertIn("user", summary)
 
+    def test_no_conflicts_no_broken_files_returns_empty_string(self):
+        """
+        Given no static conflict, no dynamic conflict, and no broken files
+        When _format_summary is called
+        Then the result is an empty string (main() only prints when at least
+            one section is non-empty; this documents that contract)
+        """
+        summary = _format_summary(None, None)
+        self.assertEqual(summary, "")
+
+    def test_includes_broken_file_section_when_present(self):
+        """
+        TOO-19: Given one broken (unparseable) config file and no takeover
+            conflicts
+        When _format_summary is called with broken_files set
+        Then the result names the broken file, its parse error, and states
+            that toolguard is falling back to ask for every tool call
+        """
+        broken = Path("/proj/.claude/toolguard_hook.local.toml")
+        summary = _format_summary(None, None, broken_files=((broken, "bad TOML"),))
+        self.assertIn(str(broken), summary)
+        self.assertIn("bad TOML", summary)
+        self.assertIn("ASK", summary)
+        self.assertIn("BROKEN", summary)
+
+    def test_broken_file_section_coexists_with_conflict_section(self):
+        """
+        TOO-19: Given both a broken config file AND a static takeover
+            conflict
+        When _format_summary is called with both
+        Then the result contains both the broken-file section and the
+            existing conflict-detected section, unmodified
+        """
+        conflict = _make_conflict()
+        broken = Path("/proj/.claude/toolguard_hook.toml")
+        summary = _format_summary(conflict, None, broken_files=((broken, "boom"),))
+        self.assertIn(str(broken), summary)
+        self.assertIn("configuration conflicts detected", summary)
+        self.assertIn("takeover_mode.enabled", summary)
+
+    def test_existing_conflict_only_output_unchanged_by_new_parameter(self):
+        """
+        Given a static + dynamic conflict combination identical to
+            test_includes_header_line, called WITHOUT broken_files
+        When _format_summary is called
+        Then the output is byte-identical to calling it with the explicit
+            default broken_files=() -- the new optional parameter does not
+            alter the pre-existing conflict-only formatting
+        """
+        conflict = _make_conflict()
+        dynamic = ("logs/toolguard-conflict-2025-01-01.md", 2)
+        without_default = _format_summary(conflict, dynamic)
+        with_explicit_default = _format_summary(conflict, dynamic, broken_files=())
+        self.assertEqual(without_default, with_explicit_default)
+
+
+class TestDetectBrokenConfigFiles(unittest.TestCase):
+    """
+    Tests for _detect_broken_config_files (TOO-19).
+
+    TOO-19 review fix: this function now takes an already-loaded
+    Configuration directly (no load_configuration() call of its own -- see
+    the function's docstring for why), so these tests build and pass a
+    Configuration double straight in rather than patching
+    toolguard.session_start.load_configuration.
+    """
+
+    def test_returns_parse_failures_from_configuration(self):
+        """
+        Given a Configuration whose parse_failures has one entry
+        When _detect_broken_config_files is called with it
+        Then it returns that same (path, message) tuple
+        """
+        broken = Path("/fake/.claude/toolguard_hook.toml")
+        config = MagicMock(spec=Configuration)
+        config.parse_failures = ((broken, "bad TOML"),)
+
+        result = _detect_broken_config_files(config)
+
+        self.assertEqual(result, ((broken, "bad TOML"),))
+
+    def test_returns_empty_tuple_when_no_parse_failures(self):
+        """
+        Given a Configuration with an empty parse_failures
+        When _detect_broken_config_files is called with it
+        Then it returns an empty tuple
+        """
+        config = MagicMock(spec=Configuration)
+        config.parse_failures = ()
+
+        result = _detect_broken_config_files(config)
+
+        self.assertEqual(result, ())
+
 
 class TestDetectConflicts(unittest.TestCase):
-    """Tests for _detect_conflicts -- integration-like, mocking load_configuration."""
+    """
+    Tests for _detect_conflicts.
+
+    TOO-19 review fix: this function now takes an already-loaded
+    Configuration directly (no load_configuration() call of its own -- see
+    the function's docstring for why), so these tests build and pass a
+    Configuration double straight in rather than patching
+    toolguard.session_start.load_configuration.
+    """
 
     def _make_config_with_conflict(self, conflict=None, project_root=None):
         """Build a Configuration mock with the given takeover conflict and project_root."""
@@ -453,47 +556,44 @@ class TestDetectConflicts(unittest.TestCase):
     def test_returns_static_conflict_when_present(self):
         """
         Given a configuration with a TakeoverEnabledConflict
-        When _detect_conflicts is called
+        When _detect_conflicts is called with it
         Then the returned static_conflict is the TakeoverEnabledConflict
         """
         expected_conflict = _make_conflict()
         config = self._make_config_with_conflict(conflict=expected_conflict)
 
-        with patch("toolguard.session_start.load_configuration", return_value=config):
-            static_conflict, dynamic_conflict = _detect_conflicts("/tmp")
+        static_conflict, dynamic_conflict = _detect_conflicts(config)
 
         self.assertIs(static_conflict, expected_conflict)
 
     def test_returns_no_static_conflict_when_none(self):
         """
         Given a configuration with no takeover conflict
-        When _detect_conflicts is called
+        When _detect_conflicts is called with it
         Then static_conflict is None
         """
         config = self._make_config_with_conflict(conflict=None)
 
-        with patch("toolguard.session_start.load_configuration", return_value=config):
-            static_conflict, _dynamic = _detect_conflicts("/tmp")
+        static_conflict, _dynamic = _detect_conflicts(config)
 
         self.assertIsNone(static_conflict)
 
     def test_returns_no_dynamic_conflict_when_no_log_dir(self):
         """
         Given a configuration with no project_root (hence no log_dir)
-        When _detect_conflicts is called
+        When _detect_conflicts is called with it
         Then dynamic_conflict is None
         """
         config = self._make_config_with_conflict(conflict=None, project_root=None)
 
-        with patch("toolguard.session_start.load_configuration", return_value=config):
-            _static, dynamic_conflict = _detect_conflicts("/tmp")
+        _static, dynamic_conflict = _detect_conflicts(config)
 
         self.assertIsNone(dynamic_conflict)
 
     def test_returns_dynamic_conflict_when_log_file_has_entries(self):
         """
         Given a project_root whose logs/ directory has a conflict log with entries
-        When _detect_conflicts is called
+        When _detect_conflicts is called with a configuration pointing at it
         Then dynamic_conflict is a (path_str, count) tuple
         """
         with TemporaryDirectory() as tmpdir:
@@ -507,10 +607,7 @@ class TestDetectConflicts(unittest.TestCase):
                 conflict=None, project_root=project_root
             )
 
-            with patch(
-                "toolguard.session_start.load_configuration", return_value=config
-            ):
-                _static, dynamic_conflict = _detect_conflicts(str(project_root))
+            _static, dynamic_conflict = _detect_conflicts(config)
 
         self.assertIsNotNone(dynamic_conflict)
         path_str, count = dynamic_conflict
@@ -519,13 +616,12 @@ class TestDetectConflicts(unittest.TestCase):
     def test_handles_missing_project_root_gracefully(self):
         """
         Given a configuration with project_root=None (no project found)
-        When _detect_conflicts is called
+        When _detect_conflicts is called with it
         Then it completes without raising and returns (None, None)
         """
         config = self._make_config_with_conflict(conflict=None, project_root=None)
 
-        with patch("toolguard.session_start.load_configuration", return_value=config):
-            static_conflict, dynamic_conflict = _detect_conflicts(None)
+        static_conflict, dynamic_conflict = _detect_conflicts(config)
 
         self.assertIsNone(static_conflict)
         self.assertIsNone(dynamic_conflict)
@@ -658,6 +754,50 @@ class TestMain(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("4", stdout_text)
         self.assertIn("toolguard-conflict-2025-06-18.md", stdout_text)
+
+    def test_stdout_alert_when_config_broken(self):
+        """
+        TOO-19: Given a Configuration reporting a broken (unparseable) config
+            file via parse_failures, and no takeover conflicts
+        When main() is called
+        Then stdout names the broken file and states toolguard is falling
+            back to ask -- the loudest channel (SessionStart stdout is
+            injected into the session context) surfaces this even when no
+            takeover conflict exists, and the hook still exits 0
+        """
+        broken = Path("/proj/.claude/toolguard_hook.local.toml")
+        config = MagicMock(spec=Configuration)
+        config.takeover_mode.return_value = TakeoverConfig(
+            enabled=False,
+            ignored_allow_patterns=(),
+            additional_ignored_patterns=(),
+            no_match_fallback="deny",
+            conflict=None,
+        )
+        config.project_root = None
+        config.parse_failures = ((broken, "bad TOML"),)
+
+        payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
+        stdout_text, exit_code = self._run_main_with_stdin(payload, config=config)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(str(broken), stdout_text)
+        self.assertIn("ASK", stdout_text)
+
+    def test_no_stdout_when_no_conflicts_or_broken_files_default_mock(self):
+        """
+        TOO-19 regression guard: Given the default no-conflict MagicMock(spec=
+            Configuration) used throughout this test class, which does NOT
+            explicitly set parse_failures
+        When main() is called
+        Then nothing is printed -- _detect_broken_config_files must treat an
+            unconfigured mock's parse_failures the same as a real empty
+            tuple (via iteration, not bare truthiness), so this pre-existing
+            test fixture shape is unaffected by the new check
+        """
+        payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
+        stdout_text, _exit = self._run_main_with_stdin(payload)
+        self.assertEqual(stdout_text.strip(), "")
 
     def test_graceful_on_load_configuration_exception(self):
         """

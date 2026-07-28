@@ -3,13 +3,20 @@ Unit tests for permission migration script.
 """
 
 import json
+import tomllib
 import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
+from toolguard.config_write_guard import (
+    ConfigWriteVerificationError,
+    verified_write_config,
+)
+from toolguard.rule_entry import RuleEntry, normalize_entries_preserving, real_patterns
 from toolguard.scripts.migrate_permissions import (
     create_backup,
     detect_similar_patterns,
@@ -205,9 +212,7 @@ class TestBackupCreation(unittest.TestCase):
                 mock_datetime.now.return_value = fixed_now
                 backup_path = create_backup(source_file, backup_dir)
 
-            self.assertEqual(
-                backup_path.name, "settings.local.2026-02-05-143022.json"
-            )
+            self.assertEqual(backup_path.name, "settings.local.2026-02-05-143022.json")
 
 
 class TestPatternKeyExtraction(unittest.TestCase):
@@ -434,6 +439,45 @@ class TestPatternSorting(unittest.TestCase):
         self.assertEqual(get_tool_priority("Edit(/tmp/*)"), (3, "edit(/tmp/*)"))
         self.assertEqual(get_tool_priority("Grep(pattern)"), (4, "grep(pattern)"))
 
+    def test_sort_patterns_tolerates_structured_entry_without_raising(self):
+        """
+        Given a list mixing a structured RuleEntry (metadata, not a raw dict)
+             and plain string patterns
+        When sort_patterns() sorts the list
+        Then it does not raise (regression guard for the confirmed
+             "TypeError: unhashable type: 'dict'" defect in get_tool_priority)
+             and orders purely by .pattern, ignoring metadata
+        """
+        structured = RuleEntry(
+            pattern="Bash(git *)",
+            metadata=MappingProxyType({"additionalContext": "be careful"}),
+            raw={"match": "Bash(git *)", "additionalContext": "be careful"},
+        )
+        entries = ["Write(/tmp/*)", structured, "Read(/tmp/*)"]
+
+        result = sort_patterns(entries)
+
+        # No TypeError raised (the fix). Bash sorts first regardless of the
+        # structured entry's metadata; Read then Write follow.
+        self.assertIs(result[0], structured)
+        self.assertEqual(result[1], "Read(/tmp/*)")
+        self.assertEqual(result[2], "Write(/tmp/*)")
+
+    def test_get_tool_priority_ignores_ruleentry_metadata(self):
+        """
+        Given two RuleEntry with the same pattern but different metadata
+        When get_tool_priority() computes each one's sort key
+        Then both keys are identical -- metadata never affects ordering
+        """
+        a = RuleEntry(
+            pattern="Bash(git *)", metadata=MappingProxyType({"additionalContext": "x"})
+        )
+        b = RuleEntry(
+            pattern="Bash(git *)", metadata=MappingProxyType({"additionalContext": "y"})
+        )
+        self.assertEqual(get_tool_priority(a), get_tool_priority(b))
+        self.assertEqual(get_tool_priority(a), (0, "bash(git *)"))
+
 
 class TestTOMLConfigWriting(unittest.TestCase):
     """Test writing TOML configuration files."""
@@ -512,6 +556,70 @@ class TestTOMLConfigWriting(unittest.TestCase):
             # Check that quotes are escaped
             self.assertIn('echo \\"test\\"', content)
 
+    def test_same_pattern_different_metadata_both_survive_write_round_trip(self):
+        """
+        TOO-19 Change 4 fix: given an existing TOML file with two structured
+            entries sharing the same pattern but different additionalContext
+            values (the shape merge_entries's case-3 contradiction handling
+            deliberately preserves side-by-side)
+        When write_toml_config() re-writes the file with both entries kept
+            unchanged, in the same relative order
+        Then BOTH entries' distinct additionalContext values are present in
+            the rewritten file -- previously the writer's rule_lines/
+            rule_comments dicts were keyed by pattern alone, so the second
+            entry's text silently overwrote the first's on write
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            original = (
+                "[permissions]\n"
+                "allow = [\n"
+                '  { match = "Bash(git push:*)", additionalContext = "first note" },\n'
+                '  { match = "Bash(git push:*)", additionalContext = "second note" },\n'
+                "]\n"
+            )
+            config_path.write_text(original)
+
+            first_entry = RuleEntry(
+                pattern="Bash(git push:*)",
+                metadata=MappingProxyType({"additionalContext": "first note"}),
+                raw={
+                    "match": "Bash(git push:*)",
+                    "additionalContext": "first note",
+                },
+            )
+            second_entry = RuleEntry(
+                pattern="Bash(git push:*)",
+                metadata=MappingProxyType({"additionalContext": "second note"}),
+                raw={
+                    "match": "Bash(git push:*)",
+                    "additionalContext": "second note",
+                },
+            )
+            permissions = {
+                "allow": [first_entry, second_entry],
+                "deny": [],
+                "ask": [],
+            }
+
+            write_toml_config(config_path, permissions, auto_sort=False)
+
+            content = config_path.read_text()
+            self.assertIn("first note", content)
+            self.assertIn("second note", content)
+            # Both original structured-entry lines are reused byte-for-byte
+            # (not just their metadata substrings, which a bug limited to
+            # e.g. list ORDER could still pass).
+            self.assertIn(
+                '{ match = "Bash(git push:*)", additionalContext = "first note" },',
+                content,
+            )
+            self.assertIn(
+                '{ match = "Bash(git push:*)", additionalContext = "second note" },',
+                content,
+            )
+            self.assertLess(content.index("first note"), content.index("second note"))
+
 
 class TestJSONConfigWriting(unittest.TestCase):
     """Test writing JSON configuration files."""
@@ -573,6 +681,287 @@ class TestJSONConfigWriting(unittest.TestCase):
             self.assertEqual(config["governed_tools"], ["Bash", "Read"])
             self.assertEqual(config["other_setting"], "value")
             self.assertEqual(config["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_write_json_config_preserves_structured_entry_without_raising(self):
+        """
+        Given a permissions dict whose allow list mixes a structured RuleEntry
+             and a plain string, with auto_sort enabled
+        When write_json_config() writes the JSON file
+        Then it does not raise (the same TypeError sort defect also reaches the
+             JSON write path via sort_patterns), the structured entry is
+             emitted as a genuine JSON object (never a stringified dict), and
+             it sorts ahead of the plain string per its Bash pattern
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.json"
+
+            structured = RuleEntry(
+                pattern="Bash(git *)",
+                metadata=MappingProxyType({"additionalContext": "be careful"}),
+            )
+            permissions = {
+                "allow": ["Read(/tmp/*)", structured],
+                "deny": [],
+                "ask": [],
+            }
+
+            write_json_config(config_path, permissions, auto_sort=True)
+
+            with open(config_path, "r") as f:
+                config = json.load(f)
+
+            allow = config["permissions"]["allow"]
+            self.assertEqual(len(allow), 2)
+            self.assertIsInstance(allow[0], dict)
+            self.assertEqual(allow[0]["match"], "Bash(git *)")
+            self.assertEqual(allow[0]["additionalContext"], "be careful")
+            self.assertEqual(allow[1], "Read(/tmp/*)")
+
+
+class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
+    """
+    TOO-19 corrective change (Change 2): write_toml_config() and
+    write_json_config() must route every write through
+    toolguard.config_write_guard.verified_write_config(), never a raw
+    Path.write_text()/open(...).write() -- so a write that would produce
+    unparseable text or silently drop a pattern is refused before anything
+    touches disk.
+    """
+
+    def test_write_toml_config_new_file_calls_verified_write_config(self):
+        """
+        Given a config_path that does not yet exist (the "new file" branch)
+        When write_toml_config() is called
+        Then toolguard.config_write_guard.verified_write_config() is invoked
+            with file_format="toml" and expected_patterns covering every
+            pattern in the permissions being written
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            permissions = {"allow": ["Bash(ls:*)"], "deny": ["Bash(rm:*)"], "ask": []}
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.verified_write_config"
+            ) as mock_write:
+                write_toml_config(config_path, permissions, auto_sort=True)
+
+            mock_write.assert_called_once()
+            args, kwargs = mock_write.call_args
+            self.assertEqual(args[0], config_path)
+            self.assertEqual(args[2], "toml")
+            self.assertEqual(
+                set(kwargs["expected_patterns"]), {"Bash(ls:*)", "Bash(rm:*)"}
+            )
+
+    def test_write_toml_config_section_replace_calls_verified_write_config(self):
+        """
+        Given an existing TOML file with a [permissions] section (the
+            "replace existing section" branch)
+        When write_toml_config() is called
+        Then verified_write_config() is invoked with file_format="toml" and
+            expected_patterns covering the newly-written permissions
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            config_path.write_text('[permissions]\nallow = ["Bash(ls:*)"]\n')
+            permissions = {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.verified_write_config"
+            ) as mock_write:
+                write_toml_config(config_path, permissions, auto_sort=True)
+
+            mock_write.assert_called_once()
+            _args, kwargs = mock_write.call_args
+            self.assertEqual(set(kwargs["expected_patterns"]), {"Bash(git:*)"})
+
+    def test_write_toml_config_append_branch_calls_verified_write_config(self):
+        """
+        Given an existing TOML file with NO [permissions] section (the
+            "append at end" branch)
+        When write_toml_config() is called
+        Then verified_write_config() is invoked with file_format="toml"
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            config_path.write_text("[hard_deny]\ndeny = []\n")
+            permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.verified_write_config"
+            ) as mock_write:
+                write_toml_config(config_path, permissions, auto_sort=True)
+
+            mock_write.assert_called_once()
+            args, kwargs = mock_write.call_args
+            self.assertEqual(args[2], "toml")
+            self.assertEqual(set(kwargs["expected_patterns"]), {"Bash(ls:*)"})
+
+    def test_write_json_config_calls_verified_write_config(self):
+        """
+        Given a permissions dict to write to a JSON config file
+        When write_json_config() is called
+        Then verified_write_config() is invoked with file_format="json" and
+            expected_patterns covering the newly-written permissions
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.json"
+            permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.verified_write_config"
+            ) as mock_write:
+                write_json_config(config_path, permissions, auto_sort=True)
+
+            mock_write.assert_called_once()
+            args, kwargs = mock_write.call_args
+            self.assertEqual(args[0], config_path)
+            self.assertEqual(args[2], "json")
+            self.assertEqual(set(kwargs["expected_patterns"]), {"Bash(ls:*)"})
+
+    def test_write_toml_config_refuses_when_guard_raises(self):
+        """
+        Given verified_write_config() raising ConfigWriteVerificationError
+            (simulating a would-be corrupting write)
+        When write_toml_config() is called
+        Then the error propagates out of write_toml_config() unmodified, and
+            (since the mock never actually touches disk) no file is created
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
+
+            with patch(
+                "toolguard.scripts.migrate_permissions.verified_write_config",
+                side_effect=ConfigWriteVerificationError(
+                    config_path, "invalid TOML", "boom"
+                ),
+            ):
+                with self.assertRaises(ConfigWriteVerificationError):
+                    write_toml_config(config_path, permissions, auto_sort=True)
+
+            self.assertFalse(config_path.exists())
+
+
+class TestWriteConfigToleratesMalformedEntries(unittest.TestCase):
+    """
+    TOO-19 review-round-2 fix: a single malformed structured entry (or any
+    other JSON element normalize_entry() can't normalize) must never block
+    writing the REST of the file. Before the fix,
+    normalize_entries_preserving()'s synthesized repr()-based pattern for
+    such an entry was fed straight into expected_patterns, which the guard
+    could never find in the real written text -- refusing every write
+    (confirmed repro). These exercise the REAL (unmocked)
+    verified_write_config path end-to-end, unlike
+    TestWriteConfigRoutesThroughVerificationGuard above.
+    """
+
+    def test_toml_write_survives_a_malformed_structured_entry(self):
+        """
+        Given an existing TOML file whose [permissions] allow list contains
+            one valid string entry and one structured entry MISSING its
+            "match" key, normalized via normalize_entries_preserving() (the
+            write-path chokepoint) and handed straight back to
+            write_toml_config()
+        When write_toml_config() is called
+        Then the write succeeds (no ConfigWriteVerificationError) and the
+            malformed entry round-trips verbatim in the file
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            original = (
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(ls)",\n'
+                '  { additionalContext = "oops" },\n'
+                "]\n"
+            )
+            config_path.write_text(original)
+
+            existing = tomllib.loads(original)["permissions"]
+            entries = {
+                perm_type: list(
+                    normalize_entries_preserving(
+                        existing.get(perm_type, []), is_native=False
+                    )
+                )
+                for perm_type in ("allow", "deny", "ask")
+            }
+
+            write_toml_config(config_path, entries, auto_sort=False)
+
+            written = tomllib.loads(config_path.read_text())["permissions"]["allow"]
+            self.assertIn("Bash(ls)", written)
+            self.assertIn({"additionalContext": "oops"}, written)
+
+    def test_json_write_survives_a_non_string_element(self):
+        """
+        Given an existing JSON config whose allow list contains a valid
+            string entry and a non-string element (a bare int), normalized
+            via normalize_entries_preserving() and handed back to
+            write_json_config()
+        When write_json_config() is called
+        Then the write succeeds and the non-string element round-trips
+            verbatim
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.json"
+            existing = {"allow": ["Bash(ls)", 42], "deny": [], "ask": []}
+            entries = {
+                perm_type: list(
+                    normalize_entries_preserving(
+                        existing.get(perm_type, []), is_native=False
+                    )
+                )
+                for perm_type in ("allow", "deny", "ask")
+            }
+
+            write_json_config(config_path, entries, auto_sort=False)
+
+            written = json.loads(config_path.read_text())["permissions"]["allow"]
+            self.assertIn("Bash(ls)", written)
+            self.assertIn(42, written)
+
+    def test_write_still_refused_when_a_real_pattern_is_genuinely_dropped(self):
+        """
+        Given entries that include BOTH a malformed (synthesized-pattern)
+            entry AND a real pattern, but the file's parsed structure has a
+            duplicate-pattern collision that causes the writer to actually
+            drop that real pattern's text (simulated directly at the
+            verified_write_config layer, since real_patterns() only affects
+            which patterns are EXCLUDED as synthetic -- it must never affect
+            whether a genuinely-missing REAL pattern is still caught)
+        When verified_write_config() is called with the real pattern in
+            expected_patterns but text that omits it
+        Then ConfigWriteVerificationError is still raised -- confirming the
+            synthesized-pattern exclusion fix does not weaken the
+            content-loss guard's actual safety net (see
+            test_config_write_guard.TestVerifiedWriteConfigContentLossGuard
+            for the guard's own direct coverage of this)
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\nallow = ["Bash(ls)", "Bash(git status)"]\n'
+            config_path.write_text(original)
+
+            entries = normalize_entries_preserving(
+                ["Bash(ls)", {"nope": "malformed"}], is_native=False
+            )
+            # real_patterns() must still surface the genuine "Bash(ls)"
+            # pattern (excluding only the synthesized one) -- confirming the
+            # exclusion is targeted, not a blanket weakening.
+            self.assertEqual(real_patterns(entries), ["Bash(ls)"])
+
+            # Text that drops "Bash(git status)" entirely -- a genuine loss.
+            new_text = '[permissions]\nallow = ["Bash(ls)"]\n'
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(
+                    config_path,
+                    new_text,
+                    "toml",
+                    expected_patterns=real_patterns(entries) + ["Bash(git status)"],
+                )
+            self.assertEqual(config_path.read_text(), original)
 
 
 class TestSettingsFileUpdate(unittest.TestCase):
@@ -799,6 +1188,82 @@ deny = []
         # - Bash(git:*) and Read(/tmp/*) were migrated
         self.assertEqual(updated_settings["permissions"]["allow"], [])
         self.assertEqual(exit_code, 0)
+
+    def test_structured_entry_round_trips_byte_identical_through_migrate(self):
+        """
+        Given an existing toolguard_hook.toml whose allow list has ONE structured
+        entry ({match=..., additionalContext=...}) with its own leading comment,
+        plus settings.local.json with one genuinely new (divergent) native pattern
+        When migrate() runs (not dry-run)
+        Then the structured entry's original line AND its leading comment survive
+             byte-identical, it keeps its sorted position ahead of the newly
+             migrated pattern, and the file still parses as valid TOML with the
+             entry's metadata intact.
+
+        This is the W1 headline regression guard: before the fix, this exact
+        scenario silently deleted the structured entry from the file (the last
+        remaining `isinstance(perm, str)` filter, in
+        Configuration.toolguard_permissions(), made the entry look
+        "divergent" from native, and the merge-then-rewrite path in migrate()
+        then wrote a merged_perms that never contained it).
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            "  # review this rule carefully\n"
+            '  { match = "Bash(git *)", additionalContext = "review carefully" },\n'
+            '  "Bash(ls *)",\n'
+            "]\n"
+            "deny = []\n"
+            "ask = []\n"
+        )
+        toml_path.write_text(toml_content)
+
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(pwd)"],
+                "deny": [],
+                "ask": [],
+            }
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
+
+        exit_code = migrate(project_root)
+        self.assertEqual(exit_code, 0)
+
+        content = toml_path.read_text()
+
+        # The structured entry's original line, byte-identical, INCLUDING its
+        # leading comment -- the round-trip guarantee.
+        self.assertIn(
+            "  # review this rule carefully\n"
+            '  { match = "Bash(git *)", additionalContext = "review carefully" },\n',
+            content,
+        )
+
+        # Position: the structured entry (git) still sorts ahead of ls, which
+        # sorts ahead of the newly-migrated pwd pattern.
+        git_pos = content.index('match = "Bash(git *)"')
+        ls_pos = content.index('"Bash(ls *)"')
+        pwd_pos = content.index('"Bash(pwd)"')
+        self.assertLess(git_pos, ls_pos)
+        self.assertLess(ls_pos, pwd_pos)
+
+        # The file is still valid TOML, and the structured entry's metadata is
+        # intact -- not stringified, not dropped.
+        reparsed = tomllib.loads(content)
+        allow = reparsed["permissions"]["allow"]
+        structured = [e for e in allow if isinstance(e, dict)]
+        self.assertEqual(len(structured), 1)
+        self.assertEqual(structured[0]["match"], "Bash(git *)")
+        self.assertEqual(structured[0]["additionalContext"], "review carefully")
 
     def test_migration_skips_identical_patterns(self):
         """
@@ -1303,6 +1768,62 @@ auto_migrate = false
             self.assertLess(permissions_pos, config_sync_pos)
 
 
+class TestStructuredEntryFallbackRendering(unittest.TestCase):
+    """
+    reassemble_permissions_section's synthesize-from-scratch fallback (TOO-19
+    Phase 0a increment 8): a NEW structured entry (no original source line to
+    reuse) must render as a valid single-line TOML inline table, never a
+    stringified dict.
+    """
+
+    def test_new_structured_entry_renders_as_valid_inline_table(self):
+        """
+        Given an existing TOML config with a [permissions] section containing
+             only plain-string rules, and a NEW structured RuleEntry (no
+             matching original line) added to the allow list passed to
+             write_toml_config
+        When write_toml_config rewrites the file
+        Then the new entry is emitted as a single-line TOML inline table
+             (not a Python-repr'd dict), and the resulting file re-parses with
+             tomllib into the same match/metadata values
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+            config_path.write_text(
+                '[permissions]\nallow = [\n  "Bash(ls:*)",\n]\ndeny = []\n'
+            )
+
+            new_entry = RuleEntry(
+                pattern="Bash(git *)",
+                metadata=MappingProxyType({"additionalContext": "review carefully"}),
+            )
+            permissions = {
+                "allow": [
+                    RuleEntry(pattern="Bash(ls:*)", raw="Bash(ls:*)"),
+                    new_entry,
+                ],
+                "deny": [],
+                "ask": [],
+            }
+            write_toml_config(config_path, permissions, auto_sort=False)
+
+            content = config_path.read_text()
+
+            # Not a Python repr -- a real TOML inline table.
+            self.assertNotIn("RuleEntry(", content)
+            self.assertIn(
+                '{ match = "Bash(git *)", additionalContext = "review carefully" }',
+                content,
+            )
+
+            reparsed = tomllib.loads(content)
+            allow = reparsed["permissions"]["allow"]
+            structured = [e for e in allow if isinstance(e, dict)]
+            self.assertEqual(len(structured), 1)
+            self.assertEqual(structured[0]["match"], "Bash(git *)")
+            self.assertEqual(structured[0]["additionalContext"], "review carefully")
+
+
 class TestCommentPreservation(unittest.TestCase):
     """Test that comments are preserved when rewriting TOML (Bug 2)."""
 
@@ -1768,7 +2289,9 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         home_claude_dir = home / ".claude"
         home_claude_dir.mkdir()
         user_toml_path = home_claude_dir / "toolguard_hook.toml"
-        user_toml_original = '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+        user_toml_original = (
+            '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+        )
         user_toml_path.write_text(user_toml_original)
 
         settings_path = claude_dir / "settings.local.json"
@@ -1813,7 +2336,9 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         home_claude_dir = home / ".claude"
         home_claude_dir.mkdir()
         user_toml_path = home_claude_dir / "toolguard_hook.toml"
-        user_toml_original = '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+        user_toml_original = (
+            '[permissions]\nallow = [\n  "Bash(other:*)",\n]\ndeny = []\n'
+        )
         user_toml_path.write_text(user_toml_original)
 
         settings_path = claude_dir / "settings.local.json"
@@ -1859,7 +2384,9 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         claude_dir.mkdir()
 
         toml_path = claude_dir / "toolguard_hook.toml"
-        toml_path.write_text('[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n')
+        toml_path.write_text(
+            '[permissions]\nallow = [\n  "Bash(git:*)",\n]\ndeny = []\n'
+        )
 
         settings_path = claude_dir / "settings.local.json"
         settings = {

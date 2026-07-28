@@ -199,6 +199,22 @@ _FOREIGN_INLINE_FLAGS = {
     "awk": ["-f"],
 }
 
+#: Matches a short-option token that carries (or is) an inline-code flag: an
+#: optional bundle of up to two other short flags, one of the inline-code
+#: letters ``c``/``e``/``r``, and an optional attached remainder (quoted or
+#: bare code with no separating space, e.g. ``-cimport``, ``-c'code'``).
+#: The ``{0,2}`` bound on the flag-bundle prefix is deliberate: it lets
+#: combined short flags like ``-uc`` match while rejecting unrelated
+#: word-like single-dash flags such as ``-name`` or ``-recurse`` (whose
+#: prefix before a trailing c/e/r would be longer than 2 letters).
+#:
+#: TOO-19: this is the single shared definition. :mod:`toolguard.compound`
+#: imports it from here (rather than each module keeping its own copy) so
+#: the bundled/attached-flag matching logic used for ASK-floor *detection*
+#: (this module) and for outer-command *extraction* (``compound.py``)
+#: cannot drift apart.
+INLINE_FLAG_TOKEN_RE: re.Pattern = re.compile(r"^-([a-zA-Z]{0,2})([cer])(.*)$")
+
 
 def _basename(name: str) -> str:
     """Return the basename (no path) of a command name.
@@ -251,11 +267,64 @@ def _is_foreign_executor(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _scan_for_inline_flag(remaining: List[str], inline_flags: List[str]) -> bool:
+    """Scan tokens after a foreign executor for an inline-code flag.
+
+    TOO-19: previously only ``remaining[0]`` (the single token immediately
+    after the executor) was checked, which meant an intervening flag (e.g.
+    ``python -u -c "..."``) or an attached/bundled flag (e.g. ``-cimport``,
+    ``-uc``) silently bypassed the ASK-floor security control. This scans
+    forward through any number of flag-shaped tokens, matching either an
+    exact flag (e.g. ``-c``) or a bundled/attached form recognised by
+    :data:`INLINE_FLAG_TOKEN_RE`.
+
+    Scanning **stops at the first token that is not itself a flag** (does
+    not start with ``-``): everything after such a token belongs to the
+    script/module being invoked, not to the interpreter itself. This is what
+    keeps ``python script.py -c foo`` and ``python -m mymod -c foo`` at
+    ``False`` -- ``script.py`` / ``mymod`` are non-flag tokens that end the
+    interpreter's own option list.
+
+    KNOWN LIMITATION (see TOO-19 implementation report): a flag whose value
+    is a SEPARATE non-flag token (e.g. Python's ``-X dev``) is
+    indistinguishable, under this rule, from a script/module argument, so
+    ``python -X dev -c "..."`` still scans as ``False``. Fixing that would
+    require a per-executor table of which flags consume a following
+    value-token without changing execution context -- judged out of scope
+    here and reported as a residual gap rather than silently accepted.
+
+    Args:
+        remaining: Tokens following the foreign executor token.
+        inline_flags: The exact flag strings (e.g. ``["-c"]``) that denote
+            inline code for this executor.
+
+    Returns:
+        True if an inline-code flag was found before the first non-flag
+        token (or end of input).
+    """
+    # Only single-letter flags (e.g. "-c") can appear in bundled/attached
+    # form via INLINE_FLAG_TOKEN_RE (which only recognises c/e/r letters).
+    inline_letters = {f[1:] for f in inline_flags if len(f) == 2 and f[0] == "-"}
+    for tok in remaining:
+        if tok in inline_flags:
+            return True
+        if not tok.startswith("-"):
+            return False
+        match = INLINE_FLAG_TOKEN_RE.match(tok)
+        if match and match.group(2) in inline_letters:
+            return True
+        # Some other flag we don't specifically recognise (e.g. -u, -B, -O,
+        # a long --flag) -- keep scanning, it doesn't end the option list.
+    return False
+
+
 def _detect_foreign_inline_code(cmd_text: str) -> bool:
     """Return True if cmd_text is a foreign executor with an inline code flag.
 
     Detects patterns like ``python3 -c "..."``, ``node -e "..."``,
-    ``uv run python -c "..."`` etc.
+    ``uv run python -c "..."``, and (TOO-19) forms with an intervening flag
+    (``python -u -c "..."``) or a bundled/attached flag (``python -uc
+    "..."``, ``python -cimport os``).
 
     Args:
         cmd_text: The command text to check.
@@ -270,9 +339,8 @@ def _detect_foreign_inline_code(cmd_text: str) -> bool:
         bn = _basename(tok)
         if not _is_foreign_executor(bn):
             continue
-        remaining = tokens[idx + 1 :]
         inline_flags = _FOREIGN_INLINE_FLAGS.get(bn, ["-c", "-e", "-r"])
-        if remaining and remaining[0] in inline_flags:
+        if _scan_for_inline_flag(tokens[idx + 1 :], inline_flags):
             return True
     return False
 

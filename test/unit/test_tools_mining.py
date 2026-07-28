@@ -120,7 +120,9 @@ class TestSignalClassification(unittest.TestCase):
         Then it is classified 'declined'.
         """
         config = _config(_layer(allow=["ls:*"]))
-        report = mine_rule_candidates(config, [_entry("Bash", "rm -rf /tmp/x", "REFUSED")])
+        report = mine_rule_candidates(
+            config, [_entry("Bash", "rm -rf /tmp/x", "REFUSED")]
+        )
         self.assertEqual(len(report.declined), 1)
         self.assertEqual(report.declined[0].command_key, "rm")
 
@@ -146,7 +148,9 @@ class TestSignalClassification(unittest.TestCase):
             }
         )
         config = _config(ConfigLayer(provenance=_prov(), content=content))
-        report = mine_rule_candidates(config, [_entry("Bash", "curl evil.test", "UNKNOWN")])
+        report = mine_rule_candidates(
+            config, [_entry("Bash", "curl evil.test", "UNKNOWN")]
+        )
         self.assertEqual(len(report.allow_candidates), 0)
         self.assertEqual(len(report.by_signal("denied")), 1)
 
@@ -185,7 +189,9 @@ class TestGroupingAndSorting(unittest.TestCase):
         git_groups = [g for g in report.groups if g.command_key == "git"]
         self.assertEqual(len(git_groups), 1)
         self.assertEqual(git_groups[0].occurrences, 3)
-        self.assertEqual(git_groups[0].distinct_commands, ("git diff HEAD", "git status"))
+        self.assertEqual(
+            git_groups[0].distinct_commands, ("git diff HEAD", "git status")
+        )
 
     def test_file_tool_groups_by_parent_directory(self):
         """

@@ -339,7 +339,9 @@ def harvest_transcripts(
             floor = age_floor
 
     try:
-        files = [c for c in transcripts_dir.iterdir() if c.is_file() and c.suffix == ".jsonl"]
+        files = [
+            c for c in transcripts_dir.iterdir() if c.is_file() and c.suffix == ".jsonl"
+        ]
     except OSError:
         return []
 

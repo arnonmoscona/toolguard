@@ -134,7 +134,9 @@ class CrossLayerRedundancy:
 # ---------------------------------------------------------------------------
 
 
-def migrate_config(config: Configuration, migration: HierarchyMigration) -> Configuration:
+def migrate_config(
+    config: Configuration, migration: HierarchyMigration
+) -> Configuration:
     """
     Build a synthetic config with the rule moved between layers.
 
@@ -282,7 +284,9 @@ def _nearest_broader_cover(
     Returns:
         The covering :class:`Provenance`, or ``None`` when nothing broader holds it.
     """
-    broader = [(spec, prov) for spec, prov in coverage.get(key, ()) if spec > specificity]
+    broader = [
+        (spec, prov) for spec, prov in coverage.get(key, ()) if spec > specificity
+    ]
     if not broader:
         return None
     return min(broader, key=lambda item: item[0])[1]

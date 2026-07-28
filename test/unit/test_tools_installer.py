@@ -1198,6 +1198,86 @@ class TestSummaryOutput(InstallerTestCase):
             "already" in lowered or "skip" in lowered or "unchanged" in lowered
         )
 
+    def test_register_hooks_preserves_existing_native_permissions(self):
+        """
+        TOO-19 review fix M2: given a user-scope settings.json that already
+        holds Claude Code's own NATIVE permissions.allow entries (unrelated
+        to toolguard's hooks)
+        When register-hooks merges its PreToolUse/SessionStart hooks into
+            that same file
+        Then the pre-existing native permission entries are still present,
+            byte-for-byte, in the resulting file (register-hooks now passes
+            expected_patterns computed from the file's own prior content, so
+            a merge bug that dropped them would be refused rather than
+            silently written)
+        """
+        settings_path = self.home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps({"permissions": {"allow": ["Bash(ls:*)", "Read(README.md)"]}})
+        )
+
+        code, _out = self.run_cli(
+            [
+                "register-hooks",
+                "--scope",
+                "user",
+                "--binary",
+                "/fake/toolguard",
+                "--governed-tools",
+                "Bash",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        data = json.loads(settings_path.read_text())
+        self.assertEqual(
+            data["permissions"]["allow"], ["Bash(ls:*)", "Read(README.md)"]
+        )
+        # And the hooks merge itself still happened.
+        self.assertIn("PreToolUse", data["hooks"])
+
+    def test_register_hooks_refuses_write_that_would_drop_native_permissions(self):
+        """
+        TOO-19 review fix M2: given a user-scope settings.json that already
+        holds a native permissions.allow entry, and a (simulated) merge bug
+        that would drop it from the serialized output
+        When register-hooks attempts to write the merged file
+        Then the write is refused (ConfigWriteVerificationError -> exit code
+            2) and the original file on disk is left completely untouched,
+            rather than silently losing the user's native permission rule
+        """
+        settings_path = self.home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        original_content = json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}})
+        settings_path.write_text(original_content)
+
+        real_dumps = installer_module.json.dumps
+
+        def _dumps_dropping_permissions(obj, *args, **kwargs):
+            """Simulate a merge bug that silently drops the permissions key."""
+            if isinstance(obj, dict) and "permissions" in obj:
+                obj = {k: v for k, v in obj.items() if k != "permissions"}
+            return real_dumps(obj, *args, **kwargs)
+
+        with patch.object(
+            installer_module.json, "dumps", side_effect=_dumps_dropping_permissions
+        ):
+            code, _out = self.run_cli(
+                [
+                    "register-hooks",
+                    "--scope",
+                    "user",
+                    "--binary",
+                    "/fake/toolguard",
+                    "--governed-tools",
+                    "Bash",
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(settings_path.read_text(), original_content)
+
     def test_seed_self_perms_no_op_summary_on_second_run(self):
         """
         Given seed-self-perms has already been run once
@@ -1922,6 +2002,98 @@ class TestSeedHardDeny(InstallerTestCase):
 
 
 # ---------------------------------------------------------------------------
+# config-write-guard wiring (TOO-19 review fix): every installer.py write of a
+# toolguard_hook.toml / settings.json must go through
+# toolguard.config_write_guard.verified_write_config, never a raw
+# _atomic_write_text -- these tests simulate a rendering bug that would have
+# produced corrupt or pattern-dropping text and confirm the write is refused
+# and the file on disk is left completely untouched.
+# ---------------------------------------------------------------------------
+
+
+class TestConfigWriteGuardWiring(InstallerTestCase):
+    """
+    Confirms installer.py's config-file writers refuse corrupt output.
+
+    Each test injects a broken renderer (standing in for a real bug in that
+    renderer) and checks that: (1) the CLI reports a non-zero exit rather than
+    silently writing garbage, and (2) any pre-existing file on disk is left
+    byte-for-byte unchanged -- the defining guarantee of
+    ``config_write_guard.verified_write_config``.
+    """
+
+    def test_write_config_refuses_corrupt_content_and_creates_no_file(self):
+        """
+        Given write-config's TOML renderer is broken and produces unparseable text
+        When write-config is run against a scope with no existing config file
+        Then the CLI exits non-zero and no toolguard_hook.toml is created at all
+        """
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        with patch.object(
+            installer_module,
+            "_render_config_toml",
+            return_value="governed_tools = [\n",  # unterminated list -- invalid TOML
+        ):
+            code, out = self.run_cli(
+                ["write-config", "--scope", "user", "--governed-tools", "Bash"]
+            )
+
+        self.assertNotEqual(code, 0)
+        self.assertFalse(config_path.exists())
+
+    def test_enable_takeover_refuses_corrupt_content_and_preserves_original(self):
+        """
+        Given a valid existing toolguard_hook.toml and a broken takeover-section
+        renderer that produces unparseable text
+        When enable-takeover is run
+        Then the CLI exits non-zero and the config file's bytes are completely
+        unchanged from before the attempted write (the backup made just before
+        the write is irrelevant here -- the ORIGINAL file itself must survive)
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        original_bytes = config_path.read_bytes()
+
+        with patch.object(
+            installer_module,
+            "_render_takeover_section",
+            return_value="[takeover_mode\nenabled = true\n",  # missing closing bracket
+        ):
+            code, out = self.run_cli(["enable-takeover", "--scope", "user"])
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(config_path.read_bytes(), original_bytes)
+
+    def test_seed_hard_deny_refuses_write_that_would_drop_existing_pattern(self):
+        """
+        Given an existing config with a hand-added custom [hard_deny] deny pattern,
+        and a broken hard-deny-section renderer that omits that pre-existing pattern
+        When seed-hard-deny is run
+        Then the CLI exits non-zero (the content-loss guard refuses the write) and
+        the config file's bytes are completely unchanged -- the custom pattern is
+        never silently dropped, even though the syntax itself would have been valid
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        existing = config_path.read_text()
+        config_path.write_text(
+            existing + '\n[hard_deny]\ndeny = [\n    "Read(**/custom-secret.key)",\n]\n'
+        )
+        original_bytes = config_path.read_bytes()
+
+        # Valid TOML, but silently drops the pre-existing custom-secret.key pattern.
+        with patch.object(
+            installer_module,
+            "_render_hard_deny_section",
+            return_value='[hard_deny]\ndeny = [\n    "Read(**/.env)",\n]\n',
+        ):
+            code, out = self.run_cli(["seed-hard-deny", "--scope", "user"])
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(config_path.read_bytes(), original_bytes)
+
+
+# ---------------------------------------------------------------------------
 # skills-status
 # ---------------------------------------------------------------------------
 
@@ -2290,6 +2462,120 @@ class TestSkillsStatus(InstallerTestCase):
             self.assertIn("scope", entry)
             self.assertIn("path", entry)
             self.assertIn("status", entry)
+
+
+class TestSeedCommandsWithStructuredEntries(InstallerTestCase):
+    """
+    Regression guards for review finding M3: the seed commands used to read raw
+    ``tomllib`` output straight into the write path, so a config already holding
+    structured ``{ match = ..., additionalContext = ... }`` entries crashed with
+    ``TypeError: unhashable type: 'dict'`` (via ``sort_patterns``) or
+    ``AttributeError: 'dict' object has no attribute 'replace'`` (via
+    ``_render_hard_deny_section``), and a raw ``in`` membership test silently
+    missed a structured entry so its pattern was re-added as a duplicate bare
+    string on every run.
+    """
+
+    def user_config_path(self):
+        """Return the path of the user-scope toolguard config in the fake HOME."""
+        return self.home / ".claude" / "toolguard_hook.toml"
+
+    def test_seed_self_perms_succeeds_when_config_holds_structured_entries(self):
+        """
+        Given a user-scope config whose permissions already contain a structured
+            entry carrying additionalContext
+        When seed-self-perms runs against it
+        Then it exits 0 rather than crashing on the unhashable dict, and the
+            structured entry's enrichment survives in the rewritten file
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+        # seed-self-perms creates the [permissions] section; only then can a
+        # structured entry be injected into it.
+        self.run_cli(["seed-self-perms", "--scope", "user"])
+        path = self.user_config_path()
+        text = path.read_text()
+        self.assertIn("allow = [", text)
+        text = text.replace(
+            "allow = [",
+            'allow = [\n    { match = "Bash(uv run *)", additionalContext = "keep me" },',
+            1,
+        )
+        path.write_text(text)
+
+        code, _ = self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        allow = tomllib.loads(path.read_text())["permissions"]["allow"]
+        self.assertIn(
+            {"match": "Bash(uv run *)", "additionalContext": "keep me"},
+            allow,
+        )
+
+    def test_seed_self_perms_does_not_duplicate_a_structured_self_permission(self):
+        """
+        Given a self-permission that is already present, but expressed as a
+            STRUCTURED entry rather than a bare string
+        When seed-self-perms runs
+        Then it recognises the pattern as already present and does NOT re-add it
+            as a duplicate plain string (membership is by pattern, not by raw
+            element identity)
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+        self.run_cli(["seed-self-perms", "--scope", "user"])
+        path = self.user_config_path()
+
+        allow = tomllib.loads(path.read_text())["permissions"]["allow"]
+        seeded = next((p for p in allow if isinstance(p, str)), None)
+        self.assertIsNotNone(seeded, "expected at least one seeded plain pattern")
+
+        # Re-express that same pattern in structured form.
+        text = path.read_text().replace(
+            f'"{seeded}",',
+            f'{{ match = "{seeded}", additionalContext = "note" }},',
+            1,
+        )
+        path.write_text(text)
+
+        code, _ = self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        allow = tomllib.loads(path.read_text())["permissions"]["allow"]
+        patterns = [p if isinstance(p, str) else p.get("match") for p in allow]
+        self.assertEqual(
+            patterns.count(seeded),
+            1,
+            f"{seeded!r} was re-added despite already being present in structured form",
+        )
+
+    def test_seed_hard_deny_succeeds_when_hard_deny_holds_structured_entries(self):
+        """
+        Given a user-scope config whose [hard_deny] section already contains a
+            structured entry
+        When seed-hard-deny runs against it
+        Then it exits 0 rather than raising AttributeError while rendering, and
+            the structured hard_deny entry's enrichment survives
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+        self.run_cli(["seed-hard-deny", "--scope", "user"])
+        path = self.user_config_path()
+
+        text = path.read_text()
+        self.assertIn("[hard_deny]", text)
+        text = text.replace(
+            "deny = [",
+            'deny = [\n    { match = "Bash(rm -rf /)", additionalContext = "never" },',
+            1,
+        )
+        path.write_text(text)
+
+        code, _ = self.run_cli(["seed-hard-deny", "--scope", "user"])
+
+        self.assertEqual(code, 0)
+        deny = tomllib.loads(path.read_text())["hard_deny"]["deny"]
+        self.assertIn(
+            {"match": "Bash(rm -rf /)", "additionalContext": "never"},
+            deny,
+        )
 
 
 if __name__ == "__main__":

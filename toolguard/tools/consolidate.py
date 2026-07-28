@@ -432,7 +432,10 @@ def _check_family1_safe(
         if decide(config, tool, cmd).verdict != decide(config_b, tool, cmd).verdict:
             changed += 1
     if changed:
-        return False, f"probe decision changes: {changed}/{len(probes)} (not equivalence-preserving)"
+        return (
+            False,
+            f"probe decision changes: {changed}/{len(probes)} (not equivalence-preserving)",
+        )
 
     # --- Corpus replay: require zero changed decisions (no broaden, no tighten) ---
     if corpus:
@@ -549,7 +552,9 @@ def _find_literal_alternations(
         suffix_tokens = first_cmd_tokens[pos + 1 :]
 
         # Build the consolidated [regex] pattern.
-        consolidated = _build_alternation_regex(prefix_tokens, varying_tokens, suffix_tokens)
+        consolidated = _build_alternation_regex(
+            prefix_tokens, varying_tokens, suffix_tokens
+        )
 
         # Safety check: probes + optional corpus replay.
         safe, evidence = _check_family1_safe(
@@ -617,9 +622,7 @@ def _check_family2_safe(
     Returns:
         Tuple of ``(passed, evidence_string)``.
     """
-    config_b = with_layer_allow_replaced(
-        config, tool, provenance, {small_body}, []
-    )
+    config_b = with_layer_allow_replaced(config, tool, provenance, {small_body}, [])
 
     # Positive probes: commands that match the small pattern and should
     # remain allowed after removal (by virtue of the larger pattern covering them).
@@ -810,7 +813,9 @@ def propose_consolidations(
     proposals.sort(
         key=lambda p: (
             p.kind,
-            p.layer_provenance.describe() if hasattr(p.layer_provenance, "describe") else str(p.layer_provenance),
+            p.layer_provenance.describe()
+            if hasattr(p.layer_provenance, "describe")
+            else str(p.layer_provenance),
             sorted(p.removed_patterns),
         )
     )
@@ -1031,7 +1036,9 @@ def propose_broadening_consolidations(
     proposals.sort(
         key=lambda p: (
             p.kind,
-            p.layer_provenance.describe() if hasattr(p.layer_provenance, "describe") else str(p.layer_provenance),
+            p.layer_provenance.describe()
+            if hasattr(p.layer_provenance, "describe")
+            else str(p.layer_provenance),
             sorted(p.removed_patterns),
         )
     )

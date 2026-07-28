@@ -145,12 +145,20 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
 
 def get_toolguard_permissions(config) -> Dict[str, List[str]]:
     """
-    Extract raw permissions from the resolved toolguard configuration.
+    Extract raw permission patterns from the resolved toolguard configuration.
 
     Only processes toolguard_hook layers (not native Claude settings), merged
     across all hierarchy levels with tool wrappers intact. Delegates entirely to
     the :class:`~toolguard.config.Configuration` abstraction, so this client never
     opens files, parses formats, or branches on discovery order.
+
+    ``Configuration.toolguard_permissions()`` returns
+    :class:`~toolguard.rule_entry.RuleEntry` tuples (TOO-19 Phase 0a increment
+    8); this function's own contract stays plain pattern strings, since every
+    caller here (divergence set-comparison, migration's redundancy/similarity
+    checks) only ever needs ``.pattern`` -- so the ``.pattern`` projection
+    happens once, right here, rather than pushing ``RuleEntry`` into callers
+    that have no use for its metadata.
 
     Args:
         config: A resolved :class:`~toolguard.config.Configuration`.
@@ -159,7 +167,9 @@ def get_toolguard_permissions(config) -> Dict[str, List[str]]:
         Dictionary with keys 'allow', 'deny', 'ask', each a list of patterns.
     """
     perms = config.toolguard_permissions()
-    return {key: list(perms[key]) for key in ("allow", "deny", "ask")}
+    return {
+        key: [entry.pattern for entry in perms[key]] for key in ("allow", "deny", "ask")
+    }
 
 
 def find_divergent_patterns(
@@ -198,7 +208,13 @@ def find_divergent_patterns(
         native_patterns = set(native.get(perm_type, []))
         toolguard_patterns = set(toolguard.get(perm_type, []))
 
-        # Find patterns in native but not in toolguard
+        # Find patterns in native but not in toolguard. Comparison #1 from
+        # RuleEntry.identity()'s docstring ("same RULE", pattern-only): both
+        # sides are already projected down to bare `.pattern` strings (see
+        # get_toolguard_permissions), never `identity()`, so a rule carrying
+        # metadata on one side and none/different metadata on the other is
+        # never reported divergent -- switching this to identity() would make
+        # migration re-add the "missing" native twin forever.
         divergent = native_patterns - toolguard_patterns
 
         # Filter out ignored patterns (only for 'allow' type in takeover mode)

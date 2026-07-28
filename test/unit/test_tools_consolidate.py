@@ -216,6 +216,35 @@ class TestWithLayerAllowReplaced(unittest.TestCase):
         self.assertEqual(len(rules_b), 1)
         self.assertIn("git status:*", rules_b[0].allow)
 
+    def test_inherits_structured_entry_preservation_from_delegate(self):
+        """
+        Given an allow list holding a plain pattern and a structured entry
+        When with_layer_allow_replaced removes only the plain pattern
+        Then it does not raise and the structured entry survives as the same
+            object (inherited from with_layer_rules_replaced via delegation).
+        """
+        prov = _make_provenance()
+        structured = {"match": "Bash(git push:*)", "additionalContext": "careful"}
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": ["Bash(git diff:*)", structured],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _make_config(layer)
+
+        result = with_layer_allow_replaced(config, "Bash", prov, {"git diff:*"}, [])
+
+        raw_allow = result.layers[0].content["permissions"]["allow"]
+        self.assertEqual(len(raw_allow), 1)
+        self.assertIs(raw_allow[0], structured)
+
 
 # ---------------------------------------------------------------------------
 # Step-0 regression: _config_without_allow delegation
@@ -232,7 +261,9 @@ class TestConfigWithoutAllowDelegation(unittest.TestCase):
         Then the returned config has only 'git status:*' in the allow list.
         """
         prov = _make_provenance()
-        layer = _make_layer("Bash", allow=["git diff:*", "git status:*"], provenance=prov)
+        layer = _make_layer(
+            "Bash", allow=["git diff:*", "git status:*"], provenance=prov
+        )
         config = _make_config(layer)
 
         result = _config_without_allow(config, "Bash", "git diff:*")
@@ -257,6 +288,44 @@ class TestConfigWithoutAllowDelegation(unittest.TestCase):
         result = _config_without_allow(config, "Bash", "git diff:*")
 
         self.assertIs(result, config)
+
+    def test_removes_structured_entry_by_pattern(self):
+        """
+        Given an allow list holding a structured entry (a dict, not a bare
+            string) whose 'match' pattern is 'Bash(git push:*)'
+        When _config_without_allow is called with 'git push:*'
+        Then the structured entry is actually removed (matched by PATTERN via
+            normalize_entry, not by raw `dict in list-of-str` identity, which
+            is always False for a structured element) and the returned config
+            is a NEW object, not the input unchanged.
+
+        Regression test for the confirmed TOO-19 Phase 0a increment 6 defect:
+        `wrapped_target in allow_list` compared a str against a list holding a
+        dict element and was always False, so the removal silently no-opped
+        and the corpus-redundancy replay saw "no decision changed", falsely
+        reporting the structured entry as redundant.
+        """
+        prov = _make_provenance()
+        structured = {"match": "Bash(git push:*)", "additionalContext": "careful"}
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": ["Bash(git diff:*)", structured],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _make_config(layer)
+
+        result = _config_without_allow(config, "Bash", "git push:*")
+
+        self.assertIsNot(result, config)
+        raw_allow = result.layers[0].content["permissions"]["allow"]
+        self.assertEqual(raw_allow, ["Bash(git diff:*)"])
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +408,9 @@ class TestFamily1GitHappyPath(unittest.TestCase):
         # Check for the escaped form of each token.
         for token in ("diff", "flake8", "isort", "log", "ls-files", "status"):
             escaped = _re.escape(token)
-            self.assertIn(escaped, added, f"Missing escaped token '{escaped}' in: {added}")
+            self.assertIn(
+                escaped, added, f"Missing escaped token '{escaped}' in: {added}"
+            )
 
     def test_consolidation_preserves_prefix_extension_commands(self):
         """

@@ -164,9 +164,7 @@ class TestMultiSectionInteraction(unittest.TestCase):
         When find_confusing_interactions runs
         Then no 'multi-section-interaction' finding is produced
         """
-        config = _make_config(
-            _make_layer("Bash", allow=["git:*"], deny=["git push:*"])
-        )
+        config = _make_config(_make_layer("Bash", allow=["git:*"], deny=["git push:*"]))
         kinds = {f.kind for f in find_confusing_interactions(config, "Bash")}
         self.assertNotIn("multi-section-interaction", kinds)
 
@@ -254,7 +252,9 @@ class TestCrossLayerInteraction(unittest.TestCase):
         """
         config = _make_config(
             _make_layer("Bash", ["git:*"], provenance=_make_provenance(0)),
-            _make_layer("Bash", [], deny=["git push:*"], provenance=_make_provenance(0)),
+            _make_layer(
+                "Bash", [], deny=["git push:*"], provenance=_make_provenance(0)
+            ),
         )
         self.assertEqual(self._cross_layer(config), [])
 

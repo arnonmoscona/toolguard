@@ -372,7 +372,9 @@ def resolve_allow_ask(
     if allow_match and not ask_match:
         return "allow", allow_pat
     if allow_match and ask_match:
-        if _literal_prefix_specificity(allow_pat) > _literal_prefix_specificity(ask_pat):
+        if _literal_prefix_specificity(allow_pat) > _literal_prefix_specificity(
+            ask_pat
+        ):
             return "allow", allow_pat
         return "ask", ask_pat
     return None

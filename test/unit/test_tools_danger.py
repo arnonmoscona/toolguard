@@ -105,12 +105,8 @@ def _make_config(
                 "governed_tools": ["Bash", "Read", "Write", "Edit"],
             }
         )
-        takeover_layer = ConfigLayer(
-            provenance=takeover_prov, content=takeover_content
-        )
-        return Configuration(
-            layers=(takeover_layer,) + tuple(layers), start_dir=None
-        )
+        takeover_layer = ConfigLayer(provenance=takeover_prov, content=takeover_content)
+        return Configuration(layers=(takeover_layer,) + tuple(layers), start_dir=None)
     return Configuration(layers=tuple(layers), start_dir=None)
 
 
@@ -284,7 +280,9 @@ class TestDestructiveCmdAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=["rm -rf:*"])
         config = _make_config(layer)
         findings = danger(config)
-        dest_findings = [f for f in findings if f.detector_id == "destructive-cmd-allow"]
+        dest_findings = [
+            f for f in findings if f.detector_id == "destructive-cmd-allow"
+        ]
         self.assertGreater(len(dest_findings), 0)
         self.assertEqual(dest_findings[0].severity, Severity.HIGH)
 
@@ -297,7 +295,9 @@ class TestDestructiveCmdAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=["rm -rf /tmp/testdir:*"])
         config = _make_config(layer)
         findings = danger(config)
-        dest_findings = [f for f in findings if f.detector_id == "destructive-cmd-allow"]
+        dest_findings = [
+            f for f in findings if f.detector_id == "destructive-cmd-allow"
+        ]
         self.assertGreater(len(dest_findings), 0)
 
     def test_safe_rm_without_rf_not_flagged(self):
@@ -309,7 +309,9 @@ class TestDestructiveCmdAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=["rm /tmp/file.txt:*"])
         config = _make_config(layer)
         findings = danger(config)
-        dest_findings = [f for f in findings if f.detector_id == "destructive-cmd-allow"]
+        dest_findings = [
+            f for f in findings if f.detector_id == "destructive-cmd-allow"
+        ]
         self.assertEqual(dest_findings, [])
 
 
@@ -330,7 +332,9 @@ class TestSecretsExposureAllow(unittest.TestCase):
         layer = _make_layer("Read", allow=[".env"])
         config = _make_config(layer)
         findings = danger(config)
-        secret_findings = [f for f in findings if f.detector_id == "secrets-exposure-allow"]
+        secret_findings = [
+            f for f in findings if f.detector_id == "secrets-exposure-allow"
+        ]
         self.assertGreater(len(secret_findings), 0)
         self.assertEqual(secret_findings[0].severity, Severity.HIGH)
 
@@ -343,7 +347,9 @@ class TestSecretsExposureAllow(unittest.TestCase):
         layer = _make_layer("Read", allow=["~/.ssh/**"])
         config = _make_config(layer)
         findings = danger(config)
-        secret_findings = [f for f in findings if f.detector_id == "secrets-exposure-allow"]
+        secret_findings = [
+            f for f in findings if f.detector_id == "secrets-exposure-allow"
+        ]
         self.assertGreater(len(secret_findings), 0)
 
     def test_bash_dotenv_cat_flagged(self):
@@ -355,7 +361,9 @@ class TestSecretsExposureAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=["cat .env:*"])
         config = _make_config(layer)
         findings = danger(config)
-        secret_findings = [f for f in findings if f.detector_id == "secrets-exposure-allow"]
+        secret_findings = [
+            f for f in findings if f.detector_id == "secrets-exposure-allow"
+        ]
         self.assertGreater(len(secret_findings), 0)
 
     def test_normal_read_pattern_not_flagged(self):
@@ -367,7 +375,9 @@ class TestSecretsExposureAllow(unittest.TestCase):
         layer = _make_layer("Read", allow=["~/projects/**"])
         config = _make_config(layer)
         findings = danger(config)
-        secret_findings = [f for f in findings if f.detector_id == "secrets-exposure-allow"]
+        secret_findings = [
+            f for f in findings if f.detector_id == "secrets-exposure-allow"
+        ]
         self.assertEqual(secret_findings, [])
 
 
@@ -388,7 +398,9 @@ class TestUnanchoredRegexAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=["[regex]find"])
         config = _make_config(layer)
         findings = danger(config)
-        regex_findings = [f for f in findings if f.detector_id == "unanchored-regex-allow"]
+        regex_findings = [
+            f for f in findings if f.detector_id == "unanchored-regex-allow"
+        ]
         self.assertGreater(len(regex_findings), 0)
         self.assertEqual(regex_findings[0].severity, Severity.MEDIUM)
         self.assertEqual(regex_findings[0].pattern, "[regex]find")
@@ -402,7 +414,9 @@ class TestUnanchoredRegexAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=[r"[regex]^git\b"])
         config = _make_config(layer)
         findings = danger(config)
-        regex_findings = [f for f in findings if f.detector_id == "unanchored-regex-allow"]
+        regex_findings = [
+            f for f in findings if f.detector_id == "unanchored-regex-allow"
+        ]
         self.assertEqual(regex_findings, [])
 
     def test_unanchored_regex_with_word_boundary(self):
@@ -415,7 +429,9 @@ class TestUnanchoredRegexAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=[r"[regex]\bfind\b(?!.*exec)"])
         config = _make_config(layer)
         findings = danger(config)
-        regex_findings = [f for f in findings if f.detector_id == "unanchored-regex-allow"]
+        regex_findings = [
+            f for f in findings if f.detector_id == "unanchored-regex-allow"
+        ]
         self.assertGreater(len(regex_findings), 0)
 
     def test_non_regex_wildcard_not_flagged_as_unanchored(self):
@@ -427,7 +443,9 @@ class TestUnanchoredRegexAllow(unittest.TestCase):
         layer = _make_layer("Bash", allow=["git *"])
         config = _make_config(layer)
         findings = danger(config)
-        regex_findings = [f for f in findings if f.detector_id == "unanchored-regex-allow"]
+        regex_findings = [
+            f for f in findings if f.detector_id == "unanchored-regex-allow"
+        ]
         self.assertEqual(regex_findings, [])
 
 
@@ -456,9 +474,9 @@ class TestTakeoverModeAwareness(unittest.TestCase):
         findings = danger(config, takeover=takeover)
         # The native Bash(*) should NOT be flagged (it's in the ignored set)
         blanket_findings = [
-            f for f in findings
-            if f.detector_id == "blanket-allow-outside-takeover"
-            and f.pattern == "*"
+            f
+            for f in findings
+            if f.detector_id == "blanket-allow-outside-takeover" and f.pattern == "*"
         ]
         self.assertEqual(blanket_findings, [])
 
@@ -566,8 +584,12 @@ class TestDangerFindingAttributes(unittest.TestCase):
         findings = danger(config)
         # uv run pytest should not trigger arbitrary-exec, and anchored regex is fine
         exec_findings = [f for f in findings if f.detector_id == "arbitrary-exec-allow"]
-        dest_findings = [f for f in findings if f.detector_id == "destructive-cmd-allow"]
-        regex_findings = [f for f in findings if f.detector_id == "unanchored-regex-allow"]
+        dest_findings = [
+            f for f in findings if f.detector_id == "destructive-cmd-allow"
+        ]
+        regex_findings = [
+            f for f in findings if f.detector_id == "unanchored-regex-allow"
+        ]
         self.assertEqual(exec_findings, [])
         self.assertEqual(dest_findings, [])
         self.assertEqual(regex_findings, [])

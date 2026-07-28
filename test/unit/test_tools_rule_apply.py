@@ -17,10 +17,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from toolguard.config import Provenance
+from toolguard.config_write_guard import ConfigWriteVerificationError
 from toolguard.tools.consolidate import ConsolidationProposal
 from toolguard.tools.rule_apply import (
+    _read_raw_permissions,
     apply_proposals,
     render_change_report,
 )
@@ -146,6 +149,314 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(len(report.files_written), 0)
         self.assertFalse(report.files[0].written)
         self.assertIn("Bash([regex]^git (diff|status))", report.files[0].diff)
+
+    def test_real_write_routes_through_verified_write_config(self):
+        """
+        Given a TOML config with a matching consolidation proposal (not dry-run)
+        When apply_proposals runs
+        Then toolguard.tools.rule_apply.verified_write_config is called with the
+             real target path, file_format="toml", and expected_patterns covering
+             every pattern in the newly-consolidated allow list (TOO-19
+             corrective change: the final real-file write must go through the
+             same self-protection gate as the writer functions it reuses)
+        """
+        cfg = self._write("toolguard_hook.toml", _TOML_WITH_FIND)
+        with patch("toolguard.tools.rule_apply.verified_write_config") as mock_write:
+            apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        mock_write.assert_called_once()
+        args, kwargs = mock_write.call_args
+        self.assertEqual(args[0], cfg)
+        self.assertEqual(args[2], "toml")
+        self.assertIn("Bash([regex]^git (diff|status))", kwargs["expected_patterns"])
+        self.assertIn("Bash(ls:*)", kwargs["expected_patterns"])
+
+    def test_refused_write_propagates_and_reports_unwritten(self):
+        """
+        Given verified_write_config() raising ConfigWriteVerificationError
+             (simulating a would-be corrupting write)
+        When apply_proposals runs (not dry-run)
+        Then the error propagates out of apply_proposals rather than being
+             swallowed, and the real file on disk is left completely unchanged
+        """
+        cfg = self._write("toolguard_hook.toml", _TOML_WITH_FIND)
+        before = cfg.read_text()
+        with patch(
+            "toolguard.tools.rule_apply.verified_write_config",
+            side_effect=ConfigWriteVerificationError(cfg, "invalid TOML", "boom"),
+        ):
+            with self.assertRaises(ConfigWriteVerificationError):
+                apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(cfg.read_text(), before)
+
+    def test_apply_survives_an_unrelated_malformed_structured_entry(self):
+        """
+        Given a TOML config whose allow list ALSO contains a structured entry
+             missing its "match" key, elsewhere in the same file
+        When a git-family consolidation targeting the OTHER rules is applied
+        Then the write succeeds (no ConfigWriteVerificationError) and the
+             malformed entry survives verbatim -- TOO-19 review-round-2 fix:
+             _apply_to_file's expected_patterns previously included that
+             entry's synthesized repr()-based pattern, which could never
+             appear in the written text and wrongly refused the write
+        """
+        text = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            '  { additionalContext = "oops" },\n'
+            '  "Bash(ls:*)",\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", text)
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(report.total_applied, 1)
+        self.assertTrue(report.files[0].written)
+        written_text = cfg.read_text()
+        self.assertIn("Bash([regex]^git (diff|status))", written_text)
+        self.assertIn('{ additionalContext = "oops" }', written_text)
+
+
+class TestStructuredEntrySurvivesUnrelatedEdit(_TempConfigMixin, unittest.TestCase):
+    """
+    A structured entry elsewhere in the same allow list must round-trip
+    byte-identical through a rule_apply edit targeting a DIFFERENT rule
+    (TOO-19 Phase 0a increment 8's write-path widening covers rule_apply.py
+    the same way it covers migration).
+    """
+
+    def test_structured_entry_untouched_by_unrelated_consolidation(self):
+        """
+        Given a TOML allow list with a structured entry (with its own leading
+             comment) plus the git diff/status rules a consolidation proposal
+             targets
+        When apply_proposals consolidates ONLY the git family
+        Then the structured entry's original line and its leading comment
+             survive byte-identical, while the git rules are still replaced
+        """
+        # "Bash(ls:*)" is listed FIRST so the structured entry's own leading
+        # comment is a per-RULE comment_block (attaches to "Bash(rm -rf:*)"
+        # via rule_comments), not the section's top-of-list comment -- a
+        # comment preceding the very first rule in a subsection is anchored
+        # to the section top rather than that rule (pre-existing, unrelated
+        # to this increment), which would make this test's "travels with the
+        # rule when re-sorted" assertion vacuous.
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(ls:*)",\n'
+            "  # keep an eye on this one\n"
+            '  { match = "Bash(rm -rf:*)", additionalContext = "dangerous" },\n'
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", toml_content)
+
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+        text = cfg.read_text()
+
+        # The unrelated structured entry (and its comment) is byte-identical.
+        self.assertIn(
+            "  # keep an eye on this one\n"
+            '  { match = "Bash(rm -rf:*)", additionalContext = "dangerous" },\n',
+            text,
+        )
+        # The targeted rules were still consolidated.
+        self.assertNotIn("Bash(git diff:*)", text)
+        self.assertNotIn("Bash(git status:*)", text)
+        self.assertIn("Bash([regex]^git (diff|status))", text)
+        self.assertEqual(report.total_applied, 1)
+
+
+# ---------------------------------------------------------------------------
+# Enrichment guard (TOO-19 Phase 0a increment 9)
+# ---------------------------------------------------------------------------
+
+
+def _rule_entry_metadata(path: Path, file_format: str, list_type: str, pattern: str):
+    """
+    Read back one entry's metadata dict from a config file on disk, by pattern.
+
+    Reuses the module's own :func:`_read_raw_permissions` (rather than
+    re-parsing TOML/JSON independently) so this assertion helper exercises
+    exactly the same read path production code uses.
+
+    Returns:
+        The entry's ``metadata`` as a plain ``dict``, or ``None`` if no entry
+        with ``pattern`` exists in ``list_type``.
+    """
+    raw = _read_raw_permissions(path, file_format)
+    for entry in raw[list_type]:
+        if entry.pattern == pattern:
+            return dict(entry.metadata)
+    return None
+
+
+class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
+    """
+    A proposal is refused, whole, rather than silently dropping enrichment --
+    but ONLY when merge_entries reports a genuine case-3 CONTRADICTION for the
+    proposal's added pattern. Case 1 (bare vs. structured, same pattern) and
+    case 2 (compatible/disjoint-key union) apply normally, using
+    merge_entries' own consolidated result.
+    """
+
+    _CONSOLIDATED = "Bash([regex]^git (diff|status))"
+
+    def test_contradiction_is_skipped_and_file_is_byte_unchanged(self):
+        """
+        Given a TOML allow list where the proposal's own consolidated pattern
+             ALREADY exists twice, as two structured entries disagreeing on
+             the same metadata key (a genuine merge_entries case-3
+             contradiction)
+        When apply_proposals runs the git-family consolidation
+        Then the proposal is skipped with a "would lose rule enrichment"
+             reason, nothing is applied, and the file is byte-for-byte
+             unchanged on disk (never apply-and-drop)
+        """
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepB" }},\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", toml_content)
+        before = cfg.read_text()
+
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(report.total_applied, 0)
+        self.assertEqual(report.total_skipped, 1)
+        self.assertIn("would lose rule enrichment", report.files[0].skipped[0][1])
+        self.assertEqual(cfg.read_text(), before)
+        self.assertFalse(report.files[0].written)
+
+    def test_clean_union_applies_with_merged_metadata(self):
+        """
+        Given a TOML allow list where the proposal's own consolidated pattern
+             ALREADY exists twice, as two structured entries with DISJOINT
+             metadata keys (a compatible merge_entries case-2 union)
+        When apply_proposals runs the git-family consolidation
+        Then the proposal applies, the git diff/status originals are removed,
+             and exactly ONE entry survives for the consolidated pattern,
+             carrying the UNION of both entries' metadata
+        """
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{self._CONSOLIDATED}", owner = "bob" }},\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", toml_content)
+
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(report.total_applied, 1)
+        self.assertTrue(report.files[0].written)
+        text = cfg.read_text()
+        self.assertNotIn("Bash(git diff:*)", text)
+        self.assertNotIn("Bash(git status:*)", text)
+        # Exactly one occurrence of the consolidated pattern's `match =` line
+        # (duplicates collapsed into the merged entry).
+        self.assertEqual(text.count(f'match = "{self._CONSOLIDATED}"'), 1)
+
+        metadata = _rule_entry_metadata(cfg, "toml", "allow", self._CONSOLIDATED)
+        self.assertEqual(metadata, {"additionalContext": "keepA", "owner": "bob"})
+
+    def test_bare_vs_structured_same_pattern_applies_no_guard(self):
+        """
+        Given a TOML allow list where the proposal's own consolidated pattern
+             already exists ONCE, as a single structured entry (case 1: bare
+             vs. structured, same pattern)
+        When apply_proposals runs the git-family consolidation (which would
+             otherwise add a bare duplicate for that same pattern)
+        Then the proposal applies without being refused (case 1 has no
+             conflict), and the pre-existing structured entry's metadata
+             survives untouched, appearing exactly once
+        """
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", toml_content)
+
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(report.total_applied, 1)
+        self.assertEqual(report.total_skipped, 0)
+        text = cfg.read_text()
+        self.assertEqual(text.count(f'match = "{self._CONSOLIDATED}"'), 1)
+
+        metadata = _rule_entry_metadata(cfg, "toml", "allow", self._CONSOLIDATED)
+        self.assertEqual(metadata, {"additionalContext": "keepA"})
+
+    def test_unrelated_enriched_entry_untouched_dict_preserved(self):
+        """
+        Given a TOML allow list holding an UNRELATED structured entry (its own
+             pattern, own metadata) alongside the plain git diff/status rules
+             a consolidation proposal targets
+        When apply_proposals consolidates ONLY the git family (a proposal
+             touching plain entries only -- the unrelated entry's pattern is
+             never part of removed_patterns or added_pattern)
+        Then the proposal applies normally and the unrelated entry's metadata
+             dict, read back from disk, is exactly preserved (not merely a
+             text substring match)
+        """
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(ls:*)",\n'
+            '  { match = "Bash(rm -rf:*)", additionalContext = "dangerous" },\n'
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", toml_content)
+
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(report.total_applied, 1)
+        self.assertEqual(report.total_skipped, 0)
+        metadata = _rule_entry_metadata(cfg, "toml", "allow", "Bash(rm -rf:*)")
+        self.assertEqual(metadata, {"additionalContext": "dangerous"})
+
+    def test_skip_reason_visible_in_change_report(self):
+        """
+        Given a proposal refused by the enrichment guard (case-3 contradiction)
+        When render_change_report renders the resulting ChangeReport
+        Then the "would lose rule enrichment" reason text a caller would see
+             is present in the rendered output, not only on the internal
+             FileChange.skipped tuple
+        """
+        toml_content = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(git diff:*)",\n'
+            '  "Bash(git status:*)",\n'
+            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepB" }},\n'
+            "]\n"
+        )
+        cfg = self._write("toolguard_hook.toml", toml_content)
+
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+        out = render_change_report(report, fmt="text")
+
+        self.assertIn("would lose rule enrichment", out)
 
 
 # ---------------------------------------------------------------------------

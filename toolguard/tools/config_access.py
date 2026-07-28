@@ -12,7 +12,8 @@ effective takeover state, etc.).
 """
 
 import re
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, List, Optional, Set, Tuple
@@ -26,6 +27,7 @@ from toolguard.config import (
     load_configuration,
     wrap_tool_pattern,
 )
+from toolguard.rule_entry import normalize_entry
 from toolguard.rule_sort import (
     find_section_boundaries,
     parse_permissions_section_with_comments,
@@ -106,9 +108,16 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
     """
     Return per-layer allow/deny/ask rules for ``tool_name``, most-specific first.
 
-    Delegates to :meth:`~toolguard.config.Configuration.permission_layers` for
-    the allow/deny portion (takeover filtering already applied there) and reads
-    the ``ask`` list directly from each layer's raw content.
+    Delegates entirely to
+    :meth:`~toolguard.config.Configuration.permission_layers` for all three
+    lists -- allow, deny, AND ask (takeover filtering, extraction, and
+    structured-entry normalization already applied there via
+    :class:`~toolguard.config.ToolPatternLayer`). TOO-19 correctness fix: this
+    function previously took ``allow``/``deny`` from ``ToolPatternLayer`` but
+    hand-rolled ``ask`` from the layer's raw content with a bare
+    ``isinstance(perm, str)`` filter -- inconsistent within one function body,
+    and it silently dropped a structured (``{match = ..., ...}``) ``ask``
+    entry, making it invisible to both maintenance and security-audit tooling.
 
     Args:
         config: The resolved configuration.
@@ -118,8 +127,8 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
         List of :class:`LayerRules`, one per discovered config layer, ordered
         most-specific first.
     """
-    prefix = f"{tool_name}("
-    # permission_layers returns ToolPatternLayer objects (allow + deny, takeover-filtered)
+    # permission_layers returns ToolPatternLayer objects (allow + deny + ask,
+    # takeover-filtered, structured entries included)
     tool_layers: Tuple[ToolPatternLayer, ...] = config.permission_layers(tool_name)
 
     # Build a provenance -> ToolPatternLayer index for quick lookup
@@ -128,29 +137,24 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
     result: List[LayerRules] = []
     for layer in config.layers:
         tl = prov_to_tool_layer.get(layer.provenance)
-        # allow and deny come from the ToolPatternLayer (with takeover filtering)
+        # allow/deny come from the ToolPatternLayer (with takeover filtering).
         allow = tl.allow if tl is not None else ()
         deny = tl.deny if tl is not None else ()
-
-        # ask patterns: toolguard extension, only in toolguard_hook layers
-        ask: List[str] = []
-        if not layer.is_native:
-            permissions = layer.content.get("permissions", {})
-            if isinstance(permissions, dict):
-                for perm in permissions.get("ask", []):
-                    if (
-                        isinstance(perm, str)
-                        and perm.startswith(prefix)
-                        and perm.endswith(")")
-                    ):
-                        ask.append(perm[len(prefix):-1])
+        # ask is a toolguard extension: native ('claude') layers have no such
+        # concept, mirrored here exactly as allow/deny's own takeover/native
+        # handling lives in permission_layers() itself -- see that method's
+        # own per-tool-name extraction, which already gates every list on
+        # is_native being irrelevant to native json layers (they simply never
+        # populate `permissions.ask`); this explicit guard just keeps the
+        # historical "native layers never report ask" contract explicit here.
+        ask = tl.ask if (tl is not None and not layer.is_native) else ()
 
         result.append(
             LayerRules(
                 provenance=layer.provenance,
                 allow=allow,
                 deny=deny,
-                ask=tuple(ask),
+                ask=ask,
             )
         )
 
@@ -209,7 +213,12 @@ def discover_tools(config: Configuration) -> Tuple[str, ...]:
 
     A tool name is the text before the first ``"("`` in a ``"Tool(body)"``
     permission pattern string.  Scans allow, deny, and ask lists across every
-    discovered config layer.
+    discovered config layer.  Each raw entry is normalized via
+    :func:`~toolguard.rule_entry.normalize_entry` (TOO-19 correctness fix):
+    the previous ``isinstance(perm, str)`` check silently skipped a
+    structured (``{match = ..., ...}``) entry, so a tool governed ONLY by
+    structured entries was never discovered -- invisible to maintenance and
+    security-audit tooling that depend on this function.
 
     This is the canonical tool-discovery implementation extracted from the
     inline loop that :func:`~toolguard.tools.danger.danger` formerly ran
@@ -231,8 +240,12 @@ def discover_tools(config: Configuration) -> Tuple[str, ...]:
                 + permissions.get("deny", [])
                 + permissions.get("ask", [])
             ):
-                if isinstance(perm, str) and "(" in perm and perm.endswith(")"):
-                    tool_name = perm[: perm.index("(")]
+                entry, _issues = normalize_entry(perm, layer.is_native)
+                if entry is None:
+                    continue
+                pattern = entry.pattern
+                if "(" in pattern and pattern.endswith(")"):
+                    tool_name = pattern[: pattern.index("(")]
                     tools_seen.add(tool_name)
     return tuple(sorted(tools_seen))
 
@@ -317,15 +330,40 @@ def with_layer_rules_replaced(
             continue
 
         # Remove all occurrences of each pattern in ``removed``, then append added.
-        new_list = [p for p in target_list if p not in wrapped_removed] + wrapped_added
+        #
+        # Removal membership is decided by PATTERN, never by the raw list
+        # element itself: a structured entry is a `dict`, and `wrapped_removed`
+        # is a `Set[str]`, so `element not in wrapped_removed` would try to
+        # hash the dict and raise `TypeError`. `normalize_entry` gives us the
+        # wrapper-intact pattern (matching `wrapped_removed`'s form) without
+        # needing to know the element's shape.
+        #
+        # A kept element is re-appended UNCHANGED (the original `str`/`dict`
+        # object, not a re-rendering of it) so that editing one pattern in a
+        # layer never touches -- byte-for-byte -- any enrichment on another
+        # entry in the same list.
+        #
+        # An element that fails to normalize (`entry is None`, e.g. a
+        # malformed structured entry) is kept as-is rather than dropped: this
+        # function's job is editing a list, not validating it. Its issues are
+        # surfaced separately by `validate_permissions` (TOO-19 increment 4).
+        new_list = []
+        for element in target_list:
+            entry, _issues = normalize_entry(element, is_native=layer.is_native)
+            if entry is not None and entry.pattern in wrapped_removed:
+                continue
+            new_list.append(element)
+        new_list = new_list + wrapped_added
         new_perms = dict(permissions)
         new_perms[list_type] = new_list
         new_content = dict(layer.content)
         new_content["permissions"] = new_perms
-        new_layer = ConfigLayer(
-            provenance=layer.provenance,
-            content=MappingProxyType(new_content),
-        )
+        # `dataclasses.replace` (not a fresh `ConfigLayer(...)` call) so every
+        # non-`content` field -- `unexpected_keys`, `duplicate_format`,
+        # `shadowed_path`, and any field added to `ConfigLayer` in the future
+        # -- carries through automatically instead of silently resetting to
+        # its default.
+        new_layer = replace(layer, content=MappingProxyType(new_content))
         new_layers.append(new_layer)
         modified = True
 
@@ -361,9 +399,7 @@ def with_layer_allow_replaced(
         A new :class:`~toolguard.config.Configuration` with the modified layer,
         or the original ``config`` when ``provenance`` matches no layer.
     """
-    return with_layer_rules_replaced(
-        config, tool, provenance, "allow", removed, added
-    )
+    return with_layer_rules_replaced(config, tool, provenance, "allow", removed, added)
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +434,11 @@ def neutralized_by_takeover(
     Returns:
         ``True`` when all three conditions hold; ``False`` otherwise.
     """
-    return takeover.enabled and is_native and pattern in takeover.normalized_ignored_patterns()
+    return (
+        takeover.enabled
+        and is_native
+        and pattern in takeover.normalized_ignored_patterns()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -459,18 +499,31 @@ def _split_tool_pattern(full_pattern: str) -> Tuple[str, str]:
     so bare patterns still key deterministically.
     """
     if "(" in full_pattern and full_pattern.endswith(")"):
-        return full_pattern[: full_pattern.index("(")], full_pattern[full_pattern.index("(") + 1 : -1]
+        return full_pattern[: full_pattern.index("(")], full_pattern[
+            full_pattern.index("(") + 1 : -1
+        ]
     return "", full_pattern
 
 
 def _inline_comment_after_pattern(line: str) -> str:
     """
-    Extract a trailing ``#`` comment that follows the quoted pattern on *line*.
+    Extract a trailing ``#`` comment that follows a rule's own quoted value(s).
 
-    Locates the closing quote of the pattern (the last quote character on the
-    line) and returns the first ``#``-to-end run after it, stripped.  Returns
-    ``""`` when there is no trailing comment.  Anchoring on the closing quote
-    avoids treating a ``#`` inside the pattern body (e.g. a regex) as a comment.
+    Locates the LAST quote character in *line* and returns the first ``#``-to-end
+    run after it, stripped.  Returns ``""`` when there is no trailing comment.
+    Anchoring on the closing quote avoids treating a ``#`` inside a quoted value
+    (e.g. a regex pattern, or a structured entry's ``additionalContext``) as a
+    comment.
+
+    Despite the parameter name, *line* is a rule's full original source span as
+    produced by :func:`~toolguard.rule_sort.parse_permissions_section_with_comments`
+    -- always a single physical line, for either a plain pattern or a
+    structured ``{...}`` entry (TOO-19 corrective change: a structured entry
+    spanning multiple physical lines is not valid TOML 1.0, and that function
+    now raises rather than returning one -- see its own docstring). This
+    still operates on the whole string rather than assuming "no embedded
+    newline", which costs nothing and stays correct even if a future
+    ``RuleEntry.raw`` shape were ever multi-valued in some other way.
     """
     last_quote = max(line.rfind("'"), line.rfind('"'))
     if last_quote == -1:
@@ -480,15 +533,26 @@ def _inline_comment_after_pattern(line: str) -> str:
     return rest[hash_pos:].strip() if hash_pos != -1 else ""
 
 
-def _layer_comment_map(provenance: Provenance) -> Dict[Tuple[str, str, str], RuleComment]:
+def _layer_comment_map(
+    provenance: Provenance,
+) -> Dict[Tuple[str, str, str], RuleComment]:
     """
     Build a ``(list_type, tool, inner_pattern) -> RuleComment`` map for a layer.
 
     Reads the layer's TOML file and re-associates comments with rules.  Returns
-    an empty map for native (``json``) layers, an unreadable/absent file, or a
-    file with no ``[permissions]`` section -- so callers can treat "no comments"
-    and "cannot read comments" identically (both degrade to no acknowledgement,
-    which is the safe direction: a finding is shown normally rather than hidden).
+    an empty map for native (``json``) layers, an unreadable/absent file, a
+    file with no ``[permissions]`` section, or a file this module's own
+    parser cannot parse (``tomllib.TOMLDecodeError`` -- most notably a
+    structured entry written across multiple physical lines, which is not
+    valid TOML 1.0 -- see ``toolguard.rule_sort``'s top-of-file docstring) --
+    so callers can treat "no comments", "cannot read comments", and "cannot
+    parse comments" identically (all three degrade to no acknowledgement,
+    which is the safe direction: a finding is shown normally rather than
+    hidden). This is a best-effort ENRICHMENT read, independent of whether
+    ``toolguard.config`` itself already loaded (or fail-open-skipped) this
+    same file -- catching the parse error here, rather than letting it
+    propagate, keeps one malformed file from crashing an entire audit run
+    over what is, for this particular facade, a purely cosmetic recovery.
 
     Args:
         provenance: Origin of the layer whose file is read.
@@ -507,7 +571,10 @@ def _layer_comment_map(provenance: Provenance) -> Dict[Tuple[str, str, str], Rul
     start, end = find_section_boundaries(text, "permissions")
     if start == -1:
         return {}
-    parsed = parse_permissions_section_with_comments(text[start:end])
+    try:
+        parsed = parse_permissions_section_with_comments(text[start:end])
+    except tomllib.TOMLDecodeError:
+        return {}
 
     result: Dict[Tuple[str, str, str], RuleComment] = {}
     for list_type in ("allow", "deny", "ask"):
@@ -530,7 +597,9 @@ def _layer_comment_map(provenance: Provenance) -> Dict[Tuple[str, str, str], Rul
     return result
 
 
-def rule_comments_for_tool(provenance: Provenance, tool: str) -> Tuple[RuleComment, ...]:
+def rule_comments_for_tool(
+    provenance: Provenance, tool: str
+) -> Tuple[RuleComment, ...]:
     """
     Return all :class:`RuleComment` records for *tool* in the given layer.
 

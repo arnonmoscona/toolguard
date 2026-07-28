@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from toolguard.config import load_configuration
+from toolguard.config import Configuration, load_configuration
 
 
 def _parse_session_start_input() -> dict:
@@ -133,65 +133,137 @@ def _check_dynamic_conflicts(log_dir: Optional[Path]):
     return None
 
 
-def _format_summary(static_conflict, dynamic_conflict) -> str:
+def _format_summary(static_conflict, dynamic_conflict, broken_files=()) -> str:
     """
-    Format a brief conflict summary for stdout.
+    Format a brief conflict/broken-config summary for stdout.
 
-    Produces a short, human-readable summary of any detected conflicts for
-    injection into the Claude Code session context. The output is intentionally
-    concise: a header line, one bullet per conflict source, and a closing
-    action prompt.
+    Produces a short, human-readable summary for injection into the Claude
+    Code session context, built from up to two independent sections:
+
+    - A broken-config section (TOO-19) when *broken_files* is non-empty:
+      names each broken file with its parse error and states that toolguard
+      is falling back to ``ask`` for every tool call. This is unconditional
+      -- it does not depend on either conflict argument.
+    - The pre-existing conflict-detected section when *static_conflict* or
+      *dynamic_conflict* is not None: a header line, one bullet per conflict
+      source, and a closing action prompt -- byte-identical to this
+      function's behaviour before *broken_files* was added.
+
+    When all three inputs are absent, the result is an empty string (callers
+    only print when at least one is present).
 
     Args:
         static_conflict: A ``TakeoverEnabledConflict`` describing cross-level
             disagreement on ``takeover_mode.enabled``, or None.
         dynamic_conflict: A ``(path_str, count)`` tuple for the most recent
             conflict log file with recorded entries, or None.
+        broken_files: ``(path, message)`` pairs for governed config files that
+            failed to parse (:attr:`~toolguard.config.Configuration.parse_failures`,
+            TOO-19). Defaults to ``()`` so existing 2-argument call sites are
+            unaffected.
 
     Returns:
-        A multi-line string suitable for printing to stdout.
+        A multi-line string suitable for printing to stdout, or "" when
+        there is nothing to report.
     """
-    lines = ["toolguard: configuration conflicts detected --"]
+    sections = []
 
-    if static_conflict is not None:
-        # Build a compact provenance string: cite the first disagreeing source
-        # so the human knows where to look, without flooding the session context.
-        provenance_parts = [
-            f"{value} [{prov.describe_brief()}]"
-            for value, prov in static_conflict.sources
+    if broken_files:
+        broken_lines = [
+            "toolguard: CONFIG BROKEN -- falling back to ASK for every tool "
+            "call until fixed --"
         ]
-        provenance_summary = "; ".join(provenance_parts)
-        lines.append(
-            f"  - takeover_mode.enabled disagrees across levels; "
-            f"failed safe to OFF ({provenance_summary})"
+        for path, message in broken_files:
+            broken_lines.append(f"  - {path}: {message}")
+        broken_lines.append(
+            "  Rules in these file(s) -- including deny/hard_deny -- are NOT "
+            "enforced. Fix them to restore normal permission handling."
         )
+        sections.append("\n".join(broken_lines))
 
-    if dynamic_conflict is not None:
-        path_str, count = dynamic_conflict
-        noun = "entry" if count == 1 else "entries"
-        lines.append(f"  - conflict log {path_str} has {count} recorded {noun}")
+    if static_conflict is not None or dynamic_conflict is not None:
+        conflict_lines = ["toolguard: configuration conflicts detected --"]
 
-    lines.append("Review and resolve; see the conflict log for details.")
-    return "\n".join(lines)
+        if static_conflict is not None:
+            # Build a compact provenance string: cite the first disagreeing
+            # source so the human knows where to look, without flooding the
+            # session context.
+            provenance_parts = [
+                f"{value} [{prov.describe_brief()}]"
+                for value, prov in static_conflict.sources
+            ]
+            provenance_summary = "; ".join(provenance_parts)
+            conflict_lines.append(
+                f"  - takeover_mode.enabled disagrees across levels; "
+                f"failed safe to OFF ({provenance_summary})"
+            )
+
+        if dynamic_conflict is not None:
+            path_str, count = dynamic_conflict
+            noun = "entry" if count == 1 else "entries"
+            conflict_lines.append(
+                f"  - conflict log {path_str} has {count} recorded {noun}"
+            )
+
+        conflict_lines.append("Review and resolve; see the conflict log for details.")
+        sections.append("\n".join(conflict_lines))
+
+    return "\n\n".join(sections)
 
 
-def _detect_conflicts(cwd: Optional[str]):
+def _detect_broken_config_files(config: Configuration):
     """
-    Load configuration and detect both static and dynamic conflicts.
+    Return every governed config file that failed to parse (TOO-19).
+
+    A non-empty result means :meth:`~toolguard.config.Configuration.resolve_permission_detailed`
+    is clamping EVERY toolguard decision to ``'ask'`` (see that method's
+    docstring) until the file(s) are fixed -- the single most severe class of
+    configuration problem, so it is surfaced unconditionally here, independent
+    of (and in addition to) the existing static/dynamic conflict summary.
+
+    Takes an already-loaded :class:`~toolguard.config.Configuration` (see
+    :func:`_detect_conflicts`, called with the SAME instance by ``main()``)
+    rather than loading its own -- ``main()`` calls ``load_configuration()``
+    exactly once per session-start invocation and both checks derive from
+    that one call (TOO-19 review fix: this used to make a second, redundant
+    ``load_configuration()`` call purely to avoid widening
+    :func:`_detect_conflicts`'s 2-tuple return shape).
+
+    Args:
+        config: An already-loaded ``Configuration``.
+
+    Returns:
+        ``config.parse_failures``, materialized via ``tuple(...)`` so it
+        behaves identically for a real ``Configuration`` and for a test
+        double that only implements iteration (see
+        ``test_session_start.py``'s pre-existing ``MagicMock(spec=Configuration)``
+        fixtures, which do not set ``parse_failures`` explicitly).
+    """
+    return tuple(config.parse_failures)
+
+
+def _detect_conflicts(config: Configuration):
+    """
+    Detect both static and dynamic configuration conflicts.
 
     This is the core logic of the SessionStart hook. It is extracted from
     ``main()`` so it can be unit-tested independently without needing to mock
     stdin or sys.exit.
 
+    Takes an already-loaded :class:`~toolguard.config.Configuration` --
+    ``main()`` loads it once and passes the same instance to this function
+    and to :func:`_detect_broken_config_files` (TOO-19 review fix: this
+    function used to call ``load_configuration()`` itself, requiring a
+    second, redundant call from ``_detect_broken_config_files`` rather than
+    widening this function's return shape).
+
     Args:
-        cwd: Working directory string from the hook payload, or None.
+        config: An already-loaded ``Configuration``.
 
     Returns:
         Tuple ``(static_conflict, dynamic_conflict)`` where either may be None
         when no conflict of that type exists.
     """
-    config = load_configuration(cwd)
-
     # Determine log directory from project root (same logic as the PreToolUse hook).
     project_root = config.project_root
     log_dir = project_root / "logs" if project_root is not None else None
@@ -234,10 +306,11 @@ def main() -> None:
     Main entry point for the SessionStart hook.
 
     Reads the SessionStart JSON payload from stdin, checks for static and dynamic
-    configuration conflicts, and prints a brief summary to stdout when any are
-    found. Claude Code injects this stdout into the session context so the agent
-    immediately learns of any unresolved conflicts. Always exits 0 -- a SessionStart
-    hook must never block or break a session.
+    configuration conflicts PLUS any governed config file that failed to parse
+    (TOO-19), and prints a brief summary to stdout when any are found. Claude
+    Code injects this stdout into the session context so the agent immediately
+    learns of any unresolved conflicts or broken config. Always exits 0 -- a
+    SessionStart hook must never block or break a session.
 
     Exit codes:
         0: Always (including --help, isatty guard, and error cases).
@@ -267,10 +340,16 @@ def main() -> None:
         payload = _parse_session_start_input()
         cwd = payload.get("cwd") or os.getcwd()
 
-        static_conflict, dynamic_conflict = _detect_conflicts(cwd)
+        # Loaded exactly once and passed to both checks below (TOO-19 review
+        # fix -- see _detect_conflicts / _detect_broken_config_files
+        # docstrings for why this used to be two separate load_configuration()
+        # calls).
+        config = load_configuration(cwd)
+        static_conflict, dynamic_conflict = _detect_conflicts(config)
+        broken_files = _detect_broken_config_files(config)
 
-        if static_conflict is not None or dynamic_conflict is not None:
-            print(_format_summary(static_conflict, dynamic_conflict))
+        if static_conflict is not None or dynamic_conflict is not None or broken_files:
+            print(_format_summary(static_conflict, dynamic_conflict, broken_files))
 
     except Exception as exc:  # noqa: BLE001 - SessionStart must never raise
         print(f"toolguard session-start: unexpected error ({exc})", file=sys.stderr)

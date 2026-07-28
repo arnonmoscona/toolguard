@@ -176,7 +176,9 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
         levels = _discover_levels(project)
 
         hook_files = [
-            (path, fmt) for path, stype, fmt, _spec in levels if stype == "toolguard_hook"
+            (path, fmt)
+            for path, stype, fmt, _spec in levels
+            if stype == "toolguard_hook"
         ]
         project_hook = [(p, f) for p, f in hook_files if str(project) in str(p)]
         self.assertEqual(len(project_hook), 1)

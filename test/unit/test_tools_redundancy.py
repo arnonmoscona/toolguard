@@ -62,7 +62,9 @@ def _make_layer(
         level="project",
         source_type=source_type,
         file_format="json",
-        path=Path(f"/fake/.claude/{'settings' if is_native else 'toolguard_hook'}.json"),
+        path=Path(
+            f"/fake/.claude/{'settings' if is_native else 'toolguard_hook'}.json"
+        ),
         specificity=specificity,
     )
     content = MappingProxyType(
@@ -333,3 +335,102 @@ class TestCorpusRedundancy(unittest.TestCase):
             self.assertEqual(f.list_type, "allow")
             self.assertIsInstance(f.note, str)
             self.assertGreater(len(f.note), 0)
+
+    def test_structured_entry_detected_as_corpus_redundant_once_fixed(self):
+        """
+        Given an allow list holding a structured entry (a dict, not a bare
+            string) 'git push:*' that is genuinely covered by a broader
+            bare rule 'git:*' in the same layer, and a corpus exercising it
+        When find_redundancy() is called with the corpus
+        Then the structured entry IS reported corpus-redundant.
+
+        Regression test for the confirmed TOO-19 Phase 0a increment 6 defect
+        in `_config_without_allow`: matching the layer to edit via
+        `wrapped_target in allow_list` is always False against a structured
+        (dict) element, so the removal ALWAYS silently no-opped for a
+        structured pattern. Empirically (see probe scripts run during
+        implementation), this did not surface as a false "REDUNDANT" report
+        -- the pre-existing `config_without is config` identity guard in
+        `find_corpus_redundant_allows` intercepts the unchanged-object case
+        and SKIPS it instead. The net effect was an unconditional coverage
+        gap: a structured entry could NEVER be detected as corpus-redundant,
+        genuinely redundant or not, because `_config_without_allow` could
+        never produce a modified config for one. This test proves the check
+        is now meaningful for structured entries by exercising a case that
+        IS genuinely redundant and confirming it fires.
+        """
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/fake/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        structured = {
+            "match": "Bash(git push:*)",
+            "additionalContext": "careful",
+        }
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": [structured, "Bash(git:*)"],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _make_config(layer)
+        corpus = [_make_log_entry("Bash", "git push origin main")]
+
+        findings = find_redundancy(config, "Bash", corpus)
+
+        corpus_findings = [f for f in findings if f.kind == "corpus"]
+        redundant_patterns = [f.redundant_pattern for f in corpus_findings]
+        self.assertIn("git push:*", redundant_patterns)
+
+    def test_structured_entry_not_falsely_flagged_redundant(self):
+        """
+        Given an allow list holding a SOLE structured entry (a dict, not a
+            bare string) as the only rule covering a corpus command, so
+            removing it necessarily changes that command's decision
+        When find_redundancy() is called with a corpus exercising it
+        Then the structured entry is NOT reported corpus-redundant.
+
+        Complements the positive regression test above: proves the fix does
+        not overcorrect into flagging every structured entry as redundant
+        regardless of whether it is actually covered by another rule.
+        """
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/fake/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        structured = {
+            "match": "Bash(git push:*)",
+            "additionalContext": "careful",
+        }
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": [structured],
+                        "deny": [],
+                        "ask": [],
+                    }
+                }
+            ),
+        )
+        config = _make_config(layer)
+        corpus = [_make_log_entry("Bash", "git push origin main")]
+
+        findings = find_redundancy(config, "Bash", corpus)
+
+        corpus_findings = [f for f in findings if f.kind == "corpus"]
+        redundant_patterns = [f.redundant_pattern for f in corpus_findings]
+        self.assertNotIn("git push:*", redundant_patterns)

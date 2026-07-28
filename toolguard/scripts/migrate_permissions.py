@@ -9,32 +9,43 @@ dry-run mode for safe preview of changes.
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from toolguard.config import (
+    Configuration,
     discover_config_files,
     find_project_root,
     load_config_file,
     load_configuration,
 )
-from toolguard.config_validation import extract_tool_name
 from toolguard.config_divergence import (
     find_divergent_patterns,
     get_native_permissions,
     get_toolguard_permissions,
+)
+from toolguard.config_validation import extract_tool_name
+from toolguard.config_write_guard import verified_write_config
+from toolguard.rule_entry import (
+    RuleEntry,
+    normalize_entries_preserving,
+    normalize_entry,
+    real_patterns,
 )
 
 # Import canonical sort and section machinery from the shared module.
 # These names are re-exported here so that any caller importing them directly
 # from this module (e.g. test_migration.py) continues to work unchanged.
 from toolguard.rule_sort import (  # noqa: F401 -- re-exported for backward compat
+    RuleEntryOrStr,
     find_section_boundaries,
     get_tool_priority,
     parse_permissions_section_with_comments,
     reassemble_permissions_section,
+    render_toml_entry,
     sort_patterns,
 )
 
@@ -431,13 +442,18 @@ def detect_similar_patterns(
 
 
 def generate_permissions_section(
-    permissions: Dict[str, List[str]], auto_sort: bool = True
+    permissions: Dict[str, List[RuleEntryOrStr]], auto_sort: bool = True
 ) -> str:
     """
     Generate the [permissions] section content.
 
     Args:
-        permissions: Dictionary with 'allow', 'deny', 'ask' keys
+        permissions: Dictionary with 'allow', 'deny', 'ask' keys, each a list
+            of pattern ``str`` and/or :class:`~toolguard.rule_entry.RuleEntry`
+            (TOO-19 Phase 0a increment 8: this is the from-scratch writer, used
+            when there is no existing file/section to reuse original lines
+            from, so every entry is rendered fresh via
+            :func:`~toolguard.rule_sort.render_toml_entry`).
         auto_sort: Whether to sort patterns before writing
 
     Returns:
@@ -446,29 +462,66 @@ def generate_permissions_section(
     # Sort if requested
     if auto_sort:
         permissions = {
-            key: sort_patterns(patterns) for key, patterns in permissions.items()
+            key: sort_patterns(entries) for key, entries in permissions.items()
         }
 
     # Generate TOML content
     lines = ["[permissions]"]
 
     for perm_type in ["allow", "deny", "ask"]:
-        patterns = permissions.get(perm_type, [])
-        if patterns:
+        entries = permissions.get(perm_type, [])
+        if entries:
             lines.append(f"{perm_type} = [")
-            for pattern in patterns:
-                # Escape quotes in pattern
-                escaped = pattern.replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'  "{escaped}",')
+            for entry in entries:
+                lines.append(f"  {render_toml_entry(entry)},")
             lines.append("]")
             lines.append("")
 
     return "\n".join(lines)
 
 
+def _patterns_from_permissions(
+    permissions: Dict[str, List[RuleEntryOrStr]],
+) -> List[str]:
+    """
+    Extract every pattern string out of a permissions dict, plain or structured.
+
+    Builds the ``expected_patterns`` argument passed to
+    :func:`~toolguard.config_write_guard.verified_write_config`'s content-loss
+    guard (TOO-19 corrective change, Change 2/4): every pattern this write is
+    ASKED to write must still be present in the text the write path actually
+    produces, or the write path itself silently lost a rule -- e.g. the
+    ``rule_lines``/``rule_comments`` same-pattern-key collision bug in
+    ``rule_sort.reassemble_permissions_section`` (TOO-19 Change 4).
+
+    Delegates to :func:`~toolguard.rule_entry.real_patterns` (TOO-19 review
+    fix) rather than extracting ``.pattern`` unconditionally: an entry from
+    :func:`~toolguard.rule_entry.normalize_entries_preserving` may carry a
+    SYNTHESIZED pattern (a raw element that failed to normalize, e.g. a
+    structured entry missing its ``match`` key) that can never appear in the
+    text this module actually writes, so including it here previously made
+    the content-loss guard wrongly refuse every write once a config held one
+    such malformed entry (confirmed repro).
+
+    Args:
+        permissions: Dict with ``'allow'``/``'deny'``/``'ask'`` keys, each a
+            list of pattern ``str`` and/or :class:`RuleEntry`.
+
+    Returns:
+        Flat list of every REAL pattern string across all three lists (order
+        and duplicates preserved -- the guard only cares about set
+        membership), excluding any synthesized-pattern entry.
+    """
+    return [
+        pattern
+        for entries in permissions.values()
+        for pattern in real_patterns(entries)
+    ]
+
+
 def write_toml_config(
     config_path: Path,
-    permissions: Dict[str, List[str]],
+    permissions: Dict[str, List[RuleEntryOrStr]],
     auto_sort: bool = True,
 ) -> None:
     """
@@ -476,20 +529,37 @@ def write_toml_config(
 
     Preserves all other sections, top-level keys, and comments in the file.
     Only replaces the [permissions] section content while maintaining comments.
+    Every branch below writes via
+    :func:`~toolguard.config_write_guard.verified_write_config`, never a raw
+    ``Path.write_text`` -- the guard refuses to write text that fails to parse
+    or that silently drops one of ``permissions``'s own patterns (TOO-19
+    corrective change: a config file this project cannot parse back is a
+    permanent, unrecoverable loss for a user whose config is not version
+    controlled).
 
     Args:
         config_path: Path to TOML file to write
-        permissions: Dictionary with 'allow', 'deny', 'ask' keys
+        permissions: Dictionary with 'allow', 'deny', 'ask' keys, each a list
+            of pattern ``str`` and/or ``RuleEntry`` (TOO-19 Phase 0a increment 8)
         auto_sort: Whether to sort patterns before writing
 
     Raises:
         OSError: If file cannot be written
+        ConfigWriteVerificationError: The text this function produced fails
+            to parse, or would drop one of ``permissions``'s own patterns.
     """
+    expected_patterns = _patterns_from_permissions(permissions)
+
     # Check if file exists
     if not config_path.exists():
         # Create new file with just permissions section (no comments to preserve)
         new_permissions_section = generate_permissions_section(permissions, auto_sort)
-        config_path.write_text(new_permissions_section + "\n")
+        verified_write_config(
+            config_path,
+            new_permissions_section + "\n",
+            "toml",
+            expected_patterns=expected_patterns,
+        )
         return
 
     # Read existing file
@@ -527,30 +597,45 @@ def write_toml_config(
         # Ensure proper spacing
         new_content = before + new_permissions_section + "\n" + after
 
-    config_path.write_text(new_content)
+    verified_write_config(
+        config_path, new_content, "toml", expected_patterns=expected_patterns
+    )
 
 
 def write_json_config(
     config_path: Path,
-    permissions: Dict[str, List[str]],
+    permissions: Dict[str, List[RuleEntryOrStr]],
     auto_sort: bool = True,
 ) -> None:
     """
     Write permissions to JSON configuration file.
 
+    Writes via :func:`~toolguard.config_write_guard.verified_write_config`,
+    never a raw file write (TOO-19 corrective change) -- see
+    :func:`write_toml_config`'s docstring for why.
+
     Args:
         config_path: Path to JSON file to write
-        permissions: Dictionary with 'allow', 'deny', 'ask' keys
+        permissions: Dictionary with 'allow', 'deny', 'ask' keys, each a list
+            of pattern ``str`` and/or ``RuleEntry`` (TOO-19 Phase 0a increment
+            8). A ``RuleEntry`` is emitted via ``to_source()`` -- for JSON
+            this is nearly free: ``to_source()`` returns the original ``dict``
+            or ``str`` verbatim and ``json.dump`` handles either with no
+            special casing.
         auto_sort: Whether to sort patterns before writing
 
     Raises:
         OSError: If file cannot be written
+        ConfigWriteVerificationError: The text this function produced fails
+            to parse, or would drop one of ``permissions``'s own patterns.
     """
     # Sort if requested
     if auto_sort:
         permissions = {
-            key: sort_patterns(patterns) for key, patterns in permissions.items()
+            key: sort_patterns(entries) for key, entries in permissions.items()
         }
+
+    expected_patterns = _patterns_from_permissions(permissions)
 
     # Read existing config if it exists
     config = {}
@@ -561,13 +646,21 @@ def write_json_config(
         except json.JSONDecodeError, OSError:
             pass
 
-    # Update permissions
-    config["permissions"] = permissions
+    # Update permissions -- render each RuleEntry to its JSON-native source
+    # (str or dict) at this single emission point; a bare str entry (legacy
+    # contract) passes through unchanged.
+    config["permissions"] = {
+        key: [
+            entry.to_source() if isinstance(entry, RuleEntry) else entry
+            for entry in entries
+        ]
+        for key, entries in permissions.items()
+    }
 
-    # Write config
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
+    new_text = json.dumps(config, indent=2) + "\n"
+    verified_write_config(
+        config_path, new_text, "json", expected_patterns=expected_patterns
+    )
 
 
 def update_settings_file(
@@ -579,6 +672,12 @@ def update_settings_file(
     Remove migrated and redundant patterns from settings.local.json.
 
     Leaves permissions structure with empty lists for unmigrated patterns.
+    Writes via :func:`~toolguard.config_write_guard.verified_write_config`
+    (TOO-19 corrective change): ``settings.local.json`` is Claude's own native
+    settings file, typically also outside version control, so a corrupting
+    write here is the same unrecoverable-data-loss risk this guard exists to
+    prevent. The content-loss check here confirms every pattern that was NOT
+    migrated/redundant (and so should survive this edit) is still present.
 
     Args:
         settings_path: Path to settings.local.json
@@ -588,6 +687,8 @@ def update_settings_file(
     Raises:
         OSError: If file cannot be read or written
         json.JSONDecodeError: If file contains invalid JSON
+        ConfigWriteVerificationError: The text this function produced fails
+            to parse, or would drop a pattern that was not being removed.
     """
     if redundant_patterns is None:
         redundant_patterns = {"allow": [], "deny": [], "ask": []}
@@ -610,41 +711,49 @@ def update_settings_file(
 
     config["permissions"] = permissions
 
-    # Write updated config
-    with open(settings_path, "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
+    expected_patterns = [
+        pattern for values in permissions.values() for pattern in values
+    ]
+    new_text = json.dumps(config, indent=2) + "\n"
+    verified_write_config(
+        settings_path, new_text, "json", expected_patterns=expected_patterns
+    )
 
 
-def migrate(
-    project_root: Path,
-    dry_run: bool = False,
-    auto_sort: bool = True,
-    backup_dir: Path = None,
-) -> int:
+@dataclass
+class _MigrationSources:
     """
-    Perform the migration of permissions from settings.local.json to toolguard config.
+    Everything migrate() reads before it can compute or report anything.
+
+    Pure load/discover phase: talks to disk (settings.local.json, the
+    hierarchical toolguard configuration, and the raw list of discovered
+    config files) but performs no comparison and prints nothing.
+    """
+
+    native_perms: Dict[str, List[str]]
+    configuration: Configuration
+    toolguard_perms: Dict[str, List[str]]
+    config_files: List[Tuple[Path, str, str]]
+    governed: set
+    ignored_patterns: List[str]
+
+
+def _load_migration_sources(
+    project_root: Path, settings_path: Path
+) -> _MigrationSources:
+    """
+    Load native permissions, the hierarchical toolguard configuration, and the
+    discovered config file list -- everything migrate() needs before it can
+    start comparing native vs. toolguard permissions.
 
     Args:
-        project_root: Path to project root directory
-        dry_run: If True, preview changes without modifying files
-        auto_sort: If True, sort patterns after migration
-        backup_dir: Directory for backup files (default: project_root/logs/config-backups)
+        project_root: Path to project root directory.
+        settings_path: Path to the project's settings.local.json (assumed to
+            exist -- migrate() checks this before calling here).
 
     Returns:
-        Exit code (0 for success, 1 for error)
+        A :class:`_MigrationSources` bundling every loaded/discovered value.
     """
-    # Set default backup directory
-    if backup_dir is None:
-        backup_dir = project_root / "logs" / "config-backups"
-
-    # Load settings.local.json permissions
-    settings_path = project_root / ".claude" / "settings.local.json"
-    if not settings_path.exists():
-        print(f"No settings.local.json found at {settings_path}")
-        print("Nothing to migrate.")
-        return 0
-
     native_perms = get_native_permissions(settings_path)
 
     # Load configuration once and reuse for both permissions and takeover mode.
@@ -669,19 +778,36 @@ def migrate(
             takeover.additional_ignored_patterns
         )
 
-    # Find divergent patterns (patterns in native but not in toolguard). Restrict to
-    # the config's GOVERNED tools: a rule for a tool toolguard does not govern (e.g.
-    # WebFetch/Skill) must be left in settings.local.json -- moving it would leave it
-    # enforced by neither toolguard nor native Claude (issue #1). Passing the live
-    # governed set means this tracks changes over time (e.g. WebFetch becoming governed).
     governed = set(configuration.governed_tools())
-    divergent = find_divergent_patterns(
-        native_perms, toolguard_perms, ignored_patterns, governed_tools=governed
+
+    return _MigrationSources(
+        native_perms=native_perms,
+        configuration=configuration,
+        toolguard_perms=toolguard_perms,
+        config_files=config_files,
+        governed=governed,
+        ignored_patterns=ignored_patterns,
     )
 
-    # Note any ungoverned-tool patterns we are intentionally leaving in place, so the
-    # user knows they were not migrated (and why).
-    skipped_ungoverned = sorted(
+
+def _find_skipped_ungoverned_patterns(
+    native_perms: Dict[str, List[str]], governed: set
+) -> List[str]:
+    """
+    Return native patterns for tools toolguard does not govern.
+
+    A rule for a tool toolguard does not govern (e.g. WebFetch/Skill) must be
+    left in settings.local.json -- moving it would leave it enforced by
+    neither toolguard nor native Claude (issue #1).
+
+    Args:
+        native_perms: Native ``settings.local.json`` permissions dict.
+        governed: The live set of tools toolguard's configuration governs.
+
+    Returns:
+        Sorted list of patterns intentionally left untouched.
+    """
+    return sorted(
         {
             pattern
             for perm_type in ("allow", "deny", "ask")
@@ -689,72 +815,91 @@ def migrate(
             if extract_tool_name(pattern) not in governed
         }
     )
-    if skipped_ungoverned:
-        print(
-            f"Leaving {len(skipped_ungoverned)} rule(s) for ungoverned tools in "
-            "settings.local.json (toolguard does not govern these; moving them would "
-            "disable them):"
-        )
-        for pattern in skipped_ungoverned:
-            print(f"  - {pattern}")
 
-    # Find redundant patterns (exact duplicates or subsets)
-    redundant = find_redundant_patterns(native_perms, toolguard_perms)
 
-    # Check if there's anything to migrate or clean up
+def _print_skipped_ungoverned(skipped_ungoverned: List[str]) -> None:
+    """Print the "leaving these ungoverned-tool rules in place" notice, if any."""
+    if not skipped_ungoverned:
+        return
+    print(
+        f"Leaving {len(skipped_ungoverned)} rule(s) for ungoverned tools in "
+        "settings.local.json (toolguard does not govern these; moving them would "
+        "disable them):"
+    )
+    for pattern in skipped_ungoverned:
+        print(f"  - {pattern}")
+
+
+def _print_divergent_report(
+    divergent: Dict[str, List[str]], toolguard_perms: Dict[str, List[str]]
+) -> None:
+    """Print the "found N pattern(s) to migrate" report, annotating superset coverage."""
     total_divergent = sum(len(patterns) for patterns in divergent.values())
+    if total_divergent == 0:
+        return
+    print(f"Found {total_divergent} pattern(s) to migrate:")
+    print()
+    for perm_type in ["allow", "deny", "ask"]:
+        patterns = divergent[perm_type]
+        if not patterns:
+            continue
+        print(f"  {perm_type.upper()}:")
+        for pattern in patterns:
+            superset_match = None
+            for existing in toolguard_perms.get(perm_type, []):
+                if is_superset(existing, pattern):
+                    superset_match = existing
+                    break
+            if superset_match:
+                print(f"    - {pattern}  ← COVERED BY: {superset_match}")
+            else:
+                print(f"    - {pattern}")
+        print()
+
+
+def _print_redundant_report(redundant: Dict[str, List[str]]) -> None:
+    """Print the "found N redundant pattern(s) to remove" report."""
     total_redundant = sum(len(patterns) for patterns in redundant.values())
-
-    if total_divergent == 0 and total_redundant == 0:
-        print("No new patterns found to migrate.")
-        print("All patterns in settings.local.json are already in toolguard config.")
-        return 0
-
-    # Report what will be migrated
-    if total_divergent > 0:
-        print(f"Found {total_divergent} pattern(s) to migrate:")
+    if total_redundant == 0:
+        return
+    print(
+        f"Found {total_redundant} redundant pattern(s) to remove (already in toolguard config):"
+    )
+    print()
+    for perm_type in ["allow", "deny", "ask"]:
+        patterns = redundant[perm_type]
+        if not patterns:
+            continue
+        print(f"  {perm_type.upper()}:")
+        for pattern in patterns:
+            print(f"    - {pattern}")
         print()
-        for perm_type in ["allow", "deny", "ask"]:
-            patterns = divergent[perm_type]
-            if patterns:
-                print(f"  {perm_type.upper()}:")
-                for pattern in patterns:
-                    # Check if covered by a superset
-                    superset_match = None
-                    for existing in toolguard_perms.get(perm_type, []):
-                        if is_superset(existing, pattern):
-                            superset_match = existing
-                            break
-                    if superset_match:
-                        print(f"    - {pattern}  ← COVERED BY: {superset_match}")
-                    else:
-                        print(f"    - {pattern}")
-                print()
 
-    # Report redundant patterns
-    if total_redundant > 0:
-        print(
-            f"Found {total_redundant} redundant pattern(s) to remove (already in toolguard config):"
-        )
-        print()
-        for perm_type in ["allow", "deny", "ask"]:
-            patterns = redundant[perm_type]
-            if patterns:
-                print(f"  {perm_type.upper()}:")
-                for pattern in patterns:
-                    print(f"    - {pattern}")
-                print()
 
-    # Find target config file (prefer TOML, create if none exists). The write
-    # target must always be project_root's OWN .claude directory -- never an
-    # existing toolguard_hook file discovered at a different level (e.g. an
-    # ancestor project or the user's home ~/.claude). config_files mixes
-    # project- and user-level entries in one priority-ordered list (see
-    # discover_config_files), so scanning it unfiltered would silently widen
-    # migration scope from "this project" to "the user's global config" when
-    # the project has no toolguard_hook config of its own yet (TOO-15).
-    target_config_path = None
-    target_format = None
+def _resolve_target_config_path(
+    project_root: Path, config_files: List[Tuple[Path, str, str]]
+) -> Tuple[Path, str]:
+    """
+    Pick the toolguard config file migrate() writes to, and announce the choice.
+
+    The write target must always be project_root's OWN .claude directory --
+    never an existing toolguard_hook file discovered at a different level
+    (e.g. an ancestor project or the user's home ~/.claude). config_files
+    mixes project- and user-level entries in one priority-ordered list (see
+    discover_config_files), so scanning it unfiltered would silently widen
+    migration scope from "this project" to "the user's global config" when
+    the project has no toolguard_hook config of its own yet (TOO-15).
+
+    Args:
+        project_root: Path to project root directory.
+        config_files: The discovered config file list from discover_config_files().
+
+    Returns:
+        ``(target_config_path, target_format)`` -- an existing project-level
+        toolguard_hook file if one was found, otherwise a fresh
+        ``project_root/.claude/toolguard_hook.toml`` path with format
+        ``"toml"``.
+    """
     project_claude_dir = project_root / ".claude"
     # discover_config_files() internally re-resolves the project root (see
     # find_project_root -> resolve_project_root), so entries it returns carry
@@ -773,67 +918,170 @@ def migrate(
             continue
         if file_path.parent.resolve() != resolved_project_claude_dir:
             continue
-        target_config_path = file_path
-        target_format = file_format
-        break
+        print(f"Will add patterns to: {file_path}")
+        return file_path, file_format
 
     # If no toolguard config exists at the project level, create
     # project_root/.claude/toolguard_hook.toml -- never fall back to an
     # existing file at a different directory.
-    if target_config_path is None:
-        target_config_path = project_claude_dir / "toolguard_hook.toml"
-        target_format = "toml"
-        print(f"No toolguard config found. Will create: {target_config_path}")
+    target_config_path = project_claude_dir / "toolguard_hook.toml"
+    print(f"No toolguard config found. Will create: {target_config_path}")
+    return target_config_path, "toml"
+
+
+def _print_similar_pattern_warnings(
+    divergent: Dict[str, List[str]], toolguard_perms: Dict[str, List[str]]
+) -> None:
+    """Print near-duplicate warnings for every pattern about to be migrated."""
+    print()
+    print("Checking for similar patterns...")
+    similar_found = False
+    for perm_type in ["allow", "deny", "ask"]:
+        existing_patterns = toolguard_perms.get(perm_type, [])
+        for new_pattern in divergent[perm_type]:
+            similar = detect_similar_patterns(
+                new_pattern, existing_patterns, max_matches=3
+            )
+            if similar:
+                if not similar_found:
+                    print("Similar patterns (top 3 by similarity):")
+                    similar_found = True
+                for sim_pattern, score, is_superset_match in similar:
+                    superset_note = " [SUPERSET]" if is_superset_match else ""
+                    print(
+                        f"  '{new_pattern}' similar to '{sim_pattern}' ({score:.2f}){superset_note}"
+                    )
+
+    if not similar_found:
+        print("  No similar patterns found.")
+    print()
+
+
+def _print_dry_run_summary(
+    settings_path: Path,
+    backup_dir: Path,
+    target_config_path: Path,
+    total_divergent: int,
+    total_redundant: int,
+    auto_sort: bool,
+) -> None:
+    """Print the numbered "would perform these actions" preview for --dry-run."""
+    print("DRY RUN: No changes will be made.")
+    print()
+    print("Would perform these actions:")
+    print(f"  1. Create backup of {settings_path} in {backup_dir}")
+    if target_config_path.exists():
+        print(f"  2. Create backup of {target_config_path} in {backup_dir}")
+        if total_divergent > 0:
+            print(f"  3. Add {total_divergent} pattern(s) to {target_config_path}")
     else:
-        print(f"Will add patterns to: {target_config_path}")
+        if total_divergent > 0:
+            print(f"  2. Create new config file {target_config_path}")
+            print(f"  3. Add {total_divergent} pattern(s) to new config")
+    total_to_remove = total_divergent + total_redundant
+    if total_to_remove > 0:
+        print(f"  4. Remove {total_to_remove} pattern(s) from {settings_path}")
+        print(f"      ({total_divergent} migrated, {total_redundant} redundant)")
+    if auto_sort:
+        print("  5. Sort all patterns in target config")
 
-    # Check for similar patterns (only for patterns being migrated)
-    if total_divergent > 0:
-        print()
-        print("Checking for similar patterns...")
-        similar_found = False
+
+def _build_merged_permissions(
+    target_config_path: Path,
+    target_format: str,
+    divergent: Dict[str, List[str]],
+    total_divergent: int,
+) -> Dict[str, List[RuleEntry]]:
+    """
+    Merge the target config's existing permissions with the divergent patterns.
+
+    Loads and normalizes the target config's existing [permissions] (if the
+    file exists), then appends every not-yet-present divergent pattern.
+
+    W1 fix (TOO-19 Phase 0a increment 8): every raw element is normalized into
+    a RuleEntry via normalize_entries_preserving -- INCLUDING one that fails
+    to normalize (preserved verbatim, never dropped). Previously this assigned
+    the raw list straight through, so a structured (dict) entry either got
+    silently deleted by reassemble_permissions_section (only patterns present
+    in new_permissions survive) or crashed sort_patterns with "TypeError:
+    unhashable type: 'dict'" -- both defects this increment fixes.
+
+    Args:
+        target_config_path: Path to the toolguard config being written to.
+        target_format: ``"toml"`` or ``"json"``.
+        divergent: Patterns to migrate, keyed by ``"allow"``/``"deny"``/``"ask"``.
+        total_divergent: Sum of all divergent pattern counts (``0`` skips the
+            "add divergent patterns" step entirely, leaving just the
+            normalized existing permissions).
+
+    Returns:
+        Merged permissions dict, ready for :func:`write_toml_config` or
+        :func:`write_json_config`.
+    """
+    merged_perms: Dict[str, List[RuleEntry]] = {"allow": [], "deny": [], "ask": []}
+    if target_config_path.exists():
+        existing_config = load_config_file(target_config_path, target_format)
+        existing_perms = existing_config.get("permissions", {})
         for perm_type in ["allow", "deny", "ask"]:
-            existing_patterns = toolguard_perms.get(perm_type, [])
-            for new_pattern in divergent[perm_type]:
-                similar = detect_similar_patterns(
-                    new_pattern, existing_patterns, max_matches=3
+            merged_perms[perm_type] = list(
+                normalize_entries_preserving(
+                    existing_perms.get(perm_type, []), is_native=False
                 )
-                if similar:
-                    if not similar_found:
-                        print("Similar patterns (top 3 by similarity):")
-                        similar_found = True
-                    for sim_pattern, score, is_superset_match in similar:
-                        superset_note = " [SUPERSET]" if is_superset_match else ""
-                        print(
-                            f"  '{new_pattern}' similar to '{sim_pattern}' ({score:.2f}){superset_note}"
-                        )
+            )
 
-        if not similar_found:
-            print("  No similar patterns found.")
-        print()
+    if total_divergent > 0:
+        for perm_type in ["allow", "deny", "ask"]:
+            existing_patterns = {entry.pattern for entry in merged_perms[perm_type]}
+            for pattern in divergent[perm_type]:
+                if pattern in existing_patterns:
+                    continue
+                # `pattern` is already a confirmed Tool(...)-wrapped string
+                # (get_native_permissions() only keeps is_tool_wrapper
+                # matches), so normalize_entry cannot return None here --
+                # the fallback below is defensive, not expected to trigger.
+                new_entry, _issues = normalize_entry(pattern, is_native=False)
+                if new_entry is None:
+                    new_entry = RuleEntry(pattern=pattern, raw=pattern)
+                merged_perms[perm_type].append(new_entry)
+                existing_patterns.add(pattern)
 
-    if dry_run:
-        print("DRY RUN: No changes will be made.")
-        print()
-        print("Would perform these actions:")
-        print(f"  1. Create backup of {settings_path} in {backup_dir}")
-        if target_config_path.exists():
-            print(f"  2. Create backup of {target_config_path} in {backup_dir}")
-            if total_divergent > 0:
-                print(f"  3. Add {total_divergent} pattern(s) to {target_config_path}")
-        else:
-            if total_divergent > 0:
-                print(f"  2. Create new config file {target_config_path}")
-                print(f"  3. Add {total_divergent} pattern(s) to new config")
-        total_to_remove = total_divergent + total_redundant
-        if total_to_remove > 0:
-            print(f"  4. Remove {total_to_remove} pattern(s) from {settings_path}")
-            print(f"      ({total_divergent} migrated, {total_redundant} redundant)")
-        if auto_sort:
-            print("  5. Sort all patterns in target config")
-        return 0
+    return merged_perms
 
-    # Perform migration
+
+def _apply_migration(
+    settings_path: Path,
+    target_config_path: Path,
+    target_format: str,
+    backup_dir: Path,
+    divergent: Dict[str, List[str]],
+    redundant: Dict[str, List[str]],
+    total_divergent: int,
+    total_redundant: int,
+    auto_sort: bool,
+) -> int:
+    """
+    Back up, write, and clean up: the actual (non-dry-run) migration write phase.
+
+    Backs up settings.local.json and (if it exists) the target config, merges
+    divergent patterns into the target config's permissions and writes it, and
+    removes migrated/redundant patterns from settings.local.json. Any failure
+    is caught and reported without letting an exception propagate out of the
+    migration -- backups already made remain available for manual recovery.
+
+    Args:
+        settings_path: Path to settings.local.json.
+        target_config_path: Path to the toolguard config being written to.
+        target_format: ``"toml"`` or ``"json"``.
+        backup_dir: Directory backups are written into.
+        divergent: Patterns to migrate, keyed by ``"allow"``/``"deny"``/``"ask"``.
+        redundant: Patterns to remove as already covered, same keying.
+        total_divergent: Sum of all divergent pattern counts.
+        total_redundant: Sum of all redundant pattern counts.
+        auto_sort: Whether to sort patterns before writing the target config.
+
+    Returns:
+        ``0`` on success, ``1`` if any step raised.
+    """
     print("Starting migration...")
     print()
 
@@ -851,23 +1099,11 @@ def migrate(
 
         # 3. Merge divergent patterns into toolguard config
         print(f"Adding patterns to {target_config_path.name}...")
+        merged_perms = _build_merged_permissions(
+            target_config_path, target_format, divergent, total_divergent
+        )
 
-        # Load existing toolguard config permissions (full structure)
-        merged_perms = {"allow": [], "deny": [], "ask": []}
-        if target_config_path.exists():
-            existing_config = load_config_file(target_config_path, target_format)
-
-            existing_perms = existing_config.get("permissions", {})
-            for perm_type in ["allow", "deny", "ask"]:
-                merged_perms[perm_type] = existing_perms.get(perm_type, [])
-
-        # Add divergent patterns (if any)
         if total_divergent > 0:
-            for perm_type in ["allow", "deny", "ask"]:
-                for pattern in divergent[perm_type]:
-                    if pattern not in merged_perms[perm_type]:
-                        merged_perms[perm_type].append(pattern)
-
             # Ensure target directory exists
             target_config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -902,6 +1138,102 @@ def migrate(
         print("Backups (if created) are available in:", backup_dir)
         print("You can manually restore from backups if needed.")
         return 1
+
+
+def migrate(
+    project_root: Path,
+    dry_run: bool = False,
+    auto_sort: bool = True,
+    backup_dir: Optional[Path] = None,
+) -> int:
+    """
+    Perform the migration of permissions from settings.local.json to toolguard config.
+
+    Structured as four phases, each delegated to its own helper: load/discover
+    sources (:func:`_load_migration_sources`), compute the divergent/redundant
+    pattern sets and report them, resolve the write target
+    (:func:`_resolve_target_config_path`), and -- unless this is a dry run --
+    apply the migration (:func:`_apply_migration`). This function itself only
+    sequences those phases and handles the early-exit "nothing to do" cases;
+    it performs no file I/O of its own.
+
+    Args:
+        project_root: Path to project root directory
+        dry_run: If True, preview changes without modifying files
+        auto_sort: If True, sort patterns after migration
+        backup_dir: Directory for backup files (default: project_root/logs/config-backups)
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    if backup_dir is None:
+        backup_dir = project_root / "logs" / "config-backups"
+
+    settings_path = project_root / ".claude" / "settings.local.json"
+    if not settings_path.exists():
+        print(f"No settings.local.json found at {settings_path}")
+        print("Nothing to migrate.")
+        return 0
+
+    sources = _load_migration_sources(project_root, settings_path)
+
+    # Find divergent patterns (patterns in native but not in toolguard). Restrict to
+    # the config's GOVERNED tools -- see _find_skipped_ungoverned_patterns's docstring
+    # for why. Passing the live governed set means this tracks changes over time
+    # (e.g. WebFetch becoming governed).
+    divergent = find_divergent_patterns(
+        sources.native_perms,
+        sources.toolguard_perms,
+        sources.ignored_patterns,
+        governed_tools=sources.governed,
+    )
+    _print_skipped_ungoverned(
+        _find_skipped_ungoverned_patterns(sources.native_perms, sources.governed)
+    )
+
+    # Find redundant patterns (exact duplicates or subsets)
+    redundant = find_redundant_patterns(sources.native_perms, sources.toolguard_perms)
+
+    total_divergent = sum(len(patterns) for patterns in divergent.values())
+    total_redundant = sum(len(patterns) for patterns in redundant.values())
+
+    if total_divergent == 0 and total_redundant == 0:
+        print("No new patterns found to migrate.")
+        print("All patterns in settings.local.json are already in toolguard config.")
+        return 0
+
+    _print_divergent_report(divergent, sources.toolguard_perms)
+    _print_redundant_report(redundant)
+
+    target_config_path, target_format = _resolve_target_config_path(
+        project_root, sources.config_files
+    )
+
+    if total_divergent > 0:
+        _print_similar_pattern_warnings(divergent, sources.toolguard_perms)
+
+    if dry_run:
+        _print_dry_run_summary(
+            settings_path,
+            backup_dir,
+            target_config_path,
+            total_divergent,
+            total_redundant,
+            auto_sort,
+        )
+        return 0
+
+    return _apply_migration(
+        settings_path,
+        target_config_path,
+        target_format,
+        backup_dir,
+        divergent,
+        redundant,
+        total_divergent,
+        total_redundant,
+        auto_sort,
+    )
 
 
 def main() -> int:

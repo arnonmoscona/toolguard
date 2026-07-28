@@ -25,6 +25,7 @@ from toolguard.tools.maintenance import (
     _collect_annotations,
     _nosecurity_block_reason,
     _partition_nosecurity,
+    _permission_patterns_in_text,
     _render_ledger,
     _render_replay,
     _run_annotate,
@@ -264,9 +265,7 @@ class TestMaintenanceCLI(unittest.TestCase):
             _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
         )
         buffer = io.StringIO()
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config", return_value=config
-        ):
+        with mock.patch("toolguard.tools.maintenance.load_config", return_value=config):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--format", "text"])
         self.assertEqual(code, 0)
@@ -282,9 +281,7 @@ class TestMaintenanceCLI(unittest.TestCase):
             _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
         )
         buffer = io.StringIO()
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config", return_value=config
-        ):
+        with mock.patch("toolguard.tools.maintenance.load_config", return_value=config):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--format", "json"])
         self.assertEqual(code, 0)
@@ -299,14 +296,14 @@ class TestMaintenanceCLI(unittest.TestCase):
             is never touched (static-only is the fast default).
         """
         config = _make_config(_make_layer("Bash", allow=[]))
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config", return_value=config
-        ), mock.patch(
-            "toolguard.tools.maintenance.harvest_corpus"
-        ) as harvest, mock.patch(
-            "toolguard.tools.maintenance.run_maintenance",
-            wraps=run_maintenance,
-        ) as run:
+        with (
+            mock.patch("toolguard.tools.maintenance.load_config", return_value=config),
+            mock.patch("toolguard.tools.maintenance.harvest_corpus") as harvest,
+            mock.patch(
+                "toolguard.tools.maintenance.run_maintenance",
+                wraps=run_maintenance,
+            ) as run,
+        ):
             with redirect_stdout(io.StringIO()):
                 code = main(["--tool", "Bash"])
         self.assertEqual(code, 0)
@@ -324,14 +321,16 @@ class TestMaintenanceCLI(unittest.TestCase):
             _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
         )
         corpus = [_make_log_entry("Bash", "git push origin main")]
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config", return_value=config
-        ), mock.patch(
-            "toolguard.tools.maintenance.harvest_corpus", return_value=corpus
-        ) as harvest, mock.patch(
-            "toolguard.tools.maintenance.run_maintenance",
-            wraps=run_maintenance,
-        ) as run:
+        with (
+            mock.patch("toolguard.tools.maintenance.load_config", return_value=config),
+            mock.patch(
+                "toolguard.tools.maintenance.harvest_corpus", return_value=corpus
+            ) as harvest,
+            mock.patch(
+                "toolguard.tools.maintenance.run_maintenance",
+                wraps=run_maintenance,
+            ) as run,
+        ):
             with redirect_stdout(io.StringIO()):
                 code = main(["--tool", "Bash", "--corpus", "--max-age-days", "7"])
         self.assertEqual(code, 0)
@@ -385,12 +384,15 @@ class TestApplyMode(unittest.TestCase):
             that the maintenance skill can feed to `toolguard-audit --edits`.
         """
         buffer = io.StringIO()
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config",
-            return_value=self._git_config(),
-        ), mock.patch(
-            "toolguard.tools.maintenance.apply_proposals",
-            return_value=ChangeReport(files=()),
+        with (
+            mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                return_value=self._git_config(),
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.apply_proposals",
+                return_value=ChangeReport(files=()),
+            ),
         ):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--apply", "--format", "json"])
@@ -431,15 +433,17 @@ class TestApplyMode(unittest.TestCase):
             NOT consulted, and the banner reports a dry run.
         """
         buffer = io.StringIO()
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config",
-            return_value=self._git_config(),
-        ), mock.patch(
-            "toolguard.tools.maintenance.apply_proposals",
-            return_value=ChangeReport(files=()),
-        ) as apply, mock.patch(
-            "toolguard.tools.maintenance.migration_preflight"
-        ) as preflight:
+        with (
+            mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                return_value=self._git_config(),
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.apply_proposals",
+                return_value=ChangeReport(files=()),
+            ) as apply,
+            mock.patch("toolguard.tools.maintenance.migration_preflight") as preflight,
+        ):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--apply"])
         self.assertEqual(code, 0)
@@ -456,14 +460,16 @@ class TestApplyMode(unittest.TestCase):
         """
         buffer = io.StringIO()
         blocked = mock.Mock(blockers=["The working tree has uncommitted changes: x"])
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config",
-            return_value=self._git_config(),
-        ), mock.patch(
-            "toolguard.tools.maintenance.migration_preflight", return_value=blocked
-        ), mock.patch(
-            "toolguard.tools.maintenance.apply_proposals"
-        ) as apply:
+        with (
+            mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                return_value=self._git_config(),
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.migration_preflight", return_value=blocked
+            ),
+            mock.patch("toolguard.tools.maintenance.apply_proposals") as apply,
+        ):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--apply", "--write"])
         self.assertEqual(code, 2)
@@ -478,15 +484,19 @@ class TestApplyMode(unittest.TestCase):
         """
         buffer = io.StringIO()
         clean = mock.Mock(blockers=[])
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config",
-            return_value=self._git_config(),
-        ), mock.patch(
-            "toolguard.tools.maintenance.migration_preflight", return_value=clean
-        ), mock.patch(
-            "toolguard.tools.maintenance.apply_proposals",
-            return_value=ChangeReport(files=()),
-        ) as apply:
+        with (
+            mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                return_value=self._git_config(),
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.migration_preflight", return_value=clean
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.apply_proposals",
+                return_value=ChangeReport(files=()),
+            ) as apply,
+        ):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--apply", "--write"])
         self.assertEqual(code, 0)
@@ -500,12 +510,15 @@ class TestApplyMode(unittest.TestCase):
         Then stdout is a JSON change report carrying a dry_run=true flag.
         """
         buffer = io.StringIO()
-        with mock.patch(
-            "toolguard.tools.maintenance.load_config",
-            return_value=self._git_config(),
-        ), mock.patch(
-            "toolguard.tools.maintenance.apply_proposals",
-            return_value=ChangeReport(files=()),
+        with (
+            mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                return_value=self._git_config(),
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.apply_proposals",
+                return_value=ChangeReport(files=()),
+            ),
         ):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--apply", "--format", "json"])
@@ -543,7 +556,9 @@ class TestNoSecurityWithholding(unittest.TestCase):
             else:
                 lines.append(f"    'Bash({body})',")
         text = (
-            "[permissions]\nallow = [\n" + "\n".join(lines) + "\n]\ndeny = []\nask = []\n"
+            "[permissions]\nallow = [\n"
+            + "\n".join(lines)
+            + "\n]\ndeny = []\nask = []\n"
         )
         path = Path(tmpdir) / "toolguard_hook.toml"
         path.write_text(text, encoding="utf-8")
@@ -718,6 +733,108 @@ class TestAnnotateMode(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
+    def test_write_with_clean_preflight_routes_through_verified_write_config(self):
+        """
+        Given --annotate --write with a clean (no-blocker) pre-flight
+        When _run_annotate runs
+        Then toolguard.tools.maintenance.verified_write_config is called with
+            file_format="toml" and expected_patterns covering every rule
+            pattern that was already in the file (TOO-19 corrective change:
+            annotation must never silently drop a rule)
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            path = Path(d) / "toolguard_hook.toml"
+            args = argparse.Namespace(write=True, format="text", dir=d, tool=["Bash"])
+            clean = mock.Mock(blockers=[])
+            with mock.patch(
+                "toolguard.tools.maintenance.migration_preflight", return_value=clean
+            ):
+                with mock.patch(
+                    "toolguard.tools.maintenance.verified_write_config"
+                ) as mock_write:
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        code = _run_annotate(args, config)
+            self.assertEqual(code, 0)
+            mock_write.assert_called_once()
+            call_args, call_kwargs = mock_write.call_args
+            self.assertEqual(call_args[0], path)
+            self.assertEqual(call_args[2], "toml")
+            self.assertEqual(
+                set(call_kwargs["expected_patterns"]),
+                {"Bash(git:*)", "Bash(git push:*)"},
+            )
+
+    def test_permission_patterns_in_text_excludes_malformed_entry(self):
+        """
+        Given [permissions] text whose allow list holds a valid string entry
+            AND a structured entry MISSING its "match" key
+        When _permission_patterns_in_text() extracts expected_patterns
+        Then only the real pattern is returned -- the malformed entry's
+            synthesized repr()-based value is excluded (TOO-19 review-round-2
+            fix): it can never appear in the annotated text this function's
+            caller writes, so including it previously made annotation on such
+            a file always refuse (confirmed repro)
+        """
+        text = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(ls)",\n'
+            '  { additionalContext = "oops" },\n'
+            "]\n"
+        )
+        self.assertEqual(_permission_patterns_in_text(text), ["Bash(ls)"])
+
+    def test_annotate_write_survives_a_malformed_structured_entry_in_the_file(self):
+        """
+        Given a real toolguard_hook.toml whose [permissions] allow list
+            includes a confusing rule (annotatable) PLUS a structured entry
+            missing its "match" key, and a clean pre-flight
+        When --annotate --write runs via _run_annotate
+        Then the write succeeds (no ConfigWriteVerificationError bubbling
+            out) and the malformed entry survives verbatim in the file --
+            end-to-end confirmation of the maintenance.py-side fix
+        """
+        with tempfile.TemporaryDirectory() as d:
+            text = (
+                "[permissions]\n"
+                "allow = [\n"
+                "    'Bash(git:*)',\n"
+                '    { additionalContext = "oops" },\n'
+                "]\n"
+                "deny = [\n"
+                "    'Bash(git push:*)',\n"
+                "]\n"
+                "ask = []\n"
+            )
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(text, encoding="utf-8")
+            prov = Provenance(
+                level="project",
+                source_type="toolguard_hook",
+                file_format="toml",
+                path=path,
+                specificity=0,
+            )
+            layer = _make_layer("Bash", allow=["git:*"], deny=["git push:*"])
+            layer = ConfigLayer(provenance=prov, content=layer.content)
+            config = _make_config(layer)
+
+            args = argparse.Namespace(write=True, format="text", dir=d, tool=["Bash"])
+            clean = mock.Mock(blockers=[])
+            with mock.patch(
+                "toolguard.tools.maintenance.migration_preflight", return_value=clean
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    code = _run_annotate(args, config)
+
+            self.assertEqual(code, 0)
+            written = path.read_text(encoding="utf-8")
+            self.assertIn('{ additionalContext = "oops" }', written)
+            self.assertIn("# toolguard:", written)
+
     def test_apply_and_annotate_are_mutually_exclusive(self):
         """
         Given both --apply and --annotate
@@ -835,20 +952,34 @@ class TestReplayCandidate(unittest.TestCase):
         )
         corpus = [_make_log_entry("Bash", "git push origin main")]
         with tempfile.TemporaryDirectory() as candidate:
-            with mock.patch(
-                "toolguard.tools.maintenance.load_config",
-                side_effect=[config_a, config_b],
-            ), mock.patch(
-                "toolguard.tools.maintenance.harvest_corpus",
-                return_value=corpus,
+            with (
+                mock.patch(
+                    "toolguard.tools.maintenance.load_config",
+                    side_effect=[config_a, config_b],
+                ),
+                mock.patch(
+                    "toolguard.tools.maintenance.harvest_corpus",
+                    return_value=corpus,
+                ),
             ):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    rc = main(["--dir", ".", "--replay-candidate", candidate, "--format", "json"])
+                    rc = main(
+                        [
+                            "--dir",
+                            ".",
+                            "--replay-candidate",
+                            candidate,
+                            "--format",
+                            "json",
+                        ]
+                    )
         self.assertEqual(rc, 0)
         payload = json.loads(buf.getvalue())["replay_candidate"]
         self.assertEqual(payload["broadened"], 1)
-        self.assertEqual(payload["broadened_commands"][0]["command"], "git push origin main")
+        self.assertEqual(
+            payload["broadened_commands"][0]["command"], "git push origin main"
+        )
 
     def test_cli_rejects_combining_with_apply(self):
         """
@@ -928,7 +1059,16 @@ class TestLedgerMode(unittest.TestCase):
         from toolguard.tools.decision_ledger import new_decision
 
         text = _render_ledger(
-            [new_decision("reject-promotion", "rm", "promote:user", "reject", "too broad", "user")]
+            [
+                new_decision(
+                    "reject-promotion",
+                    "rm",
+                    "promote:user",
+                    "reject",
+                    "too broad",
+                    "user",
+                )
+            ]
         )
         self.assertIn("[user] reject: reject-promotion on rm", text)
         self.assertIn("too broad", text)

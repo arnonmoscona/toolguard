@@ -1,4 +1,7 @@
-.claude
+.claude/*
+!.claude/commands/
+.claude/commands/*
+!.claude/commands/documentation-review.md
 logs
 .mcp.json
 .DS_Store
@@ -29,4 +32,3 @@ skills/explore-codebase/
 skills/refactor-safely/
 skills/review-changes/
 .pyscn/
-

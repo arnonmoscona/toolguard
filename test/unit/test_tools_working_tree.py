@@ -54,9 +54,7 @@ class TestWorkingTreeStatus(unittest.TestCase):
         self.assertTrue(status.is_git_repo)
         self.assertFalse(status.is_clean)
         self.assertFalse(status.is_safe_to_apply)
-        self.assertEqual(
-            status.dirty_paths, ("toolguard/config.py", "new_file.py")
-        )
+        self.assertEqual(status.dirty_paths, ("toolguard/config.py", "new_file.py"))
 
     def test_non_repo_is_not_safe(self):
         """

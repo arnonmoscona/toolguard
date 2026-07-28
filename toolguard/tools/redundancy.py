@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from toolguard.config import Configuration, Provenance, wrap_tool_pattern
 from toolguard.patterns import parse_pattern
+from toolguard.rule_entry import normalize_entry
 from toolguard.tools.config_access import per_layer_rules, with_layer_allow_replaced
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import replay
@@ -201,19 +202,13 @@ def find_static_duplicates_across_layers(
     findings: List[RedundancyFinding] = []
     for layer in per_layer_rules(config, tool):
         findings.extend(
-            find_static_duplicates(
-                list(layer.allow), layer.provenance, tool, "allow"
-            )
+            find_static_duplicates(list(layer.allow), layer.provenance, tool, "allow")
         )
         findings.extend(
-            find_static_duplicates(
-                list(layer.deny), layer.provenance, tool, "deny"
-            )
+            find_static_duplicates(list(layer.deny), layer.provenance, tool, "deny")
         )
         findings.extend(
-            find_static_duplicates(
-                list(layer.ask), layer.provenance, tool, "ask"
-            )
+            find_static_duplicates(list(layer.ask), layer.provenance, tool, "ask")
         )
     return findings
 
@@ -260,7 +255,22 @@ def _config_without_allow(
         allow_list = permissions.get("allow", [])
         if not isinstance(allow_list, list):
             continue
-        if wrapped_target in allow_list:
+        # Locate the layer by PATTERN (".pattern" -- "is this the same RULE",
+        # per RuleEntry.identity()'s comparison-semantics note), not by raw
+        # element identity: an allow-list element may be a structured `dict`,
+        # and `wrapped_target in allow_list` (a `str in list` check) is
+        # always False against one, so a structured entry's layer was never
+        # found and the removal silently no-opped. Mirrors the exact
+        # normalize_entry-then-compare-pattern idiom used by
+        # with_layer_rules_replaced. An element that fails to normalize is
+        # simply not a match here -- never raises.
+        entries = (
+            normalize_entry(element, is_native=layer.is_native)[0]
+            for element in allow_list
+        )
+        if any(
+            entry is not None and entry.pattern == wrapped_target for entry in entries
+        ):
             return with_layer_allow_replaced(
                 config, tool, layer.provenance, {pattern_to_remove}, []
             )

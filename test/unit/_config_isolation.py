@@ -5,10 +5,11 @@ toolguard/config.py reads real filesystem state from exactly three controllable
 anchors: Path.home(), toolguard.config.find_project_root(), and the
 XDG_CONFIG_HOME/CLAUDE_SETTINGS_PATH environment variables. This repo dogfoods
 toolguard on itself, so a real ~/.claude/toolguard_hook.toml (and potentially a
-real ~/.config/toolguard/rules/) genuinely exists on the machine running this
-suite -- tests that don't redirect these three anchors can silently depend on,
-or be broken by, that real state. ConfigIsolationMixin redirects all three into
-a fresh temporary directory.
+real ~/.config/toolguard/rules/ and/or ~/.toolguard/rules/ -- TOO-30/TOO-19's
+two candidate rules directories, both derived from Path.home()) genuinely
+exists on the machine running this suite -- tests that don't redirect these
+three anchors can silently depend on, or be broken by, that real state.
+ConfigIsolationMixin redirects all three into a fresh temporary directory.
 
 This module deliberately does NOT start with "test" so that
 ``unittest discover``'s ``test*.py`` pattern never picks it up as a test module
