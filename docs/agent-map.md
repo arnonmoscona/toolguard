@@ -171,6 +171,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 **`docs/architecture.md`**
 - [Package structure](architecture.md#package-structure)
 - [Hook flow](architecture.md#hook-flow)
+- [Writing configuration](architecture.md#writing-configuration)
 - [Configuration hierarchy](architecture.md#configuration-hierarchy)
 - [Pattern matching implementation](architecture.md#pattern-matching-implementation)
   - [Command tool patterns](architecture.md#command-tool-patterns)
@@ -182,7 +183,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 
 **`docs/auto-mode.md`**
 - [The honest tradeoff](auto-mode.md#the-honest-tradeoff)
-- [Why `no_match_fallback = "ask"` (the normal default) doesn't work here](auto-mode.md#why-no_match_fallback-ask-the-normal-default-doesnt-work-here)
+- [Why `no_match_fallback = "ask"` (the normal default) doesn't work here](auto-mode.md#why-no_match_fallback--ask-the-normal-default-doesnt-work-here)
 - [The recommended configuration for this specific case](auto-mode.md#the-recommended-configuration-for-this-specific-case)
 - [Recommended checklist before you turn this on](auto-mode.md#recommended-checklist-before-you-turn-this-on)
 - [How this differs from Takeover Mode](auto-mode.md#how-this-differs-from-takeover-mode)
@@ -202,6 +203,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Warning types](config-sync.md#warning-types)
 
 **`docs/configuration.md`**
+- [Contents](configuration.md#contents)
 - [Step 1: Register hook matchers](configuration.md#step-1-register-hook-matchers)
 - [Step 2: Configure governed tools](configuration.md#step-2-configure-governed-tools)
   - [Declaring additional supported tools](configuration.md#declaring-additional-supported-tools)
@@ -209,6 +211,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Step 3: Configure permission patterns](configuration.md#step-3-configure-permission-patterns)
   - [Standard patterns (in settings.local.json)](configuration.md#standard-patterns-in-settingslocaljson)
   - [Extended patterns (in toolguard_hook.toml or toolguard_hook.json)](configuration.md#extended-patterns-in-toolguard_hooktoml-or-toolguard_hookjson)
+  - [Structured rule entries, and the single line rule](configuration.md#structured-rule-entries-and-the-single-line-rule)
 - [No-match fallback](configuration.md#no-match-fallback)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)
@@ -222,6 +225,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 
 **`docs/install.md`**
   - [Set expectations up front (say this before you start)](install.md#set-expectations-up-front-say-this-before-you-start)
+- [Phase map](install.md#phase-map)
 - [Principles (follow these throughout)](install.md#principles-follow-these-throughout)
 - [Install checklist (work through it; do not skip a box)](install.md#install-checklist-work-through-it-do-not-skip-a-box)
 - [Phase 0 -- Preflight](install.md#phase-0----preflight)
@@ -259,7 +263,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Multi-line commands and scripts](permission-patterns.md#multi-line-commands-and-scripts)
   - [Command substitution and subshells](permission-patterns.md#command-substitution-and-subshells)
   - [Heredocs and the `__HEREDOC_TO_<sink>__` sentinel](permission-patterns.md#heredocs-and-the-__heredoc_to_sink__-sentinel)
-  - [Inline interpreter code (`-c` / `-e` / `-r`)](permission-patterns.md#inline-interpreter-code--c--e--r)
+  - [Inline interpreter code (`-c` / `-e` / `-r`)](permission-patterns.md#inline-interpreter-code--c---e---r)
   - [Control structures](permission-patterns.md#control-structures)
   - [Process substitution](permission-patterns.md#process-substitution)
   - [Limitations (summary)](permission-patterns.md#limitations-summary)
@@ -276,6 +280,8 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 **`docs/security.md`**
 - [Blanket allow risks](security.md#blanket-allow-risks)
 - [Multi-line commands and the ASK-safe guarantee](security.md#multi-line-commands-and-the-ask-safe-guarantee)
+- [A broken config file also fails safe, not open](security.md#a-broken-config-file-also-fails-safe-not-open)
+- [How toolguard protects its own writes](security.md#how-toolguard-protects-its-own-writes)
 - [Backup importance](security.md#backup-importance)
 - [Testing with dry-run](security.md#testing-with-dry-run)
 - [Verify toolguard is running](security.md#verify-toolguard-is-running)

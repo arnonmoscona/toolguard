@@ -16,6 +16,35 @@ sequence them, get consent, and keep a rollback record.
 (Phase 3). Read the docs you need as raw files or from the installed package; do not `git clone`
 unless the user explicitly wants a source checkout.
 
+## Phase map
+
+Work the phases in order. This map is for re-entry -- resuming after an interruption, or
+answering "what does Phase 8 do again" without re-reading the file.
+
+| Phase | What happens | Reversible? |
+| --- | --- | --- |
+| [0 -- Preflight](#phase-0----preflight) | Environment checks before any change | n/a, no changes yet |
+| [1 -- Scope](#phase-1----scope) | Which projects, user level or project level | n/a |
+| [2 -- Options](#phase-2----options-recommend-then-take-their-decision) | Takeover mode and other decisions | n/a |
+| [3 -- Install method](#phase-3----install-method) | `uv tool install` | yes, uninstall |
+| [4 -- Base config, then hook](#phase-4----write-the-base-config-then-register-the-hook-go-live-last) | Config first, go-live LAST | yes, journaled |
+| [5 -- Skills](#phase-5----skills-ask-the-user) | Install the audit/maintenance skills | yes, journaled |
+| [6 -- Validate](#phase-6----validate) | Confirm enforcement actually works | n/a |
+| [7 -- Migration](#phase-7----offer-an-initial-migration-optional) | Fold native rules in (optional) | yes, backups |
+| [8 -- Security audit](#phase-8----offer-a-security-audit-optional) | Optional review pass | n/a, read-only |
+| [9 -- Maintenance](#phase-9----offer-an-initial-maintenance-pass-optional) | Optional cleanup pass | yes, per-item consent |
+| [10 -- Takeover](#phase-10----enable-takeover-only-if-the-user-chose-it-in-phase-2) | Only if chosen in Phase 2 | yes, journaled |
+| [Wrap-up](#wrap-up) | Hand back, summarize | n/a |
+
+Supporting sections, not part of the sequence:
+
+- [Principles (follow these throughout)](#principles-follow-these-throughout) -- read before Phase 0
+- [Install checklist](#install-checklist-work-through-it-do-not-skip-a-box) -- the box-ticking version of the phases
+- [The `toolguard-install` helper](#the-toolguard-install-helper-use-it-to-cut-prompt-noise) -- subcommands that cut prompt noise
+- [The install journal](#the-install-journal-toolguardinstall-journalmd) -- what to record, and why rollback depends on it
+- [Phase R -- Rollback during install](#phase-r----rollback-during-install-if-the-user-changes-their-mind) -- if the user changes their mind
+- [Phase T -- Trace dump and issue reporting](#phase-t----trace-dump-and-issue-reporting-offer-this) -- when something went wrong
+
 ### Set expectations up front (say this before you start)
 
 Before the first system change, tell the user plainly what they are signing up for -- this is a

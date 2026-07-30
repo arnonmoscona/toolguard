@@ -11,6 +11,34 @@ Toolguard requires configuration in two places:
 
 Both must be configured for each tool you want to govern.
 
+## Contents
+
+Written for lookup rather than a start-to-finish read: jump to the section that answers the
+question in front of you.
+
+- [Step 1: Register hook matchers](#step-1-register-hook-matchers) -- which tools Claude Code
+  sends to the hook at all
+- [Step 2: Configure governed tools](#step-2-configure-governed-tools) -- which of those
+  toolguard actually enforces
+  - [Declaring additional supported tools](#declaring-additional-supported-tools)
+  - [Recommended tools to govern](#recommended-tools-to-govern)
+- [Step 3: Configure permission patterns](#step-3-configure-permission-patterns) -- the rules
+  themselves
+  - [Standard patterns (in settings.local.json)](#standard-patterns-in-settingslocaljson)
+  - [Extended patterns (in toolguard_hook.toml or toolguard_hook.json)](#extended-patterns-in-toolguard_hooktoml-or-toolguard_hookjson) -- `[regex]`, `[glob]`, `[native]`
+  - [Structured rule entries, and the single line rule](#structured-rule-entries-and-the-single-line-rule) -- the `{ match = "..." }` form, and the one-line requirement
+- [No-match fallback](#no-match-fallback) -- what happens when nothing matches
+- [Verifying configuration](#verifying-configuration)
+- [Environment variables](#environment-variables)
+  - [Boolean values](#boolean-values)
+  - [Project root detection](#project-root-detection)
+  - [.env file](#env-file)
+  - [Error handling](#error-handling)
+- [Configuration hierarchy](#configuration-hierarchy) -- how project, ancestor, and user
+  levels combine
+- [Configuration reference](#configuration-reference) -- every section and key, annotated
+- [Keeping toolguard up to date](#keeping-toolguard-up-to-date)
+
 ## Step 1: Register hook matchers
 
 Add hook matchers for each tool in `.claude/settings.local.json`. For example:
@@ -317,6 +345,58 @@ All three prefixes work for both command tools (`Bash(...)`,
 `mcp__jetbrains__execute_terminal_command(...)`) and file-path tools (`Read(...)`,
 `Write(...)`, `Edit(...)`). See [Permission Patterns](permission-patterns.md) for detailed syntax
 and examples.
+
+### Structured rule entries, and the single line rule
+
+Anywhere a pattern string is accepted in a `toolguard_hook.toml` list, toolguard also accepts
+a **structured entry**: an inline table carrying the pattern under a `match` key.
+
+```toml
+[permissions]
+allow = [
+    "Bash(git status:*)",             # plain pattern
+    { match = "Bash(git log:*)" },    # structured entry, identical meaning
+]
+```
+
+Today the two forms mean exactly the same thing: `match` is the only key toolguard
+understands, so a structured entry buys nothing over a plain string. It is documented here
+because **toolguard's own tooling can write this form into your config** (the maintenance
+skill and the migration command share a single serializer that emits it), so you may
+encounter it in a file you did not hand-edit. Additional keys are reserved for a future
+release; an unrecognized key is reported as a validation warning and otherwise ignored.
+
+> **A structured entry MUST be written on ONE line.** TOML 1.0 forbids a multi-line inline
+> table, so an entry split across lines does not merely fail on its own -- it makes the
+> **entire file** unparseable, and every rule in it stops being enforced, including any
+> `[hard_deny]` the file declares.
+
+```toml
+# WRONG -- breaks the whole file
+allow = [
+    {
+        match = "Bash(git log:*)"
+    }
+]
+
+# RIGHT
+allow = [
+    { match = "Bash(git log:*)" },
+]
+```
+
+Toolguard detects this specific mistake and names the offending line rather than reporting a
+generic TOML error:
+
+```
+structured rule entry starting at line 3 spans multiple physical lines, which is not valid
+TOML 1.0 (an inline table must be written on a single line). Rewrite it as one line.
+```
+
+A file that fails to parse does not fail silently or fail open: every decision is clamped to
+`ask` until you fix it, and the broken file is named in the output. Read
+[Security: a broken config file also fails safe, not open](security.md#a-broken-config-file-also-fails-safe-not-open)
+before relying on that clamp in an unattended session -- it behaves differently there.
 
 ## No-match fallback
 

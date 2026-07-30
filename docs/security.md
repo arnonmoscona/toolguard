@@ -1,5 +1,13 @@
 # Security Best Practices
 
+**Audience: anyone configuring toolguard -- human or agent -- who needs to know where the
+sharp edges are.** This page covers the risks of blanket allows, the two guarantees toolguard
+makes when it cannot fully understand its input (the ASK-safe guarantee for commands, and the
+same posture applied to unparseable config files), how config writes are protected from
+corruption, what to back up, how to verify toolguard is actually running, and a recommended
+review cadence with a starting set of deny patterns. Read
+[Blanket allow risks](#blanket-allow-risks) first if you read nothing else.
+
 ## Blanket allow risks
 
 **Never use blanket allows without toolguard protection.**
@@ -107,6 +115,60 @@ prompts instead. The permission prompt itself names the broken file and its pars
 injects that into the session context) until it is fixed. This mirrors the ASK-safe guarantee
 above -- decompose-with-confidence-or-ASK -- applied at the config layer instead of the
 command-parsing layer.
+
+**The rules in the broken file itself are still gone.** The clamp protects you from a silent
+`allow`; it does not resurrect the file's contents. If the unparseable file was the one
+declaring a `[hard_deny]`, that hard deny is not enforced while the file is broken -- the
+command it was blocking resolves to ASK instead of DENY.
+
+> **It does not become a silent allow, including in [auto-mode](auto-mode.md).** An ASK
+> returned by toolguard's `PreToolUse` hook is a real permission request, and Claude Code's
+> unattended modes do not bypass it -- the command still stops and waits. So a `[hard_deny]`
+> lost to a TOML syntax error degrades from "blocked outright" to "blocked pending an answer",
+> not to "allowed". What you lose is the DENY; what you keep is the stop.
+>
+> In an unattended run that means the session **stalls** on the first affected command rather
+> than proceeding without the rule -- the same dead end
+> [auto-mode.md](auto-mode.md#why-no_match_fallback--ask-the-normal-default-doesnt-work-here)
+> describes for `no_match_fallback = "ask"`. Inconvenient, and the right failure direction.
+>
+> Two habits keep it from costing you a run: declare `[hard_deny]` at the **user** level,
+> where a broken project file cannot take it out, and treat `toolguard-session-start`'s
+> broken-config warning as a stop-work item rather than noise -- especially before starting an
+> unattended session. A one-line syntax error is the cheapest possible fix, right up until it
+> costs you an overnight run.
+
+**This behaviour is deliberately not tunable, and will stay that way.** Other fallbacks are
+configurable because they answer a policy question -- what should happen to an action no rule
+covers. A parse failure is not a policy question: toolguard does not know what its rules
+*are*, so it has no basis for any verdict at all. There is nothing to trade off, so there is
+no setting to loosen. Clean, parseable config is the precondition for trusting any of it.
+Expect the friction to be loud and repeated until you fix the file -- that is the feature.
+
+The most common way to produce this specific failure is a structured rule entry split across
+several lines; see
+[Structured rule entries, and the single line rule](configuration.md#structured-rule-entries-and-the-single-line-rule).
+
+## How toolguard protects its own writes
+
+Permission config is frequently not under version control, so a corrupting write is permanent,
+unrecoverable loss. Every write toolguard performs to a config file -- from the maintenance
+skill, the migration command, and the installer alike -- goes through a single guarded path
+that makes three promises:
+
+1. **It never writes a file that does not parse.** The final text is parsed before anything
+   touches the disk. If it would not load, the write is refused and the original is left
+   byte-for-byte unchanged.
+2. **It never silently drops a rule.** Valid output can still be wrong output, so the guard
+   also checks that every pattern present before the write is still present after it. A write
+   that would lose a rule is refused, even though the result would have parsed cleanly.
+3. **It cannot leave a half-written file.** Writes go to a sibling temporary file which is
+   flushed, `fsync`ed, and then atomically renamed over the target, so a crash or a full disk
+   mid-write leaves either the old file or the new one, never a truncated one.
+
+A refusal is reported, not swallowed -- if you see one, the config on disk is intact and the
+change was not applied. This protects toolguard's own tooling; it does not protect a file you
+edit by hand, which is what the backups below are for.
 
 ## Backup importance
 

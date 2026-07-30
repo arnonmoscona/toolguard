@@ -70,7 +70,31 @@ or any test in this directory since the last push:
   and `XDG_CONFIG_HOME` outside of `_config_isolation.py` itself and the commented
   hand-rolled exceptions. Any new, uncommented hit is either a missed retrofit or a new
   ad hoc pattern that should be folded into the shared mixin instead.
-- [ ] Run the full suite (`uv run python -m unittest discover -s test -t .`) with a
-  throwaway change to your real `~/.claude/toolguard_hook.toml` (e.g. temporarily
-  setting `takeover_mode.enabled = true` if it isn't already) to sanity-check nothing
-  newly depends on real machine state. Revert the throwaway change after.
+- [ ] Sanity-check that nothing newly depends on real machine state by running the full
+  suite against an empty `$HOME`:
+
+  ```bash
+  TMPH=$(mktemp -d); TMPX=$(mktemp -d)
+  HOME="$TMPH" XDG_CONFIG_HOME="$TMPX" uv run python -m unittest discover -s test -t .
+  rm -rf "$TMPH" "$TMPX"
+  ```
+
+  **This replaces an earlier instruction to make "a throwaway change to your real
+  `~/.claude/toolguard_hook.toml`" and revert it afterwards. Do not do that, and do not
+  reintroduce it.** Mutating live permission configuration to validate anything is the
+  anti-pattern that produced the TOO-19 incident: toolguard governs the agent, these
+  files are typically untracked, and a missed revert is unrecoverable. The env-var form
+  above tests the same property, cannot lose data, and needs no revert step.
+
+  It is also strictly stronger. It found three real latent failures on its first run
+  (`TestRulesDirectoryDiscovery`, fixed 2026-07-28): they compared against a
+  `Path.home()` evaluated OUTSIDE a `clear=True` environment patch, which happened to
+  match only because `$HOME` equalled the machine's `pwd` entry. The live-config form
+  never varied `$HOME`, so it could not have found them.
+
+- [ ] For a behavioural question about what a config WOULD decide, use
+  `toolguard.testing.sandbox` -- never a real config file. One safe command:
+
+  ```bash
+  uv run python -m toolguard.testing.sandbox --config <file> --command "<command>"
+  ```

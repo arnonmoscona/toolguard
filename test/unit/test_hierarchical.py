@@ -51,13 +51,13 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
         levels = _discover_levels(project)
 
-        specs = {path.parent.parent.name: spec for path, _stype, _fmt, spec in levels}
+        specs = {path.parent.parent.name: spec for path, _stype, _fmt, spec, _lvl in levels}
         # project (.claude under 'proj') is most specific
         self.assertEqual(specs["proj"], 0)
         # intermediate ancestor 'a' is between project and user
         self.assertGreater(specs["a"], 0)
         # ~ is least specific (largest index)
-        home_spec = max(spec for _p, _s, _f, spec in levels)
+        home_spec = max(spec for _p, _s, _f, spec, _lvl in levels)
         self.assertEqual(specs[home.name], home_spec)
 
     def test_toggle_off_uses_only_project_and_user(self):
@@ -79,7 +79,7 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
         levels = _discover_levels(project)
 
-        dirs = {path.parent.parent.name for path, _s, _f, _spec in levels}
+        dirs = {path.parent.parent.name for path, _s, _f, _spec, _lvl in levels}
         self.assertIn("proj", dirs)
         self.assertIn(home.name, dirs)
         self.assertNotIn("a", dirs)
@@ -100,7 +100,7 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
         levels = _discover_levels(project)
 
-        dirs = {path.parent.parent.name for path, _s, _f, _spec in levels}
+        dirs = {path.parent.parent.name for path, _s, _f, _spec, _lvl in levels}
         self.assertIn("a", dirs)
 
     def test_project_outside_home_still_includes_user(self):
@@ -116,14 +116,14 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
         levels = _discover_levels(project)
 
-        paths = [str(path) for path, _s, _f, _spec in levels]
+        paths = [str(path) for path, _s, _f, _spec, _lvl in levels]
         self.assertTrue(any(str(project) in p for p in paths))
         self.assertTrue(any(str(home / ".claude") in p for p in paths))
         # User level is least specific (largest specificity index).
         user_specs = [
-            spec for path, _s, _f, spec in levels if str(home / ".claude") in str(path)
+            spec for path, _s, _f, spec, _lvl in levels if str(home / ".claude") in str(path)
         ]
-        max_spec = max(spec for _p, _s, _f, spec in levels)
+        max_spec = max(spec for _p, _s, _f, spec, _lvl in levels)
         self.assertEqual(user_specs[0], max_spec)
 
     def test_walk_stops_at_home(self):
@@ -158,7 +158,7 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
                 with patch("toolguard.config.Path.home", return_value=home):
                     levels = _discover_levels(project)
 
-            paths = [str(path) for path, _s, _f, _spec in levels]
+            paths = [str(path) for path, _s, _f, _spec, _lvl in levels]
             self.assertFalse(any(str(root / "home" / ".claude") in p for p in paths))
 
     def test_within_level_toml_preferred_over_json(self):
@@ -177,7 +177,7 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
         hook_files = [
             (path, fmt)
-            for path, stype, fmt, _spec in levels
+            for path, stype, fmt, _spec, _lvl in levels
             if stype == "toolguard_hook"
         ]
         project_hook = [(p, f) for p, f in hook_files if str(project) in str(p)]

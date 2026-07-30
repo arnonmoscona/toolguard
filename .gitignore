@@ -1,7 +1,10 @@
-.claude/*
-!.claude/commands/
-.claude/commands/*
-!.claude/commands/documentation-review.md
+# .claude is a SYMLINK into the dot_files repo, where its contents are version
+# controlled (claude/projects/toolguard/.claude). Git cannot descend a symlink
+# -- "pathspec is beyond a symbolic link" -- so no negation pattern can
+# re-include anything under it. The earlier attempt to track
+# .claude/commands/documentation-review.md that way is therefore impossible
+# here, and that file is now tracked in dot_files only (TOO-19, 2026-07-28).
+.claude
 logs
 .mcp.json
 .DS_Store

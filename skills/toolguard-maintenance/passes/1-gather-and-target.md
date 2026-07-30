@@ -67,7 +67,7 @@ From `context.tools[].layers`, walk **every** layer and **every** section
 > authoritative set of governed tools is `context.summary.governed_tools`;
 > `context.tools[]` does not match it in either direction. It can INCLUDE native-only
 > tools that toolguard does not govern (`Skill`, `WebFetch`) -- skip those -- and it can
-> OMIT a governed tool that carries rules (observed: an `mcp__local-tools__checked_bash`
+> OMIT a governed tool that carries rules (observed: a `Bash`
 > blanket deny lived only in the raw TOML, invisible to `context.tools[]`). So: take the
 > governed set from `governed_tools`, and for any governed tool NOT represented in
 > `context.tools[]`, read its `[permissions."<tool>"]` rules from the toolguard TOML

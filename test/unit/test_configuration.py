@@ -1766,10 +1766,16 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
     #
     # TOO-19: _rules_dir() (single directory) was replaced by _rules_dirs(),
     # returning BOTH candidate directories in precedence order (XDG first,
-    # then the legacy ~/.toolguard/rules). Like the old _rules_dir() tests
-    # these compare against a live Path.home() call rather than mocking it --
-    # pure path arithmetic with no filesystem I/O, so no isolation is needed
-    # per test/unit/CLAUDE.md's first checklist question.
+    # then the legacy ~/.toolguard/rules). These do no filesystem I/O, so they
+    # need no ConfigIsolationMixin setup -- but the expected value MUST be
+    # computed with Path.home() called INSIDE the same patched environment as
+    # the code under test. Path.home() is not pure: it reads $HOME and falls
+    # back to the pwd database when unset, so a Path.home() evaluated outside
+    # a clear=True patch can differ from one evaluated inside it. That made
+    # these three tests pass only because $HOME happened to match the pwd entry
+    # on the developer's machine; they failed under any other $HOME (found
+    # 2026-07-28 while replacing test/unit/CLAUDE.md's live-config sanity check
+    # with an empty-$HOME run).
 
     def test_rules_dirs_uses_xdg_config_home_when_set(self):
         """
@@ -1780,11 +1786,12 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
         """
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/custom/xdg"}, clear=True):
             result = config_module._rules_dirs()
+            expected_home = Path.home()
         self.assertEqual(
             result,
             (
                 Path("/custom/xdg") / "toolguard" / "rules",
-                Path.home() / ".toolguard" / "rules",
+                expected_home / ".toolguard" / "rules",
             ),
         )
 
@@ -1797,11 +1804,12 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
         """
         with patch.dict(os.environ, {}, clear=True):
             result = config_module._rules_dirs()
+            expected_home = Path.home()
         self.assertEqual(
             result,
             (
-                Path.home() / ".config" / "toolguard" / "rules",
-                Path.home() / ".toolguard" / "rules",
+                expected_home / ".config" / "toolguard" / "rules",
+                expected_home / ".toolguard" / "rules",
             ),
         )
 
@@ -1815,11 +1823,12 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
         """
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}, clear=True):
             result = config_module._rules_dirs()
+            expected_home = Path.home()
         self.assertEqual(
             result,
             (
-                Path.home() / ".config" / "toolguard" / "rules",
-                Path.home() / ".toolguard" / "rules",
+                expected_home / ".config" / "toolguard" / "rules",
+                expected_home / ".toolguard" / "rules",
             ),
         )
 
@@ -2676,69 +2685,97 @@ class TestRulesDirectoryValidationAndProvenance(
         layer = ConfigLayer(prov, MappingProxyType({"permissions": {"allow": []}}))
         self.assertIsNone(layer.shadowed_path)
 
-    def test_level_for_path_returns_user_for_rules_dir_path(self):
+    # TOO-19 (2026-07-28): these four asserted against the private
+    # _level_for_path(), which re-derived a source's level from its path shape
+    # and has been REMOVED -- _discover_levels() now emits the level directly,
+    # since it is the pass that actually found the file. The behaviours are
+    # unchanged and still asserted, now through discovery itself, which also
+    # makes them end-to-end rather than white-box.
+
+    def _discovered_level(self, project, filename):
         """
-        Given a file path under the (isolated, default-location) rules directory
-        When _level_for_path() determines its conceptual level
-        Then it returns 'user' (not 'project', the pre-TOO-30 default for any
-        path outside ~/.claude)
+        Return the level(s) discovery assigns to a file, by name.
+
+        Args:
+            project: Project root to discover from.
+            filename: The file's base name.
+
+        Returns:
+            A list of level labels for every discovered source with that name.
         """
-        fake_home, _project = self.isolate_config_environment()
+        return [
+            level
+            for path, _stype, _fmt, _spec, level in config_module._discover_levels(
+                project
+            )
+            if path.name == filename
+        ]
+
+    def test_rules_dir_file_is_discovered_at_the_user_level(self):
+        """
+        Given a rules file in the (isolated, default-location) rules directory
+        When the hierarchy levels are discovered
+        Then the file is assigned the 'user' level, not 'project'
+        """
+        fake_home, project = self.isolate_config_environment()
         rules_dir = fake_home / ".config" / "toolguard" / "rules"
         rules_dir.mkdir(parents=True)
-        gh_path = rules_dir / "gh.toml"
-        level = config_module._level_for_path(gh_path)
-        self.assertEqual(level, "user")
+        (rules_dir / "gh.toml").write_text("[permissions]\n")
 
-    def test_level_for_path_still_returns_project_for_unrelated_path(self):
+        self.assertEqual(self._discovered_level(project, "gh.toml"), ["user"])
+
+    def test_project_claude_file_is_discovered_at_the_project_level(self):
         """
-        Given a file path unrelated to both ~/.claude and the rules directory
-        When _level_for_path() determines its conceptual level
-        Then it returns 'project' (unchanged behaviour for the non-user case)
+        Given a config file in the project's own .claude directory
+        When the hierarchy levels are discovered
+        Then it is assigned the 'project' level
         """
-        level = config_module._level_for_path(
-            Path("/some/project/.claude/toolguard_hook.toml")
+        _fake_home, project = self.isolate_config_environment()
+        claude_dir = project / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "toolguard_hook.toml").write_text("[permissions]\n")
+
+        self.assertEqual(
+            self._discovered_level(project, "toolguard_hook.toml"), ["project"]
         )
-        self.assertEqual(level, "project")
 
-    def test_level_for_path_returns_user_for_legacy_toolguard_dir_path(self):
+    def test_legacy_toolguard_rules_file_is_discovered_at_the_user_level(self):
         """
-        Given a file path under the (isolated) legacy ~/.toolguard/rules
-        directory (real path, not symlinked)
-        When _level_for_path() determines its conceptual level
-        Then it returns 'user' (TOO-19: the second candidate rules directory
-        is now a recognised user-level anchor)
+        Given a rules file in the legacy ~/.toolguard/rules directory
+        When the hierarchy levels are discovered
+        Then it is assigned the 'user' level (TOO-19: the second candidate
+        rules directory is a user-level source)
         """
-        fake_home, _project = self.isolate_config_environment()
+        fake_home, project = self.isolate_config_environment()
         legacy_rules_dir = fake_home / ".toolguard" / "rules"
         legacy_rules_dir.mkdir(parents=True)
-        gh_path = legacy_rules_dir / "gh.toml"
-        level = config_module._level_for_path(gh_path)
-        self.assertEqual(level, "user")
+        (legacy_rules_dir / "gh.toml").write_text("[permissions]\n")
 
-    def test_level_for_path_returns_user_for_symlinked_legacy_toolguard_dir_path(self):
+        self.assertEqual(self._discovered_level(project, "gh.toml"), ["user"])
+
+    def test_symlinked_rules_file_is_discovered_at_the_user_level(self):
         """
-        Given a rules file that physically lives under ~/.toolguard/rules (the
-        legacy directory), symlinked INTO the XDG rules directory -- the
-        originally reported TOO-19 mislabelling scenario (this exact shape was
-        in place as a real stopgap workaround): Path.resolve() on the
-        discovered (XDG-side) symlink path follows it to the real path under
-        ~/.toolguard/rules, which pre-fix matched neither anchor
-        When _level_for_path() determines its conceptual level
-        Then it still returns 'user', not 'project', because the resolved
-        real path now matches the legacy-directory anchor
+        Given a rules file physically under ~/.toolguard/rules, symlinked INTO
+        the XDG rules directory (the real stopgap workaround shape from TOO-19)
+        When the hierarchy levels are discovered
+        Then it is still assigned the 'user' level
+
+        Under the removed path-shape derivation this depended on resolve()
+        landing on a recognised anchor. Discovery now assigns the level from
+        WHERE THE FILE WAS FOUND, so the symlink target is irrelevant.
         """
-        fake_home, _project = self.isolate_config_environment()
+        fake_home, project = self.isolate_config_environment()
         legacy_rules_dir = fake_home / ".toolguard" / "rules"
         legacy_rules_dir.mkdir(parents=True)
         real_file = legacy_rules_dir / "gh.rules.toml"
         real_file.write_text("[permissions]\n")
         xdg_rules_dir = fake_home / ".config" / "toolguard" / "rules"
         xdg_rules_dir.mkdir(parents=True)
-        symlinked_path = xdg_rules_dir / "gh.rules.toml"
-        symlinked_path.symlink_to(real_file)
-        level = config_module._level_for_path(symlinked_path)
-        self.assertEqual(level, "user")
+        (xdg_rules_dir / "gh.rules.toml").symlink_to(real_file)
+
+        levels = self._discovered_level(project, "gh.rules.toml")
+        self.assertTrue(levels, "the symlinked rules file was not discovered at all")
+        self.assertEqual(set(levels), {"user"})
 
     def test_unexpected_key_reported_as_error_and_permissions_still_resolve_end_to_end(
         self,

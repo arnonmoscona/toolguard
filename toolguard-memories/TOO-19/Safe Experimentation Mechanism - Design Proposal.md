@@ -572,9 +572,34 @@ rather than assume:
 2. **`_level_for_path` attributes a config to a hierarchy level by path shape.** A symlinked
    `.claude` could change that attribution, silently moving a rule between levels.
 
-**Action: add tests proving the hierarchy resolves identically through a symlinked
-`.claude`.** (`find_project_root` anchors on `.claude/` presence; a symlinked directory
-should satisfy it, but that too should be asserted, not assumed.)
+**DONE 2026-07-28** -- `test/unit/test_symlink_hierarchy.py`, 8 tests. Results:
+
+- `find_project_root` DOES anchor correctly on a symlinked `.claude`, returning the
+  project directory rather than the symlink target.
+- Level attribution is unchanged, and end-to-end verdicts through a symlinked `.claude`
+  are byte-identical to the real-directory control.
+- A symlinked rules FILE loads correctly (the TOO-19 near-miss did not regress).
+- **FOOTGUN FOUND AND FIXED (same day).** `_level_for_path` re-derived a source's level
+  from its path shape, resolving symlinks and testing containment under `~/.claude`. A
+  store placed under `~/.claude` therefore silently reclassified every project rule as a
+  USER rule, changing precedence with no error. Symlinking the CONTENTS instead of the
+  directory hit the identical bug (attribution resolves the file, so it follows a file
+  symlink too) -- so that apparent workaround cost version control for new files and
+  bought nothing.
+
+  **Fix:** `_discover_levels()` now emits the level itself, since it is the pass that
+  actually found the file, and `_level_for_path()` is deleted (a comment at its former
+  site warns against reintroducing path-shape derivation). The two derivations can no
+  longer disagree because there is only one. Net negative LOC.
+
+  Subtlety worth keeping: the user tier is `len(level_dirs) - 1`, NOT the maximum
+  specificity among discovered results -- a level whose directory does not exist
+  contributes nothing, so a max-over-results would promote the deepest existing level to
+  `user`. Both the fix and this subtlety are mutation-tested (reintroducing either defect
+  fails specific tests).
+
+  Practical consequence: **the store's location no longer matters**, so there is no rule
+  for future-you to remember and no doc caveat needed.
 
 This is **complementary to, not a replacement for, the Part 2 hook**: VCS covers commits;
 the hook covers the window between them, and any machine or user with no such repo.
@@ -582,6 +607,70 @@ the hook covers the window between them, and any machine or user with no such re
 ---
 
 ## Part 5 -- MISSING FROM DRAFT 1: auto-mode is the primary lever
+
+> **CORRECTION 2026-07-30 (Arnon).** The premise below was WRONG, and it propagated from here
+> into the TOO-28 comment and into a draft of `docs/security.md` before being caught. **An ASK
+> returned by a `PreToolUse` hook is NOT bypassed in auto mode** -- the command stops and waits.
+> The 2026-07-25 "measurement" (`Status: ASK / ASK floor applied` followed by the command
+> running) was misread: a logged ASK followed by execution is what an *approved* prompt looks
+> like, and it is indistinguishable in the log from a bypass. The log records the verdict, not
+> whether a human answered.
+>
+> This is consistent with what `docs/auto-mode.md` already said and this document did not
+> reconcile with: `no_match_fallback = "ask"` is described there as "a dead end in an
+> unattended run: there is no one there to answer, so an unmatched command just hangs." An
+> ASK that hangs is an ASK that blocks.
+>
+> **What this changes:**
+> - The 2026-07-25 incident is NOT explained by ask-bypass. The agent's `Edit` calls to the
+>   live config went through because an explicit `Edit(./**)` allow matched them -- an allow
+>   rule, not a missing block. That is a plainer and more actionable diagnosis.
+> - **TOO-28's motivation changes DIRECTION, not just strength.** The old framing was "ask
+>   interactively, deny in auto mode" -- add friction where nobody is watching. With the
+>   corrected fact, Arnon's reframing (2026-07-30) is the more useful one: **ask interactively,
+>   ALLOW in auto mode.** If you trust Claude Code's auto-mode classifier, toolguard's ASK is
+>   redundant friction in an unattended run rather than protection -- the classifier is already
+>   a second gate on that action, and toolguard's explicit `deny`/`hard_deny` still resolve
+>   BEFORE it. Only the ASK tier relaxes. This also removes the stall problem above instead of
+>   trading it for a hard failure.
+> - The ASK floor is a real control in auto mode, not advisory telemetry.
+>
+> **Three caveats for TOO-28 -- ALL RESOLVED by Arnon 2026-07-30:**
+>
+> 1. **Does a hook `allow` bypass the classifier?** The whole rationale assumes the classifier
+>    still judges an action toolguard allowed. If a `PreToolUse` `allow` makes Claude Code skip
+>    the classifier, then ASK -> ALLOW removes BOTH gates and the reasoning inverts. Not
+>    hypothetical: narrow native Bash allow rules DO bypass the classifier unless
+>    `autoMode.classifyAllShell` is set, so "an allow can skip the classifier" is a real
+>    mechanism in that system.
+>    **RESOLVED: test it explicitly, manually, together.** Do NOT infer it from toolguard's
+>    logs (the mistake corrected above) and do not settle it from documentation alone. This is
+>    a prerequisite for TOO-28's design, not a detail to discover during it.
+> 2. **The ASK floor is not a rule-derived ASK.** `compound.py`'s clamp fires when toolguard
+>    *cannot safely decompose* the command (foreign inline code, heredocs into an interpreter)
+>    -- a structural "I do not understand this input", not a policy choice about a known action.
+>    **RESOLVED: it gets its OWN flag, separate from the no-match case.** Arnon has commented
+>    on TOO-28 accordingly. Two distinct knobs, because they answer two distinct questions:
+>    - `no_match_fallback_auto_mode` -- "no rule matched this action"
+>    - `undecidable_fallback_auto_mode` -- "I could not decompose this command safely"
+>
+>    Keeping them separate matters: you might reasonably trust the classifier with an
+>    unmatched-but-parseable command while still refusing to hand it something toolguard
+>    itself could not read. Collapsing them into one flag would silently couple those.
+> 3. **The parse-failure clamp is exempt, permanently.**
+>    **RESOLVED (Arnon, verbatim):** *"parse failure must always be a noisy, naggy,
+>    uncomfortable, heavy friction behavior. You MUST have clean TOML for any configuration to
+>    be trusted at all."*
+>
+>    Treat this as an invariant rather than a default: **no auto-mode flag, present or future,
+>    may downgrade a parse-failure ASK.** The reasoning is that a parse failure is not a
+>    permission decision at all -- toolguard does not know what its rules are, so it has no
+>    basis for any verdict, and the classifier cannot compensate for rules it never saw.
+>    Anything that relaxes it produces the silent-allow scenario this document wrongly claimed
+>    already existed, except real and by configuration. Any future flag touching fallback
+>    behaviour needs a test asserting the parse-failure path is unaffected.
+>
+> Everything below is retained as written, for the record. Read it in light of this.
 
 Arnon's addition, and the sharpest point in the discussion. **All of this happened under
 auto-mode**, because an `ask` verdict does not block there -- measured 2026-07-25: toolguard

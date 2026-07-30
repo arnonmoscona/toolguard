@@ -645,7 +645,7 @@ def _hierarchical_toggle(project_claude_dir: Optional[Path]) -> bool:
     return True
 
 
-def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]:
+def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int, str]]:
     """
     Discover config files across the directory hierarchy, most-specific first.
 
@@ -674,9 +674,21 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
         start_dir: Directory to start project-root discovery from. Defaults to cwd.
 
     Returns:
-        List of (path, source_type, format, specificity) tuples, ordered
+        List of (path, source_type, format, specificity, level) tuples, ordered
         most-specific first then by within-level priority, with any
-        rules-directory files appended last.
+        rules-directory files appended last. ``level`` is ``'user'`` for the
+        least-specific tier (``~/.claude`` plus the rules directories) and
+        ``'project'`` otherwise.
+
+        The level is emitted HERE, by the pass that actually found the file,
+        rather than being re-derived downstream from the path's shape. An
+        earlier implementation re-derived it via ``path.resolve()`` and asked
+        whether the result lived under ``~/.claude``; that second derivation
+        disagreed with this one whenever a ``.claude`` directory (or a file
+        inside it) was a symlink into a store located under ``~/.claude``,
+        silently promoting every project rule to the user level and changing
+        precedence with no error (TOO-19, 2026-07-28). Deriving it once, from
+        the discovery structure, makes the two answers the same answer.
     """
     home = Path.home()
     user_claude_dir = home / ".claude"
@@ -717,21 +729,31 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int]]
     # its natural, least-specific position at the tail).
     _add(user_claude_dir)
 
-    results: List[Tuple[Path, str, str, int]] = []
+    # The user level is ALWAYS the last entry in level_dirs (appended last, and
+    # if the upward walk reached it first it keeps its tail position), so this
+    # index is the authoritative user tier. It is computed from level_dirs
+    # rather than from the discovered results because a level whose directory
+    # does not exist contributes no results at all -- taking the maximum over
+    # the results would then promote the deepest EXISTING level to 'user'.
+    user_specificity = len(level_dirs) - 1
+
+    results: List[Tuple[Path, str, str, int, str]] = []
     for specificity, claude_dir in enumerate(level_dirs):
         if not claude_dir.exists():
             continue
+        level = "user" if specificity == user_specificity else "project"
         for path, source_type, file_format in _discover_in_dir(claude_dir):
-            results.append((path, source_type, file_format, specificity))
+            results.append((path, source_type, file_format, specificity, level))
 
     # Optional candidate rules directories (TOO-30/TOO-19): flat *.toml/*.json
     # files that merge into the USER level (least-specific tier, index
     # len(level_dirs) - 1, which is stable even when ~/.claude itself has no
     # files). Appended after the primary ~/.claude candidates so those remain
     # the highest-priority user-level source when duplicate patterns exist.
-    user_specificity = len(level_dirs) - 1
     for path, file_format in _discover_rules_files_multi(_rules_dirs()):
-        results.append((path, "toolguard_hook_rules", file_format, user_specificity))
+        results.append(
+            (path, "toolguard_hook_rules", file_format, user_specificity, "user")
+        )
 
     return results
 
@@ -2218,27 +2240,16 @@ def _parse_source_recording_failures(
     return content
 
 
-def _level_for_path(path: Path) -> str:
-    """
-    Determine the conceptual level label for a discovered source path.
-
-    Args:
-        path: Path to the source file.
-
-    Returns:
-        'user' if the path is under the user's ~/.claude directory OR under
-        either candidate rules directory (see :func:`_rules_dirs`, TOO-30/
-        TOO-19 -- rules-directory files merge into the user level, not a level
-        of their own), otherwise 'project'.
-    """
-    resolved = path.resolve()
-    for anchor in (Path.home() / ".claude",) + _rules_dirs():
-        try:
-            resolved.relative_to(anchor.resolve())
-            return "user"
-        except ValueError:
-            continue
-    return "project"
+# NOTE (TOO-19, 2026-07-28): _level_for_path() lived here and re-derived a
+# source's hierarchy level from its path shape, by resolving symlinks and
+# testing containment under ~/.claude and the rules directories. It has been
+# REMOVED, not fixed: _discover_levels() already knows each file's level -- it
+# found the file by walking to that directory -- so the second derivation was
+# redundant, and it disagreed with the first whenever a .claude directory or a
+# file inside it was a symlink into a store under ~/.claude (project rules
+# silently became user rules, changing precedence with no error). Do not
+# reintroduce a path-shape-based level derivation; take the level from
+# _discover_levels(). See test/unit/test_symlink_hierarchy.py.
 
 
 def load_configuration(
@@ -2346,11 +2357,12 @@ def load_configuration(
     rules_duplicate_stems: Optional[frozenset] = None
     rules_shadowed_stems: Optional[Dict[str, Path]] = None
 
-    for path, source_type, file_format, specificity in _discover_levels(start_dir):
+    for path, source_type, file_format, specificity, level in _discover_levels(
+        start_dir
+    ):
         content = _parse_source_recording_failures(path, file_format, parse_failures)
         if content is None:
             continue
-        level = _level_for_path(path)
         unexpected_keys: Tuple[str, ...] = ()
         duplicate_format = False
         shadowed_path: Optional[Path] = None

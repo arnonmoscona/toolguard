@@ -15,19 +15,33 @@ toolguard/                      # Project root
 |   |-- __init__.py
 |   |-- hook.py                 # PreToolUse hook entry point (reads stdin, writes stdout)
 |   |-- session_start.py        # SessionStart conflict-alert hook entry point
+|   |-- update_check.py         # toolguard-update-check entry point
 |   |-- config.py               # Configuration loading, hierarchy, and resolution
+|   |-- config_types.py         # Frozen dataclasses for the resolved configuration
+|   |-- rule_entry.py           # RuleEntry plus the single normalize/merge chokepoint
+|   |-- issues.py               # The Issue type reported by validation
 |   |-- config_validation.py    # Validates tool permissions at startup
 |   |-- config_divergence.py    # Config divergence detection
+|   |-- config_write_guard.py   # Guarded config writes (see "Writing configuration")
+|   |-- toml_scan.py            # Pure TOML scanning primitives (stdlib-only leaf)
+|   |-- rule_sort.py            # Rule ordering and TOML section reassembly
 |   |-- auto_migrate.py         # Config auto-migration logic
 |   |-- env_config.py           # Environment configuration (.env loading)
+|   |-- constants.py            # Shared constants
 |   |-- permissions.py          # Permission checking logic
+|   |-- resolve.py              # Bash and file-path resolution with provenance
 |   |-- patterns.py             # Pattern type parsing and matching
 |   |-- normalization.py        # Path normalization functions
+|   |-- path_utils.py           # Project-root resolution primitive
 |   |-- compound.py             # Compound command handling
 |   |-- error_log.py            # Error/warning/conflict log routing
 |   |-- log_writer.py           # Command logging to markdown/JSONLines files
 |   |-- session_warnings.py     # Session-level warning markers
 |   |-- subagent.py             # Agent context identification (best-effort; see notes)
+|   |-- tools/                  # Operator tooling: the security-audit and maintenance
+|   |                           # commands and their analyzers (see docs/skills.md)
+|   |-- testing/                # Isolated experiment sandbox for behavioural questions
+|   |                           # (development only; not used by the hook)
 |   |-- parser/                 # PEG-based bash command parser
 |   |   |-- __init__.py
 |   |   |-- bash_parser.peg     # Grammar definition
@@ -128,6 +142,26 @@ build-time dependency only -- the generated parser depends solely on the standar
 Both the file-path and command paths first consult `[hard_deny]` (pooled across all
 hierarchy levels); a hard-deny match short-circuits to a refusal that no allow can override.
 Otherwise the decision comes from the more-specific-wins cascade across levels.
+
+## Writing configuration
+
+The hook itself never writes configuration -- it is a read-only path. Everything that does
+write (the maintenance skill, `toolguard-migrate`, `toolguard-install`, and auto-migration)
+funnels through `config_write_guard.py`, so there is exactly one place where config reaches
+the disk. It parses the candidate text and refuses on failure, verifies that no pattern
+present before the write has gone missing, and then writes atomically via a sibling temporary
+file plus `fsync` and `os.replace`.
+
+Two of those three checks exist because valid output is not the same as correct output: a
+file can parse perfectly and still have lost a rule. The user-facing description of the
+guarantees is in
+[Security: how toolguard protects its own writes](security.md#how-toolguard-protects-its-own-writes).
+
+Serialization has a single chokepoint too: `rule_sort.py::render_toml_entry` is the only
+place a `RuleEntry` becomes TOML, shared by the section-reassembly writer and the
+from-scratch migration writer. An entry that came from an existing file is re-emitted as its
+original source line verbatim, so a rewrite preserves comments and formatting rather than
+normalizing them away.
 
 ## Configuration hierarchy
 

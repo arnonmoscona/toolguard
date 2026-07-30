@@ -65,12 +65,13 @@ anyone cross-referencing against the project's own tracker.
   - [As-if-enacted review: `--edits` vs `--migrations`](#as-if-enacted-review---edits-vs---migrations)
   - [Apply is preview-first and gated](#apply-is-preview-first-and-gated)
   - [Flagged gap (open) -- cross-project blast radius](#flagged-gap-open----cross-project-blast-radius)
-  - [Multi-pass maintenance: SKILL.md orchestrator + `passes/` + a JSON state artifact](#multi-pass-maintenance-skillmd-orchestrator-passes-a-json-state-artifact)
+  - [Multi-pass maintenance: SKILL.md orchestrator + `passes/` + a JSON state artifact](#multi-pass-maintenance-skillmd-orchestrator--passes--a-json-state-artifact)
   - [Certify-by-staging: author by AI, certify by tool](#certify-by-staging-author-by-ai-certify-by-tool)
   - [Corpus-replay candidate validation (`--replay-candidate`)](#corpus-replay-candidate-validation---replay-candidate)
   - [Prior-decision ledger (`decision_ledger.py`)](#prior-decision-ledger-decision_ledgerpy)
   - [Layer promotion certified by a live two-level HOME-staged audit](#layer-promotion-certified-by-a-live-two-level-home-staged-audit)
   - [CLI mode summary](#cli-mode-summary)
+- [Isolated experiment sandbox (TOO-19)](#isolated-experiment-sandbox-too-19)
 
 ## Subagent Identification Workaround
 
@@ -857,3 +858,44 @@ The `toolguard --eval` hook flag (read-only resolve, no migration/logging) backs
 skill's cross-project safety-floor probe.
 
 User-facing usage of both skills is in [docs/skills.md](docs/skills.md).
+
+## Isolated experiment sandbox (TOO-19)
+
+`toolguard/testing/sandbox.py` answers behavioural questions -- "what would this config
+decide for this command?" -- against a throwaway project instead of a live one. It exists
+because the alternative was editing real configuration to test a theory, which is privilege
+escalation (toolguard governs the agent, so the agent editing toolguard's config is the agent
+editing its own permissions) and unrecoverable when the file is untracked. It happened twice
+during TOO-19.
+
+```python
+with experiment(project_config='[permissions]\nallow = ["Bash(ls *)"]') as s:
+    s.evaluate("Bash", "uv run python -c 'x'")   # -> ask, via the ASK floor
+```
+
+Isolation is structural rather than by discipline. `Path.home()` and
+`config.find_project_root` are patched inward, the environment is cleared and rebuilt
+(`CLAUDE_SETTINGS_PATH`, `TOOLGUARD_PROJECT_ROOT` and `CLAUDE_PROJECT_DIR` removed;
+`XDG_CONFIG_HOME` pointed inside the sandbox rather than merely unset), and a tripwire raises
+`SandboxEscapeError` on any write whose resolved path falls outside the sandbox root. The
+tripwire is what makes this safe by construction instead of safe by inspection: an experiment
+that *would* touch live config fails loudly rather than succeeding quietly.
+
+`.evaluate()` delegates to `toolguard.tools.decision.decide`, the same side-effect-free
+primitive behind the live hook and `--eval`, so a sandbox verdict matches the hook's by
+construction. `.run_hook()` is the end-to-end form; it runs in a subprocess, so the in-process
+tripwire cannot observe it and isolation there is by environment instead -- a weaker
+guarantee, noted in its docstring.
+
+There is a CLI for one-off questions, which is the point: the safe path has to be easier than
+the unsafe one, or it gets bypassed under time pressure.
+
+```bash
+uv run python -m toolguard.testing.sandbox --config <file> --command "<command>"
+```
+
+Anything worth running twice should become a unit test; the sandbox object is the same in
+both places, so promotion is copy-paste. Not used by the hook, and not shipped as a user
+feature -- development only. `ConfigIsolationMixin` was deliberately NOT consolidated into it
+(the tripwire is a stricter contract that may expose latent isolation violations in the
+existing suite; that discovery should be deliberate, not a side effect of a safety fix).
