@@ -189,9 +189,12 @@ inline" is "no good reason", write it to a file and run that instead.
 Installed here. Generic guidance: `~/.claude/reference/search.md` and
 `~/.claude/reference/code-review-graph.md`. This repo's own deviations:
 
-* **`tests_for` returns false zeros here** -- the `TESTED_BY` heuristic misses class-based
-  `unittest.TestCase` methods. The `CALLS` edges do exist, so use `query_graph`
-  `pattern="callers_of"` filtered to `is_test:true`.
+* **"Which tests cover this function?" is an `LSP` question now, not a graph one.** Pyright is
+  configured for this repo (2026-07-31): `incomingCalls` names each calling function, resolving
+  class-based `unittest.TestCase` methods individually. The graph's `tests_for` returns false
+  zeros here for exactly that reason -- its `TESTED_BY` heuristic misses them. The old
+  workaround (`query_graph pattern="callers_of"` filtered to `is_test:true`) still works if you
+  need it, but prefer the LSP.
 * **Semantic search is true vector mode.** Embeddings are built (local
   `sentence-transformers`) and communities post-processed (igraph). The `hybrid` mode and
   small (~0.015) scores are RRF fusion artifacts, not keyword-only fallback -- ignore them. If

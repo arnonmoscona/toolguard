@@ -1,0 +1,12 @@
+{
+  "include": ["toolguard", "test", "tools"],
+  "exclude": ["**/__pycache__", ".venv", "tmp", "cover", "coder-test"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.14",
+  "typeCheckingMode": "off",
+  "reportUnusedImport": "none",
+  "reportUnusedVariable": "none",
+  "reportUnusedFunction": "none",
+  "reportUnusedClass": "none"
+}

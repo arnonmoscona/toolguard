@@ -1,0 +1,26 @@
+// On-demand type checking only.
+//
+// Pyright auto-loads the file named exactly "pyrightconfig.json" -- that one keeps
+// typeCheckingMode off, so the editor/LSP gives navigation without diagnostics.
+// This file is inert until you ask for it explicitly:
+//
+//     pyright -p pyrightconfig.check.json
+//
+// toolguard/parser/bash_parser.py is excluded: it is generated from bash_parser.peg
+// by canopy and is not hand-edited, so type errors in it are not actionable.
+// It accounted for 671 of 874 errors before exclusion.
+{
+  "include": ["toolguard", "test", "tools"],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "tmp",
+    "cover",
+    "coder-test",
+    "toolguard/parser/bash_parser.py"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.14",
+  "typeCheckingMode": "basic"
+}
