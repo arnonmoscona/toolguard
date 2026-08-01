@@ -33,6 +33,29 @@ Invariants checked
    allowed-with-a-warning rather than blocked -- weakening the fail-closed
    guarantee.
 
+5. **HIGH / loose-undecidable-fallback** (TOO-19): the top-level
+   ``undecidable_fallback`` setting resolves to ``'allow_with_warning'``.
+   This is a DIFFERENT, and more severe, weakening than
+   ``loose-no-match-fallback`` above: ``no_match_fallback`` governs commands
+   toolguard *read and understood* but that matched no rule, whereas
+   ``undecidable_fallback`` governs commands toolguard could NOT safely
+   decompose at all (foreign inline code, heredoc payloads, process
+   substitution, unparseable control structures -- see
+   :mod:`toolguard.compound`). ``'allow_with_warning'`` here means those
+   commands EXECUTE with no rule ever evaluated against their contents,
+   which is precisely the case :mod:`toolguard.compound`'s stated governing
+   principle -- "when in doubt, ASK: any segment that cannot be safely
+   decomposed resolves to ASK rather than a silent allow of an undecomposed
+   blob" -- exists to prevent. See
+   :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`.
+   Unlike ``no_match_fallback``, ``undecidable_fallback`` has no
+   ``[takeover_mode]`` alias and applies in both takeover and non-takeover
+   modes, so this invariant is checked directly against ``config`` rather
+   than the resolved :class:`~toolguard.config.TakeoverConfig`.
+   ``undecidable_fallback = 'deny'`` is intentionally NOT flagged: it is
+   strictly more conservative than the ``'ask'`` default, and a finding on a
+   safe configuration would train users to ignore findings.
+
 Design
 ------
 - Reuses :class:`~toolguard.config.Configuration`,
@@ -449,6 +472,54 @@ def audit_takeover(
                 remediation=(
                     'Set no_match_fallback = "deny" in [takeover_mode] of your '
                     "toolguard_hook.toml/json to restore fail-closed behaviour."
+                ),
+            )
+        )
+
+    # Invariant 5: Loose undecidable_fallback (HIGH) -- TOO-19.
+    #
+    # Checked directly against ``config`` (not ``takeover``): unlike
+    # no_match_fallback, undecidable_fallback is a top-level toolguard_hook
+    # key with no [takeover_mode] alias and applies whether or not takeover
+    # is enabled -- see Configuration.resolved_undecidable_fallback for the
+    # full resolution rules (strictest-wins floor, parse-failure exemption).
+    # 'deny' is deliberately not flagged (see the module docstring's
+    # invariant 5 for why).
+    if config.resolved_undecidable_fallback() == "allow_with_warning":
+        findings.append(
+            AuditFinding(
+                finding_id="loose-undecidable-fallback",
+                severity=AuditSeverity.HIGH,
+                tool=None,
+                provenance=None,
+                description=(
+                    "undecidable_fallback is 'allow_with_warning', not 'ask' "
+                    "(the default) or 'deny'. Commands toolguard could not "
+                    "safely parse at all -- foreign inline code, heredoc "
+                    "payloads, process substitution, unparseable control "
+                    "structures -- will execute with a warning instead of "
+                    "being asked about or denied."
+                ),
+                impact=(
+                    "This is a stronger weakening than a loose "
+                    "no_match_fallback: no_match_fallback only affects "
+                    "commands toolguard read and understood but that matched "
+                    "no rule, so toolguard still knew what it was allowing. "
+                    "undecidable_fallback='allow_with_warning' instead "
+                    "executes commands toolguard could not parse at all, "
+                    "with NO rule ever evaluated against their contents. "
+                    "toolguard.compound's governing principle is 'when in "
+                    "doubt, ASK: any segment that cannot be safely "
+                    "decomposed resolves to ASK rather than a silent allow "
+                    "of an undecomposed blob' -- this setting switches that "
+                    "principle off, turning every undecidable segment into "
+                    "a silent allow."
+                ),
+                remediation=(
+                    'Set undecidable_fallback to "ask" (the default) or '
+                    '"deny" at the top level of your toolguard_hook.toml/json '
+                    "to restore the ASK floor for command segments toolguard "
+                    "cannot safely decompose."
                 ),
             )
         )

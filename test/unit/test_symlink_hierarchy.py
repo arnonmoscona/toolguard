@@ -217,7 +217,6 @@ class TestLevelAttributionThroughSymlink(SymlinkHierarchyTestCase):
 
         self.assertEqual(self._project_config_level(layout), ["project"])
 
-
     def test_symlinked_contents_under_home_claude_are_still_project_level(self):
         """
         Given a REAL project .claude directory whose CONTENTS are symlinks into a

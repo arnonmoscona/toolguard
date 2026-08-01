@@ -30,7 +30,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, List, Mapping, Optional, Set, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from toolguard.config_types import ConfigLayer as ConfigLayer
 from toolguard.config_types import ConflictOverride as ConflictOverride
@@ -96,6 +96,18 @@ _DEFAULT_NO_MATCH_FALLBACK = "ask"
 # ``[takeover_mode]`` alias) but always normalized to ``allow_with_warning``
 # before reaching this set (see ``Configuration.resolved_no_match_fallback``).
 _VALID_NO_MATCH_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning"})
+
+_DEFAULT_UNDECIDABLE_FALLBACK = "ask"
+# The recognized `undecidable_fallback` values (TOO-19). This is a DIFFERENT
+# setting from `no_match_fallback` above: `no_match_fallback` answers "I read
+# this command and no rule covered it"; `undecidable_fallback` answers "I
+# could not safely read this command at all" (foreign inline code / heredoc
+# sinks, complex control structures, process substitution -- see
+# `toolguard.compound`). It is a brand-new TOO-19 top-level key with NO
+# legacy `[takeover_mode]` alias and NO deprecated `'warn_deny'` spelling --
+# do not add either "for symmetry" with `no_match_fallback`; that history
+# does not apply here. See `Configuration.resolved_undecidable_fallback`.
+_VALID_UNDECIDABLE_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning"})
 
 # Documented defaults for the ``config_sync`` section. Single source of truth
 # shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
@@ -1407,6 +1419,68 @@ class Configuration:
                 return layer.provenance
         return None
 
+    @staticmethod
+    def _entry_for_pattern(
+        layers: Tuple[ToolPatternLayer, ...], pattern: str, kind: str
+    ) -> Optional[RuleEntry]:
+        """
+        Find the :class:`~toolguard.rule_entry.RuleEntry` behind a matched pattern.
+
+        Companion to :meth:`_provenance_for_pattern` (same first-layer-wins
+        search), kept as a separate method rather than folded into it: the
+        other caller of ``_provenance_for_pattern`` (:meth:`_detect_override`,
+        for the OVERRIDDEN deny) has no use for the entry, so merging the two
+        would hand every call site an unused value. The two methods do re-walk
+        the same (small, per-level) layer list, but that repeat scan is cheap
+        relative to the readability cost of a combined return type.
+
+        ``pattern`` is matched against ``layer.allow``/``deny``/``ask`` --
+        the WRAPPER-STRIPPED tuples -- exactly like ``_provenance_for_pattern``,
+        because that is the form ``matched_pattern`` arrives in from
+        ``decide_detailed`` (it is drawn from the stripped ``allow``/``deny``/
+        ``ask`` tuples threaded through
+        :meth:`permission_levels_with_provenance`). The corresponding
+        ``RuleEntry`` is then read off ``allow_entries``/``deny_entries``/
+        ``ask_entries`` at the SAME index -- never by comparing against
+        ``entry.pattern`` (wrapper-INTACT) -- per the index-for-index
+        invariant documented on :class:`ToolPatternLayer`.
+
+        Args:
+            layers: The contributing layers for one level (most-specific first).
+            pattern: The exact (wrapper-free) pattern string that matched.
+            kind: 'allow', 'ask', or 'deny' -- which side of the layer to search.
+
+        Returns:
+            The :class:`RuleEntry` behind the first layer whose ``kind`` list
+            contains the pattern, or None when not found (e.g. format drift
+            OR the pattern's own layer has drifted parallel lists -- see
+            below).
+        """
+        for layer in layers:
+            if kind == "allow":
+                candidates, entries = layer.allow, layer.allow_entries
+            elif kind == "ask":
+                candidates, entries = layer.ask, layer.ask_entries
+            else:
+                candidates, entries = layer.deny, layer.deny_entries
+            if pattern in candidates:
+                # TOO-19 code review m4: the alignment check must gate an
+                # immediate return, not just skip this layer. The pattern
+                # string was found in the layer THAT ACTUALLY CONTRIBUTED IT
+                # (patterns are unique per level's flattened pool by
+                # construction); if that layer's parallel lists have
+                # drifted, there is no reliable entry to return -- falling
+                # through to a LESS-specific layer that happens to contain
+                # the same pattern string would attribute enrichment to a
+                # rule that did not win. Stop here instead. This only
+                # affects which entry (if any) feeds additionalContext --
+                # never the decision/reason/provenance already resolved by
+                # the caller, so it cannot change any verdict.
+                if len(entries) != len(candidates):
+                    return None
+                return entries[candidates.index(pattern)]
+        return None
+
     def resolve_permission_detailed(
         self, tool_name: str, decide_detailed
     ) -> ResolvedDecision:
@@ -1453,6 +1527,46 @@ class Configuration:
         )
         return self._apply_parse_failure_ask_floor(resolved)
 
+    def apply_parse_failure_floor(self, decision: str, reason: str) -> Tuple[str, str]:
+        """
+        Clamp a plain ``(decision, reason)`` pair to 'ask' on a broken config.
+
+        This is the CORE clamp, extracted (TOO-19 fail-open-via-undecidable-
+        segments fix) so it can be applied both at the single-sub-command
+        chokepoint (:meth:`resolve_permission_detailed`, via
+        :meth:`_apply_parse_failure_ask_floor`) AND at the compound-command
+        boundary (:func:`toolguard.resolve.resolve_bash_permission_detailed`),
+        which can produce a verdict from segments -- grammar-level
+        :class:`~toolguard.parser.multiline.UndecidableSegment` instances --
+        that never reach ``resolve_permission_detailed`` at all and so never
+        see the per-leaf clamp. There must be exactly ONE implementation of
+        this clamp so the two call sites cannot drift.
+
+        HARD INVARIANT (TOO-19): this clamp is UNCONDITIONAL and takes no
+        settings-driven parameter -- in particular it never consults
+        ``undecidable_fallback`` (see :meth:`resolved_undecidable_fallback`),
+        and no future setting may be threaded in to relax it. A parse failure
+        means toolguard does not know what its rules ARE, so it has no basis
+        for any verdict at all; it is not a policy question a config value
+        can answer, unlike ``undecidable_fallback``'s "I read the command but
+        could not safely decompose it". Keep this method's signature free of
+        any fallback-selection parameter.
+
+        Args:
+            decision: The unclamped decision string (``'allow'``, ``'ask'``,
+                or ``'deny'``).
+            reason: The unclamped reason string, ignored and replaced when
+                the clamp fires.
+
+        Returns:
+            *(decision, reason)* unchanged when there are no parse failures
+            or *decision* is already ``'deny'`` (the floor never weakens a
+            deny); otherwise ``('ask', self._parse_failure_reason())``.
+        """
+        if not self.parse_failures or decision == "deny":
+            return decision, reason
+        return "ask", self._parse_failure_reason()
+
     def _apply_parse_failure_ask_floor(
         self, resolved: ResolvedDecision
     ) -> ResolvedDecision:
@@ -1469,6 +1583,13 @@ class Configuration:
         shared by every governed tool's resolution, rather than in the
         Bash-specific compound pipeline.
 
+        Delegates the actual clamp decision to :meth:`apply_parse_failure_floor`
+        (TOO-19 fail-open-via-undecidable-segments fix) so there is a single
+        implementation shared with the compound-boundary call site in
+        :mod:`toolguard.resolve`; this method's own job is just translating
+        to/from :class:`ResolvedDecision` and clearing the fields that
+        describe a rule match that no longer determines the verdict.
+
         Args:
             resolved: The unclamped decision.
 
@@ -1476,12 +1597,16 @@ class Configuration:
             *resolved* unchanged when there are no parse failures or the
             decision is already ``'deny'``; otherwise a new
             :class:`ResolvedDecision` with ``decision='ask'``, the ASK-floor
-            reason, and ``provenance``/``override`` cleared (they describe a
-            rule match that no longer determines the verdict).
+            reason, and ``provenance``/``override``/``additional_context``
+            cleared (they describe a rule match that no longer determines the
+            verdict).
         """
         if not self.parse_failures or resolved.decision == "deny":
             return resolved
-        return ResolvedDecision("ask", self._parse_failure_reason(), None, None)
+        decision, reason = self.apply_parse_failure_floor(
+            resolved.decision, resolved.reason
+        )
+        return ResolvedDecision(decision, reason, None, None, None)
 
     def _parse_failure_reason(self) -> str:
         """
@@ -1536,13 +1661,19 @@ class Configuration:
             kind = decision
             prov = self._provenance_for_pattern(layers, matched_pattern, kind)
             reason_with_prov = _append_provenance(reason, prov)
+            winning_entry = self._entry_for_pattern(layers, matched_pattern, kind)
+            additional_context = (
+                winning_entry.additional_context if winning_entry is not None else None
+            )
 
             override = None
             if decision == "allow":
                 override = self._detect_override(
                     levels, index, matched_pattern, prov, decide_detailed
                 )
-            return ResolvedDecision(decision, reason_with_prov, prov, override)
+            return ResolvedDecision(
+                decision, reason_with_prov, prov, override, additional_context
+            )
 
         # No level matched anything for this command/path (TOO-15). Two distinct
         # cases share this fail-closed branch:
@@ -1613,6 +1744,97 @@ class Configuration:
         hd_deny, hd_allow = self.hard_deny(tool_name)
         return bool(hd_deny or hd_allow)
 
+    def _first_toplevel_str_setting(self, key: str) -> Optional[str]:
+        """
+        Return the first non-native layer's raw string value for a top-level
+        ``toolguard_hook`` scalar setting key (TOO-19 code review m2).
+
+        Shared layer-scan used by every "fallback"-shaped setting
+        (:meth:`resolved_no_match_fallback`, :meth:`resolved_undecidable_fallback`,
+        and the TOO-28 ``*_auto_mode`` settings that will reuse it): walks
+        ``self.layers`` MOST-SPECIFIC first, skips native ``settings.json``
+        layers (these settings are toolguard extensions, never native), and
+        returns the first layer's value for ``key`` when it is present AND a
+        ``str`` (a non-string value -- e.g. a stray table -- is treated as not
+        set, same as absence).
+
+        Args:
+            key: The top-level ``toolguard_hook`` key to look up (e.g.
+                ``'no_match_fallback'``, ``'undecidable_fallback'``).
+
+        Returns:
+            The first matching layer's raw string value, or ``None`` when no
+            non-native layer sets it. Callers are responsible for any
+            alias/legacy-spelling resolution and for validating against their
+            own recognized value set -- this helper does neither.
+        """
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            if key in layer.content:
+                value = layer.content[key]
+                if isinstance(value, str):
+                    return value
+        return None
+
+    def _resolve_fallback_setting(
+        self,
+        key: str,
+        valid_values: frozenset,
+        default: str,
+        legacy_alias: Optional[Callable[[], Optional[str]]] = None,
+        deprecated_aliases: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Resolve one "fallback"-shaped ``toolguard_hook`` setting (TOO-19 code
+        review m2).
+
+        Extracted so :meth:`resolved_no_match_fallback` and
+        :meth:`resolved_undecidable_fallback` share ONE layer-scan +
+        validation body instead of duplicating it verbatim, and so the two
+        TOO-28 settings of the same shape (``no_match_fallback_auto_mode``,
+        ``undecidable_fallback_auto_mode``) can reuse this method rather than
+        requiring a THIRD/FOURTH copy or a re-done two-way de-duplication.
+        The two behavioural differences between the existing settings are
+        expressed as PARAMETERS, not special-cased in this shared body, so a
+        setting with neither difference (like ``undecidable_fallback``, and
+        presumably the TOO-28 settings) just omits them.
+
+        Resolution order:
+
+        1. :meth:`_first_toplevel_str_setting` -- most-specific non-native
+           layer that sets the top-level key wins.
+        2. If unset anywhere and *legacy_alias* is given, call it for a
+           fallback raw value (e.g. the ``[takeover_mode]`` alias).
+        3. If the resolved raw value is a key of *deprecated_aliases*, replace
+           it with the mapped canonical spelling.
+        4. Validate against *valid_values*; an unset OR unrecognized value
+           (typo/bad config) resolves to *default* rather than propagating or
+           raising.
+
+        Args:
+            key: The top-level ``toolguard_hook`` key (see
+                :meth:`_first_toplevel_str_setting`).
+            valid_values: The recognized value set for this setting.
+            default: Value to use when unset or unrecognized.
+            legacy_alias: Optional zero-arg callable returning a raw legacy
+                value to fall back to when no layer sets *key*. ``None`` means
+                this setting has no legacy alias.
+            deprecated_aliases: Optional ``{old_spelling: canonical}`` mapping
+                applied AFTER the legacy-alias fallback, regardless of which
+                mechanism supplied the raw value. ``None`` means this setting
+                has no deprecated spelling to normalize.
+
+        Returns:
+            The resolved, validated setting value.
+        """
+        raw = self._first_toplevel_str_setting(key)
+        if raw is None and legacy_alias is not None:
+            raw = legacy_alias()
+        if deprecated_aliases and raw in deprecated_aliases:
+            raw = deprecated_aliases[raw]
+        return raw if raw in valid_values else default
+
     def resolved_no_match_fallback(self) -> str:
         """
         Resolve the EFFECTIVE ``no_match_fallback`` setting (TOO-15).
@@ -1630,35 +1852,79 @@ class Configuration:
         top-level key or the ``[takeover_mode]`` alias -- is always normalized
         to the canonical ``'allow_with_warning'`` before being returned.
 
+        Shares its layer-scan and validation with
+        :meth:`resolved_undecidable_fallback` via
+        :meth:`_resolve_fallback_setting` (TOO-19 code review m2); this
+        method supplies the ``[takeover_mode]`` legacy alias and the
+        ``warn_deny`` deprecated spelling as parameters, neither of which
+        ``undecidable_fallback`` has.
+
         Returns:
             One of ``'ask'``, ``'deny'``, or ``'allow_with_warning'``. The
             resolved value is validated against the recognized set; an unset
             OR unrecognized value (typo/bad config) resolves to the default
             ``'ask'`` and is never propagated as-is.
         """
-        raw = None
-        for layer in self.layers:
-            # no_match_fallback is a toolguard extension; ignore native settings.
-            if layer.is_native:
-                continue
-            if "no_match_fallback" in layer.content:
-                value = layer.content["no_match_fallback"]
-                if isinstance(value, str):
-                    raw = value
-                    break
-        if raw is None:
-            # No top-level key anywhere: fall back to the legacy [takeover_mode]
-            # alias (already defaults to 'ask' when unset anywhere).
-            raw = self.takeover_mode().no_match_fallback
-        # Deprecated legacy alias: always normalized to the canonical name,
-        # regardless of which mechanism (top-level key or [takeover_mode])
-        # supplied it (TOO-15).
-        if raw == "warn_deny":
-            return "allow_with_warning"
-        # Validate: an unrecognized value must not propagate. Normalize to the
-        # default rather than raising, so bad config never breaks loading
-        # (TOO-15 review suggestion).
-        return raw if raw in _VALID_NO_MATCH_FALLBACKS else _DEFAULT_NO_MATCH_FALLBACK
+        return self._resolve_fallback_setting(
+            "no_match_fallback",
+            _VALID_NO_MATCH_FALLBACKS,
+            _DEFAULT_NO_MATCH_FALLBACK,
+            legacy_alias=lambda: self.takeover_mode().no_match_fallback,
+            deprecated_aliases={"warn_deny": "allow_with_warning"},
+        )
+
+    def resolved_undecidable_fallback(self) -> str:
+        """
+        Resolve the EFFECTIVE ``undecidable_fallback`` setting (TOO-19).
+
+        ``undecidable_fallback`` answers a DIFFERENT question than
+        ``no_match_fallback``: "I could not safely read this command at all"
+        (foreign inline code / heredoc sinks, complex control structures,
+        process substitution -- see :mod:`toolguard.compound`) rather than "I
+        read the command and no rule matched it". It is resolved as a
+        strictest-wins FLOOR against whatever the leaf/segment itself
+        resolved to (or, for segments that were never checked against any
+        rule at all, taken directly) -- see
+        :func:`toolguard.compound.resolve_compound_permission` and
+        :func:`toolguard.compound._resolve_leaf`.
+
+        ``undecidable_fallback`` is a TOP-LEVEL ``toolguard_hook`` key ONLY,
+        checked across ALL non-native layers (most-specific first; the first
+        layer that sets it wins). Unlike :meth:`resolved_no_match_fallback`,
+        this setting has NO legacy ``[takeover_mode]`` alias -- it is a
+        brand-new TOO-19 setting with no prior spelling to stay
+        backwards-compatible with -- and no field for it exists on
+        :class:`~toolguard.config_types.TakeoverConfig`. Do NOT add either
+        "for symmetry" with ``no_match_fallback``; that symmetry does not
+        apply here, and there is deliberately no ``[takeover_mode]`` parsing
+        for this key. There is also no deprecated ``'warn_deny'`` spelling to
+        normalize (that alias exists only for ``no_match_fallback``'s
+        history). Applies in BOTH takeover and non-takeover modes.
+
+        This setting is NOT consulted by, and has NO effect on, the
+        config-level parse-failure ASK floor
+        (:meth:`_apply_parse_failure_ask_floor`): a broken config file is
+        never a policy question this (or any) setting can relax -- see that
+        method's docstring for the rationale.
+
+        Shares its layer-scan and validation with
+        :meth:`resolved_no_match_fallback` via
+        :meth:`_resolve_fallback_setting` (TOO-19 code review m2); unlike
+        that method, this call supplies NO ``legacy_alias`` and NO
+        ``deprecated_aliases`` -- see this method's own docstring above for
+        why neither applies here.
+
+        Returns:
+            One of ``'ask'``, ``'deny'``, or ``'allow_with_warning'``. The
+            resolved value is validated against the recognized set; an unset
+            OR unrecognized value (typo/bad config) resolves to the default
+            ``'ask'`` and is never propagated as-is.
+        """
+        return self._resolve_fallback_setting(
+            "undecidable_fallback",
+            _VALID_UNDECIDABLE_FALLBACKS,
+            _DEFAULT_UNDECIDABLE_FALLBACK,
+        )
 
     @staticmethod
     def _detect_override(

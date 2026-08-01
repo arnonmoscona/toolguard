@@ -51,7 +51,9 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
         levels = _discover_levels(project)
 
-        specs = {path.parent.parent.name: spec for path, _stype, _fmt, spec, _lvl in levels}
+        specs = {
+            path.parent.parent.name: spec for path, _stype, _fmt, spec, _lvl in levels
+        }
         # project (.claude under 'proj') is most specific
         self.assertEqual(specs["proj"], 0)
         # intermediate ancestor 'a' is between project and user
@@ -121,7 +123,9 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
         self.assertTrue(any(str(home / ".claude") in p for p in paths))
         # User level is least specific (largest specificity index).
         user_specs = [
-            spec for path, _s, _f, spec, _lvl in levels if str(home / ".claude") in str(path)
+            spec
+            for path, _s, _f, spec, _lvl in levels
+            if str(home / ".claude") in str(path)
         ]
         max_spec = max(spec for _p, _s, _f, spec, _lvl in levels)
         self.assertEqual(user_specs[0], max_spec)
@@ -335,9 +339,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
             resolved = config.resolve_permission_detailed(
                 "Bash", self._detailed_decider(sub)
             )
-            return resolved.decision, resolved.reason
+            return resolved.decision, resolved.reason, resolved.additional_context
 
-        decision, _reason = resolve_compound_permission(
+        decision, _reason, _context = resolve_compound_permission(
             "git status && rm -rf /", _resolve_one
         )
         self.assertEqual(decision, "deny")
@@ -356,9 +360,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
             resolved = config.resolve_permission_detailed(
                 "Bash", self._detailed_decider(sub)
             )
-            return resolved.decision, resolved.reason
+            return resolved.decision, resolved.reason, resolved.additional_context
 
-        decision, _reason = resolve_compound_permission(
+        decision, _reason, _context = resolve_compound_permission(
             "git status && ls -l", _resolve_one
         )
         self.assertEqual(decision, "allow")
@@ -624,7 +628,9 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
         When resolve_compound_permission runs
         Then it denies with a 'no valid commands' reason
         """
-        decision, reason = resolve_compound_permission("", lambda _c: ("allow", "x"))
+        decision, reason, _context = resolve_compound_permission(
+            "", lambda _c: ("allow", "x", None)
+        )
         self.assertEqual(decision, "deny")
         self.assertIn("No valid commands", reason)
 
@@ -637,10 +643,10 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
 
         def _resolve_one(sub):
             if sub.startswith("rm"):
-                return "ask", "Command requires approval: rm *"
-            return "allow", "Command matches allow pattern: git *"
+                return "ask", "Command requires approval: rm *", None
+            return "allow", "Command matches allow pattern: git *", None
 
-        decision, reason = resolve_compound_permission(
+        decision, reason, _context = resolve_compound_permission(
             "git status && rm x", _resolve_one
         )
         self.assertEqual(decision, "ask")

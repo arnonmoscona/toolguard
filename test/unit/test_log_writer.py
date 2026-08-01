@@ -12,7 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard.log_writer import log_command
+from toolguard.log_writer import (
+    _LOG_CONTEXT_PREVIEW_WORDS,
+    _preview_additional_context,
+    log_command,
+)
 
 
 class TestLogging(unittest.TestCase):
@@ -531,6 +535,191 @@ class TestPermissionModeLogging(unittest.TestCase):
                 entry = json.loads(lines[0])
 
                 self.assertNotIn("permission_mode", entry)
+
+
+class TestPreviewAdditionalContext(unittest.TestCase):
+    """
+    Unit tests for the ``_preview_additional_context`` word-budget helper
+    (TOO-19 Phase 1, increment 7). The accumulated ``additionalContext`` block
+    can be up to 500 words (see ``compound.py::_MAX_CONTEXT_WORDS``); the LOGGED
+    copy is capped to a short preview so a human scanning the log isn't faced
+    with a 500-word block on every matching invocation. The FULL text still
+    reaches Claude via the hook's JSON output -- only the log copy is capped.
+    """
+
+    def test_short_text_passes_through_unchanged(self):
+        """
+        Given text within the word budget
+        When _preview_additional_context runs
+        Then the text is returned unchanged, with no ellipsis or word count
+        """
+        text = "prefer git status --short"
+        self.assertEqual(_preview_additional_context(text), text)
+
+    def test_long_text_is_capped_with_ellipsis_and_word_count(self):
+        """
+        Given text well over the word budget
+        When _preview_additional_context runs
+        Then only the first _LOG_CONTEXT_PREVIEW_WORDS words are kept, followed
+            by an ellipsis marker and the FULL original word count
+        """
+        words = [f"word{i}" for i in range(100)]
+        text = " ".join(words)
+        preview = _preview_additional_context(text)
+        expected_prefix = " ".join(words[:_LOG_CONTEXT_PREVIEW_WORDS])
+        self.assertTrue(preview.startswith(expected_prefix))
+        self.assertIn("...", preview)
+        self.assertIn("100 words total", preview)
+
+    def test_text_exactly_at_budget_passes_through_unchanged(self):
+        """
+        Given text with EXACTLY the word budget's word count
+        When _preview_additional_context runs
+        Then the text is returned unchanged (the cap is inclusive)
+        """
+        words = [f"word{i}" for i in range(_LOG_CONTEXT_PREVIEW_WORDS)]
+        text = " ".join(words)
+        self.assertEqual(_preview_additional_context(text), text)
+
+
+class TestAdditionalContextLogging(unittest.TestCase):
+    """
+    Test the additional_context parameter in log entries (TOO-19 Phase 1,
+    increment 7: records WHY a matching rule nudged Claude, so "why did Claude
+    get this nudge" is answerable after the fact -- capped to a short preview,
+    see TestPreviewAdditionalContext, so the log stays scannable).
+    """
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        """Clean up after tests."""
+        self.env_patcher.stop()
+
+    def test_additional_context_in_markdown_format(self):
+        """
+        Given a command logged with an additional_context short enough to fit
+            within the preview budget
+        When the markdown log is written
+        Then it contains a Context field with that exact text
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "git push",
+                "executed",
+                matched_rule="git *",
+                log_dir=log_dir,
+                additional_context="prefer git status --short",
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn("**Context**:", content)
+            self.assertIn("prefer git status --short", content)
+
+    def test_additional_context_capped_in_markdown_format(self):
+        """
+        Given a command logged with an additional_context text OVER the
+            preview word budget
+        When the markdown log is written
+        Then the Context field shows only the capped preview, not the full text
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            long_text = " ".join(f"word{i}" for i in range(100))
+            log_command(
+                "git push",
+                "executed",
+                matched_rule="git *",
+                log_dir=log_dir,
+                additional_context=long_text,
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn("**Context**:", content)
+            self.assertNotIn(long_text, content)
+            self.assertIn("100 words total", content)
+
+    def test_additional_context_in_jsonlines_format(self):
+        """
+        Given jsonlines format and a command logged with an additional_context
+        When the entry is parsed
+        Then its additional_context field equals the supplied text
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
+                log_command(
+                    "git push",
+                    "executed",
+                    matched_rule="git *",
+                    log_dir=log_dir,
+                    additional_context="prefer git status --short",
+                )
+
+                expected_filename = (
+                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+                )
+                content = (log_dir / expected_filename).read_text().strip()
+                lines = [line for line in content.split("\n") if line.strip()]
+                entry = json.loads(lines[0])
+
+                self.assertEqual(
+                    entry["additional_context"], "prefer git status --short"
+                )
+
+    def test_no_additional_context_when_not_provided(self):
+        """
+        Given a command logged without an additional_context
+        When the markdown log is written
+        Then it contains no Context field
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command("git status", "executed", log_dir=log_dir)
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertNotIn("**Context**:", content)
+
+    def test_no_additional_context_in_jsonlines_when_not_provided(self):
+        """
+        Given jsonlines format and a command logged without an
+            additional_context
+        When the entry is parsed
+        Then it has no additional_context key
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
+                log_command("git status", "executed", log_dir=log_dir)
+
+                expected_filename = (
+                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+                )
+                content = (log_dir / expected_filename).read_text().strip()
+                lines = [line for line in content.split("\n") if line.strip()]
+                entry = json.loads(lines[0])
+
+                self.assertNotIn("additional_context", entry)
 
 
 if __name__ == "__main__":

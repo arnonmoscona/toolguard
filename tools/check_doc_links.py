@@ -152,7 +152,9 @@ def check(root: pathlib.Path) -> list:
     problems = []
     for doc in docs:
         for _label, target, anchor in LINK_RE.findall(doc.read_text(errors="replace")):
-            dest = (doc.resolve().parent / target).resolve() if target else doc.resolve()
+            dest = (
+                (doc.resolve().parent / target).resolve() if target else doc.resolve()
+            )
             if not dest.exists():
                 problems.append(("missing file", doc, target, anchor))
             elif dest not in anchor_map:

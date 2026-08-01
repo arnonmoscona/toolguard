@@ -27,7 +27,10 @@ question in front of you.
   - [Standard patterns (in settings.local.json)](#standard-patterns-in-settingslocaljson)
   - [Extended patterns (in toolguard_hook.toml or toolguard_hook.json)](#extended-patterns-in-toolguard_hooktoml-or-toolguard_hookjson) -- `[regex]`, `[glob]`, `[native]`
   - [Structured rule entries, and the single line rule](#structured-rule-entries-and-the-single-line-rule) -- the `{ match = "..." }` form, and the one-line requirement
+  - [additionalContext: injecting guidance alongside a decision](#additionalcontext-injecting-guidance-alongside-a-decision) -- attaching explanatory text to a rule
 - [No-match fallback](#no-match-fallback) -- what happens when nothing matches
+- [Undecidable fallback](#undecidable-fallback) -- what happens when a command cannot be
+  safely parsed at all
 - [Verifying configuration](#verifying-configuration)
 - [Environment variables](#environment-variables)
   - [Boolean values](#boolean-values)
@@ -359,12 +362,29 @@ allow = [
 ]
 ```
 
-Today the two forms mean exactly the same thing: `match` is the only key toolguard
-understands, so a structured entry buys nothing over a plain string. It is documented here
-because **toolguard's own tooling can write this form into your config** (the maintenance
-skill and the migration command share a single serializer that emits it), so you may
-encounter it in a file you did not hand-edit. Additional keys are reserved for a future
-release; an unrecognized key is reported as a validation warning and otherwise ignored.
+A bare `{ match = "..." }` entry means exactly the same thing as the equivalent plain string.
+What a structured entry buys you is a second key, `additionalContext`: a string of guidance
+text that toolguard injects into Claude's context when this entry is the rule that decides a
+tool call. See
+[additionalContext: injecting guidance alongside a decision](#additionalcontext-injecting-guidance-alongside-a-decision)
+below for the full behaviour. The form is documented here regardless of whether you use
+`additionalContext`, because **toolguard's own tooling can write it into your config** (the
+maintenance skill and the migration command share a single serializer that emits it), so you
+may meet a bare `{ match = "..." }` entry in a file you did not hand-edit. Any key other than
+`match` and `additionalContext` is reported as a validation warning and otherwise ignored --
+reserved for a future release.
+
+A realistic allow and a realistic deny, each with enrichment:
+
+```toml
+[permissions]
+allow = [
+    { match = "Bash(git push:*)", additionalContext = "This repo requires a clean, hook-passing push. If a push is rejected, fix the underlying issue rather than reaching for --force or --no-verify." },
+]
+deny = [
+    { match = "Bash([regex]rm\\s+-rf)", additionalContext = "Recursive force-delete is denied in this repo. Use 'git clean -fdx' for tracked-repo cleanup, or ask before removing untracked data." },
+]
+```
 
 > **A structured entry MUST be written on ONE line.** TOML 1.0 forbids a multi-line inline
 > table, so an entry split across lines does not merely fail on its own -- it makes the
@@ -397,6 +417,67 @@ A file that fails to parse does not fail silently or fail open: every decision i
 `ask` until you fix it, and the broken file is named in the output. Read
 [Security: a broken config file also fails safe, not open](security.md#a-broken-config-file-also-fails-safe-not-open)
 before relying on that clamp in an unattended session -- it behaves differently there.
+
+### additionalContext: injecting guidance alongside a decision
+
+`additionalContext` is a string on a structured rule entry that toolguard injects into
+Claude's context -- as `hookSpecificOutput.additionalContext` in the hook's JSON output --
+when that entry is the rule that decided a tool call. It works for `allow`, `ask`, `deny`,
+and `[hard_deny]`, and across every governed tool (`Bash`, `Read`, `Write`, `Edit`, and any
+custom command tool). A deny or hard_deny is often where it earns the most: "you can't do
+this; do X instead" reaches Claude at the moment it needs the alternative, instead of Claude
+discovering the constraint by trial and error.
+
+- **toolguard config files only.** A structured entry carrying `additionalContext` inside a
+  native Claude `settings.json`/`settings.local.json` layer is rejected with a validation
+  warning and NOT interpreted -- neither the rule's pattern nor its context takes effect
+  there. Structured entries are a toolguard extension, and this is deliberate, not an
+  oversight.
+- **The value must be a string.** A non-string value (a number, a bool, a table) produces an
+  `error`-level validation issue, but the permission rule itself still applies -- only the
+  enrichment is dropped. Toolguard refuses to coerce it: silently stringifying `true` or `3`
+  would put the literal word "True" or "3" into Claude's context and look deliberate.
+- **Only the deciding rule injects.** Deny-first, then more-specific-wins across levels
+  decides which rule wins a tool call; only that rule's `additionalContext` is used. A rule
+  that matched but did not decide the outcome contributes nothing, even if it also carries
+  `additionalContext`.
+- **Compound Bash commands accumulate, per contributing sub-command.** When every
+  sub-command of a compound command is allowed, every allowed sub-command is a
+  decision-maker (all of them had to allow for the compound to allow), so their
+  `additionalContext` texts accumulate: one paragraph per contributing rule, separated by a
+  blank line, in match order. Identical texts are deduplicated -- one rule matching three
+  sub-commands says it once. A compound that is denied or asked has exactly one deciding
+  sub-command, so its context passes through alone -- no accumulation.
+- **The 500-word budget applies uniformly, to every decision and every governed tool.** The
+  final text -- whether it is the compound-accumulated block above, a single deny/ask leaf's
+  context, a Read/Write/Edit rule's context, or a `[hard_deny]` match's context -- is capped at
+  500 words at the point it is about to be injected, filled greedily: a paragraph that would
+  push the running total over budget is dropped WHOLE, never truncated mid-sentence, and
+  scanning continues so a later, shorter paragraph can still fit. The one case that is never
+  dropped entirely is a SINGLE paragraph that alone exceeds the budget: rather than
+  disappearing, it is truncated to a 500-word prefix with a trailing
+  `[toolguard: additionalContext truncated to 500 words ...]` marker, so a rule author's text
+  is never silently reduced to nothing.
+- **An ASK floor clamp drops it.** Two floors can clamp a decision to `ask` regardless of
+  which rule matched: the Bash-only inline/heredoc-foreign-code floor (see
+  [Permission Patterns: inline interpreter code](permission-patterns.md#inline-interpreter-code--c---e---r))
+  and the config-parse-failure floor, which applies to every governed tool (see
+  [Security: a broken config file also fails safe, not open](security.md#a-broken-config-file-also-fails-safe-not-open)).
+  When either floor clamps an `allow` (or an `ask`) down to `ask`, the context is dropped --
+  the floor decided the verdict, not the rule match, so injecting that rule's guidance would
+  misrepresent why the prompt appeared. A `deny` is never clamped by either floor, so its
+  context always survives.
+- **The key is omitted, not `null`, when there is nothing to inject.** The hook's JSON output
+  carries no `additionalContext` key at all unless there is real text to send, so any
+  consumer that doesn't know about the field sees no change in shape.
+- **The log keeps a short preview.** `logs/toolguard-*.md` records the accumulated text
+  capped to a 40-word preview plus the full word count, so a large block doesn't overwhelm a
+  human scanning the log for anomalies. The FULL text still reaches Claude via the hook's
+  JSON output for that invocation.
+- **Preview it before you rely on it.** `toolguard --eval` and
+  `uv run python -m toolguard.testing.sandbox` both report the `additionalContext` a given
+  command or path would trigger, so you can check the wording lands as intended without
+  waiting for a live tool call.
 
 ## No-match fallback
 
@@ -440,6 +521,64 @@ regardless of which one is more specific. Write new configs with the top-level k
 runbook uses to enable takeover mode -- currently writes the nested `[takeover_mode]` form,
 not the preferred top-level key. It still works correctly via the legacy-alias path
 described above; this is noted here for accuracy, not as something you need to work around.)*
+
+## Undecidable fallback
+
+`undecidable_fallback` answers a **different question** from `no_match_fallback` above, and
+that distinction is the whole reason both settings exist:
+
+- `no_match_fallback`: "I read this command and understood it, but no rule covered it."
+- `undecidable_fallback`: "I could not safely read this command at all."
+
+`undecidable_fallback` governs Bash commands toolguard cannot safely decompose -- foreign
+inline code and heredoc payloads (`python -c ...`, `<<EOF ... EOF`), process substitution,
+`case` statements, and other control structures the PEG grammar does not decompose. In these
+two situations toolguard has no rule to evaluate against the command's actual contents, so it
+names a **floor level** instead of a normal decision.
+
+Set it as a **top-level** key in `toolguard_hook.toml`:
+
+```toml
+undecidable_fallback = "ask"   # "ask" (default) | "deny" | "allow_with_warning"
+```
+
+Recognized values:
+
+- `"ask"` -- prompt. **This is the default** if the key is unset anywhere in the hierarchy,
+  or set to an unrecognized value.
+- `"deny"` -- fail-closed; block anything toolguard could not safely parse.
+- `"allow_with_warning"` -- allow the command but log a warning. Raises a **HIGH** finding
+  (`loose-undecidable-fallback`) in `toolguard-audit` -- see
+  [Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
+
+There is no `"warn_deny"` alias for this setting (that alias exists only for the older
+`no_match_fallback`, for backwards compatibility with its history).
+
+**Floor semantics, not a plain decision.** Unlike `no_match_fallback`, this setting does not
+pick the outcome outright -- it names the *weakest* outcome the undecidable command is allowed
+to resolve to, resolved **strictest-wins** (`deny` > `ask` > `allow`) against whatever the
+segment's own leaf-level resolution already was:
+
+| `undecidable_fallback` | Effect |
+|---|---|
+| `"deny"` | Always denies -- the strictest floor, nothing can weaken it. |
+| `"ask"` (default) | Denies stay denied; anything that would otherwise resolve to allow is raised to ask. |
+| `"allow_with_warning"` | No floor at all -- an explicit deny or ask still holds, but there is nothing left to raise an allow to. |
+
+An explicit `deny` or `ask` decision is **never weakened** by this setting at any value --
+the floor can only make a result *stricter*, never looser. `allow_with_warning` is the
+degenerate case where the floor equals "allow", so it has no effect on anything.
+
+**Parse-failure exemption.** A broken `toolguard_hook.toml`/`.json` file (invalid syntax,
+unreadable) always clamps the whole compound decision to `ask`, regardless of
+`undecidable_fallback` -- including for undecidable segments. A config toolguard could not
+even load is not a policy question any setting, including this one, can relax.
+
+**Top-level key only -- no `[takeover_mode]` alias.** Deliberately, unlike
+`no_match_fallback`, there is no nested `[takeover_mode].undecidable_fallback` form and none
+is planned; this is a brand-new setting with no prior spelling to preserve. Applies in
+**both** takeover and non-takeover modes, resolved more-specific-wins across the
+[configuration hierarchy](#configuration-hierarchy) the same way `no_match_fallback` is.
 
 ## Verifying configuration
 
@@ -617,9 +756,19 @@ hierarchical_configuration = true
 # rules at all always resolves to "ask"). A TOP-LEVEL key -- not nested inside
 # [takeover_mode] -- applies in BOTH takeover and non-takeover modes. Options:
 #   "ask" (prompt; DEFAULT), "deny" (fail-closed), "allow_with_warning" (allow + log a
-#   warning; "warn_deny" is a deprecated alias for it). See "No-match fallback" below
+#   warning; "warn_deny" is a deprecated alias for it). See "No-match fallback" above
 #   for the full explanation, including the legacy [takeover_mode] alias.
 no_match_fallback = "ask"
+
+# What to do with a Bash command toolguard could NOT safely parse at all (foreign inline
+# code / heredoc payloads, process substitution, undecomposable control structures) --
+# a DIFFERENT question from no_match_fallback above. A TOP-LEVEL key ONLY -- no
+# [takeover_mode] alias exists for this one. Names a strictest-wins FLOOR (deny > ask >
+# allow) against the segment's own resolved decision, so an explicit deny/ask is never
+# weakened. Options: "ask" (DEFAULT), "deny" (strictest), "allow_with_warning" (no floor
+# at all -- raises a HIGH toolguard-audit finding). See "Undecidable fallback" above for
+# the full explanation, including the parse-failure exemption.
+undecidable_fallback = "ask"
 
 # ============================================================================
 # TAKEOVER MODE - Claude sees blanket allows, toolguard enforces real rules

@@ -28,6 +28,13 @@ from toolguard.testing.sandbox import (
 
 ALLOW_LS = '[permissions]\nallow = ["Bash(ls *)"]\n'
 
+#: Same rule as ALLOW_LS but as a structured entry carrying an
+#: ``additionalContext`` enrichment (TOO-19 Phase 1).
+ALLOW_LS_ENRICHED = (
+    "[permissions]\n"
+    'allow = [{ match = "Bash(ls *)", additionalContext = "prefer the Read tool" }]\n'
+)
+
 
 class TestSandboxIsolation(unittest.TestCase):
     """Isolation of the four config-discovery anchors."""
@@ -141,7 +148,9 @@ class TestSandboxTripwire(unittest.TestCase):
         self.addCleanup(self._fail_if_created, victim)
         with experiment():
             with self.assertRaises(SandboxEscapeError):
-                victim.write_text('[permissions]\nallow = ["Bash(*)"]\n', encoding="utf-8")
+                victim.write_text(
+                    '[permissions]\nallow = ["Bash(*)"]\n', encoding="utf-8"
+                )
 
     def test_tripwire_covers_the_xdg_rules_directory(self):
         """
@@ -158,7 +167,9 @@ class TestSandboxTripwire(unittest.TestCase):
         self.addCleanup(self._fail_if_created, victim)
         with experiment():
             with self.assertRaises(SandboxEscapeError):
-                victim.write_text('[permissions]\nallow = ["Bash(*)"]\n', encoding="utf-8")
+                victim.write_text(
+                    '[permissions]\nallow = ["Bash(*)"]\n', encoding="utf-8"
+                )
 
     def test_tripwire_covers_open_in_write_mode(self):
         """
@@ -302,8 +313,9 @@ class TestSandboxEvaluation(unittest.TestCase):
         Then the verdict is not allow (it falls to the configured fallback)
         """
         with experiment(project_config=ALLOW_LS) as sandbox:
-            self.assertIn(sandbox.evaluate("Bash", "curl example.com").verdict,
-                          {"ask", "deny"})
+            self.assertIn(
+                sandbox.evaluate("Bash", "curl example.com").verdict, {"ask", "deny"}
+            )
 
     def test_hard_deny_cannot_be_overridden_by_a_project_allow(self):
         """
@@ -312,10 +324,10 @@ class TestSandboxEvaluation(unittest.TestCase):
         Then the verdict is deny, because hard_deny is unoverridable
         """
         config = '[permissions]\nallow = ["Bash(curl *)"]\n'
-        with experiment(
-            project_config=config, hard_deny=["Bash(curl *)"]
-        ) as sandbox:
-            self.assertEqual(sandbox.evaluate("Bash", "curl example.com").verdict, "deny")
+        with experiment(project_config=config, hard_deny=["Bash(curl *)"]) as sandbox:
+            self.assertEqual(
+                sandbox.evaluate("Bash", "curl example.com").verdict, "deny"
+            )
 
     def test_ask_floor_applies_to_inline_foreign_code(self):
         """
@@ -460,6 +472,64 @@ class TestSandboxCli(unittest.TestCase):
             with redirect_stdout(buffer):
                 main(["--config", str(config_file), "--command", "ls -la", "--json"])
         self.assertEqual(json.loads(buffer.getvalue())["verdict"], "allow")
+
+    def test_cli_json_reports_additional_context_when_the_rule_carries_one(self):
+        """
+        Given a structured allow entry carrying additionalContext
+        When the CLI evaluates a matching command with --json
+        Then the payload carries 'additionalContext' with that text -- the
+             sandbox is the sanctioned way to preview what the hook would do,
+             so omitting a real hook output field would make the preview lie
+        """
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "cfg.toml"
+            config_file.write_text(ALLOW_LS_ENRICHED, encoding="utf-8")
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                main(["--config", str(config_file), "--command", "ls -la", "--json"])
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["additionalContext"], "prefer the Read tool")
+
+    def test_cli_json_omits_additional_context_when_there_is_none(self):
+        """
+        Given a plain-string allow rule carrying no enrichment
+        When the CLI evaluates a matching command with --json
+        Then the 'additionalContext' key is ABSENT from the payload, not
+             present as null -- mirroring the hook's own absent-key behaviour
+        """
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "cfg.toml"
+            config_file.write_text(ALLOW_LS, encoding="utf-8")
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                main(["--config", str(config_file), "--command", "ls -la", "--json"])
+        self.assertNotIn("additionalContext", json.loads(buffer.getvalue()))
+
+    def test_cli_text_output_shows_additional_context(self):
+        """
+        Given a structured allow entry carrying additionalContext
+        When the CLI evaluates a matching command without --json
+        Then the human-readable output includes a 'context:' line
+        """
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "cfg.toml"
+            config_file.write_text(ALLOW_LS_ENRICHED, encoding="utf-8")
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                main(["--config", str(config_file), "--command", "ls -la"])
+        self.assertIn("context: prefer the Read tool", buffer.getvalue())
 
     def test_cli_module_is_runnable_as_a_subprocess(self):
         """

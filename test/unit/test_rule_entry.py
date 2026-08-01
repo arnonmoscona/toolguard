@@ -16,9 +16,9 @@ Run with:
 import unittest
 from types import MappingProxyType
 
-import toolguard.rule_entry as rule_entry_module
 from toolguard.issues import Issue
 from toolguard.rule_entry import (
+    ADDITIONAL_CONTEXT_KEY,
     KNOWN_ENRICHMENT_KEYS,
     PATTERN_KEY,
     MergeConflict,
@@ -129,19 +129,12 @@ class TestNormalizeEntryStructured(unittest.TestCase):
         Then the entry's metadata carries that key and no issue is raised
              for it
 
-        Note: KNOWN_ENRICHMENT_KEYS is currently empty (Phase 1 has not
-        landed "additionalContext" yet), so this test synthesizes a known
-        key via monkeypatching the module constant for the duration of the
-        test, to exercise the "known key -> no warning" branch independently
-        of when a real enrichment key is added.
+        "additionalContext" is the real known key as of Phase 1, so no
+        monkeypatching is needed to exercise the "known key -> no warning"
+        branch.
         """
-        original = rule_entry_module.KNOWN_ENRICHMENT_KEYS
-        rule_entry_module.KNOWN_ENRICHMENT_KEYS = frozenset({"additionalContext"})
-        try:
-            raw = {PATTERN_KEY: "Bash(git *)", "additionalContext": "why"}
-            entry, issues = normalize_entry(raw, is_native=False)
-        finally:
-            rule_entry_module.KNOWN_ENRICHMENT_KEYS = original
+        raw = {PATTERN_KEY: "Bash(git *)", "additionalContext": "why"}
+        entry, issues = normalize_entry(raw, is_native=False)
 
         self.assertIsNotNone(entry)
         self.assertEqual(dict(entry.metadata), {"additionalContext": "why"})
@@ -1020,16 +1013,16 @@ class TestModuleConstants(unittest.TestCase):
         """
         self.assertEqual(PATTERN_KEY, "match")
 
-    def test_known_enrichment_keys_starts_empty(self):
+    def test_known_enrichment_keys_holds_additional_context_only(self):
         """
-        Given the KNOWN_ENRICHMENT_KEYS constant at this point in TOO-19
+        Given the KNOWN_ENRICHMENT_KEYS constant after Phase 1
         When inspected
-        Then it is an empty frozenset -- Phase 1 has not yet added
-             "additionalContext" as a known key, and "match" (PATTERN_KEY)
-             is never itself an enrichment key
+        Then it is a frozenset holding exactly "additionalContext" --
+             "match" (PATTERN_KEY) is never itself an enrichment key
         """
-        self.assertEqual(KNOWN_ENRICHMENT_KEYS, frozenset())
+        self.assertEqual(KNOWN_ENRICHMENT_KEYS, frozenset({ADDITIONAL_CONTEXT_KEY}))
         self.assertIsInstance(KNOWN_ENRICHMENT_KEYS, frozenset)
+        self.assertNotIn(PATTERN_KEY, KNOWN_ENRICHMENT_KEYS)
 
 
 class TestRealPatterns(unittest.TestCase):
@@ -1089,6 +1082,130 @@ class TestRealPatterns(unittest.TestCase):
         Then it returns an empty list
         """
         self.assertEqual(real_patterns([]), [])
+
+
+class TestAdditionalContext(unittest.TestCase):
+    """
+    The `additionalContext` enrichment key (TOO-19 Phase 1, increment 1).
+
+    Covers the registry entry, the string-only value constraint, and the
+    `RuleEntry.additional_context` accessor that every consumer goes through.
+    """
+
+    def test_additional_context_is_a_known_enrichment_key(self):
+        """
+        Given this toolguard version
+        When the known-enrichment-key registry is inspected
+        Then 'additionalContext' is present, so it does not warn as unknown
+        """
+        self.assertIn(ADDITIONAL_CONTEXT_KEY, KNOWN_ENRICHMENT_KEYS)
+
+    def test_string_value_is_accepted_without_issues(self):
+        """
+        Given a structured entry with a string additionalContext
+        When it is normalized
+        Then it normalizes cleanly and the accessor returns the text
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(grep *)", ADDITIONAL_CONTEXT_KEY: "Prefer ag."},
+            is_native=False,
+        )
+        self.assertEqual(issues, ())
+        self.assertEqual(entry.additional_context, "Prefer ag.")
+
+    def test_non_string_value_reports_an_error_but_keeps_the_rule(self):
+        """
+        Given a structured entry whose additionalContext is a bool
+        When it is normalized
+        Then an error-level issue is reported, the RULE still normalizes, and
+        the accessor returns None so nothing is injected
+
+        Dropping the rule would turn a cosmetic mistake into a silently
+        missing rule -- exactly backwards for a deny.
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(rm -rf *)", ADDITIONAL_CONTEXT_KEY: True},
+            is_native=False,
+        )
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.pattern, "Bash(rm -rf *)")
+        self.assertIsNone(entry.additional_context)
+        self.assertEqual([i.level for i in issues], ["error"])
+        self.assertIn(ADDITIONAL_CONTEXT_KEY, issues[0].message)
+
+    def test_integer_value_is_not_silently_stringified(self):
+        """
+        Given a structured entry whose additionalContext is an int
+        When the accessor is read
+        Then it returns None rather than the digits as text
+        """
+        entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(ls *)", ADDITIONAL_CONTEXT_KEY: 3},
+            is_native=False,
+        )
+        self.assertIsNone(entry.additional_context)
+        self.assertEqual([i.level for i in issues], ["error"])
+
+    def test_absent_key_yields_none_and_no_issues(self):
+        """
+        Given a structured entry with no additionalContext at all
+        When it is normalized
+        Then there are no issues and the accessor returns None
+        """
+        entry, issues = normalize_entry({PATTERN_KEY: "Bash(ls *)"}, is_native=False)
+        self.assertEqual(issues, ())
+        self.assertIsNone(entry.additional_context)
+
+    def test_plain_string_entry_has_no_additional_context(self):
+        """
+        Given a plain (unstructured) pattern string
+        When it is normalized
+        Then the accessor returns None, so the common case needs no special casing
+        """
+        entry, issues = normalize_entry("Bash(ls *)", is_native=False)
+        self.assertEqual(issues, ())
+        self.assertIsNone(entry.additional_context)
+
+    def test_empty_and_whitespace_only_values_are_treated_as_absent(self):
+        """
+        Given entries whose additionalContext is empty or only whitespace
+        When the accessor is read
+        Then it returns None, so callers test one value instead of
+        distinguishing 'absent' from 'present but blank'
+        """
+        for blank in ("", "   ", "\n\t "):
+            with self.subTest(value=repr(blank)):
+                entry, issues = normalize_entry(
+                    {PATTERN_KEY: "Bash(ls *)", ADDITIONAL_CONTEXT_KEY: blank},
+                    is_native=False,
+                )
+                self.assertEqual(issues, ())
+                self.assertIsNone(entry.additional_context)
+
+    def test_additional_context_no_longer_warns_as_an_unknown_key(self):
+        """
+        Given a structured entry carrying additionalContext
+        When it is normalized
+        Then no 'Unknown key' warning is produced, unlike before increment 1
+        """
+        _entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(ls *)", ADDITIONAL_CONTEXT_KEY: "text"},
+            is_native=False,
+        )
+        self.assertEqual([i for i in issues if "Unknown key" in i.message], [])
+
+    def test_an_unrelated_unknown_key_still_warns(self):
+        """
+        Given a structured entry with a key this version does not understand
+        When it is normalized
+        Then it still warns, so adding additionalContext did not disable the check
+        """
+        _entry, issues = normalize_entry(
+            {PATTERN_KEY: "Bash(ls *)", "notARealKey": "x"},
+            is_native=False,
+        )
+        self.assertEqual([i.level for i in issues], ["warning"])
+        self.assertIn("notARealKey", issues[0].message)
 
 
 if __name__ == "__main__":

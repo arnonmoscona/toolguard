@@ -143,6 +143,10 @@ Both the file-path and command paths first consult `[hard_deny]` (pooled across 
 hierarchy levels); a hard-deny match short-circuits to a refusal that no allow can override.
 Otherwise the decision comes from the more-specific-wins cascade across levels.
 
+When the deciding rule is a structured entry carrying `additionalContext`, the hook's JSON
+output also carries `hookSpecificOutput.additionalContext` -- see
+[Configuration: additionalContext](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
+
 ## Writing configuration
 
 The hook itself never writes configuration -- it is a read-only path. Everything that does

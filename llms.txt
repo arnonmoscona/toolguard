@@ -34,8 +34,8 @@ below plus a question-and-pointer list for common lookups, see
 - [Quick start](docs/quickstart.md): install, register hooks for all governed tools, declare
   governed_tools, add a few patterns, verify.
 - [Configuration](docs/configuration.md): full reference -- hook matchers, governed_tools,
-  additional_supported_tools, environment variables, the hierarchy/resolution model, and the
-  annotated config template.
+  additional_supported_tools, environment variables, the hierarchy/resolution model,
+  `additionalContext` rule enrichment, and the annotated config template.
 - [Permission patterns](docs/permission-patterns.md): DEFAULT/REGEX/GLOB/NATIVE patterns, file-path
   patterns, path normalization, compound commands.
 - [Takeover mode](docs/takeover-mode.md): blanket-allow + toolguard-enforces mode, its

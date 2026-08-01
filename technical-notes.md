@@ -32,7 +32,7 @@ anyone cross-referencing against the project's own tracker.
   - [Four separate log streams (one file per concern)](#four-separate-log-streams-one-file-per-concern)
   - [Conflict logging -- allow-over-deny overrides only](#conflict-logging----allow-over-deny-overrides-only)
   - [Provenance threaded into resolution reasons](#provenance-threaded-into-resolution-reasons)
-  - [Once-per-session discovery diagnostic (M2)](#once-per-session-discovery-diagnostic-m2)
+  - [Change-detecting discovery diagnostic (M2, TOO-19)](#change-detecting-discovery-diagnostic-m2-too-19)
   - [Single source of truth for the both-formats warning (M1)](#single-source-of-truth-for-the-both-formats-warning-m1)
   - [Single source of truth for tool-wrapper stripping](#single-source-of-truth-for-tool-wrapper-stripping)
 - [Non-permission cross-level resolution (TOO-8 Phase 5)](#non-permission-cross-level-resolution-too-8-phase-5)
@@ -55,7 +55,7 @@ anyone cross-referencing against the project's own tracker.
   - [Lexical pre-pass vs. grammar](#lexical-pre-pass-vs-grammar)
   - [Heredocs, the sink sentinel, and executor classification](#heredocs-the-sink-sentinel-and-executor-classification)
   - [Command substitution: validated, but no placeholder (yet)](#command-substitution-validated-but-no-placeholder-yet)
-  - [Flagged defaults (open to revisit)](#flagged-defaults-open-to-revisit)
+  - [Flagged defaults (resolved by TOO-19)](#flagged-defaults-resolved-by-too-19)
 - [Maintenance and audit tooling (TOO-15 Phase 2)](#maintenance-and-audit-tooling-too-15-phase-2)
   - [Library-first, thin-skill seam](#library-first-thin-skill-seam)
   - [Corpus harvesting is opt-in, not automatic](#corpus-harvesting-is-opt-in-not-automatic)
@@ -332,10 +332,11 @@ separable:
 
 | File                                  | Writer                         | Contents |
 | ------------------------------------- | ------------------------------ | -------- |
-| `logs/toolguard-YYYY-MM-DD.md`        | `log_writer.log_command`       | Resolution log (high volume): allowed/refused decisions, matched-rule provenance. Also `log_writer.log_discovery` (once-per-session discovery diagnostic) and `hard_deny` denials. |
+| `logs/toolguard-YYYY-MM-DD.md`        | `log_writer.log_command`       | Resolution log (high volume): allowed/refused decisions, matched-rule provenance. Also `log_writer.log_discovery` (change-detecting discovery diagnostic, TOO-19) and `hard_deny` denials. |
 | `logs/toolguard-error-YYYY-MM-DD.md`  | `error_log.log_error`          | REAL errors only. |
 | `logs/toolguard-warning-YYYY-MM-DD.md`| `error_log.log_warning`        | Actionable warnings: both-`.toml`-and-`.json` present, unsupported/ungoverned tools. |
 | `logs/toolguard-conflict-YYYY-MM-DD.md`| `error_log.log_conflict`      | Config conflicts (allow-over-deny overrides), human/LLM-readable, ON by default. |
+| `logs/toolguard-discovery.log`        | `log_writer.log_discovery`     | Change-log backing the discovery diagnostic above: one PLAIN-TEXT line per project root per DISTINCT discovered level set (TOO-19 code review M3 -- not JSON). NOT date-partitioned, and never size-capped/rotated (see the module docstring in `log_writer.py`). |
 
 `error_log._log_entry(level, stream, ...)` is the single shared writer; the
 `stream` argument selects the `toolguard-<stream>-...` filename. All three share
@@ -385,12 +386,55 @@ There is a single cascade implementation: the hook drives
 `decide_command_at_level` / `make_command_level_decider` were removed once the
 detailed path superseded them; no separate legacy cascade remains.)
 
-### Once-per-session discovery diagnostic (M2)
+### Change-detecting discovery diagnostic (M2, TOO-19)
 
-`hook` emits, once per session (guarded by `_discovery_diagnostic_done`), a
-`discovered N config levels: <level: path>, ...` entry to the RESOLUTION log via
-`log_writer.log_discovery` (fed by `Configuration.describe_levels`). This replaces
-the discovery diagnostics that the legacy `_load_permissions` printed to stderr.
+`hook` calls `log_writer.log_discovery` on every invocation (fed by
+`Configuration.describe_levels`), but toolguard is a fresh process per
+`PreToolUse` call, so there is no in-process "once per session" to guard
+with -- a prior module-level flag (`_discovery_diagnostic_done`) advertised
+that guarantee and could never deliver it, since it reset to `False` on
+every invocation. `log_discovery` is the guard instead: it keeps a small,
+append-only, project-root-keyed change-log (`logs/toolguard-discovery.log`,
+deliberately NOT date-partitioned -- see its module docstring) and writes a
+`discovered N config levels: <level: path>, ...` entry to the RESOLUTION
+log, plus a discovery-log record, ONLY when the discovered levels differ
+from the last recorded entry for this project root. On no change, it writes
+nothing to either file. This replaces the discovery diagnostics that the
+legacy `_load_permissions` printed to stderr.
+
+**Plain text, not JSON (code review M3).** The discovery log was originally
+JSONL: one JSON object per line. That was over-engineering for what the code
+actually needs -- every record is one line, and the only thing ever read
+back is the single most recent line matching this invocation's project
+root, so JSON's structure and escaping bought nothing over a fixed-width
+delimited line. Each record is now `<iso timestamp>\t<project_root>\t<levels
+joined by the ASCII Unit Separator 0x1F>`. Tab and the Unit Separator are
+both, for all practical purposes, impossible to encounter in a real
+filesystem path or a `level: path` description string -- unlike a comma or a
+colon, which both appear in those strings routinely -- so splitting on them
+needs no escaping logic. `_parse_discovery_line` does the split; a line
+missing either separator is treated as unparseable and skipped, the same
+tolerance the old JSONL parser had for a torn write.
+
+**No size cap on the file; a bounded read instead (code review M3).** The
+original design capped how much of the file it would READ at 1 MB and
+degraded to "no prior entry" past that -- which is the bug the review
+caught: once a file crossed 1 MB, EVERY subsequent invocation saw "no prior
+entry", appended, and made the file bigger, guaranteeing every invocation
+after that would also append. Self-accelerating, and silent. The fix
+removes the size cap entirely -- the file is never truncated or rotated, by
+design -- and instead bounds only how much of it a single READ touches:
+`_last_discovery_levels_for_root` seeks to `_DISCOVERY_TAIL_READ_BYTES`
+(64 KiB) from the end and scans that tail's lines backwards for a match on
+project root, discarding a possibly-partial first line when the read didn't
+start at byte 0. Growing the file no longer changes the cost of a read (it
+is always bounded by the tail size), and no longer changes correctness
+either: the only way a read can miss the real last entry is if enough OTHER
+projects' records (in a shared `TOOLGUARD_LOG_DIR`) have been appended after
+it to push it outside the tail window, in which case the read degrades to
+"no prior entry" -- costing one redundant log write for THIS invocation,
+never an incorrect permission verdict. This is the same safety argument that
+already justified tolerating a torn final line.
 
 ### Single source of truth for the both-formats warning (M1)
 
@@ -573,6 +617,14 @@ with confidence; anything else resolves to **ASK** -- never a silent allow of an
 blob, and never a hard deny that would break a legitimate workflow. This "hidden" ASK applies
 even when no TOML pattern matches the construct.
 
+**Update (TOO-19):** "resolves to ASK" above is the *default*, not a hardcoded outcome. The
+top-level `undecidable_fallback` config key (`docs/configuration.md#undecidable-fallback`)
+names the floor this governing principle resolves to -- `"ask"` (this default), `"deny"`
+(stricter), or `"allow_with_warning"` (removes the floor entirely, the deliberate opt-out;
+raises a HIGH `toolguard-audit` finding). See `compound.py`'s `_UNDECIDABLE_FLOOR_DECISION`
+and `Configuration.resolved_undecidable_fallback` for the resolution mechanics, which this
+whole section predates.
+
 ### Grammar-first, with a light AST -- no hand-rolled parsing
 
 All STRUCTURAL parsing is done by the formal PEG grammar
@@ -649,7 +701,9 @@ bearer (e.g. `cat __HEREDOC_TO_python__`), a broad receiver allow (`allow = cat:
 `uv run*`) would otherwise match and re-open the fail-open. So a foreign-executor heredoc /
 inline-code leaf has its verdict CLAMPED to at most ASK: a plain `allow` cannot downgrade it
 (`deny` still applies). This makes "allow data-sink heredocs, ask executor heredocs"
-authorable without cross-leaf context, while guaranteeing no fail-open.
+authorable without cross-leaf context, while guaranteeing no fail-open. (TOO-19: "at most ASK"
+is the `undecidable_fallback` default; `"allow_with_warning"` removes this clamp entirely --
+see the governing-principle section above.)
 
 ### Command substitution: validated, but no placeholder (yet)
 
@@ -661,11 +715,18 @@ are false positives -- backticks inside strings/heredoc bodies -- or benign `$(d
 "don't over-engineer for rare constructs," the placeholder is deferred; current behavior
 (inner validated, outer matched with the substitution text inline) is already safe.
 
-### Flagged defaults (open to revisit)
+### Flagged defaults (resolved by TOO-19)
 
 - The foreign-executor **ASK floor** slightly constrains authoring (a plain `allow` cannot
   permit foreign inline/heredoc code -- by design, to prevent fail-open).
-- Truly-unparseable input fails closed honoring `no_match_fallback` (default ASK).
+- Truly-unparseable input fails closed via the **`undecidable_fallback`** config key
+  (default `"ask"`) -- NOT `no_match_fallback`, which answers a different question (a command
+  that was read and understood but matched no rule). Both of the items above were originally
+  hardcoded ASK; TOO-19 made the floor level itself configurable
+  (`ask`/`deny`/`allow_with_warning`), closing this "open to revisit" note. See
+  `docs/configuration.md#undecidable-fallback` for the setting and
+  `docs/security.md#loosening-the-undecidable-fallback` for the security tradeoff of loosening
+  it.
 
 ## Maintenance and audit tooling (TOO-15 Phase 2)
 

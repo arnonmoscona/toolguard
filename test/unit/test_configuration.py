@@ -31,7 +31,7 @@ from toolguard.config import (
     config_sync_settings_from_sources,
     load_configuration,
 )
-from toolguard.rule_entry import _strip_tool_wrapper
+from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry, _strip_tool_wrapper
 
 
 class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
@@ -1577,6 +1577,157 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
         self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
 
+class TestResolvedUndecidableFallback(unittest.TestCase):
+    """
+    Configuration.resolved_undecidable_fallback() (TOO-19): the top-level
+    ``undecidable_fallback`` key ONLY, most-specific-wins across non-native
+    layers. Unlike ``no_match_fallback`` there is deliberately NO legacy
+    ``[takeover_mode]`` alias and NO deprecated ``'warn_deny'`` spelling --
+    this is a brand-new setting with no history to be backwards-compatible
+    with. Defaults to 'ask'. The recognized values are 'ask', 'deny', and
+    'allow_with_warning'.
+    """
+
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_defaults_to_ask_when_nothing_set(self):
+        """
+        Given no layer sets the top-level 'undecidable_fallback' key
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then it returns the default 'ask'
+        """
+        config = Configuration(layers=(self._hook_layer("project", {}),))
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_value_ask_explicit_is_returned_as_is(self):
+        """
+        Given a hook layer explicitly setting the top-level
+            'undecidable_fallback' key to 'ask'
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then it returns 'ask'
+        """
+        layers = (self._hook_layer("project", {"undecidable_fallback": "ask"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_value_deny_is_returned_as_is(self):
+        """
+        Given a hook layer setting the top-level 'undecidable_fallback' key
+            to 'deny'
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then it returns 'deny'
+        """
+        layers = (self._hook_layer("project", {"undecidable_fallback": "deny"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "deny")
+
+    def test_value_allow_with_warning_is_returned_as_is(self):
+        """
+        Given a hook layer setting the top-level 'undecidable_fallback' key
+            to 'allow_with_warning'
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then it returns 'allow_with_warning'
+        """
+        layers = (
+            self._hook_layer("project", {"undecidable_fallback": "allow_with_warning"}),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "allow_with_warning")
+
+    def test_more_specific_layer_wins(self):
+        """
+        Given two layers both set the top-level key, project='deny' and
+            user='allow_with_warning' (project more specific)
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then the more-specific (project) value 'deny' wins
+        """
+        layers = (
+            self._hook_layer("project", {"undecidable_fallback": "deny"}, 0),
+            self._hook_layer("user", {"undecidable_fallback": "allow_with_warning"}, 1),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "deny")
+
+    def test_native_layer_top_level_key_ignored(self):
+        """
+        Given ONLY a native ('claude') layer sets a top-level
+            'undecidable_fallback' key (toolguard extensions are never read
+            from native settings)
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then the native value is ignored and the default 'ask' is returned
+        """
+        native_layer = ConfigLayer(
+            Provenance("project", "claude", "json", Path("/p/settings.json"), 0),
+            MappingProxyType({"undecidable_fallback": "deny"}),
+        )
+        config = Configuration(layers=(native_layer,))
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_invalid_value_falls_back_to_ask(self):
+        """
+        Given a layer sets the top-level 'undecidable_fallback' to an
+            unrecognized value (a typo / bad config, e.g. 'nonsense')
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then the value is not propagated; it normalizes to the default 'ask'
+        """
+        layers = (self._hook_layer("project", {"undecidable_fallback": "nonsense"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_legacy_takeover_mode_alias_is_not_honored(self):
+        """
+        Given ONLY the [takeover_mode].undecidable_fallback 'alias' shape is
+            set (no top-level key anywhere) -- mirroring no_match_fallback's
+            legacy alias syntax, which undecidable_fallback deliberately does
+            NOT have
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then the [takeover_mode] value is NOT honored and the default 'ask'
+            is returned -- undecidable_fallback has no legacy alias, by
+            design (TOO-19), and must not gain one
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"takeover_mode": {"undecidable_fallback": "deny"}}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_independent_from_no_match_fallback(self):
+        """
+        Given a single layer setting no_match_fallback='deny' and
+            undecidable_fallback='allow_with_warning' together
+        When both resolved_no_match_fallback() and
+            resolved_undecidable_fallback() are called
+        Then each resolves independently to its own configured value --
+            neither setting leaks into the other's resolution
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {
+                    "no_match_fallback": "deny",
+                    "undecidable_fallback": "allow_with_warning",
+                },
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+        self.assertEqual(config.resolved_undecidable_fallback(), "allow_with_warning")
+
+
 class TestProvenanceAndIntrospection(unittest.TestCase):
     """Provenance.describe, source_type property, describe_sources."""
 
@@ -3030,6 +3181,346 @@ class TestParseFailureAskFloor(unittest.TestCase):
 
         self.assertEqual(resolved.decision, "allow")
         self.assertIn("Command matches allow pattern: git *", resolved.reason)
+
+    def test_additional_context_cleared_by_ask_floor(self):
+        """
+        Given a structured allow entry carrying additionalContext AND a
+            recorded parse failure for a broken file
+        When resolve_permission_detailed('Bash', ...) resolves the command
+        Then the decision is clamped to 'ask' by the floor and
+            additional_context is None -- the winning rule match no longer
+            determines the verdict, same reasoning as provenance/override
+            being cleared
+        """
+        broken = Path("/p/.claude/toolguard_hook.local.toml")
+        prov = Provenance(
+            "project", "toolguard_hook", "toml", Path("/p/.claude/toolguard_hook.toml")
+        )
+        layer = ConfigLayer(
+            prov,
+            MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": [{"match": "Bash(git *)", "additionalContext": "why"}],
+                        "deny": [],
+                    }
+                }
+            ),
+        )
+        config = Configuration(
+            layers=(layer,), parse_failures=((broken, "unexpected character"),)
+        )
+
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            resolved = config.resolve_permission_detailed(
+                "Bash", self._decide_allow_git
+            )
+
+        self.assertEqual(resolved.decision, "ask")
+        self.assertIsNone(resolved.additional_context)
+
+    def test_undecidable_fallback_allow_with_warning_does_not_relax_parse_failure_floor(
+        self,
+    ):
+        """
+        HARD INVARIANT (TOO-19): the parse-failure ASK floor is permanently
+        exempt from undecidable_fallback -- no config value may ever relax it.
+
+        Given a config with undecidable_fallback='allow_with_warning' (the
+            most permissive possible setting -- the deliberate "no floor"
+            escape hatch) AND a recorded parse failure for a broken file, and
+            an allow rule that matches the command
+        When resolve_permission_detailed('Bash', ...) resolves the command
+        Then the decision is STILL clamped to 'ask' -- a broken config is not
+            a policy question undecidable_fallback (or any setting) can
+            answer, so it is completely unaffected by this test's
+            undecidable_fallback value
+        """
+        broken = Path("/p/.claude/toolguard_hook.local.toml")
+        prov = Provenance(
+            "project", "toolguard_hook", "toml", Path("/p/.claude/toolguard_hook.toml")
+        )
+        layer = ConfigLayer(
+            prov,
+            MappingProxyType(
+                {
+                    "undecidable_fallback": "allow_with_warning",
+                    "permissions": {
+                        "allow": ["Bash(git *)"],
+                        "deny": [],
+                    },
+                }
+            ),
+        )
+        config = Configuration(
+            layers=(layer,), parse_failures=((broken, "unexpected character"),)
+        )
+        # Confirm the fixture actually set the permissive value under test --
+        # a self-check that this test would notice if resolved_undecidable_fallback()
+        # itself regressed.
+        self.assertEqual(config.resolved_undecidable_fallback(), "allow_with_warning")
+
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            resolved = config.resolve_permission_detailed(
+                "Bash", self._decide_allow_git
+            )
+
+        self.assertEqual(resolved.decision, "ask")
+        self.assertIn(str(broken), resolved.reason)
+
+
+class TestAdditionalContextResolution(unittest.TestCase):
+    """
+    TOO-19 Phase 1, increment 2: Configuration._resolve_permission_detailed_unclamped
+    surfaces the winning RuleEntry's additional_context property onto
+    ResolvedDecision.additional_context.
+
+    These tests build Configuration directly from hand-constructed
+    ConfigLayer/Provenance objects with zero file I/O, so no ConfigIsolationMixin
+    is needed (per test/unit/CLAUDE.md's checklist).
+    """
+
+    @staticmethod
+    def _config(*, allow=(), deny=(), ask=()):
+        """
+        Build a single-layer project-level Bash Configuration.
+
+        Each of allow/deny/ask is a list of raw permission-list elements
+        (plain strings or structured {match=..., additionalContext=...}
+        dicts) -- NOT yet Bash(...)-wrapped, since this helper wraps the
+        'match'/plain-string pattern itself.
+        """
+
+        def _wrap(entry):
+            if isinstance(entry, dict):
+                wrapped = dict(entry)
+                wrapped["match"] = f"Bash({wrapped['match']})"
+                return wrapped
+            return f"Bash({entry})"
+
+        prov = Provenance(
+            "project", "toolguard_hook", "toml", Path("/p/.claude/toolguard_hook.toml")
+        )
+        layer = ConfigLayer(
+            prov,
+            MappingProxyType(
+                {
+                    "permissions": {
+                        "allow": [_wrap(e) for e in allow],
+                        "deny": [_wrap(e) for e in deny],
+                        "ask": [_wrap(e) for e in ask],
+                    }
+                }
+            ),
+        )
+        return Configuration(layers=(layer,))
+
+    @staticmethod
+    def _decide(allow, deny, ask):
+        """A decide_detailed closure that deny-first/ask/allow-matches 'git *'."""
+        if "git *" in deny:
+            return ("deny", "Command matches deny pattern: git *", "git *")
+        if "git *" in ask:
+            return ("ask", "Command matches ask pattern: git *", "git *")
+        if "git *" in allow:
+            return ("allow", "Command matches allow pattern: git *", "git *")
+        return None
+
+    def _resolve(self, config):
+        """Resolve 'git *' against *config* with takeover mode disabled."""
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ):
+            return config.resolve_permission_detailed("Bash", self._decide)
+
+    def test_structured_allow_entry_surfaces_additional_context(self):
+        """
+        Given a structured allow entry with additionalContext = 'why'
+        When resolve_permission_detailed('Bash', ...) resolves a match
+        Then the decision is 'allow' and additional_context is 'why'
+        """
+        config = self._config(allow=[{"match": "git *", "additionalContext": "why"}])
+        resolved = self._resolve(config)
+        self.assertEqual(resolved.decision, "allow")
+        self.assertEqual(resolved.additional_context, "why")
+
+    def test_structured_deny_entry_surfaces_additional_context(self):
+        """
+        Given a structured deny entry with additionalContext = 'why not'
+        When resolve_permission_detailed('Bash', ...) resolves a match
+        Then the decision is 'deny' and additional_context is 'why not'
+        """
+        config = self._config(deny=[{"match": "git *", "additionalContext": "why not"}])
+        resolved = self._resolve(config)
+        self.assertEqual(resolved.decision, "deny")
+        self.assertEqual(resolved.additional_context, "why not")
+
+    def test_structured_ask_entry_surfaces_additional_context(self):
+        """
+        Given a structured ask entry with additionalContext = 'careful'
+        When resolve_permission_detailed('Bash', ...) resolves a match
+        Then the decision is 'ask' and additional_context is 'careful'
+        """
+        config = self._config(ask=[{"match": "git *", "additionalContext": "careful"}])
+        resolved = self._resolve(config)
+        self.assertEqual(resolved.decision, "ask")
+        self.assertEqual(resolved.additional_context, "careful")
+
+    def test_plain_string_rule_yields_none(self):
+        """
+        Given a plain-string (unstructured) allow rule
+        When resolve_permission_detailed('Bash', ...) resolves a match
+        Then additional_context is None -- there is no metadata to surface
+        """
+        config = self._config(allow=["git *"])
+        resolved = self._resolve(config)
+        self.assertEqual(resolved.decision, "allow")
+        self.assertIsNone(resolved.additional_context)
+
+    def test_structured_entry_without_key_yields_none(self):
+        """
+        Given a structured allow entry with no additionalContext key at all
+        When resolve_permission_detailed('Bash', ...) resolves a match
+        Then additional_context is None
+        """
+        config = self._config(allow=[{"match": "git *", "autoMode": True}])
+        resolved = self._resolve(config)
+        self.assertEqual(resolved.decision, "allow")
+        self.assertIsNone(resolved.additional_context)
+
+    def test_no_match_fallback_yields_none(self):
+        """
+        Given a config with rules configured but none matching the command
+        When resolve_permission_detailed('Bash', ...) falls through to the
+            no_match_fallback branch
+        Then additional_context is None (no rule matched, nothing to surface)
+        """
+        config = self._config(allow=[{"match": "ls *", "additionalContext": "why"}])
+        resolved = self._resolve(config)
+        self.assertIsNone(resolved.additional_context)
+
+
+class TestEntryForPatternDrift(unittest.TestCase):
+    """
+    Configuration._entry_for_pattern on a layer with DRIFTED parallel lists
+    (TOO-19 code review m4): allow/allow_entries of different lengths.
+
+    Built directly from hand-constructed ToolPatternLayer objects with zero
+    file I/O (no ConfigIsolationMixin needed, per test/unit/CLAUDE.md's
+    checklist) -- this is a defensive-programming corner case (parallel-list
+    drift should never happen from normal config authoring), not something
+    reachable via a real TOML file.
+    """
+
+    @staticmethod
+    def _entry(pattern, context=None):
+        metadata = MappingProxyType(
+            {ADDITIONAL_CONTEXT_KEY: context} if context else {}
+        )
+        return RuleEntry(pattern=pattern, metadata=metadata)
+
+    def test_misaligned_layer_returns_none_instead_of_falling_through(self):
+        """
+        Given a MORE-specific layer whose allow/allow_entries have drifted
+            (2 patterns, 1 entry) and contains the winning pattern, and a
+            LESS-specific layer that also happens to contain the SAME
+            pattern string (aligned)
+        When _entry_for_pattern searches for the winning pattern
+        Then it returns None -- NOT the less-specific layer's entry -- so a
+            list-drift bug can never misattribute enrichment to a rule that
+            did not actually win
+        """
+        drifted_layer = ToolPatternLayer(
+            provenance=Provenance("project", "toolguard_hook", "toml", Path("/p.toml")),
+            allow=("git *", "ls *"),
+            deny=(),
+            allow_entries=(self._entry("git *", "should never surface"),),
+        )
+        less_specific_layer = ToolPatternLayer(
+            provenance=Provenance("user", "toolguard_hook", "toml", Path("/u.toml")),
+            allow=("git *",),
+            deny=(),
+            allow_entries=(self._entry("git *", "wrong attribution"),),
+        )
+        result = Configuration._entry_for_pattern(
+            (drifted_layer, less_specific_layer), "git *", "allow"
+        )
+        self.assertIsNone(result)
+
+    def test_aligned_layer_still_resolves_normally(self):
+        """
+        Given a normally-aligned layer (no drift)
+        When _entry_for_pattern searches for a pattern it contains
+        Then it returns that layer's own entry, unaffected by the m4 fix
+        """
+        layer = ToolPatternLayer(
+            provenance=Provenance("project", "toolguard_hook", "toml", Path("/p.toml")),
+            allow=("git *",),
+            deny=(),
+            allow_entries=(self._entry("git *", "normal context"),),
+        )
+        result = Configuration._entry_for_pattern((layer,), "git *", "allow")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.additional_context, "normal context")
+
+    def test_drift_does_not_change_the_resolved_verdict(self):
+        """
+        Given the same drifted-vs-less-specific layer pair as
+            test_misaligned_layer_returns_none_instead_of_falling_through,
+            wired through a real resolve_permission_detailed('Bash', ...) call
+        When the winning command is resolved end to end
+        Then the decision, reason, and provenance are exactly what the
+            matched-pattern/provenance resolution already determined --
+            _entry_for_pattern's fix changes ONLY additional_context
+            attribution, never the verdict (TOO-19 code review m4's gate)
+        """
+        drifted_layer = ToolPatternLayer(
+            provenance=Provenance("project", "toolguard_hook", "toml", Path("/p.toml")),
+            allow=("git *", "ls *"),
+            deny=(),
+            allow_entries=(self._entry("git *", "should never surface"),),
+        )
+        less_specific_layer = ToolPatternLayer(
+            provenance=Provenance("user", "toolguard_hook", "toml", Path("/u.toml")),
+            allow=("git *",),
+            deny=(),
+            allow_entries=(self._entry("git *", "wrong attribution"),),
+        )
+
+        class _FakeConfig(Configuration):
+            def permission_levels_with_provenance(self, tool_name):
+                return [
+                    (
+                        ("git *", "ls *"),
+                        (),
+                        (),
+                        (drifted_layer, less_specific_layer),
+                    )
+                ]
+
+        def decide(allow, deny, ask=()):
+            if "git *" in allow:
+                return "allow", "Command matches allow pattern: git *", "git *"
+            return None
+
+        resolved = _FakeConfig(layers=()).resolve_permission_detailed("Bash", decide)
+        self.assertEqual(resolved.decision, "allow")
+        self.assertEqual(
+            resolved.reason, "Command matches allow pattern: git *  [project: /p.toml]"
+        )
+        self.assertEqual(resolved.provenance.level, "project")
+        # The one thing the m4 fix DOES change: no misattributed context.
+        self.assertIsNone(resolved.additional_context)
 
 
 class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):

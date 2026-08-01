@@ -26,6 +26,32 @@ from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.hook import _resolve_event, main
 from toolguard.tools.decision import decide
 
+from test.unit._config_isolation import isolate_log_dir_for_module
+
+# TOO-19: --eval mode itself never logs (see _run_eval_mode's docstring), but
+# TestEvalMatchesLiveHookUnderFallback also drives main() WITHOUT --eval (the
+# live-hook path) to compare verdicts, and that path unconditionally reaches
+# toolguard.env_config.get_env_config() to resolve TOOLGUARD_LOG_DIR for the
+# config-discovery diagnostic log, before load_configuration() is even
+# consulted. Without this, that resolution falls back to the real process cwd
+# (the repo root under `unittest discover`) and writes real entries into the
+# developer's live logs/ directory. See test/unit/_config_isolation.py's
+# module docstring and .claude/rules/test-config-isolation.md.
+_log_tmp_dir = None
+_log_patcher = None
+
+
+def setUpModule():
+    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module (TOO-19)."""
+    global _log_tmp_dir, _log_patcher
+    _log_tmp_dir, _log_patcher, _ = isolate_log_dir_for_module()
+
+
+def tearDownModule():
+    """Undo the module-wide TOOLGUARD_LOG_DIR isolation and clean up its temp dir."""
+    _log_patcher.stop()
+    _log_tmp_dir.cleanup()
+
 
 def _prov(specificity=0):
     """Build a project-level toml provenance for a test layer."""
@@ -81,7 +107,7 @@ class TestResolveEventAntiDrift(unittest.TestCase):
             "ls",
         ]:
             with self.subTest(command=command):
-                decision, _reason = _resolve_event(
+                decision, _reason, _ctx = _resolve_event(
                     "Bash", {"command": command}, cfg, True
                 )
                 self.assertEqual(decision, decide(cfg, "Bash", command).verdict)
@@ -95,7 +121,7 @@ class TestResolveEventAntiDrift(unittest.TestCase):
         cfg = _config(tool="Read", allow=["/proj/**"], ask=["/proj/secret/**"])
         for file_path in ["/proj/readme.md", "/proj/secret/key"]:
             with self.subTest(file_path=file_path):
-                decision, _reason = _resolve_event(
+                decision, _reason, _ctx = _resolve_event(
                     "Read", {"file_path": file_path}, cfg, True
                 )
                 self.assertEqual(decision, decide(cfg, "Read", file_path).verdict)
@@ -111,9 +137,12 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is allowed with a 'Not a governed tool' reason
         """
         cfg = _config(tool="Bash", allow=["ls:*"])
-        decision, reason = _resolve_event("WebFetch", {"command": "x"}, cfg, True)
+        decision, reason, additional_context = _resolve_event(
+            "WebFetch", {"command": "x"}, cfg, True
+        )
         self.assertEqual(decision, "allow")
         self.assertIn("Not a governed tool", reason)
+        self.assertIsNone(additional_context)
 
     def test_empty_command_fails_closed(self):
         """
@@ -122,9 +151,12 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is denied (fail-closed)
         """
         cfg = _config(tool="Bash", allow=["ls:*"])
-        decision, reason = _resolve_event("Bash", {"command": ""}, cfg, True)
+        decision, reason, additional_context = _resolve_event(
+            "Bash", {"command": ""}, cfg, True
+        )
         self.assertEqual(decision, "deny")
         self.assertIn("No command provided", reason)
+        self.assertIsNone(additional_context)
 
     def test_empty_file_path_fails_closed(self):
         """
@@ -133,9 +165,12 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is denied (fail-closed)
         """
         cfg = _config(tool="Read", allow=["/proj/**"])
-        decision, reason = _resolve_event("Read", {"file_path": ""}, cfg, True)
+        decision, reason, additional_context = _resolve_event(
+            "Read", {"file_path": ""}, cfg, True
+        )
         self.assertEqual(decision, "deny")
         self.assertIn("No file_path provided", reason)
+        self.assertIsNone(additional_context)
 
 
 class TestEvalModeMain(unittest.TestCase):
@@ -175,6 +210,43 @@ class TestEvalModeMain(unittest.TestCase):
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
         mock_log.assert_not_called()
         mock_mig.assert_not_called()
+
+    def test_eval_surfaces_additional_context_for_enriched_allow_rule(self):
+        """
+        TOO-19 Phase 1: Given a structured allow rule carrying
+            additionalContext = 'prefer --short', and --eval mode
+        When main() probes the matching command
+        Then the printed JSON's hookSpecificOutput carries that
+            additionalContext -- --eval exists to preview what the live hook
+            would do, so it must not silently omit a real output field
+        """
+        content = {
+            "governed_tools": ["Bash"],
+            "permissions": {
+                "allow": [
+                    {"match": "Bash(ls:*)", "additionalContext": "prefer --short"}
+                ],
+                "deny": [],
+                "ask": [],
+            },
+        }
+        cfg = Configuration(
+            layers=(
+                ConfigLayer(provenance=_prov(), content=MappingProxyType(content)),
+            ),
+            start_dir=None,
+        )
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": None,
+            "hook_event_name": "PreToolUse",
+        }
+        output, _mock_log, _mock_mig = self._run_eval(hook_input, cfg)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertEqual(
+            output["hookSpecificOutput"]["additionalContext"], "prefer --short"
+        )
 
     def test_eval_asks_on_unmatched_command_by_default(self):
         """

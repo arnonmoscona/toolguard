@@ -361,13 +361,24 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for commands."""
 
     def _resolve(self, config, command):
-        """Resolve a command, checking hard_deny first then the cascade."""
+        """Resolve a command, checking hard_deny first then the cascade.
+
+        Returns the legacy ``(decision, reason)`` 2-tuple: the
+        ``additional_context`` element (TOO-19 Phase 1) is discarded here
+        since none of this class's callers exercise it, so every existing
+        2-tuple-unpacking call site stays unchanged.
+        """
         hd_deny, hd_allow = config.hard_deny("Bash")
 
         def _resolve_one(sub):
             hard = check_hard_deny(sub, list(hd_deny), list(hd_allow))
             if hard is not None:
-                return hard
+                # check_hard_deny returns (decision, reason, matched_pattern)
+                # as of TOO-19 code review m3; this helper's callers want the
+                # legacy (decision, reason, additional_context) shape, and
+                # none of them exercise additional_context, so it is None.
+                hard_decision, hard_reason, _matched_pattern = hard
+                return hard_decision, hard_reason, None
 
             def _decide(allow_patterns, deny_patterns, ask_patterns=()):
                 return decide_command_at_level_detailed(
@@ -378,9 +389,10 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
                 )
 
             resolved = config.resolve_permission_detailed("Bash", _decide)
-            return resolved.decision, resolved.reason
+            return resolved.decision, resolved.reason, resolved.additional_context
 
-        return resolve_compound_permission(command, _resolve_one)
+        decision, reason, _context = resolve_compound_permission(command, _resolve_one)
+        return decision, reason
 
     def test_hard_deny_overrides_more_specific_allow(self):
         """
@@ -554,13 +566,15 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         """
         Given a command matching a hard_deny.deny pattern and no carve-out
         When check_hard_deny runs
-        Then it returns a deny decision with an unoverridable reason
+        Then it returns a deny decision with an unoverridable reason and the
+            matched pattern as its own element (TOO-19 code review m3)
         """
         result = check_hard_deny("curl http://x", ["curl *"], [])
         self.assertIsNotNone(result)
-        decision, reason = result
+        decision, reason, matched_pattern = result
         self.assertEqual(decision, "deny")
         self.assertIn("cannot be overridden", reason)
+        self.assertEqual(matched_pattern, "curl *")
 
     def test_carveout_returns_none(self):
         """

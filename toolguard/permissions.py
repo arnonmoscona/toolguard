@@ -227,7 +227,7 @@ def check_hard_deny(
     deny_patterns: List[str],
     allow_patterns: List[str],
     extended_syntax: bool = True,
-) -> Optional[Tuple[str, str]]:
+) -> Optional[Tuple[str, str, str]]:
     """
     Apply the unoverridable hard-deny rule to a single command.
 
@@ -245,8 +245,12 @@ def check_hard_deny(
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
 
     Returns:
-        ``('deny', reason)`` when the command is hard-denied, otherwise ``None``
-        (no hard-deny match, so the caller falls through to the normal cascade).
+        ``('deny', reason, matched_pattern)`` when the command is hard-denied,
+        otherwise ``None`` (no hard-deny match, so the caller falls through to
+        the normal cascade). ``matched_pattern`` is returned as its own
+        element (TOO-19 code review m3) rather than requiring a caller to
+        recover it by stripping a fixed prefix/suffix off ``reason`` -- that
+        round-trip is fragile against any future wording change here.
     """
     if not deny_patterns:
         return None
@@ -264,6 +268,7 @@ def check_hard_deny(
     return (
         "deny",
         f"Command matches hard_deny pattern: {pattern} (cannot be overridden)",
+        pattern,
     )
 
 

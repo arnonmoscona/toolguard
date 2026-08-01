@@ -44,7 +44,7 @@ same names; the hook is updated to use attribute access so no behaviour changes.
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
-from toolguard.compound import resolve_compound_permission
+from toolguard.compound import cap_context_words, resolve_compound_permission
 from toolguard.normalization import expand_tilde
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 from toolguard.permissions import (
@@ -112,12 +112,23 @@ class BashResolution:
         sub_matches: One :class:`SubMatch` per extracted sub-command, in order.
             Allows callers to identify the deciding sub-command and its
             provenance/matched-rule without re-running the resolver.
+        additional_context: The accumulated ``additionalContext`` enrichment
+            text (TOO-19 Phase 1) for the compound decision -- see
+            :func:`toolguard.compound.resolve_compound_permission` -- or
+            ``None`` when no contributing sub-command's winning rule carried
+            one. Word-capped via :func:`toolguard.compound.cap_context_words`
+            at this function's return (TOO-19 code review M2) regardless of
+            whether the compound decision was allow, ask, or deny. Deliberately
+            NOT yielded by :meth:`__iter__`, for the same backwards-compatibility
+            reason as :attr:`FileResolution.additional_context`: access it as
+            ``result.additional_context``.
     """
 
     decision: str
     reason: str
     overrides: List[Tuple[str, Any]]
     sub_matches: List[SubMatch] = field(default_factory=list)
+    additional_context: Optional[str] = None
 
     def __iter__(self):
         """
@@ -152,20 +163,35 @@ class FileResolution:
             ``None``.  A ``hard_deny`` match also returns ``None`` here.
         provenance: The winning rule's provenance, or ``None`` for a hard-deny
             or a fail-closed default deny (no rule matched).
+        additional_context: The winning rule's ``additionalContext``
+            enrichment text (TOO-19 Phase 1), or ``None`` when the winning
+            entry (or the hard-deny match) did not carry one, no rule
+            matched, or the ASK floor cleared the match. Word-capped via
+            :func:`toolguard.compound.cap_context_words` at this function's
+            return (TOO-19 code review M2) -- previously only the Bash
+            all-allow accumulation path was capped; this now applies
+            uniformly, including the hard-deny branch. Deliberately NOT
+            yielded by :meth:`__iter__` -- that method is a fixed 3-tuple for
+            backwards compatibility with every existing
+            ``decision, reason, override = resolver(...)`` call site; adding a
+            4th yield would silently break every one of them. Access it as
+            ``result.additional_context``.
     """
 
     decision: str
     reason: str
     override: Optional[Any]  # Optional[ConflictOverride]
     provenance: Optional[Any]  # Optional[Provenance]
+    additional_context: Optional[str] = None
 
     def __iter__(self):
         """
         Yield ``(decision, reason, override)`` for backwards-compatible 3-tuple unpacking.
 
         Legacy callers that unpack as ``decision, reason, override = resolver(...)``
-        continue to work without modification.  ``provenance`` is NOT yielded as
-        it is a new field; access it as ``result.provenance``.
+        continue to work without modification.  ``provenance`` and
+        ``additional_context`` are NOT yielded, as both are newer fields;
+        access them as ``result.provenance`` / ``result.additional_context``.
         """
         yield self.decision
         yield self.reason
@@ -342,6 +368,49 @@ def _decide_file_path_at_level_detailed(
     )
 
 
+def _hard_deny_additional_context(
+    config, tool_name: str, matched_pattern: Optional[str]
+) -> Optional[str]:
+    """
+    Look up the ``additionalContext`` of a matched ``[hard_deny]`` pattern.
+
+    A hard deny IS the deciding match, and "why is this forbidden, and what
+    should I do instead" is exactly where an explanation earns its keep, so
+    both governed paths surface it: the file-path pool
+    (:func:`_check_file_path_hard_deny`) and the per-sub-command Bash pool
+    (:func:`resolve_bash_permission_detailed`). This is the single lookup they
+    share, so the two cannot drift apart -- an asymmetry here would make any
+    documentation of the feature wrong for one tool family or the other.
+
+    :meth:`~toolguard.config.Configuration.hard_deny_entries` returns entries
+    index-aligned with :meth:`~toolguard.config.Configuration.hard_deny`'s
+    wrapper-STRIPPED pattern tuple, so the matched (stripped) pattern is
+    located in the latter and the entry read off the former at the same index
+    -- never by comparing against ``entry.pattern``, which is wrapper-intact.
+
+    Enrichment is cosmetic: every failure to resolve it degrades to ``None``
+    and never affects the deny itself.
+
+    Args:
+        config: The resolved :class:`~toolguard.config.Configuration`.
+        tool_name: The governed tool whose hard-deny pool was matched.
+        matched_pattern: The wrapper-stripped pattern that matched, or
+            ``None`` when the caller could not recover it.
+
+    Returns:
+        The matched entry's enrichment text, or ``None`` when there is none,
+        the pattern is unknown, or the parallel lists have drifted out of
+        alignment.
+    """
+    if matched_pattern is None:
+        return None
+    deny_patterns, _allow_patterns = config.hard_deny(tool_name)
+    deny_entries, _allow_entries = config.hard_deny_entries(tool_name)
+    if len(deny_entries) != len(deny_patterns) or matched_pattern not in deny_patterns:
+        return None
+    return deny_entries[deny_patterns.index(matched_pattern)].additional_context
+
+
 def _check_file_path_hard_deny(
     tool_name: str, file_path: str, config, extended_syntax: bool
 ):
@@ -355,6 +424,13 @@ def _check_file_path_hard_deny(
     ``allow`` carve-out. Relative patterns are anchored to the project root, the
     same as normal file-path patterns.
 
+    A hard deny IS the deciding match, so the matched pattern's
+    ``additionalContext`` enrichment (TOO-19 Phase 1) -- e.g. explaining why a
+    path is hard-denied and what to use instead -- is looked up via
+    :meth:`~toolguard.config.Configuration.hard_deny_entries`, which is
+    index-aligned with :meth:`~toolguard.config.Configuration.hard_deny`'s
+    stripped pattern tuple.
+
     Args:
         tool_name: ``'Read'``, ``'Write'``, or ``'Edit'``.
         file_path: The file path under evaluation.
@@ -363,8 +439,10 @@ def _check_file_path_hard_deny(
         extended_syntax: Whether extended prefixes are honoured.
 
     Returns:
-        ``('deny', reason)`` when the path is hard-denied, otherwise ``None`` so
-        the caller falls through to the normal more-specific-wins cascade.
+        ``('deny', reason, additional_context)`` when the path is hard-denied
+        (``additional_context`` is ``None`` when the matched entry did not
+        carry one), otherwise ``None`` so the caller falls through to the
+        normal more-specific-wins cascade.
     """
     deny_patterns, allow_patterns = config.hard_deny(tool_name)
     if not deny_patterns:
@@ -391,6 +469,7 @@ def _check_file_path_hard_deny(
     return (
         "deny",
         f"Path matches hard_deny pattern: {matched_deny} (cannot be overridden)",
+        _hard_deny_additional_context(config, tool_name, matched_deny),
     )
 
 
@@ -420,15 +499,22 @@ def resolve_file_path_permission_detailed(
     Returns:
         A :class:`FileResolution` carrying ``decision``, ``reason``,
         ``override`` (:class:`~toolguard.config.ConflictOverride` or ``None``),
-        and ``provenance`` (the winning rule's
+        ``provenance`` (the winning rule's
         :class:`~toolguard.config.Provenance`, or ``None`` for a hard-deny or
-        fail-closed default deny).
+        fail-closed default deny), and ``additional_context`` (the winning
+        rule's ``additionalContext`` enrichment text, word-capped via
+        :func:`~toolguard.compound.cap_context_words` -- TOO-19 code review
+        M2 -- or ``None``).
     """
     hard = _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
     if hard is not None:
-        decision, reason = hard
+        decision, reason, hard_deny_additional_context = hard
         return FileResolution(
-            decision=decision, reason=reason, override=None, provenance=None
+            decision=decision,
+            reason=reason,
+            override=None,
+            provenance=None,
+            additional_context=cap_context_words(hard_deny_additional_context),
         )
 
     def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
@@ -456,6 +542,7 @@ def resolve_file_path_permission_detailed(
         reason=reason,
         override=resolved.override,
         provenance=resolved.provenance,
+        additional_context=cap_context_words(resolved.additional_context),
     )
 
 
@@ -486,6 +573,11 @@ def resolve_bash_permission_detailed(
     the overall decision is allow) are returned so the caller can log them to the
     conflict stream. ``hard_deny`` denials are NOT conflicts.
 
+    Foreign inline code / heredoc sinks and undecidable segments (control
+    structures, process substitution) that cannot be safely decomposed are
+    floored per ``config.resolved_undecidable_fallback()`` (TOO-19; ``'ask'``
+    by default) -- see :func:`toolguard.compound.resolve_compound_permission`.
+
     Per-sub-command provenance is recorded in the returned
     :class:`BashResolution`\\ 's ``sub_matches`` list (one :class:`SubMatch` per
     sub-command, in order).
@@ -500,7 +592,11 @@ def resolve_bash_permission_detailed(
     Returns:
         A :class:`BashResolution` with ``decision``, ``reason``, ``overrides``
         (list of ``(sub_command, ConflictOverride)`` pairs, empty when none),
-        and ``sub_matches`` (one :class:`SubMatch` per extracted sub-command).
+        ``sub_matches`` (one :class:`SubMatch` per extracted sub-command), and
+        ``additional_context`` (the accumulated ``additionalContext``
+        enrichment text, TOO-19 Phase 1, word-capped via
+        :func:`~toolguard.compound.cap_context_words` -- TOO-19 code review
+        M2 -- or ``None``).
     """
     overrides: List[Tuple[str, Any]] = []
     sub_matches: List[SubMatch] = []
@@ -511,14 +607,13 @@ def resolve_bash_permission_detailed(
             sub_command, list(hard_deny_deny), list(hard_deny_allow), extended_syntax
         )
         if hard is not None:
-            hard_decision, hard_reason = hard
-            # Extract the matched hard-deny pattern from the reason string.
-            # Reason format: "Command matches hard_deny pattern: <pattern> (cannot be overridden)"
-            matched_rule: Optional[str] = None
-            prefix = "Command matches hard_deny pattern: "
-            suffix = " (cannot be overridden)"
-            if hard_reason.startswith(prefix) and hard_reason.endswith(suffix):
-                matched_rule = hard_reason[len(prefix) : -len(suffix)]
+            # TOO-19 code review m3: check_hard_deny now returns the matched
+            # pattern as its own element rather than requiring recovery by
+            # stripping a fixed prefix/suffix off the reason string -- that
+            # round-trip was already fragile for SubMatch.matched_rule and
+            # would otherwise ALSO have to be load-bearing for
+            # _hard_deny_additional_context below.
+            hard_decision, hard_reason, matched_rule = hard
             sub_matches.append(
                 SubMatch(
                     sub_command=sub_command,
@@ -527,7 +622,11 @@ def resolve_bash_permission_detailed(
                     provenance=None,  # hard_deny is pooled; no single provenance
                 )
             )
-            return hard_decision, hard_reason
+            return (
+                hard_decision,
+                hard_reason,
+                _hard_deny_additional_context(config, "Bash", matched_rule),
+            )
 
         def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
             return decide_command_at_level_detailed(
@@ -565,9 +664,30 @@ def resolve_bash_permission_detailed(
                 provenance=resolved.provenance,
             )
         )
-        return resolved.decision, resolved.reason
+        return resolved.decision, resolved.reason, resolved.additional_context
 
-    decision, reason = resolve_compound_permission(command, _resolve_one)
+    decision, reason, additional_context = resolve_compound_permission(
+        command,
+        _resolve_one,
+        undecidable_fallback=config.resolved_undecidable_fallback(),
+    )
+
+    # TOO-19 fail-open fix: re-apply the parse-failure ASK floor HERE, at the
+    # compound boundary, in addition to the per-sub-command application inside
+    # _resolve_one (via config.resolve_permission_detailed). This second
+    # application is not redundant: resolve_compound_permission can produce a
+    # verdict from a grammar-level UndecidableSegment (process substitution,
+    # `case`, unparseable control structures -- see
+    # toolguard/parser/multiline.py) which has NO leaves and therefore never
+    # calls _resolve_one at all, so the per-leaf floor never runs for it. Only
+    # this call site sees the final compound decision regardless of how it was
+    # produced, so it is the only place that can cover that gap. Re-applying
+    # to a decision that already passed through the per-leaf floor is a
+    # deliberate no-op (the clamp is idempotent: an 'ask' stays 'ask', a
+    # 'deny' is never weakened) -- do NOT remove this call as "redundant" with
+    # the per-leaf one; that would silently reopen the undecidable-segment
+    # bypass this fix closes.
+    decision, reason = config.apply_parse_failure_floor(decision, reason)
 
     # Only allow-over-deny overrides on an ALLOWED command are conflicts; if the
     # overall decision is a deny, the recorded overrides are irrelevant.
@@ -578,4 +698,5 @@ def resolve_bash_permission_detailed(
         reason=reason,
         overrides=overrides,
         sub_matches=sub_matches,
+        additional_context=cap_context_words(additional_context),
     )

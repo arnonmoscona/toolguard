@@ -68,6 +68,13 @@ class Decision:
         sub_matches: For Bash commands: one :class:`~toolguard.resolve.SubMatch`
             per extracted sub-command (in order), carrying per-sub-command
             decision, matched rule, and provenance.  ``None`` for file-path tools.
+        additional_context: The winning rule's ``additionalContext`` enrichment
+            (TOO-19 Phase 1), or ``None`` when the matched rule (or fail-closed
+            default) carried none. Sourced from
+            :attr:`~toolguard.resolve.FileResolution.additional_context` /
+            :attr:`~toolguard.resolve.BashResolution.additional_context` without
+            any re-derivation here. Declared LAST so existing positional
+            construction of ``Decision`` stays valid.
     """
 
     tool: str
@@ -76,6 +83,7 @@ class Decision:
     reason: str
     provenance: Optional[Provenance]
     sub_matches: Optional[List[SubMatch]] = field(default=None, compare=False)
+    additional_context: Optional[str] = None
 
 
 def decide(
@@ -116,8 +124,9 @@ def decide(
             prefixes in permission patterns.  Defaults to ``True``.
 
     Returns:
-        A :class:`Decision` with the ``verdict``, ``reason``, and ``provenance``
-        of the winning rule (or ``None`` provenance for a default deny).
+        A :class:`Decision` with the ``verdict``, ``reason``, ``provenance``, and
+        ``additional_context`` of the winning rule (or ``None`` provenance /
+        ``additional_context`` for a default deny).
     """
     if tool in FILE_PATH_TOOLS:
         return _decide_file_path(config, tool, target, extended_syntax)
@@ -195,6 +204,7 @@ def _decide_bash(
         reason=result.reason,
         provenance=provenance,
         sub_matches=sub_matches if sub_matches else None,
+        additional_context=result.additional_context,
     )
 
 
@@ -238,4 +248,5 @@ def _decide_file_path(
         reason=result.reason,
         provenance=result.provenance,
         sub_matches=None,
+        additional_context=result.additional_context,
     )

@@ -7,6 +7,7 @@ Tests verify:
 - Takeover conflict + blanket allows yields HIGH finding
 - Uncovered blanket allow when takeover ON yields HIGH finding
 - Loose no_match_fallback yields LOW finding
+- Loose undecidable_fallback yields HIGH finding (TOO-19)
 - effective_takeover_state() convenience wrapper
 """
 
@@ -57,8 +58,16 @@ def _toolguard_layer(
     ignored_allow_patterns: Optional[List[str]] = None,
     allow: Optional[List[str]] = None,
     specificity: int = 0,
+    undecidable_fallback: Optional[str] = None,
 ) -> ConfigLayer:
-    """Build a toolguard_hook ConfigLayer with the given settings."""
+    """
+    Build a toolguard_hook ConfigLayer with the given settings.
+
+    ``undecidable_fallback``, when given, is written as a TOP-LEVEL key
+    (sibling of ``takeover_mode``/``governed_tools``), matching its real
+    schema (TOO-19): unlike ``no_match_fallback`` it has no
+    ``[takeover_mode]`` section and no legacy alias.
+    """
     content: dict = {}
 
     if governed_tools is not None:
@@ -71,6 +80,9 @@ def _toolguard_layer(
         takeover_section["ignored_allow_patterns"] = ignored_allow_patterns
     if takeover_section:
         content["takeover_mode"] = takeover_section
+
+    if undecidable_fallback is not None:
+        content["undecidable_fallback"] = undecidable_fallback
 
     if allow:
         content["permissions"] = {
@@ -594,6 +606,125 @@ class TestLooseNoMatchFallback(unittest.TestCase):
             f for f in findings if f.finding_id == "loose-no-match-fallback"
         ]
         self.assertEqual(fallback_findings, [])
+
+
+# ---------------------------------------------------------------------------
+# Loose-undecidable-fallback (HIGH) -- TOO-19
+# ---------------------------------------------------------------------------
+
+
+class TestLooseUndecidableFallback(unittest.TestCase):
+    """Tests for the loose-undecidable-fallback HIGH invariant (TOO-19)."""
+
+    def test_allow_with_warning_flagged_high(self):
+        """
+        Given undecidable_fallback is 'allow_with_warning'
+        When audit_takeover() is called
+        Then a HIGH 'loose-undecidable-fallback' finding is returned
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="deny",
+            ignored_allow_patterns=["Bash(*)"],
+            undecidable_fallback="allow_with_warning",
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, AuditSeverity.HIGH)
+        self.assertIsNone(matches[0].tool)
+        self.assertIsNone(matches[0].provenance)
+
+    def test_ask_not_flagged(self):
+        """
+        Given undecidable_fallback is 'ask' (the default)
+        When audit_takeover() is called
+        Then no 'loose-undecidable-fallback' finding is returned
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="deny",
+            ignored_allow_patterns=["Bash(*)"],
+            undecidable_fallback="ask",
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(matches, [])
+
+    def test_deny_not_flagged(self):
+        """
+        Given undecidable_fallback is 'deny' (strictly more conservative than default)
+        When audit_takeover() is called
+        Then no 'loose-undecidable-fallback' finding is returned, because a
+             stricter-than-default setting is never itself a risk
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="deny",
+            ignored_allow_patterns=["Bash(*)"],
+            undecidable_fallback="deny",
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(matches, [])
+
+    def test_unset_not_flagged(self):
+        """
+        Given undecidable_fallback is not set anywhere (resolves to default 'ask')
+        When audit_takeover() is called
+        Then no 'loose-undecidable-fallback' finding is returned
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="deny",
+            ignored_allow_patterns=["Bash(*)"],
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(matches, [])
+
+    def test_flagged_regardless_of_takeover_enabled(self):
+        """
+        Given undecidable_fallback is 'allow_with_warning' and takeover mode is OFF
+        When audit_takeover() is called
+        Then the HIGH finding still fires, because undecidable_fallback applies
+             in both takeover and non-takeover modes
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=False,
+            no_match_fallback="deny",
+            undecidable_fallback="allow_with_warning",
+        )
+        config = _make_config(tg_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, AuditSeverity.HIGH)
 
 
 # ---------------------------------------------------------------------------

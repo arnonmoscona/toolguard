@@ -8,7 +8,7 @@ Covers:
   citing both provenances; no conflict entry when there is no override; hard_deny
   denials are NOT conflicts (they go to the resolution log).
 - Provenance threaded into resolution reasons.
-- Once-per-session config-discovery diagnostic in the resolution log.
+- Change-detecting config-discovery diagnostic in the resolution log (TOO-19).
 - M1: the both-.toml-and-.json warning is emitted exactly once, to the warning
   stream.
 
@@ -32,7 +32,12 @@ from toolguard.config import (
     ResolvedDecision,
 )
 from toolguard.error_log import log_conflict, log_error, log_warning
-from toolguard.log_writer import log_discovery
+from toolguard.log_writer import (
+    _DISCOVERY_LOG_FILENAME,
+    _DISCOVERY_TAIL_READ_BYTES,
+    _parse_discovery_line,
+    log_discovery,
+)
 from toolguard.permissions import decide_command_at_level_detailed
 
 
@@ -294,34 +299,280 @@ class TestProvenanceHelpers(unittest.TestCase):
 
 
 class TestDiscoveryDiagnostic(unittest.TestCase):
-    """The once-per-session discovery diagnostic writes to the resolution log."""
+    """
+    The change-detecting discovery diagnostic (TOO-19).
 
-    def test_discovery_entry_written_to_resolution_log(self):
+    toolguard is a fresh process on every PreToolUse invocation, so there is
+    no in-process "once per session" to rely on. log_discovery itself is the
+    guard: it writes (to both the plain-text discovery log and the main
+    resolution log) only when the discovered levels differ from the last
+    recorded entry for the given project root; otherwise it writes nothing to
+    either file.
+
+    TOO-19 code review M3: the discovery log is plain text, one record per
+    line (``timestamp\\tproject_root\\tlevels``), not JSON -- the only thing
+    ever read back is the single most recent matching line, so JSON's
+    structure bought nothing. These tests were rewritten from JSON-record
+    assertions to plain-text ones for that reason; the scenarios they cover
+    (write-on-change, no-write-on-no-change, multi-project isolation,
+    tolerance of a torn line) are unchanged.
+    """
+
+    _LEVELS_A = [
+        "project: /proj/.claude/toolguard_hook.toml",
+        "user: /home/.claude/toolguard_hook.toml",
+    ]
+    _LEVELS_B = [
+        "project: /proj/.claude/toolguard_hook.toml",
+        "user: /home/.claude/toolguard_hook.toml",
+        "org: /org/.claude/toolguard_hook.toml",
+    ]
+
+    def _discovery_log_path(self, log_dir):
+        """Return the path to the plain-text discovery log under log_dir."""
+        return log_dir / _DISCOVERY_LOG_FILENAME
+
+    def _discovery_lines(self, log_dir):
+        """Return the discovery log's lines (split, no trailing newline)."""
+        path = self._discovery_log_path(log_dir)
+        if not path.exists():
+            return []
+        return path.read_text(encoding="utf-8").splitlines()
+
+    def _resolution_log_path(self, log_dir):
+        """Return today's main resolution-log path under log_dir."""
+        from datetime import datetime
+
+        return log_dir / f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+
+    def test_first_call_writes_both_files(self):
         """
-        Given a list of discovered level descriptions
-        When log_discovery runs
-        Then a resolution-log entry 'discovered N config levels: ...' is written
-             to toolguard-YYYY-MM-DD.md (not a warning/error/conflict file)
+        Given no prior discovery record for this project root
+        When log_discovery runs for the first time
+        Then it appends a discovery-log line AND writes the main-log entry
         """
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            log_discovery(
-                [
-                    "project: /proj/.claude/toolguard_hook.toml",
-                    "user: /home/.claude/toolguard_hook.toml",
-                ],
-                log_dir,
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            lines = self._discovery_lines(log_dir)
+            self.assertEqual(len(lines), 1)
+            timestamp, project_root, levels = _parse_discovery_line(lines[0])
+            self.assertEqual(project_root, "/proj")
+            self.assertEqual(levels, self._LEVELS_A)
+
+            resolution_text = self._resolution_log_path(log_dir).read_text()
+            self.assertIn("discovered 2 config levels", resolution_text)
+            self.assertIn("project: /proj/.claude/toolguard_hook.toml", resolution_text)
+
+    def test_unchanged_second_call_writes_nothing(self):
+        """
+        Given a first call already recorded a set of levels for this project root
+        When a second call runs immediately with the SAME levels
+        Then neither the discovery log nor the main-log file changes at all (byte-identical)
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            discovery_path = self._discovery_log_path(log_dir)
+            resolution_path = self._resolution_log_path(log_dir)
+            discovery_before = discovery_path.read_bytes()
+            resolution_before = resolution_path.read_bytes()
+
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            self.assertEqual(discovery_path.read_bytes(), discovery_before)
+            self.assertEqual(resolution_path.read_bytes(), resolution_before)
+
+    def test_different_levels_writes_both_again(self):
+        """
+        Given a first call recorded levels A for this project root
+        When a second call runs with DIFFERENT levels B
+        Then both files gain a new entry reflecting the change
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            log_discovery(self._LEVELS_B, log_dir, "/proj")
+
+            lines = self._discovery_lines(log_dir)
+            self.assertEqual(len(lines), 2)
+            _timestamp, _root, second_levels = _parse_discovery_line(lines[1])
+            self.assertEqual(second_levels, self._LEVELS_B)
+
+            resolution_text = self._resolution_log_path(log_dir).read_text()
+            self.assertEqual(resolution_text.count("**Discovery**"), 2)
+            self.assertIn("discovered 3 config levels", resolution_text)
+
+    def test_reverting_to_a_previously_seen_value_still_logs(self):
+        """
+        Given levels went A -> B (two prior discovery-log records for this project root)
+        When a third call reverts to A, which differs only from the LAST entry (B)
+        Then it logs again -- comparison is against the last entry, not the whole history
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            log_discovery(self._LEVELS_B, log_dir, "/proj")
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            lines = self._discovery_lines(log_dir)
+            self.assertEqual(len(lines), 3)
+            _timestamp, _root, last_levels = _parse_discovery_line(lines[-1])
+            self.assertEqual(last_levels, self._LEVELS_A)
+
+            resolution_text = self._resolution_log_path(log_dir).read_text()
+            self.assertEqual(resolution_text.count("**Discovery**"), 3)
+
+    def test_two_project_roots_sharing_a_log_dir_do_not_flap(self):
+        """
+        Given a TOOLGUARD_LOG_DIR shared by two different project roots
+        When calls alternate A, B, A, B (each unchanged for ITS OWN root)
+        Then every call logs (comparison is per-root, so B's entry never
+             suppresses A's next unchanged call) but a repeat for the SAME
+             root (A, A back to back) logs nothing on the repeat
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj-a")  # 1: A first ever
+            log_discovery(self._LEVELS_A, log_dir, "/proj-b")  # 2: B first ever
+            log_discovery(self._LEVELS_A, log_dir, "/proj-a")  # 3: A unchanged for A,
+            # but the most recent discovery-log record overall is B's -- must
+            # still compare against A's own last entry (1), not B's (2), so
+            # this must NOT log.
+            log_discovery(self._LEVELS_A, log_dir, "/proj-b")  # 4: same for B
+
+            lines = self._discovery_lines(log_dir)
+            self.assertEqual(len(lines), 2)  # only calls 1 and 2 logged
+
+            # Now change A's levels: must log even though B's record is the
+            # most recent line in the file.
+            log_discovery(self._LEVELS_B, log_dir, "/proj-a")
+            lines = self._discovery_lines(log_dir)
+            self.assertEqual(len(lines), 3)
+            _timestamp, last_root, _levels = _parse_discovery_line(lines[-1])
+            self.assertEqual(last_root, "/proj-a")
+
+            # A repeat call for A with its now-current levels logs nothing.
+            discovery_before = self._discovery_log_path(log_dir).read_bytes()
+            log_discovery(self._LEVELS_B, log_dir, "/proj-a")
+            self.assertEqual(
+                self._discovery_log_path(log_dir).read_bytes(), discovery_before
             )
-            resolution_files = list(log_dir.glob("toolguard-2*.md"))
-            # Filter out any per-concern streams (they have a word after toolguard-).
-            resolution_files = [p for p in resolution_files if p.name.count("-") == 3]
-            self.assertEqual(len(resolution_files), 1)
-            text = resolution_files[0].read_text()
-            self.assertIn("discovered 2 config levels", text)
-            self.assertIn("project: /proj/.claude/toolguard_hook.toml", text)
+
+    def test_corrupt_final_line_is_tolerated_as_no_prior_entry(self):
+        """
+        Given a discovery log whose final line is torn (missing its second
+            tab, as if a concurrent write were interrupted mid-record)
+        When log_discovery runs for that project root
+        Then it does not crash, treats it as having no prior entry, and logs
+             a new (duplicate-looking) record rather than raising
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            discovery_path = self._discovery_log_path(log_dir)
+            discovery_path.write_text("2026-01-01T00:00:00\t/proj")  # torn: no 2nd tab
+
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            lines = self._discovery_lines(log_dir)
+            # The torn line plus the freshly appended, valid one.
+            self.assertEqual(len(lines), 2)
+            _timestamp, _root, levels = _parse_discovery_line(lines[-1])
+            self.assertEqual(levels, self._LEVELS_A)
+
+    def test_main_log_entry_format_unchanged(self):
+        """
+        Given a discovery call that does write (first-ever for its root)
+        When the main resolution log entry is inspected
+        Then it matches the exact pre-existing format that log_harvest.py
+             relies on to skip Discovery sections (no Status field)
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            text = self._resolution_log_path(log_dir).read_text()
+            expected = (
+                "- **Discovery**: discovered 2 config levels: "
+                "project: /proj/.claude/toolguard_hook.toml, "
+                "user: /home/.claude/toolguard_hook.toml\n"
+            )
+            self.assertIn(expected, text)
             # Not routed to other streams.
             self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
             self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
+
+    def test_oversized_file_no_longer_degrades_to_permanent_append_mode(self):
+        """
+        Given a discovery log padded well past the OLD 1 MB read-size cap
+            (TOO-19 code review M3: exceeding that cap used to degrade to
+            "no prior entry", making EVERY subsequent call append -- a
+            self-accelerating bug)
+        When log_discovery runs again with the SAME levels as the last real
+            record
+        Then it still finds that record (via the bounded tail read) and logs
+             NOTHING -- proving there is no size cap that can trip this bug
+             any more
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            discovery_path = self._discovery_log_path(log_dir)
+
+            # Pad the file well past the old 1 MB cap with harmless filler
+            # records for OTHER project roots FIRST, so the real "/proj"
+            # entry (written after the padding) is the LAST line -- still
+            # within the bounded tail read even though the file overall is
+            # large.
+            filler_line = "2026-01-01T00:00:00\t/other-project\t" + ("x" * 200)
+            padding = (filler_line + "\n") * 6000  # ~1.3 MB of filler
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with open(discovery_path, "a", encoding="utf-8") as f:
+                f.write(padding)
+
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            self.assertGreater(discovery_path.stat().st_size, 1_000_000)
+
+            before = discovery_path.read_bytes()
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            after = discovery_path.read_bytes()
+
+            self.assertEqual(
+                before,
+                after,
+                "an oversized file must not make log_discovery think there "
+                "is no prior entry and append again",
+            )
+
+    def test_entry_outside_the_tail_window_degrades_to_no_prior_entry(self):
+        """
+        Given a discovery log whose real "/proj" record has been pushed
+            outside the bounded tail read window by enough filler records
+            for a DIFFERENT project root
+        When log_discovery runs again with the SAME levels as that
+            now-out-of-window record
+        Then it degrades to "no prior entry" and logs again -- a redundant
+             line, not a wrong verdict, which is the documented trade-off of
+             bounding the read instead of the file
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            discovery_path = self._discovery_log_path(log_dir)
+
+            filler_line = "2026-01-01T00:00:00\t/other-project\t" + ("x" * 200)
+            # Enough filler to push the real record well outside the tail
+            # window (_DISCOVERY_TAIL_READ_BYTES).
+            needed_lines = (_DISCOVERY_TAIL_READ_BYTES // len(filler_line)) + 50
+            padding = (filler_line + "\n") * needed_lines
+            with open(discovery_path, "a", encoding="utf-8") as f:
+                f.write(padding)
+
+            before_lines = len(self._discovery_lines(log_dir))
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+            after_lines = len(self._discovery_lines(log_dir))
+
+            self.assertEqual(after_lines, before_lines + 1)
 
 
 class TestHookConflictLogging(unittest.TestCase):

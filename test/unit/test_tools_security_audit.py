@@ -78,8 +78,16 @@ def _toolguard_layer(
     ignored_allow_patterns: Optional[List[str]] = None,
     allow: Optional[List[str]] = None,
     specificity: int = 0,
+    undecidable_fallback: Optional[str] = None,
 ) -> ConfigLayer:
-    """Build a toolguard_hook ConfigLayer with the given settings."""
+    """
+    Build a toolguard_hook ConfigLayer with the given settings.
+
+    ``undecidable_fallback``, when given, is written as a TOP-LEVEL key
+    (sibling of ``takeover_mode``/``governed_tools``), matching its real
+    schema (TOO-19): unlike ``no_match_fallback`` it has no
+    ``[takeover_mode]`` section and no legacy alias.
+    """
     content: dict = {}
 
     if governed_tools is not None:
@@ -93,6 +101,9 @@ def _toolguard_layer(
     # takeover_section always carries at least no_match_fallback, so it is
     # always attached.
     content["takeover_mode"] = takeover_section
+
+    if undecidable_fallback is not None:
+        content["undecidable_fallback"] = undecidable_fallback
 
     if allow:
         content["permissions"] = {
@@ -252,6 +263,22 @@ def _takeover_on_config() -> Configuration:
         allow=["Bash(*)"],
         hooks=_hooks_for("Bash"),
     )
+    return _make_config(tg_layer, native_layer)
+
+
+def _loose_undecidable_fallback_config() -> Configuration:
+    """
+    Return a Configuration with undecidable_fallback='allow_with_warning' (TOO-19).
+
+    - Bash governed, hook registered, no_match_fallback='deny' -- isolates the
+      resulting finding to loose-undecidable-fallback only.
+    """
+    tg_layer = _toolguard_layer(
+        governed_tools=["Bash"],
+        no_match_fallback="deny",
+        undecidable_fallback="allow_with_warning",
+    )
+    native_layer = _native_layer(hooks=_hooks_for("Bash"))
     return _make_config(tg_layer, native_layer)
 
 
@@ -487,6 +514,118 @@ class TestSecurityAuditTakeoverOnly(unittest.TestCase):
             self.assertGreater(
                 len(f.impact), 0, msg=f"Expected non-empty impact in {f!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Loose-undecidable-fallback finding, end to end (TOO-19)
+# ---------------------------------------------------------------------------
+
+
+class TestLooseUndecidableFallbackFinding(unittest.TestCase):
+    """
+    End-to-end tests: loose-undecidable-fallback reaches security_audit(),
+    render() (markdown and text), and the JSON --format output.
+    """
+
+    def setUp(self):
+        """Set up the report for a configuration with undecidable_fallback='allow_with_warning'."""
+        self.report = security_audit(_loose_undecidable_fallback_config())
+        self.matches = [
+            f
+            for f in self.report.findings
+            if f.finding_id == "loose-undecidable-fallback"
+        ]
+
+    def test_finding_present_source_takeover_severity_high(self):
+        """
+        Given undecidable_fallback='allow_with_warning'
+        When security_audit() is called
+        Then exactly one loose-undecidable-fallback finding is present, with
+             source='takeover' and severity_label='HIGH'
+        """
+        self.assertEqual(len(self.matches), 1)
+        finding = self.matches[0]
+        self.assertEqual(finding.source, "takeover")
+        self.assertEqual(finding.severity_label, "HIGH")
+        self.assertEqual(finding.severity_value, 3)
+
+    def test_ask_and_deny_do_not_produce_the_finding(self):
+        """
+        Given undecidable_fallback is 'ask' or 'deny' in two separate configs
+        When security_audit() is called on each
+        Then neither produces a loose-undecidable-fallback finding
+        """
+        for value in ("ask", "deny"):
+            tg_layer = _toolguard_layer(
+                governed_tools=["Bash"],
+                no_match_fallback="deny",
+                undecidable_fallback=value,
+            )
+            native_layer = _native_layer(hooks=_hooks_for("Bash"))
+            config = _make_config(tg_layer, native_layer)
+            report = security_audit(config)
+            matches = [
+                f
+                for f in report.findings
+                if f.finding_id == "loose-undecidable-fallback"
+            ]
+            self.assertEqual(
+                matches, [], msg=f"undecidable_fallback={value!r} should not flag"
+            )
+
+    def test_unset_does_not_produce_the_finding(self):
+        """
+        Given undecidable_fallback is not set anywhere (resolves to default 'ask')
+        When security_audit() is called
+        Then no loose-undecidable-fallback finding is produced
+        """
+        report = security_audit(_clean_config())
+        matches = [
+            f for f in report.findings if f.finding_id == "loose-undecidable-fallback"
+        ]
+        self.assertEqual(matches, [])
+
+    def test_appears_in_markdown_render(self):
+        """
+        Given a report containing the loose-undecidable-fallback finding
+        When render() is called with fmt='markdown'
+        Then the finding id and its HIGH severity heading both appear in the output
+        """
+        text = render(self.report, fmt="markdown")
+        self.assertIn("loose-undecidable-fallback", text)
+        self.assertIn("## HIGH", text)
+
+    def test_appears_in_text_render(self):
+        """
+        Given a report containing the loose-undecidable-fallback finding
+        When render() is called with fmt='text'
+        Then the finding id appears in the plain-text output
+        """
+        text = render(self.report, fmt="text")
+        self.assertIn("loose-undecidable-fallback", text)
+
+    def test_appears_in_json_output(self):
+        """
+        Given a config with undecidable_fallback='allow_with_warning'
+        When main() runs with --format json (load_config mocked to avoid any
+             real filesystem discovery -- see test-config-isolation.md)
+        Then the JSON findings list contains a loose-undecidable-fallback entry
+             with severity_label='HIGH'
+        """
+        with patch("toolguard.tools.security_audit.load_config") as mock_load:
+            mock_load.return_value = _loose_undecidable_fallback_config()
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                main(["--dir", ".", "--format", "json"])
+            data = json.loads(captured.getvalue())
+        matches = [
+            f
+            for f in data["findings"]
+            if f["finding_id"] == "loose-undecidable-fallback"
+        ]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["severity_label"], "HIGH")
+        self.assertEqual(matches[0]["source"], "takeover")
 
 
 # ---------------------------------------------------------------------------

@@ -35,3 +35,4 @@ skills/explore-codebase/
 skills/refactor-safely/
 skills/review-changes/
 .pyscn/
+__pycache__/

@@ -48,6 +48,23 @@ Key advantages over the native Claude Code permission system:
   and migration up the configuration hierarchy.
 - **Automatic rule discovery** -- suggesting new rules from your usage history.
 
+## Explaining decisions to Claude
+
+A structured rule entry can carry `additionalContext`: a short string of guidance that
+toolguard injects into Claude's context the moment that rule decides a tool call. A deny is
+often where it earns the most -- "you can't do this; do X instead" reaches Claude right when
+it needs the alternative, instead of Claude discovering the constraint by trial and error.
+
+```toml
+[permissions]
+deny = [
+    { match = "Bash([regex]rm\\s+-rf)", additionalContext = "Recursive force-delete is denied here. Use 'git clean -fdx' for tracked-repo cleanup, or ask before removing untracked data." },
+]
+```
+
+See [Configuration: additionalContext](docs/configuration.md#additionalcontext-injecting-guidance-alongside-a-decision)
+for the full behaviour -- compound-command accumulation, the ASK-floor interaction, and more.
+
 ## Documentation
 
 > **AI agents start here:** read **[docs/agent-guides.md](docs/agent-guides.md)** first. It

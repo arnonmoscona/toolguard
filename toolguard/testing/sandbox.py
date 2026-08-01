@@ -157,7 +157,7 @@ class _Tripwire:
             return
         try:
             resolved = Path(path_str).resolve()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             resolved = Path(os.path.abspath(path_str))
         if resolved == self._root or self._root in resolved.parents:
             return
@@ -264,8 +264,16 @@ class _Tripwire:
                 patch(name, self._guarded_destination(real, name))
             )
 
-        path_targets = ("write_text", "write_bytes", "mkdir", "touch", "unlink",
-                        "rmdir", "chmod", "symlink_to")
+        path_targets = (
+            "write_text",
+            "write_bytes",
+            "mkdir",
+            "touch",
+            "unlink",
+            "rmdir",
+            "chmod",
+            "symlink_to",
+        )
         for attr in path_targets:
             real = getattr(Path, attr)
             name = f"pathlib.Path.{attr}"
@@ -277,9 +285,7 @@ class _Tripwire:
 
                 return guarded
 
-            self._stack.enter_context(
-                patch.object(Path, attr, make(real, name))
-            )
+            self._stack.enter_context(patch.object(Path, attr, make(real, name)))
 
         return self
 
@@ -513,11 +519,7 @@ class Sandbox:
         Returns:
             A minimal environment pointing every discovery anchor inward.
         """
-        env = {
-            key: os.environ[key]
-            for key in _PRESERVED_ENV_VARS
-            if key in os.environ
-        }
+        env = {key: os.environ[key] for key in _PRESERVED_ENV_VARS if key in os.environ}
         env["HOME"] = str(self.home)
         env["USERPROFILE"] = str(self.home)
         env["XDG_CONFIG_HOME"] = str(self.home / ".config")
@@ -595,11 +597,7 @@ def experiment(
         for name, text in (xdg_rules_files or {}).items():
             (sandbox.xdg_rules_dir / name).write_text(text, encoding="utf-8")
 
-        env = {
-            key: os.environ[key]
-            for key in _PRESERVED_ENV_VARS
-            if key in os.environ
-        }
+        env = {key: os.environ[key] for key in _PRESERVED_ENV_VARS if key in os.environ}
         env["HOME"] = str(sandbox.home)
         env["XDG_CONFIG_HOME"] = str(sandbox.home / ".config")
         env["TOOLGUARD_LOG_DIR"] = str(sandbox.log_dir)
@@ -609,7 +607,9 @@ def experiment(
             stack.enter_context(patch.object(Path, "home", return_value=sandbox.home))
             stack.enter_context(patch.dict(os.environ, env, clear=True))
             stack.enter_context(
-                patch("toolguard.config.find_project_root", return_value=sandbox.project)
+                patch(
+                    "toolguard.config.find_project_root", return_value=sandbox.project
+                )
             )
             stack.enter_context(_Tripwire(sandbox.root))
             try:
@@ -678,7 +678,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Process exit code (0 = the evaluation ran; the verdict is on stdout).
     """
     args = _build_argparser().parse_args(argv)
-    project_config = Path(args.config).read_text(encoding="utf-8") if args.config else None
+    project_config = (
+        Path(args.config).read_text(encoding="utf-8") if args.config else None
+    )
     user_config = (
         Path(args.user_config).read_text(encoding="utf-8") if args.user_config else None
     )
@@ -690,21 +692,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ) as sandbox:
         decision = sandbox.evaluate(args.tool, args.command)
 
+    # additionalContext (TOO-19 Phase 1) is a real hook output field, so it is
+    # reported here for the same reason `--eval` reports it: a preview tool
+    # that silently omits part of what the live hook emits is worse than no
+    # preview. Omitted entirely when there is none, mirroring the hook's own
+    # absent-key-not-null behaviour (see hook.py::create_hook_output).
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "tool": decision.tool,
-                    "target": decision.target,
-                    "verdict": decision.verdict,
-                    "reason": decision.reason,
-                },
-                indent=2,
-            )
-        )
+        payload = {
+            "tool": decision.tool,
+            "target": decision.target,
+            "verdict": decision.verdict,
+            "reason": decision.reason,
+        }
+        if decision.additional_context:
+            payload["additionalContext"] = decision.additional_context
+        print(json.dumps(payload, indent=2))
     else:
         print(f"verdict: {decision.verdict}")
         print(f"reason : {decision.reason}")
+        if decision.additional_context:
+            print(f"context: {decision.additional_context}")
     return 0
 
 

@@ -7,201 +7,257 @@ tags:
 - TOO-19
 ---
 
-# Code Review Report -- 2026-07-27
+# Code Review Report -- 2026-07-31
 
-**Scope:** `toolguard/tools/installer.py`, `toolguard/rule_sort.py`,
-`test/unit/test_tools_installer.py`, `test/unit/test_rule_sort.py` (TOO-19)
+**Scope:** `changed` (`git diff HEAD`), ticket TOO-19 -- Phase 1 `additionalContext`
+injection plus the `undecidable_fallback` setting and the test log-dir isolation fix.
 **Reviewer:** code-reviewer subagent
-**Elapsed:** ~7 minutes | **Files reviewed:** 4 | **Est. cost:** ~$3
+**Elapsed:** ~32 minutes | **Files reviewed:** 11 source + 18 test + 8 docs (37)
+**Est. cost:** ~$4-5 (Opus, ~250k input / ~15k output tokens)
+**Issues:** 1 Critical, 3 Major, 8 Minor, 5 Suggestions
+
+Source files: `toolguard/compound.py`, `config.py`, `config_types.py`, `hook.py`,
+`log_writer.py`, `resolve.py`, `rule_entry.py`, `testing/sandbox.py`, `tools/decision.py`,
+`tools/takeover_audit.py`, `tools/check_doc_links.py`.
+
+**Verification run:** full suite `Ran 2012 tests ... OK`; `uv run ruff check .` clean;
+`uv run ruff format --check .` clean; `uvx pyscn analyze --skip-deps toolguard` (grade B,
+report `.pyscn/reports/analyze_20260731_184113.json`).
 
 ## Summary
 
-The change set is high quality overall. Routing every config write through
-`config_write_guard.verified_write_config` is a genuine security improvement, the
-`RuleEntry` normalization at the seed-command boundaries fixes real, reproducible
-crashes, and `_ensure_trailing_comma` correctly handles the comma-in-inline-comment
-edge case. Test quality is strong (168 tests pass, BDD docstrings throughout, ruff
-clean). Two Major issues stand out: a **silent comment-loss regression** in the
-rewritten `[permissions]` parser, and a **content-loss guard that was deliberately
-skipped for `settings.json` on a factually incorrect premise**.
+This is high-quality, unusually well-documented work. The threading of `additional_context`
+through the resolution stack is disciplined -- backwards-compatible `__iter__` contracts, a
+single lookup helper per pattern pool, and the parse-failure floor correctly extracted so the
+compound boundary and the per-leaf path cannot drift. Test coverage of the new pure helpers
+(`_accumulate_contexts`, `_apply_undecidable_floor`, `_preview_additional_context`) is
+thorough, and the `_real_log_dir_guard` mechanism is a genuinely good answer to a checklist
+that failed. The findings below are one packaging blocker, one undocumented security surface,
+and a real inconsistency in where the 500-word budget is enforced; the rest are minor.
 
-**Findings:** Critical 0 | Major 2 | Minor 5 | Suggestions 2
+---
+
+## Critical
+
+### C1. Two new test files are untracked, and the tracked `__init__.py` imports one of them
+
+`test/unit/__init__.py` (tracked, modified) executes at package-import time:
+
+```python
+from test.unit._real_log_dir_guard import REAL_LOGS_DIR, get_leak_events, install
+```
+
+`git status` shows both `test/unit/_real_log_dir_guard.py` and
+`test/unit/test_zz_real_log_dir_guard.py` as `??` (untracked). Committing the current tracked
+set makes **the entire unit suite fail to import** on any other checkout or on CI -- it passes
+here only because the files exist in the working tree. `.gitignore` was also edited in this
+change set (added `__pycache__/`), so it is worth confirming nothing else is masked.
+
+**Fix**: `git add test/unit/_real_log_dir_guard.py test/unit/test_zz_real_log_dir_guard.py`
+before committing.
 
 ---
 
 ## Major
 
-### M1. Comments after the last `]` in `[permissions]` are now silently deleted
+### M1. `additionalContext` is an undocumented model-context injection channel from project-level config
 
-**File:** `toolguard/rule_sort.py:747-775` (`parse_permissions_section_with_comments`)
+`docs/configuration.md` documents the toolguard-config-only restriction, but neither it nor
+`docs/security.md` addresses the new threat: a **project-level** `.claude/toolguard_hook.toml`
+is discovered from the project directory, so a cloned repository the user did not author can
+carry a rule whose `additionalContext` is arbitrary free text injected straight into Claude's
+context on the next matching tool call. That is qualitatively different from what a hostile
+project config could do before: previously it could grant or withhold permissions (bounded by
+`hard_deny` and more-specific-wins), now it can *steer the agent generally*, through a channel
+the model is designed to treat as system-provided guidance.
 
-The rewritten parser iterates located subsections and captures gap text only
-*between* them (`gap_text = section_text[prev_end:match_start]`). Text after the
-**final** subsection's closing `]` -- still inside the `[permissions]` section slice
-returned by `find_section_boundaries` -- is never collected, so it does not appear in
-`parsed_structure` and is dropped by `reassemble_permissions_section`. The old
-line-by-line parser flushed it as a bottom comment_block.
+`docs/security.md:26` only says "There is no protection against mistakes or malicious
+suggestions", which predates this feature and does not cover it.
 
-Confirmed end-to-end through `migrate_permissions.write_toml_config`:
+**Recommended fix**, in increasing order of cost:
 
-```toml
-[permissions]
-allow = ["Bash(git:*)"]
+1. Add a `docs/security.md` subsection naming the surface explicitly ("a rule's
+   `additionalContext` from a project-level config is text you may not have written").
+2. Prefix injected text with its provenance so it is not indistinguishable from toolguard's
+   own voice, e.g. `Rule guidance from <config path>:`. Provenance is already resolved
+   alongside the entry in `Configuration.decide_at_level` (`config.py:~1645`), so this is
+   cheap.
+3. Add a `toolguard-audit` finding enumerating rules carrying `additionalContext` with
+   project-level provenance, mirroring the new `loose-undecidable-fallback` invariant.
 
-# IMPORTANT: hard_deny below protects secrets. Do not remove.
+### M2. The 500-word budget guards only one of four injection paths, and silently discards a lone over-budget entry
 
-[hard_deny]
-```
-After a write cycle the `# IMPORTANT:` line is gone. This is unrecoverable comment
-loss in a security tool's config, and it is exactly the defect class the
-`verified_write_config` work was introduced to stop (the guard only checks
-*patterns*, not comments, so it does not catch this).
+`compound._accumulate_contexts` is the only place the budget is applied, and
+`_combine_strictest` calls it only on the **all-allow** branch:
 
-**Fix:** after the `for match_start, perm_type, ... in located:` loop, take
-`section_text[prev_end:]`, run it through
-`_flush_comment_lines(_trailing_comment_source_lines(...))`, and append it as a
-trailing `comment_block` to the last located `perm_type`. Add a regression test.
+- `compound.py:~385` -- deny branch returns `denied[0]`'s context **uncapped**.
+- `compound.py:~388` -- ask branch returns `asked[0]`'s context **uncapped**.
+- `resolve.py:~533` -- `FileResolution.additional_context` (Read/Write/Edit) is taken straight
+  from `RuleEntry.additional_context`, **uncapped**.
+- `resolve.py:~615` -- `_hard_deny_additional_context` on the Bash hard-deny path, **uncapped**.
 
-### M2. `cmd_register_hooks` skips the content-loss guard on `settings.json`, on a false premise
+Two concrete consequences:
 
-**File:** `toolguard/tools/installer.py:579-583`
+- A `Read` rule with a 5,000-word `additionalContext` is injected in full on every matching
+  call, with only a 40-word copy in the log to show for it.
+- `_accumulate_contexts` drops a paragraph **whole** when it does not fit, and applies that to
+  the *first* paragraph too: a single 501-word entry gives `total_words + words > max_words`
+  on the first iteration, `kept` stays empty, and the function returns `None`. So the same
+  text that injects in full on a `Read` rule injects **nothing at all** on a Bash allow rule --
+  no warning, no log line, and no test covering it (`test_compound.py:2226` only tests an
+  in-budget block plus an over-budget *second* paragraph).
 
-```python
-# No expected_patterns: this is Claude's settings.json (hooks/matchers), not a
-# toolguard permissions/hard_deny config -- the guard's pattern-preservation
-# check has no meaning for this file's shape.
-verified_write_config(settings_path, json.dumps(data, indent=2) + "\n", "json")
-```
+**Recommended fix**: enforce the budget once at the injection boundary rather than inside the
+compound combinator -- `hook.create_hook_output` or `tools/decision.decide` sees every path.
+Leave `_accumulate_contexts` responsible for dedup and joining only. Separately, a single
+paragraph that alone exceeds the budget should not vanish silently: either keep it (it is the
+only content) or emit a warning via `error_log.log_warning` so the rule author finds out.
 
-The premise is wrong. Claude Code's `settings.json` **does** carry a
-`permissions.allow/deny/ask` block (that is the native config toolguard is a drop-in
-replacement for), and `config_write_guard.patterns_in_config_text` explicitly
-supports `file_format="json"` and extracts under `permissions`/`hard_deny`. This
-function does a full read-modify-write of the entire settings file, so a bug in the
-hook-merging code could silently drop a user's native permission rules -- the exact
-scenario the guard exists to refuse.
+### M3. The discovery-JSONL size guard degrades into exactly the noise it was added to remove
 
-**Fix:** capture the original text before mutation and pass
-`expected_patterns=patterns_in_config_text(original_text, "json")` (guarding for the
-file-does-not-exist case). Correct the comment. Add a test that an existing native
-`permissions` block survives `register-hooks`.
+`log_writer._last_discovery_levels_for_root` returns `None` when the file exceeds
+`_DISCOVERY_JSONL_MAX_READ_BYTES` (1 MB). `log_discovery` reads `None` as "no prior record for
+this project root" and therefore **writes** -- both a JSONL record and a markdown discovery
+line. Once the file crosses 1 MB, every hook invocation appends to it, growing it faster and
+re-introducing the per-invocation discovery spam this change exists to eliminate. The failure
+mode is self-accelerating and silent.
+
+The docstring calls this "one extra, harmless log write", which is true for a transient read
+failure but not for the size cap, which is a permanent condition once reached.
+
+**Recommended fix**: on exceeding the cap, rotate or truncate the file (keep the last N
+records) rather than degrading to "no prior entry" -- or read only the tail via `seek()` from
+the end, which removes the cap's purpose entirely.
 
 ---
 
 ## Minor
 
-### m1. `.pattern if isinstance(entry, RuleEntry) else entry` triplicated
+### m1. An explicit `ask` rule on an ASK-floor leaf is misattributed to the floor and loses its context
 
-- `toolguard/rule_sort.py:121` (inline in `get_tool_priority`)
-- `toolguard/rule_sort.py:171` (`_pattern_of`)
-- `toolguard/tools/installer.py:98` (`_entry_pattern`)
+`compound.py::_resolve_leaf`, ask-floor branch: when `resolve_one` returns
+`("ask", reason, context)` from a real `ask` rule and `undecidable_fallback` is the default
+`"ask"`, `_apply_undecidable_floor` returns `"ask"` unchanged -- the floor decided nothing --
+yet the code replaces the reason with `"ASK floor applied (inline/heredoc foreign code): ..."`
+and drops the context. The prompt then names a cause that is not the real one, and the rule
+author's explanation is discarded.
 
-`installer._entry_pattern`'s docstring justifies the copy as "rather than importing
-that private name" -- but the right move is to make it public. Rename `_pattern_of`
-to `pattern_of`, export it, use it in all three sites (including inside
-`get_tool_priority`). One-line helper, three implementations, twenty lines of
-justification is a poor trade.
+**Fix**: rewrite the reason and drop the context only when the floor actually raised the
+verdict (`floored != decision`); otherwise pass `reason` and `additional_context` through. The
+verbatim-wording goal is unaffected -- the allow-to-ask case that existing tests exercise
+still takes the rewrite path.
 
-### m2. `cmd_seed_self_perms` complexity (pyscn: CC 23 / cognitive 25, "high") and duplication with `cmd_seed_hard_deny`
+### m2. `resolved_undecidable_fallback` duplicates `resolved_no_match_fallback`'s layer scan verbatim
 
-**File:** `toolguard/tools/installer.py:715-880` and `1600-1690`
+`config.py:~1755` and `config.py:~1830` contain the same "walk non-native layers, first
+`str`-valued top-level key wins" loop. The two settings differ only in key name, legacy alias,
+and valid-value set.
 
-pyscn also flags these two as a Type-4 clone pair (similarity 0.70). Both perform the
-identical sequence: normalize `[hard_deny]` deny/allow via
-`normalize_entries_preserving` -> build an `existing_patterns` set -> loop the
-required protections -> `_render_hard_deny_section` -> `_replace_or_append_toml_section`
--> compute `expected_patterns` via `patterns_in_config_text | real_patterns(...)` ->
-`verified_write_config`. That is ~35 duplicated lines carrying security-relevant
-logic in two places, where they can drift.
+**Fix**: extract `_first_toplevel_str_setting(key: str) -> Optional[str]` and have both call
+it; `resolved_no_match_fallback` keeps its `[takeover_mode]` alias and `warn_deny`
+normalization layered on top.
 
-**Suggested refactor:** extract
-`_apply_hard_deny_protections(config_path, original_text, protections) -> (added, already_present)`
-and have both commands call it. That alone should drop `cmd_seed_self_perms` well
-under CC 10.
+### m3. Hard-deny pattern recovery by reason-string parsing is now load-bearing for a second consumer
 
-### m3. `reassemble_permissions_section` complexity (pyscn: CC 16 / cognitive 40 / nesting 5, "high")
+`resolve.py:~600` recovers the matched hard-deny pattern by stripping the literal prefix
+`"Command matches hard_deny pattern: "` and suffix `" (cannot be overridden)"` off
+`check_hard_deny`'s reason string. That round-trip was already fragile for
+`SubMatch.matched_rule`; `_hard_deny_additional_context` now depends on it too, so a wording
+change in `check_hard_deny` silently disables enrichment on all hard denies *in addition to*
+breaking the logged rule name.
 
-**File:** `toolguard/rule_sort.py:754-925`
+**Fix**: have `check_hard_deny` return the matched pattern as a third element rather than
+encoding it in prose.
 
-Cognitive complexity 40 is the highest in either file. The function does four
-distinct jobs in one body.
+### m4. `_entry_for_pattern` can attribute a less-specific layer's entry on list drift
 
-**Suggested refactor:** extract
-`_classify_parsed_items(parsed_items) -> (top_comments, bottom_comments, rule_lines, rule_comments)`
-and `_key_entries(entries) -> List[Tuple[entry, key]]`. The remaining emit loop then
-reads as a straight render.
+`config.py::_entry_for_pattern` puts the `len(entries) == len(candidates)` test *inside* the
+per-layer condition. When a layer's parallel lists have drifted, the loop does not stop -- it
+moves to the next (less specific) layer, and if that layer also contains the same pattern
+string it returns *that* layer's entry, attributing enrichment to a rule that did not win.
+`_provenance_for_pattern` is not exposed to this because it has no second list.
 
-### m4. `_render_toml_scalar` turns `None` into the literal string `"None"`
+**Fix**: `return None` as soon as the pattern is found in a layer whose lists are misaligned.
 
-**File:** `toolguard/rule_sort.py:233-243`
+### m5. Complexity regression on two functions pyscn already flags critical
 
-A JSON config's `null` element (deliberately preserved by
-`normalize_entries_preserving`) round-trips into TOML as the string `"None"` -- an
-invented, non-matchable rule pattern that now looks like a real one in the file.
-`test_none_entry_value_renders_without_crashing` locks this behavior in.
-"Does not crash" is the right goal; "silently fabricates a rule" is not.
+pyscn (2026-07-31) on the changed files:
 
-**Suggested fix:** handle `None` explicitly -- either skip the element with a warning,
-or render it in a form that is unmistakably not a pattern. At minimum, state the
-chosen semantics in the docstring rather than letting it fall through the `str()`
-catch-all.
+| function | cyclomatic | cognitive | nesting |
+|---|---|---|---|
+| `hook.main` | 28 | 55 | 6 |
+| `config.Configuration.validation_issues` | 27 | 62 | 5 |
+| `log_writer.log_command` | 24 | 59 | 4 |
+| `rule_entry.merge_entries` | 18 | 42 | 4 |
+| `compound._combine_strictest` | 14 | 14 | 4 |
 
-### m5. Docstring drift in `reassemble_permissions_section`
+All are well past the project's <10 target. `main` and `log_command` were each made worse by
+this change (a new parameter plus two new conditional writes), and `log_command` now takes
+**10 parameters**. pyscn also reports a critical Type-2 clone cluster (10 fragments, 70%
+similarity) at `rule_entry.py:698` (`merge_entries`).
 
-**File:** `toolguard/rule_sort.py:815-816`
+**Suggested refactorings** (brief): split `log_command`'s two output formats into
+`_write_jsonl_entry(...)` / `_write_markdown_entry(...)` and pass a small `LogRecord`
+dataclass instead of 10 positional-or-keyword parameters; extract `main`'s file-path and Bash
+decision blocks into `_handle_file_path_event` / `_handle_bash_event`, which would also remove
+the duplicated three-way allow/ask/deny logging ladder those blocks share. Follow-up work, not
+required for this ticket.
 
-"patterns are sorted using :func:`sort_patterns`" -- the code now sorts inline with
-`sorted(keyed_entries, key=lambda pair: get_tool_priority(pair[0]))`. Behaviorally
-equivalent, but the reference is stale. Point at `get_tool_priority` instead.
+### m6. `allow_with_warning` does not actually write a warning anywhere
+
+Both `no_match_fallback` and the new `undecidable_fallback` implement `allow_with_warning` as
+the word "warning" inside a reason string; nothing reaches `error_log.log_warning`'s warning
+stream. `docs/configuration.md` says "allow the command but log a warning", which a reader will
+take to mean the warnings log. The new code matches the existing precedent, so this is not a
+regression -- but the claim is now made twice.
+
+**Fix**: either route these through `log_warning`, or soften the docs to "allow the command
+and say so in the resolution log".
+
+### m7. `log_discovery` and the new JSONL ignore `logging_enabled`
+
+`hook.main` calls `log_discovery` whenever `log_dir` resolves, without consulting
+`env_config["logging_enabled"]`. Pre-existing for the markdown line; this change adds a second,
+persistent file (`toolguard-discovery.jsonl`) created under the same unconditional path, so a
+user who explicitly disabled logging now gets a new file written.
+
+### m8. The accumulated context is stamped on every sub-command log entry
+
+`hook._log_allowed_command` passes the same `additional_context` to `log_command` for each
+sub-command of a compound, so a 6-part compound repeats the (40-word-capped) preview 6 times.
+The docstring acknowledges this as deliberate; consider logging it once, or on a single
+compound-level entry.
 
 ---
 
-## Suggestions
+## Suggestions / notes
 
-### s1. Comment volume has crossed into archaeology
+- `compound._truncate_for_display` (character budget) and
+  `log_writer._preview_additional_context` (word budget) are the only two truncation helpers
+  in the package and are genuinely different in unit and purpose -- no consolidation needed.
+  Noted so a future reader does not "unify" them.
+- `testing/sandbox.py:~583`'s `except OSError, ValueError:` and `_real_log_dir_guard.py:134`'s
+  `except TypeError, ValueError, OSError:` are valid PEP 758 syntax under this project's
+  `requires-python = ">=3.14"`. ruff produced them, they are real tuples -- do not "fix" them.
+- The `os._exit(1)` atexit backstop in `test/unit/__init__.py` is well-reasoned, and the
+  finding that `sys.exit()` does not change the exit code from an atexit callback is correct.
+  It does pre-empt later atexit handlers; `tools/coverage_stdlib.py` writes its results before
+  interpreter shutdown, so coverage runs are unaffected.
+- The deliberate separation of `_DECISION_STRICTNESS` from `_combine_strictest`'s own ordering
+  is defensible as documented, though one shared `_STRICTNESS` constant with two distinct
+  *functions* over it would carry the same argument at lower cost. Not worth changing now.
+- Docs are accurate on every claim I spot-checked (floor table, dedup, key-omitted-not-`null`,
+  native-layer rejection, absence of a `warn_deny` alias). The one overstatement is the
+  500-word cap's reach -- see M2.
 
-Roughly 60% of the installer diff and a large share of the `rule_sort` diff is prose
-recording review-fix history: ticket phase numbers, "confirmed repro", "TOO-19 review
-fix M3/M5", what the *previous* implementation did wrong. `_entry_pattern` is a
-one-line function with a twenty-line docstring; `_toml_value_of_chunk`'s docstring is
-~40 lines for a two-line body.
+## code-review-graph trial note
 
-Docstrings should state the current contract. The "why this changed" belongs in the
-commit message and the ticket, where it cannot go stale. As written, a future edit
-that changes behavior will leave a paragraph of confidently-wrong history behind --
-and this codebase's own memory notes already record stale-narrative incidents.
-
-### s2. Test gaps
-
-Test quality is otherwise excellent (clear Given/When/Then, real regression framing,
-no over-mocking). Missing:
-
-1. Comment after the last `]` inside `[permissions]` (finding M1) -- untested, which
-   is why the regression landed. `test_comment_before_first_rule_and_after_last_rule_both_captured`
-   covers only *inside* the array.
-2. Inter-subsection gap-comment attribution -- documented at length in
-   `parse_permissions_section_with_comments`'s docstring, no direct test. (Verified
-   manually: it works, and moves the comment inside the following array.)
-3. `cmd_register_hooks` preserving an existing native `permissions` block (finding M2).
-
----
-
-## What is done well
-
-- **`verified_write_config` wiring is complete and correct** for the toolguard TOML
-  paths. All remaining `_atomic_write_text` calls (journal x3, state-dir README) are
-  genuinely non-config, and the docstring at `installer.py:230` says so explicitly.
-- **`_ensure_trailing_comma`** (`rule_sort.py:579`) correctly ignores commas inside an
-  inline comment -- the obvious naive version would have been wrong.
-- **`SyntheticPattern` / `real_patterns` interplay** is a neat solution to the
-  "malformed entry must not look like a dropped rule to the write guard" problem.
-- **Duplicate-pattern `(pattern, occurrence_index)` keying** correctly preserves two
-  same-pattern entries with different `additionalContext`, with a test proving it.
-- `ruff check` clean; 168 tests pass in 0.18s.
-
-## pyscn summary (project grade B)
-
-Only two functions in scope are flagged high-risk: `cmd_seed_self_perms` (CC 23) and
-`reassemble_permissions_section` (cognitive 40). Both are addressed above (m2, m3).
-Clone pairs flagged at `installer.py:412<->1555` and `254<->1135` are docstring
-boilerplate and not actionable; `696<->1594` is the real one (m2).
+Phase: **feature work / test hardening** (not refactoring). One non-trivial use:
+`semantic_search_nodes` for "is there already a truncation helper this duplicates". Refresh
+(`embed` + `postprocess`) was run first and succeeded. Verdict: **mild win** -- it returned
+both truncation helpers plus `_collapse_whitespace` ranked above unrelated renderers, which a
+name-grep would have missed (`_preview_additional_context` and `_truncate_for_display` share
+no substring). `LSP` could not have answered this; it is a concept query, not a symbol query.
+Everything else in this review (callers of `check_compound_permission` /
+`resolve_compound_permission`, index-alignment invariants, tracked-vs-untracked files) was
+answered faster by `grep`, `git`, and reading, and I did not reach for the graph for them.

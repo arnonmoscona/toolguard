@@ -39,6 +39,13 @@ entry over letting it silently go stale.
   A: Top level. The nested `[takeover_mode].no_match_fallback` form still works but is a
   legacy alias, only used when no level sets the top-level key. See
   [configuration.md#no-match-fallback](configuration.md#no-match-fallback).
+- **Q: What's the difference between `no_match_fallback` and `undecidable_fallback`?**
+  A: `no_match_fallback` is about commands toolguard read and understood but that matched no
+  rule; `undecidable_fallback` is about commands toolguard could not safely parse at all
+  (foreign inline code, heredocs, process substitution). Both default to `"ask"`, but only
+  `undecidable_fallback` has no `[takeover_mode]` alias and raises a HIGH audit finding when
+  set to `"allow_with_warning"`. See
+  [configuration.md#undecidable-fallback](configuration.md#undecidable-fallback).
 - **Q: Why isn't my rule being enforced even though I added it?**
   A: A tool is only governed if it's in **both** the hook matcher (native settings) **and**
   `governed_tools` (`toolguard_hook.toml`) -- check both. See
@@ -86,6 +93,12 @@ entry over letting it silently go stale.
   A: Decomposed into sub-commands and validated separately; anything it can't safely
   decompose resolves to ASK, never a silent allow. See
   [permission-patterns.md#compound-and-multi-line-commands](permission-patterns.md#compound-and-multi-line-commands).
+- **Q: Can a rule explain itself to Claude -- e.g. tell it why a command was denied, or what
+  to do instead?**
+  A: Yes -- add `additionalContext` to a structured rule entry (toolguard config files only;
+  a plain string or a native-settings entry cannot carry it). It's injected only when that
+  rule is the one that decided the call. See
+  [configuration.md#additionalcontext-injecting-guidance-alongside-a-decision](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
 
 **Modes**
 
@@ -151,6 +164,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 
 **`README.md`** (project root)
 - [Why Toolguard?](../README.md#why-toolguard)
+- [Explaining decisions to Claude](../README.md#explaining-decisions-to-claude)
 - [Documentation](../README.md#documentation)
 - [Motivation](../README.md#motivation)
   - [Goals of Toolguard](../README.md#goals-of-toolguard)
@@ -212,7 +226,9 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Standard patterns (in settings.local.json)](configuration.md#standard-patterns-in-settingslocaljson)
   - [Extended patterns (in toolguard_hook.toml or toolguard_hook.json)](configuration.md#extended-patterns-in-toolguard_hooktoml-or-toolguard_hookjson)
   - [Structured rule entries, and the single line rule](configuration.md#structured-rule-entries-and-the-single-line-rule)
+  - [additionalContext: injecting guidance alongside a decision](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision)
 - [No-match fallback](configuration.md#no-match-fallback)
+- [Undecidable fallback](configuration.md#undecidable-fallback)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)
   - [Boolean values](configuration.md#boolean-values)
@@ -279,7 +295,9 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 
 **`docs/security.md`**
 - [Blanket allow risks](security.md#blanket-allow-risks)
+- [A cloned project's config can inject text into Claude's context](security.md#a-cloned-projects-config-can-inject-text-into-claudes-context)
 - [Multi-line commands and the ASK-safe guarantee](security.md#multi-line-commands-and-the-ask-safe-guarantee)
+- [Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback)
 - [A broken config file also fails safe, not open](security.md#a-broken-config-file-also-fails-safe-not-open)
 - [How toolguard protects its own writes](security.md#how-toolguard-protects-its-own-writes)
 - [Backup importance](security.md#backup-importance)

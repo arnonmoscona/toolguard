@@ -294,9 +294,14 @@ class ResolvedDecision:
             default deny (no rule matched at any level).
         override: A :class:`ConflictOverride` when the winning allow overrode a
             less-specific deny, otherwise None.
+        additional_context: The winning rule's ``additionalContext`` enrichment
+            text (TOO-19 Phase 1), or None when the winning entry did not carry
+            one, no rule matched, or the ASK floor cleared the match (see
+            :meth:`~toolguard.config.Configuration._apply_parse_failure_ask_floor`).
     """
 
     decision: str
     reason: str
     provenance: Optional["Provenance"]
     override: Optional[ConflictOverride] = None
+    additional_context: Optional[str] = None

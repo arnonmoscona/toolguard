@@ -40,12 +40,16 @@ from toolguard.issues import Issue
 # enrichment key -- see KNOWN_ENRICHMENT_KEYS.
 PATTERN_KEY = "match"
 
-# Enrichment keys this toolguard version understands. Phase 1 adds
-# "additionalContext"; a later ticket adds an auto-mode flag. Starts EMPTY:
-# `match` is the pattern key (PATTERN_KEY), not an enrichment key.
+# The enrichment key carrying text to inject into Claude's context when the
+# entry is the deciding match for a tool call (TOO-19 Phase 1).
+ADDITIONAL_CONTEXT_KEY = "additionalContext"
+
+# Enrichment keys this toolguard version understands. A later ticket adds an
+# auto-mode flag. `match` is the pattern key (PATTERN_KEY), not an enrichment
+# key, and is deliberately absent here.
 # An unknown key is a WARNING, never an error -- a newer config read by an
 # older toolguard must degrade, not break.
-KNOWN_ENRICHMENT_KEYS = frozenset()
+KNOWN_ENRICHMENT_KEYS = frozenset({ADDITIONAL_CONTEXT_KEY})
 
 # Structural matcher for a ``Tool(inner)`` permission wrapper. An identifier
 # made of word characters followed by a parenthesised body. Greedy ``.*``
@@ -198,6 +202,30 @@ class RuleEntry:
     # compare=False, repr=False: purely a write-path bookkeeping flag, not
     # part of this entry's identity (mirrors `raw`).
     synthesized_pattern: bool = field(default=False, compare=False, repr=False)
+
+    @property
+    def additional_context(self) -> Optional[str]:
+        """
+        The text to inject into Claude's context when this entry decides, if any.
+
+        The single accessor for ``additionalContext``, so no consumer reads
+        ``metadata`` directly and every consumer applies the same rules:
+
+        - A non-string value yields ``None``. It is reported as a validation
+          error at parse time (see :func:`_additional_context_issues`) and
+          must not reach the injection path, where it would render as
+          ``"True"`` or ``"3"`` in the model's context.
+        - A string that is empty or only whitespace yields ``None``, so a
+          caller can test one value rather than distinguishing "absent" from
+          "present but blank". Both mean "inject nothing".
+
+        Returns:
+            The context text, or ``None`` when this entry carries none usable.
+        """
+        value = self.metadata.get(ADDITIONAL_CONTEXT_KEY)
+        if isinstance(value, str) and value.strip():
+            return value
+        return None
 
     @property
     def is_structured(self) -> bool:
@@ -448,6 +476,7 @@ def normalize_entry(
             for key in metadata
             if key not in KNOWN_ENRICHMENT_KEYS
         )
+        issues += _additional_context_issues(pattern, metadata)
         return RuleEntry(pattern=pattern, metadata=metadata, raw=raw), issues
 
     return _reject(
@@ -457,6 +486,50 @@ def normalize_entry(
         ),
         corrective_steps="Use either a 'Tool(pattern)' string or a "
         f'structured table like {{{PATTERN_KEY} = "Tool(pattern)"}}.',
+    )
+
+
+def _additional_context_issues(pattern: str, metadata: Mapping[str, object]) -> tuple:
+    """
+    Validate an ``additionalContext`` value, if the entry carries one.
+
+    The value is injected into Claude's context as text, so anything that is
+    not a string is a configuration mistake rather than something to coerce:
+    silently stringifying ``true`` or ``3`` would put the literal word "True"
+    or "3" into the model's context and look deliberate.
+
+    Reported as an ``error``-level :class:`~toolguard.issues.Issue`, but
+    DELIBERATELY does not reject the entry. The permission rule itself is
+    still perfectly valid, and dropping it because its advisory text has the
+    wrong type would turn a cosmetic mistake into a silently missing rule --
+    exactly backwards for a `deny`. The rule keeps working; only the
+    enrichment is ignored (see :attr:`RuleEntry.additional_context`).
+
+    Args:
+        pattern: The entry's pattern, for the message.
+        metadata: The entry's enrichment mapping.
+
+    Returns:
+        A tuple of zero or one Issue.
+    """
+    if ADDITIONAL_CONTEXT_KEY not in metadata:
+        return ()
+    value = metadata[ADDITIONAL_CONTEXT_KEY]
+    if isinstance(value, str):
+        return ()
+    return (
+        Issue(
+            level="error",
+            message=(
+                f"'{ADDITIONAL_CONTEXT_KEY}' must be a string in the rule entry "
+                f"for '{pattern}', got {type(value).__name__} ({value!r}) -- the "
+                f"rule still applies, but no context will be injected."
+            ),
+            corrective_steps=(
+                f'Quote the value, e.g. {{ {PATTERN_KEY} = "{pattern}", '
+                f'{ADDITIONAL_CONTEXT_KEY} = "explanatory text" }}.'
+            ),
+        ),
     )
 
 

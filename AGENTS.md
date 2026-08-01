@@ -53,6 +53,10 @@ Key facts an agent should not get wrong:
   `[native]`, prefix inside the tool wrapper) live in `toolguard_hook.toml`.
 - `deny` beats `allow` within a level; the most-specific level wins across levels;
   `[hard_deny]` cannot be overridden by any allow.
+- A structured rule entry (`{ match = "...", additionalContext = "..." }`, toolguard config
+  files only) can inject guidance text into Claude's context when it decides a call --
+  works for allow/ask/deny/hard_deny. See
+  [docs/configuration.md#additionalcontext-injecting-guidance-alongside-a-decision](docs/configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
 
 ## Modifying the toolguard codebase itself
 

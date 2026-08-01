@@ -54,7 +54,6 @@ COMMAND_TOOLS = {
 # Module-level flags to ensure checks run only once per session
 _validation_done = False
 _divergence_check_done = False
-_discovery_diagnostic_done = False
 _takeover_conflict_logged = False
 
 
@@ -166,24 +165,39 @@ def parse_hook_input() -> Dict[str, Any]:
         raise json.JSONDecodeError(f"Invalid JSON from stdin: {e.msg}", e.doc, e.pos)
 
 
-def create_hook_output(decision: str, reason: str) -> Dict[str, Any]:
+def create_hook_output(
+    decision: str, reason: str, additional_context: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Create hook output in the format expected by Claude Code.
 
     Args:
-        decision: Permission decision ('allow' or 'deny')
+        decision: Permission decision ('allow', 'ask', or 'deny')
         reason: Human-readable reason for the decision
+        additional_context: The winning rule's ``additionalContext`` enrichment
+            (TOO-19 Phase 1) to inject back to Claude, or ``None``/empty when
+            there is nothing to add. Only decision call sites that have a
+            matched rule pass this -- error/guard paths (parse failure, no
+            command provided, ungoverned tool, etc.) have no matched rule and
+            always use the default.
 
     Returns:
-        Dictionary formatted for JSON output to Claude Code
+        Dictionary formatted for JSON output to Claude Code. The
+        ``"additionalContext"`` key is present inside ``hookSpecificOutput``
+        ONLY when ``additional_context`` is a non-empty string -- omitted
+        entirely (not set to ``null``) otherwise, so existing consumers that
+        don't know about the field see no change in shape.
     """
-    return {
+    output: Dict[str, Any] = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": decision,
             "permissionDecisionReason": reason,
         }
     }
+    if additional_context:
+        output["hookSpecificOutput"]["additionalContext"] = additional_context
+    return output
 
 
 def _build_crash_context(local_vars: Dict[str, Any]) -> Dict[str, Any]:
@@ -291,6 +305,53 @@ def _log_conflict_override(target, override, log_dir) -> None:
     log_conflict(_format_conflict_message(target, override), corrective, log_dir)
 
 
+#: Marker substrings (TOO-19 code review m6) that identify an 'allow' reason
+#: as having come from the ``allow_with_warning`` value of one of the two
+#: fallback settings, rather than from an explicit rule. Both markers are
+#: exact, already-tested wording embedded verbatim in the reason strings
+#: produced by config.py's ``resolved_no_match_fallback`` path and
+#: compound.py's ``undecidable_fallback`` ask-floor/segment paths (see
+#: test_configuration.py / test_compound.py) -- a substring containment
+#: check, not the prefix/suffix extraction m3 flagged as fragile, since
+#: nothing here needs to be RECOVERED from the reason, only detected.
+_ALLOW_WITH_WARNING_MARKERS = (
+    "no_match_fallback=allow_with_warning",
+    "undecidable_fallback=allow_with_warning",
+)
+
+
+def _log_fallback_allow_warning(reason: str, log_dir) -> None:
+    """
+    Route an ``allow_with_warning``-fallback 'allow' decision to the WARNING
+    log stream (TOO-19 code review m6).
+
+    ``docs/configuration.md`` promises that ``allow_with_warning`` will
+    "allow the command but log a warning" for BOTH ``no_match_fallback`` and
+    ``undecidable_fallback``. Previously that promise was kept only in the
+    permission-decision ``reason`` string (visible in the resolution log and
+    the permission prompt) -- it never reached
+    :func:`toolguard.error_log.log_warning`'s dedicated WARNING stream. This
+    detects either fallback setting's marker wording in *reason* and, when
+    found, writes the warning stream entry too. A no-op when *log_dir* is
+    unresolved or the reason carries neither marker (the common case: an
+    explicit allow rule matched).
+
+    Args:
+        reason: The permission-decision reason string for an 'allow' decision.
+        log_dir: Directory for the warning log, or None (no-op).
+    """
+    if not log_dir:
+        return
+    if not any(marker in reason for marker in _ALLOW_WITH_WARNING_MARKERS):
+        return
+    log_warning(
+        reason,
+        "Add an explicit allow/deny/ask rule covering this case to silence "
+        "this warning.",
+        log_dir,
+    )
+
+
 def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     """
     Record a cross-level ``takeover_mode.enabled`` disagreement (TOO-8 Phase 5).
@@ -350,6 +411,7 @@ def _log_allowed_command(
     agent_info: str,
     env_config: dict,
     permission_mode: Optional[str] = None,
+    additional_context: Optional[str] = None,
 ) -> None:
     """
     Log an allowed command, handling compound commands by logging each sub-command separately.
@@ -365,6 +427,12 @@ def _log_allowed_command(
         env_config: Environment configuration dict
         permission_mode: Claude Code's own ``permission_mode`` from the hook input,
             if present -- recorded for diagnosis only, see ``log_command``.
+        additional_context: The accumulated ``additionalContext`` enrichment
+            (TOO-19 Phase 1) for the WHOLE compound command, or ``None``. It is
+            not attributable to a single sub-command (it may combine several
+            sub-commands' contexts, see ``compound.py::_accumulate_contexts``),
+            so it is recorded on every logged sub-command entry the same way
+            the hook injects one accumulated block for the whole command.
     """
     compound_details = _parse_compound_match_details(reason)
     if compound_details:
@@ -377,6 +445,7 @@ def _log_allowed_command(
                 extra_info=agent_info,
                 config=env_config,
                 permission_mode=permission_mode,
+                additional_context=additional_context,
             )
     else:
         # Simple command: extract matched rule from reason
@@ -388,6 +457,7 @@ def _log_allowed_command(
             extra_info=agent_info,
             config=env_config,
             permission_mode=permission_mode,
+            additional_context=additional_context,
         )
 
 
@@ -435,9 +505,10 @@ def _resolve_event(
     tool_input: Dict[str, Any],
     config,
     extended_syntax: bool,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, Optional[str]]:
     """
-    Resolve a single hook event to a ``(decision, reason)`` pair, READ-ONLY.
+    Resolve a single hook event to a ``(decision, reason, additional_context)``
+    triple, READ-ONLY.
 
     This adds only the parts :func:`main` owns on top of the shared decision
     primitive -- the governed-tool check and the empty-input guard -- and then
@@ -451,6 +522,12 @@ def _resolve_event(
     inside :func:`~toolguard.tools.decision.decide` via the shared config layer --
     there is no separate reason-rewrite step here or in :func:`main` to keep in sync.
 
+    TOO-19 Phase 1: the third element carries the winning rule's
+    ``additionalContext`` enrichment, so ``--eval`` (whose whole purpose is
+    previewing what the live hook would do) doesn't silently omit a real output
+    field. The two synthetic guard verdicts above (ungoverned tool, missing
+    target) have no matched rule and always report ``None``.
+
     Args:
         tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
         tool_input: The tool input dict (carrying ``command`` or ``file_path``).
@@ -458,8 +535,9 @@ def _resolve_event(
         extended_syntax: Whether extended (regex/glob) prefixes are honoured.
 
     Returns:
-        A ``(decision, reason)`` tuple where decision is ``'allow'``, ``'deny'``,
-        or ``'ask'``.
+        A ``(decision, reason, additional_context)`` triple where decision is
+        ``'allow'``, ``'deny'``, or ``'ask'``, and ``additional_context`` is the
+        matched rule's enrichment text or ``None``.
     """
     # Local import: toolguard.tools.decision imports FILE_PATH_TOOLS from this
     # module, so importing decide() at module top-level would be a circular import.
@@ -468,19 +546,23 @@ def _resolve_event(
 
     governed_tools = list(config.governed_tools())
     if tool_name not in governed_tools:
-        return "allow", f"Not a governed tool (governed: {', '.join(governed_tools)})"
+        return (
+            "allow",
+            f"Not a governed tool (governed: {', '.join(governed_tools)})",
+            None,
+        )
 
     if tool_name in FILE_PATH_TOOLS:
         target = tool_input.get("file_path", "")
         if not target:
-            return "deny", "No file_path provided in tool input"
+            return "deny", "No file_path provided in tool input", None
     else:
         target = tool_input.get("command", "")
         if not target:
-            return "deny", "No command provided in tool input"
+            return "deny", "No command provided in tool input", None
 
     result = decide(config, tool_name, target, extended_syntax)
-    return result.verdict, result.reason
+    return result.verdict, result.reason, result.additional_context
 
 
 def _run_eval_mode() -> None:
@@ -506,10 +588,10 @@ def _run_eval_mode() -> None:
         config = load_configuration(cwd, ignore_env_override=True)
         env_config = get_env_config(start_dir=cwd)
         extended_syntax = env_config.get("extended_syntax", True)
-        decision, reason = _resolve_event(
+        decision, reason, additional_context = _resolve_event(
             tool_name, tool_input, config, extended_syntax
         )
-        print(json.dumps(create_hook_output(decision, reason)))
+        print(json.dumps(create_hook_output(decision, reason, additional_context)))
     except json.JSONDecodeError as e:
         output = create_hook_output("deny", f"Failed to parse hook input: {str(e)}")
         print(json.dumps(output), file=sys.stderr)
@@ -612,14 +694,20 @@ def main() -> None:
                 file=sys.stderr,
             )
 
-        # Emit a once-per-session config-discovery diagnostic to the resolution
-        # log (TOO-8 Phase 4, M2): "discovered N config levels: <level: path>, ...".
-        global _discovery_diagnostic_done
-        if not _discovery_diagnostic_done:
-            _discovery_diagnostic_done = True
-            disco_log_dir = env_config.get("log_dir")
-            if disco_log_dir:
-                log_discovery(list(config.describe_levels()), disco_log_dir)
+        # Emit a config-discovery diagnostic to the resolution log when the
+        # discovered levels changed since the last recorded entry for this
+        # project root (TOO-8 Phase 4, M2; TOO-19): "discovered N config
+        # levels: <level: path>, ...". toolguard is a fresh process on every
+        # tool call, so there is no in-process "once per session" -- the
+        # change-detecting JSONL log inside log_discovery is the guard
+        # instead, and it is a no-op (writes nothing) when nothing changed.
+        disco_log_dir = env_config.get("log_dir")
+        if disco_log_dir:
+            log_discovery(
+                list(config.describe_levels()),
+                disco_log_dir,
+                str(env_config.get("project_root", "")),
+            )
 
         # Run startup validation (once per session), reusing the loaded config.
         _run_startup_validation(env_config, cwd, config)
@@ -730,10 +818,11 @@ def main() -> None:
             file_result = resolve_file_path_permission_detailed(
                 tool_name, file_path, config, extended_syntax
             )
-            decision, reason, override = (
+            decision, reason, override, additional_context = (
                 file_result.decision,
                 file_result.reason,
                 file_result.override,
+                file_result.additional_context,
             )
 
             # Log the decision
@@ -741,6 +830,7 @@ def main() -> None:
             if decision == "allow":
                 # Conflict: a more-specific allow overrode a less-specific deny.
                 _log_conflict_override(log_target, override, env_config.get("log_dir"))
+                _log_fallback_allow_warning(reason, env_config.get("log_dir"))
                 matched_rule = reason.split(": ", 1)[1] if ": " in reason else None
                 log_command(
                     log_target,
@@ -749,6 +839,7 @@ def main() -> None:
                     extra_info=agent_info,
                     config=env_config,
                     permission_mode=permission_mode,
+                    additional_context=additional_context,
                 )
             elif decision == "ask":
                 log_command(
@@ -758,6 +849,7 @@ def main() -> None:
                     extra_info=agent_info,
                     config=env_config,
                     permission_mode=permission_mode,
+                    additional_context=additional_context,
                 )
             else:
                 violated_rules = [
@@ -770,9 +862,10 @@ def main() -> None:
                     extra_info=agent_info,
                     config=env_config,
                     permission_mode=permission_mode,
+                    additional_context=additional_context,
                 )
 
-            output = create_hook_output(decision, reason)
+            output = create_hook_output(decision, reason, additional_context)
             print(json.dumps(output))
             sys.exit(0)
 
@@ -809,10 +902,11 @@ def main() -> None:
         bash_result = resolve_bash_permission_detailed(
             command, config, extended_syntax, hd_deny, hd_allow
         )
-        decision, reason, bash_overrides = (
+        decision, reason, bash_overrides, additional_context = (
             bash_result.decision,
             bash_result.reason,
             bash_result.overrides,
+            bash_result.additional_context,
         )
 
         # Log the decision with agent identification
@@ -822,8 +916,14 @@ def main() -> None:
             conflict_log_dir = env_config.get("log_dir")
             for sub_command, override in bash_overrides:
                 _log_conflict_override(sub_command, override, conflict_log_dir)
+            _log_fallback_allow_warning(reason, conflict_log_dir)
             _log_allowed_command(
-                command, reason, agent_info, env_config, permission_mode
+                command,
+                reason,
+                agent_info,
+                env_config,
+                permission_mode,
+                additional_context,
             )
         elif decision == "ask":
             log_command(
@@ -833,6 +933,7 @@ def main() -> None:
                 extra_info=agent_info,
                 config=env_config,
                 permission_mode=permission_mode,
+                additional_context=additional_context,
             )
         else:
             # Extract violated rule from reason for logging
@@ -844,10 +945,11 @@ def main() -> None:
                 extra_info=agent_info,
                 config=env_config,
                 permission_mode=permission_mode,
+                additional_context=additional_context,
             )
 
         # Create and output decision
-        output = create_hook_output(decision, reason)
+        output = create_hook_output(decision, reason, additional_context)
         print(json.dumps(output))
         sys.exit(0)
 

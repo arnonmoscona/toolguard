@@ -184,6 +184,12 @@ it does not model -- resolves to **ASK** (a prompt), never to a silent allow of 
 undecomposed blob and never to a hard failure that would block a legitimate workflow. This is
 the single most important thing to understand about how multi-line input is handled.
 
+ASK is the **default**, not a hardcoded outcome: the `undecidable_fallback` config key
+controls the floor level (`"ask"` default, `"deny"`, or `"allow_with_warning"` -- the last one
+removes this guarantee and is flagged by `toolguard-audit`). See
+[Configuration: Undecidable fallback](configuration.md#undecidable-fallback) and
+[Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
+
 ### Operators
 
 **Supported operators**: `&&`, `||`, `;`, `|`, `&`

@@ -58,6 +58,48 @@ For rules that must hold no matter what any project config says, promote them to
 [`[hard_deny]`](configuration.md#configuration-reference), which is pooled across all
 hierarchy levels and cannot be overridden by an allow at any level.
 
+## A cloned project's config can inject text into Claude's context
+
+A project-level `.claude/toolguard_hook.toml` (or `.json`) is discovered from the project
+directory you open Claude Code in -- including a repository you cloned and did not author. A
+structured rule entry in that file can carry
+[`additionalContext`](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision):
+free text that toolguard injects straight into Claude's context, as
+`hookSpecificOutput.additionalContext`, whenever that rule is the one that decides a matching
+tool call. So a hostile project config is not just a set of permission rules -- it is also a
+channel for arbitrary text the model is designed to treat as system-provided guidance, and you
+may never have written or reviewed that text.
+
+**In proportion: this is a lesser included risk, not a new class of exposure.** A project-level
+config can already contribute `allow` patterns, and under more-specific-wins resolution the
+project level is the MOST specific -- so a project-level `allow` already overrides a `deny`
+declared at a less specific (e.g. user) level, for anything not pooled in
+[`[hard_deny]`](configuration.md#configuration-reference) (`hard_deny` is collected across every
+level and is the one thing a project config cannot override). In other words, a hostile project
+config already has a strictly stronger lever available to it than context injection: it can turn
+an inherited `deny` into a silent `allow` outright, before `additionalContext` even enters the
+picture. Anyone who has trusted a cloned project with permission rules at all has already accepted
+a bigger risk than this one.
+
+**The asymmetry that is genuinely new is visibility, not severity.** Permission rules --
+`allow`/`deny`/`ask`/`[hard_deny]` patterns -- are the object every audit tool in this project
+reasons about: `toolguard-audit` and `toolguard-maintain` inspect them, flag risky patterns, and
+report on them. `additionalContext`'s free text is not: no finding in `toolguard-audit`
+enumerates, inspects, or reports on it today, so a rule carrying a large or manipulative
+`additionalContext` string produces no signal in that tooling, even though it produces one every
+time the rule matches at runtime. That gap is real and, as of this writing, nothing closes it --
+reviewing a project's `toolguard_hook.toml` by hand (`grep -n additionalContext`) is the only way
+to see what it says before trusting the project.
+
+**No mitigation is planned before 1.0.** The real fix would be a user-level opt-out or review
+gate for `additionalContext` from project-level config; it is deliberately not being built yet --
+toolguard has very few users today, and adding a feature ahead of a demonstrated need is not
+this project's priority. Claude Code's own "do you trust the files in this folder?" prompt on
+first opening a project is the control that already exists here: answering yes accepts the
+project's risks, including this one, alongside everything else a project's own settings and
+`CLAUDE.md` can already do. Treat an unfamiliar cloned project the same way you would treat
+running its code -- read its `toolguard_hook.toml` before you say yes.
+
 ## Multi-line commands and the ASK-safe guarantee
 
 Claude Code frequently issues multi-line Bash, heredocs, and whole scripts in a single tool
@@ -72,6 +114,11 @@ substitution `<(...)`, and code in non-bash interpreters. *(Historically, a mult
 whose first line matched an allowed prefix could slip later lines past the checks; that
 fail-open bypass is closed.)*
 
+This ASK behaviour is the `undecidable_fallback` **default**, not a hardcoded outcome --
+see [Configuration: Undecidable fallback](configuration.md#undecidable-fallback) for the
+setting itself, and [Loosening the undecidable fallback](#loosening-the-undecidable-fallback)
+below for what changes if you set it to `allow_with_warning`.
+
 **Inline code and heredocs fed to an executor are a blanket-allow-class risk.** Code passed to
 a shell or interpreter -- `python -c "..."`, `node -e "..."`, `bash <<EOF ... EOF`,
 `cat <<EOF | bash` -- can do anything, and toolguard cannot read what it will do. Two rules
@@ -80,10 +127,14 @@ follow from this:
 - **Bash-family payloads are decomposed and validated.** `bash -c "git status; rm -rf /"` and
   `cat <<EOF | bash` have their inner bash checked command-by-command.
 - **Foreign-interpreter payloads get an ASK floor.** `python -c`, `node -e`, a heredoc piped to
-  `python`, etc. always prompt -- and a broad `allow` (even `uv run*`) **cannot** downgrade
-  that to a silent allow. An explicit `deny` still applies. Versioned interpreters
+  `python`, etc. always prompt by default -- and a broad `allow` (even `uv run*`) **cannot**
+  downgrade that to a silent allow. An explicit `deny` still applies. Versioned interpreters
   (`python3.13`, `pypy3.11`, ...) are recognized automatically -- the list is not pinned to
-  specific releases.
+  specific releases. This floor also drops any `additionalContext` the clamped rule would
+  otherwise have injected, since the floor -- not the rule match -- decided the prompt; see
+  [Configuration: additionalContext](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
+  This ASK floor's strictness is the `undecidable_fallback` setting's default; see
+  [Loosening the undecidable fallback](#loosening-the-undecidable-fallback) below.
 
   *Caveat:* the floor applies to interpreters toolguard **recognizes** (the common Python /
   Node / Perl / Ruby / PHP / R / non-bash-shell families). An interpreter it does not know
@@ -102,6 +153,50 @@ for how to write these rules.
 As always, **defense in depth**: add explicit `deny` / [`[hard_deny]`](configuration.md#configuration-reference)
 rules for destructive commands (e.g. `Bash([regex]rm\\s+-rf)`) so they hold no matter how a
 command is assembled.
+
+## Loosening the undecidable fallback
+
+Setting `undecidable_fallback = "allow_with_warning"` is a **genuine loosening of a security
+control**, not a cosmetic option -- see
+[Configuration: Undecidable fallback](configuration.md#undecidable-fallback) for the setting's
+full mechanics. This section covers what it turns off and, more importantly, what still
+protects you when it is set.
+
+**What it turns off.** The two fail-safe-not-fail-open guarantees described above -- the ASK
+floor on foreign inline code / heredoc sinks, and the "any construct toolguard cannot
+decompose resolves to ASK" guarantee for `case`, nested control structures, and process
+substitution -- both stop applying. Those commands execute with **no toolguard rule ever
+evaluated against their contents**: toolguard cannot read what a `python -c "..."` payload or
+an unparsed control structure will actually do, so this setting is trusting the command
+outright rather than gating it.
+
+**What still protects you.** `undecidable_fallback = "allow_with_warning"` only removes the
+*floor* -- it does not touch anything else in the permission pipeline:
+
+- **An explicit `deny` or `ask` rule still applies.** The floor can only ever raise an
+  undecidable segment's decision, never lower one -- so a rule that already resolves the
+  segment to `deny` or `ask` is unaffected. Only segments that would otherwise have floored
+  from a silent `allow` are exposed.
+- **[`[hard_deny]`](configuration.md#configuration-reference) still applies.** Hard-deny rules
+  are pooled and checked before normal allow/deny resolution regardless of this setting.
+- **[The parse-failure ASK floor still applies.](#a-broken-config-file-also-fails-safe-not-open)**
+  A broken `toolguard_hook.toml`/`.json` clamps to ASK unconditionally -- this is the one
+  fallback `undecidable_fallback` cannot loosen, by design.
+
+**Residual risk, concretely.** With this setting on, a compromised or careless Claude
+invocation can pass arbitrary code to `python -c`, `node -e`, a heredoc piped to an
+interpreter, or an unparseable control-structure command, and toolguard will let it run (with
+only a logged warning) unless a specific `deny`/`ask`/`[hard_deny]` rule happens to catch the
+outer command. Since the whole point of these constructs is that toolguard cannot read their
+payload, writing such a rule to catch the *contents* is not generally possible -- you would be
+relying on catching the outer invocation shape, which is exactly the blanket-allow risk
+[above](#multi-line-commands-and-the-ask-safe-guarantee) warns against.
+
+`toolguard-audit` raises a **HIGH** finding (`loose-undecidable-fallback`) whenever this
+setting resolves to `allow_with_warning`, specifically because of this residual risk -- see
+[Ongoing security review](#ongoing-security-review) below for how to run the audit routinely.
+`undecidable_fallback = "deny"`, by contrast, raises no finding: it is strictly more
+conservative than the `"ask"` default, not a loosening.
 
 ## A broken config file also fails safe, not open
 
@@ -148,6 +243,10 @@ Expect the friction to be loud and repeated until you fix the file -- that is th
 The most common way to produce this specific failure is a structured rule entry split across
 several lines; see
 [Structured rule entries, and the single line rule](configuration.md#structured-rule-entries-and-the-single-line-rule).
+
+This floor also clears any `additionalContext` a matched rule would otherwise have injected
+(unless the decision is an unaffected `deny`) -- see
+[Configuration: additionalContext](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
 
 ## How toolguard protects its own writes
 

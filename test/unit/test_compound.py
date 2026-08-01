@@ -7,10 +7,14 @@ Tests the bash parser, command extraction, and compound permission logic.
 import unittest
 
 from toolguard.compound import (
+    _accumulate_contexts,
+    _apply_undecidable_floor,
     _extract_outer_command,
     _resolve_leaf,
+    cap_context_words,
     check_compound_permission,
     get_command_breakdown,
+    resolve_compound_permission,
 )
 from toolguard.parser.command_extractor import (
     LeafCommand,
@@ -208,7 +212,9 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'allow' and the reason mentions allow
         """
-        decision, reason = check_compound_permission("git status", ["git *"], [])
+        decision, reason, _context = check_compound_permission(
+            "git status", ["git *"], []
+        )
         self.assertEqual(decision, "allow")
         self.assertIn("allow", reason.lower())
 
@@ -218,7 +224,9 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason mentions deny
         """
-        decision, reason = check_compound_permission("rm -rf /", ["git *"], ["rm *"])
+        decision, reason, _context = check_compound_permission(
+            "rm -rf /", ["git *"], ["rm *"]
+        )
         self.assertEqual(decision, "deny")
         self.assertIn("deny", reason.lower())
 
@@ -228,7 +236,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'allow' and the reason notes all sub-commands are allowed
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && git log", ["git *"], []
         )
         self.assertEqual(decision, "allow")
@@ -241,7 +249,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason names the denied 'rm -rf /'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && rm -rf /", ["git *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -254,7 +262,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason mentions the denial
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "rm -rf / && git status", ["git *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -266,7 +274,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'allow'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "cat file | grep pattern", ["cat *", "grep *"], []
         )
         self.assertEqual(decision, "allow")
@@ -277,7 +285,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason names 'rm dangerous'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "cat file | rm dangerous", ["cat *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -290,7 +298,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && cat file | rm dangerous", ["git *", "cat *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -302,7 +310,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'allow'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && cat file | grep pattern", ["git *", "cat *", "grep *"], []
         )
         self.assertEqual(decision, "allow")
@@ -313,7 +321,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' because nothing is allowed
         """
-        decision, reason = check_compound_permission("git status", [], [])
+        decision, reason, _context = check_compound_permission("git status", [], [])
         self.assertEqual(decision, "deny")
 
     def test_empty_command(self):
@@ -322,7 +330,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason notes no valid commands
         """
-        decision, reason = check_compound_permission("", ["*"], [])
+        decision, reason, _context = check_compound_permission("", ["*"], [])
         self.assertEqual(decision, "deny")
         self.assertIn("no valid commands", reason.lower())
 
@@ -332,7 +340,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status; rm file", ["git *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -343,7 +351,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason names 'rm file'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && rm file && git log", ["git *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -355,7 +363,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the decision is 'deny' and the reason reports the first denied 'rm file1'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "rm file1 && rm file2", ["git *"], ["rm *"]
         )
         self.assertEqual(decision, "deny")
@@ -368,7 +376,7 @@ class TestCompoundPermission(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the quoted && is not split and the decision is 'allow'
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             'echo "test && test" && git status', ["echo *", "git *"], []
         )
         self.assertEqual(decision, "allow")
@@ -383,7 +391,7 @@ class TestCompoundPermissionMatchDetails(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the reason reports each sub-command mapped to its matching pattern ('git status -> git *', etc.)
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && git log", ["git *"], []
         )
         self.assertEqual(decision, "allow")
@@ -397,7 +405,7 @@ class TestCompoundPermissionMatchDetails(unittest.TestCase):
         When check_compound_permission evaluates it
         Then the reason maps each sub-command to its own matching pattern
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && cat file", ["git *", "cat *"], []
         )
         self.assertEqual(decision, "allow")
@@ -410,7 +418,7 @@ class TestCompoundPermissionMatchDetails(unittest.TestCase):
         When check_compound_permission evaluates it with matching allow patterns
         Then the reason maps all three sub-commands to their patterns
         """
-        decision, reason = check_compound_permission(
+        decision, reason, _context = check_compound_permission(
             "git status && cat file | grep pattern", ["git *", "cat *", "grep *"], []
         )
         self.assertEqual(decision, "allow")
@@ -424,7 +432,9 @@ class TestCompoundPermissionMatchDetails(unittest.TestCase):
         When check_compound_permission evaluates it
         Then it is allowed and the reason does not use the compound 'sub-commands allowed' format
         """
-        decision, reason = check_compound_permission("git status", ["git *"], [])
+        decision, reason, _context = check_compound_permission(
+            "git status", ["git *"], []
+        )
         self.assertEqual(decision, "allow")
         # Single commands go through check_permission directly, no compound format
         self.assertNotIn("sub-commands allowed", reason)
@@ -1787,10 +1797,12 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
         def resolve_one(cmd):
             if check_permission(cmd, [], ["python -c*"], True)[0] == "deny":
-                return "deny", "matched deny pattern"
-            return "allow", "no match"
+                return "deny", "matched deny pattern", None
+            return "allow", "no match", None
 
-        decision, _reason = _resolve_leaf(self._leaf("python -cimport os"), resolve_one)
+        decision, _reason, _context = _resolve_leaf(
+            self._leaf("python -cimport os"), resolve_one
+        )
         self.assertEqual(decision, "deny")
 
     def test_deny_fires_for_space_separated_form(self):
@@ -1802,10 +1814,10 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
         def resolve_one(cmd):
             if check_permission(cmd, [], ["python -c*"], True)[0] == "deny":
-                return "deny", "matched deny pattern"
-            return "allow", "no match"
+                return "deny", "matched deny pattern", None
+            return "allow", "no match", None
 
-        decision, _reason = _resolve_leaf(
+        decision, _reason, _context = _resolve_leaf(
             self._leaf('python -c "import os"'), resolve_one
         )
         self.assertEqual(decision, "deny")
@@ -1819,10 +1831,12 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
         def resolve_one(cmd):
             if check_permission(cmd, [], ["python -uc*"], True)[0] == "deny":
-                return "deny", "matched deny pattern"
-            return "allow", "no match"
+                return "deny", "matched deny pattern", None
+            return "allow", "no match", None
 
-        decision, _reason = _resolve_leaf(self._leaf('python -uc "code"'), resolve_one)
+        decision, _reason, _context = _resolve_leaf(
+            self._leaf('python -uc "code"'), resolve_one
+        )
         self.assertEqual(decision, "deny")
 
     def test_allow_still_clamped_to_ask(self):
@@ -1833,9 +1847,9 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "allow", "no match"
+            return "allow", "no match", None
 
-        decision, _reason = _resolve_leaf(
+        decision, _reason, _context = _resolve_leaf(
             self._leaf('python -c "import os"'), resolve_one
         )
         self.assertEqual(decision, "ask")
@@ -1863,9 +1877,9 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         )
 
         def resolve_one(_cmd):
-            return "allow", "no match"
+            return "allow", "no match", None
 
-        _decision, reason = _resolve_leaf(self._leaf(leaf_text), resolve_one)
+        _decision, reason, _context = _resolve_leaf(self._leaf(leaf_text), resolve_one)
         self.assertIn("...", reason)
         self.assertIn("someforeigninterpreter", reason)
         self.assertLess(len(reason), 300)
@@ -1878,9 +1892,11 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "allow", "no match"
+            return "allow", "no match", None
 
-        _decision, reason = self._leaf_and_resolve('python -c "print(1)"', resolve_one)
+        _decision, reason, _context = self._leaf_and_resolve(
+            'python -c "print(1)"', resolve_one
+        )
         self.assertNotIn("...", reason)
         self.assertIn("python -c", reason)
 
@@ -1893,9 +1909,9 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         long_code = "import os\n" * 50
 
         def resolve_one(_cmd):
-            return "allow", "no match"
+            return "allow", "no match", None
 
-        _decision, reason = self._leaf_and_resolve(
+        _decision, reason, _context = self._leaf_and_resolve(
             f'python -c "{long_code}"', resolve_one
         )
         self.assertNotIn("\n", reason)
@@ -1905,6 +1921,795 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
 
     def _leaf_and_resolve(self, text, resolve_one):
         return _resolve_leaf(self._leaf(text), resolve_one)
+
+
+def _canned_resolver(mapping):
+    """Build a ``resolve_one`` closure returning a canned per-command triple.
+
+    Args:
+        mapping: Dict from exact sub-command string to its
+            ``(decision, reason, additional_context)`` triple.
+
+    Returns:
+        A callable suitable as the ``resolve_one`` argument to
+        :func:`resolve_compound_permission`.
+    """
+
+    def resolve_one(cmd):
+        return mapping[cmd]
+
+    return resolve_one
+
+
+class TestAdditionalContextThreading(unittest.TestCase):
+    """
+    TOO-19 Phase 1, increments 3 and 5: ``additionalContext`` threading through
+    the Bash/compound resolution path -- ``_resolve_leaf``,
+    ``_combine_strictest``, and ``resolve_compound_permission``.
+    """
+
+    def test_single_allowed_leaf_surfaces_its_context(self):
+        """
+        Given a single (non-compound) command whose winning rule carries
+            additionalContext
+        When resolve_compound_permission resolves it
+        Then the decision is 'allow' and the context is surfaced unchanged
+        """
+        resolve_one = _canned_resolver(
+            {"git status": ("allow", "Command matches allow pattern: git *", "use ag")}
+        )
+        decision, _reason, context = resolve_compound_permission(
+            "git status", resolve_one
+        )
+        self.assertEqual(decision, "allow")
+        self.assertEqual(context, "use ag")
+
+    def test_multi_leaf_all_allow_accumulates_distinct_contexts(self):
+        """
+        Given an all-allow compound whose two sub-commands match two
+            DIFFERENT enriched rules
+        When resolve_compound_permission resolves it
+        Then the decision is 'allow' and the context is the two paragraphs
+            joined in match order, blank line between
+        """
+        resolve_one = _canned_resolver(
+            {
+                "git status": ("allow", "git note", "prefer git status --short"),
+                "cat file": ("allow", "cat note", "prefer bat for syntax highlight"),
+            }
+        )
+        decision, _reason, context = resolve_compound_permission(
+            "git status && cat file", resolve_one
+        )
+        self.assertEqual(decision, "allow")
+        self.assertEqual(
+            context,
+            "prefer git status --short\n\nprefer bat for syntax highlight",
+        )
+
+    def test_same_enriched_rule_matching_two_leaves_dedupes(self):
+        """
+        Given an all-allow compound where BOTH sub-commands match the SAME
+            enriched rule (identical additionalContext text)
+        When resolve_compound_permission resolves it
+        Then the context is said once, not twice
+        """
+        resolve_one = _canned_resolver(
+            {
+                "git status": ("allow", "git note", "use git * carefully"),
+                "git log": ("allow", "git note", "use git * carefully"),
+            }
+        )
+        decision, _reason, context = resolve_compound_permission(
+            "git status && git log", resolve_one
+        )
+        self.assertEqual(decision, "allow")
+        self.assertEqual(context, "use git * carefully")
+
+    def test_deny_in_compound_passes_denying_leafs_context_only(self):
+        """
+        Given a compound where one sub-command is allowed (with its own
+            context) and another is DENIED (with a different context)
+        When resolve_compound_permission resolves it
+        Then the decision is 'deny' and the context is the DENYING leaf's
+            context alone -- NOT an accumulation with the allowed leaf's
+        """
+        resolve_one = _canned_resolver(
+            {
+                "git status": ("allow", "git note", "prefer git status --short"),
+                "rm file": ("deny", "dangerous", "never rm without --dry-run first"),
+            }
+        )
+        decision, _reason, context = resolve_compound_permission(
+            "git status && rm file", resolve_one
+        )
+        self.assertEqual(decision, "deny")
+        self.assertEqual(context, "never rm without --dry-run first")
+
+    def test_ask_in_compound_passes_asking_leafs_context_only(self):
+        """
+        Given a compound where one sub-command is allowed (with its own
+            context) and another requires ASK (with a different context)
+        When resolve_compound_permission resolves it
+        Then the decision is 'ask' and the context is the ASKING leaf's
+            context alone -- NOT an accumulation with the allowed leaf's
+        """
+        resolve_one = _canned_resolver(
+            {
+                "git status": ("allow", "git note", "prefer git status --short"),
+                "curl http://x": ("ask", "network access", "confirm the target host"),
+            }
+        )
+        decision, _reason, context = resolve_compound_permission(
+            "git status && curl http://x", resolve_one
+        )
+        self.assertEqual(decision, "ask")
+        self.assertEqual(context, "confirm the target host")
+
+    def test_all_allow_compound_with_no_enrichment_yields_none(self):
+        """
+        Given an all-allow compound where neither winning rule carries
+            additionalContext
+        When resolve_compound_permission resolves it
+        Then the decision is 'allow' and the context is None
+        """
+        resolve_one = _canned_resolver(
+            {
+                "git status": ("allow", "git note", None),
+                "cat file": ("allow", "cat note", None),
+            }
+        )
+        decision, _reason, context = resolve_compound_permission(
+            "git status && cat file", resolve_one
+        )
+        self.assertEqual(decision, "allow")
+        self.assertIsNone(context)
+
+    def test_undecidable_segment_yields_none_context(self):
+        """
+        Given a command containing process substitution (cannot be safely
+            decomposed)
+        When resolve_compound_permission resolves it
+        Then the decision is 'ask' (undecidable-segment floor) and the
+            context is None -- no rule ever matched
+        """
+
+        def resolve_one(_cmd):
+            self.fail("resolve_one should not be called for an undecidable segment")
+
+        decision, _reason, context = resolve_compound_permission(
+            "diff <(sort a) <(sort b)", resolve_one
+        )
+        self.assertEqual(decision, "ask")
+        self.assertIsNone(context)
+
+    def test_ask_floor_deny_passes_context_through(self):
+        """
+        Given an ASK-floor leaf (foreign inline code) whose outer command
+            matches an explicit deny rule carrying additionalContext
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'deny' and the context is passed through
+            unchanged -- the deny IS the deciding match
+        """
+
+        def resolve_one(_cmd):
+            return "deny", "matched deny pattern", "python -c is never allowed here"
+
+        leaf = LeafCommand('python -c "import os"', ask_floor=True)
+        decision, _reason, context = _resolve_leaf(leaf, resolve_one)
+        self.assertEqual(decision, "deny")
+        self.assertEqual(context, "python -c is never allowed here")
+
+    def test_ask_floor_clamp_to_ask_drops_context(self):
+        """
+        Given an ASK-floor leaf whose outer command matches an ALLOW rule
+            carrying additionalContext (no explicit deny)
+        When _resolve_leaf resolves the leaf
+        Then the decision is clamped to 'ask' and the context is None -- the
+            floor, not the rule match, decides the verdict, mirroring
+            Configuration._apply_parse_failure_ask_floor's clearing behaviour
+        """
+
+        def resolve_one(_cmd):
+            return "allow", "no match", "this context must not leak through"
+
+        leaf = LeafCommand('python -c "import os"', ask_floor=True)
+        decision, _reason, context = _resolve_leaf(leaf, resolve_one)
+        self.assertEqual(decision, "ask")
+        self.assertIsNone(context)
+
+    def test_ask_floor_explicit_ask_rule_reason_and_context_pass_through(self):
+        """
+        Given an ASK-floor leaf whose outer command matches an explicit ASK
+            rule carrying additionalContext, and undecidable_fallback='ask'
+            (the default, so the floor makes NO change)
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'ask' and BOTH the rule's own reason and its
+            context pass through unchanged -- the floor decided nothing, so
+            it must not be misattributed as the cause (TOO-19 code review m1)
+        """
+
+        def resolve_one(_cmd):
+            return "ask", "matched ask pattern: python -c:*", "confirm this is safe"
+
+        leaf = LeafCommand('python -c "import os"', ask_floor=True)
+        decision, reason, context = _resolve_leaf(
+            leaf, resolve_one, undecidable_fallback="ask"
+        )
+        self.assertEqual(decision, "ask")
+        self.assertEqual(reason, "matched ask pattern: python -c:*")
+        self.assertNotIn("ASK floor applied", reason)
+        self.assertEqual(context, "confirm this is safe")
+
+    def test_ask_floor_genuine_floor_still_names_floor_and_drops_context(self):
+        """
+        Given an ASK-floor leaf whose outer command matches an ALLOW rule
+            carrying additionalContext, and undecidable_fallback='ask' (the
+            default), so the floor RAISES 'allow' to 'ask'
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'ask', the reason names the ASK floor (not the
+            rule), and the context is dropped -- this is the genuine floor
+            case, distinct from an explicit ask rule (contrast with
+            test_ask_floor_explicit_ask_rule_reason_and_context_pass_through)
+        """
+
+        def resolve_one(_cmd):
+            return "allow", "matched allow pattern: python -c:*", "trust this"
+
+        leaf = LeafCommand('python -c "import os"', ask_floor=True)
+        decision, reason, context = _resolve_leaf(
+            leaf, resolve_one, undecidable_fallback="ask"
+        )
+        self.assertEqual(decision, "ask")
+        self.assertIn("ASK floor applied", reason)
+        self.assertIsNone(context)
+
+    def test_ask_floor_explicit_ask_rule_raised_to_deny_still_names_floor(self):
+        """
+        Given an ASK-floor leaf whose outer command matches an explicit ASK
+            rule, and undecidable_fallback='deny' (so the floor RAISES 'ask'
+            to 'deny')
+        When _resolve_leaf resolves the leaf
+        Then the decision is 'deny' and the reason names
+            undecidable_fallback=deny -- floored != decision here too, so
+            this is a genuine floor case even though the underlying decision
+            was already 'ask', and the rule's own reason/context are
+            correctly superseded
+        """
+
+        def resolve_one(_cmd):
+            return "ask", "matched ask pattern: python -c:*", "confirm this is safe"
+
+        leaf = LeafCommand('python -c "import os"', ask_floor=True)
+        decision, reason, context = _resolve_leaf(
+            leaf, resolve_one, undecidable_fallback="deny"
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("undecidable_fallback=deny", reason)
+        self.assertIsNone(context)
+
+
+class TestAccumulateContexts(unittest.TestCase):
+    """
+    _accumulate_contexts (TOO-19 Phase 1 increment 4): the pure helper that
+    merges the per-leaf additionalContext texts of an all-allow compound into
+    the single block injected back to Claude.
+    """
+
+    def test_no_contexts_returns_none(self):
+        """
+        Given an empty list of contexts
+        When they are accumulated
+        Then the result is None, so the caller omits the key entirely rather
+             than emitting an empty string
+        """
+        self.assertIsNone(_accumulate_contexts([]))
+
+    def test_all_none_contexts_returns_none(self):
+        """
+        Given leaves that all matched rules carrying no enrichment
+        When their (None) contexts are accumulated
+        Then the result is None -- callers may pass the unfiltered per-leaf list
+        """
+        self.assertIsNone(_accumulate_contexts([None, None]))
+
+    def test_blank_context_is_ignored(self):
+        """
+        Given a whitespace-only context alongside a real one
+        When they are accumulated
+        Then only the real one survives
+        """
+        self.assertEqual(_accumulate_contexts(["   ", "use ag"]), "use ag")
+
+    def test_single_context_passes_through(self):
+        """
+        Given exactly one context
+        When it is accumulated
+        Then it is returned unchanged, with no paragraph decoration
+        """
+        self.assertEqual(_accumulate_contexts(["use ag instead"]), "use ag instead")
+
+    def test_multiple_contexts_join_as_paragraphs(self):
+        """
+        Given two distinct contexts from two different enriched rules
+        When they are accumulated
+        Then they are joined as paragraphs separated by a blank line, in
+             first-seen order
+        """
+        self.assertEqual(
+            _accumulate_contexts(["first note", "second note"]),
+            "first note\n\nsecond note",
+        )
+
+    def test_duplicate_text_is_deduped(self):
+        """
+        Given one enriched rule that matched three sub-commands of a compound
+        When its identical context appears three times
+        Then it is said once -- the common case must not repeat itself
+        """
+        self.assertEqual(_accumulate_contexts(["same", "same", "same"]), "same")
+
+    def test_dedup_keeps_first_seen_order(self):
+        """
+        Given contexts A, B, A
+        When they are accumulated
+        Then the result is A then B -- the duplicate is dropped, not moved
+        """
+        self.assertEqual(_accumulate_contexts(["A", "B", "A"]), "A\n\nB")
+
+
+class TestCapContextWords(unittest.TestCase):
+    """
+    cap_context_words (TOO-19 code review M2): the word-budget enforcement
+    formerly lived inside _accumulate_contexts -- which only ran for the Bash
+    all-allow branch, leaving deny/ask/hard-deny/file-path contexts uncapped.
+    It now lives here, applied once at the actual injection boundary
+    (resolve.py), so these tests cover the budget algorithm directly rather
+    than via a single caller.
+    """
+
+    def test_none_passes_through_as_none(self):
+        """
+        Given a None text
+        When it is capped
+        Then the result is None
+        """
+        self.assertIsNone(cap_context_words(None))
+
+    def test_blank_text_returns_none(self):
+        """
+        Given a whitespace-only text
+        When it is capped
+        Then the result is None -- same as an absent context
+        """
+        self.assertIsNone(cap_context_words("   "))
+
+    def test_under_budget_text_is_unchanged(self):
+        """
+        Given a single short paragraph well under max_words
+        When it is capped
+        Then it passes through byte-for-byte
+        """
+        self.assertEqual(
+            cap_context_words("use ag instead", max_words=10), "use ag instead"
+        )
+
+    def test_paragraph_over_budget_is_dropped_whole(self):
+        """
+        Given a multi-paragraph text where the second paragraph would push
+            the running total past max_words
+        When it is capped
+        Then that paragraph is absent ENTIRELY -- never truncated mid-sentence
+        """
+        result = cap_context_words("a b c\n\nd e f", max_words=4)
+        self.assertEqual(result, "a b c")
+
+    def test_budget_is_first_fit_not_stop_at_first_overflow(self):
+        """
+        Given an over-budget paragraph followed by one that still fits
+        When the text is capped
+        Then the later short paragraph IS kept -- the scan continues past an
+             overflow rather than stopping at it
+        """
+        result = cap_context_words("x\n\nb c d e f\n\ny", max_words=3)
+        self.assertEqual(result, "x\n\ny")
+
+    def test_exactly_at_budget_is_kept(self):
+        """
+        Given paragraphs whose combined word count exactly equals max_words
+        When the text is capped
+        Then nothing is dropped -- the budget is inclusive
+        """
+        self.assertEqual(cap_context_words("a b\n\nc d", max_words=4), "a b\n\nc d")
+
+    def test_default_budget_is_500_words(self):
+        """
+        Given the default max_words
+        When a 500-word paragraph and a 1-word paragraph are capped
+        Then the 500-word one is kept and the extra word is dropped, pinning
+             the documented 500-word cap
+        """
+        big = " ".join(["w"] * 500)
+        self.assertEqual(cap_context_words(f"{big}\n\nextra"), big)
+
+    def test_lone_oversize_paragraph_is_truncated_not_dropped(self):
+        """
+        Given a SINGLE paragraph that alone exceeds max_words (M2 bug: the
+            old code returned None here, silently injecting nothing even
+            though the rule author wrote real text)
+        When it is capped
+        Then the result is a max_words-word truncated prefix plus a marker,
+             NEVER None -- a non-empty input must never collapse to nothing
+        """
+        big = " ".join(f"w{i}" for i in range(600))
+        result = cap_context_words(big, max_words=500)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.startswith(" ".join(f"w{i}" for i in range(500))))
+        self.assertIn("truncated to 500 words", result)
+        # The words actually kept (before the marker paragraph) are exactly
+        # the first 500 -- word 500 ("w500") must NOT appear in the kept
+        # prefix, only possibly inside the marker's own prose.
+        kept_prefix = result.split("\n\n[toolguard:")[0]
+        self.assertEqual(len(kept_prefix.split()), 500)
+
+    def test_lone_oversize_single_word_repeated_is_truncated(self):
+        """
+        Given a single paragraph of 501 identical words (no distinguishing
+            content, so truncation position is the only thing to verify)
+        When it is capped at the default 500-word budget
+        Then exactly 500 words are kept in the prefix and a marker follows
+        """
+        result = cap_context_words(" ".join(["w"] * 501))
+        kept_prefix = result.split("\n\n[toolguard:")[0]
+        self.assertEqual(len(kept_prefix.split()), 500)
+        self.assertIn("[toolguard: additionalContext truncated to 500 words", result)
+
+    def test_lone_oversize_among_multiple_paragraphs_truncates_the_first(self):
+        """
+        Given several paragraphs where EACH ONE individually exceeds
+            max_words (so the greedy first-fit keeps none of them whole)
+        When the text is capped
+        Then the FIRST paragraph is truncated and kept, not dropped
+        """
+        p1 = " ".join(["a"] * 10)
+        p2 = " ".join(["b"] * 10)
+        result = cap_context_words(f"{p1}\n\n{p2}", max_words=5)
+        kept_prefix = result.split("\n\n[toolguard:")[0]
+        self.assertEqual(kept_prefix, " ".join(["a"] * 5))
+
+
+def _resolve_with_fallback(
+    command: str, allow: list, deny: list, undecidable_fallback: str = "ask"
+) -> str:
+    """Resolve a (possibly compound/multi-line) command to a bare decision string.
+
+    Like ``test_multiline_bash.py``'s ``_resolve`` helper, but threads
+    *undecidable_fallback* through to ``resolve_compound_permission`` so
+    tests can exercise all three settings end to end (TOO-19).
+    """
+    decision, _reason, _context = resolve_compound_permission(
+        command,
+        lambda c: (*check_permission(c, allow, deny), None),
+        undecidable_fallback=undecidable_fallback,
+    )
+    return decision
+
+
+class TestApplyUndecidableFloor(unittest.TestCase):
+    """_apply_undecidable_floor: the pure strictest-wins floor helper (TOO-19).
+
+    Pins the full 3x3 matrix from the ticket: strictness order deny > ask >
+    allow, so the floor can only ever make a decision STRICTER than allow --
+    it never weakens an explicit deny or ask.
+    """
+
+    def test_deny_is_never_weakened_by_ask_fallback(self):
+        """
+        Given decision='deny' and undecidable_fallback='ask'
+        When _apply_undecidable_floor resolves
+        Then the result is 'deny' -- unchanged
+        """
+        self.assertEqual(_apply_undecidable_floor("deny", "ask"), "deny")
+
+    def test_deny_is_never_weakened_by_deny_fallback(self):
+        """
+        Given decision='deny' and undecidable_fallback='deny'
+        When _apply_undecidable_floor resolves
+        Then the result is 'deny' -- unchanged
+        """
+        self.assertEqual(_apply_undecidable_floor("deny", "deny"), "deny")
+
+    def test_deny_is_never_weakened_by_allow_with_warning_fallback(self):
+        """
+        Given decision='deny' and undecidable_fallback='allow_with_warning'
+            (the most permissive fallback -- the deliberate "no floor" escape
+            hatch)
+        When _apply_undecidable_floor resolves
+        Then the result is STILL 'deny' -- the floor can only ever make a
+            decision stricter than allow, never weaker
+        """
+        self.assertEqual(_apply_undecidable_floor("deny", "allow_with_warning"), "deny")
+
+    def test_ask_stays_ask_under_ask_fallback(self):
+        """
+        Given decision='ask' and undecidable_fallback='ask'
+        When _apply_undecidable_floor resolves
+        Then the result is 'ask'
+        """
+        self.assertEqual(_apply_undecidable_floor("ask", "ask"), "ask")
+
+    def test_ask_is_raised_to_deny_under_deny_fallback(self):
+        """
+        Given decision='ask' and undecidable_fallback='deny'
+        When _apply_undecidable_floor resolves
+        Then the result is 'deny' -- the deny floor is stricter than ask
+        """
+        self.assertEqual(_apply_undecidable_floor("ask", "deny"), "deny")
+
+    def test_ask_stays_ask_under_allow_with_warning_fallback(self):
+        """
+        Given decision='ask' and undecidable_fallback='allow_with_warning'
+        When _apply_undecidable_floor resolves
+        Then the result is STILL 'ask' -- allow_with_warning is a floor of
+            'allow', which is less strict than 'ask', so 'ask' is unchanged
+        """
+        self.assertEqual(_apply_undecidable_floor("ask", "allow_with_warning"), "ask")
+
+    def test_allow_is_raised_to_ask_under_ask_fallback(self):
+        """
+        Given decision='allow' and undecidable_fallback='ask' (the default)
+        When _apply_undecidable_floor resolves
+        Then the result is 'ask'
+        """
+        self.assertEqual(_apply_undecidable_floor("allow", "ask"), "ask")
+
+    def test_allow_is_raised_to_deny_under_deny_fallback(self):
+        """
+        Given decision='allow' and undecidable_fallback='deny'
+        When _apply_undecidable_floor resolves
+        Then the result is 'deny'
+        """
+        self.assertEqual(_apply_undecidable_floor("allow", "deny"), "deny")
+
+    def test_allow_stays_allow_under_allow_with_warning_fallback(self):
+        """
+        Given decision='allow' and undecidable_fallback='allow_with_warning'
+        When _apply_undecidable_floor resolves
+        Then the result is 'allow' -- the deliberate no-floor escape hatch
+        """
+        self.assertEqual(
+            _apply_undecidable_floor("allow", "allow_with_warning"), "allow"
+        )
+
+    def test_unrecognized_fallback_defaults_to_ask_floor(self):
+        """
+        Given decision='allow' and an unrecognized undecidable_fallback value
+        When _apply_undecidable_floor resolves
+        Then it is treated as 'ask' (the default), matching
+            Configuration.resolved_undecidable_fallback()'s own
+            fallback-to-default normalization
+        """
+        self.assertEqual(_apply_undecidable_floor("allow", "bogus"), "ask")
+
+
+class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
+    """Foreign inline code / heredoc sinks (leaf.ask_floor) under each
+    undecidable_fallback setting, end to end through resolve_compound_permission
+    (TOO-19).
+    """
+
+    def test_default_ask_fallback_asks(self):
+        """
+        Given allow 'uv run*' and undecidable_fallback='ask' (the default)
+        When a heredoc feeds the Python interpreter (foreign inline code)
+        Then the compound resolves to ASK -- matches pre-TOO-19 behaviour
+        """
+        cmd = "uv run python - <<'PY'\nimport os\nPY"
+        self.assertEqual(_resolve_with_fallback(cmd, ["uv run*"], [], "ask"), "ask")
+
+    def test_deny_fallback_denies(self):
+        """
+        Given allow 'uv run*' and undecidable_fallback='deny'
+        When a heredoc feeds the Python interpreter (foreign inline code)
+        Then the compound resolves to DENY -- the floor raised ask to deny
+        """
+        cmd = "uv run python - <<'PY'\nimport os\nPY"
+        self.assertEqual(_resolve_with_fallback(cmd, ["uv run*"], [], "deny"), "deny")
+
+    def test_allow_with_warning_fallback_allows(self):
+        """
+        Given allow 'uv run*' and undecidable_fallback='allow_with_warning'
+        When a heredoc feeds the Python interpreter (foreign inline code)
+        Then the compound resolves to ALLOW -- the deliberate no-floor
+            escape hatch
+        """
+        cmd = "uv run python - <<'PY'\nimport os\nPY"
+        self.assertEqual(
+            _resolve_with_fallback(cmd, ["uv run*"], [], "allow_with_warning"),
+            "allow",
+        )
+
+    def test_explicit_deny_on_outer_command_is_never_weakened_by_any_fallback(self):
+        """
+        Given a deny pattern matching the outer heredoc-bearing command AND
+            undecidable_fallback='allow_with_warning' (the most permissive
+            setting)
+        When the heredoc-into-python command is resolved
+        Then the compound is STILL DENIED -- an explicit deny on the leaf is
+            never weakened by any undecidable_fallback value
+        """
+        cmd = "uv run python - <<'PY'\nimport os\nPY"
+        self.assertEqual(
+            _resolve_with_fallback(
+                cmd,
+                ["uv run*"],
+                ["[regex]uv run python"],
+                "allow_with_warning",
+            ),
+            "deny",
+        )
+
+    def test_deny_reason_names_undecidable_fallback(self):
+        """
+        Given an allow pattern matching the outer command and
+            undecidable_fallback='deny'
+        When a foreign inline-code leaf is resolved
+        Then the deny reason names 'undecidable_fallback=deny' so a user
+            seeing the denial knows it came from the fallback setting, not
+            from a rule they wrote
+        """
+        cmd = 'python3 -c "import os"'
+        decision, reason, _context = resolve_compound_permission(
+            cmd,
+            lambda c: (*check_permission(c, ["python3 -c:*"], []), None),
+            undecidable_fallback="deny",
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("undecidable_fallback=deny", reason)
+
+    def test_allow_with_warning_reason_names_undecidable_fallback(self):
+        """
+        Given an allow pattern matching the outer command and
+            undecidable_fallback='allow_with_warning'
+        When a foreign inline-code leaf is resolved
+        Then the allow reason names 'undecidable_fallback=allow_with_warning'
+            so the warning is visible even though the command is allowed
+        """
+        cmd = 'python3 -c "import os"'
+        decision, reason, _context = resolve_compound_permission(
+            cmd,
+            lambda c: (*check_permission(c, ["python3 -c:*"], []), None),
+            undecidable_fallback="allow_with_warning",
+        )
+        self.assertEqual(decision, "allow")
+        self.assertIn("undecidable_fallback=allow_with_warning", reason)
+
+
+class TestUndecidableFallbackSegment(unittest.TestCase):
+    """UndecidableSegment (control structures, process substitution) under
+    each undecidable_fallback setting (TOO-19).
+
+    An UndecidableSegment is NEVER resolved against any rule -- there is no
+    underlying decision to floor, so it takes undecidable_fallback DIRECTLY
+    rather than via strictest-wins.
+    """
+
+    #: A command that resolves to a single UndecidableSegment (process
+    #: substitution cannot be safely decomposed today).
+    _PROCSUB_CMD = "diff <(sort a) <(sort b)"
+
+    def test_default_ask_fallback_asks(self):
+        """
+        Given undecidable_fallback='ask' (the default)
+        When a process-substitution command is resolved
+        Then the compound resolves to ASK -- matches pre-TOO-19 behaviour
+        """
+        self.assertEqual(
+            _resolve_with_fallback(self._PROCSUB_CMD, ["diff:*"], [], "ask"),
+            "ask",
+        )
+
+    def test_deny_fallback_denies(self):
+        """
+        Given undecidable_fallback='deny'
+        When a process-substitution command is resolved
+        Then the compound resolves to DENY
+        """
+        self.assertEqual(
+            _resolve_with_fallback(self._PROCSUB_CMD, ["diff:*"], [], "deny"),
+            "deny",
+        )
+
+    def test_allow_with_warning_fallback_allows(self):
+        """
+        Given undecidable_fallback='allow_with_warning'
+        When a process-substitution command is resolved
+        Then the compound resolves to ALLOW -- the deliberate no-floor
+            escape hatch
+        """
+        self.assertEqual(
+            _resolve_with_fallback(
+                self._PROCSUB_CMD, ["diff:*"], [], "allow_with_warning"
+            ),
+            "allow",
+        )
+
+    def test_complex_control_structure_under_each_fallback(self):
+        """
+        Given a nested while/if-else control structure (a second undecidable
+            shape, distinct from process substitution)
+        When resolved under each of the three undecidable_fallback settings
+        Then the compound decision matches that setting's floor exactly
+        """
+        cmd = 'while read l; do if [ -e "$l" ]; then echo ok; else echo no; fi; done'
+        cases = [("ask", "ask"), ("deny", "deny"), ("allow_with_warning", "allow")]
+        for fallback, expected in cases:
+            with self.subTest(fallback=fallback):
+                self.assertEqual(
+                    _resolve_with_fallback(cmd, ["echo:*"], [], fallback),
+                    expected,
+                )
+
+    def test_deny_reason_names_undecidable_fallback(self):
+        """
+        Given undecidable_fallback='deny'
+        When an UndecidableSegment is resolved
+        Then the deny reason names 'undecidable_fallback=deny'
+        """
+        decision, reason, _context = resolve_compound_permission(
+            self._PROCSUB_CMD,
+            lambda c: (*check_permission(c, [], []), None),
+            undecidable_fallback="deny",
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("undecidable_fallback=deny", reason)
+
+    def test_allow_with_warning_reason_names_undecidable_fallback(self):
+        """
+        Given undecidable_fallback='allow_with_warning'
+        When an UndecidableSegment is resolved
+        Then the allow reason names 'undecidable_fallback=allow_with_warning'
+        """
+        decision, reason, _context = resolve_compound_permission(
+            self._PROCSUB_CMD,
+            lambda c: (*check_permission(c, [], []), None),
+            undecidable_fallback="allow_with_warning",
+        )
+        self.assertEqual(decision, "allow")
+        self.assertIn("undecidable_fallback=allow_with_warning", reason)
+
+
+class TestCheckCompoundPermissionUndecidableFallback(unittest.TestCase):
+    """check_compound_permission threads undecidable_fallback through to
+    resolve_compound_permission (TOO-19).
+    """
+
+    def test_default_preserves_pre_too19_ask_behaviour(self):
+        """
+        Given an allow pattern matching the outer command and no
+            undecidable_fallback argument (the default)
+        When check_compound_permission resolves a foreign inline-code command
+        Then it still resolves to ASK, exactly as before TOO-19
+        """
+        decision, _reason, _context = check_compound_permission(
+            'python3 -c "import os"', ["python3 -c:*"], []
+        )
+        self.assertEqual(decision, "ask")
+
+    def test_explicit_deny_fallback_is_honored(self):
+        """
+        Given an allow pattern matching the outer command and
+            undecidable_fallback='deny' passed explicitly
+        When check_compound_permission resolves a foreign inline-code command
+        Then it resolves to DENY
+        """
+        decision, _reason, _context = check_compound_permission(
+            'python3 -c "import os"',
+            ["python3 -c:*"],
+            [],
+            undecidable_fallback="deny",
+        )
+        self.assertEqual(decision, "deny")
 
 
 if __name__ == "__main__":

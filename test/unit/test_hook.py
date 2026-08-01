@@ -33,7 +33,34 @@ from toolguard.hook import (
     parse_hook_input,
 )
 
+from test.unit._config_isolation import isolate_log_dir_for_module
+
 _NO_TAKEOVER = TakeoverConfig(False, (), (), "deny")
+
+# TOO-19: every class in this module mocks toolguard.hook.load_configuration()
+# directly, so none of them reach toolguard.config's discovery path -- but
+# every class here also drives toolguard.hook.main() end-to-end, which DOES
+# reach toolguard.env_config.get_env_config() unconditionally (before
+# load_configuration() is even called) to resolve TOOLGUARD_LOG_DIR for the
+# config-discovery diagnostic log. Without this, that resolution falls back
+# to the real process cwd (the repo root under `unittest discover`) and
+# writes real entries into the developer's live logs/ directory. See
+# test/unit/_config_isolation.py's module docstring and
+# .claude/rules/test-config-isolation.md for the full history.
+_log_tmp_dir = None
+_log_patcher = None
+
+
+def setUpModule():
+    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module (TOO-19)."""
+    global _log_tmp_dir, _log_patcher
+    _log_tmp_dir, _log_patcher, _ = isolate_log_dir_for_module()
+
+
+def tearDownModule():
+    """Undo the module-wide TOOLGUARD_LOG_DIR isolation and clean up its temp dir."""
+    _log_patcher.stop()
+    _log_tmp_dir.cleanup()
 
 
 def check_file_path_permission(
@@ -153,6 +180,20 @@ def _fake_config(
         def describe_levels(self_inner):
             # API-sync: the fake exposes no real sources.
             return ()
+
+        def resolved_undecidable_fallback(self_inner):
+            # API-sync with Configuration.resolved_undecidable_fallback
+            # (TOO-19). The fake does not model a configurable
+            # undecidable_fallback -- always 'ask' (the default); tests that
+            # need other values exercise a real Configuration.
+            return "ask"
+
+        def apply_parse_failure_floor(self_inner, decision, reason):
+            # API-sync with Configuration.apply_parse_failure_floor (TOO-19
+            # undecidable-segment bypass fix). The fake models no parse
+            # failures, so this is always a pass-through; tests that need the
+            # floor to actually clamp exercise a real Configuration.
+            return decision, reason
 
         def takeover_mode(self_inner):
             return takeover
@@ -511,6 +552,57 @@ class TestHookOutput(unittest.TestCase):
         self.assertEqual(
             output["hookSpecificOutput"]["permissionDecisionReason"],
             "Command matches deny pattern",
+        )
+
+    def test_no_additional_context_arg_omits_key_entirely(self):
+        """
+        Given create_hook_output() called with NO additional_context argument
+        When the output dict is inspected
+        Then hookSpecificOutput has no 'additionalContext' key at all (not a
+            key set to None -- an absent key, so old consumers see no new shape)
+        """
+        output = create_hook_output("allow", "Command matches allow pattern")
+        self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+
+    def test_none_additional_context_omits_key_entirely(self):
+        """
+        Given create_hook_output() called with additional_context=None
+        When the output dict is inspected
+        Then hookSpecificOutput has no 'additionalContext' key
+        """
+        output = create_hook_output(
+            "allow", "Command matches allow pattern", additional_context=None
+        )
+        self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+
+    def test_empty_string_additional_context_omits_key_entirely(self):
+        """
+        Given create_hook_output() called with additional_context="" (empty string)
+        When the output dict is inspected
+        Then hookSpecificOutput has no 'additionalContext' key -- an empty
+            string is treated the same as no enrichment, never injected
+        """
+        output = create_hook_output(
+            "allow", "Command matches allow pattern", additional_context=""
+        )
+        self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+
+    def test_non_empty_additional_context_is_included_inside_hook_specific_output(
+        self,
+    ):
+        """
+        Given create_hook_output() called with a non-empty additional_context
+        When the output dict is inspected
+        Then hookSpecificOutput carries 'additionalContext' with that exact text
+        """
+        output = create_hook_output(
+            "allow",
+            "Command matches allow pattern",
+            additional_context="prefer git status --short",
+        )
+        self.assertEqual(
+            output["hookSpecificOutput"]["additionalContext"],
+            "prefer git status --short",
         )
 
 
@@ -1352,6 +1444,150 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                 ],
                             )
 
+    def test_bash_no_match_allow_with_warning_reaches_warning_log_stream(self):
+        """
+        Given the same no_match_fallback='allow_with_warning' setup as
+            test_bash_allow_with_warning_fallback_allows_via_main
+        When main() processes the unmatched command
+        Then error_log.log_warning is called once with the same reason text
+            (TOO-19 code review m6: allow_with_warning must actually reach
+            the WARNING log stream the docs promise, not just say "warning"
+            inside the reason string)
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO):
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch("toolguard.hook.log_warning") as mock_log_warning:
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                mock_log_warning.assert_called_once()
+                                warned_reason = mock_log_warning.call_args.args[0]
+                                self.assertIn(
+                                    "no_match_fallback=allow_with_warning",
+                                    warned_reason,
+                                )
+
+    def test_bash_explicit_allow_does_not_reach_warning_log_stream(self):
+        """
+        Given a command that matches an explicit allow rule (no fallback
+            involved at all)
+        When main() processes it
+        Then error_log.log_warning is NOT called -- the m6 fix must only
+            fire for the allow_with_warning fallback, never for an ordinary
+            explicit allow
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO):
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch("toolguard.hook.log_warning") as mock_log_warning:
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                mock_log_warning.assert_not_called()
+
+    def test_bash_undecidable_allow_with_warning_reaches_warning_log_stream(self):
+        """
+        Given undecidable_fallback='allow_with_warning' and a heredoc feeding
+            foreign inline code into an otherwise-allowed interpreter
+        When main() processes the compound command
+        Then the decision is 'allow' AND error_log.log_warning is called with
+            a reason naming undecidable_fallback=allow_with_warning (TOO-19
+            code review m6, the undecidable_fallback half of the same gap)
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "undecidable_fallback": "allow_with_warning",
+                        "permissions": {"allow": ["Bash(uv run*)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "uv run python - <<'PY'\nimport os\nPY"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch("toolguard.hook.log_warning") as mock_log_warning:
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                output = json.loads(mock_stdout.getvalue())
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "allow",
+                                )
+                                mock_log_warning.assert_called_once()
+                                warned_reason = mock_log_warning.call_args.args[0]
+                                self.assertIn(
+                                    "undecidable_fallback=allow_with_warning",
+                                    warned_reason,
+                                )
+
     def test_bash_warn_deny_legacy_alias_allows_via_main(self):
         """
         Given a real Configuration governing Bash, allowing only 'git *', with
@@ -1453,6 +1689,203 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                     output["hookSpecificOutput"]["permissionDecision"],
                                     "deny",
                                 )
+
+
+class TestAdditionalContextThroughMain(unittest.TestCase):
+    """
+    TOO-19 Phase 1, increments 6+7 end-to-end: main() driven with a REAL
+    Configuration carrying a structured rule entry with additionalContext, so
+    the JSON output and the log entry (mocked here) are exercised exactly as
+    they run in production -- both for a Bash command and a file-path tool,
+    and confirming an error/guard path emits none.
+    """
+
+    @staticmethod
+    def _hook_layer(content):
+        """Build a single project-level toolguard_hook ConfigLayer."""
+        return ConfigLayer(
+            Provenance(
+                "project", "toolguard_hook", "toml", Path("/p/toolguard_hook.toml"), 0
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_bash_enriched_allow_rule_puts_context_in_emitted_json(self):
+        """
+        Given a real Configuration governing Bash with a structured allow
+            entry for 'git:*' carrying additionalContext = 'prefer --short'
+        When main() processes a matching 'git status' Bash invocation
+        Then the decision is 'allow' and the emitted JSON's hookSpecificOutput
+            carries 'additionalContext' == 'prefer --short'
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Bash(git:*)",
+                                    "additionalContext": "prefer --short",
+                                }
+                            ],
+                            "deny": [],
+                        },
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command") as mock_log:
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "allow",
+                            )
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["additionalContext"],
+                                "prefer --short",
+                            )
+                            mock_log.assert_called_once()
+                            self.assertEqual(
+                                mock_log.call_args.kwargs["additional_context"],
+                                "prefer --short",
+                            )
+
+    def test_read_enriched_allow_rule_puts_context_in_emitted_json(self):
+        """
+        Given a real Configuration governing Read with a structured allow
+            entry for '/tmp/**' carrying additionalContext = 'scratch only'
+        When main() processes a matching Read of '/tmp/test.txt'
+        Then the decision is 'allow' and the emitted JSON's hookSpecificOutput
+            carries 'additionalContext' == 'scratch only'
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Read"],
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Read([glob]/tmp/**)",
+                                    "additionalContext": "scratch only",
+                                }
+                            ],
+                            "deny": [],
+                        },
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/test.txt"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command") as mock_log:
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "allow",
+                            )
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["additionalContext"],
+                                "scratch only",
+                            )
+                            mock_log.assert_called_once()
+                            self.assertEqual(
+                                mock_log.call_args.kwargs["additional_context"],
+                                "scratch only",
+                            )
+
+    def test_error_path_no_command_provided_emits_no_additional_context(self):
+        """
+        Given a governed Bash config and a hook input with NO 'command' key
+            (an error/guard path -- there is no matched rule)
+        When main() processes the event
+        Then the decision is 'deny' and the emitted JSON's hookSpecificOutput
+            has no 'additionalContext' key at all
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Bash(git:*)",
+                                    "additionalContext": "prefer --short",
+                                }
+                            ],
+                            "deny": [],
+                        },
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch(
+                            "toolguard.hook.identify_current_agent",
+                            return_value={"agent_type": "main"},
+                        ):
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+
+                            output = json.loads(mock_stdout.getvalue())
+                            self.assertEqual(
+                                output["hookSpecificOutput"]["permissionDecision"],
+                                "deny",
+                            )
+                            self.assertNotIn(
+                                "additionalContext", output["hookSpecificOutput"]
+                            )
 
 
 class TestSettingsPathOverrideWarning(unittest.TestCase):
@@ -1823,6 +2256,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             extra_info="main",
             config={},
             permission_mode=None,
+            additional_context=None,
         )
 
     @patch("toolguard.hook.log_command")
@@ -1842,6 +2276,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             extra_info="main",
             config={},
             permission_mode=None,
+            additional_context=None,
         )
         mock_log.assert_any_call(
             "git log",
@@ -1850,6 +2285,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             extra_info="main",
             config={},
             permission_mode=None,
+            additional_context=None,
         )
 
     @patch("toolguard.hook.log_command")
@@ -1871,6 +2307,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             extra_info="sub-agent",
             config={},
             permission_mode=None,
+            additional_context=None,
         )
         mock_log.assert_any_call(
             "cat file",
@@ -1879,6 +2316,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             extra_info="sub-agent",
             config={},
             permission_mode=None,
+            additional_context=None,
         )
         mock_log.assert_any_call(
             "grep pat",
@@ -1887,6 +2325,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             extra_info="sub-agent",
             config={},
             permission_mode=None,
+            additional_context=None,
         )
 
 

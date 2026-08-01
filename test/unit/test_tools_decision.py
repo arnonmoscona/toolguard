@@ -711,3 +711,131 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         self.assertIn("rm -rf", sm.matched_rule)
         # hard-deny is pooled; no single provenance.
         self.assertIsNone(sm.provenance)
+
+
+class TestDecideAdditionalContext(_IsolatedEnvTestCase):
+    """
+    TOO-19 Phase 1, increment 6: Decision.additional_context is populated by
+    decide() for both the file-path and Bash branches, sourced directly from
+    FileResolution.additional_context / BashResolution.additional_context with
+    no re-derivation in decision.py.
+    """
+
+    def test_file_allow_structured_entry_surfaces_additional_context(self):
+        """
+        Given a Read allow structured entry for '/tmp/**' carrying
+            additionalContext = 'scratch space only'
+        When decide() is called with tool='Read' and a matching path
+        Then Decision.additional_context is 'scratch space only'
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Read([glob]/tmp/**)",
+                                    "additionalContext": "scratch space only",
+                                }
+                            ],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        result = decide(config, "Read", "/tmp/some/file.txt")
+        self.assertEqual("allow", result.verdict)
+        self.assertEqual("scratch space only", result.additional_context)
+
+    def test_file_plain_string_rule_yields_none_context(self):
+        """
+        Given a Read allow entry that is a plain string (no enrichment)
+        When decide() is called with tool='Read' and a matching path
+        Then Decision.additional_context is None
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        result = decide(config, "Read", "/tmp/some/file.txt")
+        self.assertEqual("allow", result.verdict)
+        self.assertIsNone(result.additional_context)
+
+    def test_bash_single_allow_structured_entry_surfaces_additional_context(self):
+        """
+        Given a Bash allow structured entry for 'git:*' carrying
+            additionalContext = 'prefer git status --short'
+        When decide() is called with tool='Bash' and a matching command
+        Then Decision.additional_context is 'prefer git status --short'
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Bash(git:*)",
+                                    "additionalContext": "prefer git status --short",
+                                }
+                            ],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        result = decide(config, "Bash", "git status")
+        self.assertEqual("allow", result.verdict)
+        self.assertEqual("prefer git status --short", result.additional_context)
+
+    def test_bash_plain_string_rule_yields_none_context(self):
+        """
+        Given a Bash allow entry that is a plain string (no enrichment)
+        When decide() is called with tool='Bash' and a matching command
+        Then Decision.additional_context is None
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        result = decide(config, "Bash", "git status")
+        self.assertEqual("allow", result.verdict)
+        self.assertIsNone(result.additional_context)
+
+    def test_positional_construction_of_decision_still_works(self):
+        """
+        Given the pre-existing positional field order of Decision (tool,
+            target, verdict, reason, provenance, sub_matches)
+        When a Decision is constructed positionally WITHOUT additional_context
+        Then it succeeds and additional_context defaults to None -- the new
+            field was appended LAST, so it never breaks positional callers
+        """
+        decision = Decision("Bash", "git status", "allow", "matched", None, None)
+        self.assertIsNone(decision.additional_context)
