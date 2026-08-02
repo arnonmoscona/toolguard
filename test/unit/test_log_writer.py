@@ -7,6 +7,7 @@ Tests the logging functionality including file creation, format, and content.
 import contextlib
 import io
 import json
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -720,6 +721,165 @@ class TestAdditionalContextLogging(unittest.TestCase):
                 entry = json.loads(lines[0])
 
                 self.assertNotIn("additional_context", entry)
+
+
+class TestLogFormatGoldenFile(unittest.TestCase):
+    """
+    TOO-19 m5 review "Recommended follow-ups": pin the on-disk log contract
+    (exact content, field/key order, falsy-omission) that
+    toolguard/tools/log_harvest.py and the audit skill parse. Every other
+    test in this module checks substrings or pairwise orderings; nothing
+    before this asserted a full entry's exact bytes. Covers markdown and
+    jsonlines, each with every optional field populated and with none, since
+    falsy-omission is part of the contract in both formats.
+
+    ``datetime.now()`` is patched to a single fixed value for the whole
+    class so the rendered entry (which embeds the current time in both the
+    filename and the entry body) is fully deterministic and comparable
+    byte-for-byte.
+    """
+
+    def setUp(self):
+        """Enable logging and pin datetime.now() to a fixed instant."""
+        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
+        self.env_patcher.start()
+        self.fixed_now = datetime(2026, 1, 15, 10, 30, 0)
+        self.datetime_patcher = patch("toolguard.log_writer.datetime")
+        mock_datetime = self.datetime_patcher.start()
+        mock_datetime.now.return_value = self.fixed_now
+
+    def tearDown(self):
+        """Undo the datetime and environment patches."""
+        self.datetime_patcher.stop()
+        self.env_patcher.stop()
+
+    def test_markdown_golden_all_optional_fields_populated(self):
+        """
+        Given every optional field (matched_rule, violated_rules,
+            permission_mode, note, additional_context, extra_info) is
+            populated
+        When a command is logged in markdown format
+        Then the file's content matches the exact expected markdown,
+            byte-for-byte, in Status/Command/Matched Rule/Violated
+            Rules/Permission Mode/Note/Context/Agent order
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "git push origin main",
+                "refused",
+                violated_rules=["git push:*", "**/.env/**"],
+                extra_info="main-agent",
+                log_dir=log_dir,
+                matched_rule="git push *",
+                note="pushed to protected branch",
+                permission_mode="default",
+                additional_context="be careful",
+            )
+
+            content = (log_dir / "toolguard-2026-01-15.md").read_text()
+
+            expected = (
+                "## 2026-01-15 10:30:00\n\n"
+                "- **Status**: REFUSED\n"
+                "- **Command**: `git push origin main`\n"
+                "- **Matched Rule**: `git push *`\n"
+                "- **Violated Rules**: `git push:*`, `**/.env/**`\n"
+                "- **Permission Mode**: `default`\n"
+                "- **Note**: pushed to protected branch\n"
+                "- **Context**: be careful\n"
+                "- **Agent**: main-agent\n"
+                "\n"
+            )
+            self.assertEqual(content, expected)
+
+    def test_markdown_golden_no_optional_fields(self):
+        """
+        Given no optional field is populated
+        When a command is logged in markdown format
+        Then the file contains only the mandatory heading, Status, and
+            Command lines, byte-for-byte, with every optional field omitted
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command("git status", "executed", log_dir=log_dir)
+
+            content = (log_dir / "toolguard-2026-01-15.md").read_text()
+
+            expected = (
+                "## 2026-01-15 10:30:00\n\n"
+                "- **Status**: EXECUTED\n"
+                "- **Command**: `git status`\n"
+                "\n"
+            )
+            self.assertEqual(content, expected)
+
+    def test_jsonlines_golden_all_optional_fields_populated(self):
+        """
+        Given every optional field is populated and jsonlines format is
+            selected
+        When a command is logged
+        Then the entry's keys equal, in exact insertion order, timestamp,
+            status, command, violated_rules, matched_rule, note,
+            extra_info, permission_mode, additional_context, with values
+            matching what was logged
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
+                log_command(
+                    "git push origin main",
+                    "refused",
+                    violated_rules=["git push:*", "**/.env/**"],
+                    extra_info="main-agent",
+                    log_dir=log_dir,
+                    matched_rule="git push *",
+                    note="pushed to protected branch",
+                    permission_mode="default",
+                    additional_context="be careful",
+                )
+
+            content = (log_dir / "toolguard-2026-01-15.jsonlines").read_text()
+
+            expected = {
+                "timestamp": "2026-01-15T10:30:00",
+                "status": "refused",
+                "command": "git push origin main",
+                "violated_rules": ["git push:*", "**/.env/**"],
+                "matched_rule": "git push *",
+                "note": "pushed to protected branch",
+                "extra_info": "main-agent",
+                "permission_mode": "default",
+                "additional_context": "be careful",
+            }
+            self.assertEqual(content, json.dumps(expected) + "\n\n")
+            entry = json.loads(content.strip())
+            self.assertEqual(list(entry.keys()), list(expected.keys()))
+
+    def test_jsonlines_golden_no_optional_fields(self):
+        """
+        Given no optional field is populated and jsonlines format is
+            selected
+        When a command is logged
+        Then the entry contains exactly timestamp, status, command, and an
+            empty violated_rules list, with every optional key omitted
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
+                log_command("git status", "executed", log_dir=log_dir)
+
+            content = (log_dir / "toolguard-2026-01-15.jsonlines").read_text()
+
+            expected = {
+                "timestamp": "2026-01-15T10:30:00",
+                "status": "executed",
+                "command": "git status",
+                "violated_rules": [],
+            }
+            self.assertEqual(content, json.dumps(expected) + "\n\n")
+            entry = json.loads(content.strip())
+            self.assertEqual(list(entry.keys()), list(expected.keys()))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,30 @@ This guide covers toolguard's pattern types, how matching works for each, path
 normalization, and compound-command handling. For where to put patterns (which file,
 standard vs. extended), see [Configuration](configuration.md#step-3-configure-permission-patterns).
 
+## Contents
+
+Written for lookup rather than a start-to-finish read: jump to the section that answers the
+question in front of you.
+
+- [Pattern types](#pattern-types) -- command patterns vs. file-path patterns, at a glance
+- [Command pattern examples](#command-pattern-examples)
+  - [DEFAULT patterns (standard)](#default-patterns-standard)
+  - [REGEX patterns](#regex-patterns)
+  - [GLOB patterns](#glob-patterns)
+  - [NATIVE patterns](#native-patterns)
+- [File path patterns (Read, Write, Edit)](#file-path-patterns-read-write-edit)
+- [Path normalization](#path-normalization)
+- [Compound and multi-line commands](#compound-and-multi-line-commands)
+  - [The governing principle: when in doubt, ASK](#the-governing-principle-when-in-doubt-ask)
+  - [Operators](#operators)
+  - [Multi-line commands and scripts](#multi-line-commands-and-scripts)
+  - [Command substitution and subshells](#command-substitution-and-subshells)
+  - [Heredocs and the `__HEREDOC_TO_<sink>__` sentinel](#heredocs-and-the-__heredoc_to_sink__-sentinel)
+  - [Inline interpreter code (`-c` / `-e` / `-r`)](#inline-interpreter-code--c---e---r)
+  - [Control structures](#control-structures)
+  - [Process substitution](#process-substitution)
+  - [Limitations (summary)](#limitations-summary)
+
 ## Pattern types
 
 Toolguard supports two categories of pattern matching.
@@ -185,8 +209,8 @@ undecomposed blob and never to a hard failure that would block a legitimate work
 the single most important thing to understand about how multi-line input is handled.
 
 ASK is the **default**, not a hardcoded outcome: the `undecidable_fallback` config key
-controls the floor level (`"ask"` default, `"deny"`, or `"allow_with_warning"` -- the last one
-removes this guarantee and is flagged by `toolguard-audit`). See
+controls the floor level (`"ask"` default, `"deny"`, or `"allow_with_warning"`/`"allow"` --
+the latter two remove this guarantee and are flagged by `toolguard-audit`). See
 [Configuration: Undecidable fallback](configuration.md#undecidable-fallback) and
 [Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
 

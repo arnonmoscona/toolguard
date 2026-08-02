@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shlex
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -540,6 +541,228 @@ class TestWriteConfig(InstallerTestCase):
 
 
 # ---------------------------------------------------------------------------
+# PreToolUse hook hardening helpers (TOO-19)
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_venv_bin(tmpdir: Path, python_name="python3", executable=True):
+    """
+    Build a fake ``<tmpdir>/bin/toolguard`` console script plus a
+    ``<tmpdir>/bin/<python_name>`` sibling, mirroring a real venv's ``bin/``
+    layout. Returns the console-script path.
+    """
+    bin_dir = tmpdir / "bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "toolguard"
+    binary.write_text("#!/bin/sh\n")
+    python_path = bin_dir / python_name
+    python_path.write_text("#!/bin/sh\n")
+    if executable:
+        os.chmod(python_path, 0o755)
+    return binary
+
+
+def _make_fake_venv_bin_with_space(tmpdir: Path, space_dirname: str) -> Path:
+    """
+    Build a fake ``<tmpdir>/<space_dirname>/bin/toolguard`` console script plus
+    an executable ``python3`` sibling, where *space_dirname* (a directory
+    component containing a literal space, e.g. a relocated venv or a macOS
+    path under a directory with a space) sits between *tmpdir* and ``bin/`` --
+    mirroring the TOO-19 code review M2 repro scenario. Returns the
+    console-script path.
+    """
+    bin_dir = tmpdir / space_dirname / "bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "toolguard"
+    binary.write_text("#!/bin/sh\n")
+    python_path = bin_dir / "python3"
+    python_path.write_text("#!/bin/sh\n")
+    os.chmod(python_path, 0o755)
+    return binary
+
+
+class TestToolVenvPython(unittest.TestCase):
+    """Tests for installer_module._tool_venv_python."""
+
+    def test_finds_python3_sibling(self):
+        """
+        Given a binary path whose real bin/ directory has an executable python3
+        When _tool_venv_python runs
+        Then it returns that sibling's absolute path
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(Path(d), python_name="python3")
+            result = installer_module._tool_venv_python(str(binary))
+            self.assertEqual(Path(result).name, "python3")
+            self.assertTrue(Path(result).exists())
+
+    def test_falls_back_to_plain_python_sibling(self):
+        """
+        Given a binary path whose bin/ directory has only 'python' (no 'python3')
+        When _tool_venv_python runs
+        Then it returns the 'python' sibling
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(Path(d), python_name="python")
+            result = installer_module._tool_venv_python(str(binary))
+        self.assertEqual(Path(result).name, "python")
+
+    def test_no_sibling_python_returns_none(self):
+        """
+        Given a binary path whose bin/ directory has no python/python3 sibling
+        When _tool_venv_python runs
+        Then it returns None -- never a guess
+        """
+        with TemporaryDirectory() as d:
+            bin_dir = Path(d) / "bin"
+            bin_dir.mkdir()
+            binary = bin_dir / "toolguard"
+            binary.write_text("#!/bin/sh\n")
+            self.assertIsNone(installer_module._tool_venv_python(str(binary)))
+
+    def test_non_executable_sibling_is_not_used(self):
+        """
+        Given a python3 sibling exists but is NOT executable, and no other
+        candidate exists
+        When _tool_venv_python runs
+        Then it returns None rather than an unusable path
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(
+                Path(d), python_name="python3", executable=False
+            )
+            self.assertIsNone(installer_module._tool_venv_python(str(binary)))
+
+    def test_nonexistent_binary_path_returns_none(self):
+        """
+        Given a --binary path that does not exist on disk at all (e.g. a test
+        fixture's fake path, or a broken installation)
+        When _tool_venv_python runs
+        Then it returns None -- never a guess, never raises
+        """
+        self.assertIsNone(
+            installer_module._tool_venv_python("/definitely/does/not/exist/toolguard")
+        )
+
+
+class TestHardenedHookCommand(unittest.TestCase):
+    """Tests for installer_module._hardened_hook_command."""
+
+    def test_hardened_form_when_venv_python_is_found(self):
+        """
+        Given a binary whose bin/ directory has an executable python3 sibling
+        When _hardened_hook_command runs
+        Then it returns the '-E -P -m toolguard.hook' form and hardened=True
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(Path(d))
+            command, hardened = installer_module._hardened_hook_command(str(binary))
+        self.assertTrue(hardened)
+        self.assertIn("-E -P -m toolguard.hook", command)
+        self.assertTrue(command.endswith("-E -P -m toolguard.hook"))
+
+    def test_falls_back_to_bare_binary_when_venv_python_not_found(self):
+        """
+        Given a binary with no locatable venv python (e.g. a test fixture's
+        fake, nonexistent path)
+        When _hardened_hook_command runs
+        Then it returns the bare binary path unchanged and hardened=False
+        """
+        command, hardened = installer_module._hardened_hook_command("/fake/toolguard")
+        self.assertFalse(hardened)
+        self.assertEqual(command, "/fake/toolguard")
+
+
+class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
+    """
+    TOO-19 code review 2026-08-02, Major finding M2: the hardened hook
+    command was written unquoted into a shell string; a space in the
+    interpreter path produced the exact silent fail-open the hardening
+    exists to prevent.
+
+    Given an interpreter path containing a space,
+    ``_hardened_hook_command`` must write it QUOTED, and
+    ``_hook_registration_findings`` must parse it back correctly,
+    round-tripping through the exact JSON-embedded-shell-string path Claude
+    Code uses.
+    """
+
+    def test_hardened_command_quotes_a_space_containing_interpreter_path(self):
+        """
+        Given a venv python sibling under a directory with a space in its name
+        When _hardened_hook_command builds the registration command
+        Then the interpreter path is shell-quoted (shlex.split recovers
+            exactly one token for it, not two) and marked hardened
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin_with_space(Path(d), "my venv")
+            command, hardened = installer_module._hardened_hook_command(str(binary))
+
+        self.assertTrue(hardened)
+        tokens = shlex.split(command)
+        # If the path were written unquoted, shlex.split (and, in real use, the
+        # shell Claude Code hands the command to) would split "my venv" into
+        # TWO argv words and the launch would fail -- exactly the fail-open
+        # M2 describes. Quoted, it recovers as ONE token ending in bin/python3.
+        self.assertTrue(tokens[0].endswith("bin/python3"))
+        self.assertIn("my venv", tokens[0])
+        self.assertEqual(tokens[1:], ["-E", "-P", "-m", "toolguard.hook"])
+
+    def test_hardened_command_build_then_parse_round_trips_for_space_path(self):
+        """
+        Given the exact command string _hardened_hook_command wrote for a
+            space-containing interpreter path
+        When _hook_registration_findings parses a settings.json containing
+            that command back
+        Then it reports hardened=True and interpreter_missing=False -- NOT a
+            false "BROKEN" diagnostic from misreading the quoted path as two
+            tokens (M2's second half: register-hooks quotes it, but a naive
+            command.split()[0] on read-back would still misdiagnose it)
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin_with_space(Path(d), "my venv")
+            command, hardened = installer_module._hardened_hook_command(str(binary))
+            self.assertTrue(hardened)
+
+            settings_path = Path(d) / "settings.json"
+            settings_path.write_text(
+                '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": '
+                '[{"type": "command", "command": %s}]}]}}' % json.dumps(command)
+            )
+            findings = installer_module._hook_registration_findings(settings_path)
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertTrue(finding["hardened"])
+        self.assertFalse(
+            finding["interpreter_missing"],
+            "quoted space-containing interpreter path misread as missing "
+            "(a false BROKEN diagnostic) -- M2 regressed",
+        )
+
+    def test_findings_still_flags_a_genuinely_missing_interpreter(self):
+        """
+        Given a hardened command naming an interpreter path that does NOT
+            exist on disk (space in the path, but the venv was removed)
+        When _hook_registration_findings runs
+        Then interpreter_missing is True -- the M2 fix must not silently
+            swallow a REAL broken-hook diagnostic while fixing the false one
+        """
+        with TemporaryDirectory() as d:
+            missing_path = str(Path(d) / "my venv" / "bin" / "python3")
+            command = f"{shlex.quote(missing_path)} -E -P -m toolguard.hook"
+            settings_path = Path(d) / "settings.json"
+            settings_path.write_text(
+                '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": '
+                '[{"type": "command", "command": %s}]}]}}' % json.dumps(command)
+            )
+            findings = installer_module._hook_registration_findings(settings_path)
+
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0]["interpreter_missing"])
+
+
+# ---------------------------------------------------------------------------
 # register-hooks
 # ---------------------------------------------------------------------------
 
@@ -724,6 +947,59 @@ class TestRegisterHooks(InstallerTestCase):
 
         after = self.journal_indices()
         self.assertEqual(len(after), len(before) + 1)
+
+    def test_hardened_form_registered_when_venv_python_is_locatable(self):
+        """
+        TOO-19: Given --binary points at a real console-script whose bin/
+            directory has an executable python3 sibling (a real venv shape)
+        When register-hooks runs
+        Then the registered PreToolUse command is the hardened
+        '<python3> -E -P -m toolguard.hook' form, NOT the bare binary
+        """
+        binary = _make_fake_venv_bin(self.home / "fakevenv")
+        code, out = self.run_cli(
+            [
+                "register-hooks",
+                "--scope",
+                "user",
+                "--binary",
+                str(binary),
+                "--governed-tools",
+                "Bash",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads((self.home / ".claude" / "settings.json").read_text())
+        command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(command.endswith("-E -P -m toolguard.hook"))
+        self.assertNotEqual(command, str(binary))
+        self.assertIn("hardened", out)
+
+    def test_unhardened_fallback_when_venv_python_not_locatable(self):
+        """
+        TOO-19: Given --binary is a fake path with no locatable venv python
+            (the existing fixture shape used throughout this test class)
+        When register-hooks runs
+        Then the registered PreToolUse command is the bare --binary path,
+        UNCHANGED -- confirms the fallback keeps a working (if unhardened)
+        registration instead of writing an unverified interpreter path
+        """
+        code, out = self.run_cli(
+            [
+                "register-hooks",
+                "--scope",
+                "user",
+                "--binary",
+                "/fake/toolguard",
+                "--governed-tools",
+                "Bash",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads((self.home / ".claude" / "settings.json").read_text())
+        command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(command, "/fake/toolguard")
+        self.assertIn("UNHARDENED", out)
 
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1291,47 @@ class TestEnableTakeover(InstallerTestCase):
         self.assertEqual(code, 0)
         text = (self.home / ".claude" / "toolguard_hook.toml").read_text()
         self.assertIn('no_match_fallback = "deny"', text)
+
+    def test_sets_allow_fallback(self):
+        """
+        Given a base config already exists
+        When enable-takeover is run with --no-match-fallback allow (TOO-19)
+        Then no_match_fallback is written as 'allow'
+        """
+        self._write_base_config()
+
+        code, out = self.run_cli(
+            ["enable-takeover", "--scope", "user", "--no-match-fallback", "allow"]
+        )
+
+        self.assertEqual(code, 0)
+        text = (self.home / ".claude" / "toolguard_hook.toml").read_text()
+        self.assertIn('no_match_fallback = "allow"', text)
+
+    def test_sets_allow_with_no_warnings_fallback(self):
+        """
+        Given a base config already exists
+        When enable-takeover is run with --no-match-fallback
+            allow_with_no_warnings (TOO-19's long-form alias)
+        Then no_match_fallback is written verbatim as
+            'allow_with_no_warnings' -- the CLI writes the raw choice as-is;
+            normalization to 'allow' happens at resolution time, not here
+        """
+        self._write_base_config()
+
+        code, out = self.run_cli(
+            [
+                "enable-takeover",
+                "--scope",
+                "user",
+                "--no-match-fallback",
+                "allow_with_no_warnings",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        text = (self.home / ".claude" / "toolguard_hook.toml").read_text()
+        self.assertIn('no_match_fallback = "allow_with_no_warnings"', text)
 
     def test_missing_base_config_is_rejected(self):
         """
@@ -2462,6 +2779,199 @@ class TestSkillsStatus(InstallerTestCase):
             self.assertIn("scope", entry)
             self.assertIn("path", entry)
             self.assertIn("status", entry)
+
+    def test_no_settings_files_reports_no_hook_registrations(self):
+        """
+        TOO-19: Given neither settings.json nor settings.local.json exists
+        When skills-status runs
+        Then hook_registrations is an empty list
+        """
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["hook_registrations"], [])
+
+    def test_unhardened_registration_is_reported(self):
+        """
+        TOO-19: Given settings.json has a bare-binary (unhardened) toolguard
+            PreToolUse registration
+        When skills-status runs
+        Then hook_registrations reports it with hardened=False
+        """
+        claude_dir = self.home / ".claude"
+        claude_dir.mkdir(parents=True)
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/home/x/.local/bin/toolguard",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(json.dumps(settings))
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        user_regs = [r for r in data["hook_registrations"] if r["scope"] == "user"]
+        self.assertEqual(len(user_regs), 1)
+        self.assertFalse(user_regs[0]["hardened"])
+        self.assertEqual(user_regs[0]["matcher"], "Bash")
+
+    def test_hardened_registration_with_existing_interpreter_is_reported_clean(self):
+        """
+        TOO-19: Given settings.json has a hardened registration whose
+            interpreter path DOES exist on disk
+        When skills-status runs
+        Then hardened=True and interpreter_missing=False
+        """
+        claude_dir = self.home / ".claude"
+        claude_dir.mkdir(parents=True)
+        python_path = self.home / "fake-python3"
+        python_path.write_text("#!/bin/sh\n")
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f"{python_path} -E -P -m toolguard.hook",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(json.dumps(settings))
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        user_regs = [r for r in data["hook_registrations"] if r["scope"] == "user"]
+        self.assertEqual(len(user_regs), 1)
+        self.assertTrue(user_regs[0]["hardened"])
+        self.assertFalse(user_regs[0]["interpreter_missing"])
+
+    def test_hardened_registration_with_missing_interpreter_is_flagged(self):
+        """
+        TOO-19: Given settings.json has a hardened registration whose recorded
+            interpreter path no longer exists on disk (the exact silent
+            fail-open risk hardening's own docstring warns about)
+        When skills-status runs
+        Then hardened=True and interpreter_missing=True, and the text summary
+        calls it out as BROKEN
+        """
+        claude_dir = self.home / ".claude"
+        claude_dir.mkdir(parents=True)
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    "/no/longer/there/python3 -E -P -m toolguard.hook"
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(json.dumps(settings))
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            ["skills-status", "--project-dir", str(self.project_dir)]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("BROKEN", out)
+
+        code, out_json = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+        data = json.loads(out_json)
+        user_regs = [r for r in data["hook_registrations"] if r["scope"] == "user"]
+        self.assertTrue(user_regs[0]["hardened"])
+        self.assertTrue(user_regs[0]["interpreter_missing"])
+
+    def test_non_toolguard_command_is_not_reported(self):
+        """
+        TOO-19: Given a PreToolUse hook registered for an UNRELATED command
+        When skills-status runs
+        Then it does not appear in hook_registrations
+        """
+        claude_dir = self.home / ".claude"
+        claude_dir.mkdir(parents=True)
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "some-other-tool"}],
+                    }
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(json.dumps(settings))
+
+        self._mock_git_up_to_date()
+        code, out = self.run_cli(
+            [
+                "skills-status",
+                "--project-dir",
+                str(self.project_dir),
+                "--format",
+                "json",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["hook_registrations"], [])
 
 
 class TestSeedCommandsWithStructuredEntries(InstallerTestCase):

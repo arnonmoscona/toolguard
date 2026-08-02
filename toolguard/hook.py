@@ -305,44 +305,49 @@ def _log_conflict_override(target, override, log_dir) -> None:
     log_conflict(_format_conflict_message(target, override), corrective, log_dir)
 
 
-#: Marker substrings (TOO-19 code review m6) that identify an 'allow' reason
-#: as having come from the ``allow_with_warning`` value of one of the two
-#: fallback settings, rather than from an explicit rule. Both markers are
-#: exact, already-tested wording embedded verbatim in the reason strings
-#: produced by config.py's ``resolved_no_match_fallback`` path and
-#: compound.py's ``undecidable_fallback`` ask-floor/segment paths (see
-#: test_configuration.py / test_compound.py) -- a substring containment
-#: check, not the prefix/suffix extraction m3 flagged as fragile, since
-#: nothing here needs to be RECOVERED from the reason, only detected.
-_ALLOW_WITH_WARNING_MARKERS = (
-    "no_match_fallback=allow_with_warning",
-    "undecidable_fallback=allow_with_warning",
-)
-
-
-def _log_fallback_allow_warning(reason: str, log_dir) -> None:
+def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) -> None:
     """
     Route an ``allow_with_warning``-fallback 'allow' decision to the WARNING
-    log stream (TOO-19 code review m6).
+    log stream (TOO-19 code review m6; TOO-19 allow/allow_with_no_warnings
+    follow-up).
 
     ``docs/configuration.md`` promises that ``allow_with_warning`` will
     "allow the command but log a warning" for BOTH ``no_match_fallback`` and
     ``undecidable_fallback``. Previously that promise was kept only in the
     permission-decision ``reason`` string (visible in the resolution log and
     the permission prompt) -- it never reached
-    :func:`toolguard.error_log.log_warning`'s dedicated WARNING stream. This
-    detects either fallback setting's marker wording in *reason* and, when
-    found, writes the warning stream entry too. A no-op when *log_dir* is
-    unresolved or the reason carries neither marker (the common case: an
-    explicit allow rule matched).
+    :func:`toolguard.error_log.log_warning`'s dedicated WARNING stream.
+
+    *fallback_warning* is real data carried by the resolver result
+    (:attr:`~toolguard.config_types.ResolvedDecision.fallback_warning` /
+    :attr:`~toolguard.resolve.FileResolution.fallback_warning` /
+    :attr:`~toolguard.resolve.BashResolution.fallback_warning`) -- this
+    function does not inspect *reason* itself to decide whether to log. For
+    the Bash path, that structured flag is computed per-sub-command inside
+    :func:`toolguard.compound.resolve_compound_permission_detailed` (TOO-19
+    code review M1) -- and only a single narrow spot there still resorts to a
+    marker-substring check, immediately after ``resolve_one`` returns and
+    before any multi-leaf summarisation, rather than downstream on the
+    already-summarised compound reason (see that function and
+    :func:`toolguard.compound._combine_strictest` for why the OLD downstream
+    check silently lost the warning -- and misattributed the allow to a
+    fabricated rule -- for a multi-leaf all-allow compound). Either way the
+    hook layer -- the thing this project's own CLAUDE.md most wants kept
+    honest -- reads a plain boolean instead of parsing prose itself.
+    Critically, this means the new
+    ``no_match_fallback='allow'``/``'allow_with_no_warnings'`` values
+    (TOO-19) -- which allow with NO warning by design -- can never
+    accidentally trip this: their *fallback_warning* is always ``False``,
+    regardless of what their reason text says.
 
     Args:
+        fallback_warning: Whether *reason* should be routed to the WARNING
+            stream -- ``True`` only for an 'allow' produced by
+            ``allow_with_warning``.
         reason: The permission-decision reason string for an 'allow' decision.
         log_dir: Directory for the warning log, or None (no-op).
     """
-    if not log_dir:
-        return
-    if not any(marker in reason for marker in _ALLOW_WITH_WARNING_MARKERS):
+    if not log_dir or not fallback_warning:
         return
     log_warning(
         reason,
@@ -615,6 +620,377 @@ def _print_not_a_standalone_command_message() -> None:
     )
 
 
+def _warn_if_settings_path_override() -> None:
+    """
+    Warn on stderr when ``CLAUDE_SETTINGS_PATH`` puts toolguard in single-file mode.
+
+    Single-file override footgun (TOO-15): CLAUDE_SETTINGS_PATH makes toolguard
+    read ONE settings file for EVERY directory, bypassing the whole hierarchy. As
+    a persistently-exported shell variable it silently lets one project's config
+    govern the entire machine (and, if that config is fail-closed takeover, can
+    lock it out). Surface it on stderr so the bypass is never invisible.
+    """
+    settings_path_override = os.environ.get("CLAUDE_SETTINGS_PATH")
+    if not settings_path_override:
+        return
+    print(
+        "[TOOLGUARD WARNING] CLAUDE_SETTINGS_PATH is set "
+        f"({settings_path_override}). Toolguard is in single-file mode: the "
+        "configuration hierarchy is BYPASSED -- only this file and its adjacent "
+        "toolguard_hook.toml govern every directory. If this is unintended, "
+        "unset CLAUDE_SETTINGS_PATH.",
+        file=sys.stderr,
+    )
+
+
+def _log_config_discovery(config, env_config: Dict[str, Any]) -> None:
+    """
+    Emit a config-discovery diagnostic when the discovered levels changed.
+
+    Writes "discovered N config levels: <level: path>, ..." to the resolution
+    log when the set differs from the last recorded entry for this project root
+    (TOO-8 Phase 4, M2; TOO-19). toolguard is a fresh process on every tool
+    call, so there is no in-process "once per session" -- the change-detecting
+    JSONL log inside :func:`log_discovery` is the guard instead, and it is a
+    no-op (writes nothing) when nothing changed.
+
+    Args:
+        config: The resolved configuration whose levels are described.
+        env_config: Environment configuration dict carrying ``log_dir`` and
+            ``project_root``. A no-op when no log dir is resolved.
+    """
+    disco_log_dir = env_config.get("log_dir")
+    if not disco_log_dir:
+        return
+    log_discovery(
+        list(config.describe_levels()),
+        disco_log_dir,
+        str(env_config.get("project_root", "")),
+    )
+
+
+def _announce_takeover_state(takeover, log_dir) -> None:
+    """
+    Surface takeover-mode status: the enabled warning, or a cross-level conflict.
+
+    On a cross-level ``takeover_mode.enabled`` disagreement (TOO-8 Phase 5)
+    ``enabled`` is already fail-safe OFF; the conflict is recorded to the
+    conflict log and a once-per-session warning is surfaced. The downstream
+    path is already the safe one (native prompts active).
+
+    Args:
+        takeover: The resolved :class:`~toolguard.config.TakeoverConfig`.
+        log_dir: Directory for the warning/conflict logs, or None (no-op).
+    """
+    if not log_dir:
+        return
+    if takeover.enabled:
+        issue_takeover_warning(log_dir, to_stdout=True)
+        return
+
+    global _takeover_conflict_logged
+    if takeover.conflict is None or _takeover_conflict_logged:
+        return
+    _takeover_conflict_logged = True
+    _log_takeover_enabled_conflict(takeover.conflict, log_dir)
+    issue_takeover_warning(log_dir, to_stdout=True)
+
+
+def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve takeover mode, announce its state, and return the legacy dict form.
+
+    The divergence/auto-migration tooling still consumes a plain dict, so it is
+    built from the resolved ``TakeoverConfig`` here and those clients stay
+    unchanged.
+
+    Args:
+        config: The resolved configuration.
+        env_config: Environment configuration dict (for ``log_dir``).
+
+    Returns:
+        The takeover settings as the plain dict those clients expect.
+    """
+    takeover = config.takeover_mode()
+    _announce_takeover_state(takeover, env_config.get("log_dir"))
+    return {
+        "enabled": takeover.enabled,
+        "ignored_allow_patterns": list(takeover.ignored_allow_patterns),
+        "additional_ignored_patterns": list(takeover.additional_ignored_patterns),
+        "no_match_fallback": takeover.no_match_fallback,
+    }
+
+
+def _run_divergence_check(
+    config, env_config: Dict[str, Any], takeover_dict: Dict[str, Any]
+) -> None:
+    """
+    Check for config divergence once per session, auto-migrating when configured.
+
+    When divergent patterns are found and ``config_sync.auto_migrate`` is set,
+    consolidation runs; otherwise the warning has already been shown by
+    :func:`check_and_warn_divergence`.
+
+    Args:
+        config: The resolved configuration.
+        env_config: Environment configuration dict (for ``log_dir``).
+        takeover_dict: Takeover settings in the plain-dict form these clients take.
+    """
+    global _divergence_check_done
+    if _divergence_check_done:
+        return
+    _divergence_check_done = True
+
+    log_dir = env_config.get("log_dir")
+    if not log_dir:
+        return
+    project_root = config.project_root
+    if project_root is None:
+        return
+
+    divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_dict)
+    if not divergent_patterns:
+        return
+
+    config_sync = config.config_sync_settings()
+    if config_sync["auto_migrate"]:
+        run_auto_migration(project_root, log_dir, dict(config_sync), takeover_dict)
+
+
+def _agent_info_for(hook_data: Dict[str, Any]) -> str:
+    """
+    Identify the invoking agent for logging purposes.
+
+    Args:
+        hook_data: The parsed hook event (read for ``transcript_path``).
+
+    Returns:
+        The subagent's name when the call came from a subagent, else ``"main"``.
+    """
+    agent_context = identify_current_agent(hook_data.get("transcript_path", ""))
+    return (
+        agent_context["subagent_name"]
+        if agent_context["agent_type"] == "subagent"
+        else "main"
+    )
+
+
+def _log_non_allow_decision(
+    log_target: str,
+    decision: str,
+    reason: str,
+    agent_info: str,
+    env_config: Dict[str, Any],
+    permission_mode: Optional[str],
+    additional_context: Optional[str],
+) -> None:
+    """
+    Write the resolution-log entry for an 'ask' or 'deny' verdict.
+
+    Identical for file-path tools and command tools, so both call this. An
+    'ask' is recorded under ``note`` (it is not a violation); a deny records
+    the violated rule extracted from the reason.
+
+    Args:
+        log_target: What is being logged -- a command, or ``Tool(path)``.
+        decision: ``'ask'`` or the deny verdict.
+        reason: The permission-decision reason string.
+        agent_info: Agent identification string.
+        env_config: Environment configuration dict.
+        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
+        additional_context: The winning rule's ``additionalContext`` enrichment.
+    """
+    if decision == "ask":
+        log_command(
+            log_target,
+            "ask",
+            note=reason,
+            extra_info=agent_info,
+            config=env_config,
+            permission_mode=permission_mode,
+            additional_context=additional_context,
+        )
+        return
+
+    # Extract violated rule from reason for logging
+    violated_rules = [reason.split(": ", 1)[1] if ": " in reason else reason]
+    log_command(
+        log_target,
+        "refused",
+        violated_rules,
+        extra_info=agent_info,
+        config=env_config,
+        permission_mode=permission_mode,
+        additional_context=additional_context,
+    )
+
+
+def _handle_file_path_tool(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    config,
+    env_config: Dict[str, Any],
+    agent_info: str,
+    permission_mode: Optional[str],
+) -> Tuple[str, str, Optional[str]]:
+    """
+    Resolve and log a file-path tool event (Read, Write, Edit).
+
+    Resolves the file path permission via the more-specific-wins level cascade.
+    No early "no allow configured" short-circuit here (TOO-15): an entirely
+    unconfigured tool resolves to 'ask' and a configured-but-non-matching tool
+    resolves per ``no_match_fallback`` -- both are decided centrally inside
+    ``resolve_file_path_permission_detailed`` /
+    ``Configuration.resolve_permission_detailed``, so the hook and
+    ``toolguard.tools.decision.decide()`` cannot drift apart.
+
+    Args:
+        tool_name: The file tool being invoked.
+        tool_input: The tool input dict (read for ``file_path``).
+        config: The resolved configuration.
+        env_config: Environment configuration dict.
+        agent_info: Agent identification string.
+        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
+
+    Returns:
+        A ``(decision, reason, additional_context)`` triple for the caller to
+        render as the hook's JSON output.
+    """
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        log_command(
+            f"{tool_name}()",
+            "refused",
+            ["no file_path provided"],
+            extra_info=agent_info,
+            config=env_config,
+            permission_mode=permission_mode,
+        )
+        return "deny", "No file_path provided in tool input", None
+
+    extended_syntax = env_config.get("extended_syntax", True)
+    result = resolve_file_path_permission_detailed(
+        tool_name, file_path, config, extended_syntax
+    )
+    log_target = f"{tool_name}({file_path})"
+
+    if result.decision == "allow":
+        # Conflict: a more-specific allow overrode a less-specific deny.
+        _log_conflict_override(log_target, result.override, env_config.get("log_dir"))
+        _log_fallback_allow_warning(
+            result.fallback_warning, result.reason, env_config.get("log_dir")
+        )
+        matched_rule = (
+            result.reason.split(": ", 1)[1] if ": " in result.reason else None
+        )
+        log_command(
+            log_target,
+            "executed",
+            matched_rule=matched_rule,
+            extra_info=agent_info,
+            config=env_config,
+            permission_mode=permission_mode,
+            additional_context=result.additional_context,
+        )
+    else:
+        _log_non_allow_decision(
+            log_target,
+            result.decision,
+            result.reason,
+            agent_info,
+            env_config,
+            permission_mode,
+            result.additional_context,
+        )
+
+    return result.decision, result.reason, result.additional_context
+
+
+def _handle_command_tool(
+    tool_input: Dict[str, Any],
+    config,
+    env_config: Dict[str, Any],
+    agent_info: str,
+    permission_mode: Optional[str],
+) -> Tuple[str, str, Optional[str]]:
+    """
+    Resolve and log a command tool event (Bash, MCP terminals).
+
+    Command tools all resolve against the Bash permission patterns. No early
+    "no allow configured" short-circuit here (TOO-15): an entirely unconfigured
+    Bash resolves to 'ask' and a configured-but-non-matching Bash resolves per
+    ``no_match_fallback`` (default 'ask'; 'deny' fails closed;
+    'allow_with_warning' -- or its deprecated 'warn_deny' alias -- auto-allows
+    with a warning; 'allow' -- or its 'allow_with_no_warnings' alias, TOO-19 --
+    auto-allows with NO warning) -- all decided centrally inside
+    ``resolve_bash_permission_detailed`` / ``Configuration.resolve_permission_detailed``
+    so the hook and ``toolguard.tools.decision.decide()`` cannot drift apart.
+
+    Resolution is more-specific-wins: each sub-command of a compound command
+    cascades independently through the levels; the compound is allowed iff all
+    are. The unoverridable ``[hard_deny]`` pool is checked FIRST per
+    sub-command, so a compound is hard-denied if ANY sub-command is hard-denied.
+
+    Args:
+        tool_input: The tool input dict (read for ``command``).
+        config: The resolved configuration.
+        env_config: Environment configuration dict.
+        agent_info: Agent identification string.
+        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
+
+    Returns:
+        A ``(decision, reason, additional_context)`` triple for the caller to
+        render as the hook's JSON output.
+    """
+    command = tool_input.get("command", "")
+    if not command:
+        log_command(
+            command,
+            "refused",
+            ["no command provided"],
+            extra_info=agent_info,
+            config=env_config,
+            permission_mode=permission_mode,
+        )
+        return "deny", "No command provided in tool input", None
+
+    extended_syntax = env_config.get("extended_syntax", True)
+    hd_deny, hd_allow = config.hard_deny("Bash")
+    result = resolve_bash_permission_detailed(
+        command, config, extended_syntax, hd_deny, hd_allow
+    )
+
+    if result.decision == "allow":
+        # Conflict logging: any sub-command whose more-specific allow overrode
+        # a less-specific deny is recorded to the conflict stream.
+        conflict_log_dir = env_config.get("log_dir")
+        for sub_command, override in result.overrides:
+            _log_conflict_override(sub_command, override, conflict_log_dir)
+        _log_fallback_allow_warning(
+            result.fallback_warning, result.reason, conflict_log_dir
+        )
+        _log_allowed_command(
+            command,
+            result.reason,
+            agent_info,
+            env_config,
+            permission_mode,
+            result.additional_context,
+        )
+    else:
+        _log_non_allow_decision(
+            command,
+            result.decision,
+            result.reason,
+            agent_info,
+            env_config,
+            permission_mode,
+            result.additional_context,
+        )
+
+    return result.decision, result.reason, result.additional_context
+
+
 def main() -> None:
     """
     Main hook entry point.
@@ -678,90 +1054,14 @@ def main() -> None:
         # config module; the hook only consumes semantic accessors from here on.
         config = load_configuration(cwd)
 
-        # Single-file override footgun (TOO-15): CLAUDE_SETTINGS_PATH makes toolguard
-        # read ONE settings file for EVERY directory, bypassing the whole hierarchy. As
-        # a persistently-exported shell variable it silently lets one project's config
-        # govern the entire machine (and, if that config is fail-closed takeover, can
-        # lock it out). Surface it on stderr so the bypass is never invisible.
-        settings_path_override = os.environ.get("CLAUDE_SETTINGS_PATH")
-        if settings_path_override:
-            print(
-                "[TOOLGUARD WARNING] CLAUDE_SETTINGS_PATH is set "
-                f"({settings_path_override}). Toolguard is in single-file mode: the "
-                "configuration hierarchy is BYPASSED -- only this file and its adjacent "
-                "toolguard_hook.toml govern every directory. If this is unintended, "
-                "unset CLAUDE_SETTINGS_PATH.",
-                file=sys.stderr,
-            )
-
-        # Emit a config-discovery diagnostic to the resolution log when the
-        # discovered levels changed since the last recorded entry for this
-        # project root (TOO-8 Phase 4, M2; TOO-19): "discovered N config
-        # levels: <level: path>, ...". toolguard is a fresh process on every
-        # tool call, so there is no in-process "once per session" -- the
-        # change-detecting JSONL log inside log_discovery is the guard
-        # instead, and it is a no-op (writes nothing) when nothing changed.
-        disco_log_dir = env_config.get("log_dir")
-        if disco_log_dir:
-            log_discovery(
-                list(config.describe_levels()),
-                disco_log_dir,
-                str(env_config.get("project_root", "")),
-            )
+        _warn_if_settings_path_override()
+        _log_config_discovery(config, env_config)
 
         # Run startup validation (once per session), reusing the loaded config.
         _run_startup_validation(env_config, cwd, config)
 
-        # Resolve takeover mode configuration and issue warning if enabled
-        takeover = config.takeover_mode()
-        if takeover.enabled:
-            log_dir = env_config.get("log_dir")
-            if log_dir:
-                issue_takeover_warning(log_dir, to_stdout=True)
-        elif takeover.conflict is not None:
-            # Cross-level disagreement on takeover_mode.enabled (TOO-8 Phase 5):
-            # enabled is already fail-safe OFF. Record the conflict to the
-            # conflict log and surface a once-per-session warning. The downstream
-            # path is already the safe one (native prompts active).
-            log_dir = env_config.get("log_dir")
-            if log_dir:
-                global _takeover_conflict_logged
-                if not _takeover_conflict_logged:
-                    _takeover_conflict_logged = True
-                    _log_takeover_enabled_conflict(takeover.conflict, log_dir)
-                    issue_takeover_warning(log_dir, to_stdout=True)
-
-        # Divergence/auto-migration tooling still consumes a plain dict; build it
-        # from the resolved TakeoverConfig so those clients stay unchanged.
-        takeover_dict = {
-            "enabled": takeover.enabled,
-            "ignored_allow_patterns": list(takeover.ignored_allow_patterns),
-            "additional_ignored_patterns": list(takeover.additional_ignored_patterns),
-            "no_match_fallback": takeover.no_match_fallback,
-        }
-
-        # Check for config divergence (once per session)
-        global _divergence_check_done
-        if not _divergence_check_done:
-            _divergence_check_done = True
-            log_dir = env_config.get("log_dir")
-            if log_dir:
-                project_root = config.project_root
-                if project_root is not None:
-                    divergent_patterns = check_and_warn_divergence(
-                        project_root, log_dir, takeover_dict
-                    )
-
-                    # Auto-migration: consolidate permissions if configured
-                    if divergent_patterns:
-                        config_sync = config.config_sync_settings()
-
-                        if config_sync["auto_migrate"]:
-                            # Auto-migration enabled - run it
-                            run_auto_migration(
-                                project_root, log_dir, dict(config_sync), takeover_dict
-                            )
-                        # else: warning already shown by check_and_warn_divergence
+        takeover_dict = _resolve_takeover_mode(config, env_config)
+        _run_divergence_check(config, env_config, takeover_dict)
 
         # Resolve the list of governed tools via the config abstraction
         governed_tools = list(config.governed_tools())
@@ -776,176 +1076,23 @@ def main() -> None:
             sys.exit(0)
 
         # Identify current agent context (used for logging)
-        transcript_path = hook_data.get("transcript_path", "")
-        agent_context = identify_current_agent(transcript_path)
-        agent_info = (
-            agent_context["subagent_name"]
-            if agent_context["agent_type"] == "subagent"
-            else "main"
-        )
+        agent_info = _agent_info_for(hook_data)
 
         # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
         # mode) is recorded alongside the decision, purely for diagnosis -- it
         # never affects the verdict itself. See log_command's docstring.
         permission_mode = hook_data.get("permission_mode")
 
-        # Handle file path tools (Read, Write, Edit)
+        # Resolve and log the event: file path tools (Read, Write, Edit) and
+        # command tools (Bash, MCP terminals) differ only in how the target is
+        # extracted and resolved; both return the same decision triple.
         if tool_name in FILE_PATH_TOOLS:
-            file_path = tool_input.get("file_path", "")
-            if not file_path:
-                output = create_hook_output(
-                    "deny", "No file_path provided in tool input"
-                )
-                log_command(
-                    f"{tool_name}()",
-                    "refused",
-                    ["no file_path provided"],
-                    extra_info=agent_info,
-                    config=env_config,
-                    permission_mode=permission_mode,
-                )
-                print(json.dumps(output))
-                sys.exit(0)
-
-            # Resolve file path permission via more-specific-wins level cascade.
-            # No early "no allow configured" short-circuit here (TOO-15): an
-            # entirely unconfigured tool resolves to 'ask' and a configured-but-
-            # non-matching tool resolves per no_match_fallback -- both are
-            # decided centrally inside resolve_file_path_permission_detailed /
-            # Configuration.resolve_permission_detailed, so the hook and
-            # toolguard.tools.decision.decide() cannot drift apart.
-            extended_syntax = env_config.get("extended_syntax", True)
-            file_result = resolve_file_path_permission_detailed(
-                tool_name, file_path, config, extended_syntax
-            )
-            decision, reason, override, additional_context = (
-                file_result.decision,
-                file_result.reason,
-                file_result.override,
-                file_result.additional_context,
-            )
-
-            # Log the decision
-            log_target = f"{tool_name}({file_path})"
-            if decision == "allow":
-                # Conflict: a more-specific allow overrode a less-specific deny.
-                _log_conflict_override(log_target, override, env_config.get("log_dir"))
-                _log_fallback_allow_warning(reason, env_config.get("log_dir"))
-                matched_rule = reason.split(": ", 1)[1] if ": " in reason else None
-                log_command(
-                    log_target,
-                    "executed",
-                    matched_rule=matched_rule,
-                    extra_info=agent_info,
-                    config=env_config,
-                    permission_mode=permission_mode,
-                    additional_context=additional_context,
-                )
-            elif decision == "ask":
-                log_command(
-                    log_target,
-                    "ask",
-                    note=reason,
-                    extra_info=agent_info,
-                    config=env_config,
-                    permission_mode=permission_mode,
-                    additional_context=additional_context,
-                )
-            else:
-                violated_rules = [
-                    reason.split(": ", 1)[1] if ": " in reason else reason
-                ]
-                log_command(
-                    log_target,
-                    "refused",
-                    violated_rules,
-                    extra_info=agent_info,
-                    config=env_config,
-                    permission_mode=permission_mode,
-                    additional_context=additional_context,
-                )
-
-            output = create_hook_output(decision, reason, additional_context)
-            print(json.dumps(output))
-            sys.exit(0)
-
-        # Handle command tools (Bash, MCP terminals)
-        command = tool_input.get("command", "")
-        if not command:
-            output = create_hook_output("deny", "No command provided in tool input")
-            log_command(
-                command,
-                "refused",
-                ["no command provided"],
-                extra_info=agent_info,
-                config=env_config,
-                permission_mode=permission_mode,
-            )
-            print(json.dumps(output))
-            sys.exit(0)
-
-        # Command tools (Bash, MCP terminals) all resolve against the Bash
-        # permission patterns. No early "no allow configured" short-circuit here
-        # (TOO-15): an entirely unconfigured Bash resolves to 'ask' and a
-        # configured-but-non-matching Bash resolves per no_match_fallback (default
-        # 'ask'; 'deny' fails closed; 'allow_with_warning' -- or its deprecated
-        # 'warn_deny' alias -- auto-allows) -- both decided centrally inside
-        # resolve_bash_permission_detailed / Configuration.resolve_permission_detailed
-        # so the hook and toolguard.tools.decision.decide() cannot drift apart.
-        # Resolve via more-specific-wins: each sub-command of a compound command
-        # cascades independently through the levels; compound allowed iff all are.
-        # The unoverridable [hard_deny] pool is checked FIRST per sub-command, so a
-        # compound is hard-denied if ANY sub-command is hard-denied.
-        extended_syntax = env_config.get("extended_syntax", True)
-        hd_deny, hd_allow = config.hard_deny("Bash")
-
-        bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
-        )
-        decision, reason, bash_overrides, additional_context = (
-            bash_result.decision,
-            bash_result.reason,
-            bash_result.overrides,
-            bash_result.additional_context,
-        )
-
-        # Log the decision with agent identification
-        if decision == "allow":
-            # Conflict logging: any sub-command whose more-specific allow overrode
-            # a less-specific deny is recorded to the conflict stream.
-            conflict_log_dir = env_config.get("log_dir")
-            for sub_command, override in bash_overrides:
-                _log_conflict_override(sub_command, override, conflict_log_dir)
-            _log_fallback_allow_warning(reason, conflict_log_dir)
-            _log_allowed_command(
-                command,
-                reason,
-                agent_info,
-                env_config,
-                permission_mode,
-                additional_context,
-            )
-        elif decision == "ask":
-            log_command(
-                command,
-                "ask",
-                note=reason,
-                extra_info=agent_info,
-                config=env_config,
-                permission_mode=permission_mode,
-                additional_context=additional_context,
+            decision, reason, additional_context = _handle_file_path_tool(
+                tool_name, tool_input, config, env_config, agent_info, permission_mode
             )
         else:
-            # Extract violated rule from reason for logging
-            violated_rules = [reason.split(": ", 1)[1] if ": " in reason else reason]
-            log_command(
-                command,
-                "refused",
-                violated_rules,
-                extra_info=agent_info,
-                config=env_config,
-                permission_mode=permission_mode,
-                additional_context=additional_context,
+            decision, reason, additional_context = _handle_command_tool(
+                tool_input, config, env_config, agent_info, permission_mode
             )
 
         # Create and output decision

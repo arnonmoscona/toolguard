@@ -20,6 +20,7 @@ patterns: MappingProxyType layers built directly from Configuration/ConfigLayer/
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,6 +49,37 @@ from toolguard.tools.edit_proposal import EditProposal
 from toolguard.tools.config_access import per_layer_rules
 from toolguard.tools.danger import DangerFinding, Severity
 from toolguard.tools.edit_proposal import apply_edits, edit_proposal_to_dict
+
+_pythonpath_patcher = None
+
+
+def setUpModule():
+    """
+    Isolate PYTHONPATH for this whole module (TOO-19).
+
+    security_audit() now calls audit_environment(), which reads PYTHONPATH
+    from the real environment by default (env=None). Without this, every
+    test in this module that calls security_audit()/render() without
+    passing env= explicitly would implicitly depend on whatever PYTHONPATH
+    happens to be set to on the machine running the suite -- the same class
+    of hazard test-config-isolation.md documents for the other three/four
+    config-discovery anchors, just for a NEW one this change introduces.
+    Popped (not merely read) for the module's lifetime via patch.dict's
+    save/restore, which restores the exact original value (present or
+    absent) on teardown regardless of how it was mutated meanwhile. Tests
+    that specifically want to exercise the environment finding pass env=
+    explicitly instead of relying on this module-wide patch.
+    """
+    global _pythonpath_patcher
+    _pythonpath_patcher = patch.dict(os.environ, {})
+    _pythonpath_patcher.start()
+    os.environ.pop("PYTHONPATH", None)
+
+
+def tearDownModule():
+    """Restore PYTHONPATH (and anything else) to its pre-module state."""
+    if _pythonpath_patcher is not None:
+        _pythonpath_patcher.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -1472,6 +1504,57 @@ class TestSecurityAuditClarity(unittest.TestCase):
         self.assertEqual(len(clarity), 1)
         self.assertEqual(clarity[0].finding_id, "deny-shadows-allow")
         self.assertEqual(clarity[0].severity_label, "LOW")
+
+
+class TestSecurityAuditEnvironment(unittest.TestCase):
+    """
+    The audit surfaces environment (PYTHONPATH-shadow) findings at HIGH
+    severity (TOO-19) -- silent by default, one finding when PYTHONPATH would
+    shadow the installed hook.
+    """
+
+    def test_clean_config_and_no_pythonpath_has_no_environment_finding(self):
+        """
+        Given a clean configuration and an empty environment mapping
+        When security_audit() is called with env={}
+        Then no finding has source 'environment'
+        """
+        report = security_audit(_clean_config(), env={})
+        environment = [f for f in report.findings if f.source == "environment"]
+        self.assertEqual(environment, [])
+
+    def test_shadowing_pythonpath_appears_as_high_environment_finding(self):
+        """
+        Given PYTHONPATH contains a directory holding its own toolguard/ package
+        When security_audit() is called with that env
+        Then a finding with source 'environment' and severity HIGH is reported
+        """
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d) / "toolguard"
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text("")
+
+            report = security_audit(_clean_config(), env={"PYTHONPATH": d})
+
+        environment = [f for f in report.findings if f.source == "environment"]
+        self.assertEqual(len(environment), 1)
+        self.assertEqual(environment[0].finding_id, "pythonpath-shadows-hook")
+        self.assertEqual(environment[0].severity_label, "HIGH")
+        self.assertIsNone(environment[0].tool)
+        self.assertIsNone(environment[0].pattern)
+
+    def test_default_env_none_reads_real_os_environ(self):
+        """
+        Given env is omitted (defaults to None) and the real PYTHONPATH is
+        cleared by this module's setUpModule
+        When security_audit() is called
+        Then no environment finding is produced -- confirms the default
+        argument genuinely delegates to os.environ rather than silently
+        finding something on its own
+        """
+        report = security_audit(_clean_config())
+        environment = [f for f in report.findings if f.source == "environment"]
+        self.assertEqual(environment, [])
 
 
 def _danger_finding(

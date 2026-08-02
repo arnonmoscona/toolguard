@@ -7,6 +7,7 @@ Provides logging functionality with same format as checked_bash.py.
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -96,6 +97,249 @@ def _preview_additional_context(
     return f"{preview} ... ({len(words)} words total)"
 
 
+@dataclass(frozen=True)
+class _LogRecord:
+    """
+    The fields of a single resolution-log entry, in one value.
+
+    Exists only to keep the two format writers
+    (:func:`_write_jsonlines_entry` / :func:`_write_markdown_entry`) from each
+    taking eight positional arguments; it carries no behaviour and is never
+    part of the public API. Field names mirror :func:`log_command`'s
+    parameters, whose docstring documents their meaning.
+    """
+
+    command_str: str
+    status: str
+    violated_rules: List[str] = field(default_factory=list)
+    extra_info: Optional[str] = None
+    matched_rule: Optional[str] = None
+    note: Optional[str] = None
+    permission_mode: Optional[str] = None
+    additional_context: Optional[str] = None
+
+
+def _logging_enabled(config: Optional[dict]) -> bool:
+    """
+    Decide whether logging is switched on for this invocation.
+
+    Prefers the resolved environment config when one was supplied, and falls
+    back to the legacy ``CHECKED_BASH_LOGGING_ON`` environment variable for
+    backward compatibility with checked_bash.py-era callers.
+
+    Args:
+        config: Optional environment config dict (from ``get_env_config()``).
+
+    Returns:
+        True when a log entry should be written.
+    """
+    if config is not None:
+        return config.get("logging_enabled", True)
+    return os.environ.get("CHECKED_BASH_LOGGING_ON", "true").lower() == "true"
+
+
+def _require_existing_log_dir(log_dir_path: Path) -> None:
+    """
+    Abort the process when a caller-specified log directory does not exist.
+
+    This is the historical behaviour for the two paths where the directory was
+    named explicitly (the ``log_dir`` argument and the legacy
+    ``CHECKED_BASH_LOGGING_DIR`` environment variable): a missing directory is
+    a configuration error, not something to silently create.
+
+    Args:
+        log_dir_path: The directory that must already exist.
+    """
+    if not log_dir_path.exists():
+        print(
+            f"Error: Logging directory does not exist: {log_dir_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _log_dir_from_config(config: dict) -> Optional[Path]:
+    """
+    Resolve the log directory from a resolved environment config.
+
+    Unlike the explicit/legacy paths this one is tolerant: a missing directory
+    is created when ``create_log_dir`` is set, and otherwise merely disables
+    logging for this invocation with a warning -- a hook must not kill the
+    tool call over a missing log directory.
+
+    Args:
+        config: Environment config dict carrying ``log_dir`` and, optionally,
+            ``create_log_dir``.
+
+    Returns:
+        The directory to log into, or None when logging is disabled for this
+        invocation.
+    """
+    log_dir_path = config["log_dir"]
+    if log_dir_path.exists():
+        return log_dir_path
+    if config.get("create_log_dir", False):
+        log_dir_path.mkdir(parents=True, exist_ok=True)
+        return log_dir_path
+    print(
+        f"Warning: Logging directory does not exist: {log_dir_path}. Logging disabled.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _log_dir_from_environment() -> Path:
+    """
+    Resolve the log directory the legacy way, from ``CHECKED_BASH_LOGGING_DIR``.
+
+    A relative value is taken relative to the discovered project root; an
+    absolute one is used as-is. The directory must already exist (see
+    :func:`_require_existing_log_dir`).
+
+    Returns:
+        The resolved log directory.
+
+    Raises:
+        RuntimeError: Propagated from :func:`toolguard.config.find_project_root`
+            when no project root can be found. :func:`log_command` catches
+            this specifically and treats it as fatal (prints and exits 1),
+            so it is not swallowed here.
+    """
+    logging_dir = os.environ.get("CHECKED_BASH_LOGGING_DIR", "logs")
+    if Path(logging_dir).is_absolute():
+        log_dir_path = Path(logging_dir)
+    else:
+        log_dir_path = find_project_root() / logging_dir
+    _require_existing_log_dir(log_dir_path)
+    return log_dir_path
+
+
+def _resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optional[Path]:
+    """
+    Pick the directory a log entry is written to, in caller-precedence order.
+
+    An explicitly passed *log_dir* wins (used by tests), then the resolved
+    environment *config*, then the legacy environment variables.
+
+    Args:
+        log_dir: Directory passed directly by the caller, or None.
+        config: Environment config dict, or None.
+
+    Returns:
+        The directory to log into, or None when this invocation should not log.
+    """
+    if log_dir is not None:
+        _require_existing_log_dir(log_dir)
+        return log_dir
+    if config is not None:
+        return _log_dir_from_config(config)
+    return _log_dir_from_environment()
+
+
+def _build_jsonlines_entry(record: _LogRecord) -> dict:
+    """
+    Render one log entry as a JSONLines-ready dict. Pure: no IO, no side
+    effects other than reading the current time (see the timestamp note
+    below).
+
+    Optional fields are omitted entirely when falsy, so a consumer sees the
+    same keys it always has. Key order is part of the on-disk shape and is
+    preserved here (dict insertion order, guaranteed since Python 3.7).
+
+    Deliberately calls ``datetime.now()`` again here rather than accepting
+    :func:`log_command`'s pre-formatted markdown ``timestamp`` string: the
+    JSONLines record carries its own independent ISO timestamp field, and
+    that second, distinct ``datetime.now()`` call -- separate from the one
+    that produces the markdown heading -- reproduces the original
+    implementation's call sequence exactly. This asymmetry between the two
+    renderers (this one calls ``datetime.now()`` itself; the markdown one
+    below takes a string) is required, not an oversight -- do NOT "clean it
+    up" by threading one shared timestamp into both formats. Tests patching
+    ``datetime.now`` with a ``side_effect`` list (see ``log_filename`` then
+    ``timestamp`` then this call, in :func:`log_command`) depend on the
+    sequence staying exactly as it is.
+
+    Args:
+        record: The entry's fields.
+
+    Returns:
+        A dict ready for ``json.dumps``, in on-disk key order.
+    """
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "status": record.status,
+        "command": record.command_str,
+        "violated_rules": record.violated_rules,
+    }
+    optional = (
+        ("matched_rule", record.matched_rule),
+        ("note", record.note),
+        ("extra_info", record.extra_info),
+        ("permission_mode", record.permission_mode),
+    )
+    for key, value in optional:
+        if value:
+            entry[key] = value
+    if record.additional_context:
+        entry["additional_context"] = _preview_additional_context(
+            record.additional_context
+        )
+    return entry
+
+
+def _render_markdown_entry(record: _LogRecord, timestamp: str) -> str:
+    """
+    Render one log entry in the default Markdown format. Pure: returns the
+    text, performs no IO.
+
+    Args:
+        record: The entry's fields.
+        timestamp: Pre-formatted local timestamp for the entry heading. This
+            is a plain string, not a fresh ``datetime.now()`` call,
+            deliberately: it is the SAME timestamp :func:`log_command`
+            already computed once for this entry, whereas the JSONLines
+            renderer (:func:`_build_jsonlines_entry`) calls ``datetime.now()``
+            again for its own, independent ISO field. That asymmetry is
+            required to preserve the original implementation's
+            two-distinct-``datetime.now()``-calls behaviour -- see the note
+            on :func:`_build_jsonlines_entry` for the full rationale. Do not
+            "clean it up" by having this function call ``datetime.now()``
+            itself.
+
+    Returns:
+        The full markdown text for one entry, including its trailing blank
+        line separator.
+    """
+    lines = [
+        f"## {timestamp}\n\n",
+        f"- **Status**: {record.status.upper()}\n",
+        f"- **Command**: `{record.command_str}`\n",
+    ]
+    if record.matched_rule:
+        lines.append(f"- **Matched Rule**: `{record.matched_rule}`\n")
+    if record.violated_rules:
+        lines.append(
+            f"- **Violated Rules**: {', '.join(f'`{rule}`' for rule in record.violated_rules)}\n"
+        )
+    if record.permission_mode:
+        lines.append(f"- **Permission Mode**: `{record.permission_mode}`\n")
+    if record.note:
+        # A non-violation note (e.g. WHY an 'ask' verdict was reached) --
+        # deliberately rendered under its own field, never under Violated
+        # Rules (TOO-15 review finding #3).
+        lines.append(f"- **Note**: {record.note}\n")
+    if record.additional_context:
+        # The rule's additionalContext enrichment (TOO-19 Phase 1), capped to
+        # a short preview -- see _preview_additional_context.
+        lines.append(
+            f"- **Context**: {_preview_additional_context(record.additional_context)}\n"
+        )
+    if record.extra_info:
+        lines.append(f"- **Agent**: {record.extra_info}\n")
+    lines.append("\n")
+    return "".join(lines)
+
+
 def log_command(
     command_str: str,
     status: str,
@@ -146,12 +390,7 @@ def log_command(
             command would make the log unreadable for a human scanning it.
     """
     # Check if logging is enabled (backward compatibility with CHECKED_BASH_LOGGING_ON)
-    if config is not None:
-        logging_on = config.get("logging_enabled", True)
-    else:
-        logging_on = os.environ.get("CHECKED_BASH_LOGGING_ON", "true").lower() == "true"
-
-    if not logging_on:
+    if not _logging_enabled(config):
         return
 
     try:
@@ -160,50 +399,10 @@ def log_command(
             "CHECKED_BASH_LOGGING_FORMAT", "markdown"
         ).lower()
 
-        # Resolve log directory path
-        if log_dir is not None:
-            # Use provided log directory (for testing)
-            # Check directory exists (old behavior for explicit log_dir - exit on error)
-            log_dir_path = log_dir
-            if not log_dir_path.exists():
-                print(
-                    f"Error: Logging directory does not exist: {log_dir_path}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        elif config is not None:
-            # Use config from env_config
-            log_dir_path = config["log_dir"]
-            create_log_dir = config.get("create_log_dir", False)
-
-            # Check if directory exists
-            if not log_dir_path.exists():
-                if create_log_dir:
-                    # Create directory
-                    log_dir_path.mkdir(parents=True, exist_ok=True)
-                else:
-                    # Warn and disable logging for this invocation
-                    print(
-                        f"Warning: Logging directory does not exist: {log_dir_path}. Logging disabled.",
-                        file=sys.stderr,
-                    )
-                    return
-        else:
-            # Backward compatibility: use environment variables
-            logging_dir = os.environ.get("CHECKED_BASH_LOGGING_DIR", "logs")
-            if Path(logging_dir).is_absolute():
-                log_dir_path = Path(logging_dir)
-            else:
-                project_root = find_project_root()
-                log_dir_path = project_root / logging_dir
-
-            # Check directory exists (old behavior - exit on error)
-            if not log_dir_path.exists():
-                print(
-                    f"Error: Logging directory does not exist: {log_dir_path}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        # Resolve log directory path (None => logging disabled for this call)
+        log_dir_path = _resolve_log_dir(log_dir, config)
+        if log_dir_path is None:
+            return
 
         # Generate log filename with current date and appropriate extension
         extension = "md" if logging_format == "markdown" else "jsonlines"
@@ -212,58 +411,31 @@ def log_command(
 
         # Prepare log entry
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        violated_rules = violated_rules or []
+        record = _LogRecord(
+            command_str=command_str,
+            status=status,
+            violated_rules=violated_rules or [],
+            extra_info=extra_info,
+            matched_rule=matched_rule,
+            note=note,
+            permission_mode=permission_mode,
+            additional_context=additional_context,
+        )
 
-        # Write log entry
+        # Render the entry first, then write it in a single f.write() call.
+        # This narrows the interleaving window when two hook processes
+        # append to the same file concurrently, and means a mid-render
+        # exception (e.g. a bad format string) leaves no half-written
+        # record in the audit log -- a truncated record would be worse than
+        # a missing one for a security tool's audit trail (TOO-19 m5 review
+        # finding #19).
+        if logging_format == "jsonlines":
+            rendered = json.dumps(_build_jsonlines_entry(record)) + "\n\n"
+        else:
+            rendered = _render_markdown_entry(record, timestamp)
+
         with open(log_file, "a", encoding="utf-8") as f:
-            if logging_format == "jsonlines":
-                # JSONLines format
-                entry = {
-                    "timestamp": datetime.now().isoformat(),
-                    "status": status,
-                    "command": command_str,
-                    "violated_rules": violated_rules,
-                }
-                if matched_rule:
-                    entry["matched_rule"] = matched_rule
-                if note:
-                    entry["note"] = note
-                if extra_info:
-                    entry["extra_info"] = extra_info
-                if permission_mode:
-                    entry["permission_mode"] = permission_mode
-                if additional_context:
-                    entry["additional_context"] = _preview_additional_context(
-                        additional_context
-                    )
-                f.write(json.dumps(entry) + "\n\n")
-            else:
-                # Markdown format (default)
-                f.write(f"## {timestamp}\n\n")
-                f.write(f"- **Status**: {status.upper()}\n")
-                f.write(f"- **Command**: `{command_str}`\n")
-                if matched_rule:
-                    f.write(f"- **Matched Rule**: `{matched_rule}`\n")
-                if violated_rules:
-                    f.write(
-                        f"- **Violated Rules**: {', '.join(f'`{rule}`' for rule in violated_rules)}\n"
-                    )
-                if permission_mode:
-                    f.write(f"- **Permission Mode**: `{permission_mode}`\n")
-                if note:
-                    # A non-violation note (e.g. WHY an 'ask' verdict was
-                    # reached) -- deliberately rendered under its own field,
-                    # never under Violated Rules (TOO-15 review finding #3).
-                    f.write(f"- **Note**: {note}\n")
-                if additional_context:
-                    # The rule's additionalContext enrichment (TOO-19 Phase 1),
-                    # capped to a short preview -- see _preview_additional_context.
-                    f.write(
-                        f"- **Context**: {_preview_additional_context(additional_context)}\n"
-                    )
-                if extra_info:
-                    f.write(f"- **Agent**: {extra_info}\n")
-                f.write("\n")
+            f.write(rendered)
 
     except RuntimeError as e:
         # Project root not found - fatal error

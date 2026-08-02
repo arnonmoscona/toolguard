@@ -29,13 +29,17 @@ from toolguard.config import (
     TakeoverEnabledConflict,
 )
 from toolguard.session_start import (
+    _EMPTY_SHADOW_STATUS,
+    ShadowStatus,
     _check_dynamic_conflicts,
     _count_conflict_entries,
     _detect_broken_config_files,
     _detect_conflicts,
+    _detect_shadow_status,
     _format_summary,
     _parse_session_start_input,
     _recent_conflict_logs,
+    install_provenance,
     main,
 )
 
@@ -627,6 +631,260 @@ class TestDetectConflicts(unittest.TestCase):
         self.assertIsNone(dynamic_conflict)
 
 
+def _write_fake_toolguard_checkout(root: Path) -> Path:
+    """Build a minimal on-disk toolguard checkout shape under *root*."""
+    (root / "pyproject.toml").write_text('[project]\nname = "toolguard"\n')
+    pkg = root / "toolguard"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    return pkg
+
+
+class TestDetectShadowStatus(unittest.TestCase):
+    """
+    Tests for _detect_shadow_status (TOO-19).
+
+    Both messages are gated on the active session's project itself being a
+    toolguard source checkout; every other project must report the
+    all-empty/False _EMPTY_SHADOW_STATUS regardless of what
+    install_provenance's other primitives would say.
+    """
+
+    def _make_config(self, project_root):
+        """Build a Configuration mock exposing only project_root."""
+        config = MagicMock(spec=Configuration)
+        config.project_root = project_root
+        return config
+
+    def test_no_project_root_returns_empty_status(self):
+        """
+        Given a configuration with project_root=None
+        When _detect_shadow_status runs
+        Then it returns _EMPTY_SHADOW_STATUS without touching install_provenance
+        """
+        config = self._make_config(project_root=None)
+        self.assertEqual(_detect_shadow_status(config), _EMPTY_SHADOW_STATUS)
+
+    def test_project_that_is_not_a_toolguard_checkout_returns_empty_status(self):
+        """
+        Given the active project is an ordinary (non-toolguard) directory
+        When _detect_shadow_status runs
+        Then it returns _EMPTY_SHADOW_STATUS -- meaningless for any other project
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            config = self._make_config(project_root=project_root)
+            self.assertEqual(_detect_shadow_status(config), _EMPTY_SHADOW_STATUS)
+
+    def test_governing_copy_matching_checkout_reports_running_from_checkout(self):
+        """
+        Given the active project IS a toolguard checkout, and the copy that
+        produced THIS process's import resolves to that SAME checkout
+        When _detect_shadow_status runs
+        Then running_from_checkout is True
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            pkg = _write_fake_toolguard_checkout(project_root)
+            config = self._make_config(project_root=project_root)
+
+            with (
+                patch.object(
+                    install_provenance,
+                    "governing_package_root",
+                    return_value=pkg.resolve(),
+                ),
+                patch.object(
+                    install_provenance,
+                    "installed_distribution_root",
+                    return_value=None,
+                ),
+                patch.object(
+                    install_provenance,
+                    "stale_install_report",
+                    return_value=install_provenance.StaleInstallReport(
+                        False, project_root, None
+                    ),
+                ),
+            ):
+                status = _detect_shadow_status(config)
+
+        self.assertTrue(status.running_from_checkout)
+        self.assertEqual(status.checkout_root, project_root)
+
+    def test_governing_copy_elsewhere_reports_not_running_from_checkout(self):
+        """
+        Given the active project IS a toolguard checkout, but the copy that
+        produced THIS process's import resolves SOMEWHERE ELSE (a properly
+        installed distribution)
+        When _detect_shadow_status runs
+        Then running_from_checkout is False
+        """
+        with (
+            TemporaryDirectory() as tmpdir,
+            TemporaryDirectory() as installed_dir,
+        ):
+            project_root = Path(tmpdir)
+            _write_fake_toolguard_checkout(project_root)
+            config = self._make_config(project_root=project_root)
+            elsewhere = Path(installed_dir) / "toolguard"
+            elsewhere.mkdir()
+
+            with (
+                patch.object(
+                    install_provenance,
+                    "governing_package_root",
+                    return_value=elsewhere,
+                ),
+                patch.object(
+                    install_provenance,
+                    "installed_distribution_root",
+                    return_value=elsewhere,
+                ),
+                patch.object(
+                    install_provenance,
+                    "stale_install_report",
+                    return_value=install_provenance.StaleInstallReport(
+                        False, project_root, elsewhere
+                    ),
+                ),
+            ):
+                status = _detect_shadow_status(config)
+
+        self.assertFalse(status.running_from_checkout)
+        self.assertEqual(status.installed_root, elsewhere)
+
+    def test_stale_flag_comes_from_stale_install_report(self):
+        """
+        Given install_provenance.stale_install_report reports is_stale=True
+        When _detect_shadow_status runs
+        Then the returned ShadowStatus.stale is True
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            pkg = _write_fake_toolguard_checkout(project_root)
+            config = self._make_config(project_root=project_root)
+
+            with (
+                patch.object(
+                    install_provenance,
+                    "governing_package_root",
+                    return_value=pkg.resolve(),
+                ),
+                patch.object(
+                    install_provenance,
+                    "installed_distribution_root",
+                    return_value=Path("/fake/installed/toolguard"),
+                ),
+                patch.object(
+                    install_provenance,
+                    "stale_install_report",
+                    return_value=install_provenance.StaleInstallReport(
+                        True, project_root, Path("/fake/installed/toolguard")
+                    ),
+                ),
+            ):
+                status = _detect_shadow_status(config)
+
+        self.assertTrue(status.stale)
+        self.assertEqual(status.installed_root, Path("/fake/installed/toolguard"))
+
+
+class TestFormatSummaryShadowStatus(unittest.TestCase):
+    """Tests for _format_summary's TOO-19 shadow/stale-install sections."""
+
+    def test_no_shadow_status_produces_no_extra_section(self):
+        """
+        Given shadow_status is None (the default)
+        When _format_summary is called
+        Then the output is unchanged (empty) -- existing 3-argument call sites unaffected
+        """
+        self.assertEqual(_format_summary(None, None, ()), "")
+
+    def test_running_from_checkout_section_names_both_paths(self):
+        """
+        Given a ShadowStatus with running_from_checkout=True
+        When _format_summary is called
+        Then the output names both the governing checkout path and the installed path
+        """
+        status = ShadowStatus(
+            checkout_root=Path("/home/dev/toolguard"),
+            running_from_checkout=True,
+            installed_root=Path(
+                "/home/dev/.local/share/uv/tools/toolguard/lib/toolguard"
+            ),
+            stale=False,
+        )
+        text = _format_summary(None, None, (), status)
+        self.assertIn("RUNNING FROM A SOURCE TREE", text)
+        self.assertIn("/home/dev/toolguard", text)
+        self.assertIn("/home/dev/.local/share/uv/tools/toolguard/lib/toolguard", text)
+
+    def test_running_from_checkout_with_no_installed_root_says_so(self):
+        """
+        Given running_from_checkout=True but no installed distribution was found
+        When _format_summary is called
+        Then the output states that plainly instead of printing 'None'
+        """
+        status = ShadowStatus(
+            checkout_root=Path("/home/dev/toolguard"),
+            running_from_checkout=True,
+            installed_root=None,
+            stale=False,
+        )
+        text = _format_summary(None, None, (), status)
+        self.assertIn("no installed distribution found", text)
+
+    def test_stale_section_names_reinstall_command(self):
+        """
+        Given a ShadowStatus with stale=True
+        When _format_summary is called
+        Then the output names the reinstall command and warns about uncommitted changes
+        """
+        status = ShadowStatus(
+            checkout_root=Path("/home/dev/toolguard"),
+            running_from_checkout=False,
+            installed_root=Path("/installed/toolguard"),
+            stale=True,
+        )
+        text = _format_summary(None, None, (), status)
+        self.assertIn("INSTALLED COPY IS STALE", text)
+        self.assertIn("uv tool install --force /home/dev/toolguard toolguard", text)
+        self.assertIn("uncommitted changes", text)
+
+    def test_neither_flag_set_produces_no_shadow_sections(self):
+        """
+        Given a ShadowStatus with both flags False (the gate passed but nothing
+        is actually wrong)
+        When _format_summary is called
+        Then neither shadow section appears
+        """
+        status = ShadowStatus(
+            checkout_root=Path("/home/dev/toolguard"),
+            running_from_checkout=False,
+            installed_root=Path("/installed/toolguard"),
+            stale=False,
+        )
+        text = _format_summary(None, None, (), status)
+        self.assertEqual(text, "")
+
+    def test_both_sections_can_appear_together(self):
+        """
+        Given a ShadowStatus with BOTH running_from_checkout and stale True
+        When _format_summary is called
+        Then both sections appear, separated by a blank line
+        """
+        status = ShadowStatus(
+            checkout_root=Path("/home/dev/toolguard"),
+            running_from_checkout=True,
+            installed_root=Path("/installed/toolguard"),
+            stale=True,
+        )
+        text = _format_summary(None, None, (), status)
+        self.assertIn("RUNNING FROM A SOURCE TREE", text)
+        self.assertIn("INSTALLED COPY IS STALE", text)
+
+
 class TestMain(unittest.TestCase):
     """End-to-end tests for main() -- the actual hook entry point."""
 
@@ -798,6 +1056,57 @@ class TestMain(unittest.TestCase):
         payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
         stdout_text, _exit = self._run_main_with_stdin(payload)
         self.assertEqual(stdout_text.strip(), "")
+
+    def test_stdout_alert_when_running_from_shadowed_source_tree(self):
+        """
+        TOO-19 end-to-end: Given the active project IS a toolguard checkout and
+            the copy governing THIS process resolves to that same checkout
+        When main() is called
+        Then stdout contains the RUNNING FROM A SOURCE TREE alert
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            pkg = _write_fake_toolguard_checkout(project_root)
+
+            config = MagicMock(spec=Configuration)
+            config.takeover_mode.return_value = TakeoverConfig(
+                enabled=False,
+                ignored_allow_patterns=(),
+                additional_ignored_patterns=(),
+                no_match_fallback="deny",
+                conflict=None,
+            )
+            config.project_root = project_root
+            config.parse_failures = ()
+
+            payload = json.dumps(
+                {"hook_event_name": "SessionStart", "cwd": str(project_root)}
+            )
+            with (
+                patch.object(
+                    install_provenance,
+                    "governing_package_root",
+                    return_value=pkg.resolve(),
+                ),
+                patch.object(
+                    install_provenance,
+                    "installed_distribution_root",
+                    return_value=None,
+                ),
+                patch.object(
+                    install_provenance,
+                    "stale_install_report",
+                    return_value=install_provenance.StaleInstallReport(
+                        False, project_root, None
+                    ),
+                ),
+            ):
+                stdout_text, exit_code = self._run_main_with_stdin(
+                    payload, config=config
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RUNNING FROM A SOURCE TREE", stdout_text)
 
     def test_graceful_on_load_configuration_exception(self):
         """

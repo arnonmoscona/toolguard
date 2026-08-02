@@ -44,7 +44,7 @@ same names; the hook is updated to use attribute access so no behaviour changes.
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
-from toolguard.compound import cap_context_words, resolve_compound_permission
+from toolguard.compound import cap_context_words, resolve_compound_permission_detailed
 from toolguard.normalization import expand_tilde
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 from toolguard.permissions import (
@@ -122,6 +122,21 @@ class BashResolution:
             NOT yielded by :meth:`__iter__`, for the same backwards-compatibility
             reason as :attr:`FileResolution.additional_context`: access it as
             ``result.additional_context``.
+        fallback_warning: ``True`` when this 'allow' decision should be routed
+            to the WARNING log stream (TOO-19 allow/allow_with_no_warnings
+            work) -- see :func:`toolguard.hook._log_fallback_allow_warning`.
+            Computed by :func:`_bash_result_is_fallback_warning` from *reason*
+            at the point this dataclass is built, NOT threaded through as
+            structured data the way :attr:`FileResolution.fallback_warning`
+            is: the per-sub-command ``resolve_one`` callable contract
+            (:func:`toolguard.compound.resolve_compound_permission`'s
+            parameter) is a plain 3-tuple relied on by many existing test
+            fixtures, so widening it to carry this flag was judged
+            disproportionate for what is otherwise an internal robustness
+            improvement -- see the TOO-19 implementation report for the full
+            reasoning. ``False`` for every non-allow decision. Deliberately
+            NOT yielded by :meth:`__iter__`, for the same reason as
+            :attr:`additional_context`.
     """
 
     decision: str
@@ -129,6 +144,7 @@ class BashResolution:
     overrides: List[Tuple[str, Any]]
     sub_matches: List[SubMatch] = field(default_factory=list)
     additional_context: Optional[str] = None
+    fallback_warning: bool = False
 
     def __iter__(self):
         """
@@ -176,6 +192,17 @@ class FileResolution:
             ``decision, reason, override = resolver(...)`` call site; adding a
             4th yield would silently break every one of them. Access it as
             ``result.additional_context``.
+        fallback_warning: ``True`` when this 'allow' decision should be
+            routed to the WARNING log stream (TOO-19 allow/allow_with_no_warnings
+            work) -- see :func:`toolguard.hook._log_fallback_allow_warning`.
+            Propagated directly, with no text parsing, from
+            :attr:`~toolguard.config_types.ResolvedDecision.fallback_warning`
+            -- the single-decision (file-path) resolution path goes through
+            exactly one :class:`~toolguard.config_types.ResolvedDecision`, so
+            this is real structural data, not a substring-matched marker.
+            ``False`` for a hard-deny match or any non-fallback decision.
+            Deliberately NOT yielded by :meth:`__iter__`, for the same reason
+            as :attr:`additional_context`.
     """
 
     decision: str
@@ -183,6 +210,7 @@ class FileResolution:
     override: Optional[Any]  # Optional[ConflictOverride]
     provenance: Optional[Any]  # Optional[Provenance]
     additional_context: Optional[str] = None
+    fallback_warning: bool = False
 
     def __iter__(self):
         """
@@ -501,10 +529,12 @@ def resolve_file_path_permission_detailed(
         ``override`` (:class:`~toolguard.config.ConflictOverride` or ``None``),
         ``provenance`` (the winning rule's
         :class:`~toolguard.config.Provenance`, or ``None`` for a hard-deny or
-        fail-closed default deny), and ``additional_context`` (the winning
-        rule's ``additionalContext`` enrichment text, word-capped via
+        fail-closed default deny), ``additional_context`` (the winning rule's
+        ``additionalContext`` enrichment text, word-capped via
         :func:`~toolguard.compound.cap_context_words` -- TOO-19 code review
-        M2 -- or ``None``).
+        M2 -- or ``None``), and ``fallback_warning`` (TOO-19
+        allow/allow_with_no_warnings work; ``True`` only for an 'allow'
+        produced by ``no_match_fallback='allow_with_warning'``).
     """
     hard = _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
     if hard is not None:
@@ -532,7 +562,7 @@ def resolve_file_path_permission_detailed(
     _no_match_prefix = "Command does not match any allow patterns"
     if reason.startswith(_no_match_prefix):
         # Normalise the "Command"-phrased no-match reason to file-path phrasing,
-        # preserving any suffix (e.g. the TOO-15 'ask' or 'allow_with_warning'
+        # preserving any suffix (e.g. the TOO-15 'ask'/'allow_with_warning'/'allow'
         # no_match_fallback explanation).
         reason = (
             "Path does not match any allow patterns" + reason[len(_no_match_prefix) :]
@@ -543,6 +573,7 @@ def resolve_file_path_permission_detailed(
         override=resolved.override,
         provenance=resolved.provenance,
         additional_context=cap_context_words(resolved.additional_context),
+        fallback_warning=resolved.fallback_warning,
     )
 
 
@@ -566,8 +597,9 @@ def resolve_bash_permission_detailed(
     (:meth:`~toolguard.config.Configuration.resolve_permission_detailed`), with
     the unoverridable ``[hard_deny]`` pool checked FIRST per sub-command. The
     compound decision uses the same strictness as
-    :func:`toolguard.compound.resolve_compound_permission` (any deny -> deny;
-    else any ask -> ask; else allow). Reasons carry the winning rule's provenance.
+    :func:`toolguard.compound.resolve_compound_permission_detailed` (any deny
+    -> deny; else any ask -> ask; else allow). Reasons carry the winning
+    rule's provenance.
 
     Allow-over-deny overrides discovered on any sub-command (only meaningful when
     the overall decision is allow) are returned so the caller can log them to the
@@ -576,7 +608,7 @@ def resolve_bash_permission_detailed(
     Foreign inline code / heredoc sinks and undecidable segments (control
     structures, process substitution) that cannot be safely decomposed are
     floored per ``config.resolved_undecidable_fallback()`` (TOO-19; ``'ask'``
-    by default) -- see :func:`toolguard.compound.resolve_compound_permission`.
+    by default) -- see :func:`toolguard.compound.resolve_compound_permission_detailed`.
 
     Per-sub-command provenance is recorded in the returned
     :class:`BashResolution`\\ 's ``sub_matches`` list (one :class:`SubMatch` per
@@ -592,11 +624,23 @@ def resolve_bash_permission_detailed(
     Returns:
         A :class:`BashResolution` with ``decision``, ``reason``, ``overrides``
         (list of ``(sub_command, ConflictOverride)`` pairs, empty when none),
-        ``sub_matches`` (one :class:`SubMatch` per extracted sub-command), and
+        ``sub_matches`` (one :class:`SubMatch` per extracted sub-command),
         ``additional_context`` (the accumulated ``additionalContext``
         enrichment text, TOO-19 Phase 1, word-capped via
         :func:`~toolguard.compound.cap_context_words` -- TOO-19 code review
-        M2 -- or ``None``).
+        M2 -- or ``None``), and ``fallback_warning`` (TOO-19
+        allow/allow_with_no_warnings work; ``True`` only for an 'allow' with
+        at least one contributing sub-command whose verdict came from the
+        WARNED value of ``no_match_fallback`` or ``undecidable_fallback`` --
+        TOO-19 code review M1). Propagated directly from
+        :func:`toolguard.compound.resolve_compound_permission_detailed`'s own
+        structured ``fallback_warning``, computed from a per-sub-command tag
+        rather than re-derived by searching the FINAL (possibly multi-leaf
+        summarised) reason text for a marker substring -- the latter is what
+        previously let a multi-leaf all-allow compound silently lose its
+        warning (and, separately, misattribute the allow to a fabricated
+        rule name in the log) when the escape hatch fired on only one of
+        several allowed leaves.
     """
     overrides: List[Tuple[str, Any]] = []
     sub_matches: List[SubMatch] = []
@@ -666,10 +710,12 @@ def resolve_bash_permission_detailed(
         )
         return resolved.decision, resolved.reason, resolved.additional_context
 
-    decision, reason, additional_context = resolve_compound_permission(
-        command,
-        _resolve_one,
-        undecidable_fallback=config.resolved_undecidable_fallback(),
+    decision, reason, additional_context, fallback_warning = (
+        resolve_compound_permission_detailed(
+            command,
+            _resolve_one,
+            undecidable_fallback=config.resolved_undecidable_fallback(),
+        )
     )
 
     # TOO-19 fail-open fix: re-apply the parse-failure ASK floor HERE, at the
@@ -690,13 +736,20 @@ def resolve_bash_permission_detailed(
     decision, reason = config.apply_parse_failure_floor(decision, reason)
 
     # Only allow-over-deny overrides on an ALLOWED command are conflicts; if the
-    # overall decision is a deny, the recorded overrides are irrelevant.
+    # overall decision is a deny, the recorded overrides are irrelevant. The
+    # parse-failure floor can also clamp 'allow' down to 'ask' -- when it
+    # does, fallback_warning must drop too (mirrors
+    # Configuration._apply_parse_failure_ask_floor's handling of the
+    # single-decision case), or a since-overridden verdict would still claim
+    # to warrant a WARNING-stream entry.
     if decision != "allow":
         overrides = []
+        fallback_warning = False
     return BashResolution(
         decision=decision,
         reason=reason,
         overrides=overrides,
         sub_matches=sub_matches,
         additional_context=cap_context_words(additional_context),
+        fallback_warning=fallback_warning,
     )

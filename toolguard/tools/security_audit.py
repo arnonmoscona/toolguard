@@ -1,7 +1,7 @@
 """
 Unified security audit aggregator for toolguard.
 
-This module is a THIN DETERMINISTIC AGGREGATOR over two independently-tested
+This module is a THIN DETERMINISTIC AGGREGATOR over four independently-tested
 analysers:
 
 * :mod:`~toolguard.tools.danger` -- flags dangerous allow-rule patterns in the
@@ -9,19 +9,26 @@ analysers:
   unanchored regex, blanket allows).
 * :mod:`~toolguard.tools.takeover_audit` -- audits takeover-mode invariants (hook
   registration, conflicts, uncovered blanket allows, loose fallback).
+* :mod:`~toolguard.tools.clarity` -- flags confusing same-file rule interactions
+  (a deny/ask that silently shadows part of an allow).
+* :mod:`~toolguard.tools.environment_audit` -- flags an environment (``PYTHONPATH``)
+  that would shadow the installed toolguard hook with an unreviewed source
+  checkout (TOO-19).
 
-This module contains NO detection logic of its own.  It calls the two public
-functions (:func:`~toolguard.tools.danger.danger` and
-:func:`~toolguard.tools.takeover_audit.audit_takeover`), normalises their outputs
-into a single :class:`RankedFinding` list, and returns a :class:`SecurityReport`.
-A :func:`render` helper produces human-readable text (ASCII only, no Unicode) and
-a :func:`main` entry point wires everything to a CLI.
+This module contains NO detection logic of its own.  It calls each analyser's
+public function (:func:`~toolguard.tools.danger.danger`,
+:func:`~toolguard.tools.takeover_audit.audit_takeover`,
+:func:`~toolguard.tools.clarity.find_confusing_interactions`,
+:func:`~toolguard.tools.environment_audit.audit_environment`), normalises their
+outputs into a single :class:`RankedFinding` list, and returns a
+:class:`SecurityReport`. A :func:`render` helper produces human-readable text
+(ASCII only, no Unicode) and a :func:`main` entry point wires everything to a CLI.
 
 Public API summary
 ------------------
-* :class:`RankedFinding` -- normalised finding from either source.
+* :class:`RankedFinding` -- normalised finding from any source.
 * :class:`SecurityReport` -- aggregated report: findings tuple + summary fields.
-* :func:`security_audit` -- run both analysers and return a SecurityReport.
+* :func:`security_audit` -- run every analyser and return a SecurityReport.
 * :func:`render` -- format a SecurityReport as markdown or plain text.
 * :func:`main` -- CLI entry point (``toolguard-audit`` console script).
 """
@@ -51,6 +58,7 @@ from toolguard.tools.edit_proposal import (
     edit_proposal_from_dict,
     edit_proposal_to_dict,
 )
+from toolguard.tools.environment_audit import audit_environment
 from toolguard.tools.takeover_audit import audit_takeover, effective_takeover_state
 
 # Marker prefix for an extended-syntax regex pattern body (``[regex]<body>``).
@@ -87,16 +95,22 @@ class Remediation:
 @dataclass(frozen=True)
 class RankedFinding:
     """
-    Normalised security finding from either the danger or takeover-audit analyser.
+    Normalised security finding from any of the four analysers.
 
-    Both :class:`~toolguard.tools.danger.DangerFinding` and
-    :class:`~toolguard.tools.takeover_audit.AuditFinding` are converted into this
-    shape so that consumers deal with a single uniform type.
+    :class:`~toolguard.tools.danger.DangerFinding`,
+    :class:`~toolguard.tools.takeover_audit.AuditFinding`,
+    :class:`~toolguard.tools.clarity.InteractionFinding`, and
+    :class:`~toolguard.tools.environment_audit.EnvironmentFinding` are all
+    converted into this shape so that consumers deal with a single uniform type.
 
     Attributes:
         source: ``"rule"`` for findings from
             :func:`~toolguard.tools.danger.danger`; ``"takeover"`` for findings
-            from :func:`~toolguard.tools.takeover_audit.audit_takeover`.
+            from :func:`~toolguard.tools.takeover_audit.audit_takeover`;
+            ``"clarity"`` for findings from
+            :func:`~toolguard.tools.clarity.find_confusing_interactions`;
+            ``"environment"`` for findings from
+            :func:`~toolguard.tools.environment_audit.audit_environment`.
         finding_id: Stable detector/finding identifier (e.g.
             ``"arbitrary-exec-allow"`` or ``"hook-not-registered"``).
         severity_value: Integer severity (1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL).
@@ -254,21 +268,28 @@ def _danger_proposal(df: DangerFinding) -> Optional[EditProposal]:
 def security_audit(
     config: Configuration,
     takeover: Optional[TakeoverConfig] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> SecurityReport:
     """
-    Run both security analysers and return a unified :class:`SecurityReport`.
+    Run every security analyser and return a unified :class:`SecurityReport`.
 
     This function is a pure aggregator: it calls
-    :func:`~toolguard.tools.danger.danger` and
-    :func:`~toolguard.tools.takeover_audit.audit_takeover`, normalises each
-    finding into a :class:`RankedFinding`, sorts the combined list, and computes
-    summary statistics.  No detection logic lives here.
+    :func:`~toolguard.tools.danger.danger`,
+    :func:`~toolguard.tools.takeover_audit.audit_takeover`,
+    :func:`~toolguard.tools.clarity.find_confusing_interactions`, and
+    :func:`~toolguard.tools.environment_audit.audit_environment`, normalises
+    each finding into a :class:`RankedFinding`, sorts the combined list, and
+    computes summary statistics.  No detection logic lives here.
 
     Args:
         config: The resolved configuration hierarchy to audit.
         takeover: Pre-resolved takeover configuration.  When ``None``, it is
             resolved via :func:`~toolguard.tools.takeover_audit.effective_takeover_state`
             so both analysers share the same resolved state.
+        env: Environment mapping passed through to
+            :func:`~toolguard.tools.environment_audit.audit_environment`
+            (defaults to ``os.environ`` there; exposed here purely for
+            testing without mutating the real environment).
 
     Returns:
         A :class:`SecurityReport` with all findings sorted severity-descending.
@@ -357,6 +378,27 @@ def security_audit(
                     takeover_active=takeover.enabled,
                 )
             )
+
+    # --- environment findings (source = "environment") ----------------------
+    # TOO-19: PYTHONPATH shadowing the installed hook with an unreviewed
+    # source checkout. Silent in the normal case (no PYTHONPATH, or one with
+    # no toolguard/ shadow entry) -- see the module docstring.
+    for ef in audit_environment(env):
+        ranked.append(
+            RankedFinding(
+                source="environment",
+                finding_id=ef.finding_id,
+                severity_value=ef.severity.value,
+                severity_label=ef.severity.label(),
+                tool=None,
+                locus=None,
+                pattern=None,
+                summary=ef.description,
+                impact=ef.impact,
+                remediation=Remediation(text=ef.remediation, proposal=None),
+                takeover_active=takeover.enabled,
+            )
+        )
 
     # Sort: acknowledged LAST (#NOSECURITY findings are de-prioritized but never
     # dropped), then severity DESC, source, tool (None -> ""), finding_id.

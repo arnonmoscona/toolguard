@@ -89,25 +89,48 @@ _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "mcp__jetbrains__execute_terminal_command(*)",
 )
 _DEFAULT_NO_MATCH_FALLBACK = "ask"
-# The recognized ``no_match_fallback`` values (TOO-15). Any other (typo/bad
-# config) value is normalized to the default rather than propagated. The
-# deprecated legacy value ``warn_deny`` is intentionally excluded from this
-# set -- it is still ACCEPTED on input (top-level key or the legacy
-# ``[takeover_mode]`` alias) but always normalized to ``allow_with_warning``
-# before reaching this set (see ``Configuration.resolved_no_match_fallback``).
-_VALID_NO_MATCH_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning"})
+# The recognized ``no_match_fallback`` values (TOO-15; ``'allow'`` added
+# TOO-19). Any other (typo/bad config) value is normalized to the default
+# rather than propagated. Two spellings are ACCEPTED on input but never
+# appear in this set -- both are normalized away before reaching it (see
+# ``Configuration.resolved_no_match_fallback``'s ``alias_map``):
+# the deprecated legacy value ``warn_deny`` normalizes to
+# ``allow_with_warning``, and the deliberate long-form synonym
+# ``allow_with_no_warnings`` normalizes to ``allow``. Unlike ``warn_deny``,
+# ``allow_with_no_warnings`` is NOT deprecated -- it is a permanent alias that
+# exists purely as a human reminder (see that setting's own comment below and
+# ``resolved_no_match_fallback``'s docstring for why both spellings stay).
+_VALID_NO_MATCH_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "allow"})
 
 _DEFAULT_UNDECIDABLE_FALLBACK = "ask"
-# The recognized `undecidable_fallback` values (TOO-19). This is a DIFFERENT
-# setting from `no_match_fallback` above: `no_match_fallback` answers "I read
-# this command and no rule covered it"; `undecidable_fallback` answers "I
-# could not safely read this command at all" (foreign inline code / heredoc
-# sinks, complex control structures, process substitution -- see
+# The recognized `undecidable_fallback` values (TOO-19; `'allow'` added in the
+# same allow/allow_with_no_warnings follow-up). This is a DIFFERENT setting
+# from `no_match_fallback` above: `no_match_fallback` answers "I read this
+# command and no rule covered it"; `undecidable_fallback` answers "I could
+# not safely read this command at all" (foreign inline code / heredoc sinks,
+# complex control structures, process substitution -- see
 # `toolguard.compound`). It is a brand-new TOO-19 top-level key with NO
 # legacy `[takeover_mode]` alias and NO deprecated `'warn_deny'` spelling --
 # do not add either "for symmetry" with `no_match_fallback`; that history
-# does not apply here. See `Configuration.resolved_undecidable_fallback`.
-_VALID_UNDECIDABLE_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning"})
+# does not apply here. The `allow_with_no_warnings` synonym for `'allow'` IS
+# honored here (see `resolved_undecidable_fallback`'s `alias_map`) -- that
+# alias is not part of the `warn_deny` history the asymmetry above is about,
+# it is a brand-new, deliberately symmetric spelling for both settings.
+# See `Configuration.resolved_undecidable_fallback`.
+_VALID_UNDECIDABLE_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "allow"})
+
+#: Canonical alias applied to BOTH ``no_match_fallback`` and
+#: ``undecidable_fallback`` (TOO-19 allow/allow_with_no_warnings work):
+#: ``'allow_with_no_warnings'`` is an exact synonym for ``'allow'`` -- allow
+#: the command, emit NO warning anywhere. The long spelling exists purely as
+#: a human reminder that this is a deliberate, reviewable choice; switching
+#: back to the warned variant is a 3-character edit
+#: (``allow_with_no_warnings`` -> ``allow_with_warning``). Unlike
+#: ``warn_deny`` (below), this is not a deprecated spelling being phased out
+#: -- both spellings are permanent and equally supported, so it is a plain
+#: module-level constant rather than something scoped to one setting's
+#: ``alias_map`` call.
+_ALLOW_NO_WARNINGS_ALIAS = {"allow_with_no_warnings": "allow"}
 
 # Documented defaults for the ``config_sync`` section. Single source of truth
 # shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
@@ -1685,11 +1708,12 @@ class Configuration:
         #   fail-closed-on-empty writes their own catch-all deny rule, which then
         #   flows through the normal matched-deny branch above.
         # - Rules ARE configured but simply did not match: governed by
-        #   no_match_fallback -- 'ask' (the default), 'deny', or
-        #   'allow_with_warning' (allow, with a warning reason instead of
-        #   blocking). The deprecated legacy value 'warn_deny' is normalized to
-        #   'allow_with_warning' by resolved_no_match_fallback() before this
-        #   branch ever sees it.
+        #   no_match_fallback -- 'ask' (the default), 'deny', 'allow_with_warning'
+        #   (allow, with a warning reason instead of blocking), or 'allow' (TOO-19;
+        #   allow with NO warning anywhere). The deprecated legacy value
+        #   'warn_deny' is normalized to 'allow_with_warning', and the deliberate
+        #   long-form synonym 'allow_with_no_warnings' is normalized to 'allow',
+        #   both by resolved_no_match_fallback() before this branch ever sees them.
         if not self.has_any_rules(tool_name):
             return ResolvedDecision(
                 "ask",
@@ -1705,6 +1729,16 @@ class Configuration:
                 "Command does not match any allow patterns; allowed with a "
                 "warning by no_match_fallback=allow_with_warning (add an "
                 "explicit rule to silence this)",
+                None,
+                None,
+                fallback_warning=True,
+            )
+        if fallback == "allow":
+            return ResolvedDecision(
+                "allow",
+                "Command does not match any allow patterns; allowed with no "
+                "warning by no_match_fallback=allow (add an explicit rule to "
+                "silence this)",
                 None,
                 None,
             )
@@ -1783,7 +1817,7 @@ class Configuration:
         valid_values: frozenset,
         default: str,
         legacy_alias: Optional[Callable[[], Optional[str]]] = None,
-        deprecated_aliases: Optional[Dict[str, str]] = None,
+        alias_map: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         Resolve one "fallback"-shaped ``toolguard_hook`` setting (TOO-19 code
@@ -1806,8 +1840,8 @@ class Configuration:
            layer that sets the top-level key wins.
         2. If unset anywhere and *legacy_alias* is given, call it for a
            fallback raw value (e.g. the ``[takeover_mode]`` alias).
-        3. If the resolved raw value is a key of *deprecated_aliases*, replace
-           it with the mapped canonical spelling.
+        3. If the resolved raw value is a key of *alias_map*, replace it with
+           the mapped canonical spelling.
         4. Validate against *valid_values*; an unset OR unrecognized value
            (typo/bad config) resolves to *default* rather than propagating or
            raising.
@@ -1820,10 +1854,17 @@ class Configuration:
             legacy_alias: Optional zero-arg callable returning a raw legacy
                 value to fall back to when no layer sets *key*. ``None`` means
                 this setting has no legacy alias.
-            deprecated_aliases: Optional ``{old_spelling: canonical}`` mapping
-                applied AFTER the legacy-alias fallback, regardless of which
-                mechanism supplied the raw value. ``None`` means this setting
-                has no deprecated spelling to normalize.
+            alias_map: Optional ``{spelling: canonical}`` mapping applied
+                AFTER the legacy-alias fallback, regardless of which
+                mechanism supplied the raw value. Covers BOTH kinds of
+                alternate spelling this shared body needs to normalize: a
+                truly deprecated legacy value being phased out (e.g.
+                ``no_match_fallback``'s ``'warn_deny'`` -> ``'allow_with_warning'``)
+                and a deliberate, PERMANENT synonym that is not deprecated at
+                all (e.g. ``'allow_with_no_warnings'`` -> ``'allow'``, TOO-19
+                -- the long spelling is a human reminder, not a spelling on
+                its way out). ``None`` means this setting has no alternate
+                spelling to normalize.
 
         Returns:
             The resolved, validated setting value.
@@ -1831,8 +1872,8 @@ class Configuration:
         raw = self._first_toplevel_str_setting(key)
         if raw is None and legacy_alias is not None:
             raw = legacy_alias()
-        if deprecated_aliases and raw in deprecated_aliases:
-            raw = deprecated_aliases[raw]
+        if alias_map and raw in alias_map:
+            raw = alias_map[raw]
         return raw if raw in valid_values else default
 
     def resolved_no_match_fallback(self) -> str:
@@ -1850,27 +1891,38 @@ class Configuration:
 
         The deprecated legacy value ``'warn_deny'`` -- whether set via the
         top-level key or the ``[takeover_mode]`` alias -- is always normalized
-        to the canonical ``'allow_with_warning'`` before being returned.
+        to the canonical ``'allow_with_warning'`` before being returned. The
+        deliberate (non-deprecated) long-form synonym
+        ``'allow_with_no_warnings'`` is likewise always normalized, to
+        ``'allow'`` (TOO-19) -- see the module-level
+        ``_ALLOW_NO_WARNINGS_ALIAS`` comment for why this spelling is kept
+        permanently rather than deprecated like ``warn_deny``.
 
         Shares its layer-scan and validation with
         :meth:`resolved_undecidable_fallback` via
         :meth:`_resolve_fallback_setting` (TOO-19 code review m2); this
         method supplies the ``[takeover_mode]`` legacy alias and the
-        ``warn_deny`` deprecated spelling as parameters, neither of which
-        ``undecidable_fallback`` has.
+        ``warn_deny``/``allow_with_no_warnings`` alias map as parameters. Only
+        the ``[takeover_mode]`` legacy alias and the ``warn_deny`` spelling
+        are unique to this setting -- ``allow_with_no_warnings`` is honoured
+        by :meth:`resolved_undecidable_fallback` too (TOO-19), so it is NOT
+        part of the asymmetry the rest of this docstring describes.
 
         Returns:
-            One of ``'ask'``, ``'deny'``, or ``'allow_with_warning'``. The
-            resolved value is validated against the recognized set; an unset
-            OR unrecognized value (typo/bad config) resolves to the default
-            ``'ask'`` and is never propagated as-is.
+            One of ``'ask'``, ``'deny'``, ``'allow_with_warning'``, or
+            ``'allow'``. The resolved value is validated against the
+            recognized set; an unset OR unrecognized value (typo/bad config)
+            resolves to the default ``'ask'`` and is never propagated as-is.
         """
         return self._resolve_fallback_setting(
             "no_match_fallback",
             _VALID_NO_MATCH_FALLBACKS,
             _DEFAULT_NO_MATCH_FALLBACK,
             legacy_alias=lambda: self.takeover_mode().no_match_fallback,
-            deprecated_aliases={"warn_deny": "allow_with_warning"},
+            alias_map={
+                "warn_deny": "allow_with_warning",
+                **_ALLOW_NO_WARNINGS_ALIAS,
+            },
         )
 
     def resolved_undecidable_fallback(self) -> str:
@@ -1899,7 +1951,15 @@ class Configuration:
         apply here, and there is deliberately no ``[takeover_mode]`` parsing
         for this key. There is also no deprecated ``'warn_deny'`` spelling to
         normalize (that alias exists only for ``no_match_fallback``'s
-        history). Applies in BOTH takeover and non-takeover modes.
+        history) -- keep that ONE asymmetry. Applies in BOTH takeover and
+        non-takeover modes.
+
+        The deliberate (non-deprecated) long-form synonym
+        ``'allow_with_no_warnings'`` IS honoured here, normalized to
+        ``'allow'`` (TOO-19) -- unlike ``warn_deny``, this is a brand-new
+        spelling introduced for both settings at once, not part of
+        ``no_match_fallback``'s legacy history, so it does not fall under the
+        "no symmetry with no_match_fallback" rule above.
 
         This setting is NOT consulted by, and has NO effect on, the
         config-level parse-failure ASK floor
@@ -1910,20 +1970,21 @@ class Configuration:
         Shares its layer-scan and validation with
         :meth:`resolved_no_match_fallback` via
         :meth:`_resolve_fallback_setting` (TOO-19 code review m2); unlike
-        that method, this call supplies NO ``legacy_alias`` and NO
-        ``deprecated_aliases`` -- see this method's own docstring above for
-        why neither applies here.
+        that method, this call supplies NO ``legacy_alias`` and its
+        ``alias_map`` is JUST ``_ALLOW_NO_WARNINGS_ALIAS`` -- no
+        ``warn_deny`` entry, per the asymmetry above.
 
         Returns:
-            One of ``'ask'``, ``'deny'``, or ``'allow_with_warning'``. The
-            resolved value is validated against the recognized set; an unset
-            OR unrecognized value (typo/bad config) resolves to the default
-            ``'ask'`` and is never propagated as-is.
+            One of ``'ask'``, ``'deny'``, ``'allow_with_warning'``, or
+            ``'allow'``. The resolved value is validated against the
+            recognized set; an unset OR unrecognized value (typo/bad config)
+            resolves to the default ``'ask'`` and is never propagated as-is.
         """
         return self._resolve_fallback_setting(
             "undecidable_fallback",
             _VALID_UNDECIDABLE_FALLBACKS,
             _DEFAULT_UNDECIDABLE_FALLBACK,
+            alias_map=_ALLOW_NO_WARNINGS_ALIAS,
         )
 
     @staticmethod

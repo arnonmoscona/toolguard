@@ -21,6 +21,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.hook import _parse_compound_match_details
 from toolguard.tools.decision import decide
 from toolguard.resolve import (
     BashResolution,
@@ -878,11 +879,20 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         Given a foreign inline-code command (`python3 -c "..."`) with the
             outer command allowed
         When resolve_bash_permission_detailed() resolves it under each of the
-            three undecidable_fallback settings
+            five undecidable_fallback settings (TOO-19: including the newer
+            'allow'/'allow_with_no_warnings' allow-with-no-warning values)
         Then the decision matches that setting's floor exactly (ask/deny/allow)
+            -- 'allow_with_warning', 'allow', and 'allow_with_no_warnings' are
+            all the SAME strictness level (float to 'allow')
         """
         cmd = 'python3 -c "import os"'
-        expected = {"ask": "ask", "deny": "deny", "allow_with_warning": "allow"}
+        expected = {
+            "ask": "ask",
+            "deny": "deny",
+            "allow_with_warning": "allow",
+            "allow": "allow",
+            "allow_with_no_warnings": "allow",
+        }
         for fallback, want in expected.items():
             with self.subTest(fallback=fallback):
                 config = self._config_with_fallback(fallback, allow=["python3 -c:*"])
@@ -893,11 +903,20 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         """
         Given a process-substitution command (`diff <(sort a) <(sort b)`)
         When resolve_bash_permission_detailed() resolves it under each of the
-            three undecidable_fallback settings
+            five undecidable_fallback settings (TOO-19: including the newer
+            'allow'/'allow_with_no_warnings' allow-with-no-warning values)
         Then the decision matches that setting's floor exactly (ask/deny/allow)
+            -- 'allow_with_warning', 'allow', and 'allow_with_no_warnings' are
+            all the SAME strictness level (float to 'allow')
         """
         cmd = "diff <(sort a) <(sort b)"
-        expected = {"ask": "ask", "deny": "deny", "allow_with_warning": "allow"}
+        expected = {
+            "ask": "ask",
+            "deny": "deny",
+            "allow_with_warning": "allow",
+            "allow": "allow",
+            "allow_with_no_warnings": "allow",
+        }
         for fallback, want in expected.items():
             with self.subTest(fallback=fallback):
                 config = self._config_with_fallback(fallback, allow=["diff:*"])
@@ -1008,6 +1027,420 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
 
         result = self._resolve(config, 'python3 -c "import os"')
         self.assertEqual(result.decision, "ask")
+
+
+class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
+    """
+    TOO-19 code review 2026-08-02, Major finding M1: ``allow_with_warning``
+    silently lost its warning -- and misattributed the allow to a fabricated
+    rule name -- on a multi-leaf all-allow compound.
+
+    Given the exact repro config/commands from that review: ``Bash(ls)`` +
+    ``Bash(python *)`` allow, undecidable_fallback set to each of
+    ``'allow_with_warning'`` and ``'allow'``.
+
+    A single-leaf ask-floor command and a two-leaf compound wrapping the same
+    ask-floor command must agree on fallback_warning -- before this fix the
+    multi-leaf case silently reported False (defect 1) and fabricated a
+    'python -c' rule match in the reason (defect 2).
+    """
+
+    def _repro_config(self, undecidable_fallback):
+        """Build the exact M1 repro config: Bash(ls) + Bash(python *) allow only."""
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": undecidable_fallback,
+                        "permissions": {
+                            "allow": ["Bash(ls)", "Bash(python *)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+
+    def test_single_leaf_allow_with_warning_sets_fallback_warning_true(self):
+        """
+        Given undecidable_fallback='allow_with_warning'
+        When resolving the single-leaf command 'python -c "print(1)"'
+        Then the decision is allow and fallback_warning is True (baseline,
+            unaffected by this fix -- confirms the repro table's row 1)
+        """
+        config = self._repro_config("allow_with_warning")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(result.fallback_warning)
+
+    def test_multi_leaf_allow_with_warning_sets_fallback_warning_true(self):
+        """
+        Given undecidable_fallback='allow_with_warning'
+        When resolving the two-leaf compound 'ls && python -c "print(1)"'
+        Then the decision is allow and fallback_warning is True -- BEFORE
+            the fix this was False (M1 defect 1: the marker was destroyed by
+            the multi-leaf 'cmd -> pattern' summary)
+        """
+        config = self._repro_config("allow_with_warning")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(
+            result.fallback_warning,
+            "multi-leaf compound lost the warning -- M1 defect 1 regressed",
+        )
+
+    def test_multi_leaf_reason_never_fabricates_a_matched_rule(self):
+        """
+        Given undecidable_fallback='allow_with_warning' and NO rule named
+            'python -c' anywhere in the config
+        When resolving 'ls && python -c "print(1)"'
+        Then the reason does NOT claim 'python -c' (or any other pattern) was
+            a matched rule for that leaf -- M1 defect 2. An absent record is
+            required in place of the fabricated one.
+        """
+        config = self._repro_config("allow_with_warning")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertNotIn(
+            "-> python -c",
+            result.reason,
+            "fabricated 'python -c' rule attribution reappeared in the reason",
+        )
+        self.assertIn("[fallback allow -- no rule matched]", result.reason)
+
+    def test_single_vs_multi_leaf_parity_for_silent_allow(self):
+        """
+        Given undecidable_fallback='allow' (TOO-19 no-warning value)
+        When resolving both the single-leaf and two-leaf compound forms
+        Then BOTH report fallback_warning False (no warning was ever
+            promised for this value) and neither reason fabricates a
+            'python -c' rule match
+        """
+        config = self._repro_config("allow")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        for command in ('python -c "print(1)"', 'ls && python -c "print(1)"'):
+            with self.subTest(command=command):
+                result = resolve_bash_permission_detailed(
+                    command, config, True, hd_deny, hd_allow
+                )
+                self.assertEqual(result.decision, "allow")
+                self.assertFalse(result.fallback_warning)
+                self.assertNotIn("-> python -c", result.reason)
+
+    def test_multi_leaf_reason_round_trips_through_hooks_own_log_breakdown(self):
+        """
+        Given the same multi-leaf compound reason
+        When hook.py's own _parse_compound_match_details() (used to build the
+            per-sub-command resolution-log breakdown) parses it
+        Then the fallback-allow leaf's entry survives as ONE (cmd, rule) pair
+            with the honest placeholder as the rule -- discovered live against
+            the real hook: a comma inside the placeholder text would have been
+            split into two bogus entries by this function's ", " delimiter,
+            which is exactly what a first version of this fix did
+        """
+        config = self._repro_config("allow_with_warning")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        details = _parse_compound_match_details(result.reason)
+        self.assertIsNotNone(details)
+        commands = [cmd for cmd, _rule in details]
+        self.assertIn('python -c "print(1)"', commands)
+        for cmd, rule in details:
+            if cmd == 'python -c "print(1)"':
+                self.assertEqual(rule, "[fallback allow -- no rule matched]")
+
+    def test_three_leaf_compound_warns_when_any_leaf_is_an_escape_hatch(self):
+        """
+        Given undecidable_fallback='allow_with_warning' and a THREE-leaf
+            compound where only the middle leaf is the ask-floor escape hatch
+        When resolving 'ls && python -c "print(1)" && ls'
+        Then fallback_warning is still True (any(), not all()) and neither
+            genuine leaf ('ls -> ls') is mislabelled as a fallback allow
+        """
+        config = self._repro_config("allow_with_warning")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'ls && python -c "print(1)" && ls', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(result.fallback_warning)
+        self.assertIn("[fallback allow -- no rule matched]", result.reason)
+        self.assertIn("ls -> ls", result.reason)
+
+
+class TestFallbackWarningField(unittest.TestCase):
+    """
+    TOO-19 allow/allow_with_no_warnings work: FileResolution.fallback_warning
+    and BashResolution.fallback_warning correctly distinguish an 'allow'
+    produced by ``allow_with_warning`` (True -- route to the WARNING log
+    stream) from one produced by ``allow``/``allow_with_no_warnings`` (False
+    -- no warning anywhere), for both settings and both the file-path and
+    Bash resolution paths. Also guards the marker-safety property
+    hook.py/resolve.py rely on: the newer no-warning reason text must never
+    accidentally contain the ``allow_with_warning`` marker substring.
+    """
+
+    def test_no_match_fallback_allow_with_warning_sets_bash_fallback_warning_true(
+        self,
+    ):
+        """
+        Given Bash allows only 'git:*' and no_match_fallback='allow_with_warning'
+        When resolve_bash_permission_detailed() resolves an unmatched command
+        Then the decision is 'allow' and fallback_warning is True
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {"allow": ["Bash(git:*)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "ls -la", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(result.fallback_warning)
+
+    def test_no_match_fallback_allow_sets_bash_fallback_warning_false(self):
+        """
+        Given Bash allows only 'git:*' and no_match_fallback='allow' (TOO-19)
+        When resolve_bash_permission_detailed() resolves an unmatched command
+        Then the decision is 'allow' and fallback_warning is False -- no
+            warning is ever emitted for the plain 'allow' value
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow",
+                        "permissions": {"allow": ["Bash(git:*)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "ls -la", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertFalse(result.fallback_warning)
+        self.assertNotIn("allow_with_warning", result.reason)
+
+    def test_no_match_fallback_allow_with_no_warnings_alias_matches_allow(self):
+        """
+        Given Bash allows only 'git:*' and
+            no_match_fallback='allow_with_no_warnings' (the long-form alias)
+        When resolve_bash_permission_detailed() resolves an unmatched command
+        Then it behaves IDENTICALLY to 'allow': decision 'allow',
+            fallback_warning False, no 'allow_with_warning' substring in reason
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_no_warnings",
+                        "permissions": {"allow": ["Bash(git:*)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "ls -la", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertFalse(result.fallback_warning)
+        self.assertNotIn("allow_with_warning", result.reason)
+        self.assertIn("no_match_fallback=allow", result.reason)
+
+    def test_no_match_fallback_allow_with_warning_sets_file_fallback_warning_true(
+        self,
+    ):
+        """
+        Given Read allows only '/tmp/**' and no_match_fallback='allow_with_warning'
+        When resolve_file_path_permission_detailed() resolves an unmatched path
+        Then the decision is 'allow' and fallback_warning is True
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        result = resolve_file_path_permission_detailed(
+            "Read", "/etc/passwd", config, True
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(result.fallback_warning)
+
+    def test_no_match_fallback_allow_sets_file_fallback_warning_false(self):
+        """
+        Given Read allows only '/tmp/**' and no_match_fallback='allow' (TOO-19)
+        When resolve_file_path_permission_detailed() resolves an unmatched path
+        Then the decision is 'allow' and fallback_warning is False, and the
+            reason text does not claim a warning was emitted
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow",
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/**)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        result = resolve_file_path_permission_detailed(
+            "Read", "/etc/passwd", config, True
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertFalse(result.fallback_warning)
+        self.assertIn("no warning", result.reason)
+        self.assertNotIn("allow_with_warning", result.reason)
+
+    def test_explicit_rule_match_never_sets_fallback_warning(self):
+        """
+        Given Bash allows 'git:*' and no_match_fallback='allow_with_warning'
+        When resolve_bash_permission_detailed() resolves a command that
+            matches the EXPLICIT allow rule (not the fallback)
+        Then fallback_warning is False -- an explicit rule match is never
+            mistaken for a fallback-driven allow, however the fallback
+            setting happens to be configured
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {"allow": ["Bash(git:*)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "git status", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertFalse(result.fallback_warning)
+
+    def test_undecidable_fallback_ask_floor_leaf_reason_text_by_value(self):
+        """
+        Given a foreign inline-code command with the outer command allowed
+        When undecidable_fallback is 'allow_with_warning' vs 'allow'
+        Then only the 'allow_with_warning' reason claims a warning was
+            emitted; the 'allow' reason says "no warning" and never contains
+            the 'allow_with_warning' marker substring
+        """
+        cmd = 'python3 -c "import os"'
+        for fallback, warned in (("allow_with_warning", True), ("allow", False)):
+            with self.subTest(fallback=fallback):
+                config = _make_config(
+                    [
+                        (
+                            "project",
+                            "toolguard_hook",
+                            {
+                                "undecidable_fallback": fallback,
+                                "permissions": {
+                                    "allow": ["Bash(python3 -c:*)"],
+                                    "deny": [],
+                                },
+                            },
+                        )
+                    ]
+                )
+                hd_deny, hd_allow = config.hard_deny("Bash")
+                result = resolve_bash_permission_detailed(
+                    cmd, config, True, hd_deny, hd_allow
+                )
+                self.assertEqual(result.decision, "allow")
+                self.assertEqual(result.fallback_warning, warned)
+                if warned:
+                    self.assertIn(
+                        "undecidable_fallback=allow_with_warning", result.reason
+                    )
+                else:
+                    self.assertIn("no warning", result.reason)
+                    self.assertNotIn("allow_with_warning", result.reason)
+
+    def test_undecidable_fallback_segment_reason_text_by_value(self):
+        """
+        Given a process-substitution command (grammar-level UndecidableSegment)
+        When undecidable_fallback is 'allow_with_warning' vs 'allow'
+        Then only the 'allow_with_warning' reason claims a warning was
+            emitted; the 'allow' reason says "no warning" and never contains
+            the 'allow_with_warning' marker substring
+        """
+        cmd = "diff <(sort a) <(sort b)"
+        for fallback, warned in (("allow_with_warning", True), ("allow", False)):
+            with self.subTest(fallback=fallback):
+                config = _make_config(
+                    [
+                        (
+                            "project",
+                            "toolguard_hook",
+                            {
+                                "undecidable_fallback": fallback,
+                                "permissions": {
+                                    "allow": ["Bash(diff:*)"],
+                                    "deny": [],
+                                },
+                            },
+                        )
+                    ]
+                )
+                hd_deny, hd_allow = config.hard_deny("Bash")
+                result = resolve_bash_permission_detailed(
+                    cmd, config, True, hd_deny, hd_allow
+                )
+                self.assertEqual(result.decision, "allow")
+                self.assertEqual(result.fallback_warning, warned)
+                if warned:
+                    self.assertIn(
+                        "undecidable_fallback=allow_with_warning", result.reason
+                    )
+                else:
+                    self.assertIn("no warning", result.reason)
+                    self.assertNotIn("allow_with_warning", result.reason)
 
 
 class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):

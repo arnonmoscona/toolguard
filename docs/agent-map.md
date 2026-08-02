@@ -183,6 +183,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Recipe: clean up accumulated permissions](agent-guides.md#recipe-clean-up-accumulated-permissions)
 
 **`docs/architecture.md`**
+- [Contents](architecture.md#contents)
 - [Package structure](architecture.md#package-structure)
 - [Hook flow](architecture.md#hook-flow)
 - [Writing configuration](architecture.md#writing-configuration)
@@ -265,6 +266,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Phase T -- Trace dump and issue reporting (offer this)](install.md#phase-t----trace-dump-and-issue-reporting-offer-this)
 
 **`docs/permission-patterns.md`**
+- [Contents](permission-patterns.md#contents)
 - [Pattern types](permission-patterns.md#pattern-types)
 - [Command pattern examples](permission-patterns.md#command-pattern-examples)
   - [DEFAULT patterns (standard)](permission-patterns.md#default-patterns-standard)
@@ -294,6 +296,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Uninstalling](quickstart.md#uninstalling)
 
 **`docs/security.md`**
+- [Contents](security.md#contents)
 - [Blanket allow risks](security.md#blanket-allow-risks)
 - [A cloned project's config can inject text into Claude's context](security.md#a-cloned-projects-config-can-inject-text-into-claudes-context)
 - [Multi-line commands and the ASK-safe guarantee](security.md#multi-line-commands-and-the-ask-safe-guarantee)

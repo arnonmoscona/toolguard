@@ -39,6 +39,8 @@ Design notes
 
 import argparse
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -501,8 +503,22 @@ hooks (never clobbering them).
 
 Writes to ~/.claude/settings.json (user scope) or
 <project-dir>/.claude/settings.local.json (project scope): one PreToolUse
-matcher per governed tool pointing at --binary, plus a SessionStart matcher
-pointing at "<--binary>-session-start".
+matcher per governed tool, plus a SessionStart matcher pointing at
+"<--binary>-session-start".
+
+The PreToolUse matcher's command is HARDENED (TOO-19) when possible:
+"<tool venv python> -E -P -m toolguard.hook" instead of the bare --binary
+path. -E/-P make the interpreter ignore PYTHONPATH and cwd entirely when
+resolving imports, so a stray PYTHONPATH=. (or any working-tree toolguard/
+package) can never shadow the installed hook with unreviewed code -- see
+docs/security.md ("The hook can be silently shadowed"). The interpreter path
+is derived from --binary (its resolved location's sibling python3/python) and
+is verified to exist and be executable BEFORE being written; if it cannot be
+found, the bare --binary form is registered instead (unhardened, but working
+-- a hook that fails to launch is a SILENT, non-blocking Claude Code hook
+error that lets the tool call proceed with NO toolguard decision at all,
+which is worse than the shadowing this hardens against, so an unverified path
+is never written).
 
 Hooks are MERGED into any existing PreToolUse/SessionStart entries -- other
 hook types already present (PostToolUse, SessionEnd, ...) and any matcher
@@ -514,6 +530,85 @@ only if the file did not exist yet). Journals one entry naming the file
 edited and the matchers added; its reverse is "restore the backup" (or
 "delete the file" if it was freshly created).
 """
+
+#: The module the hardened PreToolUse hook command runs via "-m" (TOO-19).
+_HOOK_MODULE = "toolguard.hook"
+
+
+def _tool_venv_python(binary: str) -> Optional[str]:
+    """
+    Best-effort: resolve the tool venv's python interpreter next to *binary*.
+
+    *binary* is the installed console-script path for the toolguard hook
+    (e.g. a ``uv tool install`` shim, or a venv's ``bin/toolguard``).
+    Resolving *one* level of symlinks (``Path.resolve()``) lands on the
+    script's REAL location -- for a ``uv tool install`` this is
+    ``.../uv/tools/toolguard/bin/toolguard`` -- and every such ``bin/``
+    directory ships a ``python3`` (or ``python``) sibling that is the correct
+    interpreter for that exact venv. The SIBLING NAME (not its own further
+    symlink target) is what gets returned, so the path stays stable across a
+    later ``uv tool install --force`` reinstall, which recreates the same
+    venv directory in place.
+
+    Never guesses: returns ``None`` when no such sibling exists or is not
+    executable, so the caller can fall back to the unhardened bare-binary
+    registration rather than writing an interpreter path that might not run.
+
+    Args:
+        binary: Path to the installed toolguard console-script.
+
+    Returns:
+        The absolute path to the sibling interpreter, verified to exist and
+        be executable, or ``None``.
+    """
+    try:
+        bin_dir = Path(binary).resolve().parent
+    except OSError:
+        return None
+    for name in ("python3", "python"):
+        candidate = bin_dir / name
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _hardened_hook_command(binary: str) -> Tuple[str, bool]:
+    """
+    Build the command to register for the toolguard PreToolUse hook (TOO-19).
+
+    Prefers the hardened form ``<venv python> -E -P -m toolguard.hook`` (see
+    docs/security.md, "The hook can be silently shadowed"), which cannot be
+    shadowed by a PYTHONPATH or cwd-relative ``toolguard/`` package. Falls
+    back to the bare *binary* path, UNHARDENED, when the venv python cannot
+    be located: a working unhardened hook is strictly better than a broken
+    absolute path the OS cannot exec -- a launch failure is a non-blocking
+    Claude Code hook error, so the tool call proceeds with NO toolguard
+    decision at all, silently, which is worse than the shadowing risk this
+    hardens against.
+
+    TOO-19 code review M2: *python_path* is written through :func:`shlex.quote`
+    before being embedded in the command string. Claude Code hands this string
+    to a shell, so an interpreter path containing a space (a relocated venv, or
+    a macOS path under a directory with a space) would otherwise split into
+    multiple argv words and fail to launch -- silently, since a hook launch
+    failure is a non-blocking Claude Code error -- exactly the fail-open this
+    hardening exists to close. ``register-hooks`` verifying the interpreter
+    exists and is executable is not sufficient on its own: existence says
+    nothing about whether the written string will re-parse back into that same
+    single path. See :func:`_hook_registration_findings`, which parses the
+    command back with :func:`shlex.split` for the same reason.
+
+    Args:
+        binary: Path to the installed toolguard console-script.
+
+    Returns:
+        ``(command, hardened)`` -- the command string to register, and
+        whether it is the hardened form.
+    """
+    python_path = _tool_venv_python(binary)
+    if python_path is None:
+        return binary, False
+    return f"{shlex.quote(python_path)} -E -P -m {_HOOK_MODULE}", True
 
 
 def cmd_register_hooks(args: argparse.Namespace) -> int:
@@ -534,6 +629,7 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
     settings_path = _settings_path(args.scope, args.project_dir)
     governed_tools = _split_csv(args.governed_tools)
     binary = args.binary
+    hook_command, hook_hardened = _hardened_hook_command(binary)
     session_start_binary = f"{binary}-session-start"
 
     backup_path: Optional[Path] = None
@@ -560,7 +656,7 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
             skipped_matchers.append(tool)
             continue
         pre_tool_use.append(
-            {"matcher": tool, "hooks": [{"type": "command", "command": binary}]}
+            {"matcher": tool, "hooks": [{"type": "command", "command": hook_command}]}
         )
         added_matchers.append(tool)
 
@@ -610,7 +706,8 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
         action=(
             f"registered hooks at {args.scope} scope: edited {settings_path} to add "
             f"PreToolUse matchers for {','.join(added_matchers) or '(none new)'} and "
-            f"a SessionStart hook at {session_start_binary}, pointing at {binary}"
+            f"a SessionStart hook at {session_start_binary}, pointing PreToolUse at "
+            f"'{hook_command}' ({'hardened' if hook_hardened else 'UNHARDENED'})"
         ),
         reverse=reverse,
         backup=str(backup_path) if backup_path else None,
@@ -623,6 +720,14 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
     )
     if skipped_matchers:
         print(f"  already present, unchanged: {', '.join(skipped_matchers)}")
+    if added_matchers:
+        if hook_hardened:
+            print(f"  PreToolUse command (hardened): {hook_command}")
+        else:
+            print(
+                f"  PreToolUse command (UNHARDENED -- could not locate a venv "
+                f"python next to {binary}): {hook_command}"
+            )
     print(
         "  SessionStart hook: "
         + (
@@ -920,9 +1025,11 @@ Writes/replaces only the [takeover_mode] section of toolguard_hook.toml at
 the chosen scope -- governed_tools and every other section are left
 untouched. --no-match-fallback chooses what an unmatched command resolves to
 when the tool HAS rules but none match; the default is "ask" (prompts,
-matching Claude Code's own native behavior for anything unmatched) --
-"allow_with_warning" (allow, but flagged) and "deny" (fail-closed) are also
-accepted.
+matching Claude Code's own native behavior for anything unmatched). Also
+accepted: "allow_with_warning" (allow, but flagged with a logged warning),
+"allow" (allow, with NO warning logged -- also spelled "allow_with_no_warnings",
+an identical, longer alias that exists as a human reminder this is a
+deliberate loosening), and "deny" (fail-closed).
 
 Precondition: toolguard_hook.toml must already exist at the chosen scope (run
 write-config first) -- refuses otherwise.
@@ -1715,7 +1822,7 @@ _SKILLS_STATUS_HELP = """\
 Report toolguard's own installation freshness (TOO-15 completion-gate check).
 READ-ONLY: makes no backup and appends no journal entry.
 
-Reports two things, side by side:
+Reports three things, side by side:
   - binary install status: the install kind (git/local/unknown), via
     toolguard.update_check.detect_install(), and whether a newer commit is
     available upstream. A network-unreachable or undeterminable remote is
@@ -1732,17 +1839,26 @@ Reports two things, side by side:
       invalid   -- something exists at the path but is not a valid skill
                    directory (e.g. an empty directory, or a plain file) -- a
                    distinct, reportable state from missing.
+  - PreToolUse hook registration status (TOO-19): for every toolguard
+    PreToolUse command found in settings.json (user scope) and
+    settings.local.json (project scope), whether it is the HARDENED
+    "-E -P -m toolguard.hook" form register-hooks now writes, or an older
+    UNHARDENED bare-binary registration (re-run register-hooks to switch),
+    or -- for an already-hardened command -- whether its recorded
+    interpreter path still exists on disk (a missing one is a SILENT,
+    non-blocking hook failure at the next tool call; see register-hooks
+    --help and docs/security.md).
 
 --project-dir defaults to the current working directory, so running this
 from inside the project you care about needs no flag.
 
 --format text (default) prints a human-readable summary; --format json
-prints a JSON object with "binary" and "skills" keys.
+prints a JSON object with "binary", "skills", and "hook_registrations" keys.
 
 Exit code is always 0 -- this is a diagnostic, never a pass/fail gate. It
 only raises an error for a genuine filesystem/permissions failure, never for
-any of the missing/invalid/stale states themselves (those are normal,
-expected, reportable outcomes, not errors).
+any of the missing/invalid/stale/unhardened states themselves (those are
+normal, expected, reportable outcomes, not errors).
 """
 
 
@@ -1847,6 +1963,84 @@ def _binary_status() -> dict:
     }
 
 
+def _hook_registration_findings(settings_path: Path) -> List[dict]:
+    """
+    Classify each toolguard PreToolUse hook command registered in *settings_path*.
+
+    READ-ONLY: reads (never writes) the settings file, if it exists, and
+    returns one entry per PreToolUse hook whose command mentions "toolguard"
+    (case-insensitive substring, matching the permissive detection convention
+    used elsewhere in this project -- see
+    :func:`~toolguard.tools.takeover_audit._get_registered_toolguard_tools`),
+    classified as hardened (contains ``-m toolguard.hook``) or not (TOO-19).
+    A missing, unreadable, or unparseable settings file, or one with no such
+    hook, yields an empty list -- this is a diagnostic, never an error.
+
+    Args:
+        settings_path: The ``settings.json``/``settings.local.json`` path to
+            inspect.
+
+    Returns:
+        A list of dicts: ``{"matcher": str, "command": str, "hardened":
+        bool, "interpreter_missing": bool}``. ``interpreter_missing`` is
+        ``True`` only for a hardened command whose recorded interpreter path
+        no longer exists on disk -- the exact silent-fail-open risk the
+        hardening's own docstring warns about, caught here proactively
+        instead of only at hook-launch time.
+    """
+    try:
+        raw = settings_path.read_text()
+        data = json.loads(raw) if raw.strip() else {}
+    except OSError, json.JSONDecodeError:
+        return []
+
+    pre_tool_use = data.get("hooks", {}).get("PreToolUse", [])
+    if not isinstance(pre_tool_use, list):
+        return []
+
+    findings: List[dict] = []
+    for entry in pre_tool_use:
+        if not isinstance(entry, dict):
+            continue
+        matcher = entry.get("matcher", "")
+        for hook in entry.get("hooks", []):
+            if not isinstance(hook, dict):
+                continue
+            command = hook.get("command", "")
+            if not isinstance(command, str) or "toolguard" not in command.lower():
+                continue
+            hardened = f"-m {_HOOK_MODULE}" in command
+            interpreter_missing = False
+            if hardened:
+                # TOO-19 code review M2: _hardened_hook_command() now writes
+                # the interpreter path through shlex.quote() (a space in the
+                # path would otherwise split into multiple argv words and
+                # fail to launch), so it must be parsed back with
+                # shlex.split() here, not command.split() -- the naive split
+                # would report a correctly-quoted path as
+                # interpreter_missing (a false BROKEN diagnostic; TOO-19 code
+                # review m3 already fixed the related "env FOO=1 ..."
+                # false-positive the same way). Guarded: a hand-edited
+                # command with unbalanced quotes fails shlex.split with a
+                # ValueError -- fall back to the naive split rather than
+                # raising out of a read-only diagnostic.
+                try:
+                    tokens = shlex.split(command)
+                except ValueError:
+                    tokens = command.split()
+                interpreter = tokens[0] if tokens else ""
+                interpreter_missing = not Path(interpreter).exists()
+            findings.append(
+                {
+                    "matcher": matcher,
+                    "command": command,
+                    "hardened": hardened,
+                    "interpreter_missing": interpreter_missing,
+                }
+            )
+    return findings
+
+
 def cmd_skills_status(args: argparse.Namespace) -> int:
     """
     Handle the ``skills-status`` subcommand: report install freshness. READ-ONLY.
@@ -1868,6 +2062,10 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
         ("user", _claude_dir("user", None)),
         ("project", _claude_dir("project", project_dir)),
     )
+    scoped_settings_paths = (
+        ("user", _settings_path("user", None)),
+        ("project", _settings_path("project", project_dir)),
+    )
 
     try:
         skills = [
@@ -1881,11 +2079,25 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
             for scope, claude_dir in scoped_claude_dirs
         ]
         binary = _binary_status()
+        hook_registrations = [
+            {"scope": scope, **finding}
+            for scope, settings_path in scoped_settings_paths
+            for finding in _hook_registration_findings(settings_path)
+        ]
     except OSError as exc:
         raise InstallerError(f"could not read installation state: {exc}") from exc
 
     if args.format == "json":
-        print(json.dumps({"binary": binary, "skills": skills}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "binary": binary,
+                    "skills": skills,
+                    "hook_registrations": hook_registrations,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     print("binary install status:")
@@ -1908,6 +2120,22 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
             if entry["skill"] != skill_name:
                 continue
             print(f"    {entry['scope']} ({entry['path']}): {entry['status']}")
+
+    print("\nPreToolUse hook registration (TOO-19):")
+    if not hook_registrations:
+        print("  none found")
+    for reg in hook_registrations:
+        if reg["hardened"] and reg["interpreter_missing"]:
+            status = "HARDENED but interpreter path NO LONGER EXISTS -- BROKEN"
+        elif reg["hardened"]:
+            status = "hardened"
+        else:
+            status = (
+                "UNHARDENED -- re-run register-hooks to switch to the "
+                "-E -P -m toolguard.hook form"
+            )
+        print(f"  {reg['scope']} matcher '{reg['matcher']}': {status}")
+        print(f"    command: {reg['command']}")
     return 0
 
 
@@ -2029,7 +2257,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_scope_args(p)
     p.add_argument(
         "--no-match-fallback",
-        choices=("ask", "deny", "allow_with_warning"),
+        choices=(
+            "ask",
+            "deny",
+            "allow_with_warning",
+            "allow",
+            "allow_with_no_warnings",
+        ),
         default="ask",
         help="what an unmatched command resolves to when the tool has rules but "
         "none match (default: ask)",

@@ -29,6 +29,15 @@ question-and-pointer list for common lookups.
   [Auto-mode with toolguard](auto-mode.md) first. `no_match_fallback = "allow_with_warning"`
   is the right answer *only* for that specific unattended case -- it is not a general
   recommendation, and setting it as a default elsewhere would weaken protection.
+- **Setting a fallback -- know which one you mean.** `no_match_fallback` answers "I read this
+  command and no rule covered it"; `undecidable_fallback` answers "I could not safely parse
+  this command at all" (foreign inline code, heredocs, process substitution). They are
+  configured and resolved independently. A structured rule entry (`{ match = "...",
+  additionalContext = "..." }`) can also attach guidance text that toolguard injects into
+  Claude's context when that rule decides a call. See
+  [Configuration: No-match fallback](configuration.md#no-match-fallback),
+  [Configuration: Undecidable fallback](configuration.md#undecidable-fallback), and
+  [Configuration: additionalContext](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
 - **Task is "clean up my rules" or "is my config safe" beyond simple drift?** See
   [Maintenance & Audit Skills](skills.md) -- the `toolguard-security-audit` and
   `toolguard-maintenance` skills do this more thoroughly (evidence-backed, family-grouped,

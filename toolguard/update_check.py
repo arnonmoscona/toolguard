@@ -33,6 +33,13 @@ import argparse
 import importlib.metadata
 import json
 import os
+
+# subprocess is imported for its own sake here (not just for run_git()'s
+# benefit) -- see is_git_worktree()/local_repo_head()/local_remote_head()/
+# remote_head() below, whose module-attribute access
+# (patch.object(update_check.subprocess, "run", ...) in test_update_check.py)
+# requires this module to hold its own reference to the module, even though
+# the actual subprocess.run() call itself now lives in toolguard._git.run_git.
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -41,18 +48,13 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-# Distribution name to introspect and to print in the upgrade command. Kept as a
-# fallback only; the live value is read from installed metadata so the printed
-# command stays correct even if the distribution is renamed (e.g. for PyPI).
-_DEFAULT_DIST_NAME = "toolguard"
+from toolguard._git import run_git
+from toolguard.constants import DIST_NAME as _DEFAULT_DIST_NAME
 
 # Exit codes (stable contract -- see module docstring).
 EXIT_UP_TO_DATE = 0
 EXIT_UPDATE_AVAILABLE = 1
 EXIT_UNKNOWN = 2
-
-# Network/process guard: never prompt for credentials, never hang.
-_GIT_TIMEOUT_SECONDS = 10
 
 
 class InstallKind(Enum):
@@ -172,7 +174,10 @@ def is_git_worktree(repo: Path) -> bool:
     Return True when ``repo`` is the root of a git work tree.
 
     Runs ``git -C <repo> rev-parse --is-inside-work-tree`` to confirm. This
-    subprocess is monkeypatch-able by tests.
+    subprocess is monkeypatch-able by tests (``patch.object(update_check.subprocess,
+    "run", ...)`` -- the actual call now lives in :func:`toolguard._git.run_git`,
+    which imports the SAME ``subprocess`` module, so patching it here still
+    intercepts the call; see the module-level ``import subprocess`` comment).
 
     Args:
         repo: A directory suspected to be a git work tree root.
@@ -181,16 +186,10 @@ def is_git_worktree(repo: Path) -> bool:
         True when git confirms the directory is inside a work tree, False on
         any failure.
     """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-        return result.returncode == 0 and result.stdout.strip() == "true"
-    except OSError, subprocess.SubprocessError:
+    result = run_git(["-C", str(repo), "rev-parse", "--is-inside-work-tree"])
+    if result is None:
         return False
+    return result.returncode == 0 and result.stdout.strip() == "true"
 
 
 def local_repo_head(repo: Path) -> Optional[str]:
@@ -206,19 +205,11 @@ def local_repo_head(repo: Path) -> Optional[str]:
     Returns:
         The HEAD commit SHA, or None on any failure (not a repo, git missing, etc.).
     """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0:
-            return None
-        sha = result.stdout.strip()
-        return sha if sha else None
-    except OSError, subprocess.SubprocessError:
+    result = run_git(["-C", str(repo), "rev-parse", "HEAD"])
+    if result is None or result.returncode != 0:
         return None
+    sha = result.stdout.strip()
+    return sha if sha else None
 
 
 def local_remote_head(repo: Path) -> Optional[str]:
@@ -237,23 +228,12 @@ def local_remote_head(repo: Path) -> Optional[str]:
     """
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "ls-remote", "origin", "HEAD"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0:
-            return None
-        first_line = (
-            result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-        )
-        sha = first_line.split("\t", 1)[0].strip() if first_line else ""
-        return sha or None
-    except OSError, subprocess.SubprocessError:
+    result = run_git(["-C", str(repo), "ls-remote", "origin", "HEAD"], env=env)
+    if result is None or result.returncode != 0:
         return None
+    first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    sha = first_line.split("\t", 1)[0].strip() if first_line else ""
+    return sha or None
 
 
 def detect_install() -> InstallInfo:
@@ -345,17 +325,8 @@ def remote_head(url: str) -> Optional[str]:
     """
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", url, "HEAD"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    if result.returncode != 0:
+    result = run_git(["ls-remote", url, "HEAD"], env=env)
+    if result is None or result.returncode != 0:
         return None
     first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     sha = first_line.split("\t", 1)[0].strip() if first_line else ""

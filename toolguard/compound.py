@@ -64,14 +64,22 @@ _MAX_CONTEXT_WORDS = 500
 _DECISION_STRICTNESS = {"allow": 0, "ask": 1, "deny": 2}
 
 #: Maps each recognized ``undecidable_fallback`` value to the decision it
-#: floors an undecidable result to. ``'allow_with_warning'`` floors to
-#: ``'allow'`` -- i.e. NO floor at all, the deliberate TOO-19 escape hatch:
-#: the floor can only ever make a verdict STRICTER than allow, never weaken
-#: an explicit deny or ask.
+#: floors an undecidable result to. ``'allow_with_warning'`` AND ``'allow'``
+#: (TOO-19 allow/allow_with_no_warnings work) both float to ``'allow'`` -- i.e.
+#: NO floor at all, the deliberate TOO-19 escape hatch: the floor can only
+#: ever make a verdict STRICTER than allow, never weaken an explicit deny or
+#: ask. The two values are the SAME strictness level; only whether a warning
+#: is logged differs, and that distinction is decided by the callers below
+#: (:func:`_resolve_leaf`, :func:`resolve_compound_permission`), not by this
+#: table -- ``'allow_with_no_warnings'`` never reaches this table at all
+#: (normalized to ``'allow'`` by
+#: :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`
+#: before compound.py ever sees it).
 _UNDECIDABLE_FLOOR_DECISION = {
     "ask": "ask",
     "deny": "deny",
     "allow_with_warning": "allow",
+    "allow": "allow",
 }
 
 
@@ -84,13 +92,19 @@ def _apply_undecidable_floor(decision: str, undecidable_fallback: str) -> str:
     STRICTER than ``allow`` -- it never weakens an explicit ``deny`` or
     ``ask``:
 
-    ================  ===========  ============  =======================
-    *decision*         ``ask``      ``deny``      ``allow_with_warning``
-    ================  ===========  ============  =======================
-    ``deny``           deny         deny          deny
-    ``ask``            ask          deny          ask
-    ``allow``          ask          deny          allow
-    ================  ===========  ============  =======================
+    ================  ===========  ============  =======================  ===========
+    *decision*         ``ask``      ``deny``      ``allow_with_warning``   ``allow``
+    ================  ===========  ============  =======================  ===========
+    ``deny``           deny         deny          deny                     deny
+    ``ask``            ask          deny          ask                      ask
+    ``allow``          ask          deny          allow                    allow
+    ================  ===========  ============  =======================  ===========
+
+    ``allow_with_warning`` and ``allow`` (TOO-19) behave IDENTICALLY for
+    floor purposes -- same column above -- because they are the same
+    strictness level; only whether the eventual allow is logged with a
+    warning differs, and that is decided by *reason*-text branching in the
+    two callers, not by this floor.
 
     An unrecognized *undecidable_fallback* value is treated as ``'ask'``
     (the default), matching :meth:`toolguard.config.Configuration.resolved_undecidable_fallback`'s
@@ -101,7 +115,7 @@ def _apply_undecidable_floor(decision: str, undecidable_fallback: str) -> str:
         decision: The decision to floor -- one of ``'allow'``, ``'ask'``, or
             ``'deny'``.
         undecidable_fallback: The configured floor -- one of ``'ask'``,
-            ``'deny'``, or ``'allow_with_warning'``.
+            ``'deny'``, ``'allow_with_warning'``, or ``'allow'``.
 
     Returns:
         The floored decision -- one of ``'allow'``, ``'ask'``, or ``'deny'``.
@@ -112,11 +126,47 @@ def _apply_undecidable_floor(decision: str, undecidable_fallback: str) -> str:
     return decision
 
 
-def _resolve_leaf(
+def _fallback_kind_for_reason(decision: str, reason: str) -> Optional[str]:
+    """Classify a ``resolve_one`` result as a fallback-escape-hatch outcome or not.
+
+    TOO-19 code review M1: structured detection where the caller can determine
+    the outcome directly from what it just constructed (the ASK-floor and
+    ``UndecidableSegment`` branches below), and this TEXT-based fallback ONLY
+    for the one place that genuinely cannot be structural: an ordinary
+    (non-ASK-floor) sub-command's ``resolve_one`` result. That callable's
+    return type is a plain 3-tuple relied on by ~18 test-authored closures
+    (see the TOO-19 implementation report), so the richer
+    ``ResolvedDecision.fallback_warning`` bit computed inside
+    :meth:`~toolguard.config.Configuration.resolve_permission_detailed` never
+    reaches this module -- only its already-tested, verbatim reason wording
+    does. Only the ``no_match_fallback`` marker can appear here:
+    ``undecidable_fallback`` reasons are constructed by THIS module, never by
+    ``resolve_one``.
+
+    Args:
+        decision: The sub-command's decision.
+        reason: The sub-command's reason text.
+
+    Returns:
+        ``'warned'`` when *reason* names the ``allow_with_warning`` value of
+        ``no_match_fallback``, ``'silent'`` when it names the plain
+        ``allow`` value, or ``None`` for a non-``allow`` decision or a
+        genuine rule match.
+    """
+    if decision != "allow":
+        return None
+    if "no_match_fallback=allow_with_warning" in reason:
+        return "warned"
+    if "no_match_fallback=allow" in reason:
+        return "silent"
+    return None
+
+
+def _resolve_leaf_detailed(
     leaf: LeafCommand,
     resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str]]:
+) -> Tuple[str, str, Optional[str], Optional[str]]:
     """Resolve a single leaf command through the grammar splitter then resolve_one.
 
     The leaf may still be a compound single-line command (``git status && echo x``).
@@ -148,26 +198,40 @@ def _resolve_leaf(
     the floor made no change (``floored == decision``), the floor decided
     nothing -- the rule's own reason and context are passed through
     unchanged instead of being misattributed to "ASK floor applied". The
-    ``allow_with_warning`` escape-hatch branch (``floored == 'allow'``) is
-    NOT affected by this distinction: it always names the escape hatch,
-    because that warning is about the leaf being unverifiable inline/heredoc
-    content, not about whether a rule happened to also match the truncated
-    outer command -- see that branch below.
+    ``allow_with_warning``/``allow`` (TOO-19) escape-hatch branch
+    (``floored == 'allow'``) is NOT affected by this distinction: it always
+    names the escape hatch, because that message is about the leaf being
+    unverifiable inline/heredoc content, not about whether a rule happened to
+    also match the truncated outer command -- see that branch below.
+
+    ``fallback_kind`` (TOO-19 code review M1, the 4th return element): a
+    structured tag for whether this leaf's ``allow`` came from a fallback
+    escape hatch rather than a matched rule, and if so whether it was the
+    warned variant -- ``'warned'``, ``'silent'``, or ``None``. This is what
+    lets the OUTER combine (:func:`resolve_compound_permission_detailed`)
+    both (a) route a multi-leaf compound's warning to the WARNING log
+    stream even when this leaf is only one of several allowed leaves, and
+    (b) avoid fabricating a "cmd -> pattern" match for an escape-hatch leaf
+    in its multi-allow summary (see :func:`_combine_strictest`). On the
+    ASK-floor path this is known STRUCTURALLY, from *undecidable_fallback*
+    itself -- no text matching. On the normal path it is collapsed from the
+    inner :func:`_combine_strictest` call's own aggregate boolean (itself
+    built from :func:`_fallback_kind_for_reason` per sub-command).
 
     Args:
         leaf: A :class:`~toolguard.parser.multiline.LeafCommand` to resolve.
         resolve_one: Callable mapping a single command string to
             ``(decision, reason, additional_context)``.
         undecidable_fallback: The configured floor (TOO-19) -- one of
-            ``'ask'`` (default), ``'deny'``, or ``'allow_with_warning'`` --
-            sourced from
+            ``'ask'`` (default), ``'deny'``, ``'allow_with_warning'``, or
+            ``'allow'`` -- sourced from
             :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`.
             Defaults to ``'ask'`` so every pre-TOO-19 caller/test is
             unaffected.
 
     Returns:
-        ``(decision, reason, additional_context)`` for the leaf, with the
-        floor applied.
+        ``(decision, reason, additional_context, fallback_kind)`` for the
+        leaf, with the floor applied.
     """
     # For ASK-floor leaves (foreign inline code, foreign heredoc sinks),
     # we need to check for explicit denies but floor allow/ask per
@@ -179,7 +243,7 @@ def _resolve_leaf(
         outer_cmd = _extract_outer_command(leaf.text)
         decision, reason, additional_context = resolve_one(outer_cmd)
         if decision == "deny":
-            return "deny", reason, additional_context
+            return "deny", reason, additional_context, None
         # allow or ask -> floor per undecidable_fallback.  Bound the command
         # shown in the reason so an unbounded inline-code blob never reaches
         # the permission prompt (the matching above still used the
@@ -194,13 +258,14 @@ def _resolve_leaf(
                 # the floor was even consulted. Preserve the rule's own
                 # reason and context rather than overwriting them with floor
                 # language that misattributes the verdict's real cause.
-                return "ask", reason, additional_context
+                return "ask", reason, additional_context, None
             # Genuine floor case: undecidable_fallback raised 'allow' to
             # 'ask'. Wording preserved verbatim from before TOO-19 so
             # existing tests/log parsing do not churn.
             return (
                 "ask",
                 f"ASK floor applied (inline/heredoc foreign code): {display_cmd}",
+                None,
                 None,
             )
         if floored == "deny":
@@ -209,14 +274,28 @@ def _resolve_leaf(
                 "Denied by undecidable_fallback=deny (inline/heredoc foreign "
                 f"code, unable to safely verify): {display_cmd}",
                 None,
+                None,
             )
-        # floored == "allow": undecidable_fallback=allow_with_warning, the
-        # deliberate no-floor escape hatch -- allow, but say so plainly.
+        # floored == "allow": undecidable_fallback is either 'allow_with_warning'
+        # or 'allow' (TOO-19) -- both are the deliberate no-floor escape hatch,
+        # differing only in whether a warning is logged. Branch on the ACTUAL
+        # configured value (not just "floored == allow", which both share) so
+        # 'allow' never claims a warning was emitted. fallback_kind is known
+        # STRUCTURALLY here -- no text matching needed (TOO-19 code review M1).
+        if undecidable_fallback == "allow_with_warning":
+            return (
+                "allow",
+                "Allowed with a warning by undecidable_fallback=allow_with_warning "
+                f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}",
+                None,
+                "warned",
+            )
         return (
             "allow",
-            "Allowed with a warning by undecidable_fallback=allow_with_warning "
+            "Allowed with no warning by undecidable_fallback=allow "
             f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}",
             None,
+            "silent",
         )
 
     # Use the PEG grammar to further split the leaf into sub-commands
@@ -224,16 +303,18 @@ def _resolve_leaf(
     if not sub_commands:
         # Empty leaf -- treat as no-op; should not normally happen
         logger.debug("Empty leaf command after grammar extraction: %r", leaf.text)
-        return "deny", "No valid commands found in leaf", None
+        return "deny", "No valid commands found in leaf", None, None
 
-    # Resolve each sub-command and build (decision, reason, cmd, context) 4-tuples.
-    # For deny/ask, pre-format the reason with the sub-command context so that
-    # _combine_strictest can pass the formatted message through unchanged.
-    # For allow, pass the raw reason through so _combine_strictest can build
-    # the "cmd -> pattern" summary for the all-allowed case.
-    quads: List[Tuple[str, str, str, Optional[str]]] = []
+    # Resolve each sub-command and build (decision, reason, cmd, context,
+    # fallback_kind) quintuples. For deny/ask, pre-format the reason with the
+    # sub-command context so that _combine_strictest can pass the formatted
+    # message through unchanged. For allow, pass the raw reason through so
+    # _combine_strictest can build the "cmd -> pattern" summary for the
+    # all-allowed case.
+    quads: List[Tuple[str, str, str, Optional[str], Optional[str]]] = []
     for cmd in sub_commands:
         decision, reason, additional_context = resolve_one(cmd)
+        fallback_kind = _fallback_kind_for_reason(decision, reason)
         if decision == "deny":
             formatted = (
                 f"Compound command contains denied sub-command: {cmd} ({reason})"
@@ -246,10 +327,54 @@ def _resolve_leaf(
         else:
             # allow: pass raw reason through for "cmd -> pattern" formatting
             formatted = reason
-        quads.append((decision, formatted, cmd, additional_context))
+        quads.append((decision, formatted, cmd, additional_context, fallback_kind))
 
-    # Route through the ONE strictest-wins combinator.
-    return _combine_strictest(quads)
+    # Route through the ONE strictest-wins combinator. Its own aggregate
+    # fallback_warning bool is collapsed back to the tri-state 'warned'/None
+    # here -- an inner multi-sub-command leaf's OWN reason text (either the
+    # single-allowed pass-through or the "All N sub-commands allowed: [...]"
+    # summary) never has the trailing-colon shape that risks fabrication
+    # (see _combine_strictest), so the outer combine needs only to know
+    # whether to count this leaf toward the WARNING stream, not to re-gate
+    # fabrication for it.
+    decision, reason, additional_context, fallback_warning = _combine_strictest(quads)
+    return (
+        decision,
+        reason,
+        additional_context,
+        ("warned" if fallback_warning else None),
+    )
+
+
+def _resolve_leaf(
+    leaf: LeafCommand,
+    resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
+    undecidable_fallback: str = "ask",
+) -> Tuple[str, str, Optional[str]]:
+    """Resolve a single leaf command -- backwards-compatible 3-tuple wrapper.
+
+    Thin wrapper around :func:`_resolve_leaf_detailed` (TOO-19 code review
+    M1) that drops the structured ``fallback_kind`` 4th element. Kept as a
+    separate, unchanged-signature function because it is called directly (not
+    just transitively) by many existing tests; :func:`resolve_compound_permission_detailed`
+    calls :func:`_resolve_leaf_detailed` directly instead, to get the
+    structured flag without widening this function's contract.
+
+    Args:
+        leaf: A :class:`~toolguard.parser.multiline.LeafCommand` to resolve.
+        resolve_one: Callable mapping a single command string to
+            ``(decision, reason, additional_context)``.
+        undecidable_fallback: The configured floor (TOO-19) -- see
+            :func:`_resolve_leaf_detailed`.
+
+    Returns:
+        ``(decision, reason, additional_context)`` for the leaf, with the
+        floor applied.
+    """
+    decision, reason, additional_context, _fallback_kind = _resolve_leaf_detailed(
+        leaf, resolve_one, undecidable_fallback
+    )
+    return decision, reason, additional_context
 
 
 def _extract_outer_command(leaf_text: str) -> str:
@@ -448,9 +573,9 @@ def cap_context_words(
 
 
 def _combine_strictest(
-    results: List[Tuple[str, str, str, Optional[str]]],
-) -> Tuple[str, str, Optional[str]]:
-    """Combine a list of (decision, reason, leaf_text, context) tuples, strictest-wins.
+    results: List[Tuple[str, str, str, Optional[str], Optional[str]]],
+) -> Tuple[str, str, Optional[str], bool]:
+    """Combine (decision, reason, leaf_text, context, fallback_kind) tuples, strictest-wins.
 
     Priority: deny > ask > allow.
 
@@ -467,32 +592,74 @@ def _combine_strictest(
     single-allowed-leaf case, so a lone allowed leaf still surfaces its
     context.
 
+    ``fallback_warning`` (TOO-19 code review M1, the 4th return element):
+    ``True`` iff the overall decision is ``'allow'`` and at least one
+    contributing leaf's ``fallback_kind`` is ``'warned'`` -- i.e. at least one
+    allowed leaf's verdict came from the WARNED value of ``no_match_fallback``
+    or ``undecidable_fallback``. Computed as a structured ``any()`` over the
+    per-leaf tags rather than re-derived from the (possibly summarised) final
+    *reason* string, which is what let a multi-leaf all-allow compound
+    silently drop the warning before this fix: the old single downstream
+    text-search (:func:`toolguard.resolve._bash_result_is_fallback_warning`)
+    ran on the summary text below, which never repeats the marker substring.
+    ``False`` for every non-``allow`` decision.
+
+    Fabrication guard (TOO-19 code review M1, defect 2): in the multi-allow
+    summary below, a leaf whose ``fallback_kind`` is not ``None`` is an
+    escape-hatch allow, not a matched rule -- its reason's own trailing
+    ``"...): <outer_cmd>"`` text must NOT be parsed as a ``"cmd -> pattern"``
+    match (the ``": "`` split below would extract the outer-command stub as a
+    fabricated pattern name; this is exactly what previously logged
+    ``python -c "print(1)" -> python -c`` for a command no ``python -c`` rule
+    ever matched). Such leaves get an explicit, honest placeholder instead: an
+    absent/generic record is preferred over a false one. The placeholder is
+    deliberately comma-free: ``hook.py``'s ``_parse_compound_match_details``
+    splits this same bracketed list on ``", "`` to build its own per-sub-command
+    log breakdown, so a placeholder containing a comma would itself be
+    mis-split into two bogus entries there -- caught by end-to-end
+    verification against the real hook, not by this module's own tests.
+
     Args:
-        results: List of ``(decision, reason, leaf_text, additional_context)``
-            4-tuples where ``leaf_text`` is the original command text for the
-            element.
+        results: List of ``(decision, reason, leaf_text, additional_context,
+            fallback_kind)`` 5-tuples where ``leaf_text`` is the original
+            command text for the element and ``fallback_kind`` is
+            ``'warned'``, ``'silent'``, or ``None`` (see
+            :func:`_resolve_leaf_detailed`).
 
     Returns:
-        The single strictest ``(decision, reason, additional_context)`` tuple.
+        ``(decision, reason, additional_context, fallback_warning)``.
     """
-    denied = [(d, r, t, c) for d, r, t, c in results if d == "deny"]
-    asked = [(d, r, t, c) for d, r, t, c in results if d == "ask"]
-    allowed = [(d, r, t, c) for d, r, t, c in results if d == "allow"]
+    denied = [(d, r, t, c) for d, r, t, c, _fk in results if d == "deny"]
+    asked = [(d, r, t, c) for d, r, t, c, _fk in results if d == "ask"]
+    allowed = [(d, r, t, c, fk) for d, r, t, c, fk in results if d == "allow"]
 
     if denied:
         _d, r, _t, c = denied[0]
-        return "deny", r, c
+        return "deny", r, c, False
     if asked:
         _d, r, _t, c = asked[0]
-        return "ask", r, c
+        return "ask", r, c, False
     if allowed:
-        accumulated_context = _accumulate_contexts([c for _d, _r, _t, c in allowed])
+        accumulated_context = _accumulate_contexts(
+            [c for _d, _r, _t, c, _fk in allowed]
+        )
+        fallback_warning = any(fk == "warned" for _d, _r, _t, _c, fk in allowed)
         if len(allowed) == 1:
-            _d, r, _t, _c = allowed[0]
-            return "allow", r, accumulated_context
+            _d, r, _t, _c, _fk = allowed[0]
+            return "allow", r, accumulated_context, fallback_warning
         # Multiple allowed leaves: build "cmd -> pattern" summary.
         match_details = []
-        for _d, r, leaf_text, _c in allowed:
+        for _d, r, leaf_text, _c, fk in allowed:
+            if fk is not None:
+                # Escape-hatch allow (TOO-19 code review M1 defect 2): do NOT
+                # attempt the "cmd -> pattern" extraction below -- there is no
+                # pattern, and the reason's trailing "...): <outer_cmd>" text
+                # would be misparsed as one. Record that plainly instead.
+                cmd_part = leaf_text.strip().rstrip(";").strip() or "?"
+                match_details.append(
+                    f"{cmd_part} -> [fallback allow -- no rule matched]"
+                )
+                continue
             # Extract the pattern from the leaf reason.  The leaf reason may be
             # in one of two forms:
             #   "Command matches allow pattern: <pat>"  (from check_permission)
@@ -515,8 +682,9 @@ def _combine_strictest(
             "allow",
             f"All {len(allowed)} sub-commands allowed: [{', '.join(match_details)}]",
             accumulated_context,
+            fallback_warning,
         )
-    return "deny", "No commands to evaluate", None
+    return "deny", "No commands to evaluate", None, False
 
 
 # ---------------------------------------------------------------------------
@@ -556,8 +724,8 @@ def check_compound_permission(
             prefix parsing.
         undecidable_fallback: The configured floor (TOO-19) applied to
             foreign inline code / heredoc sinks and undecidable segments --
-            one of ``'ask'`` (default), ``'deny'``, or
-            ``'allow_with_warning'``. See :func:`resolve_compound_permission`.
+            one of ``'ask'`` (default), ``'deny'``, ``'allow_with_warning'``,
+            or ``'allow'``. See :func:`resolve_compound_permission`.
 
     Returns:
         ``(decision, reason, additional_context)`` where *decision* is
@@ -574,11 +742,11 @@ def check_compound_permission(
     )
 
 
-def resolve_compound_permission(
+def resolve_compound_permission_detailed(
     command: str,
     resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str]]:
+) -> Tuple[str, str, Optional[str], bool]:
     """Resolve a compound command where each sub-command cascades independently.
 
     Each extracted sub-command is resolved through ``resolve_one`` -- typically
@@ -595,6 +763,16 @@ def resolve_compound_permission(
     *undecidable_fallback* (TOO-19; ``'ask'`` by default) rather than failing
     open.
 
+    This is the REAL implementation (TOO-19 code review M1); ``resolve_compound_permission``
+    is a thin backwards-compatible 3-tuple wrapper around it (many existing
+    tests unpack that function's result as a 3-tuple directly, so its
+    signature could not grow). This ``_detailed`` variant additionally
+    returns a structured ``fallback_warning`` flag -- see
+    :func:`_combine_strictest` -- computed from the same widened per-element
+    quad :func:`_resolve_leaf_detailed` and the ``UndecidableSegment`` branch
+    below already tag their own results with, rather than re-derived from the
+    final (possibly leaf-summarised) reason text downstream.
+
     Args:
         command: The bash command line (may be compound or multi-line).
         resolve_one: Callable mapping a single sub-command string to its
@@ -602,12 +780,13 @@ def resolve_compound_permission(
             across config levels).
         undecidable_fallback: The configured floor (TOO-19) for anything that
             cannot be safely decomposed -- one of ``'ask'`` (default),
-            ``'deny'``, or ``'allow_with_warning'`` -- sourced from
+            ``'deny'``, ``'allow_with_warning'``, or ``'allow'`` -- sourced
+            from
             :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`.
             Applied two ways: as a strictest-wins FLOOR against
             ``ask_floor`` leaves' own resolved decision (see
-            :func:`_resolve_leaf`/:func:`_apply_undecidable_floor`, since
-            those DID run through ``resolve_one`` and may have hit an
+            :func:`_resolve_leaf_detailed`/:func:`_apply_undecidable_floor`,
+            since those DID run through ``resolve_one`` and may have hit an
             explicit deny); and taken DIRECTLY for an
             :class:`~toolguard.parser.multiline.UndecidableSegment`, which
             never runs through ``resolve_one`` at all -- there is no
@@ -615,23 +794,28 @@ def resolve_compound_permission(
             pre-TOO-19 caller/test is unaffected.
 
     Returns:
-        ``(decision, reason, additional_context)``. For an all-allowed
-        compound the reason lists per-sub-command matched rules, matching the
-        legacy format the hook logs; ``additional_context`` is the
-        accumulated ``additionalContext`` block (TOO-19 Phase 1) -- see
+        ``(decision, reason, additional_context, fallback_warning)``. For an
+        all-allowed compound the reason lists per-sub-command matched rules,
+        matching the legacy format the hook logs; ``additional_context`` is
+        the accumulated ``additionalContext`` block (TOO-19 Phase 1) -- see
         :func:`_combine_strictest` and :func:`_accumulate_contexts` -- or
-        ``None`` when nothing survived.
+        ``None`` when nothing survived; ``fallback_warning`` is ``True`` iff
+        the decision is ``'allow'`` and at least one contributing leaf's
+        verdict came from the WARNED value of ``no_match_fallback`` or
+        ``undecidable_fallback`` (TOO-19 code review M1).
     """
     structured = extract_structured(command)
 
     if not structured:
-        return "deny", "No valid commands found in command line", None
+        return "deny", "No valid commands found in command line", None, False
 
     # Resolve each element and collect results.
-    # Each entry is (decision, reason, leaf_text, additional_context) where
-    # leaf_text is the original element text (used to build combined
-    # "cmd -> pattern" reason).
-    all_results: List[Tuple[str, str, str, Optional[str]]] = []
+    # Each entry is (decision, reason, leaf_text, additional_context,
+    # fallback_kind) where leaf_text is the original element text (used to
+    # build combined "cmd -> pattern" reason) and fallback_kind is
+    # 'warned'/'silent'/None (TOO-19 code review M1; see
+    # _resolve_leaf_detailed).
+    all_results: List[Tuple[str, str, str, Optional[str], Optional[str]]] = []
 
     for element in structured:
         if isinstance(element, UndecidableSegment):
@@ -647,6 +831,7 @@ def resolve_compound_permission(
                 element.reason,
             )
             display = element.original[:80]
+            fallback_kind = None
             if floored == "ask":
                 # Default case: wording preserved verbatim from before
                 # TOO-19 so existing tests/log parsing do not churn.
@@ -656,25 +841,73 @@ def resolve_compound_permission(
                     f"Undecidable segment denied by undecidable_fallback=deny "
                     f"({element.reason}): {display}"
                 )
-            else:
-                # allow_with_warning, the deliberate no-floor escape hatch.
+            elif undecidable_fallback == "allow_with_warning":
+                # The deliberate no-floor escape hatch, WITH a warning.
+                # fallback_kind is known STRUCTURALLY here -- no text
+                # matching needed (TOO-19 code review M1).
                 reason = (
                     "Undecidable segment allowed with a warning by "
                     f"undecidable_fallback=allow_with_warning ({element.reason}): "
                     f"{display}"
                 )
-            all_results.append((floored, reason, element.original, None))
+                fallback_kind = "warned"
+            else:
+                # undecidable_fallback == "allow" (TOO-19): same no-floor
+                # escape hatch, but no warning -- say so plainly rather than
+                # letting the 'allow_with_warning' wording above cover both.
+                reason = (
+                    "Undecidable segment allowed with no warning by "
+                    f"undecidable_fallback=allow ({element.reason}): {display}"
+                )
+                fallback_kind = "silent"
+            all_results.append((floored, reason, element.original, None, fallback_kind))
         elif isinstance(element, LeafCommand):
-            d, r, c = _resolve_leaf(element, resolve_one, undecidable_fallback)
-            all_results.append((d, r, element.text, c))
+            d, r, c, fk = _resolve_leaf_detailed(
+                element, resolve_one, undecidable_fallback
+            )
+            all_results.append((d, r, element.text, c, fk))
         else:
             # Should not happen
             logger.warning("Unknown extraction result type: %r", type(element))
             all_results.append(
-                ("ask", "Unknown extraction result; cannot verify", "", None)
+                ("ask", "Unknown extraction result; cannot verify", "", None, None)
             )
 
     return _combine_strictest(all_results)
+
+
+def resolve_compound_permission(
+    command: str,
+    resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
+    undecidable_fallback: str = "ask",
+) -> Tuple[str, str, Optional[str]]:
+    """Resolve a compound command -- backwards-compatible 3-tuple wrapper.
+
+    Thin wrapper around :func:`resolve_compound_permission_detailed` (TOO-19
+    code review M1) that drops the structured ``fallback_warning`` 4th
+    element. Kept as a separate, unchanged-signature function because many
+    existing tests (``test_compound.py``, ``test_hierarchical.py``,
+    ``test_hard_deny.py``, ``test_multiline_bash.py``) unpack its result as a
+    3-tuple directly; :func:`toolguard.resolve.resolve_bash_permission_detailed`
+    calls :func:`resolve_compound_permission_detailed` directly instead, to
+    get the structured flag without widening this function's contract.
+
+    Args:
+        command: The bash command line (may be compound or multi-line).
+        resolve_one: Callable mapping a single sub-command string to its
+            resolved ``(decision, reason, additional_context)``.
+        undecidable_fallback: The configured floor (TOO-19) -- see
+            :func:`resolve_compound_permission_detailed`.
+
+    Returns:
+        ``(decision, reason, additional_context)``.
+    """
+    decision, reason, additional_context, _fallback_warning = (
+        resolve_compound_permission_detailed(
+            command, resolve_one, undecidable_fallback=undecidable_fallback
+        )
+    )
+    return decision, reason, additional_context
 
 
 def get_command_breakdown(command: str) -> List[str]:

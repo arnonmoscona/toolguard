@@ -1393,9 +1393,11 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
     honoured as a backwards-compatible alias when no layer sets the top-level
     key. The top-level key wins when both are set. Applies regardless of
     takeover_mode.enabled. Defaults to 'ask'. The recognized values are 'ask',
-    'deny', and 'allow_with_warning'; the deprecated legacy value 'warn_deny'
-    (whether set via the top-level key or the ``[takeover_mode]`` alias) is
-    normalized to 'allow_with_warning'.
+    'deny', 'allow_with_warning', and 'allow' (TOO-19). Two spellings are
+    accepted but normalized before reaching the recognized set: the
+    deprecated legacy value 'warn_deny' normalizes to 'allow_with_warning',
+    and the deliberate (non-deprecated) long-form synonym
+    'allow_with_no_warnings' normalizes to 'allow'.
     """
 
     @staticmethod
@@ -1576,6 +1578,51 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
         config = Configuration(layers=layers)
         self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
+    def test_value_allow_is_returned_as_is(self):
+        """
+        Given a hook layer setting the top-level 'no_match_fallback' key to
+            'allow' (TOO-19, the canonical no-warning spelling)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it returns 'allow' unchanged
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": "allow"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "allow")
+
+    def test_allow_with_no_warnings_normalizes_to_allow_via_top_level_key(self):
+        """
+        Given a hook layer setting the top-level 'no_match_fallback' key to
+            'allow_with_no_warnings' (TOO-19's deliberate long-form synonym)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then it is normalized to the canonical 'allow' -- identical to setting
+            'allow' directly
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"no_match_fallback": "allow_with_no_warnings"}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "allow")
+
+    def test_allow_with_no_warnings_via_legacy_takeover_alias_normalizes(self):
+        """
+        Given only the legacy [takeover_mode].no_match_fallback is set to
+            'allow_with_no_warnings' (no top-level key anywhere)
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the legacy-alias value is still normalized to 'allow' -- the
+            alias normalization applies regardless of which mechanism
+            supplied the raw value (TOO-19)
+        """
+        layers = (
+            self._hook_layer(
+                "project",
+                {"takeover_mode": {"no_match_fallback": "allow_with_no_warnings"}},
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "allow")
+
 
 class TestResolvedUndecidableFallback(unittest.TestCase):
     """
@@ -1584,8 +1631,11 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
     layers. Unlike ``no_match_fallback`` there is deliberately NO legacy
     ``[takeover_mode]`` alias and NO deprecated ``'warn_deny'`` spelling --
     this is a brand-new setting with no history to be backwards-compatible
-    with. Defaults to 'ask'. The recognized values are 'ask', 'deny', and
-    'allow_with_warning'.
+    with. Defaults to 'ask'. The recognized values are 'ask', 'deny',
+    'allow_with_warning', and 'allow'. The deliberate (non-deprecated)
+    long-form synonym 'allow_with_no_warnings' IS honoured here (normalizes
+    to 'allow') -- that alias was introduced for both settings at once
+    (TOO-19), unlike 'warn_deny', which remains no_match_fallback-only.
     """
 
     @staticmethod
@@ -1702,6 +1752,49 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
                 "project", {"takeover_mode": {"undecidable_fallback": "deny"}}
             ),
         )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_value_allow_is_returned_as_is(self):
+        """
+        Given a hook layer setting the top-level 'undecidable_fallback' key
+            to 'allow' (TOO-19, the canonical no-warning spelling)
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then it returns 'allow' unchanged
+        """
+        layers = (self._hook_layer("project", {"undecidable_fallback": "allow"}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "allow")
+
+    def test_allow_with_no_warnings_normalizes_to_allow(self):
+        """
+        Given a hook layer setting the top-level 'undecidable_fallback' key
+            to 'allow_with_no_warnings' (TOO-19's deliberate long-form synonym)
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then it is normalized to the canonical 'allow' -- identical to
+            setting 'allow' directly, and identical in meaning between the
+            two settings
+        """
+        layers = (
+            self._hook_layer(
+                "project", {"undecidable_fallback": "allow_with_no_warnings"}
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_undecidable_fallback(), "allow")
+
+    def test_warn_deny_is_not_honored_falls_back_to_ask(self):
+        """
+        Given a hook layer setting the top-level 'undecidable_fallback' key
+            to 'warn_deny' -- no_match_fallback's deprecated legacy spelling
+        When Configuration.resolved_undecidable_fallback() resolves
+        Then 'warn_deny' is NOT normalized (unlike for no_match_fallback) --
+            it is simply an unrecognized value here and falls back to the
+            default 'ask'. This is the deliberate no_match_fallback/
+            undecidable_fallback asymmetry the TOO-19 allow/allow_with_no_warnings
+            work must preserve.
+        """
+        layers = (self._hook_layer("project", {"undecidable_fallback": "warn_deny"}),)
         config = Configuration(layers=layers)
         self.assertEqual(config.resolved_undecidable_fallback(), "ask")
 

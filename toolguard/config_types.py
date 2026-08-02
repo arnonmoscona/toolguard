@@ -298,6 +298,21 @@ class ResolvedDecision:
             text (TOO-19 Phase 1), or None when the winning entry did not carry
             one, no rule matched, or the ASK floor cleared the match (see
             :meth:`~toolguard.config.Configuration._apply_parse_failure_ask_floor`).
+        fallback_warning: ``True`` exactly when this decision is an 'allow'
+            produced by ``no_match_fallback='allow_with_warning'`` (TOO-19
+            allow/allow_with_no_warnings work) -- i.e. the caller should route
+            *reason* to the WARNING log stream in addition to the normal
+            resolution log. ``False`` for every other decision, including an
+            explicit rule match AND an 'allow' produced by the newer
+            ``no_match_fallback='allow'``/``'allow_with_no_warnings'`` values,
+            which are allow-with-NO-warning by definition. This is real,
+            structurally-known data set by
+            :meth:`~toolguard.config.Configuration._resolve_permission_detailed_unclamped`
+            at the exact point it decides the fallback branch, so
+            :func:`toolguard.hook._log_fallback_allow_warning` can key off it
+            directly instead of pattern-matching *reason* -- see that
+            function's docstring for why this replaced the old substring-marker
+            approach for the file-path (non-compound) resolution path.
     """
 
     decision: str
@@ -305,3 +320,4 @@ class ResolvedDecision:
     provenance: Optional["Provenance"]
     override: Optional[ConflictOverride] = None
     additional_context: Optional[str] = None
+    fallback_warning: bool = False

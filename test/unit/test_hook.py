@@ -1588,6 +1588,163 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                     warned_reason,
                                 )
 
+    def test_bash_no_match_allow_does_not_reach_warning_log_stream(self):
+        """
+        Given no_match_fallback='allow' (TOO-19: allow with NO warning)
+        When main() processes an unmatched command
+        Then the decision is 'allow' but error_log.log_warning is NEVER
+            called -- 'allow' must not trip the same warning-stream logic
+            'allow_with_warning' does, and the reason text does not claim a
+            warning was emitted
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "no_match_fallback": "allow",
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch("toolguard.hook.log_warning") as mock_log_warning:
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                output = json.loads(mock_stdout.getvalue())
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "allow",
+                                )
+                                mock_log_warning.assert_not_called()
+                                self.assertNotIn(
+                                    "allow_with_warning",
+                                    output["hookSpecificOutput"][
+                                        "permissionDecisionReason"
+                                    ],
+                                )
+
+    def test_bash_no_match_allow_with_no_warnings_alias_via_main(self):
+        """
+        Given no_match_fallback='allow_with_no_warnings' (TOO-19's long-form
+            alias for 'allow')
+        When main() processes an unmatched command
+        Then the decision is 'allow', error_log.log_warning is NEVER called
+            (identical behaviour to plain 'allow'), and the reason names
+            no_match_fallback=allow (the alias is normalized before the
+            reason is built)
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "no_match_fallback": "allow_with_no_warnings",
+                        "permissions": {"allow": ["Bash(git *)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch("toolguard.hook.log_warning") as mock_log_warning:
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                output = json.loads(mock_stdout.getvalue())
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "allow",
+                                )
+                                mock_log_warning.assert_not_called()
+                                reason = output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ]
+                                self.assertIn("no_match_fallback=allow", reason)
+                                self.assertNotIn("allow_with_warning", reason)
+
+    def test_bash_undecidable_allow_does_not_reach_warning_log_stream(self):
+        """
+        Given undecidable_fallback='allow' (TOO-19: allow with NO warning)
+            and a heredoc feeding foreign inline code into an otherwise-allowed
+            interpreter
+        When main() processes the compound command
+        Then the decision is 'allow' but error_log.log_warning is NEVER
+            called -- the undecidable_fallback half of the same no-warning
+            guarantee 'no_match_fallback=allow' has
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    {
+                        "governed_tools": ["Bash"],
+                        "undecidable_fallback": "allow",
+                        "permissions": {"allow": ["Bash(uv run*)"], "deny": []},
+                    }
+                ),
+            )
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "uv run python - <<'PY'\nimport os\nPY"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch("toolguard.hook.log_command"):
+                        with patch("toolguard.hook.log_warning") as mock_log_warning:
+                            with patch(
+                                "toolguard.hook.identify_current_agent",
+                                return_value={"agent_type": "main"},
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+                                output = json.loads(mock_stdout.getvalue())
+                                self.assertEqual(
+                                    output["hookSpecificOutput"]["permissionDecision"],
+                                    "allow",
+                                )
+                                mock_log_warning.assert_not_called()
+
     def test_bash_warn_deny_legacy_alias_allows_via_main(self):
         """
         Given a real Configuration governing Bash, allowing only 'git *', with
@@ -2552,6 +2709,57 @@ class TestHookCrashCapture(unittest.TestCase):
             self.assertIn("not a standalone command", mock_stderr.getvalue())
             errors_dir = home / ".toolguard" / "errors"
             self.assertFalse(errors_dir.exists())
+
+    def test_crash_context_carries_tool_name_tool_input_cwd(self):
+        """
+        TOO-19 m5 review recommended follow-up: pin the invariant
+        `_build_crash_context` depends on -- that `tool_name`, `tool_input`,
+        and `cwd` are all still in scope (and thus captured via `locals()`)
+        at the point an unexpected exception reaches main()'s generic
+        `except Exception` clause, since they are assigned early in the
+        try-body and never reassigned before an exception from permission
+        resolution could occur.
+
+        Given a governed Bash event with a known tool_name, tool_input, and
+        cwd, and resolve_bash_permission_detailed forced to raise an
+        unexpected RuntimeError after those three are assigned
+        When main() runs and the exception falls through to the generic
+        `except Exception` clause
+        Then log_crash is called with a crash context dict whose tool_name,
+        tool_input, and cwd values equal exactly what was in the hook input
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+            "cwd": "/some/project/dir",
+        }
+        config = _fake_config(governed=["Bash"], bash=(["git *"], []))
+
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with (
+                patch("sys.stdin", StringIO(json.dumps(hook_input))),
+                patch("sys.stdin.isatty", return_value=False),
+                patch("sys.stdout", new_callable=StringIO),
+                patch("sys.stderr", new_callable=StringIO),
+                patch("toolguard.hook.load_configuration", return_value=config),
+                patch(
+                    "toolguard.hook.resolve_bash_permission_detailed",
+                    side_effect=RuntimeError("boom from resolver"),
+                ),
+                patch("pathlib.Path.home", return_value=home),
+                patch("toolguard.hook.log_crash") as mock_log_crash,
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            mock_log_crash.assert_called_once()
+            _exc, crash_context = mock_log_crash.call_args.args[:2]
+            self.assertEqual(crash_context["tool_name"], "Bash")
+            self.assertEqual(crash_context["tool_input"], {"command": "git status"})
+            self.assertEqual(crash_context["cwd"], "/some/project/dir")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,29 @@ corruption, what to back up, how to verify toolguard is actually running, and a 
 review cadence with a starting set of deny patterns. Read
 [Blanket allow risks](#blanket-allow-risks) first if you read nothing else.
 
+## Contents
+
+Written for lookup rather than a start-to-finish read: jump to the section that answers the
+question in front of you.
+
+- [Blanket allow risks](#blanket-allow-risks) -- why a bare `Bash(*)`/`Write(*)` is dangerous,
+  and the safe alternatives
+- [A cloned project's config can inject text into Claude's context](#a-cloned-projects-config-can-inject-text-into-claudes-context) -- the `additionalContext` risk from an untrusted project
+- [Multi-line commands and the ASK-safe guarantee](#multi-line-commands-and-the-ask-safe-guarantee) -- why undecomposable input never silently executes
+- [Loosening the undecidable fallback](#loosening-the-undecidable-fallback) -- what
+  `undecidable_fallback = "allow_with_warning"`/`"allow"` turns off and what still protects you
+- [A broken config file also fails safe, not open](#a-broken-config-file-also-fails-safe-not-open) -- the parse-failure ASK floor
+- [How toolguard protects its own writes](#how-toolguard-protects-its-own-writes) -- the
+  guarantees behind every config write toolguard performs
+- [Backup importance](#backup-importance)
+- [Testing with dry-run](#testing-with-dry-run)
+- [Verify toolguard is running](#verify-toolguard-is-running) -- red flags that it is not
+- [The hook can be silently shadowed](#the-hook-can-be-silently-shadowed) -- `PYTHONPATH`
+  making an unreviewed checkout govern instead of the installed release
+- [Ongoing security review](#ongoing-security-review) -- what to check and how often
+- [Maintaining your toolguard configuration](#maintaining-your-toolguard-configuration) -- keeping rules readable and trustworthy over time
+- [Recommended deny patterns](#recommended-deny-patterns) -- a starting deny list
+
 ## Blanket allow risks
 
 **Never use blanket allows without toolguard protection.**
@@ -56,7 +79,9 @@ review cadence with a starting set of deny patterns. Read
 
 For rules that must hold no matter what any project config says, promote them to
 [`[hard_deny]`](configuration.md#configuration-reference), which is pooled across all
-hierarchy levels and cannot be overridden by an allow at any level.
+hierarchy levels and cannot be overridden by a `[permissions]` allow at any level (it has
+its own narrow `hard_deny.allow` carve-out list, which is a different mechanism -- see the
+configuration reference linked above).
 
 ## A cloned project's config can inject text into Claude's context
 
@@ -117,7 +142,7 @@ fail-open bypass is closed.)*
 This ASK behaviour is the `undecidable_fallback` **default**, not a hardcoded outcome --
 see [Configuration: Undecidable fallback](configuration.md#undecidable-fallback) for the
 setting itself, and [Loosening the undecidable fallback](#loosening-the-undecidable-fallback)
-below for what changes if you set it to `allow_with_warning`.
+below for what changes if you set it to `allow_with_warning` or `allow`.
 
 **Inline code and heredocs fed to an executor are a blanket-allow-class risk.** Code passed to
 a shell or interpreter -- `python -c "..."`, `node -e "..."`, `bash <<EOF ... EOF`,
@@ -156,11 +181,20 @@ command is assembled.
 
 ## Loosening the undecidable fallback
 
-Setting `undecidable_fallback = "allow_with_warning"` is a **genuine loosening of a security
-control**, not a cosmetic option -- see
+Setting `undecidable_fallback` to `"allow_with_warning"`, `"allow"`, or its identical alias
+`"allow_with_no_warnings"` is a **genuine loosening of a security control**, not a cosmetic
+option -- see
 [Configuration: Undecidable fallback](configuration.md#undecidable-fallback) for the setting's
 full mechanics. This section covers what it turns off and, more importantly, what still
 protects you when it is set.
+
+**`"allow"` is not a safer or more cautious spelling than `"allow_with_warning"` -- it is
+strictly less safe.** Both values have IDENTICAL effect on what gets allowed or denied; the
+only difference is that `"allow"` records nothing at all, not even a warning. Do not read the
+shorter, plainer-sounding name as the more conservative choice. The long alias
+`"allow_with_no_warnings"` exists specifically to counter that impression: seeing it in a
+config file is a deliberate nudge that this is worth reconsidering, and reverting to the
+warned variant is a 3-character edit (`allow_with_no_warnings` -> `allow_with_warning`).
 
 **What it turns off.** The two fail-safe-not-fail-open guarantees described above -- the ASK
 floor on foreign inline code / heredoc sinks, and the "any construct toolguard cannot
@@ -170,8 +204,8 @@ evaluated against their contents**: toolguard cannot read what a `python -c "...
 an unparsed control structure will actually do, so this setting is trusting the command
 outright rather than gating it.
 
-**What still protects you.** `undecidable_fallback = "allow_with_warning"` only removes the
-*floor* -- it does not touch anything else in the permission pipeline:
+**What still protects you.** Any of the three loosened values above only removes the *floor*
+-- none of them touches anything else in the permission pipeline:
 
 - **An explicit `deny` or `ask` rule still applies.** The floor can only ever raise an
   undecidable segment's decision, never lower one -- so a rule that already resolves the
@@ -183,17 +217,22 @@ outright rather than gating it.
   A broken `toolguard_hook.toml`/`.json` clamps to ASK unconditionally -- this is the one
   fallback `undecidable_fallback` cannot loosen, by design.
 
-**Residual risk, concretely.** With this setting on, a compromised or careless Claude
-invocation can pass arbitrary code to `python -c`, `node -e`, a heredoc piped to an
+**Residual risk, concretely.** With `"allow_with_warning"` set, a compromised or careless
+Claude invocation can pass arbitrary code to `python -c`, `node -e`, a heredoc piped to an
 interpreter, or an unparseable control-structure command, and toolguard will let it run (with
 only a logged warning) unless a specific `deny`/`ask`/`[hard_deny]` rule happens to catch the
-outer command. Since the whole point of these constructs is that toolguard cannot read their
-payload, writing such a rule to catch the *contents* is not generally possible -- you would be
-relying on catching the outer invocation shape, which is exactly the blanket-allow risk
+outer command. **With `"allow"`/`"allow_with_no_warnings"` set, the same thing happens with NOT
+EVEN a logged warning** -- the only record of what ran is whatever Claude's own transcript
+retains; toolguard's own logs show nothing distinguishing it from an ordinary explicit allow.
+Since the whole point of these constructs is that toolguard cannot read their payload, writing
+a rule to catch the *contents* is not generally possible -- you would be relying on catching
+the outer invocation shape, which is exactly the blanket-allow risk
 [above](#multi-line-commands-and-the-ask-safe-guarantee) warns against.
 
 `toolguard-audit` raises a **HIGH** finding (`loose-undecidable-fallback`) whenever this
-setting resolves to `allow_with_warning`, specifically because of this residual risk -- see
+setting resolves to `allow_with_warning` OR `allow` (the latter includes the
+`allow_with_no_warnings` alias, already normalized before the audit runs) -- `allow` triggers
+the SAME severity, never a lower one, since it is the less-safe of the two. See
 [Ongoing security review](#ongoing-security-review) below for how to run the audit routinely.
 `undecidable_fallback = "deny"`, by contrast, raises no finding: it is strictly more
 conservative than the `"ask"` default, not a loosening.
@@ -348,6 +387,59 @@ diff .claude/toolguard_hook.toml logs/config-backups/toolguard_hook-*.toml
 
 This matters most under [Takeover Mode](takeover-mode.md): if toolguard is silently not
 running, the blanket allows are fully exposed.
+
+## The hook can be silently shadowed
+
+Toolguard *appearing* to run and toolguard's *own reviewed code* making the decision are not
+the same guarantee. A stray `PYTHONPATH` entry -- most commonly `PYTHONPATH=.` left exported
+from a shell rc file -- can make Python import a different `toolguard/` package than the one
+actually installed, if that entry happens to contain its own `toolguard/` directory (a clone
+of this repository is the obvious case, but any directory with a `toolguard/` subdirectory
+qualifies). When that happens for the PreToolUse hook process, **every permission decision on
+this machine is made by whatever code sits in that shadowing directory** -- possibly
+uncommitted, mid-refactor, or simply never reviewed -- instead of the installed release. The
+hook still runs, still returns a decision, and produces no error: this is a silent substitution
+of *what* is deciding, not a failure you would notice from the logs described above. This was
+found the hard way (TOO-19): a real install ran a shadowed, mid-refactor checkout as its live
+permission hook for weeks before anyone noticed.
+
+**Detection is automatic and gated to toolguard's own repository.** `toolguard-session-start`
+checks, once per session, whether the active project IS a toolguard source checkout, and if so
+whether the copy that produced that check is that same checkout rather than the installed
+distribution -- if so, it prints a loud alert naming both the governing and the installed path.
+A related, separate check catches a **stale install**: the installed copy's content differs
+from a *clean* (no uncommitted changes) working tree, meaning you committed something and
+forgot to reinstall. Both checks are silent everywhere else -- they answer a question that only
+makes sense while you are developing toolguard itself. `toolguard-audit` carries a
+complementary, always-on finding (`pythonpath-shadows-hook`, HIGH severity) that fires whenever
+`PYTHONPATH` contains an entry that WOULD shadow the hook, independent of whether this
+particular process happened to be shadowed -- silent, like every other finding in this project,
+when the condition does not hold.
+
+**The installer hardens the registration itself.** `toolguard-install register-hooks` registers
+the PreToolUse hook as `<tool venv python> -E -P -m toolguard.hook` rather than the bare
+console-script path, when it can verify the interpreter path first. `-E` makes the interpreter
+ignore `PYTHONPATH` entirely; `-P` additionally stops it from prepending the current working
+directory (or the script's own directory) to `sys.path` -- both are needed, because a plain
+`-m` invocation would still pick up a `toolguard/` package sitting in the process's cwd even
+with `PYTHONPATH` unset. Together they make the registered hook immune to both shadowing
+vectors. `toolguard-install skills-status` reports an existing **unhardened** registration (an
+older bare-binary form) so you can re-run `register-hooks` to switch to the hardened form; it
+also flags a hardened registration whose recorded interpreter no longer exists on disk, which
+is otherwise a silent failure -- see the note below.
+
+**One risk this hardening deliberately manages, not eliminates: the hardened command bakes an
+absolute interpreter path into your settings file.** If that exact path ever stops existing (an
+unusual reinstall layout, a manually relocated venv), Claude Code cannot launch the hook at all
+-- and a PreToolUse hook that fails to launch is, in Claude Code's own hook contract, a
+**non-blocking error**: the tool call proceeds with **no toolguard decision whatsoever**,
+silently. That would be strictly worse than the shadowing problem this hardening exists to
+close. `register-hooks` therefore verifies the interpreter path exists and is executable
+*before* writing it, and falls back to the older, unhardened-but-working bare-binary form when
+it cannot -- an unhardened, working hook is always preferred over a hardened, broken one. Run
+`toolguard-install skills-status` after any reinstall that might relocate the tool's venv, so a
+newly-broken hardened path is caught by a diagnostic rather than by a silently ungoverned
+session.
 
 ## Ongoing security review
 

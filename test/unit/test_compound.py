@@ -2398,9 +2398,12 @@ def _resolve_with_fallback(
 class TestApplyUndecidableFloor(unittest.TestCase):
     """_apply_undecidable_floor: the pure strictest-wins floor helper (TOO-19).
 
-    Pins the full 3x3 matrix from the ticket: strictness order deny > ask >
+    Pins the full 3x3 matrix from the ticket (deny/ask/allow decisions under
+    ask/deny/allow_with_warning fallbacks): strictness order deny > ask >
     allow, so the floor can only ever make a decision STRICTER than allow --
-    it never weakens an explicit deny or ask.
+    it never weakens an explicit deny or ask. Also pins that 'allow' (TOO-19
+    allow/allow_with_no_warnings work) is the SAME no-floor escape hatch as
+    'allow_with_warning' for every decision.
     """
 
     def test_deny_is_never_weakened_by_ask_fallback(self):
@@ -2490,6 +2493,50 @@ class TestApplyUndecidableFloor(unittest.TestCase):
             fallback-to-default normalization
         """
         self.assertEqual(_apply_undecidable_floor("allow", "bogus"), "ask")
+
+    def test_deny_is_never_weakened_by_allow_fallback(self):
+        """
+        Given decision='deny' and undecidable_fallback='allow' (TOO-19)
+        When _apply_undecidable_floor resolves
+        Then the result is STILL 'deny' -- 'allow' is the same no-floor
+            escape hatch as 'allow_with_warning', so it behaves identically
+        """
+        self.assertEqual(_apply_undecidable_floor("deny", "allow"), "deny")
+
+    def test_ask_stays_ask_under_allow_fallback(self):
+        """
+        Given decision='ask' and undecidable_fallback='allow' (TOO-19)
+        When _apply_undecidable_floor resolves
+        Then the result is STILL 'ask' -- 'allow' is a floor of 'allow',
+            which is less strict than 'ask', so 'ask' is unchanged, exactly
+            like 'allow_with_warning'
+        """
+        self.assertEqual(_apply_undecidable_floor("ask", "allow"), "ask")
+
+    def test_allow_stays_allow_under_allow_fallback(self):
+        """
+        Given decision='allow' and undecidable_fallback='allow' (TOO-19)
+        When _apply_undecidable_floor resolves
+        Then the result is 'allow' -- the same no-floor escape hatch as
+            'allow_with_warning', for floor purposes
+        """
+        self.assertEqual(_apply_undecidable_floor("allow", "allow"), "allow")
+
+    def test_allow_and_allow_with_warning_are_identical_for_floor_purposes(self):
+        """
+        Given every one of the three decisions ('deny', 'ask', 'allow')
+        When floored under 'allow' vs 'allow_with_warning' (TOO-19)
+        Then both fallback values produce the EXACT SAME floored result for
+            every decision -- they are the same strictness level, differing
+            only in whether a warning is logged (a distinction this pure
+            floor function does not make at all)
+        """
+        for decision in ("deny", "ask", "allow"):
+            with self.subTest(decision=decision):
+                self.assertEqual(
+                    _apply_undecidable_floor(decision, "allow"),
+                    _apply_undecidable_floor(decision, "allow_with_warning"),
+                )
 
 
 class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
@@ -2584,6 +2631,40 @@ class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
         self.assertEqual(decision, "allow")
         self.assertIn("undecidable_fallback=allow_with_warning", reason)
 
+    def test_allow_fallback_allows(self):
+        """
+        Given allow 'uv run*' and undecidable_fallback='allow' (TOO-19)
+        When a heredoc feeds the Python interpreter (foreign inline code)
+        Then the compound resolves to ALLOW -- the same no-floor escape
+            hatch as 'allow_with_warning'
+        """
+        cmd = "uv run python - <<'PY'\nimport os\nPY"
+        self.assertEqual(
+            _resolve_with_fallback(cmd, ["uv run*"], [], "allow"),
+            "allow",
+        )
+
+    def test_allow_reason_names_undecidable_fallback_with_no_warning(self):
+        """
+        Given an allow pattern matching the outer command and
+            undecidable_fallback='allow' (TOO-19)
+        When a foreign inline-code leaf is resolved
+        Then the allow reason names 'undecidable_fallback=allow' and says
+            "no warning" -- and never contains the 'allow_with_warning'
+            marker substring, so hook.py's warning-stream routing cannot
+            mistake it for the warned variant
+        """
+        cmd = 'python3 -c "import os"'
+        decision, reason, _context = resolve_compound_permission(
+            cmd,
+            lambda c: (*check_permission(c, ["python3 -c:*"], []), None),
+            undecidable_fallback="allow",
+        )
+        self.assertEqual(decision, "allow")
+        self.assertIn("undecidable_fallback=allow", reason)
+        self.assertIn("no warning", reason)
+        self.assertNotIn("allow_with_warning", reason)
+
 
 class TestUndecidableFallbackSegment(unittest.TestCase):
     """UndecidableSegment (control structures, process substitution) under
@@ -2677,6 +2758,36 @@ class TestUndecidableFallbackSegment(unittest.TestCase):
         )
         self.assertEqual(decision, "allow")
         self.assertIn("undecidable_fallback=allow_with_warning", reason)
+
+    def test_allow_fallback_allows(self):
+        """
+        Given undecidable_fallback='allow' (TOO-19)
+        When a process-substitution command is resolved
+        Then the compound resolves to ALLOW -- the same no-floor escape
+            hatch as 'allow_with_warning'
+        """
+        self.assertEqual(
+            _resolve_with_fallback(self._PROCSUB_CMD, ["diff:*"], [], "allow"),
+            "allow",
+        )
+
+    def test_allow_reason_names_undecidable_fallback_with_no_warning(self):
+        """
+        Given undecidable_fallback='allow' (TOO-19)
+        When an UndecidableSegment is resolved
+        Then the allow reason names 'undecidable_fallback=allow' and says
+            "no warning" -- and never contains the 'allow_with_warning'
+            marker substring
+        """
+        decision, reason, _context = resolve_compound_permission(
+            self._PROCSUB_CMD,
+            lambda c: (*check_permission(c, [], []), None),
+            undecidable_fallback="allow",
+        )
+        self.assertEqual(decision, "allow")
+        self.assertIn("undecidable_fallback=allow", reason)
+        self.assertIn("no warning", reason)
+        self.assertNotIn("allow_with_warning", reason)
 
 
 class TestCheckCompoundPermissionUndecidableFallback(unittest.TestCase):

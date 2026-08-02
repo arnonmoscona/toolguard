@@ -51,6 +51,13 @@ reviewable trail of everything that ran *without* an explicit rule behind it. Yo
 `allow`/`deny` rules and your `hard_deny` floor are still fully enforced; only the *unmatched*
 case is loosened.
 
+**Do not substitute `no_match_fallback = "allow"` (or its `allow_with_no_warnings` alias)
+here.** Those values exist for a genuinely different situation -- see
+[Configuration: No-match fallback](configuration.md#no-match-fallback) -- and produce NO log
+entry for the unmatched case at all. This whole recommendation's safety story is "everything
+unmatched is logged so you can review it later"; `allow` quietly deletes that review trail
+while looking like a simpler version of the same setting. Use `allow_with_warning`.
+
 **This is deliberately not the general recommendation.** Outside of unattended auto-mode,
 prefer the stricter `ask` default -- `allow_with_warning` is a named exception for this one
 use case, not a setting to reach for generally.
@@ -60,6 +67,16 @@ than naked auto-mode (real logging, a real `hard_deny` floor, real explicit `den
 still hold) -- but it is not a substitute for a well-built rule set. Anything that falls
 through to the fallback executes *silently*, and you only find out by reading the logs
 afterward. This is a **detective control for the unmatched case, not a preventive one.**
+
+**`no_match_fallback` is not the only fallback that can hang an unattended run.**
+`undecidable_fallback` -- a separate, top-level setting for commands toolguard cannot safely
+parse at all (foreign inline code, heredocs, process substitution), rather than commands that
+simply match no rule -- also defaults to `ask` and has the exact same dead-end problem in
+auto-mode. Loosening `no_match_fallback` alone does not touch it. `toolguard-audit` raises a
+HIGH finding if you loosen it to `allow_with_warning`, which is a signal to weigh the same
+tradeoff deliberately rather than by default. See
+[Configuration: Undecidable fallback](configuration.md#undecidable-fallback) and
+[Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
 
 ## Recommended checklist before you turn this on
 

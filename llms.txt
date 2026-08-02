@@ -23,8 +23,8 @@ below plus a question-and-pointer list for common lookups, see
   governed_tools / additional_supported_tools, writing rules, and diagnosing denials.
 - [Agent map](docs/agent-map.md): heading-level index of every doc, plus a
   question-and-pointer list of recurring questions ("where does `no_match_fallback` go",
-  "is it OK to delete `~/.toolguard`", etc.) with one-line answers and links to the full
-  detail.
+  "what's the difference between `no_match_fallback` and `undecidable_fallback`", "is it OK
+  to delete `~/.toolguard`", etc.) with one-line answers and links to the full detail.
 - [Maintenance & audit skills](docs/skills.md): the toolguard-security-audit and
   toolguard-maintenance skills -- audit config for risk, and clean up / consolidate / promote
   rules with per-item consent.

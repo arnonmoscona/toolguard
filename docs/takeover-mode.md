@@ -132,6 +132,12 @@ enabled = true
 See [Configuration: No-match fallback](configuration.md#no-match-fallback) for the full
 explanation (all three values, resolution order, and the legacy-alias precedence rule).
 
+`no_match_fallback` has a sibling setting, `undecidable_fallback`, that answers a different
+question -- "this command could not be safely parsed at all" (foreign inline code, heredocs,
+process substitution) rather than "no rule covered this command." It applies whether or not
+takeover mode is on, has no `[takeover_mode]` alias, and defaults to `"ask"`. See
+[Configuration: Undecidable fallback](configuration.md#undecidable-fallback).
+
 **Example with custom patterns**:
 
 ```toml

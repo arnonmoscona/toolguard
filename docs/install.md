@@ -275,9 +275,19 @@ briefly, and use their answer.
   experience needs to feel different just because takeover is now the real gatekeeper. The user can
   tighten it to fail-closed `deny` once confident, or loosen it to `allow_with_warning` if they
   find prompting too disruptive and knowingly accept the tradeoff -- but that is a choice to
-  present, not the one to steer them toward. The values are `ask` (prompt; **recommended**) /
-  `allow_with_warning` (allow + warn; available, not encouraged) / `deny` (fail-closed; optional
-  for maximum strictness). Phase 10 walks this; nothing to set here.
+  present, not the one to steer them toward. The values THIS FLOW presents are `ask` (prompt;
+  **recommended**) / `allow_with_warning` (allow + warn; available, not encouraged) / `deny`
+  (fail-closed; optional for maximum strictness). `allow` and its `allow_with_no_warnings`
+  alias also exist (TOO-19: allow with NO warning logged) but are deliberately NOT offered in
+  this guided conversation -- they are strictly less safe than `allow_with_warning` with no
+  install-time upside, so presenting them here would only add a worse option to steer someone
+  away from. A user who wants one can still set it by hand later; see
+  [Configuration: No-match fallback](configuration.md#no-match-fallback). Phase 10 walks this;
+  nothing to set here.
+  `undecidable_fallback` is a separate setting (for commands toolguard cannot safely parse at
+  all, e.g. foreign inline code or heredocs, rather than commands that simply match no rule) --
+  leave it at its `ask` default; there is no install-time decision for it. See
+  [Configuration: Undecidable fallback](configuration.md#undecidable-fallback).
 
 So Phase 4 writes the base config with takeover **disabled** regardless of their choice; Phase 10
 enables it (with the self-permissions it needs) if they chose takeover. Keep the base config
@@ -761,6 +771,9 @@ each, but they are not equally worth recommending:
 
 It is their call how tight they want to be -- your job is to make sure they understand the
 tradeoff between the three, not to push them toward whichever feels quietest in the moment.
+(`allow` and its `allow_with_no_warnings` alias also exist and resolve to the CLI's
+`--no-match-fallback` choices, but are deliberately not part of this three-option
+conversation -- see 10.2's config note above for why.)
 
 **10.3 Re-validate under takeover.** Re-run `toolguard-audit --with-context --format json` and
 confirm top-level `takeover_active` is now **true**, `sources` are as expected, and the

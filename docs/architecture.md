@@ -5,6 +5,24 @@ pattern matching is implemented, and the logging streams. For the deeper design 
 behind the hierarchy, resolution, hard-deny, and logging work, see
 [technical-notes.md](../technical-notes.md).
 
+## Contents
+
+Written for lookup rather than a start-to-finish read: jump to the section that answers the
+question in front of you.
+
+- [Package structure](#package-structure) -- the package layout and where each module lives
+- [Hook flow](#hook-flow) -- request flow from `PreToolUse` through to allow/deny
+- [Writing configuration](#writing-configuration) -- the single guarded write chokepoint
+- [Configuration hierarchy](#configuration-hierarchy) -- how levels combine (summary; full
+  detail in `configuration.md`)
+- [Pattern matching implementation](#pattern-matching-implementation)
+  - [Command tool patterns](#command-tool-patterns)
+  - [Compound command resolution](#compound-command-resolution)
+  - [File path tool patterns](#file-path-tool-patterns)
+- [Logging](#logging) -- the four log streams and what each records
+  - [Error and warning logs](#error-and-warning-logs)
+  - [Conflict logging and SessionStart alerts](#conflict-logging-and-sessionstart-alerts)
+
 ## Package structure
 
 ```
@@ -77,6 +95,12 @@ The bash parser is generated from a formal PEG grammar (`parser/bash_parser.peg`
 `canopy` parser generator. This is a deliberate design choice: compound commands are split
 into parts by a real grammar rather than hand-rolled regular expressions. `canopy` is a
 build-time dependency only -- the generated parser depends solely on the standard library.
+
+`toolguard/testing/` is a development and testing support facility (an isolated sandbox for
+answering "what would this config decide?" without touching live config), not a core
+architectural element -- see
+[technical-notes.md: Isolated experiment sandbox](../technical-notes.md#isolated-experiment-sandbox-too-19)
+for what it does and its CLI.
 
 ## Hook flow
 

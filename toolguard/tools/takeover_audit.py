@@ -26,22 +26,34 @@ Invariants checked
    Toolguard strips the ignored patterns; an uncovered blanket allow remains live
    and bypasses the real-gatekeeper role.
 
-4. **LOW / loose-no-match-fallback**: ``no_match_fallback`` is set to
-   anything other than ``'deny'`` (e.g. the TOO-15 default ``'ask'``,
-   ``'allow_with_warning'``, or its deprecated legacy alias ``'warn_deny'``).
-   Looser fallbacks mean that commands not matching any rule are prompted or
-   allowed-with-a-warning rather than blocked -- weakening the fail-closed
-   guarantee.
+4. **LOW / loose-no-match-fallback**: ``no_match_fallback`` (the RAW,
+   un-normalized value read off :class:`~toolguard.config.TakeoverConfig`) is
+   set to anything other than ``'deny'`` -- e.g. the TOO-15 default
+   ``'ask'``, ``'allow_with_warning'``/its deprecated legacy alias
+   ``'warn_deny'``, or ``'allow'``/its TOO-19 long-form alias
+   ``'allow_with_no_warnings'``. This check is a blanket ``!= 'deny'``, so it
+   already covers the two TOO-19 values with NO code change needed: they are
+   simply two more non-``'deny'`` raw spellings. Looser fallbacks mean that
+   commands not matching any rule are prompted, allowed-with-a-warning, or
+   allowed-with-no-warning-at-all rather than blocked -- weakening the
+   fail-closed guarantee.
 
 5. **HIGH / loose-undecidable-fallback** (TOO-19): the top-level
-   ``undecidable_fallback`` setting resolves to ``'allow_with_warning'``.
-   This is a DIFFERENT, and more severe, weakening than
-   ``loose-no-match-fallback`` above: ``no_match_fallback`` governs commands
-   toolguard *read and understood* but that matched no rule, whereas
-   ``undecidable_fallback`` governs commands toolguard could NOT safely
-   decompose at all (foreign inline code, heredoc payloads, process
-   substitution, unparseable control structures -- see
-   :mod:`toolguard.compound`). ``'allow_with_warning'`` here means those
+   ``undecidable_fallback`` setting resolves to ``'allow_with_warning'`` OR
+   ``'allow'`` (the latter added in the TOO-19 allow/allow_with_no_warnings
+   follow-up, including via its ``'allow_with_no_warnings'`` alias, already
+   normalized to ``'allow'`` by
+   :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`
+   before this check ever sees it). ``'allow'`` is flagged identically to
+   ``'allow_with_warning'``, not more leniently: it is STRICTLY less safe
+   (nothing is even logged), so it cannot be exempt from a finding that
+   ``'allow_with_warning'`` triggers. This is a DIFFERENT, and more severe,
+   weakening than ``loose-no-match-fallback`` above: ``no_match_fallback``
+   governs commands toolguard *read and understood* but that matched no
+   rule, whereas ``undecidable_fallback`` governs commands toolguard could
+   NOT safely decompose at all (foreign inline code, heredoc payloads,
+   process substitution, unparseable control structures -- see
+   :mod:`toolguard.compound`). Either loosened value here means those
    commands EXECUTE with no rule ever evaluated against their contents,
    which is precisely the case :mod:`toolguard.compound`'s stated governing
    principle -- "when in doubt, ASK: any segment that cannot be safely
@@ -451,6 +463,15 @@ def audit_takeover(
             )
 
     # Invariant 4: Loose no_match_fallback (LOW)
+    #
+    # A blanket "not 'deny'" check -- deliberately not an explicit allow-list
+    # of loose values -- so it needs NO code change for the TOO-19
+    # 'allow'/'allow_with_no_warnings' values (or any future spelling): any
+    # raw value other than the literal string 'deny' already fires this.
+    # Checked here, verified during the TOO-19 allow/allow_with_no_warnings
+    # follow-up: consistent with Invariant 5 below without needing the same
+    # explicit-set treatment, because this check was never an equality test
+    # against one specific loose value the way Invariant 5's was.
     expected_fallback = "deny"
     if takeover.no_match_fallback != expected_fallback:
         findings.append(
@@ -484,8 +505,39 @@ def audit_takeover(
     # is enabled -- see Configuration.resolved_undecidable_fallback for the
     # full resolution rules (strictest-wins floor, parse-failure exemption).
     # 'deny' is deliberately not flagged (see the module docstring's
-    # invariant 5 for why).
-    if config.resolved_undecidable_fallback() == "allow_with_warning":
+    # invariant 5 for why). 'allow' (TOO-19 allow/allow_with_no_warnings
+    # follow-up) is flagged in the SAME set as 'allow_with_warning' -- not a
+    # separate, lower-severity finding -- since it is strictly less safe
+    # (nothing is even logged). 'allow_with_no_warnings' never reaches this
+    # check as such: resolved_undecidable_fallback() already normalized it to
+    # 'allow' before returning.
+    resolved_undecidable = config.resolved_undecidable_fallback()
+    if resolved_undecidable in ("allow_with_warning", "allow"):
+        if resolved_undecidable == "allow_with_warning":
+            execution_note = (
+                "will execute with a warning instead of being asked about or denied."
+            )
+            no_rule_note = (
+                ". toolguard.compound's governing principle is 'when in doubt, "
+                "ASK: any segment that cannot be safely decomposed resolves to "
+                "ASK rather than a silent allow of an undecomposed blob' -- "
+                "this setting switches that principle off, turning every "
+                "undecidable segment into a silent allow."
+            )
+        else:
+            execution_note = (
+                "will execute with NO warning at all, and nothing recorded, "
+                "instead of being asked about or denied."
+            )
+            no_rule_note = (
+                ", and -- unlike 'allow_with_warning' -- without even a "
+                "warning log entry marking that it happened. "
+                "toolguard.compound's governing principle is 'when in doubt, "
+                "ASK: any segment that cannot be safely decomposed resolves to "
+                "ASK rather than a silent allow of an undecomposed blob' -- "
+                "this setting switches that principle off AND removes the "
+                "one record that it did."
+            )
         findings.append(
             AuditFinding(
                 finding_id="loose-undecidable-fallback",
@@ -493,27 +545,20 @@ def audit_takeover(
                 tool=None,
                 provenance=None,
                 description=(
-                    "undecidable_fallback is 'allow_with_warning', not 'ask' "
-                    "(the default) or 'deny'. Commands toolguard could not "
-                    "safely parse at all -- foreign inline code, heredoc "
+                    f"undecidable_fallback is '{resolved_undecidable}', not "
+                    "'ask' (the default) or 'deny'. Commands toolguard could "
+                    "not safely parse at all -- foreign inline code, heredoc "
                     "payloads, process substitution, unparseable control "
-                    "structures -- will execute with a warning instead of "
-                    "being asked about or denied."
+                    f"structures -- {execution_note}"
                 ),
                 impact=(
                     "This is a stronger weakening than a loose "
                     "no_match_fallback: no_match_fallback only affects "
                     "commands toolguard read and understood but that matched "
                     "no rule, so toolguard still knew what it was allowing. "
-                    "undecidable_fallback='allow_with_warning' instead "
+                    f"undecidable_fallback='{resolved_undecidable}' instead "
                     "executes commands toolguard could not parse at all, "
-                    "with NO rule ever evaluated against their contents. "
-                    "toolguard.compound's governing principle is 'when in "
-                    "doubt, ASK: any segment that cannot be safely "
-                    "decomposed resolves to ASK rather than a silent allow "
-                    "of an undecomposed blob' -- this setting switches that "
-                    "principle off, turning every undecidable segment into "
-                    "a silent allow."
+                    f"with NO rule ever evaluated against their contents{no_rule_note}"
                 ),
                 remediation=(
                     'Set undecidable_fallback to "ask" (the default) or '

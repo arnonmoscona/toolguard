@@ -489,7 +489,7 @@ Set it as a **top-level** key in `toolguard_hook.toml` -- not nested inside `[ta
 or any other section:
 
 ```toml
-no_match_fallback = "ask"   # "ask" (default) | "deny" | "allow_with_warning"
+no_match_fallback = "ask"   # "ask" (default) | "deny" | "allow_with_warning" | "allow" | "allow_with_no_warnings"
 ```
 
 Recognized values:
@@ -497,12 +497,20 @@ Recognized values:
 - `"ask"` -- prompt, the same as Claude Code's own default. **This is the default** if the
   key is unset anywhere in the hierarchy.
 - `"deny"` -- fail-closed; block anything that doesn't match an explicit rule.
-- `"allow_with_warning"` -- allow the command but log a warning (`"warn_deny"` is a
+- `"allow_with_warning"` -- allow the command and log a warning (`"warn_deny"` is a
   deprecated alias for this value, still accepted). See
   [Auto-mode with toolguard](auto-mode.md) for the one case this is actually recommended
   for -- it is not a general recommendation.
+- `"allow"` -- allow the command with **no warning anywhere** -- not in the resolution log
+  reason, not in the WARNING log stream. Strictly less safe than `"allow_with_warning"`: this
+  is the fully-silent variant.
+- `"allow_with_no_warnings"` -- an exact synonym for `"allow"`, identical in every respect.
+  It exists purely as a **human reminder**: seeing the long spelling in a config file is a
+  prompt to reconsider it, and switching back to the warned variant is a 3-character edit
+  (`allow_with_no_warnings` -> `allow_with_warning`). Prefer this spelling over `"allow"`
+  when a person, not just an automated migration, is choosing to loosen the setting.
 
-An unrecognized value (a typo, or anything outside the three above) is never propagated as
+An unrecognized value (a typo, or anything outside the five above) is never propagated as
 configuration -- it silently resolves to the default `"ask"` rather than breaking config
 loading.
 
@@ -539,7 +547,7 @@ names a **floor level** instead of a normal decision.
 Set it as a **top-level** key in `toolguard_hook.toml`:
 
 ```toml
-undecidable_fallback = "ask"   # "ask" (default) | "deny" | "allow_with_warning"
+undecidable_fallback = "ask"   # "ask" (default) | "deny" | "allow_with_warning" | "allow" | "allow_with_no_warnings"
 ```
 
 Recognized values:
@@ -547,12 +555,22 @@ Recognized values:
 - `"ask"` -- prompt. **This is the default** if the key is unset anywhere in the hierarchy,
   or set to an unrecognized value.
 - `"deny"` -- fail-closed; block anything toolguard could not safely parse.
-- `"allow_with_warning"` -- allow the command but log a warning. Raises a **HIGH** finding
+- `"allow_with_warning"` -- allow the command and log a warning. Raises a **HIGH** finding
   (`loose-undecidable-fallback`) in `toolguard-audit` -- see
   [Security: Loosening the undecidable fallback](security.md#loosening-the-undecidable-fallback).
+- `"allow"` -- allow the command with **no warning anywhere**. Strictly less safe than
+  `"allow_with_warning"` (nothing is even logged), so it raises the SAME **HIGH**
+  `loose-undecidable-fallback` finding -- never a lower severity, since the risk is greater,
+  not smaller.
+- `"allow_with_no_warnings"` -- an exact synonym for `"allow"`, normalized to it before
+  resolution. Same human-reminder rationale as `no_match_fallback`'s identical alias above:
+  the long spelling is a deliberate nudge to reconsider, and reverting to
+  `"allow_with_warning"` is a 3-character edit.
 
 There is no `"warn_deny"` alias for this setting (that alias exists only for the older
-`no_match_fallback`, for backwards compatibility with its history).
+`no_match_fallback`, for backwards compatibility with its history). `"allow_with_no_warnings"`
+IS honored for both settings -- it is a brand-new spelling introduced for both at once, not
+part of `warn_deny`'s no_match_fallback-only history.
 
 **Floor semantics, not a plain decision.** Unlike `no_match_fallback`, this setting does not
 pick the outcome outright -- it names the *weakest* outcome the undecidable command is allowed
@@ -563,11 +581,14 @@ segment's own leaf-level resolution already was:
 |---|---|
 | `"deny"` | Always denies -- the strictest floor, nothing can weaken it. |
 | `"ask"` (default) | Denies stay denied; anything that would otherwise resolve to allow is raised to ask. |
-| `"allow_with_warning"` | No floor at all -- an explicit deny or ask still holds, but there is nothing left to raise an allow to. |
+| `"allow_with_warning"` | No floor at all -- an explicit deny or ask still holds, but there is nothing left to raise an allow to. Allowed segments are logged with a warning. |
+| `"allow"` / `"allow_with_no_warnings"` | Same floor behaviour as `"allow_with_warning"` -- identical strictness, zero effect on what gets allowed or denied. The only difference is that NO warning is logged for the resulting allow. |
 
 An explicit `deny` or `ask` decision is **never weakened** by this setting at any value --
-the floor can only make a result *stricter*, never looser. `allow_with_warning` is the
-degenerate case where the floor equals "allow", so it has no effect on anything.
+the floor can only make a result *stricter*, never looser. `allow_with_warning`, `allow`, and
+`allow_with_no_warnings` are all the degenerate case where the floor equals "allow", so none of
+them has any effect on what gets allowed or denied -- they differ only in whether the resulting
+allow is logged with a warning.
 
 **Parse-failure exemption.** A broken `toolguard_hook.toml`/`.json` file (invalid syntax,
 unreadable) always clamps the whole compound decision to `ask`, regardless of
@@ -756,8 +777,10 @@ hierarchical_configuration = true
 # rules at all always resolves to "ask"). A TOP-LEVEL key -- not nested inside
 # [takeover_mode] -- applies in BOTH takeover and non-takeover modes. Options:
 #   "ask" (prompt; DEFAULT), "deny" (fail-closed), "allow_with_warning" (allow + log a
-#   warning; "warn_deny" is a deprecated alias for it). See "No-match fallback" above
-#   for the full explanation, including the legacy [takeover_mode] alias.
+#   warning; "warn_deny" is a deprecated alias for it), "allow" (allow, NO warning
+#   anywhere; "allow_with_no_warnings" is an identical long-form alias, kept as a human
+#   reminder). See "No-match fallback" above for the full explanation, including the
+#   legacy [takeover_mode] alias.
 no_match_fallback = "ask"
 
 # What to do with a Bash command toolguard could NOT safely parse at all (foreign inline
@@ -766,8 +789,10 @@ no_match_fallback = "ask"
 # [takeover_mode] alias exists for this one. Names a strictest-wins FLOOR (deny > ask >
 # allow) against the segment's own resolved decision, so an explicit deny/ask is never
 # weakened. Options: "ask" (DEFAULT), "deny" (strictest), "allow_with_warning" (no floor
-# at all -- raises a HIGH toolguard-audit finding). See "Undecidable fallback" above for
-# the full explanation, including the parse-failure exemption.
+# at all -- raises a HIGH toolguard-audit finding), "allow" (same no-floor behaviour, but
+# NO warning logged -- raises the SAME HIGH finding, not a lower one; "allow_with_no_warnings"
+# is an identical long-form alias). See "Undecidable fallback" above for the full
+# explanation, including the parse-failure exemption.
 undecidable_fallback = "ask"
 
 # ============================================================================

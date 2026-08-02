@@ -607,6 +607,60 @@ class TestLooseNoMatchFallback(unittest.TestCase):
         ]
         self.assertEqual(fallback_findings, [])
 
+    def test_allow_fallback_flagged(self):
+        """
+        Given no_match_fallback is 'allow' (TOO-19: allow with NO warning)
+        When audit_takeover() is called
+        Then a LOW 'loose-no-match-fallback' finding is returned -- the
+            blanket '!= deny' check requires no special-casing for this new
+            value, it is simply another non-'deny' raw spelling
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="allow",
+            ignored_allow_patterns=["Bash(*)"],
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        fallback_findings = [
+            f for f in findings if f.finding_id == "loose-no-match-fallback"
+        ]
+        self.assertEqual(len(fallback_findings), 1)
+        self.assertEqual(fallback_findings[0].severity, AuditSeverity.LOW)
+
+    def test_allow_with_no_warnings_fallback_flagged(self):
+        """
+        Given no_match_fallback is 'allow_with_no_warnings' (TOO-19's
+            long-form alias for 'allow')
+        When audit_takeover() is called
+        Then a LOW 'loose-no-match-fallback' finding is returned, exactly as
+            for 'allow' -- the raw value read off TakeoverConfig is not
+            normalized, but the blanket '!= deny' check does not care which
+            non-'deny' spelling was used
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="allow_with_no_warnings",
+            ignored_allow_patterns=["Bash(*)"],
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        fallback_findings = [
+            f for f in findings if f.finding_id == "loose-no-match-fallback"
+        ]
+        self.assertEqual(len(fallback_findings), 1)
+        self.assertEqual(fallback_findings[0].severity, AuditSeverity.LOW)
+
 
 # ---------------------------------------------------------------------------
 # Loose-undecidable-fallback (HIGH) -- TOO-19
@@ -721,6 +775,59 @@ class TestLooseUndecidableFallback(unittest.TestCase):
             undecidable_fallback="allow_with_warning",
         )
         config = _make_config(tg_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, AuditSeverity.HIGH)
+
+    def test_allow_flagged_high(self):
+        """
+        Given undecidable_fallback is 'allow' (TOO-19: allow with NO warning)
+        When audit_takeover() is called
+        Then a HIGH 'loose-undecidable-fallback' finding is returned -- the
+            SAME severity as 'allow_with_warning', never lower, since 'allow'
+            is strictly LESS safe (nothing is even logged)
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="deny",
+            ignored_allow_patterns=["Bash(*)"],
+            undecidable_fallback="allow",
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
+        findings = audit_takeover(config)
+        matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, AuditSeverity.HIGH)
+        self.assertIn("allow", matches[0].description)
+        self.assertIn("NO warning", matches[0].description)
+
+    def test_allow_with_no_warnings_flagged_high(self):
+        """
+        Given undecidable_fallback is 'allow_with_no_warnings' (TOO-19's
+            long-form alias)
+        When audit_takeover() is called
+        Then a HIGH 'loose-undecidable-fallback' finding is returned -- the
+            alias is normalized to 'allow' by resolved_undecidable_fallback()
+            before this check runs, so it is flagged identically to 'allow'
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            takeover_enabled=True,
+            no_match_fallback="deny",
+            ignored_allow_patterns=["Bash(*)"],
+            undecidable_fallback="allow_with_no_warnings",
+        )
+        native_layer = _native_layer(
+            allow=["Bash(*)"],
+            hooks=_hooks_for("Bash"),
+        )
+        config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
         matches = [f for f in findings if f.finding_id == "loose-undecidable-fallback"]
         self.assertEqual(len(matches), 1)

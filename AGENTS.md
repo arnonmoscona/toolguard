@@ -52,7 +52,13 @@ Key facts an agent should not get wrong:
 - Standard patterns live in `settings.local.json`; extended patterns (`[regex]`/`[glob]`/
   `[native]`, prefix inside the tool wrapper) live in `toolguard_hook.toml`.
 - `deny` beats `allow` within a level; the most-specific level wins across levels;
-  `[hard_deny]` cannot be overridden by any allow.
+  `[hard_deny]` cannot be overridden by a `[permissions]` allow at any level (it has its own
+  narrow `hard_deny.allow` carve-out list -- see
+  [docs/configuration.md#configuration-reference](docs/configuration.md#configuration-reference)).
+- `no_match_fallback` ("no rule covered this command") and `undecidable_fallback` ("this
+  command could not be safely parsed at all") are two different settings that answer two
+  different questions -- see
+  [docs/configuration.md#undecidable-fallback](docs/configuration.md#undecidable-fallback).
 - A structured rule entry (`{ match = "...", additionalContext = "..." }`, toolguard config
   files only) can inject guidance text into Claude's context when it decides a call --
   works for allow/ask/deny/hard_deny. See

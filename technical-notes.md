@@ -72,6 +72,13 @@ anyone cross-referencing against the project's own tracker.
   - [Layer promotion certified by a live two-level HOME-staged audit](#layer-promotion-certified-by-a-live-two-level-home-staged-audit)
   - [CLI mode summary](#cli-mode-summary)
 - [Isolated experiment sandbox (TOO-19)](#isolated-experiment-sandbox-too-19)
+- [Shadowed-hook detection and install hardening (TOO-19)](#shadowed-hook-detection-and-install-hardening-too-19)
+  - [Why the two footguns need different flags](#why-the-two-footguns-need-different-flags)
+  - [`toolguard/install_provenance.py` -- placement rationale](#toolguardinstall_provenancepy----placement-rationale)
+  - [The clean-tree predicate (stale-install detection)](#the-clean-tree-predicate-stale-install-detection)
+  - [The SessionStart gate: only inside toolguard's own repo](#the-sessionstart-gate-only-inside-toolguards-own-repo)
+  - [The audit predicate: `PYTHONPATH` content, not process provenance](#the-audit-predicate-pythonpath-content-not-process-provenance)
+  - [Installer hardening, and its one real risk](#installer-hardening-and-its-one-real-risk)
 
 ## Subagent Identification Workaround
 
@@ -620,10 +627,12 @@ even when no TOML pattern matches the construct.
 **Update (TOO-19):** "resolves to ASK" above is the *default*, not a hardcoded outcome. The
 top-level `undecidable_fallback` config key (`docs/configuration.md#undecidable-fallback`)
 names the floor this governing principle resolves to -- `"ask"` (this default), `"deny"`
-(stricter), or `"allow_with_warning"` (removes the floor entirely, the deliberate opt-out;
-raises a HIGH `toolguard-audit` finding). See `compound.py`'s `_UNDECIDABLE_FLOOR_DECISION`
-and `Configuration.resolved_undecidable_fallback` for the resolution mechanics, which this
-whole section predates.
+(stricter), or `"allow_with_warning"`/`"allow"` (both remove the floor entirely, the
+deliberate opt-out, and both raise the SAME HIGH `toolguard-audit` finding -- `"allow"` is
+strictly less safe since it logs no warning at all; `"allow_with_no_warnings"` is an
+identical alias for `"allow"`, kept as a human reminder). See `compound.py`'s
+`_UNDECIDABLE_FLOOR_DECISION` and `Configuration.resolved_undecidable_fallback` for the
+resolution mechanics, which this whole section predates.
 
 ### Grammar-first, with a light AST -- no hand-rolled parsing
 
@@ -702,8 +711,8 @@ bearer (e.g. `cat __HEREDOC_TO_python__`), a broad receiver allow (`allow = cat:
 inline-code leaf has its verdict CLAMPED to at most ASK: a plain `allow` cannot downgrade it
 (`deny` still applies). This makes "allow data-sink heredocs, ask executor heredocs"
 authorable without cross-leaf context, while guaranteeing no fail-open. (TOO-19: "at most ASK"
-is the `undecidable_fallback` default; `"allow_with_warning"` removes this clamp entirely --
-see the governing-principle section above.)
+is the `undecidable_fallback` default; `"allow_with_warning"`/`"allow"` remove this clamp
+entirely -- see the governing-principle section above.)
 
 ### Command substitution: validated, but no placeholder (yet)
 
@@ -723,7 +732,9 @@ are false positives -- backticks inside strings/heredoc bodies -- or benign `$(d
   (default `"ask"`) -- NOT `no_match_fallback`, which answers a different question (a command
   that was read and understood but matched no rule). Both of the items above were originally
   hardcoded ASK; TOO-19 made the floor level itself configurable
-  (`ask`/`deny`/`allow_with_warning`), closing this "open to revisit" note. See
+  (`ask`/`deny`/`allow_with_warning`/`allow` -- `allow_with_no_warnings` is a deliberate,
+  permanent alias for `allow`; unlike `no_match_fallback`, there is no `warn_deny` spelling
+  here), closing this "open to revisit" note. See
   `docs/configuration.md#undecidable-fallback` for the setting and
   `docs/security.md#loosening-the-undecidable-fallback` for the security tradeoff of loosening
   it.
@@ -955,8 +966,179 @@ the unsafe one, or it gets bypassed under time pressure.
 uv run python -m toolguard.testing.sandbox --config <file> --command "<command>"
 ```
 
+Full flag list (see `toolguard/testing/sandbox.py::_build_argparser`):
+
+- `--config FILE` -- PROJECT-level `toolguard_hook.toml` text to load into the sandbox.
+- `--user-config FILE` -- USER-level `toolguard_hook.toml` text. Needed to reproduce a
+  hierarchy/precedence question (project overriding, or failing to override, a user-level
+  rule) -- omitting it means the experiment only has one level, so any cross-level question
+  answers itself trivially.
+- `--command COMMAND` (required) -- the Bash command, or the file path for a file-path tool,
+  to evaluate.
+- `--tool NAME` (default `Bash`) -- which tool to evaluate `--command` as. Without setting
+  this, `Read`/`Write`/`Edit` cannot be evaluated at all -- the sandbox always checks against
+  `Bash` unless told otherwise.
+- `--hard-deny PATTERN` (repeatable) -- add one `[hard_deny]` pattern to the experiment; pass
+  it more than once for several patterns.
+- `--json` -- emit the verdict as JSON instead of human-readable text, for scripted use.
+
 Anything worth running twice should become a unit test; the sandbox object is the same in
 both places, so promotion is copy-paste. Not used by the hook, and not shipped as a user
 feature -- development only. `ConfigIsolationMixin` was deliberately NOT consolidated into it
 (the tripwire is a stricter contract that may expose latent isolation violations in the
 existing suite; that discovery should be deliberate, not a side effect of a safety fix).
+
+## Shadowed-hook detection and install hardening (TOO-19)
+
+`PYTHONPATH=.` exported from a shell rc file made a source checkout of this repository SHADOW
+the installed toolguard package for every process whose working directory happened to be that
+checkout -- including the tool venv's own interpreter running the live PreToolUse hook. The
+hook silently governed real permission decisions with uncommitted, mid-refactor code for weeks
+before this was noticed. `toolguard/install_provenance.py` is the fix's detection layer;
+`toolguard/session_start.py`, `toolguard/tools/environment_audit.py`, and
+`toolguard/tools/installer.py` are its three consumers. User-facing rationale:
+[docs/security.md: The hook can be silently shadowed](docs/security.md#the-hook-can-be-silently-shadowed).
+
+### Why the two footguns need different flags
+
+Measured directly, not assumed:
+
+- **Console-script invocation** (`toolguard` from `~/.local/bin/`): `PYTHONPATH` alone is the
+  cause. Unsetting it fixes shadowing with no other change.
+- **`-m` invocation** (`python -m toolguard.hook`): Python ALSO prepends the current working
+  directory to `sys.path` for a `-m` invocation, so `-E` (ignore `PYTHONPATH`) alone is
+  insufficient -- `-E -P` is required. Verified: `python -E -P -m toolguard.rule_entry` fails
+  with "No module named" (the installed copy is governing, as intended, and this environment
+  has none installed) while plain `-m` resolves the working tree instead. `toolguard/hook.py`
+  already carries an `if __name__ == "__main__": main()` guard, so `-m toolguard.hook` is a
+  valid, and the deliberately chosen, entry form for the hardened registration -- see
+  [Installer hardening](#installer-hardening-and-its-one-real-risk) below for why the
+  registered command uses `-m` at all rather than just hardening the console-script shim.
+
+### `toolguard/install_provenance.py` -- placement rationale
+
+A new, small, stdlib-only leaf module rather than a home in `toolguard/path_utils.py` or
+`toolguard/tools/`, for two independent reasons:
+
+- **Not `path_utils.py`.** That module's documented charter is project-root MARKER discovery
+  (the shared "climb toward home" walk-up config/env loaders and the migration gate use) --
+  a different question from "which toolguard package/distribution is this". Folding install
+  provenance in would muddy an already-precisely-scoped leaf module for a concern its own
+  callers (`toolguard.config`, `toolguard.env_config`) have no reason to import.
+- **Not `toolguard/tools/`.** That package is documented as deliberately segregated from the
+  runtime permission-evaluation path (`toolguard/tools/__init__.py`), so that automation
+  tooling concerns never bleed into the hook's import graph. `toolguard/session_start.py` --
+  the primary consumer here -- currently imports only `toolguard.config` at module level, and
+  this change keeps it that way: `install_provenance` is a top-level `toolguard/*.py` leaf
+  module, importable from both `session_start.py` (session-level, not `tools/`) and
+  `toolguard/tools/environment_audit.py` (which, like every other analyser in `tools/`, freely
+  imports top-level `toolguard.*` modules) without creating a new dependency in either
+  direction.
+
+`governing_package_root()` deliberately does NOT import the `toolguard` top-level package to ask
+"where was I imported from" -- it uses `Path(__file__).resolve().parent` from INSIDE
+`install_provenance.py` itself, which is exactly the currently-governing copy for whichever
+process is running this code, with no risk of a second, separate import resolving differently.
+
+### The clean-tree predicate (stale-install detection)
+
+`stale_install_report()` answers "does the installed copy's content differ from this working
+tree", but ONLY reports `is_stale=True` when the working tree is confirmed CLEAN under
+`toolguard/` (`git status --porcelain -- toolguard` prints nothing) AND its content hash
+differs from the installed copy's. Every other outcome -- dirty, undetermined (no git, not a
+work tree, subprocess failure), or no installed distribution found at all -- reports
+`is_stale=False`. This is deliberate, not an oversight: during active development the tree
+differs from the installed copy constantly, so warning on a dirty tree would be pure noise and
+train the reader to ignore the message; and uncertainty (git unavailable) must never be
+silently promoted into a claim, so it resolves to silence rather than a guess. The content
+comparison itself (`_hash_py_files`) hashes every `.py` file's relative path and byte content
+in SORTED RELATIVE order (not filesystem iteration order, and not tied to either root's
+absolute path), so two directories with the same internal layout hash identically regardless of
+creation order or where they happen to live on disk.
+
+This is intentionally a DIFFERENT comparison from `toolguard/update_check.py` (TOO-16), which
+compares a local checkout's git HEAD against `git ls-remote origin HEAD` -- a git-history
+freshness question. `stale_install_report()` compares ACTUAL FILE CONTENT currently sitting in
+site-packages against the checkout's current content, which is the only check that has any
+signal for the specific scenario this was built for: a machine deliberately governed by a local,
+unpushed build (`uv tool install /local/path toolguard`), where there IS no useful remote to
+diff against. `installed_distribution_root()` locates that installed copy via
+`importlib.metadata.distribution()`, which walks `sys.path` for the matching `*.dist-info`
+directory the same way `pip`/`uv` left it -- succeeding even while the import itself is being
+shadowed, since dist-info discovery and the actual import resolution are separate mechanisms.
+
+### The SessionStart gate: only inside toolguard's own repo
+
+Both `toolguard-session-start` checks are gated on the ACTIVE SESSION's project itself being a
+toolguard source checkout (`config.project_root` has a sibling `pyproject.toml` naming
+"toolguard" next to a real `toolguard/__init__.py`) -- not on whether the copy governing this
+particular process happens to be a checkout. The reason: `PYTHONPATH=.` is a RELATIVE entry, so
+it only actually shadows anything when the process's cwd -- which Claude Code sets to the
+ACTIVE PROJECT for that session -- literally contains a `toolguard/` package, i.e. only in a
+session working inside a toolguard checkout (or one improbably named the same). Gating on
+`config.project_root` rather than blindly reporting `governing_package_root()`'s classification
+means the check answers the question a developer working on toolguard itself actually has
+("is MY checkout the one making decisions right now"), and stays silent for every other project
+a user happens to open Claude Code in, where the question is meaningless. `ShadowStatus.
+running_from_checkout` then additionally requires `governing_package_root()` to equal that SAME
+checkout's `toolguard/` directory (not merely "some checkout somewhere") -- true live shadowing,
+not just "you happen to be developing toolguard right now with a correctly installed hook".
+
+### The audit predicate: `PYTHONPATH` content, not process provenance
+
+`toolguard/tools/environment_audit.py`'s `audit_environment()` finding
+(`pythonpath-shadows-hook`, HIGH) fires on a PURELY PREDICTIVE question -- does `PYTHONPATH`
+contain an entry under which a `toolguard/` package exists -- read directly from the
+environment, never from how the CURRENT process (`toolguard-audit` itself) was launched or
+imported. This distinction is load-bearing: `toolguard-audit --dev` legitimately runs from this
+source tree on purpose (see `CLAUDE.md`'s "Running toolguard's own skills against this repo"),
+which says nothing about whether an ordinary `toolguard` PreToolUse hook invocation -- launched
+separately by Claude Code, but sharing the same shell environment -- would ALSO be shadowed. A
+predicate keyed to "how was I invoked" would be silent exactly when it needs to fire (an
+Arnon-style `--dev` audit run with a genuinely shadowing `PYTHONPATH` still set) and would fire
+on the harmless case (`--dev` with no `PYTHONPATH` shadowing risk at all). Reading the
+environment directly avoids both failure modes. The finding follows the same
+silent-in-the-normal-case shape as `takeover_audit.py`'s `loose-undecidable-fallback`: a
+positive boolean predicate that is false for essentially every real environment, so it never
+trains a reader to ignore audit output.
+
+### Installer hardening, and its one real risk
+
+`toolguard-install register-hooks` registers the PreToolUse hook as
+`<tool venv python> -E -P -m toolguard.hook` (`_hardened_hook_command` in
+`toolguard/tools/installer.py`) rather than the bare console-script path it used to write. The
+interpreter path is derived from `--binary` by resolving ONE level of symlinks
+(`Path(binary).resolve().parent`) -- for a `uv tool install`, `~/.local/bin/toolguard` is a
+symlink whose target is the real script inside `.../uv/tools/toolguard/bin/`, and every such
+`bin/` directory ships a `python3`/`python` SIBLING that is the correct interpreter for that
+exact venv. The sibling's own path (not a further-resolved target) is what gets written, so it
+survives a later `uv tool install --force`, which recreates the same venv directory in place
+rather than moving it -- verified against the real machine layout during this ticket
+(`~/.local/share/uv/tools/toolguard/bin/python3` is a stable symlink name across reinstalls,
+even though what it points at, the shared managed interpreter, can itself change version).
+
+**The one risk that matters: a hardened command bakes an ABSOLUTE interpreter path into
+settings.json.** If that path is ever wrong -- and Claude Code's own hook contract makes this
+concrete, not theoretical: only exit code 2 blocks a `PreToolUse` hook, and ANY OTHER outcome,
+including the process failing to launch at all (`ENOENT` on a missing interpreter), is a
+**non-blocking hook error** -- the tool call proceeds with NO toolguard decision whatsoever,
+silently. That is strictly worse than the shadowing problem this hardening exists to close: a
+shadowed hook still governs, just with the wrong code; a broken hardened path governs NOTHING
+and produces no prompt telling you so. `_tool_venv_python()` therefore verifies the candidate
+interpreter both EXISTS and is EXECUTABLE (`os.access(..., os.X_OK)`) before it is ever
+returned, and `_hardened_hook_command()` falls back to the bare, unhardened, but WORKING
+`--binary` path when no verified interpreter can be found -- an unhardened hook that runs is
+always preferred over a hardened one that might not. `cmd_skills_status` (`skills-status`, the
+installer's read-only status/verify path) additionally re-checks an EXISTING hardened
+registration's recorded interpreter path against disk and reports `interpreter_missing=True`
+if it no longer exists, so a later reinstall that relocates the venv is caught by a diagnostic
+rather than discovered only when a tool call silently stops being governed.
+
+SessionStart's own hook registration was deliberately left UNHARDENED in this pass (still the
+bare `<binary>-session-start` form) -- the ticket's own line-pointer named only the PreToolUse
+registration, and `toolguard-session-start`'s `main()` is wrapped in a broad
+`except Exception` and always exits 0, so a shadowed or broken SessionStart process degrades to
+"no session-start message this session" rather than a security-relevant silent failure. This is
+a known, accepted asymmetry, not an oversight: if it ever needs closing, the same
+`_hardened_hook_command` helper generalises directly to a `toolguard.session_start` module
+form.

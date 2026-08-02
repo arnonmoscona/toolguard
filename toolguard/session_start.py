@@ -20,6 +20,15 @@ Two sources of conflict are checked:
 The hook nags every session while conflicts remain. There is no deduplication
 marker: persistent nagging is intentional to encourage resolution.
 
+A THIRD, unrelated check runs alongside the two above (TOO-19): whether the
+toolguard governing this machine is a shadowed source checkout, or a properly
+installed copy that has drifted from its own checkout. See
+:func:`_detect_shadow_status` and :mod:`toolguard.install_provenance` for the
+detection primitives, and ``docs/security.md`` ("The hook can be silently
+shadowed") for the full rationale. Both messages are gated on the ACTIVE
+session's project being toolguard's own source repo -- meaningless for any
+other project, so they stay silent there.
+
 Input: JSON via stdin (SessionStart shape -- ``hook_event_name``, ``cwd``,
        ``session_id``; NO ``tool_name`` / ``tool_input`` fields).
 Output: A short conflict summary on stdout when conflicts exist; nothing otherwise.
@@ -30,9 +39,11 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from toolguard import install_provenance
 from toolguard.config import Configuration, load_configuration
 
 
@@ -133,12 +144,17 @@ def _check_dynamic_conflicts(log_dir: Optional[Path]):
     return None
 
 
-def _format_summary(static_conflict, dynamic_conflict, broken_files=()) -> str:
+def _format_summary(
+    static_conflict,
+    dynamic_conflict,
+    broken_files=(),
+    shadow_status: Optional[ShadowStatus] = None,
+) -> str:
     """
-    Format a brief conflict/broken-config summary for stdout.
+    Format a brief conflict/broken-config/shadow-status summary for stdout.
 
     Produces a short, human-readable summary for injection into the Claude
-    Code session context, built from up to two independent sections:
+    Code session context, built from up to four independent sections:
 
     - A broken-config section (TOO-19) when *broken_files* is non-empty:
       names each broken file with its parse error and states that toolguard
@@ -148,9 +164,16 @@ def _format_summary(static_conflict, dynamic_conflict, broken_files=()) -> str:
       *dynamic_conflict* is not None: a header line, one bullet per conflict
       source, and a closing action prompt -- byte-identical to this
       function's behaviour before *broken_files* was added.
+    - A "running from a source tree" section (TOO-19) when
+      *shadow_status* is given and ``shadow_status.running_from_checkout``
+      is True: names both the governing and installed paths.
+    - A "stale install" section (TOO-19) when *shadow_status* is given and
+      ``shadow_status.stale`` is True: names both paths and the reinstall
+      command. Independent of the section above -- either, neither, or both
+      may fire.
 
-    When all three inputs are absent, the result is an empty string (callers
-    only print when at least one is present).
+    When every input is absent, the result is an empty string (callers only
+    print when at least one is present).
 
     Args:
         static_conflict: A ``TakeoverEnabledConflict`` describing cross-level
@@ -161,6 +184,8 @@ def _format_summary(static_conflict, dynamic_conflict, broken_files=()) -> str:
             failed to parse (:attr:`~toolguard.config.Configuration.parse_failures`,
             TOO-19). Defaults to ``()`` so existing 2-argument call sites are
             unaffected.
+        shadow_status: A :class:`ShadowStatus` (see :func:`_detect_shadow_status`),
+            or ``None`` so existing call sites are unaffected.
 
     Returns:
         A multi-line string suitable for printing to stdout, or "" when
@@ -207,6 +232,39 @@ def _format_summary(static_conflict, dynamic_conflict, broken_files=()) -> str:
 
         conflict_lines.append("Review and resolve; see the conflict log for details.")
         sections.append("\n".join(conflict_lines))
+
+    if shadow_status is not None and shadow_status.running_from_checkout:
+        installed_desc = (
+            str(shadow_status.installed_root)
+            if shadow_status.installed_root is not None
+            else "(no installed distribution found)"
+        )
+        sections.append(
+            "toolguard: RUNNING FROM A SOURCE TREE, NOT THE INSTALLED "
+            "DISTRIBUTION --\n"
+            f"  governing:  {shadow_status.checkout_root / 'toolguard'}\n"
+            f"  installed:  {installed_desc}\n"
+            "  Every toolguard invocation sharing this environment is "
+            "currently using UNREVIEWED code from this checkout instead of "
+            "the installed release -- including the PreToolUse permission "
+            "hook, which is making every allow/deny/ask decision from it. "
+            "See docs/security.md ('The hook can be silently shadowed') for "
+            "how this happens and how to fix it."
+        )
+
+    if shadow_status is not None and shadow_status.stale:
+        sections.append(
+            "toolguard: INSTALLED COPY IS STALE --\n"
+            f"  checkout:   {shadow_status.checkout_root}\n"
+            f"  installed:  {shadow_status.installed_root}\n"
+            "  This checkout has changes that are not in the installed "
+            "distribution. Reinstall: uv tool install --force "
+            f"{shadow_status.checkout_root} toolguard\n"
+            "  Installing from a local path snapshots the working tree AS "
+            "IT IS NOW, including any uncommitted changes -- commit first. "
+            "This install affects EVERY project toolguard governs on this "
+            "machine, not just this one."
+        )
 
     return "\n\n".join(sections)
 
@@ -278,6 +336,85 @@ def _detect_conflicts(config: Configuration):
     return static_conflict, dynamic_conflict
 
 
+@dataclass(frozen=True)
+class ShadowStatus:
+    """
+    TOO-19 shadow/stale-install status for the CURRENT session.
+
+    Gated on the active session's project being toolguard's own source
+    checkout (see :func:`_detect_shadow_status`) -- meaningless, and always
+    the all-empty/False values below, for every other project.
+
+    Attributes:
+        checkout_root: The active project's root, when it IS a toolguard
+            source checkout (see
+            :func:`~toolguard.install_provenance.source_checkout_root`);
+            ``None`` when the gate failed (nothing else here is populated).
+        running_from_checkout: ``True`` when the toolguard copy that produced
+            THIS ``toolguard-session-start`` invocation is that SAME
+            checkout -- genuine live shadowing, e.g. via ``PYTHONPATH`` --
+            rather than a properly installed distribution.
+        installed_root: The installed distribution's package root (via
+            :func:`~toolguard.install_provenance.installed_distribution_root`),
+            or ``None`` when none was found.
+        stale: ``True`` only when :attr:`checkout_root` is confirmed clean
+            (git) AND its content hash differs from :attr:`installed_root`'s
+            -- see :func:`~toolguard.install_provenance.stale_install_report`.
+    """
+
+    checkout_root: Optional[Path]
+    running_from_checkout: bool
+    installed_root: Optional[Path]
+    stale: bool
+
+
+_EMPTY_SHADOW_STATUS = ShadowStatus(
+    checkout_root=None, running_from_checkout=False, installed_root=None, stale=False
+)
+
+
+def _detect_shadow_status(config: Configuration) -> ShadowStatus:
+    """
+    Detect TOO-19 shadow/stale-install status for the current session.
+
+    Gated on the active session's project (``config.project_root``) itself
+    being a toolguard source checkout -- both checks are meaningless for any
+    other project (a Claude Code session in an unrelated repo has no
+    "working tree" for toolguard to compare against), so this returns
+    :data:`_EMPTY_SHADOW_STATUS` immediately when that gate fails.
+
+    Args:
+        config: An already-loaded ``Configuration`` (reused from ``main()``,
+            matching the pattern in :func:`_detect_conflicts` /
+            :func:`_detect_broken_config_files`).
+
+    Returns:
+        A :class:`ShadowStatus`.
+    """
+    project_root = config.project_root
+    if project_root is None:
+        return _EMPTY_SHADOW_STATUS
+
+    checkout_root = install_provenance.source_checkout_root(
+        package_root=project_root / "toolguard"
+    )
+    if checkout_root is None:
+        return _EMPTY_SHADOW_STATUS
+
+    governing_root = install_provenance.governing_package_root()
+    running_from_checkout = governing_root == (checkout_root / "toolguard").resolve()
+
+    installed_root = install_provenance.installed_distribution_root()
+    stale_report = install_provenance.stale_install_report(checkout_root)
+
+    return ShadowStatus(
+        checkout_root=checkout_root,
+        running_from_checkout=running_from_checkout,
+        installed_root=installed_root,
+        stale=stale_report.is_stale,
+    )
+
+
 def _build_session_start_argparser() -> argparse.ArgumentParser:
     """
     Build the argument parser for the toolguard SessionStart hook.
@@ -306,11 +443,13 @@ def main() -> None:
     Main entry point for the SessionStart hook.
 
     Reads the SessionStart JSON payload from stdin, checks for static and dynamic
-    configuration conflicts PLUS any governed config file that failed to parse
-    (TOO-19), and prints a brief summary to stdout when any are found. Claude
-    Code injects this stdout into the session context so the agent immediately
-    learns of any unresolved conflicts or broken config. Always exits 0 -- a
-    SessionStart hook must never block or break a session.
+    configuration conflicts, any governed config file that failed to parse
+    (TOO-19), and -- when the active project is toolguard's own source repo --
+    a shadowed/stale install (TOO-19, see :func:`_detect_shadow_status`), and
+    prints a brief summary to stdout when any are found. Claude Code injects
+    this stdout into the session context so the agent immediately learns of
+    any unresolved conflicts, broken config, or install-provenance problem.
+    Always exits 0 -- a SessionStart hook must never block or break a session.
 
     Exit codes:
         0: Always (including --help, isatty guard, and error cases).
@@ -347,9 +486,20 @@ def main() -> None:
         config = load_configuration(cwd)
         static_conflict, dynamic_conflict = _detect_conflicts(config)
         broken_files = _detect_broken_config_files(config)
+        shadow_status = _detect_shadow_status(config)
 
-        if static_conflict is not None or dynamic_conflict is not None or broken_files:
-            print(_format_summary(static_conflict, dynamic_conflict, broken_files))
+        if (
+            static_conflict is not None
+            or dynamic_conflict is not None
+            or broken_files
+            or shadow_status.running_from_checkout
+            or shadow_status.stale
+        ):
+            print(
+                _format_summary(
+                    static_conflict, dynamic_conflict, broken_files, shadow_status
+                )
+            )
 
     except Exception as exc:  # noqa: BLE001 - SessionStart must never raise
         print(f"toolguard session-start: unexpected error ({exc})", file=sys.stderr)
