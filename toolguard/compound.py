@@ -126,39 +126,111 @@ def _apply_undecidable_floor(decision: str, undecidable_fallback: str) -> str:
     return decision
 
 
-def _fallback_kind_for_reason(decision: str, reason: str) -> Optional[str]:
-    """Classify a ``resolve_one`` result as a fallback-escape-hatch outcome or not.
+#: Stand-in recorded wherever a per-sub-command "matched rule" would normally
+#: go but the ``allow`` came from a fallback ESCAPE HATCH rather than a rule
+#: match (TOO-19 code review M1/m5). Shared by :func:`_combine_strictest`'s
+#: multi-leaf summary and by ``hook.py``'s single-leaf audit-log branch so the
+#: two cannot drift into two different conventions for the same situation.
+#:
+#: Deliberately comma-free: ``hook.py``'s ``_parse_compound_match_details``
+#: splits the bracketed summary list on ``", "``, so a comma here would be
+#: mis-split into two bogus per-sub-command entries.
+FALLBACK_ALLOW_PLACEHOLDER = "[fallback allow -- no rule matched]"
+
+#: The ``deny``-side counterpart of :data:`FALLBACK_ALLOW_PLACEHOLDER` (TOO-19
+#: deny-side rule fabrication fix). Recorded as the ``Violated Rules`` entry
+#: wherever a deny came from the ``undecidable_fallback=deny`` escape hatch
+#: rather than a matched deny rule -- see ``hook.py``'s
+#: ``_log_non_allow_decision``. Comma-free for the same reason as the allow
+#: placeholder, even though nothing currently re-splits a deny reason on
+#: ``", "``: keeping the two placeholders to the same shape is cheaper than
+#: reasoning about whether that stays true.
+FALLBACK_DENY_PLACEHOLDER = "[fallback deny -- no rule matched]"
+
+#: Reason-text markers that identify a fallback-escape-hatch outcome, each
+#: mapped to the ``fallback_kind`` tag it implies AND the single *decision* it
+#: is valid evidence for -- ``fallback_kind_for_reason`` only matches a marker
+#: against reasons carrying that same decision, so an accidental substring
+#: collision in a hand-written ``additionalContext`` or pattern name can only
+#: ever misclassify within its own decision, never cross an allow reason into
+#: a deny finding or vice versa. Ordered LONGEST-MARKER-FIRST WITHIN a decision
+#: because ``...=allow_with_warning`` has ``...=allow`` as a prefix -- a
+#: shorter marker must never shadow the longer one; the ``deny`` marker has no
+#: such prefix collision, so its position relative to the ``allow`` ones does
+#: not matter. The ``allow``-side settings: the ``no_match_fallback`` wording
+#: is built by :meth:`~toolguard.config.Configuration.resolve_permission_detailed`
+#: and reaches this module through ``resolve_one``; the ``undecidable_fallback``
+#: wording is built by this module itself and reaches ``hook.py`` as the FINAL
+#: reason of a single-leaf command (TOO-19 m5). The ``deny``-side marker
+#: (TOO-19 deny-side rule fabrication fix) covers BOTH deny reason shapes this
+#: module builds for ``undecidable_fallback=deny`` -- the ASK-floor leaf's
+#: ``"Denied by undecidable_fallback=deny (...): <display>"`` and the
+#: ``UndecidableSegment``'s ``"Undecidable segment denied by
+#: undecidable_fallback=deny (...): <display>"`` -- with a single substring,
+#: since both contain it verbatim. There is no ``no_match_fallback=deny``
+#: marker: that reason (``"Command does not match any allow patterns"``,
+#: built by ``config.py``) never contains a ``": "`` at all, so it was never
+#: at risk of the fabrication this guards against.
+_FALLBACK_REASON_MARKERS = (
+    ("no_match_fallback=allow_with_warning", "warned", "allow"),
+    ("undecidable_fallback=allow_with_warning", "warned", "allow"),
+    ("no_match_fallback=allow", "silent", "allow"),
+    ("undecidable_fallback=allow", "silent", "allow"),
+    ("undecidable_fallback=deny", "denied", "deny"),
+)
+
+
+def fallback_kind_for_reason(decision: str, reason: str) -> Optional[str]:
+    """Classify an ``allow`` or ``deny`` result as a fallback-escape-hatch outcome or not.
 
     TOO-19 code review M1: structured detection where the caller can determine
     the outcome directly from what it just constructed (the ASK-floor and
     ``UndecidableSegment`` branches below), and this TEXT-based fallback ONLY
-    for the one place that genuinely cannot be structural: an ordinary
-    (non-ASK-floor) sub-command's ``resolve_one`` result. That callable's
-    return type is a plain 3-tuple relied on by ~18 test-authored closures
-    (see the TOO-19 implementation report), so the richer
-    ``ResolvedDecision.fallback_warning`` bit computed inside
-    :meth:`~toolguard.config.Configuration.resolve_permission_detailed` never
-    reaches this module -- only its already-tested, verbatim reason wording
-    does. Only the ``no_match_fallback`` marker can appear here:
-    ``undecidable_fallback`` reasons are constructed by THIS module, never by
-    ``resolve_one``.
+    for the places that genuinely cannot be structural:
+
+    - an ordinary (non-ASK-floor) sub-command's ``resolve_one`` result. That
+      callable's return type is a plain 3-tuple relied on by ~18 test-authored
+      closures (see the TOO-19 implementation report), so the richer
+      ``ResolvedDecision.fallback_warning`` bit computed inside
+      :meth:`~toolguard.config.Configuration.resolve_permission_detailed` never
+      reaches this module -- only its already-tested, verbatim reason wording
+      does. Only ``no_match_fallback`` markers can appear on that path.
+    - ``hook.py``'s audit-log branch for a SINGLE-leaf command (TOO-19 m5 for
+      ``allow``; TOO-19 deny-side rule fabrication fix for ``deny``), which
+      sees only the final reason string. There the ``undecidable_fallback``
+      markers this module itself writes are the ones that matter, which is
+      why this helper recognizes both fallback settings and is public rather
+      than module-private.
+
+    ``deny`` was folded into this SAME function rather than given a parallel
+    ``fallback_kind_for_deny_reason`` (TOO-19 deny-side rule fabrication fix):
+    the marker table, the longest-marker-first ordering concern, and the
+    "classify this reason string" contract are all identical between the two
+    decisions, and the alternative (a second function checking a second
+    marker tuple) is exactly the kind of drift risk that made this function
+    public in the first place. Each marker in ``_FALLBACK_REASON_MARKERS`` is
+    tagged with the one decision it is valid evidence for, and only matched
+    against a reason carrying that same decision, so folding ``deny`` into
+    the same table cannot let an allow marker misclassify a deny (or vice
+    versa) even in the (currently unreachable) case of a substring collision.
 
     Args:
-        decision: The sub-command's decision.
-        reason: The sub-command's reason text.
+        decision: The decision the *reason* accompanies.
+        reason: The reason text.
 
     Returns:
         ``'warned'`` when *reason* names the ``allow_with_warning`` value of
-        ``no_match_fallback``, ``'silent'`` when it names the plain
-        ``allow`` value, or ``None`` for a non-``allow`` decision or a
+        either allow-side fallback setting, ``'silent'`` when it names the
+        plain ``allow`` value of either, ``'denied'`` when *decision* is
+        ``'deny'`` and *reason* names ``undecidable_fallback=deny``, or
+        ``None`` for a decision other than ``'allow'``/``'deny'`` or a
         genuine rule match.
     """
-    if decision != "allow":
+    if decision not in ("allow", "deny"):
         return None
-    if "no_match_fallback=allow_with_warning" in reason:
-        return "warned"
-    if "no_match_fallback=allow" in reason:
-        return "silent"
+    for marker, kind, applies_to in _FALLBACK_REASON_MARKERS:
+        if applies_to == decision and marker in reason:
+            return kind
     return None
 
 
@@ -216,7 +288,7 @@ def _resolve_leaf_detailed(
     ASK-floor path this is known STRUCTURALLY, from *undecidable_fallback*
     itself -- no text matching. On the normal path it is collapsed from the
     inner :func:`_combine_strictest` call's own aggregate boolean (itself
-    built from :func:`_fallback_kind_for_reason` per sub-command).
+    built from :func:`fallback_kind_for_reason` per sub-command).
 
     Args:
         leaf: A :class:`~toolguard.parser.multiline.LeafCommand` to resolve.
@@ -314,7 +386,7 @@ def _resolve_leaf_detailed(
     quads: List[Tuple[str, str, str, Optional[str], Optional[str]]] = []
     for cmd in sub_commands:
         decision, reason, additional_context = resolve_one(cmd)
-        fallback_kind = _fallback_kind_for_reason(decision, reason)
+        fallback_kind = fallback_kind_for_reason(decision, reason)
         if decision == "deny":
             formatted = (
                 f"Compound command contains denied sub-command: {cmd} ({reason})"
@@ -656,9 +728,7 @@ def _combine_strictest(
                 # pattern, and the reason's trailing "...): <outer_cmd>" text
                 # would be misparsed as one. Record that plainly instead.
                 cmd_part = leaf_text.strip().rstrip(";").strip() or "?"
-                match_details.append(
-                    f"{cmd_part} -> [fallback allow -- no rule matched]"
-                )
+                match_details.append(f"{cmd_part} -> {FALLBACK_ALLOW_PLACEHOLDER}")
                 continue
             # Extract the pattern from the leaf reason.  The leaf reason may be
             # in one of two forms:

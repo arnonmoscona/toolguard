@@ -1879,6 +1879,194 @@ class TestToolguardPermissionsEdgeCases(unittest.TestCase):
         self.assertEqual(perms["allow"], ())
 
 
+class TestUnrecognizedFallbackSettings(unittest.TestCase):
+    """
+    Configuration.unrecognized_fallback_settings() (TOO-19 m5).
+
+    Arnon set ``no_match_fallback = "allow_with_no_warning"`` (singular). It
+    was unrecognized, so it resolved to 'ask' -- maximum friction -- with no
+    diagnostic anywhere, and the conclusion drawn was "the feature is broken"
+    rather than "there is a typo". Resolution semantics are unchanged ('ask'
+    IS the safe direction); what changed is that the typo is now named, with
+    the offending value, the setting, the file, and the accepted spellings.
+    """
+
+    @staticmethod
+    def _hook_layer(level, content, specificity=0):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_the_real_typo_is_detected_and_still_resolves_to_ask(self):
+        """
+        Given no_match_fallback = 'allow_with_no_warning' (singular -- the
+            real typo that cost a round trip)
+        When unrecognized_fallback_settings() runs
+        Then exactly one record names the setting, the offending value, the
+            file, and the accepted spellings -- and resolution still returns
+            'ask', because the safe direction is deliberately unchanged
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    "user", {"no_match_fallback": "allow_with_no_warning"}
+                ),
+            )
+        )
+        found = config.unrecognized_fallback_settings()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].key, "no_match_fallback")
+        self.assertEqual(found[0].value, "allow_with_no_warning")
+        self.assertEqual(found[0].provenance.level, "user")
+        self.assertIn("allow_with_no_warnings", found[0].accepted)
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
+
+    def test_applies_to_undecidable_fallback_too(self):
+        """
+        Given undecidable_fallback set to a value that is not recognized
+        When unrecognized_fallback_settings() runs
+        Then it is reported the same way no_match_fallback would be
+        """
+        config = Configuration(
+            layers=(self._hook_layer("user", {"undecidable_fallback": "allowed"}),)
+        )
+        found = config.unrecognized_fallback_settings()
+        self.assertEqual([f.key for f in found], ["undecidable_fallback"])
+        self.assertEqual(config.resolved_undecidable_fallback(), "ask")
+
+    def test_valid_and_alias_values_never_fire(self):
+        """
+        Given every accepted spelling of both settings, including the aliases
+            normalized away before validation ('warn_deny',
+            'allow_with_no_warnings')
+        When unrecognized_fallback_settings() runs
+        Then nothing is reported for any of them
+        """
+        for value in (
+            "ask",
+            "deny",
+            "allow",
+            "allow_with_warning",
+            "allow_with_no_warnings",
+        ):
+            with self.subTest(value=value):
+                config = Configuration(
+                    layers=(
+                        self._hook_layer(
+                            "user",
+                            {
+                                "no_match_fallback": value,
+                                "undecidable_fallback": value,
+                            },
+                        ),
+                    )
+                )
+                self.assertEqual(config.unrecognized_fallback_settings(), ())
+
+        config = Configuration(
+            layers=(self._hook_layer("user", {"no_match_fallback": "warn_deny"}),)
+        )
+        self.assertEqual(config.unrecognized_fallback_settings(), ())
+
+    def test_unset_never_fires(self):
+        """
+        Given a layer that sets neither fallback setting
+        When unrecognized_fallback_settings() runs
+        Then nothing is reported
+        """
+        config = Configuration(layers=(self._hook_layer("user", {}),))
+        self.assertEqual(config.unrecognized_fallback_settings(), ())
+
+    def test_non_string_value_is_reported(self):
+        """
+        Given no_match_fallback set to a boolean rather than a string
+        When unrecognized_fallback_settings() runs
+        Then it is reported too -- a non-string is treated as unset by
+            resolution, which is the same silent outcome a typo produced
+        """
+        config = Configuration(
+            layers=(self._hook_layer("user", {"no_match_fallback": True}),)
+        )
+        found = config.unrecognized_fallback_settings()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].value, "True")
+
+    def test_every_offending_layer_is_reported_not_just_the_winner(self):
+        """
+        Given a more-specific layer with a VALID value masking a
+            less-specific layer with a typo
+        When unrecognized_fallback_settings() runs
+        Then the masked typo is still reported -- it is inert today but
+            becomes live the moment the masking layer is removed
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer("project", {"no_match_fallback": "deny"}, 1),
+                self._hook_layer("user", {"no_match_fallback": "denyy"}, 0),
+            )
+        )
+        found = config.unrecognized_fallback_settings()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].provenance.level, "user")
+        self.assertEqual(config.resolved_no_match_fallback(), "deny")
+
+    def test_native_layers_are_ignored(self):
+        """
+        Given a NATIVE settings.json layer carrying a no_match_fallback key
+        When unrecognized_fallback_settings() runs
+        Then nothing is reported -- these are toolguard extensions and are
+            never read from native layers, so flagging one would be noise
+        """
+        native = ConfigLayer(
+            Provenance(
+                "project",
+                "claude",
+                "json",
+                Path("/project/.claude/settings.json"),
+                0,
+            ),
+            MappingProxyType({"no_match_fallback": "nonsense"}),
+        )
+        config = Configuration(layers=(native,))
+        self.assertEqual(config.unrecognized_fallback_settings(), ())
+
+    def test_reaches_validation_issues_as_a_warning(self):
+        """
+        Given a misspelled no_match_fallback value
+        When validation_issues() runs
+        Then one 'warning' Issue carries the value, the setting, the file, and
+            the accepted spellings -- so it reaches the resolution-log warning
+            stream the hook routes issues to
+        """
+        config = Configuration(
+            layers=(
+                self._hook_layer(
+                    "user", {"no_match_fallback": "allow_with_no_warning"}
+                ),
+            )
+        )
+        matching = [
+            issue
+            for issue in config.validation_issues()
+            if "no_match_fallback" in issue.message
+        ]
+        self.assertEqual(len(matching), 1)
+        issue = matching[0]
+        self.assertEqual(issue.level, "warning")
+        self.assertIn("allow_with_no_warning", issue.message)
+        self.assertIn("toolguard_hook.toml", issue.message)
+        self.assertIn("allow_with_no_warnings", issue.message)
+        self.assertIn("allow_with_no_warnings", issue.corrective_steps)
+
+
 class TestValidationAdditionalSupportedTools(unittest.TestCase):
     """additional_supported_tools suppress the unsupported-tool issue."""
 

@@ -762,6 +762,188 @@ class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
         self.assertTrue(findings[0]["interpreter_missing"])
 
 
+class TestSkipEnvWrapper(unittest.TestCase):
+    """
+    Tests for installer_module._skip_env_wrapper.
+
+    TOO-19 code review m3: isolates the token-walking logic that
+    _interpreter_missing relies on to find the real interpreter past a
+    leading ``env`` wrapper.
+    """
+
+    def test_no_env_wrapper_returns_tokens_unchanged(self):
+        """
+        Given tokens with no leading "env"
+        When _skip_env_wrapper runs
+        Then the tokens are returned unchanged
+        """
+        tokens = ["/usr/bin/python3", "-E", "-P", "-m", "toolguard.hook"]
+        self.assertEqual(installer_module._skip_env_wrapper(tokens), tokens)
+
+    def test_empty_tokens_returns_empty(self):
+        """
+        Given an empty token list
+        When _skip_env_wrapper runs
+        Then it returns an empty list rather than raising an IndexError
+        """
+        self.assertEqual(installer_module._skip_env_wrapper([]), [])
+
+    def test_skips_env_and_an_option_that_takes_an_argument(self):
+        """
+        Given tokens starting with "env -u PYTHONPATH <python> ..." (env's
+            -u option consumes the following argument)
+        When _skip_env_wrapper runs
+        Then both "env", "-u", and "PYTHONPATH" are skipped, leaving the
+            interpreter as the first remaining token
+        """
+        tokens = ["env", "-u", "PYTHONPATH", "/usr/bin/python3", "-E", "-P"]
+        self.assertEqual(
+            installer_module._skip_env_wrapper(tokens),
+            ["/usr/bin/python3", "-E", "-P"],
+        )
+
+    def test_skips_env_and_a_variable_assignment(self):
+        """
+        Given tokens starting with "env FOO=1 <python> ..." (a NAME=VALUE
+            assignment, not an option)
+        When _skip_env_wrapper runs
+        Then both "env" and "FOO=1" are skipped
+        """
+        tokens = ["env", "FOO=1", "/usr/bin/python3", "-E", "-P"]
+        self.assertEqual(
+            installer_module._skip_env_wrapper(tokens),
+            ["/usr/bin/python3", "-E", "-P"],
+        )
+
+    def test_env_with_nothing_left_returns_empty(self):
+        """
+        Given "env" alone with no command following it (a degenerate/broken
+            registration)
+        When _skip_env_wrapper runs
+        Then it returns an empty list rather than raising
+        """
+        self.assertEqual(installer_module._skip_env_wrapper(["env"]), [])
+
+
+class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
+    """
+    TOO-19 code review m3: a correctly hardened registration was reported as
+    BROKEN when wrapped (e.g. ``env -u PYTHONPATH <python> ...``), because
+    ``_hook_registration_findings`` treated token 0 as the interpreter
+    unconditionally. These tests cover the five command shapes discussed in
+    the finding: plain console script, env-wrapped hardened, unwrapped
+    hardened, a bare name resolvable via PATH, and a genuinely nonexistent
+    interpreter (which must STILL be flagged missing).
+    """
+
+    def _findings_for(self, tmpdir: Path, command: str) -> list:
+        """Write a minimal settings.json with one PreToolUse *command* and classify it."""
+        settings_path = tmpdir / "settings.json"
+        settings_path.write_text(
+            '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": '
+            '[{"type": "command", "command": %s}]}]}}' % json.dumps(command)
+        )
+        return installer_module._hook_registration_findings(settings_path)
+
+    def test_plain_console_script_is_not_hardened_and_not_flagged(self):
+        """
+        Given a plain, non-hardened toolguard console-script command (no
+            "-m toolguard.hook")
+        When _hook_registration_findings runs
+        Then hardened is False and interpreter_missing is False -- interpreter
+            identification is never invoked for a non-hardened command
+        """
+        with TemporaryDirectory() as d:
+            findings = self._findings_for(Path(d), "/home/fake/.local/bin/toolguard")
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0]["hardened"])
+        self.assertFalse(findings[0]["interpreter_missing"])
+
+    def test_env_wrapped_hardened_command_with_existing_interpreter_is_not_missing(
+        self,
+    ):
+        """
+        Given a hardened command hand-wrapped in "env -u PYTHONPATH <python>
+            ..." (a realistic way to scrub an inherited PYTHONPATH before
+            launching the hardened interpreter) whose interpreter DOES exist
+        When _hook_registration_findings runs
+        Then interpreter_missing is False -- token 0 being "env" (the
+            wrapper), not the interpreter, must not be misread as missing
+            (this is the exact false-positive TOO-19 m3 reports)
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(Path(d))
+            base_command, hardened = installer_module._hardened_hook_command(
+                str(binary)
+            )
+            self.assertTrue(hardened)
+            findings = self._findings_for(Path(d), f"env -u PYTHONPATH {base_command}")
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0]["hardened"])
+        self.assertFalse(
+            findings[0]["interpreter_missing"],
+            "env-wrapped hardened command misread as BROKEN -- token 0 is "
+            "the 'env' wrapper, not the interpreter (TOO-19 m3)",
+        )
+
+    def test_unwrapped_hardened_command_with_existing_interpreter_is_not_missing(self):
+        """
+        Given a hardened command with no wrapper, whose interpreter DOES exist
+        When _hook_registration_findings runs
+        Then interpreter_missing is False (baseline correctness, unaffected
+            by the env-wrapper handling added for m3)
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(Path(d))
+            command, hardened = installer_module._hardened_hook_command(str(binary))
+            self.assertTrue(hardened)
+            findings = self._findings_for(Path(d), command)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0]["interpreter_missing"])
+
+    def test_bare_name_resolvable_on_path_is_not_missing(self):
+        """
+        Given a hardened command naming a bare interpreter (no directory
+            component) that resolves via PATH, not an absolute path
+        When _hook_registration_findings runs
+        Then interpreter_missing is False -- shutil.which recognizes a
+            PATH-resolvable bare name even though Path(name).exists() alone
+            would not (a relative bare name is not resolved against PATH by
+            Path.exists())
+        """
+        with TemporaryDirectory() as d:
+            bin_dir = Path(d) / "custom_bin"
+            bin_dir.mkdir()
+            fake_interpreter = bin_dir / "toolguard-fake-python3"
+            fake_interpreter.write_text("#!/bin/sh\n")
+            os.chmod(fake_interpreter, 0o755)
+            command = "toolguard-fake-python3 -E -P -m toolguard.hook"
+            with patch.dict(
+                os.environ,
+                {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            ):
+                findings = self._findings_for(Path(d), command)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0]["interpreter_missing"])
+
+    def test_genuinely_nonexistent_interpreter_is_still_flagged_missing(self):
+        """
+        Given a hardened command naming an interpreter path that does not
+            exist anywhere on disk and is not resolvable via PATH
+        When _hook_registration_findings runs
+        Then interpreter_missing is True -- the env-wrapper/PATH handling
+            added for m3 must not turn this into a false negative; a broken
+            hook still needs to be flagged
+        """
+        with TemporaryDirectory() as d:
+            missing_path = str(Path(d) / "no" / "such" / "python3")
+            findings = self._findings_for(
+                Path(d), f"{missing_path} -E -P -m toolguard.hook"
+            )
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0]["interpreter_missing"])
+
+
 # ---------------------------------------------------------------------------
 # register-hooks
 # ---------------------------------------------------------------------------
@@ -802,6 +984,61 @@ class TestRegisterHooks(InstallerTestCase):
             h["command"] for h in data["hooks"]["SessionStart"][0]["hooks"]
         ]
         self.assertIn(f"{binary}-session-start", session_start_commands)
+
+    def test_session_start_hook_is_never_hardened(self):
+        """
+        TOO-19 code review s1: SessionStart must stay registered as the BARE
+        "<binary>-session-start" form, never hardened through
+        _hardened_hook_command (or any "-m ..." style equivalent). Hardening
+        it would make install_provenance.governing_package_root() -- which
+        _detect_shadow_status() in toolguard/session_start.py compares
+        against the active project's own source checkout -- resolve the
+        INSTALLED distribution unconditionally, ignoring PYTHONPATH/cwd. That
+        would make shadow/stale-install detection permanently and silently
+        blind to the exact condition it exists to catch (a checkout
+        shadowing the installed hook), with no error and no other test
+        failing to say so. See technical-notes.md, "Shadowed-hook detection
+        and install hardening (TOO-19)".
+
+        Given register-hooks registers the SessionStart hook for a binary
+            whose sibling python3 WOULD be found by _hardened_hook_command
+            (so a regression toward hardening it would actually succeed,
+            not silently no-op)
+        When register-hooks runs
+        Then the SessionStart command is exactly "<binary>-session-start" --
+            not the hardened "-E -P -m ..." form
+        """
+        with TemporaryDirectory() as d:
+            binary = _make_fake_venv_bin(Path(d))
+            code, out = self.run_cli(
+                [
+                    "register-hooks",
+                    "--scope",
+                    "user",
+                    "--binary",
+                    str(binary),
+                    "--governed-tools",
+                    "Bash",
+                ]
+            )
+        self.assertEqual(code, 0)
+        settings_path = self.home / ".claude" / "settings.json"
+        data = json.loads(settings_path.read_text())
+        session_start_commands = [
+            h["command"]
+            for entry in data["hooks"]["SessionStart"]
+            for h in entry.get("hooks", [])
+        ]
+        self.assertEqual(
+            session_start_commands,
+            [f"{binary}-session-start"],
+            "SessionStart hook command must stay the BARE "
+            "'<binary>-session-start' form. Hardening it would make "
+            "governing_package_root() always resolve the INSTALLED "
+            "distribution, so _detect_shadow_status() could never observe a "
+            "shadowed/live working tree again -- see technical-notes.md, "
+            "'Shadowed-hook detection and install hardening (TOO-19)'.",
+        )
 
     def test_project_scope_writes_settings_local_json(self):
         """

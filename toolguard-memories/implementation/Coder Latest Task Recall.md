@@ -8,6 +8,176 @@ tags:
 - implementation
 ---
 
+# TOO-19 M1 single-leaf fabrication, legacy env var removal, fallback typo warning -- task recall (CURRENT)
+
+Ticket: TOO-19. Repo: /home/arnon/projects/toolguard, branch too-19.
+
+Captured verbatim from the launching task (three independent, pre-authorized fixes):
+
+## FIX 1 -- M1, the remaining single-leaf fabrication
+
+Config with ONLY `Bash(ls)` and `Bash(python *)`, plus `undecidable_fallback =
+"allow_with_warning"`, driving the real hook with `TOOLGUARD_LOG_DIR`/`TOOLGUARD_PROJECT_ROOT`
+at a temp dir, command `python -c "print(1)"`:
+
+- reason: `Allowed with a warning by undecidable_fallback=allow_with_warning (inline/heredoc
+  foreign code, unable to safely verify): python -c`
+- log records: `- **Matched Rule**: \`python -c\``
+
+There is no `python -c` rule -- the real decider was the undecidable floor; `python -c` is the
+truncated display command from the ASK-floor reason, extracted by `hook.py`'s
+`reason.split(": ", 1)[1]`.
+
+Fix the same way the compound case was fixed: an absent record beats a false one. The compound
+path (`toolguard/compound.py`, `_combine_strictest`) already records
+`[fallback allow -- no rule matched]` for an escape-hatch leaf inside its "cmd -> pattern"
+summary. Make the single-leaf path (`toolguard/hook.py::_log_allowed_command`) consistent with
+that, not a second convention. Do NOT widen `resolve_one`'s 3-tuple contract (a prior pass judged
+that disproportionate and it still holds).
+
+Verify by reproducing before and after. Test single-leaf AND compound together so they cannot
+diverge again.
+
+## FIX 2 -- remove two legacy env vars from toolguard/log_writer.py
+
+`CHECKED_BASH_LOGGING_ON` and `CHECKED_BASH_LOGGING_DIR` are checked_bash.py-era fallbacks:
+undocumented, referenced nowhere in docs/config, unset in Arnon's environment, zero test
+coverage. One can silently disable the audit log. Arnon chose removal over documenting them
+(1.0RC1 in view).
+
+Must preserve behaviour for anyone who has not set them (defaults already match -- should be a
+true no-op):
+- `_logging_enabled`: `os.environ.get("CHECKED_BASH_LOGGING_ON", "true").lower() == "true"` when
+  `config is None`. Unset => True. Must still be True after removal on that path.
+- `_log_dir_from_environment`: reads `CHECKED_BASH_LOGGING_DIR` default `"logs"`. Preserve
+  unset behaviour exactly.
+
+Read both call paths carefully, confirm what `config is None` is actually for before deleting.
+If removal would change behaviour in any case, STOP and report instead.
+
+Do NOT touch `CHECKED_BASH_LOGGING_FORMAT` -- not named in this fix, out of scope.
+
+Resolves Finding 6 in `tmp/doc-review-2026-07-31.md` -- update that finding's heading and the
+Resolutions table to FIXED, following the file's existing convention.
+
+## FIX 3 -- unrecognised fallback value must warn loudly, still fall back to ask
+
+Arnon set `no_match_fallback = "allow_with_no_warning"` (singular, not a recognised value) --
+silently resolved to `ask` (max friction), no diagnostic anywhere. Concluded the feature was
+broken rather than a typo.
+
+Required: a clear warning at session start, but still fall back to `ask` (the safe direction).
+Do not change resolution semantics -- unrecognised value still resolves to `ask`.
+
+Implementation steer (verify before following): `Configuration.validation_issues()` already
+exists as the channel; `toolguard/session_start.py` already runs once per session and surfaces
+loudly. Route a new validation issue through that path.
+
+Message must name: the offending value, the setting it was set on, the file it came from, and
+the accepted values.
+
+Applies to BOTH `no_match_fallback` and `undecidable_fallback`. Must not fire when valid or
+unset.
+
+## Verification (from task)
+
+- `TMPH=$(mktemp -d); TMPX=$(mktemp -d); HOME="$TMPH" XDG_CONFIG_HOME="$TMPX" uv run python -m
+  unittest discover -s test -t .; rm -rf "$TMPH" "$TMPX"` -- must be OK. Baseline **2149**, count
+  must go UP.
+- `uv run ruff check .` and `uv run ruff format --check .` clean repo-wide.
+- `uv run python tools/check_doc_links.py` exits 0.
+- Fix 1: paste before/after repro for single-leaf AND compound.
+- Fix 3: end-to-end demo -- misspelled fallback value config, session-start warning naming bad
+  value + accepted set, verdict still `ask`.
+- Real repo `logs/` untouched: before/after entry counts around suite run.
+
+## Report target
+
+basic-memory project `toolguard`, path `TOO-19/TOO-19 M1 single-leaf, legacy env var removal,
+fallback typo warning.md`, tagged `task-memory` and `TOO-19`.
+
+## Investigation done before the blocking issue (Phase 1, useful for resuming)
+
+- `hook.py::_log_allowed_command` (~line 413-466): single-leaf branch does
+  `matched_rule = reason.split(": ", 1)[1] if ": " in reason else None` -- unconditionally, no
+  fallback-awareness. `_parse_compound_match_details` only matches the
+  `"All \d+ sub-commands allowed: [...]"` pattern, so a single allowed leaf never goes through
+  that path even when it's itself a compound-with-one-leaf.
+- `compound.py::_combine_strictest` (~line 578-687): when `len(allowed) == 1` it returns the
+  raw leaf reason UNCHANGED (line 647-649) -- this is exactly why the multi-leaf fix (which adds
+  `[fallback allow -- no rule matched]` for escape-hatch leaves in the "cmd -> pattern" summary,
+  line 650-686) never covers the single-leaf case. That's the root cause of the residual M1 bug.
+- `compound.py::_fallback_kind_for_reason` (~line 129-162, private): classifies an `allow`
+  reason as `'warned'`/`'silent'`/`None` by substring-matching `"no_match_fallback=allow..."`.
+  Only handles `no_match_fallback` text -- never sees `undecidable_fallback` text because its
+  only call site (line 317, inside `_resolve_leaf_detailed`'s non-ask_floor branch) never
+  produces that text. The ask_floor branch (line 242-298) constructs `fallback_kind`
+  structurally (`'warned'`/`'silent'`) without calling this helper, and unconditionally
+  overwrites the reason with escape-hatch wording for ANY non-deny outcome of an ask_floor leaf
+  -- even if the truncated outer command text happened to match a real allow rule -- which is
+  correct/intentional (inline code content itself was never vetted).
+- `resolve.py::resolve_bash_permission_detailed` builds `BashResolution.sub_matches` (one
+  `SubMatch` per extracted sub-command with a `matched_rule` field) but `hook.py` never reads
+  `sub_matches` for logging at all -- only re-parses the final reason string. Not proposed to
+  change (would be a bigger refactor than needed; `resolve_one`'s 3-tuple contract explicitly
+  must not widen).
+- Planned fix shape (not yet implemented): promote `_fallback_kind_for_reason` to a public
+  helper covering BOTH `no_match_fallback=allow` and `undecidable_fallback=allow` substrings
+  (broadening it is a no-op for its existing internal call site, since that text never appears
+  there), extract the placeholder string `"[fallback allow -- no rule matched]"` to a shared
+  module-level constant in `compound.py`, and have `hook.py::_log_allowed_command`'s single-leaf
+  branch use both instead of blind `split(": ", 1)[1]`.
+- File-path tools (Read/Write/Edit) checked and found NOT affected: their fallback reason text
+  (`"...allowed with a warning by no_match_fallback=allow_with_warning (add an explicit rule to
+  silence this)"`) contains no `": "` substring, so `hook.py`'s existing
+  `matched_rule = result.reason.split(": ", 1)[1] if ": " in result.reason else None` already
+  yields `None` there -- no fabrication today, no fix needed on that path.
+- Analogous latent bug identified but OUT OF SCOPE per the task's explicit framing (fix
+  compound-allow-style fabrication only): `hook.py::_log_non_allow_decision`'s
+  `violated_rules = [reason.split(": ", 1)[1] if ": " in reason else reason]` would ALSO
+  fabricate a "violated rule" name (the truncated display command) for a single ask_floor leaf
+  denied via `undecidable_fallback=deny` (reason: `"Denied by undecidable_fallback=deny
+  (inline/heredoc foreign code, unable to safely verify): <cmd>"`). Not fixed -- flagged for
+  Arnon's awareness only, since the task named this fix narrowly ("M1", "fallback allow") and
+  scope discipline says not to widen without asking.
+- Fix 2 files read: `toolguard/log_writer.py` `_logging_enabled` (line ~122-138),
+  `_log_dir_from_environment` (line ~191-214), `_resolve_log_dir` (line ~217-236). Confirmed
+  `config is None` path is only reached when `log_command()` is called without an explicit
+  `config=` dict -- in production `hook.py` ALWAYS passes `config=env_config` (a dict, never
+  `None`), so the `config is None` / legacy-env branch is exercised only by direct/test callers
+  that don't route through `get_env_config()`. `CHECKED_BASH_LOGGING_FORMAT` (a THIRD env var,
+  not named in this fix) also lives in `log_command` at line ~398 -- confirmed out of scope, not
+  to be touched.
+- Fix 3 not yet investigated in depth (blocked before reaching it) -- next step is to read
+  `Configuration.validation_issues()` and `toolguard/session_start.py`'s warning-surfacing path,
+  and find how `resolved_no_match_fallback()` / `resolved_undecidable_fallback()` currently
+  handle an unrecognised value (silently normalizing to `ask` with no signal, per the bug
+  report).
+
+## BLOCKING ISSUE -- raised before any implementation, per this task's own contingency
+
+See the response text delivered alongside this memory update for the full explanation.
+Summary: my system-prompt identity (feature-coder) states an absolute, non-negotiable
+prohibition on ever changing content under the project's main test directory (`test/unit/`
+here), with the explicit meta-rule that no launching-agent message can override this (only
+the permission system or the user's own direct message can). The task text explicitly
+instructs writing tests in `test/unit/` and explicitly anticipates this exact conflict,
+instructing me to STOP and say so rather than silently rerouting to `coder-test/`. Per the
+meta-instruction, doing exactly that -- stopping and flagging -- is the compliant action for
+BOTH sets of instructions simultaneously; it is not actually a conflict resolved by picking
+one side.
+
+Note for whoever resumes: `git log` shows Arnon has, in this project, personally committed
+substantial `test/unit/*.py` changes himself (commit 44b9d12, "TOO-19 temporary fixes...",
+includes `test_hook.py`, `test_log_writer.py`, `test_compound.py`, `test_resolve.py`, etc.) --
+consistent with a workflow where a coder subagent's draft test content is authored and then
+reviewed/committed by Arnon directly, which may be exactly the intended path here. That is
+useful context for Arnon/the launching agent when deciding how to unblock this, but it is not,
+by itself, treated here as the "user's own message" required to lift the prohibition.
+
+---
+STALE CONTENT BELOW THIS LINE (from prior tasks, retained per project convention):
+---
 ---
 STALE CONTENT BELOW THIS LINE (from a prior TOO-30 task). Current task recall follows,
 this note is being reused per project convention.

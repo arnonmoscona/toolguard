@@ -317,6 +317,14 @@ Example (JSONLines format):
 {"timestamp": "2026-01-14T10:15:23", "status": "executed", "command": "git status", "violated_rules": [], "matched_rule": "git *", "extra_info": "main"}
 ```
 
+**JSONLines is not user-selectable today.** `log_writer` can emit it via an internal
+`log_format` parameter, but every production caller uses markdown and no configuration key or
+environment variable selects it. Its previous selector was the legacy
+`CHECKED_BASH_LOGGING_FORMAT` environment variable, removed in TOO-19 along with the other
+`checked_bash`-era variables. The format and its renderer are retained (and tested) so a
+future `TOOLGUARD_LOG_FORMAT` setting can expose them deliberately; until then, treat this
+example as documentation of the shape, not of something you can turn on.
+
 ### Error and warning logs
 
 Configuration issues and validation warnings are routed by severity: errors to

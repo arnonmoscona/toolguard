@@ -143,37 +143,80 @@ enabled = true
 validate_layers = true
 strict_mode = true
 
-[[architecture.layers]]
-name = "presentation"
-packages = ["router", "routers", "route", "routes", "endpoint", "endpoints", "handler", "handlers", "controller", "controllers", "view", "views", "api", "apis", "ui", "web", "rest", "graphql"]
+# TOO-19 (2026-08-02): this replaced pyscn's STOCK template, which declared generic
+# web-app layers (presentation/application/domain/infrastructure) matched by package
+# names like "router", "service", "repository". No toolguard module matches any of
+# those, so every dependency landed in "unknown layer" -- 157 violations and a 16/100
+# compliance score that measured nothing. The score was an artefact of an uncustomised
+# template, NOT evidence about this codebase.
+#
+# Layer order (each layer may import ONLY from itself and layers BELOW it):
+#
+#   foundation  <-  config  <-  engine  <-  runtime  <-  tooling  <-  support
+#
+# EVERY module must appear in exactly one layer. An unlisted module is silently
+# unmapped and its dependencies stop being validated, so the map degrades quietly
+# rather than failing -- see tools/ for the completeness check that makes this
+# deterministic instead of a matter of remembering.
 
 [[architecture.layers]]
-name = "application"
-packages = ["service", "services", "usecase", "usecases", "use_case", "use_cases", "workflow", "workflows", "command", "commands", "query", "queries", "manager", "managers"]
+name = "foundation"
+# Leaves: no toolguard imports at all, or only other foundation modules.
+packages = ["constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance"]
 
 [[architecture.layers]]
-name = "domain"
-packages = ["model", "models", "entity", "entities", "schema", "schemas", "domain", "domains", "core", "business", "aggregate", "aggregates", "valueobject", "valueobjects"]
+name = "config"
+# Owns the configuration model, discovery, validation, and the write path.
+packages = ["rule_entry", "config_types", "config", "config_validation", "config_write_guard", "env_config", "rule_sort", "auto_migrate", "config_divergence"]
 
 [[architecture.layers]]
-name = "infrastructure"
-packages = ["repository", "repositories", "repo", "repos", "db", "database", "adapter", "adapters", "persistence", "storage", "cache", "client", "clients", "external"]
-[[architecture.rules]]
-from = "presentation" 
-allow = ["presentation", "application", "domain", "infrastructure"]
+name = "engine"
+# Pure decision logic: pattern matching, command decomposition, resolution.
+packages = ["permissions", "compound", "resolve", "parser"]
+
+[[architecture.layers]]
+name = "runtime"
+# Entry points and side-effecting session/logging concerns.
+packages = ["hook", "session_start", "log_writer", "error_log", "session_warnings", "subagent", "update_check"]
+
+[[architecture.layers]]
+name = "tooling"
+# Operator tooling behind the skills, plus one-off scripts.
+packages = ["tools", "scripts"]
+
+[[architecture.layers]]
+name = "support"
+# Test/experiment support. May reach anywhere; nothing may depend on it.
+packages = ["testing"]
 
 [[architecture.rules]]
-from = "application" 
-allow = ["application", "domain", "infrastructure"]
+from = "foundation"
+allow = ["foundation"]
+deny = ["config", "engine", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
-from = "domain" 
-allow = ["domain", "infrastructure"] 
-deny = ["presentation", "application"]
+from = "config"
+allow = ["config", "foundation"]
+deny = ["engine", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
-from = "infrastructure" 
-allow = ["infrastructure", "domain", "application"]
+from = "engine"
+allow = ["engine", "config", "foundation"]
+deny = ["runtime", "tooling", "support"]
+
+[[architecture.rules]]
+from = "runtime"
+allow = ["runtime", "engine", "config", "foundation"]
+deny = ["tooling", "support"]
+
+[[architecture.rules]]
+from = "tooling"
+allow = ["tooling", "runtime", "engine", "config", "foundation"]
+deny = ["support"]
+
+[[architecture.rules]]
+from = "support"
+allow = ["support", "tooling", "runtime", "engine", "config", "foundation"]
 
 
 # =============================================================================

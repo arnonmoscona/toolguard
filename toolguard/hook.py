@@ -22,6 +22,11 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from toolguard.auto_migrate import run_auto_migration
+from toolguard.compound import (
+    FALLBACK_ALLOW_PLACEHOLDER,
+    FALLBACK_DENY_PLACEHOLDER,
+    fallback_kind_for_reason,
+)
 from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
@@ -410,6 +415,72 @@ def _parse_compound_match_details(reason: str):
     return details if details else None
 
 
+def _reason_suffix_or_placeholder(
+    decision: str, reason: str, placeholder: str
+) -> Optional[str]:
+    """
+    Recover the trailing ``": <value>"`` portion of a reason, or *placeholder*.
+
+    A genuine rule-match reason ends in ``": <pattern> [<level>: <file>]"``,
+    so the historical behaviour -- take everything after the first ``": "``
+    -- reads the pattern back out of it. But the fallback ESCAPE-HATCH reasons
+    this hook can also receive end the SAME way, with a truncated DISPLAY
+    COMMAND after the colon instead of a pattern::
+
+        Allowed with a warning by undecidable_fallback=allow_with_warning
+        (inline/heredoc foreign code, unable to safely verify): python -c
+
+        Denied by undecidable_fallback=deny (inline/heredoc foreign code,
+        unable to safely verify): python -c
+
+    Splitting either blindly fabricates a rule attribution -- ``python -c``
+    above -- for a config in which no such rule exists anywhere (TOO-19 m5 for
+    the allow shape; TOO-19 deny-side rule fabrication fix for the deny
+    shape). :func:`~toolguard.compound.fallback_kind_for_reason` is the ONE
+    mechanism that tells a fallback escape hatch apart from a genuine match
+    for both decisions, and this helper is the ONE place that acts on that
+    classification, shared by :func:`_matched_rule_for_single_command` (allow)
+    and :func:`_log_non_allow_decision` (deny) so the two extraction sites
+    cannot drift into separate conventions.
+
+    Args:
+        decision: The decision *reason* accompanies (``'allow'`` or
+            ``'deny'``).
+        reason: The reason text.
+        placeholder: What to return when *reason* names a fallback escape
+            hatch instead of a genuine rule match.
+
+    Returns:
+        *placeholder* when *reason* names a fallback escape hatch, the text
+        after the first ``": "`` when it looks like a rule match, or ``None``
+        when *reason* has no ``": "`` at all -- the caller decides what "no
+        match" means for it (an absent record beats a false one either way).
+    """
+    if fallback_kind_for_reason(decision, reason) is not None:
+        return placeholder
+    return reason.split(": ", 1)[1] if ": " in reason else None
+
+
+def _matched_rule_for_single_command(reason: str) -> Optional[str]:
+    """
+    Derive the ``Matched Rule`` audit-log field for a SINGLE-leaf allow.
+
+    Thin wrapper around :func:`_reason_suffix_or_placeholder` pinned to
+    ``decision='allow'`` and :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER`
+    -- see that function for why the extraction has to guard against fallback
+    escape-hatch reasons at all (TOO-19 m5).
+
+    Args:
+        reason: The final allow reason for a non-compound (single-leaf) result.
+
+    Returns:
+        The placeholder when *reason* names a fallback escape hatch, the text
+        after the first ``": "`` when it looks like a rule match, or ``None``
+        when neither applies (an absent record beats a false one).
+    """
+    return _reason_suffix_or_placeholder("allow", reason, FALLBACK_ALLOW_PLACEHOLDER)
+
+
 def _log_allowed_command(
     command: str,
     reason: str,
@@ -453,8 +524,9 @@ def _log_allowed_command(
                 additional_context=additional_context,
             )
     else:
-        # Simple command: extract matched rule from reason
-        matched_rule = reason.split(": ", 1)[1] if ": " in reason else None
+        # Simple command: extract matched rule from reason -- but never
+        # fabricate one for a fallback escape hatch (TOO-19 m5).
+        matched_rule = _matched_rule_for_single_command(reason)
         log_command(
             command,
             "executed",
@@ -788,8 +860,27 @@ def _log_non_allow_decision(
     Write the resolution-log entry for an 'ask' or 'deny' verdict.
 
     Identical for file-path tools and command tools, so both call this. An
-    'ask' is recorded under ``note`` (it is not a violation); a deny records
-    the violated rule extracted from the reason.
+    'ask' is recorded under ``note`` (it is not a violation) with the FULL
+    reason text -- never split, so it carries no fabrication risk regardless
+    of the reason's shape. A deny records the violated rule extracted from
+    the reason.
+
+    That extraction (TOO-19 deny-side rule fabrication fix) is where the risk
+    lives: a genuine deny reason ends in ``": <pattern>"``, but a deny
+    produced by the ``undecidable_fallback=deny`` escape hatch (foreign
+    inline/heredoc code or an undecomposable segment that could not be safely
+    verified) ends in the SAME ``": <display command>"`` shape -- see
+    :func:`toolguard.compound.resolve_compound_permission_detailed` and
+    :func:`_reason_suffix_or_placeholder`'s docstring for the two reason
+    strings this covers. Splitting blindly recorded that truncated display
+    command as a ``Violated Rules`` entry for a config in which no such rule
+    exists anywhere. Uses the SAME mechanism as the allow side's
+    :func:`_matched_rule_for_single_command` -- :func:`_reason_suffix_or_placeholder`
+    backed by :func:`~toolguard.compound.fallback_kind_for_reason` -- so the
+    two extraction sites cannot diverge into two conventions. Unlike the
+    allow side, when *reason* has no ``": "`` at all the FULL reason is used
+    (not ``None``) -- this preserves the pre-fix behaviour for reasons like
+    ``"No commands to evaluate"`` that never had a colon to split on.
 
     Args:
         log_target: What is being logged -- a command, or ``Tool(path)``.
@@ -812,8 +903,11 @@ def _log_non_allow_decision(
         )
         return
 
-    # Extract violated rule from reason for logging
-    violated_rules = [reason.split(": ", 1)[1] if ": " in reason else reason]
+    # Extract violated rule from reason for logging -- an absent/generic
+    # record beats a false one when reason names a fallback escape hatch
+    # rather than a matched rule.
+    suffix = _reason_suffix_or_placeholder(decision, reason, FALLBACK_DENY_PLACEHOLDER)
+    violated_rules = [suffix if suffix is not None else reason]
     log_command(
         log_target,
         "refused",

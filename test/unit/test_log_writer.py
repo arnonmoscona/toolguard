@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from toolguard.log_writer import (
     _LOG_CONTEXT_PREVIEW_WORDS,
+    LOG_FORMAT_JSONLINES,
     _preview_additional_context,
     log_command,
 )
@@ -22,16 +23,6 @@ from toolguard.log_writer import (
 
 class TestLogging(unittest.TestCase):
     """Test logging functionality."""
-
-    def setUp(self):
-        """Set up test fixtures."""
-        # Enable logging for tests
-        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
-        self.env_patcher.start()
-
-    def tearDown(self):
-        """Clean up after tests."""
-        self.env_patcher.stop()
 
     def test_log_file_creation_with_correct_name_format(self):
         """
@@ -146,7 +137,7 @@ class TestLogging(unittest.TestCase):
 
     def test_logging_respects_disabled_flag(self):
         """
-        Given CHECKED_BASH_LOGGING_ON is set to false
+        Given a resolved environment config whose logging_enabled is False
         When a command is logged
         Then no log file is created
         """
@@ -155,17 +146,84 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Disable logging
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "false"}):
+            log_command(
+                "git status",
+                "executed",
+                log_dir=log_dir,
+                config={"logging_enabled": False, "log_dir": log_dir},
+            )
+
+            log_files = list(log_dir.glob("toolguard-*.md"))
+            self.assertEqual(
+                len(log_files),
+                0,
+                "Log file should not be created when logging is disabled",
+            )
+
+    def test_logging_enabled_by_default_without_a_config(self):
+        """
+        Given no environment config is supplied at all (a direct caller)
+        When a command is logged
+        Then logging is ON -- a log file is created
+
+        TOO-19 m5 regression guard: the no-config default used to be read from
+        a legacy CHECKED_BASH_LOGGING_ON environment variable that defaulted to
+        "true". That variable is gone; this asserts the removal left the
+        default unchanged rather than accidentally switching the audit log off.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            log_command("git status", "executed", log_dir=log_dir)
+
+            log_files = list(log_dir.glob("toolguard-*.md"))
+            self.assertEqual(
+                len(log_files),
+                1,
+                "Logging must default to ON when no config is supplied",
+            )
+
+    def test_legacy_checked_bash_env_vars_are_ignored(self):
+        """
+        Given the three legacy CHECKED_BASH_* variables are set to values that
+            would previously have changed behaviour (logging off, a different
+            directory, jsonlines format)
+        When a command is logged with no environment config
+        Then they are ignored entirely: a markdown log file is still written
+            into the default location the caller asked for
+
+        TOO-19 m5: these checked_bash.py-era fallbacks were removed. This test
+        is the guard against one being quietly reintroduced.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            other_dir = Path(tmpdir) / "elsewhere"
+            other_dir.mkdir()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "CHECKED_BASH_LOGGING_ON": "false",
+                    "CHECKED_BASH_LOGGING_DIR": str(other_dir),
+                    "CHECKED_BASH_LOGGING_FORMAT": "jsonlines",
+                },
+            ):
                 log_command("git status", "executed", log_dir=log_dir)
 
-                # Check that no log file was created
-                log_files = list(log_dir.glob("toolguard-*.md"))
-                self.assertEqual(
-                    len(log_files),
-                    0,
-                    "Log file should not be created when logging is disabled",
-                )
+            self.assertEqual(
+                len(list(log_dir.glob("toolguard-*.md"))),
+                1,
+                "CHECKED_BASH_LOGGING_ON/FORMAT must no longer be consulted",
+            )
+            self.assertEqual(
+                len(list(other_dir.glob("toolguard-*"))),
+                0,
+                "CHECKED_BASH_LOGGING_DIR must no longer be consulted",
+            )
 
     def test_jsonlines_format(self):
         """
@@ -179,32 +237,36 @@ class TestLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             # Set logging format to jsonlines
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                "git status",
+                "executed",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                # Check that log file was created with .jsonlines extension
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                log_file = log_dir / expected_filename
+            # Check that log file was created with .jsonlines extension
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            log_file = log_dir / expected_filename
 
-                self.assertTrue(
-                    log_file.exists(), f"JSONLines log file {log_file} was not created"
-                )
+            self.assertTrue(
+                log_file.exists(), f"JSONLines log file {log_file} was not created"
+            )
 
-                # Read and parse the JSON content
-                content = log_file.read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                self.assertGreater(len(lines), 0, "No JSON entries found")
+            # Read and parse the JSON content
+            content = log_file.read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            self.assertGreater(len(lines), 0, "No JSON entries found")
 
-                # Parse the first entry
-                entry = json.loads(lines[0])
-                self.assertIn("timestamp", entry)
-                self.assertIn("status", entry)
-                self.assertIn("command", entry)
-                self.assertIn("violated_rules", entry)
-                self.assertEqual(entry["status"], "executed")
-                self.assertEqual(entry["command"], "git status")
+            # Parse the first entry
+            entry = json.loads(lines[0])
+            self.assertIn("timestamp", entry)
+            self.assertIn("status", entry)
+            self.assertIn("command", entry)
+            self.assertIn("violated_rules", entry)
+            self.assertEqual(entry["status"], "executed")
+            self.assertEqual(entry["command"], "git status")
 
     def test_log_without_violated_rules(self):
         """
@@ -263,15 +325,6 @@ class TestLogging(unittest.TestCase):
 class TestMatchedRuleLogging(unittest.TestCase):
     """Test matched_rule parameter in log entries."""
 
-    def setUp(self):
-        """Set up test fixtures."""
-        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
-        self.env_patcher.start()
-
-    def tearDown(self):
-        """Clean up after tests."""
-        self.env_patcher.stop()
-
     def test_matched_rule_in_markdown_format(self):
         """
         Given a command logged with a matched_rule
@@ -300,19 +353,22 @@ class TestMatchedRuleLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command(
-                    "git status", "executed", matched_rule="git *", log_dir=log_dir
-                )
+            log_command(
+                "git status",
+                "executed",
+                matched_rule="git *",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                content = (log_dir / expected_filename).read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                entry = json.loads(lines[0])
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            entry = json.loads(lines[0])
 
-                self.assertEqual(entry["matched_rule"], "git *")
+            self.assertEqual(entry["matched_rule"], "git *")
 
     def test_no_matched_rule_when_not_provided(self):
         """
@@ -341,17 +397,21 @@ class TestMatchedRuleLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                "git status",
+                "executed",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                content = (log_dir / expected_filename).read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                entry = json.loads(lines[0])
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            entry = json.loads(lines[0])
 
-                self.assertNotIn("matched_rule", entry)
+            self.assertNotIn("matched_rule", entry)
 
     def test_denied_command_no_matched_rule(self):
         """
@@ -437,15 +497,6 @@ class TestPermissionModeLogging(unittest.TestCase):
     the decision itself).
     """
 
-    def setUp(self):
-        """Set up test fixtures."""
-        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
-        self.env_patcher.start()
-
-    def tearDown(self):
-        """Clean up after tests."""
-        self.env_patcher.stop()
-
     def test_permission_mode_in_markdown_format(self):
         """
         Given a command logged with a permission_mode
@@ -480,23 +531,23 @@ class TestPermissionModeLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command(
-                    "cd /tmp",
-                    "ask",
-                    note="no match",
-                    log_dir=log_dir,
-                    permission_mode="default",
-                )
+            log_command(
+                "cd /tmp",
+                "ask",
+                note="no match",
+                log_dir=log_dir,
+                permission_mode="default",
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                content = (log_dir / expected_filename).read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                entry = json.loads(lines[0])
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            entry = json.loads(lines[0])
 
-                self.assertEqual(entry["permission_mode"], "default")
+            self.assertEqual(entry["permission_mode"], "default")
 
     def test_no_permission_mode_when_not_provided(self):
         """
@@ -525,17 +576,21 @@ class TestPermissionModeLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                "git status",
+                "executed",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                content = (log_dir / expected_filename).read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                entry = json.loads(lines[0])
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            entry = json.loads(lines[0])
 
-                self.assertNotIn("permission_mode", entry)
+            self.assertNotIn("permission_mode", entry)
 
 
 class TestPreviewAdditionalContext(unittest.TestCase):
@@ -590,15 +645,6 @@ class TestAdditionalContextLogging(unittest.TestCase):
     get this nudge" is answerable after the fact -- capped to a short preview,
     see TestPreviewAdditionalContext, so the log stays scannable).
     """
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
-        self.env_patcher.start()
-
-    def tearDown(self):
-        """Clean up after tests."""
-        self.env_patcher.stop()
 
     def test_additional_context_in_markdown_format(self):
         """
@@ -662,25 +708,23 @@ class TestAdditionalContextLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command(
-                    "git push",
-                    "executed",
-                    matched_rule="git *",
-                    log_dir=log_dir,
-                    additional_context="prefer git status --short",
-                )
+            log_command(
+                "git push",
+                "executed",
+                matched_rule="git *",
+                log_dir=log_dir,
+                additional_context="prefer git status --short",
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                content = (log_dir / expected_filename).read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                entry = json.loads(lines[0])
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            entry = json.loads(lines[0])
 
-                self.assertEqual(
-                    entry["additional_context"], "prefer git status --short"
-                )
+            self.assertEqual(entry["additional_context"], "prefer git status --short")
 
     def test_no_additional_context_when_not_provided(self):
         """
@@ -710,17 +754,21 @@ class TestAdditionalContextLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                "git status",
+                "executed",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
-                expected_filename = (
-                    f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
-                )
-                content = (log_dir / expected_filename).read_text().strip()
-                lines = [line for line in content.split("\n") if line.strip()]
-                entry = json.loads(lines[0])
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            lines = [line for line in content.split("\n") if line.strip()]
+            entry = json.loads(lines[0])
 
-                self.assertNotIn("additional_context", entry)
+            self.assertNotIn("additional_context", entry)
 
 
 class TestLogFormatGoldenFile(unittest.TestCase):
@@ -740,18 +788,15 @@ class TestLogFormatGoldenFile(unittest.TestCase):
     """
 
     def setUp(self):
-        """Enable logging and pin datetime.now() to a fixed instant."""
-        self.env_patcher = patch.dict("os.environ", {"CHECKED_BASH_LOGGING_ON": "true"})
-        self.env_patcher.start()
+        """Pin datetime.now() to a fixed instant."""
         self.fixed_now = datetime(2026, 1, 15, 10, 30, 0)
         self.datetime_patcher = patch("toolguard.log_writer.datetime")
         mock_datetime = self.datetime_patcher.start()
         mock_datetime.now.return_value = self.fixed_now
 
     def tearDown(self):
-        """Undo the datetime and environment patches."""
+        """Undo the datetime patch."""
         self.datetime_patcher.stop()
-        self.env_patcher.stop()
 
     def test_markdown_golden_all_optional_fields_populated(self):
         """
@@ -826,18 +871,18 @@ class TestLogFormatGoldenFile(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command(
-                    "git push origin main",
-                    "refused",
-                    violated_rules=["git push:*", "**/.env/**"],
-                    extra_info="main-agent",
-                    log_dir=log_dir,
-                    matched_rule="git push *",
-                    note="pushed to protected branch",
-                    permission_mode="default",
-                    additional_context="be careful",
-                )
+            log_command(
+                "git push origin main",
+                "refused",
+                violated_rules=["git push:*", "**/.env/**"],
+                extra_info="main-agent",
+                log_dir=log_dir,
+                matched_rule="git push *",
+                note="pushed to protected branch",
+                permission_mode="default",
+                additional_context="be careful",
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
             content = (log_dir / "toolguard-2026-01-15.jsonlines").read_text()
 
@@ -866,8 +911,12 @@ class TestLogFormatGoldenFile(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            with patch.dict("os.environ", {"CHECKED_BASH_LOGGING_FORMAT": "jsonlines"}):
-                log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                "git status",
+                "executed",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
 
             content = (log_dir / "toolguard-2026-01-15.jsonlines").read_text()
 

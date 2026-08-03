@@ -39,6 +39,9 @@ from toolguard.config_types import ResolvedDecision as ResolvedDecision
 from toolguard.config_types import TakeoverConfig as TakeoverConfig
 from toolguard.config_types import TakeoverEnabledConflict as TakeoverEnabledConflict
 from toolguard.config_types import ToolPatternLayer as ToolPatternLayer
+from toolguard.config_types import (
+    UnrecognizedFallbackSetting as UnrecognizedFallbackSetting,
+)
 from toolguard.config_validation import validate_permissions
 from toolguard.issues import Issue
 from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
@@ -131,6 +134,24 @@ _VALID_UNDECIDABLE_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "
 #: module-level constant rather than something scoped to one setting's
 #: ``alias_map`` call.
 _ALLOW_NO_WARNINGS_ALIAS = {"allow_with_no_warnings": "allow"}
+
+#: The spellings a HUMAN may write for each ``*_fallback`` setting, used only
+#: to build the "Accepted values:" part of the unrecognized-value warning
+#: (TOO-19 m5; see :meth:`Configuration.unrecognized_fallback_settings`).
+#: Deliberately NOT the same as ``_VALID_*_FALLBACKS``, which hold the
+#: post-normalization CANONICAL set: a user who typed ``allow_with_no_warning``
+#: needs to be shown ``allow_with_no_warnings``, and that spelling never
+#: appears in the canonical set because the alias map replaces it first.
+#: Equally deliberately EXCLUDES the deprecated ``warn_deny``: it still
+#: resolves, so it never triggers this warning, but printing it here would be
+#: advertising a spelling that is on its way out.
+_ACCEPTED_FALLBACK_SPELLINGS = (
+    "allow",
+    "allow_with_no_warnings",
+    "allow_with_warning",
+    "ask",
+    "deny",
+)
 
 # Documented defaults for the ``config_sync`` section. Single source of truth
 # shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
@@ -1987,6 +2008,81 @@ class Configuration:
             alias_map=_ALLOW_NO_WARNINGS_ALIAS,
         )
 
+    def unrecognized_fallback_settings(
+        self,
+    ) -> Tuple[UnrecognizedFallbackSetting, ...]:
+        """
+        Find every layer that sets a ``*_fallback`` key to an unusable value (TOO-19 m5).
+
+        Both :meth:`resolved_no_match_fallback` and
+        :meth:`resolved_undecidable_fallback` fall back to ``'ask'`` when the
+        configured value is not recognized. That resolution is correct and is
+        NOT changed here -- ``'ask'`` is the safe direction. The problem this
+        method exists to fix is that it used to happen with no diagnostic
+        anywhere: ``no_match_fallback = "allow_with_no_warning"`` (singular)
+        silently produced maximum-friction ``ask`` behaviour, which reads as a
+        broken feature rather than a typo.
+
+        Two kinds of unusable value are reported, because both are equally
+        silent:
+
+        - a string that is not a recognized spelling (after the alias map --
+          ``warn_deny`` and ``allow_with_no_warnings`` are recognized and so
+          never reported);
+        - a non-string value (a bool, a number, a table). These are treated as
+          "not set" by :meth:`_first_toplevel_str_setting`, which is the same
+          silent outcome.
+
+        EVERY offending layer is reported, not just the winning one. A bad
+        value at a less-specific level is inert today but is still a typo, and
+        it becomes live the moment the more-specific level that masks it is
+        removed.
+
+        Scope: the TOP-LEVEL ``no_match_fallback`` / ``undecidable_fallback``
+        keys. The deprecated ``[takeover_mode].no_match_fallback`` alias is not
+        covered -- it is resolved through :class:`~toolguard.config_types.TakeoverConfig`,
+        which does not retain per-layer provenance for that field, so it cannot
+        name the file the way this warning must.
+
+        Returns:
+            Tuple of :class:`~toolguard.config_types.UnrecognizedFallbackSetting`,
+            in layer order (most-specific first), ``no_match_fallback`` before
+            ``undecidable_fallback`` within a layer.
+        """
+        valid_by_key = {
+            "no_match_fallback": _VALID_NO_MATCH_FALLBACKS,
+            "undecidable_fallback": _VALID_UNDECIDABLE_FALLBACKS,
+        }
+        alias_by_key = {
+            "no_match_fallback": {
+                "warn_deny": "allow_with_warning",
+                **_ALLOW_NO_WARNINGS_ALIAS,
+            },
+            "undecidable_fallback": dict(_ALLOW_NO_WARNINGS_ALIAS),
+        }
+        found: List[UnrecognizedFallbackSetting] = []
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            for key, valid_values in valid_by_key.items():
+                if key not in layer.content:
+                    continue
+                raw = layer.content[key]
+                normalized = (
+                    alias_by_key[key].get(raw, raw) if isinstance(raw, str) else raw
+                )
+                if isinstance(normalized, str) and normalized in valid_values:
+                    continue
+                found.append(
+                    UnrecognizedFallbackSetting(
+                        key=key,
+                        value=str(raw),
+                        provenance=layer.provenance,
+                        accepted=_ACCEPTED_FALLBACK_SPELLINGS,
+                    )
+                )
+        return tuple(found)
+
     @staticmethod
     def _detect_override(
         levels, winning_index, winning_pattern, winning_prov, decide_detailed
@@ -2291,6 +2387,27 @@ class Configuration:
                         "~/.config/toolguard/rules (or $XDG_CONFIG_HOME/"
                         "toolguard/rules) and ~/.toolguard/rules -- the "
                         "ignored file's rules are not enforced."
+                    ),
+                )
+            )
+
+        # 1c) A *_fallback setting written with a value toolguard does not
+        #     recognize (TOO-19 m5). Resolution silently falls back to 'ask',
+        #     which is the safe direction but is indistinguishable from a
+        #     broken feature when nothing says so. A 'warning', not an 'error':
+        #     the effective behaviour is the SAFE one, unlike the fail-open
+        #     classes above. Also surfaced at session start (see
+        #     toolguard/session_start.py) -- the log alone is not loud enough
+        #     for something that presents as maximum friction with no cause.
+        for bad in self.unrecognized_fallback_settings():
+            issues.append(
+                Issue(
+                    level="warning",
+                    message=bad.describe(),
+                    corrective_steps=(
+                        f"Set {bad.key} to one of: {', '.join(bad.accepted)}. "
+                        f"Until then it resolves to 'ask', which prompts for "
+                        f"everything the setting was meant to decide."
                     ),
                 )
             )

@@ -14,6 +14,18 @@ from typing import List, Optional, Tuple
 
 from toolguard.config import find_project_root
 
+#: The two resolution-log output formats :func:`log_command` can render.
+#: Markdown is the default and the only one any production caller selects; the
+#: JSONLines variant exists for machine consumption (``docs/security.md`` names
+#: ``logs/toolguard-YYYY-MM-DD.jsonlines`` "for scripting").
+#:
+#: TOO-19 m5: these replace a legacy ``CHECKED_BASH_LOGGING_FORMAT``
+#: environment variable -- one of three undocumented checked_bash.py-era
+#: fallbacks removed with 1.0RC1 in view. See :func:`log_command`'s
+#: ``log_format`` parameter for why the FORMAT survived its selector.
+LOG_FORMAT_MARKDOWN = "markdown"
+LOG_FORMAT_JSONLINES = "jsonlines"
+
 #: Filename for the config-discovery change-log (TOO-19). Deliberately
 #: NOT date-partitioned like the main resolution log (``toolguard-YYYY-MM-DD.md``):
 #: a dated discovery log would start empty every morning and re-log the same
@@ -123,9 +135,19 @@ def _logging_enabled(config: Optional[dict]) -> bool:
     """
     Decide whether logging is switched on for this invocation.
 
-    Prefers the resolved environment config when one was supplied, and falls
-    back to the legacy ``CHECKED_BASH_LOGGING_ON`` environment variable for
-    backward compatibility with checked_bash.py-era callers.
+    Uses the resolved environment config when one was supplied (production
+    always supplies one -- every ``log_command`` call in ``hook.py`` passes
+    ``config=env_config``). With no config -- direct/test callers only --
+    logging is ON.
+
+    TOO-19 m5: this used to consult a legacy ``CHECKED_BASH_LOGGING_ON``
+    environment variable in the no-config case, a checked_bash.py-era
+    fallback that was undocumented, referenced by no config or doc, and able
+    to silently switch the audit log off. It defaulted to ``"true"`` when
+    unset, so removing it is a no-op for anyone who never set it -- which,
+    with 1.0RC1 in view, was everyone. ``TOOLGUARD_LOGGING_ENABLED`` (read via
+    :func:`toolguard.env_config.get_env_config` into the ``logging_enabled``
+    key) is the supported way to turn logging off.
 
     Args:
         config: Optional environment config dict (from ``get_env_config()``).
@@ -135,17 +157,18 @@ def _logging_enabled(config: Optional[dict]) -> bool:
     """
     if config is not None:
         return config.get("logging_enabled", True)
-    return os.environ.get("CHECKED_BASH_LOGGING_ON", "true").lower() == "true"
+    return True
 
 
 def _require_existing_log_dir(log_dir_path: Path) -> None:
     """
     Abort the process when a caller-specified log directory does not exist.
 
-    This is the historical behaviour for the two paths where the directory was
-    named explicitly (the ``log_dir`` argument and the legacy
-    ``CHECKED_BASH_LOGGING_DIR`` environment variable): a missing directory is
-    a configuration error, not something to silently create.
+    This is the historical behaviour for the two paths where the directory is
+    named without a resolved environment config behind it (the explicit
+    ``log_dir`` argument and the no-config default, see
+    :func:`_log_dir_from_environment`): a missing directory is a configuration
+    error, not something to silently create.
 
     Args:
         log_dir_path: The directory that must already exist.
@@ -190,11 +213,20 @@ def _log_dir_from_config(config: dict) -> Optional[Path]:
 
 def _log_dir_from_environment() -> Path:
     """
-    Resolve the log directory the legacy way, from ``CHECKED_BASH_LOGGING_DIR``.
+    Resolve the log directory with neither an explicit path nor a resolved config.
 
-    A relative value is taken relative to the discovered project root; an
-    absolute one is used as-is. The directory must already exist (see
-    :func:`_require_existing_log_dir`).
+    Falls back to ``<project root>/logs``. The directory must already exist
+    (see :func:`_require_existing_log_dir`).
+
+    TOO-19 m5: the directory name used to be overridable by a legacy
+    ``CHECKED_BASH_LOGGING_DIR`` environment variable that defaulted to
+    ``"logs"`` -- a checked_bash.py-era fallback, undocumented and referenced
+    by no config or doc. Removing it is a no-op for anyone who never set it.
+    ``TOOLGUARD_LOG_DIR`` (read via
+    :func:`toolguard.env_config.get_env_config`) is the supported override,
+    and production always goes through it because ``hook.py`` passes a
+    resolved config to every ``log_command`` call, so this function is reached
+    only by direct/test callers.
 
     Returns:
         The resolved log directory.
@@ -205,11 +237,7 @@ def _log_dir_from_environment() -> Path:
             this specifically and treats it as fatal (prints and exits 1),
             so it is not swallowed here.
     """
-    logging_dir = os.environ.get("CHECKED_BASH_LOGGING_DIR", "logs")
-    if Path(logging_dir).is_absolute():
-        log_dir_path = Path(logging_dir)
-    else:
-        log_dir_path = find_project_root() / logging_dir
+    log_dir_path = find_project_root() / "logs"
     _require_existing_log_dir(log_dir_path)
     return log_dir_path
 
@@ -219,7 +247,7 @@ def _resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optiona
     Pick the directory a log entry is written to, in caller-precedence order.
 
     An explicitly passed *log_dir* wins (used by tests), then the resolved
-    environment *config*, then the legacy environment variables.
+    environment *config*, then the ``<project root>/logs`` default.
 
     Args:
         log_dir: Directory passed directly by the caller, or None.
@@ -351,6 +379,7 @@ def log_command(
     note: Optional[str] = None,
     permission_mode: Optional[str] = None,
     additional_context: Optional[str] = None,
+    log_format: str = LOG_FORMAT_MARKDOWN,
 ) -> None:
     """
     Log command execution to file if logging is enabled.
@@ -388,16 +417,25 @@ def log_command(
             full -- the full text already reached Claude via the hook's JSON
             output for that invocation; logging it in full on every matching
             command would make the log unreadable for a human scanning it.
+        log_format: :data:`LOG_FORMAT_MARKDOWN` (the default, and what every
+            production caller uses) or :data:`LOG_FORMAT_JSONLINES`. TOO-19
+            m5: this used to be read from a legacy
+            ``CHECKED_BASH_LOGGING_FORMAT`` environment variable, removed
+            along with the other two ``CHECKED_BASH_*`` fallbacks. It became an
+            explicit parameter rather than disappearing entirely because the
+            JSONLines renderer is a real, documented output format
+            (``docs/security.md`` names ``.jsonlines`` "for scripting") -- the
+            legacy env var was the wrong SELECTOR for it, not a reason to
+            delete the format itself. Unlike the other two removed variables,
+            this one had no modern ``TOOLGUARD_*`` equivalent to fall back on;
+            supplying one is a documentation/config decision, not something
+            this removal should have made silently.
     """
-    # Check if logging is enabled (backward compatibility with CHECKED_BASH_LOGGING_ON)
     if not _logging_enabled(config):
         return
 
     try:
-        # Get logging configuration
-        logging_format = os.environ.get(
-            "CHECKED_BASH_LOGGING_FORMAT", "markdown"
-        ).lower()
+        logging_format = log_format.lower()
 
         # Resolve log directory path (None => logging disabled for this call)
         log_dir_path = _resolve_log_dir(log_dir, config)

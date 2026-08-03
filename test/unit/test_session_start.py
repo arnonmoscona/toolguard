@@ -15,6 +15,7 @@ Coverage areas:
 - Summary formatting
 """
 
+import contextlib
 import json
 import unittest
 from io import StringIO
@@ -27,6 +28,7 @@ from toolguard.config import (
     Provenance,
     TakeoverConfig,
     TakeoverEnabledConflict,
+    UnrecognizedFallbackSetting,
 )
 from toolguard.session_start import (
     _EMPTY_SHADOW_STATUS,
@@ -36,6 +38,7 @@ from toolguard.session_start import (
     _detect_broken_config_files,
     _detect_conflicts,
     _detect_shadow_status,
+    _detect_unrecognized_fallbacks,
     _format_summary,
     _parse_session_start_input,
     _recent_conflict_logs,
@@ -530,6 +533,113 @@ class TestDetectBrokenConfigFiles(unittest.TestCase):
         result = _detect_broken_config_files(config)
 
         self.assertEqual(result, ())
+
+
+class TestUnrecognizedFallbackAtSessionStart(unittest.TestCase):
+    """
+    TOO-19 m5: a ``*_fallback`` setting written with an unrecognized value must
+    warn LOUDLY at session start, not only in the resolution log.
+
+    The log alone is not enough for this failure mode: it presents as maximum
+    prompting with no stated cause, and on an unattended run nobody reads the
+    log until after the round trip has already been paid.
+    """
+
+    @staticmethod
+    def _bad(key="no_match_fallback", value="allow_with_no_warning"):
+        """Build one UnrecognizedFallbackSetting record for the given key/value."""
+        return UnrecognizedFallbackSetting(
+            key=key,
+            value=value,
+            provenance=_make_provenance(level="user"),
+            accepted=("allow", "allow_with_no_warnings", "ask", "deny"),
+        )
+
+    def test_detect_returns_the_configurations_records(self):
+        """
+        Given a Configuration reporting one unrecognized fallback setting
+        When _detect_unrecognized_fallbacks is called with it
+        Then that record is returned as a tuple
+        """
+        config = MagicMock(spec=Configuration)
+        config.unrecognized_fallback_settings.return_value = (self._bad(),)
+
+        self.assertEqual(_detect_unrecognized_fallbacks(config), (self._bad(),))
+
+    def test_detect_returns_empty_when_every_setting_is_valid(self):
+        """
+        Given a Configuration reporting no unrecognized fallback settings
+        When _detect_unrecognized_fallbacks is called with it
+        Then it returns an empty tuple
+        """
+        config = MagicMock(spec=Configuration)
+        config.unrecognized_fallback_settings.return_value = ()
+
+        self.assertEqual(_detect_unrecognized_fallbacks(config), ())
+
+    def test_summary_names_value_setting_file_and_accepted_spellings(self):
+        """
+        Given one unrecognized fallback record
+        When _format_summary renders it
+        Then the section names the offending value, the setting it was on,
+            the file it came from, the accepted spellings, and the fact that
+            the effective behaviour is 'ask'
+        """
+        summary = _format_summary(None, None, (), None, (self._bad(),))
+
+        self.assertIn("allow_with_no_warning", summary)
+        self.assertIn("no_match_fallback", summary)
+        self.assertIn("toolguard_hook.toml", summary)
+        self.assertIn("allow_with_no_warnings", summary)
+        self.assertIn("ask", summary)
+
+    def test_summary_omits_the_section_when_there_is_nothing_to_report(self):
+        """
+        Given no unrecognized fallback records and nothing else to report
+        When _format_summary renders
+        Then the summary is empty -- a valid or unset value must not warn
+        """
+        self.assertEqual(_format_summary(None, None, (), None, ()), "")
+
+    def test_main_prints_the_warning_for_an_otherwise_clean_config(self):
+        """
+        Given a config with NO conflicts, NO parse failures and NO shadowed
+            install, whose only problem is a misspelled fallback value
+        When main() runs the SessionStart hook
+        Then the warning is printed to stdout on its own -- it must not
+            depend on some other problem also being present
+        """
+        config = MagicMock(spec=Configuration)
+        config.takeover_mode.return_value = TakeoverConfig(
+            enabled=False,
+            ignored_allow_patterns=(),
+            additional_ignored_patterns=(),
+            no_match_fallback="deny",
+            conflict=None,
+        )
+        config.parse_failures = ()
+        config.project_root = None
+        config.unrecognized_fallback_settings.return_value = (self._bad(),)
+
+        payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/fake"})
+        with (
+            patch("sys.stdin", StringIO(payload)),
+            patch("toolguard.session_start.load_configuration", return_value=config),
+            patch(
+                "toolguard.session_start._check_dynamic_conflicts", return_value=None
+            ),
+            patch(
+                "toolguard.session_start._detect_shadow_status",
+                return_value=_EMPTY_SHADOW_STATUS,
+            ),
+            patch("sys.stdout", new_callable=StringIO) as out,
+        ):
+            with contextlib.suppress(SystemExit):
+                main()
+
+        printed = out.getvalue()
+        self.assertIn("UNRECOGNIZED FALLBACK SETTING", printed)
+        self.assertIn("allow_with_no_warning", printed)
 
 
 class TestDetectConflicts(unittest.TestCase):

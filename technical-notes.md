@@ -1142,3 +1142,22 @@ registration, and `toolguard-session-start`'s `main()` is wrapped in a broad
 a known, accepted asymmetry, not an oversight: if it ever needs closing, the same
 `_hardened_hook_command` helper generalises directly to a `toolguard.session_start` module
 form.
+
+**A second, stronger reason surfaced by code review (TOO-19 s1, 2026-08-02): hardening
+SessionStart would not just be an unnecessary asymmetry, it would actively break the shadow
+detection this whole section exists for.** `_detect_shadow_status()` (`toolguard/session_start.py`)
+compares `install_provenance.governing_package_root()` -- which `toolguard` package is ACTUALLY
+governing the currently-running process -- against the active session's own source checkout, to
+tell live shadowing (a `PYTHONPATH`-shadowed checkout governing decisions) apart from a properly
+installed distribution. `-E -P` are exactly the flags that make Python ignore `PYTHONPATH` and
+cwd when resolving imports (see "Why the two footguns need different flags" above) -- which is
+precisely what makes the PreToolUse hardening correct THERE, but would make
+`governing_package_root()` inside a hardened SessionStart process resolve the installed
+distribution UNCONDITIONALLY, even from a session working inside a genuinely shadowing checkout.
+Shadow/stale-install detection would go permanently and silently blind: not an error, not a
+degraded message, just a feature that stopped noticing the exact condition it was built to catch,
+with no test failing to say so. This makes UNHARDENED not a preference but an invariant:
+`cmd_register_hooks` in `toolguard/tools/installer.py` carries a comment at the
+`session_start_binary` assignment stating it, and
+`test/unit/test_tools_installer.py::TestRegisterHooks::test_session_start_hook_is_never_hardened`
+fails, with a message naming this reason, if that ever regresses.

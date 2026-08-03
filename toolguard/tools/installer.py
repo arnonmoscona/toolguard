@@ -630,6 +630,23 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
     governed_tools = _split_csv(args.governed_tools)
     binary = args.binary
     hook_command, hook_hardened = _hardened_hook_command(binary)
+    # TOO-19 code review s1: SessionStart is registered as the BARE
+    # "<binary>-session-start" form -- deliberately, and NEVER through
+    # _hardened_hook_command(). Hardening it (an "-E -P -m
+    # toolguard.session_start" style command) would make Python resolve the
+    # "toolguard" package via the interpreter's own site-packages ALWAYS,
+    # ignoring PYTHONPATH/cwd -- which is exactly what
+    # toolguard.session_start's _detect_shadow_status() is trying to observe:
+    # it compares governing_package_root() (which copy of toolguard is
+    # ACTUALLY governing this process) against the active project's source
+    # checkout to detect live shadowing. A hardened SessionStart could never
+    # resolve anything but the installed distribution, so shadow/stale-install
+    # detection would go permanently, silently blind for every session -- no
+    # test failure, no error, just a feature that stopped noticing anything.
+    # See technical-notes.md, "Shadowed-hook detection and install hardening
+    # (TOO-19)", and test_tools_installer.py's
+    # test_session_start_hook_is_never_hardened, which fails specifically on
+    # this if it regresses.
     session_start_binary = f"{binary}-session-start"
 
     backup_path: Optional[Path] = None
@@ -1963,6 +1980,98 @@ def _binary_status() -> dict:
     }
 
 
+#: ``env`` options that themselves consume a following argument, so the
+#: token after them is NOT the wrapped command (e.g. ``env -u PYTHONPATH
+#: <python> ...``). Deliberately just the realistic subset -- see
+#: :func:`_skip_env_wrapper`.
+_ENV_OPTIONS_WITH_ARG = frozenset(
+    {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+)
+
+
+def _skip_env_wrapper(tokens: List[str]) -> List[str]:
+    """
+    Skip a leading ``env`` wrapper -- and its own options/assignments -- in *tokens*.
+
+    TOO-19 code review m3: a hand-edited hook registration wrapped in ``env``
+    (e.g. ``env -u PYTHONPATH <venv python> -E -P -m toolguard.hook``, used to
+    scrub an inherited ``PYTHONPATH`` before launching the hardened
+    interpreter) has the wrapper, not the interpreter, as token 0. Treating
+    token 0 as "the interpreter" unconditionally reports a correctly hardened,
+    working registration as ``interpreter_missing`` -- a false BROKEN
+    diagnostic on exactly the configuration the hardening recommends.
+
+    ``env [OPTION]... [NAME=VALUE]... [COMMAND [ARG]...]`` is the realistic
+    shape: some options take a following argument (``-u NAME``), most don't
+    (``-i``), and any number of ``NAME=VALUE`` assignments may precede the
+    actual command. This is deliberately NOT a general shell/env parser --
+    only enough to walk past ``env``'s own tokens to whatever comes next,
+    which is treated as the interpreter regardless of what it turns out to
+    be. Any other leading wrapper (``sudo``, a shell, ...) is not recognized
+    and its first token is treated as the interpreter, same as before this
+    fix -- a narrower false positive than the one this closes, and not one
+    ``register-hooks`` itself ever produces.
+
+    Args:
+        tokens: The shlex-split (or naive-split, on unbalanced quotes)
+            command tokens.
+
+    Returns:
+        *tokens* with a leading ``env`` and its own options/assignments
+        removed, or *tokens* unchanged if it does not start with ``"env"``.
+    """
+    if not tokens or tokens[0] != "env":
+        return tokens
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _ENV_OPTIONS_WITH_ARG:
+            index += 2
+        elif token.startswith("-"):
+            index += 1
+        elif "=" in token:
+            index += 1
+        else:
+            break
+    return tokens[index:]
+
+
+def _interpreter_missing(command: str) -> bool:
+    """
+    Determine whether a hardened hook *command*'s interpreter is missing.
+
+    TOO-19 code review m3: the interpreter is not always token 0 -- a hand
+    wrapped command (``env -u PYTHONPATH <python> ...``) puts the wrapper
+    there instead (see :func:`_skip_env_wrapper`). And a bare command name
+    that resolves on ``PATH`` (rather than an absolute path that must
+    ``Path.exists()``) is also not missing, so :func:`shutil.which` is
+    checked in addition to a direct existence check.
+
+    Deliberately biased toward under-reporting: a command shape this
+    function cannot make sense of (tokens exhausted after skipping the ``env``
+    wrapper, for instance) is reported as NOT missing, per this diagnostic's
+    own asymmetry -- a missed warning costs nothing here, but crying BROKEN on
+    a correct registration teaches readers to ignore the diagnostic entirely
+    (see :func:`_hook_registration_findings`'s docstring).
+
+    Args:
+        command: The full hook command string as registered in settings.json.
+
+    Returns:
+        ``True`` only when an interpreter token was identified and it
+        resolves neither via :meth:`Path.exists` nor :func:`shutil.which`.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    tokens = _skip_env_wrapper(tokens)
+    if not tokens:
+        return False
+    interpreter = tokens[0]
+    return not (Path(interpreter).exists() or shutil.which(interpreter))
+
+
 def _hook_registration_findings(settings_path: Path) -> List[dict]:
     """
     Classify each toolguard PreToolUse hook command registered in *settings_path*.
@@ -1983,9 +2092,11 @@ def _hook_registration_findings(settings_path: Path) -> List[dict]:
     Returns:
         A list of dicts: ``{"matcher": str, "command": str, "hardened":
         bool, "interpreter_missing": bool}``. ``interpreter_missing`` is
-        ``True`` only for a hardened command whose recorded interpreter path
-        no longer exists on disk -- the exact silent-fail-open risk the
-        hardening's own docstring warns about, caught here proactively
+        ``True`` only for a hardened command whose interpreter (identified by
+        :func:`_interpreter_missing`, which understands a leading ``env``
+        wrapper and a bare PATH-resolvable name, not just token 0 as an
+        absolute path) resolves nowhere -- the exact silent-fail-open risk
+        the hardening's own docstring warns about, caught here proactively
         instead of only at hook-launch time.
     """
     try:
@@ -2010,26 +2121,18 @@ def _hook_registration_findings(settings_path: Path) -> List[dict]:
             if not isinstance(command, str) or "toolguard" not in command.lower():
                 continue
             hardened = f"-m {_HOOK_MODULE}" in command
-            interpreter_missing = False
-            if hardened:
-                # TOO-19 code review M2: _hardened_hook_command() now writes
-                # the interpreter path through shlex.quote() (a space in the
-                # path would otherwise split into multiple argv words and
-                # fail to launch), so it must be parsed back with
-                # shlex.split() here, not command.split() -- the naive split
-                # would report a correctly-quoted path as
-                # interpreter_missing (a false BROKEN diagnostic; TOO-19 code
-                # review m3 already fixed the related "env FOO=1 ..."
-                # false-positive the same way). Guarded: a hand-edited
-                # command with unbalanced quotes fails shlex.split with a
-                # ValueError -- fall back to the naive split rather than
-                # raising out of a read-only diagnostic.
-                try:
-                    tokens = shlex.split(command)
-                except ValueError:
-                    tokens = command.split()
-                interpreter = tokens[0] if tokens else ""
-                interpreter_missing = not Path(interpreter).exists()
+            # TOO-19 code review M2 (quoting) and m3 (interpreter
+            # identification): interpreter resolution is delegated entirely
+            # to _interpreter_missing(), which shlex-splits the command
+            # (falling back to a naive split on unbalanced quotes from a
+            # hand-edited command, rather than raising out of a read-only
+            # diagnostic), skips a leading "env" wrapper and its own
+            # options/assignments, and accepts a bare PATH-resolvable name in
+            # addition to an absolute path that exists -- see that function's
+            # docstring for why an "env"-wrapped hardened command (e.g. "env
+            # -u PYTHONPATH <python> -E -P -m toolguard.hook") is NOT
+            # interpreter_missing.
+            interpreter_missing = hardened and _interpreter_missing(command)
             findings.append(
                 {
                     "matcher": matcher,

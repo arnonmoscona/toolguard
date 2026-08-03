@@ -149,12 +149,13 @@ def _format_summary(
     dynamic_conflict,
     broken_files=(),
     shadow_status: Optional[ShadowStatus] = None,
+    unrecognized_fallbacks=(),
 ) -> str:
     """
     Format a brief conflict/broken-config/shadow-status summary for stdout.
 
     Produces a short, human-readable summary for injection into the Claude
-    Code session context, built from up to four independent sections:
+    Code session context, built from up to five independent sections:
 
     - A broken-config section (TOO-19) when *broken_files* is non-empty:
       names each broken file with its parse error and states that toolguard
@@ -171,6 +172,10 @@ def _format_summary(
       ``shadow_status.stale`` is True: names both paths and the reinstall
       command. Independent of the section above -- either, neither, or both
       may fire.
+    - An unrecognized-fallback-value section (TOO-19 m5) when
+      *unrecognized_fallbacks* is non-empty: one bullet per offending setting,
+      naming the value, the setting, the file, and the accepted spellings,
+      plus the fact that it is resolving to ``ask``.
 
     When every input is absent, the result is an empty string (callers only
     print when at least one is present).
@@ -186,6 +191,9 @@ def _format_summary(
             unaffected.
         shadow_status: A :class:`ShadowStatus` (see :func:`_detect_shadow_status`),
             or ``None`` so existing call sites are unaffected.
+        unrecognized_fallbacks: :class:`~toolguard.config_types.UnrecognizedFallbackSetting`
+            records from :func:`_detect_unrecognized_fallbacks` (TOO-19 m5).
+            Defaults to ``()`` so existing call sites are unaffected.
 
     Returns:
         A multi-line string suitable for printing to stdout, or "" when
@@ -205,6 +213,24 @@ def _format_summary(
             "enforced. Fix them to restore normal permission handling."
         )
         sections.append("\n".join(broken_lines))
+
+    if unrecognized_fallbacks:
+        fallback_lines = [
+            "toolguard: UNRECOGNIZED FALLBACK SETTING -- resolving to 'ask' "
+            "(maximum prompting) --"
+        ]
+        for bad in unrecognized_fallbacks:
+            fallback_lines.append(
+                f"  - {bad.key} = {bad.value!r} in "
+                f"{bad.provenance.describe_brief()} is not a recognized value"
+            )
+            fallback_lines.append(f"    accepted: {', '.join(bad.accepted)}")
+        fallback_lines.append(
+            "  This is almost always a typo. Until it is fixed the setting has "
+            "no effect and every decision it was meant to make falls back to "
+            "'ask' -- the safe direction, but the most friction."
+        )
+        sections.append("\n".join(fallback_lines))
 
     if static_conflict is not None or dynamic_conflict is not None:
         conflict_lines = ["toolguard: configuration conflicts detected --"]
@@ -298,6 +324,38 @@ def _detect_broken_config_files(config: Configuration):
         fixtures, which do not set ``parse_failures`` explicitly).
     """
     return tuple(config.parse_failures)
+
+
+def _detect_unrecognized_fallbacks(config: Configuration):
+    """
+    Return every ``*_fallback`` setting written with an unrecognized value (TOO-19 m5).
+
+    Both fallback settings resolve an unrecognized value to ``'ask'`` -- the
+    safe direction -- but they used to do so with no diagnostic anywhere. A
+    one-character typo (``allow_with_no_warning`` for
+    ``allow_with_no_warnings``) therefore presented as maximum friction with no
+    stated cause, which reads as a broken feature rather than a typo. The
+    resolution-log warning added alongside this is not enough on its own: an
+    unattended session stalls on prompts and nobody reads the log until after
+    the round trip, so it is repeated here where Claude Code injects it into
+    the session context.
+
+    Takes the already-loaded ``Configuration`` ``main()`` built, like the other
+    ``_detect_*`` helpers.
+
+    Args:
+        config: An already-loaded ``Configuration``.
+
+    Returns:
+        A tuple of
+        :class:`~toolguard.config_types.UnrecognizedFallbackSetting`, empty
+        when every fallback setting is valid or unset. Materialized via
+        ``tuple(...)`` for the same reason as
+        :func:`_detect_broken_config_files`: it behaves identically for a real
+        ``Configuration`` and for a ``MagicMock(spec=Configuration)`` test
+        double that does not stub this method explicitly.
+    """
+    return tuple(config.unrecognized_fallback_settings())
 
 
 def _detect_conflicts(config: Configuration):
@@ -444,8 +502,10 @@ def main() -> None:
 
     Reads the SessionStart JSON payload from stdin, checks for static and dynamic
     configuration conflicts, any governed config file that failed to parse
-    (TOO-19), and -- when the active project is toolguard's own source repo --
-    a shadowed/stale install (TOO-19, see :func:`_detect_shadow_status`), and
+    (TOO-19), any ``*_fallback`` setting written with an unrecognized value
+    (TOO-19 m5, see :func:`_detect_unrecognized_fallbacks`), and -- when the
+    active project is toolguard's own source repo -- a shadowed/stale install
+    (TOO-19, see :func:`_detect_shadow_status`), and
     prints a brief summary to stdout when any are found. Claude Code injects
     this stdout into the session context so the agent immediately learns of
     any unresolved conflicts, broken config, or install-provenance problem.
@@ -487,6 +547,7 @@ def main() -> None:
         static_conflict, dynamic_conflict = _detect_conflicts(config)
         broken_files = _detect_broken_config_files(config)
         shadow_status = _detect_shadow_status(config)
+        unrecognized_fallbacks = _detect_unrecognized_fallbacks(config)
 
         if (
             static_conflict is not None
@@ -494,10 +555,15 @@ def main() -> None:
             or broken_files
             or shadow_status.running_from_checkout
             or shadow_status.stale
+            or unrecognized_fallbacks
         ):
             print(
                 _format_summary(
-                    static_conflict, dynamic_conflict, broken_files, shadow_status
+                    static_conflict,
+                    dynamic_conflict,
+                    broken_files,
+                    shadow_status,
+                    unrecognized_fallbacks,
                 )
             )
 

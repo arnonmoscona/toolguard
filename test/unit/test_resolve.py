@@ -20,8 +20,15 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
+from unittest.mock import patch
+
+from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.hook import _parse_compound_match_details
+from toolguard.hook import (
+    _log_allowed_command,
+    _log_non_allow_decision,
+    _parse_compound_match_details,
+)
 from toolguard.tools.decision import decide
 from toolguard.resolve import (
     BashResolution,
@@ -1178,6 +1185,391 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         self.assertTrue(result.fallback_warning)
         self.assertIn("[fallback allow -- no rule matched]", result.reason)
         self.assertIn("ls -> ls", result.reason)
+
+
+class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
+    """
+    TOO-19 m5: the audit log must never name a rule that does not exist.
+
+    ``hook.py::_log_allowed_command`` derived its ``Matched Rule`` field by
+    splitting the reason on the first ``": "``. For a fallback ESCAPE-HATCH
+    allow the text after that colon is the truncated DISPLAY COMMAND, not a
+    pattern, so a config whose only rules were ``Bash(ls)`` and
+    ``Bash(python *)`` recorded ``**Matched Rule**: `python -c``` -- a rule
+    that exists nowhere.
+
+    The MULTI-leaf path had already been fixed to record
+    ``[fallback allow -- no rule matched]``. These tests pin single-leaf and
+    compound to that ONE convention together, so they cannot diverge into two
+    conventions again, and drive the REAL reason strings through the REAL
+    logging entry point rather than asserting against hand-written text.
+    """
+
+    def _repro_config(self, undecidable_fallback):
+        """Build the m5 repro config: Bash(ls) + Bash(python *) allow only."""
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": undecidable_fallback,
+                        "permissions": {
+                            "allow": ["Bash(ls)", "Bash(python *)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+
+    def _logged_rules(self, command, undecidable_fallback="allow_with_warning"):
+        """Resolve *command*, log the allow, and return the (cmd, matched_rule) pairs."""
+        config = self._repro_config(undecidable_fallback)
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        with patch("toolguard.hook.log_command") as mock_log:
+            _log_allowed_command(
+                command,
+                result.reason,
+                "main",
+                {"logging_enabled": True},
+            )
+        return [
+            (call.args[0], call.kwargs.get("matched_rule"))
+            for call in mock_log.call_args_list
+        ]
+
+    def test_single_leaf_escape_hatch_logs_the_placeholder_not_a_pattern(self):
+        """
+        Given undecidable_fallback='allow_with_warning' and NO 'python -c'
+            rule anywhere in the config
+        When the single-leaf command 'python -c "print(1)"' is allowed and
+            logged
+        Then the recorded matched rule is the fallback placeholder, and in
+            particular is NOT the fabricated 'python -c'
+        """
+        logged = self._logged_rules('python -c "print(1)"')
+        self.assertEqual(len(logged), 1)
+        command, matched_rule = logged[0]
+        self.assertEqual(command, 'python -c "print(1)"')
+        self.assertNotEqual(
+            matched_rule, "python -c", "the fabricated rule attribution regressed"
+        )
+        self.assertEqual(matched_rule, FALLBACK_ALLOW_PLACEHOLDER)
+
+    def test_compound_escape_hatch_leaf_logs_the_same_placeholder(self):
+        """
+        Given the same config and the two-leaf compound
+            'ls && python -c "print(1)"'
+        When it is allowed and logged
+        Then the genuine 'ls' leaf keeps its real matched pattern and the
+            escape-hatch leaf records the SAME placeholder the single-leaf
+            path uses -- one convention, not two
+        """
+        logged = dict(self._logged_rules('ls && python -c "print(1)"'))
+        self.assertEqual(len(logged), 2)
+        self.assertEqual(
+            logged['python -c "print(1)"'],
+            FALLBACK_ALLOW_PLACEHOLDER,
+        )
+        self.assertIn("ls", logged["ls"])
+        self.assertNotEqual(logged["ls"], FALLBACK_ALLOW_PLACEHOLDER)
+
+    def test_single_leaf_and_compound_agree_for_the_silent_allow_value(self):
+        """
+        Given undecidable_fallback='allow' (the no-warning value, whose reason
+            text differs from the warned one)
+        When both the single-leaf and the compound forms are logged
+        Then both record the fallback placeholder for the escape-hatch leaf --
+            the marker recognition must not be specific to the warned wording
+        """
+        single = self._logged_rules('python -c "print(1)"', "allow")
+        compound = dict(self._logged_rules('ls && python -c "print(1)"', "allow"))
+        self.assertEqual(single[0][1], FALLBACK_ALLOW_PLACEHOLDER)
+        self.assertEqual(compound['python -c "print(1)"'], FALLBACK_ALLOW_PLACEHOLDER)
+
+    def test_a_genuine_rule_match_still_records_its_pattern(self):
+        """
+        Given a command that DOES match a configured allow rule
+        When it is allowed and logged
+        Then the matched rule is still extracted from the reason as before --
+            the fabrication guard must not blank out real attributions
+        """
+        logged = self._logged_rules("ls")
+        self.assertEqual(len(logged), 1)
+        _command, matched_rule = logged[0]
+        self.assertIsNotNone(matched_rule)
+        self.assertIn("ls", matched_rule)
+        self.assertNotEqual(matched_rule, FALLBACK_ALLOW_PLACEHOLDER)
+
+    def test_no_match_fallback_allow_also_records_the_placeholder(self):
+        """
+        Given no_match_fallback='allow_with_warning' and a command no rule
+            covers at all (the OTHER fallback escape hatch, whose reason text
+            is built by config.py rather than compound.py)
+        When it is allowed and logged
+        Then the placeholder is recorded -- previously this reason had no
+            ': ' at all so the field was simply absent, which was not wrong
+            but was a second, inconsistent convention for the same situation
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {"allow": ["Bash(ls)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "cat README.md", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        with patch("toolguard.hook.log_command") as mock_log:
+            _log_allowed_command(
+                "cat README.md",
+                result.reason,
+                "main",
+                {"logging_enabled": True},
+            )
+        self.assertEqual(
+            mock_log.call_args_list[0].kwargs.get("matched_rule"),
+            FALLBACK_ALLOW_PLACEHOLDER,
+        )
+
+
+class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
+    """
+    TOO-19 deny-side rule fabrication fix: the audit log must never name a
+    rule that does not exist, on the deny side either.
+
+    ``hook.py::_log_non_allow_decision`` derived its ``Violated Rules`` field
+    for a deny by splitting the reason on the first ``": "``. For a deny
+    produced by the ``undecidable_fallback=deny`` escape hatch, the text
+    after that colon is the truncated DISPLAY COMMAND, not a rule, so a
+    config whose only rules were ``Bash(ls)`` and ``Bash(python *)`` recorded
+    ``**Violated Rules**: `python -c``` -- a rule that exists nowhere. This is
+    the deny-side counterpart of the allow-side m5 fix pinned by
+    :class:`TestAuditLogMatchedRuleNeverFabricated` above; both now share the
+    SAME mechanism (``fallback_kind_for_reason`` +
+    ``FALLBACK_ALLOW_PLACEHOLDER``/``FALLBACK_DENY_PLACEHOLDER``).
+    """
+
+    def _repro_config(self, undecidable_fallback):
+        """Build the m5-style repro config: Bash(ls) + Bash(python *) allow only."""
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": undecidable_fallback,
+                        "permissions": {
+                            "allow": ["Bash(ls)", "Bash(python *)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+
+    def _log_and_capture(self, config, command):
+        """Resolve *command* against *config* and return (result, mock_log_command call)."""
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
+        with patch("toolguard.hook.log_command") as mock_log:
+            _log_non_allow_decision(
+                command,
+                result.decision,
+                result.reason,
+                "main",
+                {"logging_enabled": True},
+                None,
+                result.additional_context,
+            )
+        self.assertEqual(len(mock_log.call_args_list), 1)
+        return result, mock_log.call_args_list[0]
+
+    def test_single_leaf_undecidable_deny_logs_the_placeholder_not_a_command(self):
+        """
+        Given undecidable_fallback='deny' and NO 'python -c' rule anywhere in
+            the config
+        When the single-leaf command 'python -c "print(1)"' is denied by the
+            undecidable floor and logged
+        Then the recorded violated rule is the fallback placeholder, and in
+            particular is NOT the fabricated 'python -c'
+        """
+        config = self._repro_config("deny")
+        result, call = self._log_and_capture(config, 'python -c "print(1)"')
+        self.assertEqual(result.decision, "deny")
+        violated_rules = call.args[2]
+        self.assertNotEqual(
+            violated_rules, ["python -c"], "the fabricated rule attribution regressed"
+        )
+        self.assertEqual(violated_rules, [FALLBACK_DENY_PLACEHOLDER])
+
+    def test_compound_leaf_undecidable_deny_logs_the_same_placeholder(self):
+        """
+        Given the same config and the two-leaf compound
+            'ls && python -c "print(1)"'
+        When the compound is denied (any deny -> deny, driven by the
+            escape-hatch leaf) and logged
+        Then the recorded violated rule is still the placeholder, not the
+            escape-hatch leaf's truncated display command -- one convention,
+            not two, matching the single-leaf case
+        """
+        config = self._repro_config("deny")
+        result, call = self._log_and_capture(config, 'ls && python -c "print(1)"')
+        self.assertEqual(result.decision, "deny")
+        self.assertEqual(call.args[2], [FALLBACK_DENY_PLACEHOLDER])
+
+    def test_undecidable_segment_deny_logs_the_placeholder_not_the_command(self):
+        """
+        Given undecidable_fallback='deny' and a process-substitution command
+            (an UndecidableSegment -- a grammar shape distinct from the
+            ASK-floor leaf case above, with its OWN reason-string construction
+            in resolve_compound_permission_detailed)
+        When the segment cannot be safely decomposed and is denied by the
+            floor, then logged
+        Then the recorded violated rule is the placeholder, not the
+            truncated original segment text -- both deny reason shapes this
+            module builds are covered by the SAME marker, not just the
+            ASK-floor one
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "deny",
+                        "permissions": {"allow": ["Bash(diff *)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        result, call = self._log_and_capture(config, "diff <(sort a) <(sort b)")
+        self.assertEqual(result.decision, "deny")
+        self.assertIn("undecidable_fallback=deny", result.reason)
+        self.assertEqual(call.args[2], [FALLBACK_DENY_PLACEHOLDER])
+
+    def test_a_genuine_deny_still_records_its_real_pattern(self):
+        """
+        Given a command that matches a configured DENY rule directly (no
+            undecidable_fallback escape hatch involved)
+        When it is denied and logged
+        Then the violated rule is still extracted from the reason as before --
+            the fabrication guard must not blank out real attributions
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(*)"],
+                            "deny": ["Bash(rm -rf *)"],
+                        },
+                    },
+                )
+            ]
+        )
+        result, call = self._log_and_capture(config, "rm -rf /tmp/x")
+        self.assertEqual(result.decision, "deny")
+        violated_rules = call.args[2]
+        self.assertNotEqual(violated_rules, [FALLBACK_DENY_PLACEHOLDER])
+        self.assertIn("rm -rf", violated_rules[0])
+
+    def test_no_match_fallback_deny_has_no_colon_and_is_unaffected(self):
+        """
+        Given no_match_fallback='deny' (a config choice, distinct from
+            undecidable_fallback) and a file path no Read rule covers at all
+        When it is denied and logged
+        Then the full reason (which never had a ': ' to begin with) is
+            recorded as before -- this path was never at risk of fabrication,
+            since :func:`~toolguard.compound.fallback_kind_for_reason` has no
+            marker for it and the reason has no colon to mis-split, and stays
+            untouched by the fix
+
+        Uses the FILE-PATH resolver rather than Bash: unlike
+        ``resolve_bash_permission_detailed``, ``resolve_file_path_permission_detailed``
+        never wraps its reason in the "Compound command contains denied
+        sub-command: ..." formatting (there is no compound-command concept
+        for file paths), so this is the one real caller of
+        ``_log_non_allow_decision`` that reaches it with the truly unwrapped,
+        colon-free ``no_match_fallback`` reason from ``config.py``.
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {"allow": ["Read(other.txt)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        result = resolve_file_path_permission_detailed("Read", "README.md", config)
+        self.assertEqual(result.decision, "deny")
+        self.assertNotIn(": ", result.reason)
+        with patch("toolguard.hook.log_command") as mock_log:
+            _log_non_allow_decision(
+                "Read(README.md)",
+                result.decision,
+                result.reason,
+                "main",
+                {"logging_enabled": True},
+                None,
+                result.additional_context,
+            )
+        self.assertEqual(len(mock_log.call_args_list), 1)
+        self.assertEqual(mock_log.call_args_list[0].args[2], [result.reason])
+
+    def test_ask_side_is_unaffected_full_reason_is_always_the_note(self):
+        """
+        Given the same escape-hatch scenario but undecidable_fallback='ask'
+            (the default), so the floor produces 'ask' rather than 'deny'
+        When the leaf is floored to 'ask' and logged
+        Then the FULL reason text is recorded as the note verbatim -- the
+            'ask' branch of _log_non_allow_decision never splits the reason,
+            so it was never at risk of this fabrication; this pins that it
+            stays that way
+        """
+        config = self._repro_config("ask")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "ask")
+        with patch("toolguard.hook.log_command") as mock_log:
+            _log_non_allow_decision(
+                'python -c "print(1)"',
+                result.decision,
+                result.reason,
+                "main",
+                {"logging_enabled": True},
+                None,
+                result.additional_context,
+            )
+        self.assertEqual(len(mock_log.call_args_list), 1)
+        call = mock_log.call_args_list[0]
+        self.assertEqual(call.kwargs.get("note"), result.reason)
+        # 'ask' never populates violated_rules (positional arg 3 of
+        # log_command) -- there is no violation to name a rule for.
+        self.assertEqual(len(call.args), 2, "ask must not pass violated_rules")
 
 
 class TestFallbackWarningField(unittest.TestCase):

@@ -206,6 +206,52 @@ class TakeoverEnabledConflict:
 
 
 @dataclass(frozen=True)
+class UnrecognizedFallbackSetting:
+    """
+    A ``*_fallback`` setting written with a value toolguard does not recognize.
+
+    TOO-19 m5. ``no_match_fallback`` and ``undecidable_fallback`` both resolve
+    an unrecognized value to the safe default ``'ask'`` and keep going -- that
+    part is deliberate and unchanged, because ``'ask'`` is the safe direction
+    when a policy setting cannot be read. What was NOT acceptable is that it
+    happened SILENTLY: a single-character typo (``allow_with_no_warnings``
+    written as ``allow_with_no_warning``) produced maximum-friction behaviour
+    with no diagnostic anywhere, which reads as "the feature is broken" rather
+    than "you have a typo". This record carries everything a warning needs to
+    say so, including the accepted spellings -- a warning that omits those is
+    what turns a typo into a round trip.
+
+    Attributes:
+        key: The setting name -- ``'no_match_fallback'`` or
+            ``'undecidable_fallback'``.
+        value: The offending value EXACTLY as written in the file, rendered as
+            a string (a non-string value, e.g. a bool or a table, is equally
+            unusable and equally silent, so it is reported the same way).
+        provenance: Origin of the layer that set it, so the warning can name
+            the file to edit.
+        accepted: The accepted spellings for *key*, sorted, INCLUDING the
+            aliases that are normalized away before validation -- the user
+            needs the spellings they may type, not the internal canonical set.
+    """
+
+    key: str
+    value: str
+    provenance: "Provenance"
+    accepted: Tuple[str, ...]
+
+    def describe(self) -> str:
+        """
+        Return a one-line human-readable description naming value, setting,
+        file, and accepted spellings.
+        """
+        return (
+            f"{self.key} = {self.value!r} in {self.provenance.describe_brief()} "
+            f"is not a recognized value; falling back to 'ask'. "
+            f"Accepted values: {', '.join(self.accepted)}"
+        )
+
+
+@dataclass(frozen=True)
 class TakeoverConfig:
     """
     Resolved takeover-mode configuration (TOO-8 Phase 5).
