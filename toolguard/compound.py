@@ -888,11 +888,14 @@ def resolve_compound_permission_detailed(
 
     for element in structured:
         if isinstance(element, UndecidableSegment):
-            # Cannot safely decompose -- no rule was ever matched, so there
-            # is no underlying decision to floor; take undecidable_fallback
-            # DIRECTLY (TOO-19), not via _apply_undecidable_floor. No rule
-            # matched, so no context.
-            floored = _UNDECIDABLE_FLOOR_DECISION.get(undecidable_fallback, "ask")
+            # No rule matched, so there is no underlying decision to floor.
+            # Modelling that as 'allow' makes this the same operation as every
+            # other floor application: the floor is never weaker than 'allow',
+            # so clamping 'allow' yields the fallback itself for every value.
+            # TOO-45 D4 -- previously a direct table lookup here, which meant
+            # the floor had two implementations and mutating either one alone
+            # changed nothing.
+            floored = _apply_undecidable_floor("allow", undecidable_fallback)
             logger.debug(
                 "Undecidable segment (-> %s): %r reason=%s",
                 floored,
