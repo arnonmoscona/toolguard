@@ -373,6 +373,194 @@ _FALLBACK_CASES: List[Tuple[str, str]] = [
     ("Bash", "ls -la /tmp"),
 ]
 
+#: TOO-45 audit follow-up: `_FALLBACK_CASES` above matches `Bash(ls *)` /
+#: `Bash(pwd)` / (deny) `Bash(sudo *)` for most of its rows, or reaches the
+#: file-tool "unconfigured tool" branch for its Read/Write/Edit rows (that
+#: fixture never configures permissions for those tools) -- neither reaches
+#: the no_match_fallback dispatch tail itself. These 30 commands are chosen
+#: to match NEITHER the allow nor the deny pattern in any `fallback_*`
+#: fixture, and to avoid process substitution (`<(...)`/`$(...)`, which would
+#: land in the UNDECIDABLE branch instead -- a different code path), so every
+#: one of them genuinely falls through to `no_match_fallback` and shows the
+#: setting's effect distinctly. Appended (not merged into `_FALLBACK_CASES`)
+#: so the original 15-case list -- and every existing case's golden -- is
+#: untouched.
+_FALLBACK_DISPATCH_CASES: List[Tuple[str, str]] = [
+    ("Bash", "uptime"),
+    ("Bash", "hostname"),
+    ("Bash", "id"),
+    ("Bash", "env"),
+    ("Bash", "printenv"),
+    ("Bash", "which python3"),
+    ("Bash", "type ls"),
+    ("Bash", "history"),
+    ("Bash", "jobs"),
+    ("Bash", "alias"),
+    ("Bash", "cal"),
+    ("Bash", "w"),
+    ("Bash", "who"),
+    ("Bash", "last"),
+    ("Bash", "ps aux"),
+    ("Bash", "top -bn1"),
+    ("Bash", "vmstat"),
+    ("Bash", "df -h"),
+    ("Bash", "free -m"),
+    ("Bash", "uname -a"),
+    ("Bash", "cat notes.txt"),
+    ("Bash", "head -n 5 file.txt"),
+    ("Bash", "tail -n 20 log.txt"),
+    ("Bash", "wc -l file.txt"),
+    ("Bash", "grep TODO src/main.py"),
+    ("Bash", "find . -name '*.py'"),
+    ("Bash", "cut -d, -f1 data.csv"),
+    ("Bash", "sort data.txt"),
+    ("Bash", "uniq data.txt"),
+    ("Bash", "printf 'hi\\n'"),
+]
+
+#: TOO-45 audit follow-up: extra cases for the `empty` fixture (point 4 --
+#: the unconfigured-tool branch). `empty` has NO config file at all, so
+#: EVERY case here -- regardless of shape -- resolves via
+#: `Configuration.has_any_rules` returning False, unconditionally 'ask'.
+#: Content is varied purely for realism/breadth, not because it changes
+#: which branch fires.
+_EMPTY_EXTRA_CASES: List[Tuple[str, str]] = [
+    ("Bash", "curl https://example.com"),
+    ("Bash", "npm install"),
+    ("Bash", "docker ps"),
+    ("Bash", "kubectl get pods"),
+    ("Bash", "terraform plan"),
+    ("Bash", "make build"),
+    ("Bash", "python3 script.py"),
+    ("Bash", "chmod +x run.sh"),
+    ("Bash", "mv a.txt b.txt"),
+    ("Bash", "cp a.txt b.txt"),
+    ("Read", "/etc/hosts"),
+    ("Write", "./output/result.json"),
+    ("Edit", "./src/main.py"),
+    ("Bash", "systemctl status nginx"),
+    ("Bash", "brew install wget"),
+]
+
+#: TOO-45 audit follow-up: extra cases for the `parse_failure` fixture (point
+#: 5 -- the parse-failure ASK floor). None of these match the fixture's
+#: `[hard_deny]` pattern (`^rm\s+-rf\s+/$`), so every one is clamped from its
+#: pre-floor decision to 'ask' with the distinctive
+#: "toolguard config is BROKEN" reason -- observable proof the floor fired,
+#: independent of what the pre-clamp decision would have been.
+_PARSE_FAILURE_EXTRA_CASES: List[Tuple[str, str]] = [
+    ("Bash", "whoami"),
+    ("Bash", "date"),
+    ("Bash", "df -h"),
+    ("Bash", "free -m"),
+    ("Bash", "uname -a"),
+    ("Bash", "history"),
+    ("Bash", "ps aux"),
+    ("Bash", "grep TODO notes.md"),
+    ("Bash", "find . -name '*.txt'"),
+    ("Bash", "mv a.txt b.txt"),
+    ("Read", "/home/tguser/projects/toolguard/notes/todo.md"),
+    ("Write", "./scratch/y.txt"),
+    ("Edit", "./config/app.yaml"),
+    ("Bash", "ls -la && whoami"),
+    ("Bash", "cat file.txt && ls"),
+]
+
+#: TOO-45 audit follow-up (point 6): cases matching `ask_provenance`'s
+#: patterns one-for-one, spanning all three contributing sources -- project
+#: level (specificity 0), the user level's own toolguard_hook.toml (12 + 9
+#: cases respectively), and a rules-dir file merged into that SAME user level
+#: as a second, distinct layer (4 cases) -- so
+#: `Configuration._provenance_for_pattern` / `_entry_for_pattern` take their
+#: `kind == "ask"` branch across more than one hierarchy level AND across
+#: more than one layer within the user level. See
+#: `configs/ask_provenance/*/.claude/toolguard_hook.toml` and
+#: `configs/ask_provenance/home/.toolguard/rules/extra.rules.toml`.
+_ASK_PROVENANCE_CASES: List[Tuple[str, str]] = [
+    # -- project level (most specific) --
+    ("Bash", "rm proj-file-a.txt"),
+    ("Bash", "rm proj-file-b.txt"),
+    ("Bash", "mv proj-file-c.txt dest.txt"),
+    ("Bash", "chmod 777 proj-perm.txt"),
+    ("Bash", "kill -9 1111"),
+    ("Bash", "kill -9 2222"),
+    ("Bash", "mkfs.ext4 /dev/proj-disk"),
+    ("Bash", "dd if=/dev/zero of=proj-out.img"),
+    ("Read", "./secrets/proj-secret.txt"),
+    ("Write", "./deploy/proj-manifest.yaml"),
+    ("Bash", "shutdown -h now"),
+    ("Bash", "iptables -F"),
+    # -- user level, toolguard_hook.toml (layer 0 of the user level) --
+    ("Bash", "rm user-file-a.txt"),
+    ("Bash", "rm user-file-b.txt"),
+    ("Bash", "mv user-file-c.txt dest.txt"),
+    ("Bash", "chmod 777 user-perm.txt"),
+    ("Bash", "kill -9 3333"),
+    ("Bash", "kill -9 4444"),
+    ("Bash", "mkfs.ext4 /dev/user-disk"),
+    ("Read", "./secrets/user-secret.txt"),
+    ("Write", "./deploy/user-manifest.yaml"),
+    # -- user level, rules-dir file (layer 1 of the SAME user level) --
+    ("Bash", "rm rules-file-a.txt"),
+    ("Bash", "mv rules-file-b.txt dest.txt"),
+    ("Bash", "chmod 777 rules-perm.txt"),
+    ("Bash", "kill -9 5555"),
+]
+
+#: TOO-45 audit follow-up (point 7): cases for `override_breadth`, matching
+#: its project-level allow patterns that each override a broader, less-
+#: specific user-level deny -- see
+#: `configs/override_breadth/*/.claude/toolguard_hook.toml`. 22 single-leaf
+#: cases (16 Bash + 2 Read + 2 Write + 2 Edit) + 6 compound-command cases
+#: (two overriding leaves each, overall verdict allow so both surface -- see
+#: `toolguard/resolve.py::resolve_bash_permission_detailed`, which clears
+#: `overrides` entirely for any non-allow overall verdict) + 3 negative
+#: controls (`echo hello`/`ls -R`: plain allow, no home-level counterpart at
+#: all; `sudo reboot`: home-level deny with NO project rule, so deny wins
+#: outright -- nothing to override). Registered here for the IN-PROCESS
+#: corpus too (the allow verdicts themselves are correct and worth pinning),
+#: but `_detect_override`'s actual firing is invisible to `decide()` --
+#: :func:`toolguard.tools.decision.decide` never returns
+#: `ConflictOverride` at all (dropped at the `_decide_bash`/`_decide_file_path`
+#: adapters) and the hook's JSON output doesn't carry it either. It is
+#: observable ONLY via the conflict log side effect the end-to-end corpus can
+#: see (see :data:`E2E_CASES` and `fixture_loader.py`'s
+#: `conflict_logged`/`_count_stream_log_entries`) -- the mutation test for
+#: this point must use the end-to-end corpus, not this one.
+_OVERRIDE_BREADTH_CASES: List[Tuple[str, str]] = [
+    ("Bash", "git push origin main"),
+    ("Bash", "git push --force origin main"),
+    ("Bash", "npm install lodash"),
+    ("Bash", "npm uninstall left-pad"),
+    ("Bash", "docker rm my-container"),
+    ("Bash", "docker stop my-container"),
+    ("Bash", "kubectl delete pod test-pod"),
+    ("Bash", "kubectl delete deployment web"),
+    ("Bash", "terraform apply -auto-approve"),
+    ("Bash", "terraform destroy -auto-approve"),
+    ("Bash", "rm keep.txt"),
+    ("Bash", "rm -f build.log"),
+    ("Bash", "chmod 644 file.txt"),
+    ("Bash", "chown alice file.txt"),
+    ("Bash", "systemctl restart myapp"),
+    ("Bash", "systemctl stop myapp"),
+    ("Read", "./docs/allowed.md"),
+    ("Read", "./data/allowed.csv"),
+    ("Write", "./scratch/allowed.txt"),
+    ("Write", "./out/allowed.log"),
+    ("Edit", "./config/allowed.yaml"),
+    ("Edit", "./src/allowed.py"),
+    ("Bash", "git push origin main && npm install lodash"),
+    ("Bash", "docker rm my-container && docker stop my-container"),
+    ("Bash", "kubectl delete pod test-pod && kubectl delete deployment web"),
+    ("Bash", "terraform apply -auto-approve && terraform destroy -auto-approve"),
+    ("Bash", "rm keep.txt && chmod 644 file.txt"),
+    ("Bash", "chown alice file.txt && systemctl restart myapp"),
+    ("Bash", "echo hello"),
+    ("Bash", "ls -R"),
+    ("Bash", "sudo reboot"),
+]
+
 #: Shared by the three `undecidable_*` fixtures, whose configs differ ONLY in
 #: `undecidable_fallback`'s value.
 _UNDECIDABLE_CASES: List[Tuple[str, str]] = [
@@ -410,10 +598,11 @@ SYNTHETIC_CASES: Dict[str, List[Tuple[str, str]]] = {
         ("Write", "./scratch/new.txt"),
         ("Edit", "~/.bashrc"),
         ("Bash", "git status"),
-    ],
-    "fallback_ask": list(_FALLBACK_CASES),
-    "fallback_deny": list(_FALLBACK_CASES),
-    "fallback_allow_warning": list(_FALLBACK_CASES),
+    ]
+    + _EMPTY_EXTRA_CASES,
+    "fallback_ask": list(_FALLBACK_CASES) + list(_FALLBACK_DISPATCH_CASES),
+    "fallback_deny": list(_FALLBACK_CASES) + list(_FALLBACK_DISPATCH_CASES),
+    "fallback_allow_warning": list(_FALLBACK_CASES) + list(_FALLBACK_DISPATCH_CASES),
     "fallback_allow_silent": list(_FALLBACK_CASES),
     "undecidable_ask": list(_UNDECIDABLE_CASES),
     "undecidable_deny": list(_UNDECIDABLE_CASES),
@@ -453,7 +642,8 @@ SYNTHETIC_CASES: Dict[str, List[Tuple[str, str]]] = {
         ("Bash", "rm -rf /tmp"),
         ("Bash", "ls -la && cat notes.txt"),
         ("Bash", "ls -la /home"),
-    ],
+    ]
+    + _PARSE_FAILURE_EXTRA_CASES,
     "hierarchy_conflict": [
         ("Bash", "rm important-file backup.txt"),
         ("Bash", "rm important-file old.log"),
@@ -508,6 +698,8 @@ SYNTHETIC_CASES: Dict[str, List[Tuple[str, str]]] = {
         ("Bash", "sudo reboot && curl -X DELETE https://x"),
         ("Bash", "cat a.txt && sudo reboot && ls -la"),
     ],
+    "ask_provenance": list(_ASK_PROVENANCE_CASES),
+    "override_breadth": list(_OVERRIDE_BREADTH_CASES),
 }
 
 
@@ -589,6 +781,14 @@ E2E_CASES: List[Tuple[str, str, str]] = [
     # --- the full realistic config stack, end to end ---
     ("realistic", "Bash", "git status"),
     ("realistic", "Bash", "gh status"),
+    # --- TOO-45 audit follow-up (point 7): every override_breadth case,
+    # end-to-end -- this is the ONLY corpus that can observe
+    # `Configuration._detect_override` firing at all (see
+    # `fixture_loader.py`'s `conflict_logged` golden key and its module
+    # docstring for why). Includes the 3 negative controls (echo hello /
+    # ls -R / sudo reboot) so the mutation battery can also confirm the
+    # signal stays False when there is genuinely nothing to override.
+    *(("override_breadth", tool, target) for tool, target in _OVERRIDE_BREADTH_CASES),
 ]
 
 

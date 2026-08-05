@@ -24,7 +24,22 @@ Two corpora live here, for two different seams:
   :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`, for exactly that
   reason -- deliberately small (a few dozen cases; subprocess startup
   dominates), chosen to span the output-JSON surface rather than to
-  re-exercise decision coverage the in-process corpus already has.
+  re-exercise decision coverage the in-process corpus already has. It is
+  ALSO the only place (TOO-45 audit follow-up) that can see
+  :class:`~toolguard.config.ConflictOverride`: it is dropped by
+  :func:`toolguard.tools.decision.decide` (:class:`~toolguard.tools.decision.Decision`
+  carries no such field) and never appears in the hook's JSON output either
+  -- it exists ONLY as an entry in ``logs/toolguard-conflict-*.md``, a THIRD
+  seam neither corpus's primary comparison touches. See
+  :func:`_count_stream_log_entries` and the ``conflict_logged`` golden key
+  below. (The ``allow_with_warning`` fallback's own WARNING-stream routing
+  was investigated the same way and deliberately NOT instrumented here:
+  ``toolguard-warning-*.md`` also receives an unrelated, pre-existing "tool
+  not in governed_tools" advisory on every hook run for any fixture that
+  does not set ``governed_tools`` explicitly, which would make a
+  presence-only signal on that stream noisy rather than diagnostic. The
+  in-process corpus's ``reason`` text already pins that fallback firing
+  precisely -- see ``fallback_allow_warning``'s cases in ``cases.jsonl``.)
 
 See ``README.md`` (this directory) for what the corpus is for and how to
 update it. This module deliberately does NOT start with ``test`` so
@@ -70,6 +85,11 @@ FIXTURE_IDS = (
     "hierarchy_conflict",
     "pattern_forms",
     "enrichment",
+    # TOO-45 audit follow-up (config.py's no-match-fallback tail and its
+    # thinnest-covered neighbours): 'ask'-rule provenance across multiple
+    # hierarchy levels/layers, and allow-over-deny override breadth.
+    "ask_provenance",
+    "override_breadth",
 )
 
 #: Placeholders substituted for the sandbox's own (per-run, ephemeral)
@@ -422,6 +442,49 @@ _RUN_HOOK_DIAGNOSTIC_KEYS = ("_stderr", "_returncode")
 _HOOK_OUTPUT_PROSE_FIELDS = ("permissionDecisionReason", "additionalContext")
 
 
+#: Log streams (see ``toolguard/error_log.py``) whose entry counts this
+#: corpus observes as a SIDE EFFECT of ``run_hook``'s subprocess -- filename
+#: shape ``toolguard-<stream>-*.md`` under the sandbox's ``log_dir``, each
+#: entry starting a new ``## `` header line. Counting header lines (rather
+#: than parsing full entries) is enough to detect "did a new entry appear
+#: during this one case", which is all the ``conflict_logged`` golden key
+#: needs. ``'warning'`` is deliberately NOT included -- see the end-to-end
+#: corpus's module-level rationale above for why that stream is too noisy to
+#: use as a presence-only signal.
+_OBSERVED_LOG_STREAMS = ("conflict",)
+
+
+def _count_stream_log_entries(sandbox, stream: str) -> int:
+    """
+    Count ``## `` entry headers across all ``toolguard-<stream>-*.md`` files
+    in *sandbox*'s log directory.
+
+    Used to detect, by a before/after delta around one :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`
+    call, whether THAT case caused a new log entry -- the only way this
+    corpus can observe :class:`~toolguard.config.ConflictOverride` (routed to
+    the ``'conflict'`` stream), since it never reaches
+    :func:`toolguard.tools.decision.decide`'s return value or the hook's JSON
+    output (see the end-to-end corpus's module-level rationale above).
+
+    Args:
+        sandbox: The fixture's :class:`~toolguard.testing.sandbox.Sandbox`.
+        stream: ``'conflict'`` (see :data:`_OBSERVED_LOG_STREAMS`).
+
+    Returns:
+        Total entry count across every date-stamped file for *stream*
+        (there is realistically only one, for "today", but summing is
+        correct regardless).
+    """
+    total = 0
+    for path in sandbox.log_dir.glob(f"toolguard-{stream}-*.md"):
+        total += sum(
+            1
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("## ")
+        )
+    return total
+
+
 def build_hook_payload(tool: str, target: str) -> Dict[str, Any]:
     """
     Build a minimal ``PreToolUse`` hook event payload for
@@ -448,6 +511,8 @@ def e2e_decision_to_golden(
     target: str,
     hook_result: Dict[str, Any],
     sanitize: Callable[[Optional[str]], Optional[str]],
+    *,
+    conflict_logged: bool = False,
 ) -> Dict[str, Any]:
     """
     Build one end-to-end golden record from a real
@@ -466,10 +531,22 @@ def e2e_decision_to_golden(
         hook_result: The dict returned by
             :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`.
         sanitize: Ephemeral-path sanitizer from :func:`load_fixture_sandbox`.
+        conflict_logged: Whether THIS case caused a new entry in the
+            ``'conflict'`` log stream (see :func:`_count_stream_log_entries`)
+            -- the only observable trace of
+            :class:`~toolguard.config.ConflictOverride`. Included in the
+            golden ONLY when ``True`` (see below).
 
     Returns:
         ``{"fixture", "tool", "target", "response"}`` where ``response`` is
-        the sanitized hook JSON output (``_stderr``/``_returncode`` dropped).
+        the sanitized hook JSON output (``_stderr``/``_returncode`` dropped),
+        PLUS ``conflict_logged`` -- but ONLY when ``True``. Omitting the key
+        rather than always writing ``False`` keeps every case that predates
+        this instrumentation (none of which triggers a conflict-log entry)
+        byte-identical after regeneration; a comparison reads a missing key
+        as ``False`` via ``dict.get`` (see :func:`compare_e2e_goldens`), so
+        the two representations are equivalent for every purpose that
+        matters here.
     """
     response = {
         key: value
@@ -483,7 +560,15 @@ def e2e_decision_to_golden(
                 hook_specific_output[field_name] = sanitize(
                     hook_specific_output[field_name]
                 )
-    return {"fixture": fixture_id, "tool": tool, "target": target, "response": response}
+    golden: Dict[str, Any] = {
+        "fixture": fixture_id,
+        "tool": tool,
+        "target": target,
+        "response": response,
+    }
+    if conflict_logged:
+        golden["conflict_logged"] = True
+    return golden
 
 
 def generate_e2e_goldens_in_memory(cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -516,9 +601,22 @@ def generate_e2e_goldens_in_memory(cases: List[Dict[str, Any]]) -> List[Dict[str
             for index in indices:
                 case = cases[index]
                 tool, target = case["tool"], case["target"]
+                before = {
+                    stream: _count_stream_log_entries(sandbox, stream)
+                    for stream in _OBSERVED_LOG_STREAMS
+                }
                 hook_result = sandbox.run_hook(build_hook_payload(tool, target))
+                after = {
+                    stream: _count_stream_log_entries(sandbox, stream)
+                    for stream in _OBSERVED_LOG_STREAMS
+                }
                 results[index] = e2e_decision_to_golden(
-                    fixture_id, tool, target, hook_result, sanitize
+                    fixture_id,
+                    tool,
+                    target,
+                    hook_result,
+                    sanitize,
+                    conflict_logged=after["conflict"] > before["conflict"],
                 )
     return results
 
@@ -690,9 +788,11 @@ class E2EHardMismatch:
     One HARD end-to-end difference -- always a test failure.
 
     Attributes:
-        kind: ``"permissionDecision"`` (the decision itself changed) or
+        kind: ``"permissionDecision"`` (the decision itself changed),
             ``"additionalContext_presence"`` (the KEY appeared or disappeared
-            from ``hookSpecificOutput`` -- independent of what its text says).
+            from ``hookSpecificOutput`` -- independent of what its text
+            says), or ``"conflict_logged"`` (a ``ConflictOverride`` was/was
+            not written to the conflict log -- TOO-45 audit follow-up).
         expected: The committed golden's value for *kind*.
         actual: The freshly replayed value for *kind*.
     """
@@ -713,8 +813,11 @@ class E2EComparisonResult:
     two-tier split (see that class's docstring for the rationale), adapted to
     the nested ``hookSpecificOutput`` shape:
 
-    - HARD (:attr:`hard_mismatches`): ``permissionDecision``, and the
-      PRESENCE/ABSENCE of the ``additionalContext`` key.
+    - HARD (:attr:`hard_mismatches`): ``permissionDecision``, the
+      PRESENCE/ABSENCE of the ``additionalContext`` key, and (TOO-45 audit
+      follow-up) the presence/absence of a new ``'conflict'``-stream entry
+      (see :func:`_count_stream_log_entries`) -- presence-only, same
+      rationale as ``additionalContext``'s key.
     - TRACKED (:attr:`prose_diffs`, reusing :class:`ProseDiff`):
       ``permissionDecisionReason``'s text, and ``additionalContext``'s text
       when present on both sides.
@@ -791,6 +894,21 @@ def compare_e2e_goldens(
                     actual=actual_has_context,
                 )
             )
+
+        for kind in ("conflict_logged",):
+            expected_flag = expected_index[key].get(kind, False)
+            actual_flag = actual_index[key].get(kind, False)
+            if expected_flag != actual_flag:
+                result.hard_mismatches.append(
+                    E2EHardMismatch(
+                        fixture=fixture,
+                        tool=tool,
+                        target=target,
+                        kind=kind,
+                        expected=expected_flag,
+                        actual=actual_flag,
+                    )
+                )
 
         expected_reason = expected_hso.get("permissionDecisionReason")
         actual_reason = actual_hso.get("permissionDecisionReason")

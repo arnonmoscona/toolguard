@@ -5187,6 +5187,842 @@
 {"fixture": "realistic", "target": "grep '\"fixture\": \"pattern_forms\"' test/verdict_corpus/goldens.jsonl", "tool": "Bash"}
 {"fixture": "realistic", "target": "grep -n \"other/file.txt\\|scratch/output.txt\" tools/corpus_build.py", "tool": "Bash"}
 {"fixture": "realistic", "target": "uv run ruff format tools/corpus_build.py 2>&1\nuv run ruff check tools/corpus_build.py 2>&1\nuv run python tools/corpus_build.py --extract 2>&1 | tail -4", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/corpus_build.py --generate 2>&1 | tail -6", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: print a compact summary of every e2e golden after fixing the two fixture bugs\n# TOUCHES: reads test/verdict_corpus/e2e_goldens.jsonl; writes nothing\n# INLINE BECAUSE: trivial one-shot report over an already-generated data file\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json\nverdicts = {}\nfor line in open('test/verdict_corpus/e2e_goldens.jsonl'):\n    r = json.loads(line)\n    hso = r['response'].get('hookSpecificOutput', {})\n    v = hso.get('permissionDecision')\n    verdicts[v] = verdicts.get(v, 0) + 1\n    print(f\\\"[{r['fixture']}] {r['tool']}({r['target']!r}) -> {v!r} ctx={'additionalContext' in hso}\\\")\nprint('---')\nprint(verdicts)\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -o '\"chat_id\":\"[0-9-]*\"' /home/tguser/.claude/projects/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9.jsonl 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -o 'chat_id=\"[0-9-]*\"' /home/tguser/.claude/projects/-home-arnon-projects-toolguard/*.jsonl 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "cp test/verdict_corpus/goldens.jsonl /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/goldens_run_a.jsonl\ncp test/verdict_corpus/e2e_goldens.jsonl /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/e2e_goldens_run_a.jsonl\nuv run python tools/corpus_build.py --generate 2>&1 | tail -3\ndiff /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/goldens_run_a.jsonl test/verdict_corpus/goldens.jsonl && echo \"in-process: BYTE-IDENTICAL\"\ndiff /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/e2e_goldens_run_a.jsonl test/verdict_corpus/e2e_goldens.jsonl && echo \"e2e: BYTE-IDENTICAL\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/corpus_build.py --verify 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/unit/test_verdict_corpus.py", "tool": "Read"}
+{"fixture": "realistic", "target": "echo \"=== module inventory by zone ===\" && for z in \"toolguard/*.py\" \"toolguard/parser/*.py\" \"toolguard/tools/*.py\" \"toolguard/scripts/*.py\" \"toolguard/testing/*.py\"; do n=$(ls $z 2>/dev/null | wc -l); l=$(cat $z 2>/dev/null | wc -l); echo \"$(printf '%-24s' \"$z\") modules=$n  loc=$l\"; done\necho\necho \"=== fan-in: how many modules import each core module ===\"\nfor m in config permissions compound resolve hook log_writer rule_entry rule_sort issues constants; do\n  c=$(grep -rl \"from toolguard.$m import\\|from toolguard import.*\\b$m\\b\\|import toolguard.$m\" toolguard --include=\"*.py\" 2>/dev/null | grep -v \"toolguard/$m.py\" | wc -l)\n  echo \"$(printf '%-14s' \"$m\") fan-in=$c\"\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/unit/test_verdict_corpus.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "cd /home/tguser/projects/toolguard\necho \"=== relative imports present? ===\"; grep -rn \"^from \\.\\|^from \\.\\.\" toolguard --include=\"*.py\" | wc -l\necho \"=== absolute toolguard imports ===\"; grep -rn \"^from toolguard\\|^import toolguard\" toolguard --include=\"*.py\" | wc -l\necho \"=== zone inventory ===\"\nfor z in toolguard toolguard/parser toolguard/tools toolguard/scripts toolguard/testing; do\n  n=$(find $z -maxdepth 1 -name \"*.py\" | wc -l); l=$(find $z -maxdepth 1 -name \"*.py\" -exec cat {} + | wc -l)\n  printf '%-20s modules=%-4s loc=%s\\n' \"$z\" \"$n\" \"$l\"\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format test/unit/test_verdict_corpus.py 2>&1\nuv run ruff check test/unit/test_verdict_corpus.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python -m unittest test.unit.test_verdict_corpus -v 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_verdict_corpus.TestVerdictCorpusEndToEnd -v 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"async def\\|await \\|import threading\" tools/corpus_build.py test/verdict_corpus/fixture_loader.py test/unit/test_verdict_corpus.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/README.md", "tool": "Read"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/README.md", "tool": "Edit"}
+{"fixture": "realistic", "target": "# INTENT: re-run the full CP1 gate independently now the agent says the output-seam gap is closed.\n#         All five seeded behaviour changes must now be CAUGHT, including the one that was the\n#         known blind spot. This is the CP1 evidence; the builder's own single check is not it.\n# TOUCHES: TEMPORARILY WRITES toolguard/compound.py, config.py, tools/decision.py, hook.py --\n#         all restored from in-memory bytes with a sha256 proof printed. No git operations.\n# NOT INLINE BECAUSE: mutates four production files and must provably restore them.\nuv run python \"/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutation_gate.py\" 2>&1 | tail -16", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^?? toolguard-memories\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "git ls-files .claude/", "tool": "Bash"}
+{"fixture": "realistic", "target": "git -C \"$(readlink -f .claude)\" rev-parse --show-toplevel 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "readlink -f .claude", "tool": "Bash"}
+{"fixture": "realistic", "target": "git -C /home/tguser/projects/dot_files status --short claude/projects/toolguard/.claude/ 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '/\\[architecture\\]/,/^\\[/p' .pyscn.toml | head -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat ~/.claude/rules/python.md 2>/dev/null | head -100", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat /home/tguser/projects/toolguard/.claude/rules/testing.md 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat .pyscn.toml 2>/dev/null | head -150", "tool": "Bash"}
+{"fixture": "realistic", "target": "find tools -maxdepth 1 -type f | sort && echo \"---\" && cat tools/coverage_stdlib.py | head -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '150,320p' .pyscn.toml", "tool": "Bash"}
+{"fixture": "realistic", "target": "find toolguard -name \"*.py\" | sort", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,40p' toolguard/__init__.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"reason\\.\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '450,470p' toolguard/hook.py; echo ---; sed -n '965,985p' toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"reason\\.\\(split\\|startswith\\|find\\)\\|in reason\\b\" toolguard/*.py toolguard/tools/*.py toolguard/scripts/*.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '210,240p' toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"__iter__\" toolguard/*.py toolguard/tools/*.py toolguard/scripts/*.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"^class.*Decision\\|^class.*Verdict\\|^class.*Resolution\" toolguard/*.py toolguard/tools/*.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '85,230p' toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_bash_permission_detailed\\|resolve_file_path_permission_detailed\" toolguard/ --include=*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^toolguard/resolve.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"resolve_bash_permission_detailed\\|resolve_file_path_permission_detailed\" toolguard/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_bash_permission_detailed\\|resolve_file_path_permission_detailed\" toolguard/hook.py toolguard/testing/sandbox.py toolguard/tools/*.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i \"tools\\.\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" toolguard/tools/decision.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i \"hook\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" toolguard/config_divergence.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" toolguard/auto_migrate.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"toolguard\\.tools\\|from \\.tools\\|import tools\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"migrate_permissions\\|scripts\\.\" toolguard/config_divergence.py toolguard/auto_migrate.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"scripts\" toolguard/config_divergence.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"class ToolPatternLayer\" toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"ToolPatternLayer\" toolguard/config_types.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,60p' tools/check_doc_links.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def main\\|argparse\\|ArgumentParser\\|sys.exit\" tools/check_doc_links.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"add_argument\\|add_subparsers\\|def main\\|__future__\" tools/corpus_build.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"resolve_project_root\\|REPO_ROOT\\|Path(__file__)\" tools/*.py toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git log --oneline -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "git log --format='%s' -50", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -oE 'TOO-[0-9]+'", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,60p' pyproject.toml", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest discover -s test -t . 2>&1 | tail -5", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest discover -s test -t . > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/baseline_test_run.log 2>&1; tail -15 /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/baseline_test_run.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,50p' tools/corpus_build.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^from\\|^import\" toolguard/tools/*.py | grep -v \"^toolguard/tools/__init__\" | sed -n '1,5p'; echo ---; python3 -c \"import tomllib\" 2>&1; uv run python -c \"import sys; print(sys.version)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -c \"import tomllib, sys; print(sys.version)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Write"}
+{"fixture": "realistic", "target": "git -C /home/tguser/projects/toolguard log --oneline", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -n \"def find_iter_shims\" -A 60 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '563,572p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '540,580p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m py_compile tools/architecture_fitness.py && echo COMPILE_OK", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"zone_of\\|removesuffix\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '905,920p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff check tools/architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n 'module = node.module or \"\"' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff check tools/architecture_fitness.py 2>&1; echo \"---format---\"; uv run ruff format tools/architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --layers 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --predicates 2>&1 | head -100", "tool": "Bash"}
+{"fixture": "realistic", "target": "n=$(grep -c \"hookSpecificOutput\\|permissionDecision\\|hook_event_name\\|tool_input\" toolguard/$m.py 2>/dev/null || echo 0)", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"hookSpecificOutput\\|permissionDecision\\|hook_event_name\\|tool_input\" toolguard/$m.py 2>/dev/null || echo 0", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"hookSpecificOutput\\|permissionDecision\\|hook_event_name\\|tool_input\" toolguard/$m.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def \\|^ def \" toolguard/log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"hookSpecificOutput\\|permissionDecision\\|hook_event_name\\|tool_input\" toolguard/compound.py toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^\\s+\\w+:|^def|\\) ->\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def find_reason_parsing_sites\" -A 45 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '720,740p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format tools/architecture_fitness.py 2>&1; uv run ruff check tools/architecture_fitness.py 2>&1; uv run python tools/architecture_fitness.py --predicates 2>&1 | sed -n '/R3/,/R5/p'", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --metrics 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "cp -v \"$(readlink -f .claude)/toolguard_hook.toml\" tmp/too-45-guard-backups/project.toolguard_hook.toml", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/tmp/too-45-guard-backups/README.md", "tool": "Write"}
+{"fixture": "realistic", "target": "grep -n \"coupled_100pct\\|def compute_metrics\\|def render_metrics_text\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"coupled_100pct_pairs\\]:\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1180,1200p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format tools/architecture_fitness.py >/dev/null 2>&1; uv run ruff check tools/architecture_fitness.py; time uv run python tools/architecture_fitness.py --metrics 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\\| from\\| import\" toolguard/parser/multiline.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i command_extractor", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\\| from\\| import\" toolguard/parser/command_extractor.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i multiline", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class \\|^def \" toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"^ def \" toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --guard --since HEAD --no-lint 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --guard --since HEAD 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^ def \" toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_permission_detailed\" toolguard --include=\"*.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^from toolguard\\|^import toolguard\" toolguard/compound.py toolguard/resolve.py toolguard/permissions.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i corpus", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _run_git\\|^def _changed_paths_since\\|^def _test_files_at_ref\\|^def _test_files_now\\|^def run_guard\\|^def _project_dependencies\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_run_git(\\[\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"build_import_graph()\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1349,1410p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1410,1425p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format tools/architecture_fitness.py && uv run ruff check tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --layers 2>&1; echo \"exit=$?\"; uv run python tools/architecture_fitness.py --guard --no-lint 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,30p' test/unit/test_hook.py 2>/dev/null | head -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" test/unit/test_tools_corpus.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"import tools\\b\\|from tools\\b\\|tools\\.corpus_build\\|tools\\.check_doc_links\" test/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -c \"\nimport sys\nsys.path.insert(0, '.')\nimport tools.architecture_fitness as af\nprint(af.REPO_ROOT)\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class Test\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Write"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_architecture_fitness -v 2>&1 | tail -100", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def extract_toolguard_imports\\|extract_toolguard_imports(\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '295,320p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '370,390p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_architecture_fitness -v 2>&1 | tail -80", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"extract_toolguard_imports(root\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "python3 - <<'EOF' 2>&1 || true\nEOF\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Read"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_architecture_fitness -v 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_main_layers_mode_smoke\\|test_main_requires_at_least_one_mode\" -A 12 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\\|    import io\\|    import json as json_module\\|    from contextlib\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"        import io\\|        from contextlib\\|        import json as json_module\\|json_module\\.loads\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format tools/architecture_fitness.py test/unit/test_architecture_fitness.py 2>&1; uv run ruff check tools/architecture_fitness.py test/unit/test_architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^Ran \\|^OK\\|^FAILED\\|^ERROR\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_test_run.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format --check . 2>&1 | tail -20; echo \"---check---\"; uv run ruff check . 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/check_doc_links.py 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --guard --since HEAD 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --layers --predicates --metrics --guard --no-lint --json > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_json.json 2>&1; echo \"exit=$?\"; uv run python -c \"\nimport json\ndata = json.load(open('/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_json.json'))\nprint(sorted(data.keys()))\nprint(sorted(data['predicates'].keys()))\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"async def\\|await \\|threading\\.\" /home/tguser/projects/toolguard/tools/architecture_fitness.py /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^ import \\|^ import \\|^ from \\|^ from \" /home/tguser/projects/toolguard/tools/architecture_fitness.py /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_ticket_token\" -B2 -A6 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _ticket_token\" -B3 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_architecture_fitness 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python - <<'PY'\nimport ast\ntree = ast.parse(open(\"tools/architecture_fitness.py\").read())\nmissing = []\nfor node in ast.walk(tree):\n    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):\n        if not (node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant) and isinstance(node.body[0].value.value, str)):\n            missing.append((node.name, node.lineno))\nprint(missing)\nPY", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def strongconnect\\|def longest_from\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format tools/architecture_fitness.py >/dev/null && uv run ruff check tools/architecture_fitness.py && uv run python -m unittest test.unit.test_architecture_fitness 2>&1 | tail -6", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python - <<'PY'\nimport ast\ntree = ast.parse(open(\"test/unit/test_architecture_fitness.py\").read())\nmissing = []\nfor node in ast.walk(tree):\n    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):\n        if not (node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant) and isinstance(node.body[0].value.value, str)):\n            missing.append((node.name, node.lineno))\nprint(missing)\nPY", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _arch\" -A3 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format test/unit/test_architecture_fitness.py >/dev/null && uv run ruff check test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^Ran \\|^OK\\|^FAILED\\|^ERROR\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_test_run2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format --check . 2>&1 | tail -5\necho \"---\"\nuv run ruff check . 2>&1 | tail -5\necho \"---doc links---\"\nuv run python tools/check_doc_links.py 2>&1\necho \"---dogfood guard---\"\nuv run python tools/architecture_fitness.py --guard --since HEAD 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"^import tools\\b\\|^from tools\\b\\|^import tools\\.\\|^from tools\\.\" toolguard/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestSmokeAgainstRealTree\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format test/unit/test_architecture_fitness.py >/dev/null && uv run ruff check test/unit/test_architecture_fitness.py && uv run python -m unittest test.unit.test_architecture_fitness 2>&1 | tail -8", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^Ran \\|^OK\\|^FAILED\\|^ERROR\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/final_test_run.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --layers 2>&1\necho \"====================\"\nuv run python tools/architecture_fitness.py --predicates 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --metrics 2>&1 | head -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "date +\"%H:%M\"; wc -l tools/architecture_fitness.py test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --layers 2>&1 | tail -25", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --predicates 2>&1 | head -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --metrics 2>&1 | head -45", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --guard 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"warning\" toolguard/resolve.py toolguard/compound.py toolguard/config_types.py --include=\"*.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^\\s*#\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i \"field\\|: str\\|Optional\\|def \\|warnings:\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"fallback_warning\\|warnings:\\|warning:\" toolguard/resolve.py toolguard/config_types.py toolguard/tools/decision.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"fallback_warning\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"\\-\\-eval\\|permissionDecision\\|def main\\b\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '540,660p' /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '660,730p' /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def create_hook_output\" -A 30 /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "command -v toolguard; ls -la ~/.local/bin/toolguard 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "printf '{\"session_id\":\"guard\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git clean -fdx\"},\"cwd\":\"/home/tguser/projects/toolguard\"}' | ~/.local/bin/toolguard --eval", "tool": "Bash"}
+{"fixture": "realistic", "target": "for spec in \\\n  'Bash|{\"command\":\"git stash\"}|deny' \\\n  'Bash|{\"command\":\"git commit --amend\"}|deny' \\\n  'Bash|{\"command\":\"git rm -r toolguard/tools\"}|deny' \\\n  'Bash|{\"command\":\"git bisect start\"}|deny' \\\n  'Bash|{\"command\":\"git commit -m x\"}|allow' \\\n  'Bash|{\"command\":\"git stash list\"}|allow' \\\n  ; do\n  IFS='|' read -r tool input expect <<< \"$spec\"\n  result=$(printf '{\"session_id\":\"guard\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"%s\",\"tool_input\":%s,\"cwd\":\"/home/tguser/projects/toolguard\"}' \"$tool\" \"$input\" | ~/.local/bin/toolguard --eval)\n  echo \"expect=$expect -> $result\" | head -c 300\n  echo\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "for spec in \\\n  'Write|{\"file_path\":\"/home/tguser/projects/toolguard/logs/probe.md\"}|deny' \\\n  'Edit|{\"file_path\":\"/home/tguser/projects/toolguard/.claude/toolguard_hook.toml\"}|deny' \\\n  'Write|{\"file_path\":\"/home/tguser/.claude/settings.json\"}|deny' \\\n  'Write|{\"file_path\":\"/home/tguser/projects/toolguard/toolguard/compound.py\"}|allow' \\\n  'Read|{\"file_path\":\"/home/tguser/projects/toolguard/logs/probe.md\"}|allow' \\\n  ; do\n  IFS='|' read -r tool input expect <<< \"$spec\"\n  result=$(printf '{\"session_id\":\"guard\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"%s\",\"tool_input\":%s,\"cwd\":\"/home/tguser/projects/toolguard\"}' \"$tool\" \"$input\" | ~/.local/bin/toolguard --eval)\n  echo \"expect=$expect -> $result\" | head -c 260\n  echo\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"^from toolguard\\.\\(config\\|permissions\\|compound\\|resolve\\|config_types\\|rule_entry\\|rule_sort\\)\\b\\|^from toolguard import \\(config\\|permissions\\|compound\\|resolve\\)\\b\" toolguard/tools toolguard/scripts --include=\"*.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rl \"^from toolguard\\.\\(config\\|permissions\\|compound\\|resolve\\|config_types\\|rule_entry\\|rule_sort\\)\\b\\|^from toolguard import \\(config\\|permissions\\|compound\\|resolve\\)\\b\" toolguard/tools toolguard/scripts --include=\"*.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n '``--guard``' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^@dataclass\\nclass GuardReport\\|class GuardReport\\|^def run_guard\\|^def _project_dependencies\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def run_guard\" -A 90 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1570,1650p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def render_guard_text\" -A 12 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def main\" -A 70 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1778,1810p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format tools/architecture_fitness.py 2>&1; uv run ruff check tools/architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --guard-canaries-only 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --guard-canaries-only --json 2>&1 | uv run python -c \"\nimport json, sys\ndata = json.load(sys.stdin)\ng = data['guard']\nprint('ok:', g['ok'])\nprint('warnings:', g['warnings'])\nfor r in g['canary_results']:\n    print(r['tool'], r['target'], r['expected'], r['actual'], r['error'])\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --guard 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^import\\|^from\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _commit_all\" -A 10 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestGuard\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class Test\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1040,1070p' /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"af.run_guard(\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python - <<'EOF'\nimport re\npath = \"test/unit/test_architecture_fitness.py\"\ntext = open(path, encoding=\"utf-8\").read()\nold = \"report = af.run_guard(since=base, run_lint=False, repo_root=root)\"\nnew = \"report = af.run_guard(\\n                since=base, run_lint=False, repo_root=root, run_canaries=False\\n            )\"\ncount = text.count(old)\nprint(\"occurrences:\", count)\ntext = text.replace(old, new)\nopen(path, \"w\", encoding=\"utf-8\").write(text)\nEOF", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"run_canaries=False\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format test/unit/test_architecture_fitness.py 2>&1; uv run ruff check test/unit/test_architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestGuardIntegration\" -A5 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_run_guard_runs_on_real_repo_without_lint\" -A 10 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_main_requires_at_least_one_mode\" -B2 -A15 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format test/unit/test_architecture_fitness.py tools/architecture_fitness.py 2>&1\nuv run ruff check test/unit/test_architecture_fitness.py tools/architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_architecture_fitness -v 2>&1 | tail -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^Ran \\|^OK\\|^FAILED\\|^ERROR\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/final_test_run3.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"async def\\|await \\|threading\\.\" tools/architecture_fitness.py test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^ import \\|^ import \\|^ from \\|^ from \" tools/architecture_fitness.py test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --guard --since HEAD 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/architecture_fitness.py --guard --no-lint 2>&1 >/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --guard-canaries-only 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A6 \"^GUARD_CANARIES\" tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/canary_detect_test.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: verify the new canary check actually DETECTS a mismatch against the live config, not\n#         just that it passes. Cannot test by deleting a deny rule -- the TOO-45 guards lock me\n#         out of both permission files -- so instead flip one canary EXPECTATION and confirm the\n#         tool reports the disagreement and names the case.\n# TOUCHES: TEMPORARILY WRITES tools/architecture_fitness.py, restored from in-memory bytes with a\n#         sha256 proof. Reads the live permission config via the installed hook. No git ops.\n# NOT INLINE BECAUSE: mutates a repo file and must provably restore it.\nuv run python \"/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/canary_detect_test.py\" 2>&1 | tail -14", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -nE \"^\\s+\\w+:\\s|^class|^\\s{4}[a-z_]+:\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A12 \"^class SubMatch\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^\\s*[0-9]+-\\s+[a-z_]+:\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^\\s{4}[a-z_]+:\\s*(str|bool|Optional|List)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"FileResolution(\\|BashResolution(\" toolguard/*.py toolguard/tools/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"class \\|:class:\\|#\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_matched_rule_for_single_command\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -B4 -A12 \"_matched_rule_for_single_command(reason)\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_log_allowed_command(\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -B12 \"_log_allowed_command(\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^[0-9]+[-:]\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -nE \"def |sub_matches|if |else|for |matched_rule|log_command|Args|:param\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A25 \"^def _parse_compound_match_details\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -nE \"reason|split|startswith|for |return|rindex|marker|\\\"\\\"\\\"\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "wc -l toolguard/resolve.py toolguard/hook.py toolguard/config.py toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_combine_strictest\\|def resolve_compound_permission_detailed\\|def resolve_compound_permission\\b\" /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def apply_parse_failure_floor\\|def resolved_undecidable_fallback\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_parse_compound_match_details\\|_COMPOUND_MATCH_PATTERN\\|_reason_suffix_or_placeholder\\|_matched_rule_for_single_command\\|fallback_kind_for_reason\\|_log_allowed_command\\|def _handle_file_path_tool\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_resolve_permission_detailed_unclamped\\|matched_rule\\|matched_pattern\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def fallback_kind_for_reason\" -A 40 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_resolve_leaf_detailed\\|fallback_kind\" /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_apply_undecidable_floor\" -A 30 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_log_allowed_command\\|_parse_compound_match_details\" /home/tguser/projects/toolguard/test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_log_non_allow_decision\\b\" /home/tguser/projects/toolguard/toolguard/ /home/tguser/projects/toolguard/test/unit/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,40p' /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1,45p' /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest discover -s test -t . > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/baseline_test.log 2>&1; echo \"EXIT: $?\"; tail -15 /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/baseline_test.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^Ran |^OK|^FAILED|Tests run\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/baseline_test.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m py_compile toolguard/resolve.py && uv run ruff check toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_resolve test.unit.test_hook 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_verdict_corpus 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"re\\.\\|^import re\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_log_allowed_command(\\|_log_non_allow_decision(\\|_handle_command_tool\\|_handle_file_path_tool\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m py_compile toolguard/hook.py && uv run ruff check toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_hook test.unit.test_resolve 2>&1 | tail -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestParseCompoundMatchDetails\\|class TestLogAllowedCommand\\|class TestHookArgparseAndIsatty\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"FALLBACK_ALLOW_PLACEHOLDER\\|^from toolguard\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_hook 2>&1 | tail -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_multi_leaf_reason_round_trips_through_hooks_own_log_breakdown\\|class TestAuditLogMatchedRuleNeverFabricated\\|_logged_rules\\|class TestAuditLogViolatedRuleNeverFabricated\\|_log_and_capture\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_log_non_allow_decision(\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_resolve -v 2>&1 | tail -80", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"FALLBACK_ALLOW_PLACEHOLDER\\s*=\\|FALLBACK_DENY_PLACEHOLDER\\s*=\" /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"bash_parser\\|generated\\|GENERATED\\|exclude\" tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -inE \"generat|canopy|do not edit|auto\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"SubMatch\\|^import re\\|re\\.compile\\|re\\.\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_log_allowed_command(\" -A 10 /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestLogAllowedCommand\\|class TestHookArgparseAndIsatty\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m py_compile test/unit/test_hook.py && uv run python -m unittest test.unit.test_hook 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"sub_matches=result.sub_matches\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_multi_leaf_fallback_allow_leaf_is_structurally_ruleless\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m py_compile test/unit/test_resolve.py test/unit/test_hook.py && uv run python -m unittest test.unit.test_resolve test.unit.test_hook 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^Ran |^OK|^FAILED\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_test_after.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_verdict_corpus -v 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --guard 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --predicates 2>&1 | tail -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/corpus_build.py --verify 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format toolguard/resolve.py toolguard/hook.py test/unit/test_hook.py test/unit/test_resolve.py && uv run ruff check toolguard/resolve.py toolguard/hook.py test/unit/test_hook.py test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^Ran |^OK|^FAILED\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_test_final.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff --stat toolguard/ test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"cannot be overridden\" /home/tguser/projects/toolguard/test/unit/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"violated_rules\\|matched_rule\\|log_command\" /home/tguser/projects/toolguard/test/unit/test_hard_deny.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"tracked_field\\|TRACKED_FIELD\\|violated_rules\\|matched_rule\" /home/tguser/projects/toolguard/test/unit/test_verdict_corpus.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"tracked\\|reason\\b\\|additional_context\\|provenance\" /home/tguser/projects/toolguard/tools/corpus_build.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m py_compile toolguard/resolve.py && uv run ruff format toolguard/resolve.py && uv run ruff check toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^Ran |^OK|^FAILED\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/full_test_v2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "git status --short toolguard/ test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "git status --short test/ toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff test/unit/test_hook.py test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"List\\[\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff check toolguard/resolve.py toolguard/hook.py test/unit/test_hook.py test/unit/test_resolve.py toolguard/config.py toolguard/config_types.py && uv run ruff format --check toolguard/resolve.py toolguard/hook.py test/unit/test_hook.py test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -B6 -A14 \"hard.deny\\|hard_deny\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -A30 \"_log_non_allow_decision\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A8 \"def _check_file_path_hard_deny\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"Returns|return|Tuple|pattern\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -B4 -A12 \"hard_deny_additional_context\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A22 \"^def _log_non_allow_decision\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"violated|matched_rule|reason|log_command|or \"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"iter_python_files(\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n \"$((l-8)),$((l+1))p\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "(l-8)", "tool": "Bash"}
+{"fixture": "realistic", "target": "l-8", "tool": "Bash"}
+{"fixture": "realistic", "target": "(l+1)", "tool": "Bash"}
+{"fixture": "realistic", "target": "l+1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def \\|iter_python_files\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "awk 'NR<=551 && /^def /{name=$0; line=NR} END{}' /home/tguser/projects/toolguard/tools/architecture_fitness.py\nfor l in 551 638 701 877; do\n  awk -v L=$l 'NR<=L && /^def /{name=$0} NR==L{print L\": \"name}' /home/tguser/projects/toolguard/tools/architecture_fitness.py\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "rm -rf /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3 && cp -r /home/tguser/projects/toolguard /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3 && echo done", "tool": "Bash"}
+{"fixture": "realistic", "target": "cd /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"additionalContext\\|additional_context\" --include=\"*.py\" toolguard/ test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/rule_entry.py", "tool": "Read"}
+{"fixture": "realistic", "target": "head -3 /home/tguser/projects/toolguard/toolguard/parser/bash_parser.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"additional_context\\|additionalContext\\|ADDITIONAL_CONTEXT\" toolguard/compound.py toolguard/resolve.py toolguard/hook.py toolguard/log_writer.py toolguard/config.py toolguard/config_types.py toolguard/config_write_guard.py toolguard/toml_scan.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "for l in 370 456 586 616 703 766 900 942 1408; do\n  awk -v L=$l 'NR<=L && /^def /{name=$0} NR==L{print L\": \"name}' /home/tguser/projects/toolguard/tools/architecture_fitness.py\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/resolve.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/compound.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/log_writer.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -n \"^def find_verdict_types\\|^def find_iter_shims\\|^def find_reason_parsing_sites\\|^VERDICT_NAME_RE_WORDS\\|^_REASON_STRING_METHODS\\|^def compute_predicates\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"iter_python_files(toolguard_dir)\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "for l in 370 607 747 810 944 986; do\n  awk -v L=$l 'NR<=L && /^def /{name=$0} NR==L{print L\": \"name}' /home/tguser/projects/toolguard/tools/architecture_fitness.py\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"R3_SANCTIONED_SITES\\s*=\\|_REASON_STRING_METHODS\\s*=\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_preview_additional_context\\|_LOG_CONTEXT_PREVIEW_WORDS\" test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"ResolvedDecision(\" toolguard/ test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"def \\|class \\|:param\\|Optional\\[.ResolvedDecision\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/rule_entry.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/config_types.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"^def compute_predicates\" -A 60 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1108,1145p' /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/config.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/resolve.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n '``--predicates``' -A 6 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def production_files\\|production_files(\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def list_generated_files\" -A 12 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/compound.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"^from typing import\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def compute_metrics\" -A 25 /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"return {\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --predicates 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_resolve_leaf\\b\" test/ toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"_resolve_leaf_detailed\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_parse_compound_match_details\\|_COMPOUND_MATCH_PATTERN\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_resolve_leaf(\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i hook", "tool": "Bash"}
+{"fixture": "realistic", "target": "git -C /home/tguser/projects/toolguard diff --stat HEAD -- toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git -C /home/tguser/projects/toolguard log --oneline -5 -- toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _combine_strictest\" -A 100 toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"reason_body\\|reason\\.split\\|reason\\.startswith\" /home/tguser/projects/toolguard/toolguard/resolve.py /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def check_compound_permission\\|^def resolve_compound_permission\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_compute_metrics_runs_on_real_repo\\|test_assembles_all_predicate_keys\" -A 20 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_compound_permission_detailed\\|resolve_compound_permission(\\|check_compound_permission(\" test/*.py test/unit/*.py toolguard/*.py toolguard/**/*.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"def resolve_compound_permission\\|def check_compound_permission\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n '\"parser\"' /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestImportGraphExtraction\" /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFindVerdictTypes\" -A 20 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "toolguard.config_types\" 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFindIterShims\" -A 3 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/hook.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFindParallelArrays\" -A 35 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _log_non_allow_decision\" -A 90 toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFindReasonParsingSites\" -A 100 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_log_conflict_override\\|_log_fallback_allow_warning\\|log_command(\\|_log_allowed_command(\\|_log_non_allow_decision(\\|result.additional_context\\|result.matched_rule\\|return result.decision\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFindPrivateImports\" -A 60 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFindEnrichmentFootprint\" -A 20 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/log_writer.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"test_production_files_filters_non_toolguard_paths\" -A 12 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestMetricsIntegration\" -A 40 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_assembles_all_predicate_keys\" -A 15 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_compute_metrics_runs_on_real_repo\" -A 20 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^(FAIL|ERROR|OK|Ran |FAILED)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_compute_predicates_runs_on_real_tree\" -A 12 /home/tguser/projects/toolguard/test/unit/test_architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_known_enrichment_keys_holds_additional_context_only\" -A 20 test/unit/test_rule_entry.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format test/unit/test_architecture_fitness.py 2>&1\nuv run ruff check test/unit/test_architecture_fitness.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_rule_entry.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_rule_entry.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"^Ran \\|^OK\\|^FAILED\\|^ERROR\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/final_test_run4.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestLogAllowedCommand\" -A 5 test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_hook.py", "tool": "Read"}
+{"fixture": "realistic", "target": "uv run ruff format --check . 2>&1 | tail -3\necho \"---\"\nuv run ruff check . 2>&1 | tail -3", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --layers 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_hook.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "uv run python tools/check_doc_links.py 2>&1\necho \"---dogfood guard against HEAD---\"\nuv run python tools/architecture_fitness.py --guard --since HEAD 2>&1; echo \"exit=$?\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class Test.*AdditionalContext\\|def test.*additional_context\" test/unit/test_rule_entry.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def test.*additional_context\\|class Test.*CreateHookOutput\\|class Test.*additional\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"additionalContext\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_accumulate_contexts\\|accumulated\" test/unit/test_compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"additional_context\" test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"audit_note\\|auditNote\" toolguard/ test/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_resolve.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -n \"^def _make_config\" -A 40 test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class Test\" test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff --stat toolguard/ test/unit/test_hook.py test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_resolve.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"matches allow pattern\\|matches deny pattern\\|matches ask pattern\\|Command matches\\|Path matches\" /home/tguser/projects/toolguard/toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff toolguard/ test/unit/test_hook.py test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/.claude/projects/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/tool-results/bx6f6kus8.txt", "tool": "Read"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --predicates 2>&1 | head -80", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '555,610p' toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_check_file_path_hard_deny\" -A 60 toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"additional_context\" test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_combine_strictest\" -A 80 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _check_file_path_hard_deny\" -A 80 toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def fallback_kind_for_reason\" -A 60 toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_log_writer.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -n \"def _combine_strictest\" /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/test/unit/test_log_writer.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"class Sandbox\" -A 40 toolguard/testing/sandbox.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1100,1200p' test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_repro_config\" -A 40 test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_matched_rule.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: probe what the NEW BashResolution.matched_rule field holds for an ask-floor\n#         escape-hatch leaf, where the escape hatch decided and no rule did. Judging\n#         whether the new field's documented contract (\"the deciding rule\") holds.\n# TOUCHES: reads test/unit/test_resolve.py + toolguard/*.py via import; writes nothing\n# NOT INLINE BECAUSE: needs a fixture-built Configuration across 4 fallback values x 3\n#         commands; too long to read as an inline argument\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_matched_rule.py 2>&1 | head -80", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^from toolguard\\|^import\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"matched_rule\" /home/tguser/projects/toolguard/toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"matched_rule\\|split(\\\": \\\"\" /home/tguser/projects/toolguard/toolguard/tools/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _resolve_leaf_detailed\" -A 90 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"matched_rule\" toolguard/tools/ toolguard/testing/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"decision\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"SubMatch(\" -A 8 toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_append_provenance\" -A 30 /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_check_file_path_hard_deny\" toolguard/ test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^toolguard/resolve.py:4[0-9][0-9]\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _make_config\" -A 45 /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "ls -la /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/ 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "cd /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3 && for f in rule_entry.py config_types.py config.py resolve.py compound.py hook.py log_writer.py; do\n  echo \"=== toolguard/$f ===\"\n  diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | diffstat 2>/dev/null || diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c \"^[+-]\"\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_probe_r3.py", "tool": "Write"}
+{"fixture": "realistic", "target": "git diff -U0 toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -vE \"^\\+\\s*(#|\\\"\\\"\\\"|$)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -vE \"^\\+\\s*[A-Za-z\\`:*(-]\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -cE \"^\\+[^+]\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "add=$(diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c '^+[^+]')", "tool": "Bash"}
+{"fixture": "realistic", "target": "diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c '^+[^+]'", "tool": "Bash"}
+{"fixture": "realistic", "target": "diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c '^+[^+]'", "tool": "Bash"}
+{"fixture": "realistic", "target": "del=$(diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c '^-[^-]')", "tool": "Bash"}
+{"fixture": "realistic", "target": "diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c '^-[^-]'", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c '^-[^-]'", "tool": "Bash"}
+{"fixture": "realistic", "target": "total_add=$((total_add+add))", "tool": "Bash"}
+{"fixture": "realistic", "target": "(total_add+add)", "tool": "Bash"}
+{"fixture": "realistic", "target": "total_add+add", "tool": "Bash"}
+{"fixture": "realistic", "target": "total_del=$((total_del+del))", "tool": "Bash"}
+{"fixture": "realistic", "target": "(total_del+del)", "tool": "Bash"}
+{"fixture": "realistic", "target": "total_del+del", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: compare the pre-change reason-string extraction with the new structured\n#         matched_rule field, to find where the audit-log value silently differs\n# TOUCHES: reads toolguard/**/*.py (imports only); writes nothing\n# NOT INLINE BECAUSE: ~100 lines building several Configuration fixtures and\n#         iterating command shapes; too long to read inline\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_probe_r3.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "diff -rq /home/tguser/projects/toolguard/toolguard/ /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3/toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^Only in /tmp.*verdict_corpus\\|test_architecture_fitness\\|test_verdict_corpus\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/split_diff.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: split the R3 production diff into executable-code lines vs docstring/comment lines,\n#         to size the change honestly (the +264/-99 headline may be mostly prose)\n# TOUCHES: runs `git diff -U0 toolguard/`; writes nothing\n# NOT INLINE BECAUSE: needs triple-quote state tracking across the diff stream, not a grep\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/split_diff.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_probe_r3b.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: same old-vs-new matched_rule comparison, for the FILE-PATH resolver\n#         (allow, deny, and hard_deny shapes), which the first probe missed\n# TOUCHES: reads toolguard/**/*.py (imports only); writes nothing\n# NOT INLINE BECAUSE: builds a Configuration fixture and loops path shapes; too long inline\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_probe_r3b.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "timeout 300 uv run python -m unittest discover -s test -t . 2>&1 | tail -5", "tool": "Bash"}
+{"fixture": "realistic", "target": "cd /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3 && for f in rule_entry.py config_types.py config.py resolve.py compound.py hook.py log_writer.py; do\n  add=$(diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c '^+[^+]')\n  del=$(diff -u \"/home/tguser/projects/toolguard/toolguard/$f\" \"toolguard/$f\" | grep -c '^-[^-]')\n  echo \"$f: +$add -$del\"\ndone", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep '^+[^+]'", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -vE '^\\+\\s*($|#|\"\"\"|\\.\\.|:|-|[A-Za-z][A-Za-z ,\\-`.\\x27]*$)'", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_code_only_diff.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: strip all docstrings via AST from both HEAD and working-tree versions of the\n#         four changed modules and diff the remainder, to measure how much of this\n#         change set is executable code versus prose\n# TOUCHES: reads toolguard/*.py and `git show HEAD:...`; writes nothing\n# NOT INLINE BECAUSE: an ast.NodeTransformer plus a per-file unified diff; not a one-liner\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_code_only_diff.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_probe_r3c.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: check what the new public BashResolution.matched_rule field holds for\n#         undecidable_fallback escape-hatch leaves, where the per-leaf SubMatch\n#         decision is stale relative to the compound verdict\n# TOUCHES: reads toolguard/**/*.py (imports only); writes nothing\n# NOT INLINE BECAUSE: builds Configuration fixtures across three fallback settings\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_probe_r3c.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"asdict\\|BashResolution\\|FileResolution\" /home/tguser/projects/toolguard/toolguard/ --include=*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^/home/tguser/projects/toolguard/toolguard/resolve.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_bash_result_is_fallback_warning\" toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_one\" test/ --include=*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"def resolve_one\\|resolve_one=\" test/ --include=*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_one\" toolguard/ --include=*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_log_allowed_command\\|_matched_rule_for_single_command\\|_reason_suffix_or_placeholder\\|_log_non_allow_decision\" /home/tguser/projects/toolguard/test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "which pyscn 2>&1; sed -n '2402,2500p' /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_one\" test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rnE \"def [a-z_]*resolve_one|resolve_one *=\" test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_one\" toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rnE \"def [a-z_]*resolve_one\" test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rlE \"def [a-z_]*resolve_one\" test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rnE \"def [a-z_]*resolve_one\" test/unit/", "tool": "Bash"}
+{"fixture": "realistic", "target": "MUT=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutcopy\nrm -rf \"$MUT\" && mkdir -p \"$MUT\"\ncp -r /home/tguser/projects/toolguard/toolguard /home/tguser/projects/toolguard/test /home/tguser/projects/toolguard/pyproject.toml \"$MUT\"/ 2>/dev/null\nls \"$MUT\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/review_mutate.py", "tool": "Write"}
+{"fixture": "realistic", "target": "grep -E \"^(OK|FAILED|Ran |FAIL:|ERROR:)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "perl -0pi -e 's/matched_rule=matched_pattern,/matched_rule=None,/' \"$MUT/toolguard/config.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "sub_matches\\),/matched_rule=None,/' \"$MUT/toolguard/resolve.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"matched_rule=None\" \"$MUT/toolguard/config.py\" \"$MUT/toolguard/resolve.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "cd \"$MUT\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_bash_compound_sub_matches_populated\" -A 40 /home/tguser/projects/toolguard/test/unit/test_tools_decision.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn analyze --skip-clones --skip-cbo --min-complexity 8 ./pyscn_scope 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A28 \"def _deciding_sub_match_rule\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git -C /home/tguser/projects/toolguard status --short toolguard/ test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"Matched Rule\" toolguard/ --include=\"*.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest discover -s test -t . > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_full_baseline.log 2>&1; tail -30 /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_full_baseline.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|ERROR:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_full_baseline.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '2660,2670p' /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_full_baseline.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "wc -l /home/tguser/projects/toolguard/toolguard/hook.py /home/tguser/projects/toolguard/toolguard/config.py /home/tguser/projects/toolguard/toolguard/tools/log_harvest.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"matched_rule\\|_reason_suffix_or_placeholder\\|_matched_rule_for_single_command\\|def log_command\\|provenance\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def log_command\\|^ def log_command\" -A 60 /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"def log_command\" /home/tguser/projects/toolguard/toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/toolguard/tools/log_harvest.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -rn \"Matched Rule\\|matched_rule\\|Provenance\\|provenance\" /home/tguser/projects/toolguard/test/unit/test_log_writer.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -i log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_simple_command_logs_matched_rule\" -A 40 /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"resolve_bash_permission_detailed\\|_make_config\\|def _build_config\\|ConfigLayer(\\|Configuration(\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class \\|def test_simple_command_logs_matched_rule\\|def test_compound_command_logs_per_subcommand\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^from toolguard\\|^import toolguard\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"resolve_bash_permission_detailed\\|from toolguard.resolve import\\|from toolguard.resolve\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class \\|assertIn\\|assertIsNotNone\\|assertEqual\\|assertIsNone\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class Test\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"assertIsNotNone.*matched_rule\\|hard_deny.*matched_rule\\|matched_rule.*hard_deny\" /home/tguser/projects/toolguard/test/unit/test_resolve.py /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"curl\" /home/tguser/projects/toolguard/test/unit/test_resolve.py /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"hard_deny\" /home/tguser/projects/toolguard/test/unit/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class Test\\|hard_deny\\|matched_rule\" /home/tguser/projects/toolguard/test/unit/test_hard_deny.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"resolve_bash_permission_detailed\\|class Test\\|BashResolution\\|\\.matched_rule\" /home/tguser/projects/toolguard/test/unit/test_hard_deny.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_strip_tool_wrapper\" -A 30 /home/tguser/projects/toolguard/toolguard/rule_entry.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_matched_rule.py <<'PY'\n# INTENT: probe the exact matched_rule/reason/provenance values resolve_bash_permission_detailed\n# produces for a few scenarios (plain allow, deny, hard-deny, file allow, escape-hatch) so tests\n# can pin exact-equality assertions instead of substring checks.\n# TOUCHES: reads nothing on disk (in-memory Configuration only); writes nothing.\nfrom pathlib import Path\nfrom types import MappingProxyType\n\nfrom toolguard.config import ConfigLayer, Configuration, Provenance\nfrom toolguard.resolve import resolve_bash_permission_detailed, resolve_file_path_permission_detailed\n\n\ndef layer(specificity, content):\n    return ConfigLayer(\n        Provenance(\"project\", \"toolguard_hook\", \"toml\", Path(\"/p/toolguard_hook.toml\"), specificity),\n        MappingProxyType(content),\n    )\n\n\n# 1. plain single-leaf allow\nconfig = Configuration(layers=(layer(0, {\"permissions\": {\"allow\": [\"Bash(ls)\"], \"deny\": []}}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"ls -la\", config, True, hd_deny, hd_allow)\nprint(\"1 allow:\", repr(r.decision), repr(r.matched_rule), repr(r.reason))\n\n# 2. deny\nconfig = Configuration(layers=(layer(0, {\"permissions\": {\"allow\": [\"Bash(*)\"], \"deny\": [\"Bash(rm -rf *)\"]}}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"rm -rf /tmp/x\", config, True, hd_deny, hd_allow)\nprint(\"2 deny:\", repr(r.decision), repr(r.matched_rule), repr(r.reason))\n\n# 3. hard-deny\nconfig = Configuration(layers=(layer(0, {\"hard_deny\": {\"deny\": [\"Bash(curl *)\"]}}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"curl http://x\", config, True, hd_deny, hd_allow)\nprint(\"3 hard-deny:\", repr(r.decision), repr(r.matched_rule), repr(r.reason))\nprint(\"   sub_matches:\", r.sub_matches)\n\n# 4. file-path allow\nconfig = Configuration(layers=(layer(0, {\"permissions\": {\"allow\": [\"Read(/tmp/x/**)\"], \"deny\": []}}),))\nfr = resolve_file_path_permission_detailed(\"Read\", \"/tmp/x/foo.txt\", config)\nprint(\"4 file allow:\", repr(fr.decision), repr(fr.matched_rule), repr(fr.reason))\n\n# 5. escape hatch single-leaf python -c under undecidable_fallback=deny\nconfig = Configuration(layers=(layer(0, {\n    \"undecidable_fallback\": \"deny\",\n    \"permissions\": {\"allow\": [\"Bash(ls)\", \"Bash(python *)\"], \"deny\": []},\n}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed('python -c \"print(1)\"', config, True, hd_deny, hd_allow)\nprint(\"5 escape hatch:\", repr(r.decision), repr(r.matched_rule), repr(r.reason))\n\n# 6. ls && python -c \"print(1)\" under undecidable_fallback=deny (the review's alleged divergence)\nconfig = Configuration(layers=(layer(0, {\n    \"undecidable_fallback\": \"deny\",\n    \"permissions\": {\"allow\": [\"Bash(ls)\", \"Bash(python *)\"], \"deny\": []},\n}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed('ls && python -c \"print(1)\"', config, True, hd_deny, hd_allow)\nprint(\"6 multi-leaf escape hatch:\", repr(r.decision), repr(r.matched_rule), repr(r.reason))\nfor sm in r.sub_matches:\n    print(\"   sub_match:\", sm)\nPY\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_matched_rule.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_combine_strictest\\|_resolve_leaf_detailed\\|def resolve_compound_permission_detailed\" -n /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe2.py <<'PY'\n# INTENT: probe exact matched_rule value for a plain single-leaf allow with a\n# prefix-glob pattern, and the ls:* / rm -rf:* / curl:* colon-glob forms named\n# in the review, to pin exact-equality test assertions.\n# TOUCHES: reads nothing on disk; writes nothing.\nfrom pathlib import Path\nfrom types import MappingProxyType\n\nfrom toolguard.config import ConfigLayer, Configuration, Provenance\nfrom toolguard.resolve import resolve_bash_permission_detailed\n\n\ndef layer(specificity, content):\n    return ConfigLayer(\n        Provenance(\"project\", \"toolguard_hook\", \"toml\", Path(\"/p/toolguard_hook.toml\"), specificity),\n        MappingProxyType(content),\n    )\n\n\nconfig = Configuration(layers=(layer(0, {\"permissions\": {\"allow\": [\"Bash(ls:*)\"], \"deny\": []}}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"ls -la\", config, True, hd_deny, hd_allow)\nprint(\"allow ls:*\", repr(r.decision), repr(r.matched_rule))\n\nconfig = Configuration(layers=(layer(0, {\"permissions\": {\"allow\": [\"Bash(*)\"], \"deny\": [\"Bash(rm -rf:*)\"]}}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"rm -rf /tmp/x\", config, True, hd_deny, hd_allow)\nprint(\"deny rm -rf:*\", repr(r.decision), repr(r.matched_rule))\n\nconfig = Configuration(layers=(layer(0, {\"hard_deny\": {\"deny\": [\"Bash(curl:*)\"]}}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"curl http://x\", config, True, hd_deny, hd_allow)\nprint(\"hard-deny curl:*\", repr(r.decision), repr(r.matched_rule))\nPY\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe2.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"matched_rule=matched_pattern\\|matched_pattern\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe3.py <<'PY'\n# INTENT: probe exact matched_rule for the existing _repro_config's \"ls\" allow\n# and \"rm -rf *\" deny scenarios already used in test_resolve.py, to replace\n# assertIn with assertEqual without guessing the exact string.\n# TOUCHES: reads nothing on disk; writes nothing.\nfrom pathlib import Path\nfrom types import MappingProxyType\n\nfrom toolguard.config import ConfigLayer, Configuration, Provenance\nfrom toolguard.resolve import resolve_bash_permission_detailed\n\n\ndef layer(specificity, content):\n    return ConfigLayer(\n        Provenance(\"project\", \"toolguard_hook\", \"toml\", Path(\"/p/toolguard_hook.toml\"), specificity),\n        MappingProxyType(content),\n    )\n\n\nconfig = Configuration(layers=(layer(0, {\n    \"undecidable_fallback\": \"allow_with_warning\",\n    \"permissions\": {\"allow\": [\"Bash(ls)\", \"Bash(python *)\"], \"deny\": []},\n}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"ls\", config, True, hd_deny, hd_allow)\nprint(\"ls allow:\", repr(r.decision), repr(r.matched_rule))\n\nconfig = Configuration(layers=(layer(0, {\n    \"permissions\": {\"allow\": [\"Bash(*)\"], \"deny\": [\"Bash(rm -rf *)\"]},\n}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed(\"rm -rf /tmp/x\", config, True, hd_deny, hd_allow)\nprint(\"rm -rf deny:\", repr(r.decision), repr(r.matched_rule))\nPY\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe3.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"FileResolution\\|resolve_file_path_permission_detailed\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_deciding_sub_match_rule\\|_deciding_sub_match\\b\" /home/tguser/projects/toolguard/test/ /home/tguser/projects/toolguard/toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"why the line below\\|short comment\\|why it is short\" /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_bash_result_is_fallback_warning\" /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"TOO-45 R3\\|no longer\\|removed that extraction\\|removed the extraction\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^FALLBACK_ALLOW_PLACEHOLDER\\|^FALLBACK_DENY_PLACEHOLDER\\|def fallback_kind_for_reason\" -A 5 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -c \"import toolguard.resolve\" 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|ERROR:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_resolve.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_log_writer -v 2>&1 | tail -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"assert_called_once_with\\|assert_any_call\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"assert_called_once_with\\|assert_any_call\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"_log_non_allow_decision\\|_log_allowed_command\" /home/tguser/projects/toolguard/test/unit/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"assert_called_once_with\" /home/tguser/projects/toolguard/test/unit/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"test_hook.py\\|test_resolve.py\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"mock_log\\b\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def test_\\|mock_log\\.\" /home/tguser/projects/toolguard/test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -B1 \"mock_log\\.\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep \"mock_log\\.\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|ERROR:\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_hook.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe4.py <<'PY'\n# INTENT: probe exact result.matched_rule / provenance.describe_brief() for the\n# new test_simple_command_logs_matched_rule rewrite, so the pinned test uses\n# real, verified values rather than guesses.\n# TOUCHES: reads nothing on disk; writes nothing.\nfrom pathlib import Path\nfrom types import MappingProxyType\n\nfrom toolguard.config import ConfigLayer, Configuration, Provenance\nfrom toolguard.resolve import resolve_bash_permission_detailed\nfrom toolguard.hook import _provenance_brief\n\nconfig = Configuration(\n    layers=(\n        ConfigLayer(\n            Provenance(\"project\", \"toolguard_hook\", \"toml\", Path(\"/p/toolguard_hook.toml\"), 0),\n            MappingProxyType({\"permissions\": {\"allow\": [\"Bash(ls)\"], \"deny\": []}}),\n        ),\n    )\n)\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nresult = resolve_bash_permission_detailed(\"ls\", config, True, hd_deny, hd_allow)\nprint(\"decision:\", result.decision)\nprint(\"matched_rule:\", repr(result.matched_rule))\nprint(\"reason:\", repr(result.reason))\nprint(\"provenance:\", result.provenance)\nprint(\"provenance_brief:\", repr(_provenance_brief(result.provenance)))\nPY\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe4.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_hook.TestLogAllowedCommand -v 2>&1 | tail -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|ERROR:\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_hook2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_resolve.TestAuditLogMatchedRuleNeverFabricated test.unit.test_resolve.TestAuditLogViolatedRuleNeverFabricated -v 2>&1 | tail -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat > /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe5.py <<'PY'\n# INTENT: probe BashResolution.matched_rule for the single-leaf escape-hatch\n# allow case (undecidable_fallback=allow_with_warning) to confirm it is the\n# real (misleading) stub match, distinct from the deny case's None.\n# TOUCHES: reads nothing on disk; writes nothing.\nfrom pathlib import Path\nfrom types import MappingProxyType\n\nfrom toolguard.config import ConfigLayer, Configuration, Provenance\nfrom toolguard.resolve import resolve_bash_permission_detailed\n\n\ndef layer(specificity, content):\n    return ConfigLayer(\n        Provenance(\"project\", \"toolguard_hook\", \"toml\", Path(\"/p/toolguard_hook.toml\"), specificity),\n        MappingProxyType(content),\n    )\n\n\nconfig = Configuration(layers=(layer(0, {\n    \"undecidable_fallback\": \"allow_with_warning\",\n    \"permissions\": {\"allow\": [\"Bash(ls)\", \"Bash(python *)\"], \"deny\": []},\n}),))\nhd_deny, hd_allow = config.hard_deny(\"Bash\")\nr = resolve_bash_permission_detailed('python -c \"print(1)\"', config, True, hd_deny, hd_allow)\nprint(\"decision:\", r.decision, \"matched_rule:\", repr(r.matched_rule), \"provenance:\", r.provenance)\nPY\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe5.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFilePathAdditionalContext\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_resolve.TestFileResolutionMatchedRuleExact -v 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|ERROR:\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_pinning.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"matched_rule=matched_pattern\" toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"matched_rule=reason_with_prov\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\\|^ERROR:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutation_test.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_revert.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_log_writer.TestProvenanceLogging -v 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestFallbackWarningField\" /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_resolve.TestAuditLogProvenanceThreading -v 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_provenance.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"matched_rule:\" /home/tguser/projects/toolguard/toolguard/config_types.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/toolguard/tools/log_harvest.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_tools_log_harvest -v 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"Matched Rule.*\\[.*:.*\\]\\|\\[explicit:\\|\\[project:.*\\]\\`\" /home/tguser/projects/toolguard --include=\"*.md\" --include=\"*.py\" 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"/test/\\|toolguard-memories/\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '370,400p' /home/tguser/projects/toolguard/technical-notes.md\necho \"=== architecture.md ===\"\nsed -n '270,300p' /home/tguser/projects/toolguard/docs/architecture.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_docs.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"EXACTLY\\|can never diverge\\|never diverge\\|cannot diverge\" /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_bash_result_is_fallback_warning\" /home/tguser/projects/toolguard/toolguard/resolve.py /home/tguser/projects/toolguard/toolguard/*.py 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rln \"_deciding_sub_match_rule\\|_bash_result_is_fallback_warning\" /home/tguser/projects/toolguard --include=\"*.py\" --include=\"*.md\" 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_docdrift.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_verdict_corpus 2>&1 | tail -15", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --guard 2>&1 | tail -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format . 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_after_ruff.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -A3 -B3 \"^-.*[a-zA-Z]\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^--$\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/architecture_fitness.py --predicates 2>&1 | tail -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"R3\\b\" /home/tguser/projects/toolguard/tools/architecture_fitness.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/corpus_build.py --verify 2>&1 | tail -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff format . 2>&1 | tail -10 && uv run ruff check . 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n 'ls && python -c' /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def test_compound_leaf_undecidable_deny_logs_the_same_placeholder\" -A 15 /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_resolve.TestAuditLogViolatedRuleNeverFabricated.test_compound_leaf_undecidable_deny_logs_the_same_placeholder -v 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|^OK\\|FAILED\\|^FAIL:\\|^ERROR:\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/test_final.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest test.unit.test_verdict_corpus 2>&1 | tail -5\necho \"=== guard ===\"\nuv run python tools/architecture_fitness.py --guard 2>&1 | tail -5\necho \"=== corpus verify ===\"\nuv run python tools/corpus_build.py --verify 2>&1 | tail -5\necho \"=== ruff ===\"\nuv run ruff format . 2>&1 | tail -5\nuv run ruff check . 2>&1 | tail -5", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"toolguard-memories\\|^M CLAUDE.md\\|^M uv.lock\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: independently verify the acceptance criterion for R3's closure -- make the new\n#         matched_rule field carry a WRONG value and confirm the FULL suite now fails. Before the\n#         follow-up work this mutation left all 2300 tests passing, which was the finding that\n#         reopened the step. Run against the whole suite, not just the corpus.\n# TOUCHES: TEMPORARILY WRITES toolguard/config.py, restored from in-memory bytes with a sha256\n#          proof printed. No git operations.\n# NOT INLINE BECAUSE: mutates a production file and must provably restore it.\nuv run python \"/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutation_gate.py\" matched_rule_wrong_value 2>&1 | tail -8", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff --stat toolguard/ docs/ test/unit/test_hook.py test/unit/test_resolve.py test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff toolguard/resolve.py toolguard/compound.py toolguard/config.py toolguard/config_types.py toolguard/log_writer.py toolguard/tools/log_harvest.py docs/architecture.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff test/unit/test_hook.py test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "cp -r /home/tguser/projects/toolguard /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch 2>/dev/null; ls /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch | head -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff --stat toolguard/ test/ docs/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _deciding_sub_match\" -A 60 toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1640,1790p' /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"provenance\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"provenance\" toolguard/log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '600,830p' /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class SubMatch\" -A 40 /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -i 's/print(f\"    sub_matches/print(f\"    provenance     = {result.provenance!r}\")\\n        print(f\"    sub_matches/' /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_matched_rule.py && echo patched", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -A 6 \"cmd='python -c\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: same probe as above, rerun to view full output (previous grep filter matched nothing)\n# TOUCHES: reads test/unit/test_resolve.py + toolguard/*.py via import; writes nothing\n# NOT INLINE BECAUSE: fixture-built Configuration across 4 fallback values x 3 commands\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_matched_rule.py 2>&1 | head -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/judge_r3_final_probe.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: verify the _deciding_sub_match fix on the final tree, and check whether the NEW\n#         BashResolution.provenance field carries a provenance for a decision the named rule\n#         did not make (the allow-fallback case the agreement check cannot catch)\n# TOUCHES: reads test/unit/test_resolve.py + toolguard/*.py via import; writes nothing\n# NOT INLINE BECAUSE: fixture-built Configuration across 4 fallback values x 3 commands\nTG_ATTEST_READONLY=1 uv run python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/judge_r3_final_probe.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '1000,1180p' /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"fallback_kind_for_reason\" -A 60 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "ls -a /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch | head -20; echo \"---\"; du -sh /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def log_command\" -A 20 toolguard/log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^\\s*[0-9]+[-:]\\s+[a-z_]+:\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "SC=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch; ls -d $SC/.venv 2>&1; python3 --version; ls $SC/toolguard/parser/", "tool": "Bash"}
+{"fixture": "realistic", "target": "SC=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch; ls -d $SC/.venv 2>&1; ls $SC/toolguard/parser/", "tool": "Bash"}
+{"fixture": "realistic", "target": "cd /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/tg-scratch", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python tools/corpus_build.py --verify 2>&1 | tail -6", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"matched_rule=reason_with_prov\" toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff toolguard/compound.py toolguard/tools/log_harvest.py docs/architecture.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutate.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: run a 22-mutation battery against the SCRATCH COPY of toolguard -- patch one line, run the\n#         full unittest suite, restore, and report which mutations survive (= unpinned values)\n# TOUCHES: reads+WRITES only under /tmp/claude-1000/.../scratchpad/tg-scratch (a throwaway copy);\n#          the real /home/tguser/projects/toolguard working tree is NOT touched\n# NOT INLINE BECAUSE: 22 mutation specs plus apply/run/restore logic; far too long to read inline\nTG_INTENT=1 uv run --no-sync python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutate.py 2>&1 | tail -60", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"Matched Rule\" --include=*.py --include=*.md . 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^./logs/\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v test/verdict_corpus", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^./toolguard-memories\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"Matched Rule\" . --exclude-dir=logs --exclude-dir=.git --exclude-dir=toolguard-memories --exclude-dir=verdict_corpus 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"\\.matched_rule\\|matched_rule=\" /home/tguser/projects/toolguard/toolguard/ --include=*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^.*test\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep \"\\.py:\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _combine_strictest\" -A 130 /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '160,215p' /home/tguser/projects/toolguard/toolguard/tools/log_harvest.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"rule_text\" /home/tguser/projects/toolguard/toolguard/ /home/tguser/projects/toolguard/test 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_r3.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: drive the real resolve->hook->log_writer pipeline for 9 scenarios and print the actual\n#         audit-log markdown produced, to check claims about Matched Rule / Provenance field shape\n# TOUCHES: reads the SCRATCH COPY of toolguard; writes only inside a TemporaryDirectory it deletes\n# NOT INLINE BECAUSE: ~130 lines of scenario setup across bash + file-path resolvers\nTG_INTENT=1 uv run --no-sync python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_r3.py 2>&1 | head -140", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_repro_config\" -A 30 /home/tguser/projects/toolguard/test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"undecidable_fallback\\|no_match_fallback\\|log_dir\" probe_r3.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: re-run the same 9-scenario probe with a valid log_dir Path and correct config keys, so the\n#         actual audit-log markdown is produced and printed\n# TOUCHES: reads the SCRATCH COPY of toolguard; writes only inside a TemporaryDirectory it deletes\n# NOT INLINE BECAUSE: ~135 lines of scenario setup across bash + file-path resolvers\nTG_INTENT=1 uv run --no-sync python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/probe_r3.py 2>&1 | head -180", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutate2.py", "tool": "Write"}
+{"fixture": "realistic", "target": "# INTENT: second mutation batch -- target the hook.py wiring sites (_handle_command_tool /\n#         _handle_file_path_tool) that the new tests bypass, to see if the wiring itself is pinned\n# TOUCHES: reads+WRITES only the throwaway scratch copy under /tmp/claude-1000/...; real tree untouched\n# NOT INLINE BECAUSE: 7 multi-line mutation specs plus apply/run/restore logic\nTG_INTENT=1 uv run --no-sync python /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutate2.py 2>&1 | tail -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_handle_command_tool\\|_handle_file_path_tool\" /home/tguser/projects/toolguard/test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def log_command\" -A 20 /home/tguser/projects/toolguard/toolguard/log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"log_command(\" /home/tguser/projects/toolguard/toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn analyze --json --skip-clones --skip-cbo -o /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/pyscn_out /home/tguser/projects/toolguard/toolguard/hook.py /home/tguser/projects/toolguard/toolguard/resolve.py /home/tguser/projects/toolguard/toolguard/log_writer.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn analyze --select complexity --min-complexity 8 --no-open toolguard/hook.py toolguard/resolve.py toolguard/log_writer.py toolguard/config.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"pyscn\" /home/tguser/projects/toolguard/.gitignore", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn complexity --min 8 /home/tguser/projects/toolguard/toolguard/hook.py /home/tguser/projects/toolguard/toolguard/resolve.py /home/tguser/projects/toolguard/toolguard/log_writer.py 2>&1 | head -50", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn --help 2>&1 | sed -n '1,40p'", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn analyze --select complexity --min-complexity 8 --csv --no-open toolguard/hook.py toolguard/resolve.py toolguard/log_writer.py 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -iE \"log_allowed|non_allow|deciding|reason_suffix|matched_rule_for|provenance_brief|resolve_bash|_render_markdown|log_command|resolve_file_path|_resolve_permission_detailed\" /home/tguser/projects/toolguard/.pyscn/reports/analyze_20260804_194908.csv", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat /home/tguser/projects/toolguard/.pyscn/reports/analyze_20260804_194908.csv | head -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "pyscn analyze --select complexity --min-complexity 1 --json --no-open toolguard/hook.py toolguard/resolve.py >/dev/null 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "F=$(ls -t /home/tguser/projects/toolguard/.pyscn/reports/*.json | head -1)", "tool": "Bash"}
+{"fixture": "realistic", "target": "ls -t /home/tguser/projects/toolguard/.pyscn/reports/*.json | head -1", "tool": "Bash"}
+{"fixture": "realistic", "target": "ls -t /home/tguser/projects/toolguard/.pyscn/reports/*.json", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_bash_result_is_fallback_warning\" /home/tguser/projects/toolguard/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"cannot be overridden\" /home/tguser/projects/toolguard/test/", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"Violated Rules\\|violated_rules\" /home/tguser/projects/toolguard/test/unit/test_logging_streams.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"Provenance\\|provenance\" /home/tguser/projects/toolguard/test/unit/test_tools_log_harvest.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "date +\"%H:%M:%S\"; echo \"--- old-code suffix behaviour on the exact reason strings the probe printed ---\"; uv run python -c \"\nreasons = [\n ('compound deny (real rule)', 'Compound command contains denied sub-command: rm foo (Command matches deny pattern: rm *  [project: /p/tg.toml])'),\n ('bash hard deny', 'Compound command contains denied sub-command: curl http://x (Command matches hard_deny pattern: curl:* (cannot be overridden))'),\n ('file hard deny', 'Path matches hard_deny pattern: /etc/** (cannot be overridden)'),\n ('file normal deny', 'Path matches deny pattern: /secrets/**  [project: /p/tg.toml]'),\n ('single-leaf allow', 'Command matches allow pattern: git status  [project: /p/tg.toml]'),\n]\nfor label, r in reasons:\n    old = r.split(': ', 1)[1] if ': ' in r else None\n    print(f'{label:28} OLD -> {old!r}')\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -h \"Violated Rules\" /home/tguser/projects/toolguard/logs/toolguard-2026-08-0*.md 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Compound command contains denied sub-command\" /home/tguser/projects/toolguard/toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '370,400p' /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -B4 -m2 'Violated Rules\\*\\*: `python3 \\*' /home/tguser/projects/toolguard/logs/toolguard-2026-08-0*.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -cE \"^\\s*(#|$)\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/added.txt", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -cE \"^\\s*[a-z_]+ *[:=]|return |def |lines\\.append\" /tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/added.txt", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run ruff check toolguard/ test/unit/test_hook.py test/unit/test_resolve.py test/unit/test_log_writer.py 2>&1 | tail -5; echo \"--- format check ---\"; uv run ruff format --check toolguard/ test/unit/test_hook.py test/unit/test_resolve.py test/unit/test_log_writer.py 2>&1 | tail -5; date +\"%H:%M:%S\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _reason_suffix_or_placeholder\\|def _matched_rule_for_single_command\\|def _provenance_brief\\|def _parse_compound_match_details\\|def _log_allowed_command\\|def _log_non_allow_decision\\|single_provenance = \\|logged_provenance = \\|_log_allowed_command(\\|_log_non_allow_decision(\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def _deciding_sub_match\\|matched_rule: The deciding\\|provenance: The deciding\\|# TOO-45 R3: \\`_check_file_path_hard_deny\\`\\|deciding = _deciding_sub_match\" /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Provenance\\*\\*\\|NOTE: this parameter list\" /home/tguser/projects/toolguard/toolguard/log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"is never\" /home/tguser/projects/toolguard/toolguard/tools/log_harvest.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"field is absent\" /home/tguser/projects/toolguard/docs/architecture.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "echo \"starting sub-agent: feature-coder\"; date +\"%H:%M:%S\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "wc -l toolguard/hook.py toolguard/resolve.py toolguard/log_writer.py toolguard/tools/log_harvest.py docs/architecture.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_handle_command_tool\\|_handle_file_path_tool\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_log_allowed_command\\|_log_non_allow_decision\\|_handle_file_path_tool\\|_provenance_brief\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class Test\\|def test_\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def log_command\" -A 30 toolguard/log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_deciding_sub_match\\b\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"test_provenance_ordering_in_markdown\" -A 40 test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestProvenanceLogging\" -A 5 test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"describe_brief\\|\\[.*:.*\\]\\|reason_with_prov\\|reason +=\\|f\\\"{reason}\" toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"match_details\\|_combine_strictest\\|-> \\|append_provenance\\|matched_rule\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"folded\\|never.*Matched Rule\\|separate field\\|own field\" docs/architecture.md", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"folded back\\|never folded\" toolguard/ docs/ 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"undecidable_fallback\" test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def test_single_leaf_escape_hatch_raw_matched_rule_is_the_misleading_stub_match\\|def test_compound_leaf_undecidable_deny_logs_the_same_placeholder\\|class TestAuditLogViolatedRuleNeverFabricated\\|def test_a_genuine_deny_still_records_its_real_pattern\\|def test_a_genuine_rule_match_still_records_its_pattern\" test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_hook_layer\\b\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_FALLBACK_REASON_MARKERS\" -A 25 toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "TG_ATTEST_READONLY=1 uv run python - __HEREDOC_TO_python__", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"FALLBACK_ALLOW_PLACEHOLDER\\|FALLBACK_DENY_PLACEHOLDER\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^from toolguard.compound import\\|^from toolguard.resolve import\" test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "sed -n '954,1070p' test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _fake_config\" -A 40 test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"\\\"Read(\\|'Read(\\|permissions.*Read\\|Write(\" test/unit/test_resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def resolve_file_path_permission_detailed\" -A 3 toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _deciding_sub_match\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "uv run python -m unittest discover -s test -t . 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/test_out.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestHookArgparseAndIsatty\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^class TestLogAllowedCommand\\|^class TestHookArgparseAndIsatty\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"TestHandleCommandToolAuditWiring|TestHandleFilePathToolAuditWiring|^OK|^FAILED|Error|Ran \"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/test_out2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "cp toolguard/hook.py /tmp/hook.py.bak", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/mutation1.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^FAIL:\\|^ERROR:\" /tmp/mutation1.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"result.matched_rule,\\|_provenance_brief(result.provenance),\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/revert1.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"single_provenance = provenance if single_matched_rule == matched_rule else None\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "cp toolguard/hook.py /tmp/hook.py.bak2", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/mutation2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^FAIL:\\|^ERROR:\" /tmp/mutation2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/revert2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/final_suite.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"class TestHandleCommandToolAuditWiring\\|class TestHandleFilePathToolAuditWiring\" test/unit/test_hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/final_suite2.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff --stat toolguard/hook.py toolguard/resolve.py toolguard/log_writer.py toolguard/tools/log_harvest.py docs/architecture.md test/unit/test_hook.py test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"toolguard-memories\\|^??\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep \"^ M\\|^AM\\|^M \"", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff docs/architecture.md toolguard/log_writer.py toolguard/tools/log_harvest.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"BUT NOT\\|SAME escape-hatch caveat\\|decision INEQUALITY\\|compound.py:722.*_combine_strictest\\|list this function\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def _parse_compound_match_details\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^OK\\|^FAILED\\|Ran [0-9]* test\" /tmp/final_suite3.log", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"async def\\|threading\" toolguard/hook.py toolguard/resolve.py toolguard/log_writer.py toolguard/tools/log_harvest.py test/unit/test_hook.py test/unit/test_log_writer.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^ from \\|^ import \\|^ from \\|^ import \" toolguard/hook.py toolguard/resolve.py toolguard/log_writer.py toolguard/tools/log_harvest.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -A10 \"_log_allowed_command(\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n -B2 -A6 \"single_provenance\" toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: independently verify R3's two closure acceptance criteria -- (a) swapping matched_rule\n#         and provenance at the hook call site, and (b) removing the escape-hatch provenance\n#         suppression. Both survived the full suite before this round; both must now FAIL.\n# TOUCHES: TEMPORARILY WRITES toolguard/hook.py, restored from in-memory bytes with sha256 proof.\n#          No git operations.\n# NOT INLINE BECAUSE: mutates a production file and must provably restore it.\nuv run python \"/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutation_gate.py\" audit_args_swapped escape_hatch_provenance_unsuppressed 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "git diff --stat toolguard/ docs/", "tool": "Bash"}
+{"fixture": "realistic", "target": "git add -A toolguard/ test/ tools/ docs/", "tool": "Bash"}
+{"fixture": "realistic", "target": "git commit -q -F - __HEREDOC_TO_git__", "tool": "Bash"}
+{"fixture": "realistic", "target": "cp -r /home/tguser/projects/toolguard /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && ls /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_UNDECIDABLE_FLOOR_DECISION.get\\|_apply_undecidable_floor(\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"undecidable\" test/verdict_corpus/cases.jsonl", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep '\"fixture\": \"undecidable_deny\"' test/verdict_corpus/cases.jsonl", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"<(\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "df -h /tmp /home/tguser 2>&1 | head -20; echo \"---\"; du -sh /tmp/claude-1000 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_UNDECIDABLE_FLOOR_DECISION\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_apply_undecidable_floor\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c undecidable test/verdict_corpus/cases.jsonl", "tool": "Bash"}
+{"fixture": "realistic", "target": "rm -rf /tmp/claude-1000/-home-arnon-projects-toolguard/*/tasks/* 2>/dev/null; true", "tool": "Bash"}
+{"fixture": "realistic", "target": "pwd; echo \"---\"; ls toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "echo alive", "tool": "Bash"}
+{"fixture": "realistic", "target": "rm -rf /tmp/claude-1000/-home-arnon-projects-toolguard/canary-r3 2>/dev/null; rm -rf /tmp/claude-1000/-home-arnon-projects-toolguard/*/scratchpad/tg-scratch 2>/dev/null; df -h /tmp 2>/dev/null | tail -1", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c '\"fixture\": \"undecidable' test/verdict_corpus/cases.jsonl", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep '\"fixture\": \"undecidable' test/verdict_corpus/cases.jsonl", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c '<('", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: D4 prediction check. Before unifying the two undecidable-floor sites, prove the corpus\n#         actually exercises the one being changed -- break compound.py:895 and confirm the corpus\n#         FAILS. If it passes, the corpus does not cover that path and D4 would prove nothing,\n#         which is the more valuable finding.\n# TOUCHES: TEMPORARILY WRITES toolguard/compound.py, restored from in-memory bytes with a sha256\n#          proof. No git operations.\n# NOT INLINE BECAUSE: mutates a production file and must provably restore it.\nuv run python \"/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutation_gate.py\" d4_undecidable_segment_site 2>&1 | tail -8", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"_UNDECIDABLE_FLOOR_DECISION.get\" toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: prove D4's unification is real, not cosmetic. Disable the floor helper's comparison --\n#         the exact mutation that was MISSED at CP1 because a second implementation masked it.\n#         If D4 genuinely unified the two sites, this must now be CAUGHT by the corpus.\n# TOUCHES: TEMPORARILY WRITES toolguard/compound.py, restored with a sha256 proof. No git ops.\n# NOT INLINE BECAUSE: mutates a production file and must provably restore it.\nuv run python \"/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad/mutation_gate.py\" d4_proof_helper_now_load_bearing 2>&1 | tail -8", "tool": "Bash"}
+{"fixture": "realistic", "target": "git add -A toolguard/", "tool": "Bash"}
+{"fixture": "realistic", "target": "df -h", "tool": "Bash"}
+{"fixture": "realistic", "target": "du -sh /home/tguser/projects/toolguard 2>/dev/null; du -sh /home/tguser/projects/toolguard/.git /home/tguser/projects/toolguard/.venv 2>/dev/null", "tool": "Bash"}
+{"fixture": "realistic", "target": "du -sh /home/tguser/projects/toolguard; echo \"---\"; du -sh /home/tguser/projects/toolguard/.git; echo \"---\"; ls -a /home/tguser/projects/toolguard", "tool": "Bash"}
+{"fixture": "realistic", "target": "mkdir -p /tmp/claude-1000/-home-arnon-projects-toolguard && cp -r /home/tguser/projects/toolguard /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && ls /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace | head -40", "tool": "Bash"}
+{"fixture": "realistic", "target": "cd /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"resolve_permission_detailed\\|_detect_override\\|_resolve_permission_detailed_unclamped\\|apply_parse_failure_floor\\|_apply_parse_failure_ask_floor\\|_parse_failure_reason\\|permission_levels_with_provenance\\|_provenance_for_pattern\\|_entry_for_pattern\" -r --include=*.py .", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"^./.venv\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/usr/bin/du -sh . .git .venv logs cover tmp toolguard-memories test tools 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "/usr/bin/du -sh .git .venv logs cover tmp toolguard-memories test tools toolguard 2>&1", "tool": "Bash"}
+{"fixture": "realistic", "target": "rm -rf /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && mkdir -p /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && tar cf - --exclude=.venv --exclude=./tmp --exclude=.git --exclude=cover --exclude=logs . | tar xf - -C /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && /usr/bin/du -sh /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && ls -la /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "toolguard.config as c; print(toolguard.__file__); print(c.__file__)\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"resolve_permission_detailed\\|_detect_override\\|apply_parse_failure_floor\\|_parse_failure_reason\\|permission_levels_with_provenance\\|_provenance_for_pattern\\|_entry_for_pattern\" --include=\"*.py\" .", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"\\.venv\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/toolguard/config.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/toolguard/resolve.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -n \"^def \\|^class \\|^ def \" test/verdict_corpus/fixture_loader.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"fixture_loader\\|def replay\\|def main\\|decide(\" tools/corpus_build.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/test/verdict_corpus/fixture_loader.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/tools/corpus_build.py", "tool": "Read"}
+{"fixture": "realistic", "target": "grep -n \"def decide\\|^class Decision\\|def decide_bash\\|def decide_file\" toolguard/tools/decision.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"FIXTURE_IDS\" test/verdict_corpus/fixture_loader.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/toolguard/tools/decision.py", "tool": "Read"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/-home-arnon-projects-toolguard/scratch_placeholder", "tool": "Write"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_callgraph.py", "tool": "Write"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_state.py", "tool": "Write"}
+{"fixture": "realistic", "target": "cat /tmp/claude-1000/-home-arnon-projects-toolguard/5c2c389b-c2d4-4e5c-9582-411a41dc8296/tasks/b3k8w0sa0.output", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_lines.py", "tool": "Write"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_lines.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "cd /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace && python3 - <<'EOF' 2>/dev/null || true\nEOF\ntrue", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_tests.py", "tool": "Write"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_size.py", "tool": "Write"}
+{"fixture": "realistic", "target": "tail -25 /tmp/claude-1000/-home-arnon-projects-toolguard/5c2c389b-c2d4-4e5c-9582-411a41dc8296/tasks/bil2aspjy.output", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -nE \"^(Ran [0-9]+ test|OK|FAILED|ERROR:|ERROR |=====)\" /tmp/claude-1000/-home-arnon-projects-toolguard/5c2c389b-c2d4-4e5c-9582-411a41dc8296/tasks/bil2aspjy.output", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"\" /tmp/claude-1000/-home-arnon-projects-toolguard/5c2c389b-c2d4-4e5c-9582-411a41dc8296/tasks/bil2aspjy.output", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"Ran \\|OK\\|FAILED\\|Error\\|error\" /tmp/claude-1000/-home-arnon-projects-toolguard/5c2c389b-c2d4-4e5c-9582-411a41dc8296/tasks/bil2aspjy.output", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat /tmp/claude-1000/-home-arnon-projects-toolguard/5c2c389b-c2d4-4e5c-9582-411a41dc8296/tasks/b5fwbawuy.output 2>/dev/null; echo \"---\"; ls -la /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/out/", "tool": "Bash"}
+{"fixture": "realistic", "target": "tail -20 /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/out/baseline.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_branch.py", "tool": "Write"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/probe_tests.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -n \"resolve_permission_detailed(\\|apply_parse_failure_floor(\" toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -v \"def \\|:meth:\\|#\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/mutate.py", "tool": "Write"}
+{"fixture": "realistic", "target": "grep -E \"^(ERROR|FAIL): \" d1probe/out/mut.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"AttributeError|TypeError\" d1probe/out/mut.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -B3 -A12 \"^ERROR: test_bash_tool_is_governed\" d1probe/out/mut.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"^ERROR: \" -A20 d1probe/out/mut.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"test_hook.py|_FakeConfig|resolve_permission_detailed\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -c \"resolve_permission_detailed\" toolguard/config.py toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "/tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/mutate.py", "tool": "Edit"}
+{"fixture": "realistic", "target": "grep -E \"^(ERROR|FAIL): \" d1probe/out/mutb.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -E \"AttributeError\" d1probe/out/mutb.err", "tool": "Bash"}
+{"fixture": "realistic", "target": "pgrep -af \"probe_lines\" | head; echo \"---\"; ls -la /tmp/claude-1000/-home-arnon-projects-toolguard/d1-trace/d1probe/out/depth.json", "tool": "Bash"}
+{"fixture": "realistic", "target": "git show d5bdab3 --stat", "tool": "Bash"}
+{"fixture": "realistic", "target": "date && time uv run python -m unittest discover -s test -t . 2>&1 | tail -20", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/corpus_build.py --verify 2>&1 | tail -30", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"no_match_fallback\\|_detect_override\\|_entry_for_pattern\\|_provenance_for_pattern\\|has_any_rules\\|fallback_warning\\|undecidable_fallback\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "python3 -c \"\nimport json, collections\nc = collections.Counter()\nwith open('test/verdict_corpus/cases.jsonl') as f:\n    for line in f:\n        d = json.loads(line)\n        c[d['fixture']] += 1\nfor k,v in c.most_common():\n    print(v, k)\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: count cases per fixture in cases.jsonl for baseline analysis\n# TOUCHES: reads test/verdict_corpus/cases.jsonl; writes nothing\n# INLINE BECAUSE: quick one-off counting query, not reusable\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json, collections\nc = collections.Counter()\nwith open('test/verdict_corpus/cases.jsonl') as f:\n    for line in f:\n        d = json.loads(line)\n        c[d['fixture']] += 1\nfor k,v in c.most_common():\n    print(v, k)\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "for f in fallback_ask fallback_allow_warning fallback_deny fallback_allow_silent; do echo \"=== $f ===\"; cat \"test/verdict_corpus/configs/$f.toml\"; echo; done", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"UndecidableSegment\\|undecidable\" /home/tguser/projects/toolguard/toolguard/parser/multiline.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"fallback_warning\" /home/tguser/projects/toolguard/toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def permission_levels_with_provenance\\|def permission_layers\\|def _discover_levels\\|class ConfigLayer\\|level=\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def experiral\\|def experiment\\|class Sandbox\\|project_under_home\\|hierarchical\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"^def experiment\\|^class Sandbox\\|def __init__\\|project_under_home\\|hierarchical\\|ancestor\" /home/tguser/projects/toolguard/toolguard/testing/sandbox.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "find test/verdict_corpus/configs/hierarchy_conflict -type f | sort; echo ---; for f in $(find test/verdict_corpus/configs/hierarchy_conflict -type f); do echo \"=== $f ===\"; cat \"$f\"; done", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"override\" /home/tguser/projects/toolguard/toolguard/compound.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"override\\|ConflictOverride\" /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"override\\|class Decision\\|def decide\" /home/tguser/projects/toolguard/toolguard/tools/decision.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"override\\|_log_hierarchy_conflict\\|ConflictOverride\" /home/tguser/projects/toolguard/toolguard/hook.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"def log_conflict\\|def log_warning\\|CONFLICT\\|conflict.*file\\|filename\" /home/tguser/projects/toolguard/toolguard/error_log.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat test/verdict_corpus/configs/enrichment.toml; echo \"=== parse_failure ===\"; find test/verdict_corpus/configs/parse_failure -type f; for f in $(find test/verdict_corpus/configs/parse_failure -type f); do echo \"--- $f ---\"; cat \"$f\"; done", "tool": "Bash"}
+{"fixture": "realistic", "target": "cat test/verdict_corpus/configs/pattern_forms.toml; echo \"=== hard_deny.toml (for anchoring pattern reference) ===\"; cat test/verdict_corpus/configs/hard_deny.toml", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_extract_tool_entries\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "mkdir -p /tmp/too45-corpus-backup && cp test/verdict_corpus/cases.jsonl test/verdict_corpus/goldens.jsonl test/verdict_corpus/e2e_cases.jsonl test/verdict_corpus/e2e_goldens.jsonl /tmp/too45-corpus-backup/ && ls -la /tmp/too45-corpus-backup/", "tool": "Bash"}
+{"fixture": "realistic", "target": "SCRATCH=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad\nmkdir -p \"$SCRATCH/too45-corpus-backup\"\ncp test/verdict_corpus/cases.jsonl test/verdict_corpus/goldens.jsonl test/verdict_corpus/e2e_cases.jsonl test/verdict_corpus/e2e_goldens.jsonl \"$SCRATCH/too45-corpus-backup/\"\nrm -rf /tmp/too45-corpus-backup\nls -la \"$SCRATCH/too45-corpus-backup/\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "mkdir -p test/verdict_corpus/configs/ask_provenance/project/.claude\nmkdir -p test/verdict_corpus/configs/ask_provenance/home/.claude\nmkdir -p test/verdict_corpus/configs/ask_provenance/home/.toolguard/rules\nmkdir -p test/verdict_corpus/configs/override_breadth/project/.claude\nmkdir -p test/verdict_corpus/configs/override_breadth/home/.claude\necho done", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/project/.claude/toolguard_hook.toml", "tool": "Write"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/home/.claude/toolguard_hook.toml", "tool": "Write"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/home/.toolguard/rules/extra.rules.toml", "tool": "Write"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/project/.claude/toolguard_hook.toml", "tool": "Edit"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/override_breadth/project/.claude/toolguard_hook.toml", "tool": "Write"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/override_breadth/home/.claude/toolguard_hook.toml", "tool": "Write"}
+{"fixture": "realistic", "target": "grep -n '\"empty\":\\|\"parse_failure\":\\|\"hierarchy_conflict\":\\|\"pattern_forms\":\\|\"enrichment\":' tools/corpus_build.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: count cases per fixture after extract, to verify additions landed as designed\n# TOUCHES: reads test/verdict_corpus/cases.jsonl and e2e_cases.jsonl; writes nothing\n# INLINE BECAUSE: quick one-off counting query\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json, collections\nc = collections.Counter()\nwith open('test/verdict_corpus/cases.jsonl') as f:\n    for line in f:\n        d = json.loads(line)\n        c[d['fixture']] += 1\nfor k,v in c.most_common():\n    print(v, k)\nprint('---e2e---')\nc2 = collections.Counter()\nwith open('test/verdict_corpus/e2e_cases.jsonl') as f:\n    for line in f:\n        d = json.loads(line)\n        c2[d['fixture']] += 1\nfor k,v in c2.most_common():\n    print(v, k)\n\"", "tool": "Bash"}
+{"fixture": "realistic", "target": "SCRATCH=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad\n# INTENT: verify every pre-existing (fixture,tool,target) case's golden is byte-identical to the pre-change backup\n# TOUCHES: reads test/verdict_corpus/{goldens,e2e_goldens}.jsonl and the scratchpad backup copies; writes nothing\n# INLINE BECAUSE: one-off diffing query comparing two JSONL snapshots by key, not reusable\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json\n\ndef load(path):\n    d = {}\n    with open(path) as f:\n        for line in f:\n            r = json.loads(line)\n            d[(r['fixture'], r['tool'], r['target'])] = r\n    return d\n\nold = load('$SCRATCH/too45-corpus-backup/goldens.jsonl')\nnew = load('test/verdict_corpus/goldens.jsonl')\nchanged = []\nmissing = []\nfor k, v in old.items():\n    if k not in new:\n        missing.append(k)\n    elif new[k] != v:\n        changed.append(k)\nprint('in-process: old cases', len(old), 'new total', len(new))\nprint('in-process: missing (present before, absent now):', len(missing))\nprint('in-process: changed (value differs):', len(changed))\nfor k in changed[:10]:\n    print('  CHANGED', k)\n    print('   old:', old[k])\n    print('   new:', new[k])\n\nold_e2e = load('$SCRATCH/too45-corpus-backup/e2e_goldens.jsonl')\nnew_e2e = load('test/verdict_corpus/e2e_goldens.jsonl')\nchanged_e2e = []\nmissing_e2e = []\nfor k, v in old_e2e.items():\n    if k not in new_e2e:\n        missing_e2e.append(k)\n    elif new_e2e[k] != v:\n        changed_e2e.append(k)\nprint()\nprint('e2e: old cases', len(old_e2e), 'new total', len(new_e2e))\nprint('e2e: missing:', len(missing_e2e))\nprint('e2e: changed:', len(changed_e2e))\nfor k in changed_e2e:\n    print('  CHANGED', k)\n    print('   old:', old_e2e[k])\n    print('   new:', new_e2e[k])\n\"\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"governed_tools\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"not in governed_tools\\|governed_tools_set\\|absent from governed_tools\\|def validate_permissions\" /home/tguser/projects/toolguard/toolguard/config_validation.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"validate_permissions\\|merged_config\\[.governed_tools.\\]\" /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "SCRATCH=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad\ncp test/verdict_corpus/cases.jsonl test/verdict_corpus/goldens.jsonl test/verdict_corpus/e2e_cases.jsonl test/verdict_corpus/e2e_goldens.jsonl \"$SCRATCH/too45-corpus-backup-broken-attempt/\" 2>/dev/null\nmkdir -p \"$SCRATCH/too45-corpus-backup-broken-attempt\"\ncp test/verdict_corpus/cases.jsonl test/verdict_corpus/goldens.jsonl test/verdict_corpus/e2e_cases.jsonl test/verdict_corpus/e2e_goldens.jsonl \"$SCRATCH/too45-corpus-backup-broken-attempt/\"\necho saved", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"warning_logged\\|conflict_logged\\|_OBSERVED_LOG_STREAMS\\|_count_stream_log_entries\" test/verdict_corpus/fixture_loader.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"warning_logged\" test/verdict_corpus/fixture_loader.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/corpus_build.py --extract 2>&1 | tail -6", "tool": "Bash"}
+{"fixture": "realistic", "target": "SCRATCH=/tmp/claude-1000/-home-arnon-projects-toolguard/19b5a95c-bf5a-4909-8a27-d628237d87a9/scratchpad\n# INTENT: re-verify every pre-existing (fixture,tool,target) case's golden is byte-identical to the ORIGINAL pre-change backup, after fixing the warning_logged confound\n# TOUCHES: reads test/verdict_corpus/{goldens,e2e_goldens}.jsonl and the scratchpad backup; writes nothing\n# INLINE BECAUSE: one-off diffing query\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json\n\ndef load(path):\n    d = {}\n    with open(path) as f:\n        for line in f:\n            r = json.loads(line)\n            d[(r['fixture'], r['tool'], r['target'])] = r\n    return d\n\nold = load('$SCRATCH/too45-corpus-backup/goldens.jsonl')\nnew = load('test/verdict_corpus/goldens.jsonl')\nchanged = [k for k, v in old.items() if k in new and new[k] != v]\nmissing = [k for k in old if k not in new]\nprint('in-process: old', len(old), 'new', len(new), 'missing', len(missing), 'changed', len(changed))\nfor k in changed[:5]:\n    print(' CHANGED', k, old[k], new[k])\n\nold_e2e = load('$SCRATCH/too45-corpus-backup/e2e_goldens.jsonl')\nnew_e2e = load('test/verdict_corpus/e2e_goldens.jsonl')\nchanged_e2e = [k for k, v in old_e2e.items() if k in new_e2e and new_e2e[k] != v]\nmissing_e2e = [k for k in old_e2e if k not in new_e2e]\nprint('e2e: old', len(old_e2e), 'new', len(new_e2e), 'missing', len(missing_e2e), 'changed', len(changed_e2e))\nfor k in changed_e2e:\n    print(' CHANGED', k)\n    print('  old:', old_e2e[k])\n    print('  new:', new_e2e[k])\n\"\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python -m unittest discover -s test -t . 2>&1 | tail -10", "tool": "Bash"}
+{"fixture": "realistic", "target": "time uv run python tools/corpus_build.py --verify 2>&1 | tail -15", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: spot-check that override_breadth e2e cases show conflict_logged where expected (positives) and not where not (negatives), and that ask_provenance cases resolve to 'ask' with correct provenance\n# TOUCHES: reads test/verdict_corpus/{e2e_goldens,goldens}.jsonl; writes nothing\n# INLINE BECAUSE: one-off verification query\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json\n\nwith open('test/verdict_corpus/e2e_goldens.jsonl') as f:\n    recs = [json.loads(l) for l in f]\nob = [r for r in recs if r['fixture'] == 'override_breadth']\nprint('override_breadth e2e cases:', len(ob))\nconflict_true = [r for r in ob if r.get('conflict_logged')]\nconflict_false = [r for r in ob if not r.get('conflict_logged')]\nprint('conflict_logged True:', len(conflict_true))\nprint('conflict_logged False (targets):', [r['target'] for r in conflict_false])\nfor r in ob[:3]:\n    print(' sample:', r['tool'], r['target'], '-> decision:', r['response']['hookSpecificOutput']['permissionDecision'], 'conflict_logged:', r.get('conflict_logged', False))\n\nwith open('test/verdict_corpus/goldens.jsonl') as f:\n    grecs = [json.loads(l) for l in f]\nap = [r for r in grecs if r['fixture'] == 'ask_provenance']\nprint()\nprint('ask_provenance in-process cases:', len(ap))\nverdicts = set(r['verdict'] for r in ap)\nprint('verdicts seen:', verdicts)\nfor r in ap[:4]:\n    print(' sample:', r['tool'], r['target'], '->', r['verdict'], '| prov:', r['provenance'], '| ctx:', r['additional_context'])\n\"\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "TG_ATTEST_READONLY=1 uv run python -c \"\nimport json\nwith open('test/verdict_corpus/e2e_goldens.jsonl') as f:\n    recs = [json.loads(l) for l in f]\nob = [r for r in recs if r['fixture'] == 'override_breadth' and r['tool'] in ('Read','Write','Edit')]\nfor r in ob:\n    hso = r['response']['hookSpecificOutput']\n    print(r['tool'], r['target'], '->', hso.get('permissionDecision'), '|', hso.get('permissionDecisionReason'))\n\"\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_anchor_relative_path\\|def resolve_file_path_permission_detailed\\|def match_file_path\\|def _match_pattern\" /home/tguser/projects/toolguard/toolguard/config.py /home/tguser/projects/toolguard/toolguard/resolve.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -n \"_decide_file_path_at_level_detailed\\|_anchor_relative_path\" /home/tguser/projects/toolguard/toolguard/resolve.py /home/tguser/projects/toolguard/toolguard/config.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep -rn \"_anchor_file_pattern\\|_match_file_path_pattern\\|_first_matching_file_pattern\\|_anchor_relative_path\" /home/tguser/projects/toolguard/toolguard/*.py", "tool": "Bash"}
+{"fixture": "realistic", "target": "grep \"^.*:def \\|^.*: def \"", "tool": "Bash"}
+{"fixture": "realistic", "target": "# INTENT: check whether ask_provenance's 2 file-path cases (Read/Write) actually match their intended ask rule, or are silently falling through to the no_match_fallback=ask default (same shape as the override_breadth file-path bug just found)\n# TOUCHES: reads test/verdict_corpus/goldens.jsonl; writes nothing\n# INLINE BECAUSE: one-off verification query\nTG_ATTEST_READONLY=1 uv run python -c \"\nimport json\nwith open('test/verdict_corpus/goldens.jsonl') as f:\n    recs = [json.loads(l) for l in f]\nap = [r for r in recs if r['fixture'] == 'ask_provenance' and r['tool'] in ('Read','Write')]\nfor r in ap:\n    print(r['tool'], r['target'], '->', r['verdict'], '| reason:', r['reason'], '| prov:', r['provenance'])\n\"\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "TG_ATTEST_READONLY=1 uv run python -c \"\nimport json\nwith open('test/verdict_corpus/goldens.jsonl') as f:\n    recs = [json.loads(l) for l in f]\npf = [r for r in recs if r['fixture'] == 'pattern_forms' and r['tool'] in ('Read','Write')]\nfor r in pf:\n    print(r['tool'], r['target'], '->', r['verdict'], '| reason:', r['reason'])\n\"\n", "tool": "Bash"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/override_breadth/project/.claude/toolguard_hook.toml", "tool": "Read"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/override_breadth/project/.claude/toolguard_hook.toml", "tool": "Edit"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/override_breadth/home/.claude/toolguard_hook.toml", "tool": "Read"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/override_breadth/home/.claude/toolguard_hook.toml", "tool": "Edit"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/project/.claude/toolguard_hook.toml", "tool": "Read"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/home/.claude/toolguard_hook.toml", "tool": "Read"}
+{"fixture": "realistic", "target": "/home/tguser/projects/toolguard/test/verdict_corpus/configs/ask_provenance/home/.claude/toolguard_hook.toml", "tool": "Edit"}
+{"fixture": "realistic", "target": "uv run python tools/corpus_build.py --extract 2>&1 | tail -6 && echo \"---generate---\" && uv run python tools/corpus_build.py --generate 2>&1 | tail -6", "tool": "Bash"}
 {"fixture": "empty", "target": "ls -la", "tool": "Bash"}
 {"fixture": "empty", "target": "pwd", "tool": "Bash"}
 {"fixture": "empty", "target": "echo hello", "tool": "Bash"}
@@ -5202,6 +6038,21 @@
 {"fixture": "empty", "target": "./scratch/new.txt", "tool": "Write"}
 {"fixture": "empty", "target": "~/.bashrc", "tool": "Edit"}
 {"fixture": "empty", "target": "git status", "tool": "Bash"}
+{"fixture": "empty", "target": "curl https://example.com", "tool": "Bash"}
+{"fixture": "empty", "target": "npm install", "tool": "Bash"}
+{"fixture": "empty", "target": "docker ps", "tool": "Bash"}
+{"fixture": "empty", "target": "kubectl get pods", "tool": "Bash"}
+{"fixture": "empty", "target": "terraform plan", "tool": "Bash"}
+{"fixture": "empty", "target": "make build", "tool": "Bash"}
+{"fixture": "empty", "target": "python3 script.py", "tool": "Bash"}
+{"fixture": "empty", "target": "chmod +x run.sh", "tool": "Bash"}
+{"fixture": "empty", "target": "mv a.txt b.txt", "tool": "Bash"}
+{"fixture": "empty", "target": "cp a.txt b.txt", "tool": "Bash"}
+{"fixture": "empty", "target": "/etc/hosts", "tool": "Read"}
+{"fixture": "empty", "target": "./output/result.json", "tool": "Write"}
+{"fixture": "empty", "target": "./src/main.py", "tool": "Edit"}
+{"fixture": "empty", "target": "systemctl status nginx", "tool": "Bash"}
+{"fixture": "empty", "target": "brew install wget", "tool": "Bash"}
 {"fixture": "fallback_ask", "target": "ls -la", "tool": "Bash"}
 {"fixture": "fallback_ask", "target": "pwd", "tool": "Bash"}
 {"fixture": "fallback_ask", "target": "sudo reboot", "tool": "Bash"}
@@ -5217,6 +6068,36 @@
 {"fixture": "fallback_ask", "target": "./scratch/x.txt", "tool": "Write"}
 {"fixture": "fallback_ask", "target": "~/.bashrc", "tool": "Edit"}
 {"fixture": "fallback_ask", "target": "ls -la /tmp", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "uptime", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "hostname", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "id", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "env", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "printenv", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "which python3", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "type ls", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "history", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "jobs", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "alias", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "cal", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "w", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "who", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "last", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "ps aux", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "top -bn1", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "vmstat", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "df -h", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "free -m", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "uname -a", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "cat notes.txt", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "head -n 5 file.txt", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "tail -n 20 log.txt", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "wc -l file.txt", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "grep TODO src/main.py", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "find . -name '*.py'", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "cut -d, -f1 data.csv", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "sort data.txt", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "uniq data.txt", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "printf 'hi\\n'", "tool": "Bash"}
 {"fixture": "fallback_deny", "target": "ls -la", "tool": "Bash"}
 {"fixture": "fallback_deny", "target": "pwd", "tool": "Bash"}
 {"fixture": "fallback_deny", "target": "sudo reboot", "tool": "Bash"}
@@ -5232,6 +6113,36 @@
 {"fixture": "fallback_deny", "target": "./scratch/x.txt", "tool": "Write"}
 {"fixture": "fallback_deny", "target": "~/.bashrc", "tool": "Edit"}
 {"fixture": "fallback_deny", "target": "ls -la /tmp", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "uptime", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "hostname", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "id", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "env", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "printenv", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "which python3", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "type ls", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "history", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "jobs", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "alias", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "cal", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "w", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "who", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "last", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "ps aux", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "top -bn1", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "vmstat", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "df -h", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "free -m", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "uname -a", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "cat notes.txt", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "head -n 5 file.txt", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "tail -n 20 log.txt", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "wc -l file.txt", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "grep TODO src/main.py", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "find . -name '*.py'", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "cut -d, -f1 data.csv", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "sort data.txt", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "uniq data.txt", "tool": "Bash"}
+{"fixture": "fallback_deny", "target": "printf 'hi\\n'", "tool": "Bash"}
 {"fixture": "fallback_allow_warning", "target": "ls -la", "tool": "Bash"}
 {"fixture": "fallback_allow_warning", "target": "pwd", "tool": "Bash"}
 {"fixture": "fallback_allow_warning", "target": "sudo reboot", "tool": "Bash"}
@@ -5247,6 +6158,36 @@
 {"fixture": "fallback_allow_warning", "target": "./scratch/x.txt", "tool": "Write"}
 {"fixture": "fallback_allow_warning", "target": "~/.bashrc", "tool": "Edit"}
 {"fixture": "fallback_allow_warning", "target": "ls -la /tmp", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "uptime", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "hostname", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "id", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "env", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "printenv", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "which python3", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "type ls", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "history", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "jobs", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "alias", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "cal", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "w", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "who", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "last", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "ps aux", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "top -bn1", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "vmstat", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "df -h", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "free -m", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "uname -a", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "cat notes.txt", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "head -n 5 file.txt", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "tail -n 20 log.txt", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "wc -l file.txt", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "grep TODO src/main.py", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "find . -name '*.py'", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "cut -d, -f1 data.csv", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "sort data.txt", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "uniq data.txt", "tool": "Bash"}
+{"fixture": "fallback_allow_warning", "target": "printf 'hi\\n'", "tool": "Bash"}
 {"fixture": "fallback_allow_silent", "target": "ls -la", "tool": "Bash"}
 {"fixture": "fallback_allow_silent", "target": "pwd", "tool": "Bash"}
 {"fixture": "fallback_allow_silent", "target": "sudo reboot", "tool": "Bash"}
@@ -5339,6 +6280,21 @@
 {"fixture": "parse_failure", "target": "rm -rf /tmp", "tool": "Bash"}
 {"fixture": "parse_failure", "target": "ls -la && cat notes.txt", "tool": "Bash"}
 {"fixture": "parse_failure", "target": "ls -la /home", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "whoami", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "date", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "df -h", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "free -m", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "uname -a", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "history", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "ps aux", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "grep TODO notes.md", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "find . -name '*.txt'", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "mv a.txt b.txt", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "/home/tguser/projects/toolguard/notes/todo.md", "tool": "Read"}
+{"fixture": "parse_failure", "target": "./scratch/y.txt", "tool": "Write"}
+{"fixture": "parse_failure", "target": "./config/app.yaml", "tool": "Edit"}
+{"fixture": "parse_failure", "target": "ls -la && whoami", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "cat file.txt && ls", "tool": "Bash"}
 {"fixture": "hierarchy_conflict", "target": "rm important-file backup.txt", "tool": "Bash"}
 {"fixture": "hierarchy_conflict", "target": "rm important-file old.log", "tool": "Bash"}
 {"fixture": "hierarchy_conflict", "target": "ls -la", "tool": "Bash"}
@@ -5387,3 +6343,59 @@
 {"fixture": "enrichment", "target": "curl -X GET https://api.example.com/x", "tool": "Bash"}
 {"fixture": "enrichment", "target": "sudo reboot && curl -X DELETE https://x", "tool": "Bash"}
 {"fixture": "enrichment", "target": "cat a.txt && sudo reboot && ls -la", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "rm proj-file-a.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "rm proj-file-b.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "mv proj-file-c.txt dest.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "chmod 777 proj-perm.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "kill -9 1111", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "kill -9 2222", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "mkfs.ext4 /dev/proj-disk", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "dd if=/dev/zero of=proj-out.img", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "./secrets/proj-secret.txt", "tool": "Read"}
+{"fixture": "ask_provenance", "target": "./deploy/proj-manifest.yaml", "tool": "Write"}
+{"fixture": "ask_provenance", "target": "shutdown -h now", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "iptables -F", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "rm user-file-a.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "rm user-file-b.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "mv user-file-c.txt dest.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "chmod 777 user-perm.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "kill -9 3333", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "kill -9 4444", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "mkfs.ext4 /dev/user-disk", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "./secrets/user-secret.txt", "tool": "Read"}
+{"fixture": "ask_provenance", "target": "./deploy/user-manifest.yaml", "tool": "Write"}
+{"fixture": "ask_provenance", "target": "rm rules-file-a.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "mv rules-file-b.txt dest.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "chmod 777 rules-perm.txt", "tool": "Bash"}
+{"fixture": "ask_provenance", "target": "kill -9 5555", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "git push origin main", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "git push --force origin main", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "npm install lodash", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "npm uninstall left-pad", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "docker rm my-container", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "docker stop my-container", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "kubectl delete pod test-pod", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "kubectl delete deployment web", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "terraform apply -auto-approve", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "terraform destroy -auto-approve", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "rm keep.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "rm -f build.log", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "chmod 644 file.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "chown alice file.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "systemctl restart myapp", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "systemctl stop myapp", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "./docs/allowed.md", "tool": "Read"}
+{"fixture": "override_breadth", "target": "./data/allowed.csv", "tool": "Read"}
+{"fixture": "override_breadth", "target": "./scratch/allowed.txt", "tool": "Write"}
+{"fixture": "override_breadth", "target": "./out/allowed.log", "tool": "Write"}
+{"fixture": "override_breadth", "target": "./config/allowed.yaml", "tool": "Edit"}
+{"fixture": "override_breadth", "target": "./src/allowed.py", "tool": "Edit"}
+{"fixture": "override_breadth", "target": "git push origin main && npm install lodash", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "docker rm my-container && docker stop my-container", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "kubectl delete pod test-pod && kubectl delete deployment web", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "terraform apply -auto-approve && terraform destroy -auto-approve", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "rm keep.txt && chmod 644 file.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "chown alice file.txt && systemctl restart myapp", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "echo hello", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "ls -R", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "sudo reboot", "tool": "Bash"}

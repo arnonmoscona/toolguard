@@ -28,3 +28,34 @@
 {"fixture": "hierarchy_conflict", "target": "rm important-file backup.txt && ls -la", "tool": "Bash"}
 {"fixture": "realistic", "target": "git status", "tool": "Bash"}
 {"fixture": "realistic", "target": "gh status", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "git push origin main", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "git push --force origin main", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "npm install lodash", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "npm uninstall left-pad", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "docker rm my-container", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "docker stop my-container", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "kubectl delete pod test-pod", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "kubectl delete deployment web", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "terraform apply -auto-approve", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "terraform destroy -auto-approve", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "rm keep.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "rm -f build.log", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "chmod 644 file.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "chown alice file.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "systemctl restart myapp", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "systemctl stop myapp", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "./docs/allowed.md", "tool": "Read"}
+{"fixture": "override_breadth", "target": "./data/allowed.csv", "tool": "Read"}
+{"fixture": "override_breadth", "target": "./scratch/allowed.txt", "tool": "Write"}
+{"fixture": "override_breadth", "target": "./out/allowed.log", "tool": "Write"}
+{"fixture": "override_breadth", "target": "./config/allowed.yaml", "tool": "Edit"}
+{"fixture": "override_breadth", "target": "./src/allowed.py", "tool": "Edit"}
+{"fixture": "override_breadth", "target": "git push origin main && npm install lodash", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "docker rm my-container && docker stop my-container", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "kubectl delete pod test-pod && kubectl delete deployment web", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "terraform apply -auto-approve && terraform destroy -auto-approve", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "rm keep.txt && chmod 644 file.txt", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "chown alice file.txt && systemctl restart myapp", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "echo hello", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "ls -R", "tool": "Bash"}
+{"fixture": "override_breadth", "target": "sudo reboot", "tool": "Bash"}
