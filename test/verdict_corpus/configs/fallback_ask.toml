@@ -1,0 +1,13 @@
+# TOO-45 verdict-corpus fixture: pins no_match_fallback = "ask".
+# A handful of explicit rules so cases can show explicit-rule-priority-over-fallback
+# as well as the fallback itself kicking in for anything unmatched.
+no_match_fallback = "ask"
+
+[permissions]
+allow = [
+    "Bash(ls *)",
+    "Bash(pwd)",
+]
+deny = [
+    "Bash(sudo *)",
+]

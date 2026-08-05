@@ -126,6 +126,7 @@ class _LogRecord:
     violated_rules: List[str] = field(default_factory=list)
     extra_info: Optional[str] = None
     matched_rule: Optional[str] = None
+    provenance: Optional[str] = None
     note: Optional[str] = None
     permission_mode: Optional[str] = None
     additional_context: Optional[str] = None
@@ -301,6 +302,7 @@ def _build_jsonlines_entry(record: _LogRecord) -> dict:
     }
     optional = (
         ("matched_rule", record.matched_rule),
+        ("provenance", record.provenance),
         ("note", record.note),
         ("extra_info", record.extra_info),
         ("permission_mode", record.permission_mode),
@@ -349,6 +351,13 @@ def _render_markdown_entry(record: _LogRecord, timestamp: str) -> str:
         lines.append(
             f"- **Violated Rules**: {', '.join(f'`{rule}`' for rule in record.violated_rules)}\n"
         )
+    if record.provenance:
+        # Origin of the matched/violated rule (TOO-45 R3 follow-up): a
+        # SEPARATE field, not folded back into Matched Rule / Violated Rules
+        # text -- see log_command's provenance parameter. Rendered AFTER
+        # Violated Rules so a deny's Provenance sits below the field it
+        # describes, not above it.
+        lines.append(f"- **Provenance**: {record.provenance}\n")
     if record.permission_mode:
         lines.append(f"- **Permission Mode**: `{record.permission_mode}`\n")
     if record.note:
@@ -376,6 +385,9 @@ def log_command(
     extra_info: Optional[str] = None,
     config: Optional[dict] = None,
     matched_rule: Optional[str] = None,
+    # NOTE: this parameter list is already wide; TOO-45 R1 (a verdict object)
+    # is the planned fix. Do not add another one-off field without it.
+    provenance: Optional[str] = None,
     note: Optional[str] = None,
     permission_mode: Optional[str] = None,
     additional_context: Optional[str] = None,
@@ -398,6 +410,15 @@ def log_command(
         extra_info: Optional additional info to include in the log entry (e.g., agent identification)
         config: Optional environment config dict (from get_env_config())
         matched_rule: Optional pattern string that permitted the command (for allowed commands)
+        provenance: Optional brief origin ("level: path") of the rule named by
+            ``matched_rule`` / the deny it violated (TOO-45 R3 follow-up --
+            e.g. :meth:`~toolguard.config_types.Provenance.describe_brief`).
+            Rendered in its OWN field, never folded back into
+            ``matched_rule`` or ``violated_rules`` text -- see
+            :class:`~toolguard.config_types.ResolvedDecision.matched_rule`
+            for why those two must stay parse-free. ``None`` when the caller
+            has no single provenance to attribute (e.g. a hard-deny match,
+            pooled across levels).
         note: Optional free-text note for a non-violation outcome (e.g. WHY an
             'ask' verdict was reached). Rendered under its own field, distinct
             from ``violated_rules``, so an 'ask' outcome is never mislabeled as
@@ -455,6 +476,7 @@ def log_command(
             violated_rules=violated_rules or [],
             extra_info=extra_info,
             matched_rule=matched_rule,
+            provenance=provenance,
             note=note,
             permission_mode=permission_mode,
             additional_context=additional_context,

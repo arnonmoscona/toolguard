@@ -1,0 +1,11 @@
+# TOO-45 verdict-corpus fixture: pins no_match_fallback = "deny".
+no_match_fallback = "deny"
+
+[permissions]
+allow = [
+    "Bash(ls *)",
+    "Bash(pwd)",
+]
+deny = [
+    "Bash(sudo *)",
+]

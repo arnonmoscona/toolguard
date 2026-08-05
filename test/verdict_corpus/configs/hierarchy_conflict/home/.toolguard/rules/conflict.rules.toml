@@ -1,0 +1,12 @@
+# TOO-45 verdict-corpus fixture (rules-dir level, ~/.toolguard/rules/). A
+# THIRD conflicting source for the same two patterns, agreeing with the
+# project level rather than the user level -- exercises that a rules-dir file
+# participates in the same more-specific-wins resolution as the two primary
+# levels rather than being treated as a separate authority.
+[permissions]
+allow = [
+    "Bash(rm important-file *)",
+]
+deny = [
+    "Bash(ls *)",
+]

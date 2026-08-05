@@ -1,0 +1,402 @@
+# git permission rules for toolguard.
+#
+# Derived from `git help -a` (git 2.5x surface) plus the man pages for the
+# dual-mode subcommands (config, remote, branch, tag, stash, notes, submodule,
+# worktree, bundle, bisect, reflog, replace, refs, sparse-checkout, maintenance).
+#
+# DISPOSITION (as specified):
+#   1) read-only git operations                -> allow
+#   2) operations that change the repository   -> ask
+#   3) operations that change git config       -> deny
+#
+# "Changes the repository" is read as: touches refs, objects, the index, the
+# working tree, hooks, remotes, or repository metadata.  Commands that only
+# WRITE AN OUTPUT FILE the user explicitly asked for (`git archive -o`,
+# `git format-patch`, `git bundle create`, `git diff --output=`) leave the
+# repository untouched and are therefore in `allow`.  Ruled acceptable on review
+# (Arnon, 2026-07-25): those writes are under git's control, so the risk is low.
+#
+# ---------------------------------------------------------------------------
+# REVIEW DECISIONS (Arnon, 2026-07-25) -- deviations from the first draft
+# ---------------------------------------------------------------------------
+#   * `git push -u` / `git branch -u` / `--set-upstream-to` / `--unset-upstream`
+#     -> ASK, not deny.  They do write config, but they are routine and a deny
+#     is only overridable at a more specific level.  See section 13.
+#   * `git remote add|rename|remove|set-url|set-head|set-branches`  -> DENY.
+#     Remotes live in .git/config; kept strict.
+#   * `git config <name> <value>` (the legacy, subcommand-less syntax) -> DENY,
+#     including its READ form `git config <name>`.  The two cannot be told apart
+#     from the command line by argument shape alone (flags may sit anywhere), so
+#     the whole legacy form is denied.  Use `git config get <name>` to read.
+#   * `git init` / `git clone` -> DENY, not ask.  Both write a fresh .git/config
+#     as a primary effect.  See section 13.
+#   * Sections 15/16 (arbitrary-command escape hatches, repo-serving daemons)
+#     are additions beyond the three-bucket disposition; kept as-is on review.
+#
+# STILL INCONSISTENT, NOT RULED ON:  `git submodule add` writes .gitmodules,
+# which is configuration, yet it sits in `ask` alongside the other submodule
+# mutations.  By the same logic that denies `git remote add` it arguably belongs
+# in `deny`.  Left in `ask` deliberately rather than changed silently.
+#
+# ---------------------------------------------------------------------------
+# TWO REPEATED PREFIX BLOCKS (read these once, then ignore them)
+# ---------------------------------------------------------------------------
+# Every rule starts with one of two prefixes.  They exist so that `git -C x`,
+# `git --no-pager`, `/usr/bin/git`, etc. cannot slip past a rule by pushing the
+# subcommand off the front of the string.
+#
+#   RO  (used by every ALLOW rule) -- strict whitelist of harmless globals:
+#       ^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*
+#
+#   ANY (used by every ASK/DENY rule) -- swallows ANY option-shaped token, so a
+#       novel global flag cannot be used to dodge an ask or a deny:
+#       ^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*
+#
+#   The asymmetry is deliberate: allow rules fail closed (an unrecognized global
+#   option means "no allow match"), ask/deny rules fail open (an unrecognized
+#   global option is still caught).
+#
+# ---------------------------------------------------------------------------
+# WHY THE ASK RULES CARRY NEGATIVE LOOKAHEADS
+# ---------------------------------------------------------------------------
+# Within one hierarchy level, when an allow AND an ask both match, toolguard
+# breaks the tie with `_literal_prefix_specificity` -- the number of literal
+# characters before the first `*`, `?` or `[`.  For [regex] patterns of this
+# shape the first `?` lands at index 2 (`^(?:`), so EVERY rule here scores 2,
+# every comparison is a tie, and a tie resolves to ASK.
+#
+# Consequence: allow and ask patterns MUST be mutually exclusive by
+# construction.  That is why `git stash`, `git branch`, `git tag`, `git notes`,
+# `git reflog`, `git bisect`, `git apply`, `git config`, ... carry `(?!...)`
+# lookaheads on the ask/deny side that re-state their read-only forms.  Without
+# them the read-only forms would silently degrade to prompts (or, for config,
+# to denies).
+#
+# This was caught by testing, not by reading: the first draft omitted the
+# lookaheads on `stash` and `bisect`, and `git stash list` / `git bisect log`
+# silently became prompts.  If you edit an allow rule below, edit its mirrored
+# ask/deny lookahead in the same edit -- they are exact negations of each other
+# and nothing enforces that but the test matrix.
+#
+# ---------------------------------------------------------------------------
+# OTHER WORKAROUNDS BAKED INTO THESE PATTERNS
+# ---------------------------------------------------------------------------
+# 1. `\b` IS THE WRONG SUBCOMMAND TERMINATOR.  `-` is a non-word character, so
+#    `commit\b` matches `commit-graph`, `merge\b` matches `merge-base`, and
+#    `cherry\b` matches `cherry-pick`.  Every subcommand alternation therefore
+#    ends in `(?![-\w])`, not `\b`.  Two live mis-classifications came from this
+#    (`git commit-graph verify` and `git merge-base` were being asked).
+#
+# 2. NO MACRO FACILITY.  Toolguard has no way to name a shared sub-pattern, so
+#    the RO/ANY prefix block above is spelled out in full in all ~76 rules.  It
+#    is boilerplate: when reading a rule, skip to the first subcommand name.
+#
+# 3. TOML LITERAL STRINGS ('...', not "...").  Single-quoted TOML strings do no
+#    escape processing, so the regexes are written once, unescaped.  If you ever
+#    port these to JSON (settings.local.json) every backslash must be doubled --
+#    and note that extended [regex] syntax is only read from toolguard_hook
+#    files / rules-dir files, never from settings.local.json.
+#
+# 4. SEPARATED FLAG VALUES.  `--contains HEAD` and `--contains=HEAD` are both
+#    legal; the read-only flag lists accept `(?:=\S+|\s+\S+)?` for every flag
+#    that takes a value, or the `git branch --contains HEAD` read would have
+#    been classified as a branch creation.
+#
+# 5. `-c` IS POSITION-SENSITIVE.  `git -c k=v <cmd>` injects config (denied),
+#    but `git commit -c HEAD~1` reuses a message and `git switch -c foo` creates
+#    a branch (both fine).  The deny in section 14 anchors `-c` to global-option
+#    position -- only other global options may precede it -- instead of matching
+#    ` -c ` anywhere, which would have blocked commit and switch.
+#
+# ---------------------------------------------------------------------------
+# TESTING
+# ---------------------------------------------------------------------------
+# Validated against toolguard's own `decide_command_at_level_detailed`, not by
+# eyeballing the regexes: 141 command/expected-decision cases, all passing.
+#
+#     uv run python tmp/git_rules_check.py
+#
+# Re-run it after any edit here -- several of these rules are one character away
+# from being wrong in a way that reads perfectly fine.
+#
+# Generated with Claude Code (Opus 5), reviewed against git's own man pages.
+
+[permissions]
+
+allow = [
+    # ======================================================================
+    # 0. Bare invocation, help, version
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s*$)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:--version|--help|-h)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+help\b)',
+
+    # ======================================================================
+    # 1. History / content inspection (porcelain)
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*(?:status|log|show|whatchanged|shortlog|describe|blame|annotate|range-diff|cherry|show-branch|diff)(?![-\w]))',
+
+    # `git grep` is read-only, but -O/--open-files-in-pager runs a command:
+    # denied separately below.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*grep(?![-\w]))',
+
+    # ======================================================================
+    # 2. Plumbing interrogators (read-only by definition)
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*(?:rev-parse|rev-list|ls-files|ls-tree|ls-remote|cat-file|merge-base|name-rev|for-each-ref|show-ref|show-index|verify-pack|verify-commit|verify-tag|count-objects|fsck|patch-id|get-tar-commit-id|unpack-file|var|last-modified|pack-redundant)(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*(?:diff-files|diff-index|diff-tree|diff-pairs)(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*(?:check-attr|check-ignore|check-mailmap|check-ref-format|column|stripspace|interpret-trailers)(?![-\w]))',
+
+    # ======================================================================
+    # 3. Export / report: read the repo, write only an explicit output file
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*(?:archive|format-patch|fast-export|request-pull|bugreport|diagnose)(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*bundle\s+(?:create|verify|list-heads)\b)',
+
+    # ======================================================================
+    # 4. Read-only forms of dual-mode subcommands
+    #    (each of these has a matching lookahead in the ask/deny list)
+    # ======================================================================
+
+    # git config: ONLY the documented read forms.  Note the legacy read form
+    # `git config user.name` is NOT here -- see "Judgment calls".
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*config\s+(?:(?:--(?:global|local|system|worktree|file=\S+|blob=\S+|includes|no-includes|show-origin|show-scope|show-names|null|name-only|type=\S+|default=\S+|url=\S+|all|regexp|fixed-value|value=\S+)|-z)\s+)*(?:get|list|--get|--get-all|--get-regexp|--get-urlmatch|--list|-l)\b)',
+
+    # git remote: listing / showing only.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*remote(?:\s+(?:-v|--verbose))*\s*$)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*remote\s+(?:(?:-v|--verbose)\s+)*(?:show|get-url)\b)',
+
+    # git branch: flag-only listing forms (no positional arg -- a positional
+    # arg to `git branch` CREATES a branch).
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*branch(?:\s+(?:-a|--all|-r|--remotes|(?:-l|--list)(?:\s+\S+)?|-v|-vv|--verbose|-i|--ignore-case|--color|--no-color|--column|--no-column|--show-current|--no-abbrev|--abbrev=\S+|--sort=\S+|--format=\S+|--points-at(?:=\S+|\s+\S+)|--merged(?:=\S+|\s+\S+)?|--no-merged(?:=\S+|\s+\S+)?|--contains(?:=\S+|\s+\S+)?|--no-contains(?:=\S+|\s+\S+)?))*\s*$)',
+
+    # git tag: flag-only listing forms (a positional arg CREATES a tag).
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*tag(?:\s+(?:(?:-l|--list)(?:\s+\S+)?|-n\d*|-i|--ignore-case|--color|--no-color|--column|--no-column|--omit-empty|--sort=\S+|--format=\S+|--points-at(?:=\S+|\s+\S+)|--merged(?:=\S+|\s+\S+)?|--no-merged(?:=\S+|\s+\S+)?|--contains(?:=\S+|\s+\S+)?|--no-contains(?:=\S+|\s+\S+)?))*\s*$)',
+
+    # git stash / notes / reflog / replace / worktree / submodule / bisect /
+    # sparse-checkout / rerere / refs / repo: read-only subcommands.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*stash\s+(?:list|show)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*notes(?:\s+--ref(?:=|\s+)\S+)*\s*(?:$|\s*(?:list|show|get-ref)\b))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*reflog(?:\s*$|\s+(?:show|exists)\b))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*replace(?:\s*$|\s+(?:-l|--list)\b))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*worktree\s+list\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*submodule(?:\s*$|\s+(?:(?:--quiet|--cached)\s+)*(?:status|summary)\b))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*bisect\s+(?:log|terms|view|visualize)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*sparse-checkout\s+(?:list|check-rules)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*rerere\s+(?:status|diff|remaining)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*refs\s+(?:list|verify|exists)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*repo\s+(?:info|structure)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*(?:commit-graph|multi-pack-index)\s+verify(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*scalar\s+(?:list|diagnose)\b)',
+
+    # git symbolic-ref: the READ form takes exactly one non-flag argument.
+    # Two arguments = a write, and is excluded by the mirrored ask lookahead.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*symbolic-ref\s+(?:(?:-q|--quiet|--short)\s+)*\S+\s*$)',
+
+    # git apply --check/--stat/--summary/--numstat: inspects a patch, applies
+    # nothing.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--no-pager|--paginate|--git-dir=\S+|--work-tree=\S+|--no-optional-locks)\s+)*apply\b(?=.*\s(?:--check|--stat|--summary|--numstat)\b))',
+
+    # <TEMPORARY>
+    # TEMPORARY allows for the TOO-45 refactoring autonomous agent loop.
+    #
+    # `clean`, `stash` and `bisect` started in this block and were moved to the
+    # matching TEMPORARY deny block at the top of `deny` -- rationale is there.
+    # `rm` stays here: deleting a module is legitimate refactoring work.  Only the
+    # recursive form is denied.
+    #
+    # NOTE: these use the ANY prefix rather than the RO prefix that every other
+    # allow rule in this file uses, because they were lifted verbatim from `ask`.
+    # Deliberate deviation, left as-is: section 14 still denies the `-c`,
+    # `--config-env` and `--exec-path` global options, which are the ones that
+    # matter.  Worth tightening if this block ever becomes permanent.
+
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:add|rm|mv|restore|revert|commit)(?![-\w]))',
+    # </TEMPORARY>
+
+]
+
+ask = [
+
+    # <TEMPORARY>
+    # TEMPORARY ask for refactoring autonomous agent loop
+
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:checkout|switch|reset|merge|cherry-pick|rebase|am)(?![-\w]))',
+    # </TEMPORARY>
+
+    # ======================================================================
+    # 5. Working tree / index / refs / objects: unambiguous mutations
+    # ======================================================================
+# <TEMPORARY-COMMENT-OUT>
+#    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:add|rm|mv|restore|checkout|switch|clean|reset|revert|commit|merge|cherry-pick|rebase|am)(?![-\w]))',
+#
+#    # `git stash` with no subcommand is `git stash push`; only list/show read.
+#    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*stash(?![-\w])(?!\s+(?:list|show)(?![-\w])))',
+#    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*bisect(?![-\w])(?!\s+(?:log|terms|view|visualize)(?![-\w])))',
+# </TEMPORARY-COMMENT-OUT>
+
+    # ======================================================================
+    # 6. Network operations that write into the repo (or into a remote)
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:fetch|pull|push|backfill|fetch-pack|send-pack|update-server-info)(?![-\w]))',
+
+    # ======================================================================
+    # 7. Repository creation / maintenance / object-store rewriting
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:gc|prune|prune-packed|repack|pack-objects|pack-refs|index-pack|unpack-objects|fast-import|replay)(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*maintenance\s+run\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:commit-graph|multi-pack-index)\s+(?!verify\b)\S+)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*refs\s+(?:migrate|optimize)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*scalar\s+(?:run|delete)\b)',
+
+    # ======================================================================
+    # 8. Plumbing writers (write objects, refs, the index, or the work tree)
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:update-index|update-ref|read-tree|write-tree|checkout-index|commit-tree|hash-object|mktag|mktree|merge-index|merge-one-file|merge-file|merge-tree|mailinfo|mailsplit|quiltimport)(?![-\w]))',
+
+    # ======================================================================
+    # 9. Dual-mode subcommands: the mutating half.
+    #    Each lookahead is the exact negation of the matching allow rule.
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*apply\b(?!.*\s(?:--check|--stat|--summary|--numstat)\b))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*branch\b(?!(?:\s+(?:-a|--all|-r|--remotes|(?:-l|--list)(?:\s+\S+)?|-v|-vv|--verbose|-i|--ignore-case|--color|--no-color|--column|--no-column|--show-current|--no-abbrev|--abbrev=\S+|--sort=\S+|--format=\S+|--points-at(?:=\S+|\s+\S+)|--merged(?:=\S+|\s+\S+)?|--no-merged(?:=\S+|\s+\S+)?|--contains(?:=\S+|\s+\S+)?|--no-contains(?:=\S+|\s+\S+)?))*\s*$))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*tag\b(?!(?:\s+(?:(?:-l|--list)(?:\s+\S+)?|-n\d*|-i|--ignore-case|--color|--no-color|--column|--no-column|--omit-empty|--sort=\S+|--format=\S+|--points-at(?:=\S+|\s+\S+)|--merged(?:=\S+|\s+\S+)?|--no-merged(?:=\S+|\s+\S+)?|--contains(?:=\S+|\s+\S+)?|--no-contains(?:=\S+|\s+\S+)?))*\s*$))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*notes\b(?!(?:\s+--ref(?:=|\s+)\S+)*\s*(?:$|\s*(?:list|show|get-ref)\b)))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*reflog\b(?!(?:\s*$|\s+(?:show|exists)\b)))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*replace\b(?!(?:\s*$|\s+(?:-l|--list)\b)))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*symbolic-ref\b(?!\s+(?:(?:-q|--quiet|--short)\s+)*\S+\s*$))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*worktree\s+(?:add|move|remove|prune|repair|lock|unlock)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*submodule\s+(?:(?:--quiet|--cached)\s+)*(?:add|init|deinit|update|sync|absorbgitdirs)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*sparse-checkout\s+(?:init|set|add|reapply|disable|clean)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*rerere\s+(?:gc|clear|forget)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*bundle\s+unbundle\b)',
+    # `git remote prune|update` rewrites remote-tracking refs (not config).
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*remote\s+(?:(?:-v|--verbose)\s+)*(?:prune|update)\b)',
+
+    # ======================================================================
+    # 10. Interactive / GUI front-ends that can commit
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:gui|citool|gitk|difftool|mergetool)(?![-\w]))',
+
+    # ======================================================================
+    # 11. Foreign-SCM bridges and outbound mail (side effects outside the repo)
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:svn|p4|cvsimport|cvsexportcommit|archimport|send-email|imap-send)(?![-\w]))',
+]
+
+deny = [
+    # <TEMPORARY>
+    # TEMPORARY denies for the TOO-45 refactoring autonomous agent loop.
+    #
+    # WHY THESE ARE DENIES AND NOT DELETIONS.  With
+    # `no_match_fallback = "allow_with_no_warnings"` set at the user level (itself
+    # temporary, until TOO-28), removing a rule from `allow` does NOT stop a
+    # command -- it falls through to the fallback and is silently allowed.
+    # Anything that must be stopped needs an explicit deny.  Deny also beats
+    # allow, so these override the TEMPORARY allow block regardless of ordering.
+    #
+    # Revert = delete this whole fence.
+
+    # `git clean` deletes untracked files and, with -x, ignored ones.  In this repo
+    # that is toolguard-memories/ (the ticket plan and the loop's decision log),
+    # plus logs/ and tmp/ (the verdict-corpus source and the assessment documents).
+    # The loop is explicitly barred from touching logs/; this is the same rule.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*clean(?![-\w]))',
+
+    # `git stash` is redundant now that the loop may commit on this branch, and its
+    # failure mode is silent rather than loud: a stashed change leaves a tree that
+    # no longer matches what the loop believes it is testing, so the invariants and
+    # the verdict corpus pass against the wrong state and report success.  A
+    # subagent already ran stash/stash pop on a dirty tree during TOO-19.
+    # `git stash list` / `git stash show` stay allowed via section 4.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*stash(?![-\w])(?!\s+(?:list|show)(?![-\w])))',
+
+    # `git bisect` moves HEAD and leaves a detached HEAD -- a checkout in all but
+    # name, while `checkout` itself is only `ask`.  The loop has no use for it.
+    # log/terms/view/visualize stay allowed via section 4.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*bisect(?![-\w])(?!\s+(?:log|terms|view|visualize)(?![-\w])))',
+
+    # Recursive delete.  Plain `rm -r` followed by `git add -A` does the same job
+    # while stating the blast radius in the command text.  `git rm <file>` allowed.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*rm(?![-\w])(?=.*\s(?:-\w*r\w*|--recursive)(?![-\w])))',
+
+    # History rewrite.  The commit trail is the spine of the decision log; keep it
+    # append-only so an amend cannot silently change what was recorded.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*commit(?![-\w])(?=.*\s--amend(?![-\w])))',
+    # </TEMPORARY>
+
+    # ======================================================================
+    # 12. git config: everything that is not one of the read forms.
+    #     The lookahead is the exact negation of the config allow rule, so the
+    #     read forms are not caught here (deny is evaluated first).
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*config\b(?!\s+(?:(?:--(?:global|local|system|worktree|file=\S+|blob=\S+|includes|no-includes|show-origin|show-scope|show-names|null|name-only|type=\S+|default=\S+|url=\S+|all|regexp|fixed-value|value=\S+)|-z)\s+)*(?:get|list|--get|--get-all|--get-regexp|--get-urlmatch|--list|-l)\b))',
+
+    # ======================================================================
+    # 13. Other writers of git configuration
+    # ======================================================================
+    # Remotes live in .git/config -- adding/renaming/retargeting one is a
+    # config change.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*remote\s+(?:(?:-v|--verbose)\s+)*(?:add|rename|remove|rm|set-head|set-branches|set-url)\b)',
+    # .gitmodules is submodule configuration.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*submodule\s+(?:(?:--quiet|--cached)\s+)*set-(?:url|branch)\b)',
+    # REVIEW DECISION (Arnon, 2026-07-25) -- NOT denied, deliberately:
+    # `git push -u`, `git branch -u`, `--set-upstream-to`, `--unset-upstream`.
+    # These DO write branch.<name>.remote / branch.<name>.merge, so the strict
+    # reading of the disposition would file them here.  They are also routine,
+    # and a deny can only be overridden at a MORE SPECIFIC hierarchy level,
+    # which makes an over-tight deny expensive to walk back.  Ruled `ask`.
+    # No rule is needed to get that: `-u` and `--set-upstream*` are absent from
+    # the read-only flag lists in the `branch`/`tag` ALLOW rules, so these
+    # commands fail the allow match and fall to the generic `push` / `branch`
+    # ask rules in section 5/6/9.
+
+    # Repository creation.  `git init` and `git clone` both write a fresh
+    # .git/config (core.*, remote.origin.*, branch.*) as a primary effect, so
+    # they belong in the config bucket, not the repository bucket.
+    # REVIEW DECISION (Arnon, 2026-07-25): proposed as `ask`, promoted to
+    # `deny`.  This subsumes the narrower `git clone -c k=v` rule it replaces.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:init|clone)(?![-\w]))',
+    # `scalar clone` is `git clone` plus a config-registration pass, so it is
+    # denied for the same reason.  INFERRED from the init/clone decision rather
+    # than separately ruled on -- the easiest rule here to revert to `ask`.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*scalar\s+clone\b)',
+    # maintenance register/start writes maintenance.* config + a scheduler job.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*maintenance\s+(?:register|unregister|start|stop)\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*scalar\s+(?:register|unregister|reconfigure)\b)',
+    # Credential helpers read/write stored secrets.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*credential(?:-cache|-store)?\b)',
+
+    # ======================================================================
+    # 14. Transient config injection -- the `git -c` family.
+    #     `-c` is matched ONLY in global-option position (before the
+    #     subcommand), so `git commit -c HEAD~1` and `git switch -c foo` are
+    #     unaffected.
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--\S+)\s+)*-c\s)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--\S+)\s+)*--config-env(?:=|\s))',
+    # --exec-path relocates the git binaries git itself will execute.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-C\s+\S+|--\S+)\s+)*--exec-path(?:=|\s))',
+
+    # ======================================================================
+    # 15. Arbitrary-command escape hatches.
+    #     NOT part of the stated disposition -- added because each of these
+    #     runs a command that toolguard never sees, so it would tunnel straight
+    #     through every rule above.  Remove them only deliberately.
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*for-each-repo(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*bisect\s+run\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*submodule\s+(?:(?:--quiet|--recursive)\s+)*foreach\b)',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*rebase\b.*\s(?:-x\s|--exec(?:=|\s)))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*filter-branch(?![-\w]))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:difftool|mergetool)\b.*\s(?:-x\s|--extcmd(?:=|\s)))',
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*grep(?![-\w]).*\s(?:-O|--open-files-in-pager))',
+    # `git hook run <name>` executes repository-controlled scripts on demand.
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*hook(?![-\w]))',
+
+    # ======================================================================
+    # 16. Network servers -- expose the repository to other machines.
+    #     Also outside the stated disposition; see notes.
+    # ======================================================================
+    'Bash([regex]^(?:\S*/)?git\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:daemon|http-backend|instaweb|gitweb|cvsserver)(?![-\w]))',
+]

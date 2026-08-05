@@ -389,12 +389,130 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     log_conflict(message, corrective, log_dir)
 
 
+def _reason_suffix_or_placeholder(
+    decision: str, reason: str, placeholder: str, matched_rule: Optional[str]
+) -> Optional[str]:
+    """
+    Return *matched_rule*, or *placeholder* when *reason* names a fallback escape hatch.
+
+    A fallback ESCAPE-HATCH reason (``undecidable_fallback``'s allow/deny
+    branches) ends in the same ``": <text>"`` shape as a genuine rule-match
+    reason, but the text is a truncated DISPLAY COMMAND, not a pattern --
+    e.g. ``Denied by undecidable_fallback=deny (...): python -c``. Crediting
+    that text to a rule would fabricate an attribution for a rule that does
+    not exist in the config (TOO-19 m5 allow-side / deny-side fix).
+    :func:`~toolguard.compound.fallback_kind_for_reason` is the ONE
+    mechanism that tells the two shapes apart, and this helper is the ONE
+    place that acts on it, shared by :func:`_matched_rule_for_single_command`
+    (allow) and :func:`_log_non_allow_decision` (deny) so the two call sites
+    cannot drift into separate conventions.
+
+    Args:
+        decision: The decision *reason* accompanies (``'allow'`` or
+            ``'deny'``).
+        reason: Consulted ONLY for the escape-hatch classification above --
+            never parsed for a value.
+        placeholder: What to return when *reason* names a fallback escape
+            hatch instead of a genuine rule match.
+        matched_rule: The structured matched-rule value already resolved by
+            the caller (``None`` when no rule matched).
+
+    Returns:
+        *placeholder* when *reason* names a fallback escape hatch, otherwise
+        *matched_rule* unchanged (which may itself be ``None`` -- an absent
+        record beats a false one either way).
+    """
+    if fallback_kind_for_reason(decision, reason) is not None:
+        return placeholder
+    return matched_rule
+
+
+def _matched_rule_for_single_command(
+    reason: str, matched_rule: Optional[str]
+) -> Optional[str]:
+    """
+    Derive the ``Matched Rule`` audit-log field for a SINGLE-leaf allow.
+
+    Thin wrapper around :func:`_reason_suffix_or_placeholder` pinned to
+    ``decision='allow'`` and :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER`.
+
+    Args:
+        reason: The final allow reason for a non-compound (single-leaf)
+            result -- consulted only for the escape-hatch classification.
+        matched_rule: The structured matched-rule value for this result
+            (e.g. ``BashResolution.matched_rule``), or ``None``.
+
+    Returns:
+        The placeholder when *reason* names a fallback escape hatch,
+        otherwise *matched_rule* unchanged.
+    """
+    return _reason_suffix_or_placeholder(
+        "allow", reason, FALLBACK_ALLOW_PLACEHOLDER, matched_rule
+    )
+
+
+def _provenance_brief(provenance: Optional[Any]) -> Optional[str]:
+    """
+    Render a resolution's winning provenance for the audit log, or ``None``.
+
+    Args:
+        provenance: The resolution's winning
+            :class:`~toolguard.config_types.Provenance`, or ``None`` (no
+            single rule to attribute -- e.g. a hard-deny match, pooled
+            across levels, or no rule matched at all).
+
+    Returns:
+        ``provenance.describe_brief()``, or ``None``.
+    """
+    return provenance.describe_brief() if provenance is not None else None
+
+
 _COMPOUND_MATCH_PATTERN = re.compile(r"All \d+ sub-commands allowed: \[(.+)\]")
 
 
 def _parse_compound_match_details(reason: str):
     """
     Parse per-sub-command match details from a compound command's allow reason.
+
+    TOO-45 R3 investigated replacing this with ``BashResolution.sub_matches``
+    (one structured :class:`~toolguard.resolve.SubMatch` per extracted
+    sub-command) and found it is NOT a safe substitute for THIS purpose,
+    specifically for an ask-floor leaf (foreign inline code / heredoc sink,
+    see ``compound.py::_resolve_leaf_detailed``):
+
+    - ``SubMatch.sub_command`` for such a leaf is the TRUNCATED outer-command
+      stub :func:`~toolguard.compound._extract_outer_command` resolves for
+      the explicit-deny check (e.g. ``python -c``), not the leaf's real
+      original text (e.g. ``python -c "print(1)"``) that this reason -- and
+      the audit log -- must show.
+    - ``SubMatch.matched_rule`` for such a leaf reflects whether that
+      TRUNCATED STUB happened to match a real allow rule (e.g. a broad
+      ``Bash(python *)`` allow matches the stub ``python -c``) -- but
+      ``_resolve_leaf_detailed`` overrides ANY non-deny outcome for an
+      ask-floor leaf with the undecidable-fallback escape hatch regardless,
+      because a stub match does not verify the unread inline payload. So a
+      genuinely non-``None`` ``matched_rule`` can still need the fallback
+      placeholder here, and ``sub_matches`` alone cannot tell the two apart
+      -- that classification happens entirely inside ``compound.py``, AFTER
+      ``resolve_one`` (and therefore ``SubMatch`` construction) already
+      returned, and is never threaded back through the ``resolve_one``
+      3-tuple contract (:func:`~toolguard.compound.fallback_kind_for_reason`'s
+      own docstring already documents that contract as intentionally thin;
+      widening it was judged disproportionate once already, for the
+      structurally identical case pinned by
+      :attr:`~toolguard.resolve.BashResolution.fallback_warning`'s
+      docstring).
+
+    ``compound.py:722``'s ``_combine_strictest`` already builds this same
+    determination as a ``match_details`` LIST before joining it into the
+    ``"All N sub-commands allowed: [...]"`` reason string this function then
+    splits back apart -- so consuming that list directly, instead of this
+    round trip, is a viable follow-up NOT done here: building the list still
+    parses each leaf's reason (``compound.py:738-747``), so it would move the
+    parse rather than remove it, and removing it needs ``resolve_one``'s
+    3-tuple contract widened, out of scope for this fix (see R1). Confirmed
+    live by two TOO-19 m5 regression tests failing the moment ``sub_matches``
+    was substituted here instead.
 
     Args:
         reason: The reason string from check_compound_permission, e.g.
@@ -415,72 +533,6 @@ def _parse_compound_match_details(reason: str):
     return details if details else None
 
 
-def _reason_suffix_or_placeholder(
-    decision: str, reason: str, placeholder: str
-) -> Optional[str]:
-    """
-    Recover the trailing ``": <value>"`` portion of a reason, or *placeholder*.
-
-    A genuine rule-match reason ends in ``": <pattern> [<level>: <file>]"``,
-    so the historical behaviour -- take everything after the first ``": "``
-    -- reads the pattern back out of it. But the fallback ESCAPE-HATCH reasons
-    this hook can also receive end the SAME way, with a truncated DISPLAY
-    COMMAND after the colon instead of a pattern::
-
-        Allowed with a warning by undecidable_fallback=allow_with_warning
-        (inline/heredoc foreign code, unable to safely verify): python -c
-
-        Denied by undecidable_fallback=deny (inline/heredoc foreign code,
-        unable to safely verify): python -c
-
-    Splitting either blindly fabricates a rule attribution -- ``python -c``
-    above -- for a config in which no such rule exists anywhere (TOO-19 m5 for
-    the allow shape; TOO-19 deny-side rule fabrication fix for the deny
-    shape). :func:`~toolguard.compound.fallback_kind_for_reason` is the ONE
-    mechanism that tells a fallback escape hatch apart from a genuine match
-    for both decisions, and this helper is the ONE place that acts on that
-    classification, shared by :func:`_matched_rule_for_single_command` (allow)
-    and :func:`_log_non_allow_decision` (deny) so the two extraction sites
-    cannot drift into separate conventions.
-
-    Args:
-        decision: The decision *reason* accompanies (``'allow'`` or
-            ``'deny'``).
-        reason: The reason text.
-        placeholder: What to return when *reason* names a fallback escape
-            hatch instead of a genuine rule match.
-
-    Returns:
-        *placeholder* when *reason* names a fallback escape hatch, the text
-        after the first ``": "`` when it looks like a rule match, or ``None``
-        when *reason* has no ``": "`` at all -- the caller decides what "no
-        match" means for it (an absent record beats a false one either way).
-    """
-    if fallback_kind_for_reason(decision, reason) is not None:
-        return placeholder
-    return reason.split(": ", 1)[1] if ": " in reason else None
-
-
-def _matched_rule_for_single_command(reason: str) -> Optional[str]:
-    """
-    Derive the ``Matched Rule`` audit-log field for a SINGLE-leaf allow.
-
-    Thin wrapper around :func:`_reason_suffix_or_placeholder` pinned to
-    ``decision='allow'`` and :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER`
-    -- see that function for why the extraction has to guard against fallback
-    escape-hatch reasons at all (TOO-19 m5).
-
-    Args:
-        reason: The final allow reason for a non-compound (single-leaf) result.
-
-    Returns:
-        The placeholder when *reason* names a fallback escape hatch, the text
-        after the first ``": "`` when it looks like a rule match, or ``None``
-        when neither applies (an absent record beats a false one).
-    """
-    return _reason_suffix_or_placeholder("allow", reason, FALLBACK_ALLOW_PLACEHOLDER)
-
-
 def _log_allowed_command(
     command: str,
     reason: str,
@@ -488,17 +540,27 @@ def _log_allowed_command(
     env_config: dict,
     permission_mode: Optional[str] = None,
     additional_context: Optional[str] = None,
+    matched_rule: Optional[str] = None,
+    provenance: Optional[str] = None,
 ) -> None:
     """
     Log an allowed command, handling compound commands by logging each sub-command separately.
 
-    For simple commands or single-command results, logs one entry with the matched rule.
-    For compound commands where check_compound_permission returns per-sub-command details,
-    logs a separate entry for each sub-command with its own matched rule.
+    For a simple (single-leaf) command, logs one entry with the STRUCTURED
+    matched rule (see :func:`_matched_rule_for_single_command`). For a
+    compound command, logs a separate entry per sub-command, recovered from
+    *reason*'s own breakdown via :func:`_parse_compound_match_details` --
+    see that function's docstring for why the compound case could not also
+    be converted to read ``BashResolution.sub_matches`` directly. Because
+    of that, per-sub-command *provenance* is not available in the compound
+    branch either, so it is logged only in the single-leaf case.
 
     Args:
         command: The original command string
-        reason: The allow reason from permission checking
+        reason: The allow reason from permission checking. Drives the
+            compound branch via :func:`_parse_compound_match_details`, and
+            (for the single-leaf branch) the fallback-escape-hatch guard in
+            :func:`_matched_rule_for_single_command`.
         agent_info: Agent identification string
         env_config: Environment configuration dict
         permission_mode: Claude Code's own ``permission_mode`` from the hook input,
@@ -509,28 +571,41 @@ def _log_allowed_command(
             sub-commands' contexts, see ``compound.py::_accumulate_contexts``),
             so it is recorded on every logged sub-command entry the same way
             the hook injects one accumulated block for the whole command.
+        matched_rule: ``BashResolution.matched_rule`` for this command --
+            used only in the single-leaf case (see
+            :func:`_matched_rule_for_single_command`).
+        provenance: ``BashResolution.provenance``, rendered via
+            :func:`_provenance_brief` -- used only in the single-leaf case,
+            and only when *matched_rule* survived the fallback-escape-hatch
+            guard unchanged (a placeholder must never be paired with a real
+            provenance from the leaf whose rule it replaced).
     """
     compound_details = _parse_compound_match_details(reason)
     if compound_details:
-        # Compound command: log each sub-command separately
-        for sub_cmd, matched_rule in compound_details:
+        # Compound command: log each sub-command separately.
+        for sub_cmd, sub_matched_rule in compound_details:
             log_command(
                 sub_cmd,
                 "executed",
-                matched_rule=matched_rule,
+                matched_rule=sub_matched_rule,
                 extra_info=agent_info,
                 config=env_config,
                 permission_mode=permission_mode,
                 additional_context=additional_context,
             )
     else:
-        # Simple command: extract matched rule from reason -- but never
-        # fabricate one for a fallback escape hatch (TOO-19 m5).
-        matched_rule = _matched_rule_for_single_command(reason)
+        # Simple command: use the structured matched rule -- but never
+        # fabricate one for a fallback escape hatch (TOO-19 m5). Suppress
+        # provenance the same way when the guard replaced matched_rule with
+        # the placeholder, so the log never pairs a real provenance with a
+        # rule that did not actually decide the verdict.
+        single_matched_rule = _matched_rule_for_single_command(reason, matched_rule)
+        single_provenance = provenance if single_matched_rule == matched_rule else None
         log_command(
             command,
             "executed",
-            matched_rule=matched_rule,
+            matched_rule=single_matched_rule,
+            provenance=single_provenance,
             extra_info=agent_info,
             config=env_config,
             permission_mode=permission_mode,
@@ -855,6 +930,8 @@ def _log_non_allow_decision(
     env_config: Dict[str, Any],
     permission_mode: Optional[str],
     additional_context: Optional[str],
+    matched_rule: Optional[str] = None,
+    provenance: Optional[str] = None,
 ) -> None:
     """
     Write the resolution-log entry for an 'ask' or 'deny' verdict.
@@ -862,34 +939,37 @@ def _log_non_allow_decision(
     Identical for file-path tools and command tools, so both call this. An
     'ask' is recorded under ``note`` (it is not a violation) with the FULL
     reason text -- never split, so it carries no fabrication risk regardless
-    of the reason's shape. A deny records the violated rule extracted from
-    the reason.
-
-    That extraction (TOO-19 deny-side rule fabrication fix) is where the risk
-    lives: a genuine deny reason ends in ``": <pattern>"``, but a deny
-    produced by the ``undecidable_fallback=deny`` escape hatch (foreign
-    inline/heredoc code or an undecomposable segment that could not be safely
-    verified) ends in the SAME ``": <display command>"`` shape -- see
-    :func:`toolguard.compound.resolve_compound_permission_detailed` and
-    :func:`_reason_suffix_or_placeholder`'s docstring for the two reason
-    strings this covers. Splitting blindly recorded that truncated display
-    command as a ``Violated Rules`` entry for a config in which no such rule
-    exists anywhere. Uses the SAME mechanism as the allow side's
-    :func:`_matched_rule_for_single_command` -- :func:`_reason_suffix_or_placeholder`
-    backed by :func:`~toolguard.compound.fallback_kind_for_reason` -- so the
-    two extraction sites cannot diverge into two conventions. Unlike the
-    allow side, when *reason* has no ``": "`` at all the FULL reason is used
-    (not ``None``) -- this preserves the pre-fix behaviour for reasons like
-    ``"No commands to evaluate"`` that never had a colon to split on.
+    of the reason's shape. A deny records the violated rule from
+    *matched_rule* via :func:`_reason_suffix_or_placeholder` (the SAME
+    mechanism the allow side uses, via :func:`_matched_rule_for_single_command`,
+    so the two call sites cannot diverge into two conventions -- see that
+    function's docstring for the fabrication risk this guards against).
+    Unlike the allow side, when *matched_rule* is ``None`` and *reason* is
+    not a recognised escape hatch, the FULL reason is used (not ``None``) --
+    this preserves the pre-TOO-19 behaviour for reasons like ``"No commands
+    to evaluate"`` that never named a rule at all.
 
     Args:
         log_target: What is being logged -- a command, or ``Tool(path)``.
         decision: ``'ask'`` or the deny verdict.
-        reason: The permission-decision reason string.
+        reason: The permission-decision reason string -- consulted only for
+            :func:`_reason_suffix_or_placeholder`'s fallback-escape-hatch
+            classification (the 'ask' branch also uses it verbatim as the
+            log note).
         agent_info: Agent identification string.
         env_config: Environment configuration dict.
         permission_mode: Claude Code's own permission mode, recorded for diagnosis.
         additional_context: The winning rule's ``additionalContext`` enrichment.
+        matched_rule: The structured matched-rule value for this deny (e.g.
+            ``BashResolution.matched_rule`` / ``FileResolution.matched_rule``),
+            or ``None`` when no rule matched (fail-closed default deny, hard
+            deny, or a fallback escape hatch).
+        provenance: ``BashResolution.provenance`` / ``FileResolution.provenance``,
+            rendered via :func:`_provenance_brief` -- suppressed the same way
+            as *matched_rule* when *reason* names a fallback escape hatch
+            (never paired with a rule that did not actually decide the
+            verdict), and naturally absent for a hard deny (pooled across
+            levels, no single provenance).
     """
     if decision == "ask":
         log_command(
@@ -903,11 +983,15 @@ def _log_non_allow_decision(
         )
         return
 
-    # Extract violated rule from reason for logging -- an absent/generic
+    # Use the structured violated rule for logging -- an absent/generic
     # record beats a false one when reason names a fallback escape hatch
-    # rather than a matched rule.
-    suffix = _reason_suffix_or_placeholder(decision, reason, FALLBACK_DENY_PLACEHOLDER)
+    # rather than a matched rule. Provenance is suppressed the same way
+    # (see the Args docstring above).
+    suffix = _reason_suffix_or_placeholder(
+        decision, reason, FALLBACK_DENY_PLACEHOLDER, matched_rule
+    )
     violated_rules = [suffix if suffix is not None else reason]
+    logged_provenance = provenance if suffix == matched_rule else None
     log_command(
         log_target,
         "refused",
@@ -916,6 +1000,7 @@ def _log_non_allow_decision(
         config=env_config,
         permission_mode=permission_mode,
         additional_context=additional_context,
+        provenance=logged_provenance,
     )
 
 
@@ -974,13 +1059,11 @@ def _handle_file_path_tool(
         _log_fallback_allow_warning(
             result.fallback_warning, result.reason, env_config.get("log_dir")
         )
-        matched_rule = (
-            result.reason.split(": ", 1)[1] if ": " in result.reason else None
-        )
         log_command(
             log_target,
             "executed",
-            matched_rule=matched_rule,
+            matched_rule=result.matched_rule,
+            provenance=_provenance_brief(result.provenance),
             extra_info=agent_info,
             config=env_config,
             permission_mode=permission_mode,
@@ -995,6 +1078,8 @@ def _handle_file_path_tool(
             env_config,
             permission_mode,
             result.additional_context,
+            result.matched_rule,
+            _provenance_brief(result.provenance),
         )
 
     return result.decision, result.reason, result.additional_context
@@ -1070,6 +1155,8 @@ def _handle_command_tool(
             env_config,
             permission_mode,
             result.additional_context,
+            result.matched_rule,
+            _provenance_brief(result.provenance),
         )
     else:
         _log_non_allow_decision(
@@ -1080,6 +1167,8 @@ def _handle_command_tool(
             env_config,
             permission_mode,
             result.additional_context,
+            result.matched_rule,
+            _provenance_brief(result.provenance),
         )
 
     return result.decision, result.reason, result.additional_context

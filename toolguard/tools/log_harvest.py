@@ -11,7 +11,8 @@ Log file format (one Markdown section per event)::
 
     - **Status**: EXECUTED
     - **Command**: `ls -la`
-    - **Matched Rule**: `ls:*  [explicit: /path/to/config]`
+    - **Matched Rule**: `ls:*`
+    - **Provenance**: explicit: /path/to/config
     - **Agent**: main
 
     ## 2026-06-23 10:27:35
@@ -21,12 +22,23 @@ Log file format (one Markdown section per event)::
     - **Violated Rules**: `Command does not match any allow patterns`
     - **Agent**: main
 
+**Provenance** is a separate field (TOO-45 R3 follow-up) for a SINGLE-leaf
+entry -- absent (no field at all) whenever there is no single rule to
+attribute (e.g. a hard-deny match, pooled across levels). For a COMPOUND
+command's per-sub-command entries, provenance (when available) is instead
+folded back into ``Matched Rule`` in the pre-R3 bracketed format (e.g.
+``git *  [project: /path]``) and there is no separate Provenance field at
+all -- per-sub-command provenance was never threaded through that logging
+path (see ``hook.py::_log_allowed_command``'s docstring). This module does
+not currently parse the field into :class:`LogEntry` either way.
+
 File-tool entries use a ``Tool(path)`` command shape::
 
     ## ...
     - **Status**: EXECUTED
     - **Command**: `Read(/abs/path/to/file)`
-    - **Matched Rule**: `~/projects/**  [project: ...]`
+    - **Matched Rule**: `~/projects/**`
+    - **Provenance**: project: /p/.claude/toolguard_hook.toml
     - **Agent**: main
 
 Discovery and conflict entries are silently skipped (they have no ``Status``

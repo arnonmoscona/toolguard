@@ -61,11 +61,13 @@ class Provenance:
 
     def describe_brief(self) -> str:
         """
-        Return a compact ``level: path`` label for reason-string suffixes.
+        Return a compact ``level: path`` label.
 
-        Used to append matched-rule provenance to a decision reason as a
-        bracketed suffix, e.g. ``[project: /home/me/proj/.claude/toolguard_hook.toml]``.
-        Kept terse so it does not bloat the resolution log.
+        Two uses: appended to a decision *reason* as a bracketed suffix
+        (e.g. ``[project: /home/me/proj/.claude/toolguard_hook.toml]``), and
+        rendered as the audit log's standalone ``Provenance`` field (see
+        ``hook._provenance_brief``). Kept terse so it does not bloat the
+        resolution log.
         """
         return f"{self.level}: {self.path}"
 
@@ -359,6 +361,10 @@ class ResolvedDecision:
             directly instead of pattern-matching *reason* -- see that
             function's docstring for why this replaced the old substring-marker
             approach for the file-path (non-compound) resolution path.
+        matched_rule: The pattern text the cascade matched, or None when no
+            rule matched (fail-closed default, fallback, or a floor that
+            cleared the match). Not derived from *reason*; see
+            *fallback_warning* above for the same design pattern.
     """
 
     decision: str
@@ -367,3 +373,4 @@ class ResolvedDecision:
     override: Optional[ConflictOverride] = None
     additional_context: Optional[str] = None
     fallback_warning: bool = False
+    matched_rule: Optional[str] = None

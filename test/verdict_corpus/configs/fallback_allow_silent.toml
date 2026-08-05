@@ -1,0 +1,14 @@
+# TOO-45 verdict-corpus fixture: pins no_match_fallback = "allow_with_no_warnings",
+# the permanent alias spelling for "allow" (deliberately used here, rather than the
+# canonical "allow", so the corpus exercises alias resolution -- see
+# Configuration.resolved_no_match_fallback's alias_map).
+no_match_fallback = "allow_with_no_warnings"
+
+[permissions]
+allow = [
+    "Bash(ls *)",
+    "Bash(pwd)",
+]
+deny = [
+    "Bash(sudo *)",
+]

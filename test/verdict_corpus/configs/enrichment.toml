@@ -1,0 +1,22 @@
+# TOO-45 verdict-corpus fixture: pins additionalContext enrichment on allow,
+# ask, deny and hard_deny entries (structured `{ match = "...", additionalContext
+# = "..." }` inline tables -- must stay on one physical TOML line), plus the
+# multi-part accumulation case for a compound command whose sub-commands each
+# carry their own context.
+[permissions]
+allow = [
+    { match = "Bash(ls *)", additionalContext = "Listing directory contents is safe." },
+    { match = "Bash(cat *)", additionalContext = "Reading a text file for review." },
+    "Bash(pwd)",
+]
+ask = [
+    { match = "Bash(rm *)", additionalContext = "Double-check the target before deleting." },
+]
+deny = [
+    { match = "Bash(sudo *)", additionalContext = "Privilege escalation is never permitted." },
+]
+
+[hard_deny]
+deny = [
+    { match = "Bash([regex]^curl\\b.*-X\\s+DELETE)", additionalContext = "Destructive HTTP verbs are hard-denied." },
+]

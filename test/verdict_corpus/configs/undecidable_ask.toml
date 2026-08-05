@@ -1,0 +1,11 @@
+# TOO-45 verdict-corpus fixture: pins undecidable_fallback = "ask".
+undecidable_fallback = "ask"
+
+[permissions]
+allow = [
+    "Bash(ls *)",
+    "Bash(diff *)",
+]
+deny = [
+    "Bash(sudo *)",
+]

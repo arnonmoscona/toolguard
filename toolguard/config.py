@@ -1716,7 +1716,15 @@ class Configuration:
                     levels, index, matched_pattern, prov, decide_detailed
                 )
             return ResolvedDecision(
-                decision, reason_with_prov, prov, override, additional_context
+                decision,
+                reason_with_prov,
+                prov,
+                override,
+                additional_context,
+                # TOO-45 R3: carry the matched pattern instead of discarding it
+                # into `reason_with_prov` for callers to parse back out. It is
+                # already in hand here -- both lookups above key off it.
+                matched_rule=matched_pattern,
             )
 
         # No level matched anything for this command/path (TOO-15). Two distinct

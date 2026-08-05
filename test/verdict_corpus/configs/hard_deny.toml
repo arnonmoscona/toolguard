@@ -1,0 +1,41 @@
+# TOO-45 verdict-corpus fixture: pins [hard_deny] behaviour for both Bash and
+# file-path tools, including a hard_deny.allow carve-out (an EXCEPTION to a
+# hard_deny.deny pattern, not a normal/forced allow -- see
+# Configuration.hard_deny's docstring).
+#
+# governed_tools is set explicitly (default is ('Bash',) when unset) so Read
+# is actually governed -- otherwise the end-to-end corpus's Read(**/.env)
+# hard-deny case would short-circuit to "allow" at the "Not a governed tool"
+# check in hook.py::main BEFORE ever reaching hard_deny, which is a real and
+# correct behaviour but not what this fixture is for. decide() (the in-process
+# corpus's entry point) never consults governed_tools at all, so this key has
+# no effect there -- it only matters for the end-to-end (real hook) corpus.
+governed_tools = ["Bash", "Read", "Write", "Edit"]
+
+# Read patterns use the ABSOLUTE `[glob]/**/...` form deliberately, not the
+# bare project-relative `**/...` form: an unprefixed relative pattern is
+# anchored to the sandbox's own (ephemeral) project root
+# (Configuration._anchor_relative_path), which none of this fixture's
+# absolute-looking case targets (chosen for portability across regenerations,
+# not tied to any one sandbox's project directory) would ever fall under --
+# confirmed by generating goldens with the relative form first and finding
+# every Read case fell through to the no_match_fallback default instead of
+# ever reaching [hard_deny] or the normal allow rule.
+[permissions]
+allow = [
+    "Bash(rm *)",
+    "Bash(curl *)",
+    "Read([glob]/**)",
+]
+
+[hard_deny]
+deny = [
+    "Bash([regex]^rm\\s+-rf\\s+/$)",
+    "Bash([regex]^curl\\b)",
+    "Read([glob]/**/.env)",
+    "Read([glob]/**/.ssh/**)",
+]
+allow = [
+    "Bash(curl localhost*)",
+    "Bash(curl 127.0.0.1*)",
+]

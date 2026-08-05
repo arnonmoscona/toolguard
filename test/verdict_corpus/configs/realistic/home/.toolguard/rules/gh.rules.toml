@@ -1,0 +1,183 @@
+# gh CLI permission rules for toolguard, derived from cli.github.com/manual/gh and
+# cli.github.com/manual/gh_api against this disposition:
+#   1) strictly read-only gh operations -> allow
+#   2) anything that modifies the repo (or other GitHub-side state)     -> deny
+#   3) anything that runs/executes something ON GITHUB, except search  -> deny
+#   4) issue comment / issue create -> allow (explicit exception); every other
+#      issue command that changes the issue -> deny
+#
+# Drop this [permissions] block into a toolguard_hook.toml (merge with any
+# existing allow/deny arrays -- don't just overwrite them).
+#
+# Generated with Claude code (Sonnet 5)
+#
+# If this was using built-in claude permission rules you would have needed about 197
+# rules total as opposed to 61 rules here. And it would be limited to prefix matching
+# only andwouldn't have even covered the complex deny rules for gh api like:
+#   "Bash([regex]^(?:\\S*/)?gh\\s+api\\s.*(-X\\s|--method(\\s|=)))"
+# Which is impossible to express at all in claude's permissions model.
+#
+# -----------------
+# Claude's comments:
+# -----------------
+#
+#   (a|b|c) alternation, so each leaf subcommand needs its own line):
+#   Counting it out by expanding every alternation group in the toolguard regex into individual literal prefix rules (native Bash(gh <subcommand>:*) syntax has no
+#
+#   Allow: 91 rules (vs. 33 toolguard regex lines)
+#   Deny: 106 rules (vs. 28 toolguard regex lines)
+#   Total: ~197 rules (vs. 61)
+#
+#   That ~3.2x blowup is mechanical — every (list|view|status|comment|create) group becomes 5 separate lines,
+#   (close|delete|develop|edit|lock|pin|reopen|transfer|unlock|unpin) becomes 10, etc.
+#
+#   But there's a more important problem than the count: the gh api mutation-detection can't be replicated at all with native rules, at any count. Native permissions
+#   only do prefix matching (Bash(gh api:*) = "starts with this text, then anything"). My toolguard deny relies on -X/--method/-f/-F/--input or graphql appearing
+#   anywhere in the argument list, in arbitrary order — gh api repos/x/y -X DELETE and gh api -X DELETE repos/x/y are both real, and there's no bound on how many tokens
+#   can precede the flag. A prefix rule can only anchor at the start, so it can catch gh api -X:* (flag written first) but not the equally common gh api repos/x/y -X
+#   DELETE (flag written after the endpoint) — and there's no finite number of rules that covers every possible endpoint-token-count before the flag.
+#
+#   So the honest native-only options for gh api are:
+#   - Allow gh api:* wholesale and accept the mutation path is unenforceable, or
+#   - Deny gh api:* wholesale and lose the legitimate GET use case entirely.
+#
+#   Either way, native Claude permissions can't reproduce the nuanced "GET-only" carve-out this disposition asked for — that's precisely the class of rule (content/flag
+#   inspection over the whole command line, not just its prefix) that toolguard's [regex] matching exists to make possible. The ~197-rule figure is the cost for
+#   everything except that gap; the gap itself isn't a rule-count problem, it's a capability gap.
+
+[permissions]
+
+allow = [
+    # --- top-level / local-only, no GitHub side effects ---
+    "Bash([regex]^(?:\\S*/)?gh$)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+(help|--help|-h|--version|status)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+browse\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+completion\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+alias\\s+(list|delete)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+config\\s+(get|list|clear-cache)\\b)",
+
+    # --- auth: read-only status/token only ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+auth\\s+(status|token)\\b)",
+
+    # --- read-only listings/views across resource groups ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+cache\\s+list\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+codespace\\s+(list|view|logs|ports)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+discussion\\s+(list|view)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+extension\\s+(list|search)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+gist\\s+(list|view|clone)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+gpg-key\\s+list\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+label\\s+list\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+licenses\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+org\\s+list\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+project\\s+(list|view|field-list|item-list)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+release\\s+(list|view|download|verify|verify-asset)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+repo\\s+(list|view|clone|set-default|read-dir|read-file)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+repo\\s+(deploy-key|gitignore|license|autolink)\\s+(list|view)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+ruleset\\s+(check|list|view)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+run\\s+(list|view|watch|download)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+secret\\s+list\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+skill\\s+(list|search|preview)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+ssh-key\\s+list\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+variable\\s+(list|get)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+workflow\\s+(list|view)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+agent-task\\s+(list|view)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+attestation\\s+(download|trusted-root|verify)\\b)",
+
+    # --- pr: read-only + local checkout (no GitHub-side write) ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+pr\\s+(list|view|diff|checks|status|checkout)\\b)",
+
+    # --- issue: read-only, PLUS the explicit comment/create carve-out (disposition #4) ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+issue\\s+(list|view|status|comment|create)\\b)",
+
+    # --- search: explicit exception to the "no execute" rule (disposition #3) ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+search\\s+(code|commits|issues|prs|repos)\\b)",
+
+    # --- gh api: baseline allow, narrowed by the deny carve-outs below.
+    # Only a bare GET with no mutating flags survives (deny takes precedence).
+    "Bash([regex]^(?:\\S*/)?gh\\s+api\\b)",
+]
+
+deny = [
+    # --- codespace: anything that creates/modifies/executes on the remote box ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+codespace\\s+(code|cp|create|delete|edit|jupyter|rebuild|ssh|stop)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+codespace\\s+ports\\s+(forward|visibility)\\b)",
+
+    # --- discussion: content mutations (no comment/create exception -- that
+    # exception was only granted for issues) ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+discussion\\s+(comment|create|edit)\\b)",
+
+    # --- extension: install/remove/upgrade/create all write locally-executed
+    # code; exec runs it; browse's TUI can install on a keypress so it's
+    # excluded from the read-only allow above too ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+extension\\s+(install|remove|upgrade|create|exec|browse)\\b)",
+
+    # --- gist mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+gist\\s+(create|delete|edit|rename)\\b)",
+
+    # --- account-security mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+gpg-key\\s+(add|delete)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+ssh-key\\s+(add|delete)\\b)",
+
+    # --- issue: everything that changes the issue itself ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+issue\\s+(close|delete|develop|edit|lock|pin|reopen|transfer|unlock|unpin)\\b)",
+
+    # --- label mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+label\\s+(clone|create|delete|edit)\\b)",
+
+    # --- pr: every mutation, including comment/create (disposition's
+    # comment/create exception names issues only, not PRs) ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+pr\\s+(close|comment|create|edit|lock|merge|ready|reopen|revert|review|unlock|update-branch)\\b)",
+
+    # --- project mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+project\\s+(close|copy|create|delete|edit|field-create|field-delete|item-add|item-archive|item-create|item-delete|item-edit|link|mark-template|unlink)\\b)",
+
+    # --- release mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+release\\s+(create|delete-asset|delete|edit|upload)\\b)",
+
+    # --- repo mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+repo\\s+(archive|create|delete|edit|fork|rename|sync|unarchive)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+repo\\s+(autolink|deploy-key)\\s+(create|add|delete)\\b)",
+
+    # --- Actions: cancel/delete/rerun EXECUTE or destroy runs; enable/disable/run
+    # a workflow all execute-or-modify on GitHub (disposition #3) ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+run\\s+(cancel|delete|rerun)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+workflow\\s+(disable|enable|run)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+cache\\s+delete\\b)",
+
+    # --- secrets/variables: high-value mutations ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+secret\\s+(set|delete)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+variable\\s+(set|delete)\\b)",
+
+    # --- skill: install/publish/update all execute or write ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+skill\\s+(install|publish|update)\\b)",
+
+    # --- agent-task create: launches an agent task execution on GitHub ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+agent-task\\s+create\\b)",
+
+    # --- copilot / preview: undocumented/execution-flavored subcommands, no
+    # safe read-only carve-out identified ---
+    "Bash([regex]^(?:\\S*/)?gh\\s+copilot\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+preview\\b)",
+
+    # --- alias set/import and config set: NOT named in the disposition, but
+    # denied for a structural reason -- an alias or a pager/editor config value
+    # is free text that gh later re-invokes. A rule that pattern-matches the
+    # literal command text (as all of these do) cannot see through
+    # `gh alias set nuke 'api -X DELETE ...'` -- invoking `gh nuke` afterward
+    # would sail past every deny above. Same risk for `gh config set pager ...`
+    # / `editor ...`, since gh shells out to the configured pager/editor on
+    # otherwise-read-only commands. Denying the *definition* step closes the
+    # hole; allowing get/list/delete is safe since those can't inject anything.
+    "Bash([regex]^(?:\\S*/)?gh\\s+alias\\s+(set|import)\\b)",
+    "Bash([regex]^(?:\\S*/)?gh\\s+config\\s+set\\b)",
+
+    # --- gh api: mutation forms (order-independent of the general allow above,
+    # since deny always wins within a level) ---
+    # explicit method override (GET is the only implicit read-only default)
+    "Bash([regex]^(?:\\S*/)?gh\\s+api\\s.*(-X\\s|--method(\\s|=)))",
+    # -f/-F/--input add parameters, which flips the implicit method to POST
+    "Bash([regex]^(?:\\S*/)?gh\\s+api\\s.*(\\s-f\\s|\\s--raw-field(\\s|=)|\\s-F\\s|\\s--field(\\s|=)|\\s--input(\\s|=)))",
+    # graphql always transports over POST, so a query vs. a mutation can't be
+    # told apart from the command line alone -- deny wholesale
+    "Bash([regex]^(?:\\S*/)?gh\\s+api\\s+(--\\S+(\\s+\\S+)?\\s+)*graphql\\b)",
+]

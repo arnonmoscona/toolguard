@@ -489,6 +489,198 @@ class TestMatchedRuleLogging(unittest.TestCase):
             )
 
 
+class TestProvenanceLogging(unittest.TestCase):
+    """
+    TOO-45 R3 follow-up: provenance is its OWN log field, not folded back
+    into matched_rule/violated_rules text -- see log_command's provenance
+    parameter docstring for why.
+    """
+
+    def test_provenance_in_markdown_format_for_allow(self):
+        """
+        Given an allowed command logged with both matched_rule and provenance
+        When the markdown log is written
+        Then it contains a Provenance field with the supplied text, separate
+            from the Matched Rule field
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "git status",
+                "executed",
+                matched_rule="git *",
+                provenance="project: /p/toolguard_hook.toml",
+                log_dir=log_dir,
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn("`git *`", content)
+            self.assertIn("**Provenance**: project: /p/toolguard_hook.toml", content)
+
+    def test_provenance_in_markdown_format_for_deny(self):
+        """
+        Given a refused command logged with violated_rules and provenance
+        When the markdown log is written
+        Then it contains a Provenance field alongside the Violated Rules field
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "rm -rf /tmp/x",
+                "refused",
+                violated_rules=["rm -rf *"],
+                provenance="project: /p/toolguard_hook.toml",
+                log_dir=log_dir,
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn("Violated Rules", content)
+            self.assertIn("**Provenance**: project: /p/toolguard_hook.toml", content)
+
+    def test_no_provenance_field_for_hard_deny(self):
+        """
+        Given a refused command logged with violated_rules but NO provenance
+            (the hard-deny case -- pooled across levels, no single source)
+        When the markdown log is written
+        Then it shows Violated Rules but no Provenance field at all
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "curl http://x",
+                "refused",
+                violated_rules=["curl:*"],
+                log_dir=log_dir,
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            self.assertIn("Violated Rules", content)
+            self.assertNotIn("Provenance", content)
+
+    def test_provenance_in_jsonlines_format(self):
+        """
+        Given jsonlines format and a command logged with matched_rule and provenance
+        When the entry is parsed
+        Then its provenance field equals the supplied text
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "git status",
+                "executed",
+                matched_rule="git *",
+                provenance="project: /p/toolguard_hook.toml",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
+
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            entry = json.loads(content.split("\n")[0])
+
+            self.assertEqual(entry["provenance"], "project: /p/toolguard_hook.toml")
+
+    def test_no_provenance_key_in_jsonlines_when_not_provided(self):
+        """
+        Given jsonlines format and a command logged without provenance
+        When the entry is parsed
+        Then it has no provenance key
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "git status",
+                "executed",
+                matched_rule="git *",
+                log_dir=log_dir,
+                log_format=LOG_FORMAT_JSONLINES,
+            )
+
+            expected_filename = (
+                f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
+            )
+            content = (log_dir / expected_filename).read_text().strip()
+            entry = json.loads(content.split("\n")[0])
+
+            self.assertNotIn("provenance", entry)
+
+    def test_provenance_ordering_in_markdown(self):
+        """
+        Given a command logged with matched_rule, provenance, and extra_info
+        When the markdown log is written
+        Then Provenance appears after Matched Rule and before Agent
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "git status",
+                "executed",
+                matched_rule="git *",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="main",
+                log_dir=log_dir,
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            matched_pos = content.index("**Matched Rule**")
+            provenance_pos = content.index("**Provenance**")
+            agent_pos = content.index("**Agent**")
+
+            self.assertLess(
+                matched_pos,
+                provenance_pos,
+                "Provenance should appear after Matched Rule",
+            )
+            self.assertLess(
+                provenance_pos, agent_pos, "Provenance should appear before Agent"
+            )
+
+    def test_provenance_ordering_in_markdown_for_deny(self):
+        """
+        Given a REFUSED command logged with violated_rules, provenance, and
+            extra_info (no matched_rule -- the normal deny shape)
+        When the markdown log is written
+        Then Provenance appears AFTER Violated Rules and before Agent -- it
+            describes the violated rule, so it must not render above it
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                "rm -rf /tmp/x",
+                "refused",
+                violated_rules=["rm -rf *"],
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="main",
+                log_dir=log_dir,
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            content = (log_dir / expected_filename).read_text()
+
+            violated_pos = content.index("**Violated Rules**")
+            provenance_pos = content.index("**Provenance**")
+            agent_pos = content.index("**Agent**")
+
+            self.assertLess(
+                violated_pos,
+                provenance_pos,
+                "Provenance should appear after Violated Rules",
+            )
+            self.assertLess(
+                provenance_pos, agent_pos, "Provenance should appear before Agent"
+            )
+
+
 class TestPermissionModeLogging(unittest.TestCase):
     """
     Test the permission_mode parameter in log entries (TOO-15: recorded so a

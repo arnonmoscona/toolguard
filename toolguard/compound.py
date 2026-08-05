@@ -671,10 +671,9 @@ def _combine_strictest(
     or ``undecidable_fallback``. Computed as a structured ``any()`` over the
     per-leaf tags rather than re-derived from the (possibly summarised) final
     *reason* string, which is what let a multi-leaf all-allow compound
-    silently drop the warning before this fix: the old single downstream
-    text-search (:func:`toolguard.resolve._bash_result_is_fallback_warning`)
-    ran on the summary text below, which never repeats the marker substring.
-    ``False`` for every non-``allow`` decision.
+    silently drop the warning before this fix: the old downstream text-search
+    (since removed) ran on the summary text below, which never repeats the
+    marker substring. ``False`` for every non-``allow`` decision.
 
     Fabrication guard (TOO-19 code review M1, defect 2): in the multi-allow
     summary below, a leaf whose ``fallback_kind`` is not ``None`` is an

@@ -122,21 +122,34 @@ class BashResolution:
             NOT yielded by :meth:`__iter__`, for the same backwards-compatibility
             reason as :attr:`FileResolution.additional_context`: access it as
             ``result.additional_context``.
-        fallback_warning: ``True`` when this 'allow' decision should be routed
-            to the WARNING log stream (TOO-19 allow/allow_with_no_warnings
+        fallback_warning: ``True`` when this 'allow' decision should be
+            routed to the WARNING log stream (TOO-19 allow/allow_with_no_warnings
             work) -- see :func:`toolguard.hook._log_fallback_allow_warning`.
-            Computed by :func:`_bash_result_is_fallback_warning` from *reason*
-            at the point this dataclass is built, NOT threaded through as
-            structured data the way :attr:`FileResolution.fallback_warning`
-            is: the per-sub-command ``resolve_one`` callable contract
-            (:func:`toolguard.compound.resolve_compound_permission`'s
-            parameter) is a plain 3-tuple relied on by many existing test
-            fixtures, so widening it to carry this flag was judged
-            disproportionate for what is otherwise an internal robustness
-            improvement -- see the TOO-19 implementation report for the full
-            reasoning. ``False`` for every non-allow decision. Deliberately
-            NOT yielded by :meth:`__iter__`, for the same reason as
+            Propagated directly from
+            :func:`toolguard.compound.resolve_compound_permission_detailed`'s
+            own structured return value (see that function's docstring for
+            how it is computed per sub-command) -- not derived from *reason*.
+            ``False`` for every non-allow decision. Deliberately NOT yielded
+            by :meth:`__iter__`, for the same reason as
             :attr:`additional_context`.
+        matched_rule: The deciding sub-command's matched-rule pattern, or
+            ``None`` when there is no single decider to attribute (see
+            :func:`_deciding_sub_match`). Not derived from *reason* -- BUT NOT
+            SAFE ALONE for an ``undecidable_fallback`` escape-hatch verdict:
+            when the escape-hatch leaf's OWN pre-floor decision happens to
+            equal the final decision, this is the real, misleading rule its
+            truncated stub matched, not the rule that actually decided.
+            Correct today only because ``hook.py``'s
+            ``_matched_rule_for_single_command`` / ``_log_non_allow_decision``
+            re-check *reason* via ``compound.fallback_kind_for_reason`` before
+            logging and replace this value with a placeholder when it fires
+            -- any new consumer of this field must apply that same check
+            itself.
+        provenance: The deciding sub-command's provenance, sourced the same
+            way as :attr:`matched_rule` (same deciding :class:`SubMatch`) --
+            ``None`` for a hard-deny match (pooled across levels, no single
+            provenance) or when there is no single decider. Subject to the
+            SAME escape-hatch caveat as :attr:`matched_rule` above.
     """
 
     decision: str
@@ -145,6 +158,9 @@ class BashResolution:
     sub_matches: List[SubMatch] = field(default_factory=list)
     additional_context: Optional[str] = None
     fallback_warning: bool = False
+    # Deliberately NOT yielded by __iter__, for the same reason as additional_context.
+    matched_rule: Optional[str] = None
+    provenance: Optional[Any] = None  # Optional[Provenance]
 
     def __iter__(self):
         """
@@ -203,6 +219,9 @@ class FileResolution:
             ``False`` for a hard-deny match or any non-fallback decision.
             Deliberately NOT yielded by :meth:`__iter__`, for the same reason
             as :attr:`additional_context`.
+        matched_rule: The winning rule's pattern text as matched, or ``None``
+            for a hard-deny match or a fail-closed/fallback default (no rule
+            matched). Not derived from *reason*.
     """
 
     decision: str
@@ -211,6 +230,8 @@ class FileResolution:
     provenance: Optional[Any]  # Optional[Provenance]
     additional_context: Optional[str] = None
     fallback_warning: bool = False
+    # Deliberately NOT yielded by __iter__, for the same reason as additional_context.
+    matched_rule: Optional[str] = None
 
     def __iter__(self):
         """
@@ -545,6 +566,23 @@ def resolve_file_path_permission_detailed(
             override=None,
             provenance=None,
             additional_context=cap_context_words(hard_deny_additional_context),
+            # TOO-45 R3: `_check_file_path_hard_deny` computes the matched
+            # pattern internally (`matched_deny`) but returns only a 3-tuple
+            # -- the pattern itself is not one of the returned values, only
+            # baked into `reason` -- so there is nothing to attribute here
+            # without re-parsing that string. Widening that return signature
+            # (mirroring `check_hard_deny`'s Bash-side pattern-as-its-own-
+            # element convention, TOO-19 code review m3) would close this,
+            # but is out of R3's scope per the ticket; this stays None
+            # deliberately rather than being an oversight. NOTE: this means
+            # `_log_non_allow_decision`'s "Violated Rules" log entry for a
+            # file-path hard-deny falls through to the FULL reason text
+            # (e.g. "Path matches hard_deny pattern: X (cannot be
+            # overridden)") rather than the OLD colon-split extraction
+            # ("X (cannot be overridden)") -- more verbose, not fabricated,
+            # and outside the corpus's tracked fields (log content, not the
+            # hook's JSON reason) -- see the R3 implementation report.
+            matched_rule=None,
         )
 
     def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
@@ -574,12 +612,79 @@ def resolve_file_path_permission_detailed(
         provenance=resolved.provenance,
         additional_context=cap_context_words(resolved.additional_context),
         fallback_warning=resolved.fallback_warning,
+        # TOO-45 R3: already in hand on `resolved` -- no need for a caller to
+        # parse it back out of `reason`.
+        matched_rule=resolved.matched_rule,
     )
 
 
 # ---------------------------------------------------------------------------
 # Bash / command-tool resolver (pure)
 # ---------------------------------------------------------------------------
+
+
+def _deciding_sub_match(
+    decision: str, sub_matches: List[SubMatch]
+) -> Optional[SubMatch]:
+    """
+    Find the sub-command whose own decision produced a compound Bash verdict.
+
+    Returns the FIRST sub-command (extraction order) whose recorded decision
+    equals the compound's *decision*. Checked for every decision, including a
+    single leaf: a floor (the ASK floor for foreign inline code, or
+    ``undecidable_fallback``) can override a leaf's own verdict, in which
+    case that leaf did not decide and must not be credited with a rule it
+    didn't win on -- e.g. `python -c "..."` resolves 'allow' via `python *`,
+    the floor makes it 'ask', and the audit log must not name `python *` as
+    the deciding rule.
+
+    For a genuinely multi-leaf ALL-allow compound there is no single
+    decider -- every leaf had to allow for the compound to allow -- so this
+    returns ``None``; per-sub-command detail is still available on
+    ``sub_matches`` itself for callers that need it (see
+    ``hook.py::_log_allowed_command``).
+
+    This is NOT guaranteed to agree with whichever sub-command's reason
+    ``_combine_strictest`` surfaced: for an ASK-floor leaf (foreign
+    inline/heredoc code), its recorded ``SubMatch`` reflects resolving the
+    TRUNCATED outer-command stub through the normal cascade, not the leaf's
+    real, floored verdict -- so the two can genuinely diverge. Example:
+    `ls && python -c "print(1)"` under ``undecidable_fallback=deny`` --
+    both recorded sub_matches say 'allow' (the stub `python -c` matches a
+    real `python *` rule), but the floor makes the compound 'deny'; nothing
+    agrees, so this correctly returns ``None`` rather than mis-attributing
+    the deny to either leaf.
+
+    That example is the case where decision INEQUALITY saves this function --
+    it does not generalise. When the escape-hatch leaf's own pre-floor
+    decision happens to EQUAL the final decision (single-leaf
+    `python -c "..."` under `allow_with_warning`/`allow`: the stub's real
+    `python *` match already says 'allow', same as the floored result), this
+    function returns that leaf's real, misleading ``SubMatch`` -- it cannot
+    tell "the rule decided" from "the escape hatch decided and a rule
+    happened to also match the stub" from *decision* and *sub_matches*
+    alone. Safe today only because ``hook.py``'s
+    ``_matched_rule_for_single_command`` / ``_log_non_allow_decision``
+    re-classify *reason* via ``compound.fallback_kind_for_reason`` before
+    logging and substitute a placeholder when it fires; this function itself
+    performs no such check.
+
+    Args:
+        decision: The compound's final decision, AFTER the parse-failure
+            floor (:meth:`~toolguard.config.Configuration.apply_parse_failure_floor`)
+            has already been applied.
+        sub_matches: The per-sub-command records accumulated while
+            resolving, in extraction order.
+
+    Returns:
+        The deciding :class:`SubMatch`, or ``None`` when there is no single
+        decider to attribute.
+    """
+    if decision in ("deny", "ask") or len(sub_matches) == 1:
+        for sub_match in sub_matches:
+            if sub_match.decision == decision:
+                return sub_match
+    return None
 
 
 def resolve_bash_permission_detailed(
@@ -640,7 +745,10 @@ def resolve_bash_permission_detailed(
         previously let a multi-leaf all-allow compound silently lose its
         warning (and, separately, misattribute the allow to a fabricated
         rule name in the log) when the escape hatch fired on only one of
-        several allowed leaves.
+        several allowed leaves. Also carries ``matched_rule`` and
+        ``provenance``, both sourced from :func:`_deciding_sub_match` (the
+        single sub-command whose own decision produced the compound verdict,
+        or ``None`` when there is none to attribute).
     """
     overrides: List[Tuple[str, Any]] = []
     sub_matches: List[SubMatch] = []
@@ -685,26 +793,11 @@ def resolve_bash_permission_detailed(
         if resolved.decision == "allow" and resolved.override is not None:
             overrides.append((sub_command, resolved.override))
 
-        # Extract matched_rule from reason (format: "Command matches <kind> pattern: <rule>  [...]")
-        sub_matched_rule: Optional[str] = None
-        reason_body = resolved.reason
-        # Strip the bracketed provenance suffix if present
-        if "  [" in reason_body:
-            reason_body = reason_body[: reason_body.rindex("  [")]
-        for marker in (
-            "Command matches allow pattern: ",
-            "Command matches deny pattern: ",
-            "Command matches ask pattern: ",
-        ):
-            if reason_body.startswith(marker):
-                sub_matched_rule = reason_body[len(marker) :]
-                break
-
         sub_matches.append(
             SubMatch(
                 sub_command=sub_command,
                 decision=resolved.decision,
-                matched_rule=sub_matched_rule,
+                matched_rule=resolved.matched_rule,
                 provenance=resolved.provenance,
             )
         )
@@ -745,6 +838,7 @@ def resolve_bash_permission_detailed(
     if decision != "allow":
         overrides = []
         fallback_warning = False
+    deciding = _deciding_sub_match(decision, sub_matches)
     return BashResolution(
         decision=decision,
         reason=reason,
@@ -752,4 +846,6 @@ def resolve_bash_permission_detailed(
         sub_matches=sub_matches,
         additional_context=cap_context_words(additional_context),
         fallback_warning=fallback_warning,
+        matched_rule=deciding.matched_rule if deciding is not None else None,
+        provenance=deciding.provenance if deciding is not None else None,
     )

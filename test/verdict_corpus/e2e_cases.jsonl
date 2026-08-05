@@ -1,0 +1,30 @@
+{"fixture": "enrichment", "target": "ls -la", "tool": "Bash"}
+{"fixture": "enrichment", "target": "pwd", "tool": "Bash"}
+{"fixture": "enrichment", "target": "rm file.txt", "tool": "Bash"}
+{"fixture": "enrichment", "target": "sudo reboot", "tool": "Bash"}
+{"fixture": "enrichment", "target": "curl -X DELETE https://api.example.com/x", "tool": "Bash"}
+{"fixture": "enrichment", "target": "ls -la && cat file.txt", "tool": "Bash"}
+{"fixture": "enrichment", "target": "cat a.txt && cat b.txt", "tool": "Bash"}
+{"fixture": "enrichment", "target": "pwd && ls -la", "tool": "Bash"}
+{"fixture": "enrichment", "target": "echo hi", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "ls -la", "tool": "Bash"}
+{"fixture": "parse_failure", "target": "rm -rf /", "tool": "Bash"}
+{"fixture": "undecidable_ask", "target": "diff <(ls) <(ls -la)", "tool": "Bash"}
+{"fixture": "undecidable_deny", "target": "diff <(ls) <(ls -la)", "tool": "Bash"}
+{"fixture": "undecidable_allow", "target": "diff <(ls) <(ls -la)", "tool": "Bash"}
+{"fixture": "hard_deny", "target": "rm -rf /", "tool": "Bash"}
+{"fixture": "hard_deny", "target": "curl https://evil.example.com", "tool": "Bash"}
+{"fixture": "hard_deny", "target": "curl localhost:8080/health", "tool": "Bash"}
+{"fixture": "hard_deny", "target": "/home/tguser/.env", "tool": "Read"}
+{"fixture": "hard_deny", "target": "rm -rf / && ls", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "ls -la", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "sudo reboot", "tool": "Bash"}
+{"fixture": "fallback_ask", "target": "echo hello", "tool": "Bash"}
+{"fixture": "empty", "target": "ls -la", "tool": "Bash"}
+{"fixture": "pattern_forms", "target": "./docs/architecture.md", "tool": "Read"}
+{"fixture": "pattern_forms", "target": "./scratch/output.txt", "tool": "Write"}
+{"fixture": "pattern_forms", "target": "git status", "tool": "Bash"}
+{"fixture": "pattern_forms", "target": "git push origin main", "tool": "Bash"}
+{"fixture": "hierarchy_conflict", "target": "rm important-file backup.txt && ls -la", "tool": "Bash"}
+{"fixture": "realistic", "target": "git status", "tool": "Bash"}
+{"fixture": "realistic", "target": "gh status", "tool": "Bash"}

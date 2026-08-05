@@ -271,12 +271,16 @@ Toolguard writes to four separate daily log streams, one file per concern:
 | Conflicts | `logs/toolguard-conflict-YYYY-MM-DD.md` | Cross-level conflicts (allow-over-deny overrides, takeover `enabled` disagreements) |
 
 Each resolution entry records the timestamp, the operation (command or file path with tool
-name), the decision (allow/deny), the **matched rule** (for allowed commands, including the
-winning rule's provenance -- which level/file it came from), the violated rules (for denied
-commands), and the best-effort agent identification.
+name), the decision (allow/deny), the **matched rule** (for allowed commands) or **violated
+rules** (for denied commands), the rule's **provenance** -- which level/file it came from, in
+its OWN field, when there is a single rule to attribute -- and the best-effort agent
+identification.
 
 For compound commands (e.g., `git status && git log`), each sub-command is logged as a
-**separate entry** with its own matched rule.
+**separate entry** with its own matched rule. Compound entries do NOT get a separate
+**Provenance** field: when available, that sub-command's provenance is instead folded back
+into **Matched Rule** in the pre-R3 bracketed format (e.g. `` `git *  [project: /path]` ``) --
+per-sub-command provenance is not threaded through that logging path.
 
 Example resolution entries (markdown format):
 
@@ -285,14 +289,16 @@ Example resolution entries (markdown format):
 
 - **Status**: EXECUTED
 - **Command**: `git status`
-- **Matched Rule**: `git *  [project: .claude/toolguard_hook.toml]`
+- **Matched Rule**: `git *`
+- **Provenance**: project: .claude/toolguard_hook.toml
 - **Agent**: main
 
 ## 2026-01-14 10:15:45
 
 - **Status**: EXECUTED
 - **Command**: `gh pr view`
-- **Matched Rule**: `gh pr view*  [user: ~/.config/toolguard/rules/gh.toml]`
+- **Matched Rule**: `gh pr view*`
+- **Provenance**: user: ~/.config/toolguard/rules/gh.toml
 - **Agent**: main
 
 ## 2026-01-14 10:16:02
@@ -311,10 +317,15 @@ that matched, distinct from -- but merged into the same user level as --
 first entry's `.claude/toolguard_hook.toml` -- the actual provenance is always the full
 absolute path, e.g. `/home/alice/.config/toolguard/rules/gh.toml`.)
 
+The **Provenance** field is absent (not merely blank) whenever there is no single rule to
+attribute -- e.g. an unoverridable `[hard_deny]` match, which is pooled across levels -- and
+also for every compound sub-command entry, whose provenance (when available) is folded into
+**Matched Rule** instead, per the note above.
+
 Example (JSONLines format):
 
 ```json
-{"timestamp": "2026-01-14T10:15:23", "status": "executed", "command": "git status", "violated_rules": [], "matched_rule": "git *", "extra_info": "main"}
+{"timestamp": "2026-01-14T10:15:23", "status": "executed", "command": "git status", "violated_rules": [], "matched_rule": "git *", "provenance": "project: .claude/toolguard_hook.toml", "extra_info": "main"}
 ```
 
 **JSONLines is not user-selectable today.** `log_writer` can emit it via an internal

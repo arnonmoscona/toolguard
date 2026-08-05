@@ -1,0 +1,25 @@
+# TOO-45 verdict-corpus fixture: pins every pattern-form prefix -- native
+# (no prefix, and the explicit [native] spelling), [regex], and [glob] -- for
+# both Bash and file-path tools.
+#
+# governed_tools is set explicitly (default is ('Bash',) when unset) so Read
+# and Write are actually governed -- see hard_deny.toml's identical comment
+# for why this matters for the end-to-end corpus specifically.
+governed_tools = ["Bash", "Read", "Write", "Edit"]
+
+[permissions]
+allow = [
+    "Bash(git status)",
+    "Bash(git log:*)",
+    "Bash([native]git show:*)",
+    "Bash([regex]^git\\s+(status|log)\\b)",
+    "Bash([glob]git diff*)",
+    "Read(./docs/**)",
+    "Read([glob]./README.md)",
+    "Read([regex]^\\./(docs|test)/.*)",
+    "Write(./scratch/**)",
+]
+deny = [
+    "Bash([regex]^git\\s+push\\b)",
+    "Bash([glob]git reset --hard*)",
+]
