@@ -25,7 +25,6 @@ from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHO
 from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import (
     FILE_PATH_TOOLS,
-    _decide_file_path_at_level_detailed,
     _handle_command_tool,
     _handle_file_path_tool,
     _log_allowed_command,
@@ -35,7 +34,10 @@ from toolguard.hook import (
     parse_hook_input,
 )
 from toolguard.log_writer import LogRecord
-from toolguard.resolve import resolve_bash_permission_detailed
+from toolguard.resolve import (
+    _decide_file_path_at_level_detailed,
+    resolve_bash_permission_detailed,
+)
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
@@ -74,7 +76,7 @@ def check_file_path_permission(
     Evaluate a file path against flat allow/deny pattern lists, returning (decision, reason).
 
     Thin test adapter over the live single-level resolver
-    :func:`toolguard.hook._decide_file_path_at_level_detailed`. It preserves the
+    :func:`toolguard.resolve._decide_file_path_at_level_detailed`. It preserves the
     decision semantics the removed ``check_file_path_permission`` had (deny-first,
     glob/regex/native prefixes, tilde expansion, default-deny when nothing matches)
     so the existing file-path test intents carry over unchanged. An empty

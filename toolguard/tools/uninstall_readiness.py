@@ -268,7 +268,7 @@ def evaluate_uninstall_readiness_permissions(
         claude_dir, settings_path
     ):
         decision = decide(config, permission.tool, permission.probe)
-        statuses.append(_status_for(permission, decision.verdict))
+        statuses.append(_status_for(permission, decision.decision))
     return statuses
 
 

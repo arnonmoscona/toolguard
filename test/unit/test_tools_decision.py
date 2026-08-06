@@ -25,8 +25,9 @@ from toolguard.config import (
     Configuration,
     Provenance,
 )
+from toolguard.config_types import RuntimeVerdict
 from toolguard.resolve import UnitVerdict
-from toolguard.tools.decision import Decision, decide
+from toolguard.tools.decision import decide
 
 
 def _make_config(layers_content):
@@ -88,7 +89,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "ls -la")
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
         self.assertEqual("Bash", decision.tool)
         self.assertEqual("ls -la", decision.target)
 
@@ -116,7 +117,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "whoami")
-        self.assertEqual("ask", decision.verdict)
+        self.assertEqual("ask", decision.decision)
 
     def test_deny_pattern_blocks_command(self):
         """
@@ -140,7 +141,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "rm -rf /tmp/foo")
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("deny", decision.decision)
 
     def test_more_specific_allow_at_project_level_wins_over_user_deny(self):
         """
@@ -175,7 +176,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "git push origin main")
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
 
     def test_hard_deny_cannot_be_overridden(self):
         """
@@ -203,7 +204,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "rm -rf /")
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("deny", decision.decision)
 
     def test_hard_deny_carve_out_exempts_command(self):
         """
@@ -232,7 +233,7 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "rm -rf /tmp/foo")
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
 
 
 class TestDecideCompoundBash(_IsolatedEnvTestCase):
@@ -260,7 +261,7 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "git status && ls -la")
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
 
     def test_compound_one_unmatched_yields_ask(self):
         """
@@ -287,7 +288,7 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Bash", "git status && whoami")
-        self.assertEqual("ask", decision.verdict)
+        self.assertEqual("ask", decision.decision)
 
 
 class TestDecideFilePath(_IsolatedEnvTestCase):
@@ -316,7 +317,7 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Read", f"{home}/projects/foo/bar.py")
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
 
     def test_read_asks_when_no_allow_pattern_matches(self):
         """
@@ -341,7 +342,7 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Read", "/etc/passwd")
-        self.assertEqual("ask", decision.verdict)
+        self.assertEqual("ask", decision.decision)
 
     def test_file_path_deny_pattern_blocks_path(self):
         """
@@ -367,7 +368,7 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Read", "/home/user/project/.env")
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual("deny", decision.decision)
 
     def test_edit_tool_uses_same_file_path_logic(self):
         """
@@ -392,7 +393,7 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
             ]
         )
         decision = decide(config, "Edit", f"{home}/projects/myfile.py")
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
 
 
 class TestDecideSideEffectFree(_IsolatedEnvTestCase):
@@ -462,13 +463,14 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
         finally:
             sys.exit = original_exit
         self.assertEqual([], exit_called)
-        self.assertEqual("ask", decision.verdict)
+        self.assertEqual("ask", decision.decision)
 
     def test_decide_returns_decision_dataclass(self):
         """
         Given any valid configuration and command
         When decide is called
-        Then it returns a Decision instance with tool, target, verdict, and reason fields
+        Then it returns a RuntimeVerdict instance with tool, target, decision,
+            and reason fields
         """
 
         config = _make_config(
@@ -486,10 +488,10 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "git status")
-        self.assertIsInstance(result, Decision)
+        self.assertIsInstance(result, RuntimeVerdict)
         self.assertEqual("Bash", result.tool)
         self.assertEqual("git status", result.target)
-        self.assertIn(result.verdict, ("allow", "ask", "deny"))
+        self.assertIn(result.decision, ("allow", "ask", "deny"))
         self.assertIsInstance(result.reason, str)
         self.assertGreater(len(result.reason), 0)
 
@@ -499,15 +501,17 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
     Regression guards for provenance surfacing through the decision layer.
 
     These tests document and protect against the regression where a normal
-    (non-conflict) file allow returned provenance=None in Decision, and the
-    original absence of any provenance for Bash decisions.
+    (non-conflict) file allow returned provenance=None in the decision
+    (formerly the ``Decision`` DTO, unified into ``RuntimeVerdict`` by
+    TOO-45 R6-S3), and the original absence of any provenance for Bash
+    decisions.
     """
 
     def test_file_allow_provenance_is_non_none(self):
         """
         Given a config that allows Read under /tmp/**
         When decide() is called with tool='Read' and a matching path
-        Then Decision.provenance is non-None and identifies the allowing layer
+        Then RuntimeVerdict.provenance is non-None and identifies the allowing layer
 
         This is a regression guard: a prior implementation set provenance only
         from override.winning_provenance, which was None for normal (non-conflict)
@@ -529,7 +533,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Read", "/tmp/some/file.txt")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertIsNotNone(
             result.provenance,
             "provenance must be non-None for a normal (non-conflict) file allow",
@@ -541,7 +545,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         """
         Given a config that has no allow pattern covering /etc/passwd
         When decide() is called with tool='Read' and /etc/passwd
-        Then Decision.provenance is None (no rule matched -- resolves via the
+        Then RuntimeVerdict.provenance is None (no rule matched -- resolves via the
             TOO-15 default no_match_fallback 'ask')
         """
 
@@ -560,7 +564,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Read", "/etc/passwd")
-        self.assertEqual("ask", result.verdict)
+        self.assertEqual("ask", result.decision)
         # No rule matched; the no_match_fallback result carries no provenance.
         self.assertIsNone(result.provenance)
 
@@ -568,7 +572,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         """
         Given a config that allows 'git:*' at the project level
         When decide() is called with a single allowed Bash command
-        Then Decision.provenance is non-None and identifies the project layer
+        Then RuntimeVerdict.provenance is non-None and identifies the project layer
         """
 
         config = _make_config(
@@ -586,7 +590,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "git status")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertIsNotNone(
             result.provenance,
             "provenance must be non-None for a matched Bash allow",
@@ -601,17 +605,17 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         When decide() is called with the two-leaf compound
             'python -c "print(1)" && ls' (the escape-hatch ask-floor leaf
             extracts FIRST, the genuine match 'ls' second)
-        Then Decision.provenance is non-None and identifies the project
-            layer, consistent with Decision.matched_rule ('ls') -- NOT None
+        Then RuntimeVerdict.provenance is non-None and identifies the project
+            layer, consistent with RuntimeVerdict.matched_rule ('ls') -- NOT None
 
         TOO-45 R1e finishing pass regression guard: this adapter used to
-        derive Decision.provenance independently as "the first sub-command's
+        derive RuntimeVerdict.provenance independently as "the first sub-command's
         provenance" rather than reusing RuntimeVerdict.provenance (which
         already carries the correct, matched_rule-consistent attribution).
         Extraction order is exactly why that was wrong: with the
         escape-hatch leaf first, the old code returned the ESCAPE HATCH's
         provenance -- None -- even though 'ls' genuinely matched and
-        Decision.matched_rule already correctly said so, an inconsistency
+        RuntimeVerdict.matched_rule already correctly said so, an inconsistency
         confirmed by temporarily reintroducing the old logic and watching
         this test fail. See test_resolve.
         TestUndecidableFallbackMultiLeafWarningParity's sibling test for the
@@ -634,7 +638,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", 'python -c "print(1)" && ls')
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertEqual(result.matched_rule, "ls")
         self.assertIsNotNone(
             result.provenance,
@@ -646,7 +650,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         """
         Given a config that allows 'git:*' and 'ls:*'
         When decide() is called with the compound command 'git status && ls -la'
-        Then Decision.sub_matches has two entries, one per sub-command,
+        Then RuntimeVerdict.sub_matches has two entries, one per sub-command,
              each with a non-None matched_rule and provenance
         """
 
@@ -665,7 +669,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "git status && ls -la")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertIsNotNone(result.sub_matches)
         self.assertEqual(2, len(result.sub_matches))
 
@@ -684,7 +688,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         """
         Given a config that allows 'git:*' but not 'whoami'
         When decide() is called with 'git status && whoami'
-        Then Decision.verdict is 'ask' (TOO-15 default no_match_fallback,
+        Then RuntimeVerdict.decision is 'ask' (TOO-15 default no_match_fallback,
              propagated from the unmatched 'whoami' sub-command), sub_matches
              has two entries, and the second sub-command ('whoami') has
              decision='ask' in sub_matches
@@ -705,7 +709,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "git status && whoami")
-        self.assertEqual("ask", result.verdict)
+        self.assertEqual("ask", result.decision)
         self.assertIsNotNone(result.sub_matches)
         self.assertEqual(2, len(result.sub_matches))
 
@@ -726,7 +730,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         """
         Given a config with 'rm -rf:*' in hard_deny.deny
         When decide() is called with 'rm -rf /'
-        Then Decision.sub_matches[0].matched_rule contains the hard-deny pattern
+        Then RuntimeVerdict.sub_matches[0].matched_rule contains the hard-deny pattern
              and sub_matches[0].provenance is None (hard-deny is pooled)
         """
 
@@ -749,7 +753,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "rm -rf /")
-        self.assertEqual("deny", result.verdict)
+        self.assertEqual("deny", result.decision)
         self.assertIsNotNone(result.sub_matches)
         self.assertEqual(1, len(result.sub_matches))
 
@@ -764,9 +768,9 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
 
 class TestDecideAdditionalContext(_IsolatedEnvTestCase):
     """
-    TOO-19 Phase 1, increment 6: Decision.additional_context is populated by
+    TOO-19 Phase 1, increment 6: RuntimeVerdict.additional_context is populated by
     decide() for both the file-path and Bash branches, sourced directly from
-    RuntimeVerdict.additional_context with no re-derivation in decision.py.
+    the resolver's own RuntimeVerdict with no re-derivation in decision.py.
     """
 
     def test_file_allow_structured_entry_surfaces_additional_context(self):
@@ -774,7 +778,7 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
         Given a Read allow structured entry for '/tmp/**' carrying
             additionalContext = 'scratch space only'
         When decide() is called with tool='Read' and a matching path
-        Then Decision.additional_context is 'scratch space only'
+        Then RuntimeVerdict.additional_context is 'scratch space only'
         """
         config = _make_config(
             [
@@ -796,14 +800,14 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Read", "/tmp/some/file.txt")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertEqual("scratch space only", result.additional_context)
 
     def test_file_plain_string_rule_yields_none_context(self):
         """
         Given a Read allow entry that is a plain string (no enrichment)
         When decide() is called with tool='Read' and a matching path
-        Then Decision.additional_context is None
+        Then RuntimeVerdict.additional_context is None
         """
         config = _make_config(
             [
@@ -820,7 +824,7 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Read", "/tmp/some/file.txt")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertIsNone(result.additional_context)
 
     def test_bash_single_allow_structured_entry_surfaces_additional_context(self):
@@ -828,7 +832,7 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
         Given a Bash allow structured entry for 'git:*' carrying
             additionalContext = 'prefer git status --short'
         When decide() is called with tool='Bash' and a matching command
-        Then Decision.additional_context is 'prefer git status --short'
+        Then RuntimeVerdict.additional_context is 'prefer git status --short'
         """
         config = _make_config(
             [
@@ -850,14 +854,14 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "git status")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertEqual("prefer git status --short", result.additional_context)
 
     def test_bash_plain_string_rule_yields_none_context(self):
         """
         Given a Bash allow entry that is a plain string (no enrichment)
         When decide() is called with tool='Bash' and a matching command
-        Then Decision.additional_context is None
+        Then RuntimeVerdict.additional_context is None
         """
         config = _make_config(
             [
@@ -874,16 +878,17 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
             ]
         )
         result = decide(config, "Bash", "git status")
-        self.assertEqual("allow", result.verdict)
+        self.assertEqual("allow", result.decision)
         self.assertIsNone(result.additional_context)
 
-    def test_positional_construction_of_decision_still_works(self):
-        """
-        Given the pre-existing positional field order of Decision (tool,
-            target, verdict, reason, provenance, sub_matches)
-        When a Decision is constructed positionally WITHOUT additional_context
-        Then it succeeds and additional_context defaults to None -- the new
-            field was appended LAST, so it never breaks positional callers
-        """
-        decision = Decision("Bash", "git status", "allow", "matched", None, None)
-        self.assertIsNone(decision.additional_context)
+    # test_positional_construction_of_decision_still_works was removed here
+    # (TOO-45 R6-S3): it pinned toolguard.tools.decision.Decision's own
+    # positional field order (tool, target, verdict, reason, provenance,
+    # sub_matches) -- specifically, that a PRIOR field addition
+    # (additional_context) to Decision had been appended last so it never
+    # broke a positional caller. Decision itself is now deleted (unified
+    # into RuntimeVerdict), so there is nothing left for this test to pin;
+    # RuntimeVerdict's own field order was not touched by this stage and has
+    # no equivalent positional-construction regression test either before or
+    # after -- not manufactured here to avoid inventing coverage this stage
+    # did not require.

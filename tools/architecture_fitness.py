@@ -31,10 +31,13 @@ Four modes
     components, not a bare boolean. Every generated file (banner-detected, see
     below) is excluded from every predicate here and named explicitly in the
     output -- a predicate only satisfiable by hand-editing generated code is a
-    trap this project's own rules forbid walking into. R1 and R5 additionally
-    exclude ``toolguard/parser/`` (out of scope for this ticket), also named
-    explicitly, from their respective checks (R1's verdict-type/shim scan;
-    R5's import-cycle check).
+    trap this project's own rules forbid walking into. R1, R5 and R6
+    additionally exclude ``toolguard/parser/`` (out of scope for this
+    ticket), also named explicitly, from their respective checks (R1's
+    verdict-type/shim scan; R5's import-cycle check; R6's private-reach
+    guarded set). R6 also reports what it structurally CANNOT check
+    (``unresolvable`` sites plus a fixed ``known_limitations`` list) --
+    see ``scan_private_reaches``'s docstring.
 
 Generated code
     A file whose first ~10 lines carry a banner such as "generated from",
@@ -622,10 +625,15 @@ def longest_dependency_chain(graph: Dict[str, Set[str]]) -> List[str]:
 # =============================================================================
 
 #: Field names that mark a class as carrying the DECISION ITSELF. Spelled
-#: ``decision`` on every runtime verdict type except
-#: :class:`~toolguard.tools.decision.Decision`, which spells its own verdict
-#: field ``verdict`` (see that class's docstring: "a richer ``verdict`` field
-#: that distinguishes ``ask`` from ``allow`` and ``deny``") -- both count.
+#: ``decision`` on every verdict type on the tree today. ``verdict`` is kept
+#: in the set for historical and forward-looking reasons: until TOO-45 R6-S3,
+#: :mod:`toolguard.tools.decision`'s own ``Decision`` DTO (the TOOLING
+#: altitude) spelled its own verdict field ``verdict`` instead, and R6-S3
+#: unified that class away rather than renaming its field first -- so this
+#: detector must still recognise the spelling in case a future TOOLING-
+#: altitude class chooses it again (see :func:`classify_verdict_altitudes`'s
+#: TOOLING rule, which is otherwise untouched by the unification: it is
+#: currently unpopulated on the real tree, not incapable of firing).
 _VERDICT_DECISION_FIELD_NAMES = frozenset({"decision", "verdict"})
 
 #: Field names that mark a class as carrying VERDICT-SUPPORTING data, on top
@@ -691,9 +699,16 @@ def _class_field_names(node: ast.ClassDef) -> Set[str]:
 #: same exclusion via :data:`R5_OUT_OF_SCOPE_PACKAGES` below, kept as a
 #: separate name (not a rename of this constant) to avoid a blast-radius edit
 #: across every docstring in this module that already names
-#: ``R1_OUT_OF_SCOPE_PACKAGES``. R6's private-import check does not apply it:
-#: R6 only ever looks at ``tools/``/``scripts/`` importers (see
-#: :data:`R6_GUARDED_MODULES`), so it never reaches ``parser/`` regardless.
+#: ``R1_OUT_OF_SCOPE_PACKAGES``.
+#:
+#: TOO-45 R6-S0: R6's private-reach check now applies this exclusion too,
+#: via :func:`_r6_guarded_modules`. Before R6-S0 it didn't need to -- its
+#: guarded set was a hand-maintained module list that simply never named
+#: ``parser``, so the exclusion held by accident. R6-S0 derives the guarded
+#: set from ``.pyscn.toml``'s layer map instead, and ``parser`` is listed in
+#: the engine layer's packages there, so without an explicit exclusion R6
+#: would have started reaching into a package this ticket does not touch at
+#: all. See :func:`_r6_guarded_modules`'s own docstring.
 R1_OUT_OF_SCOPE_PACKAGES = ("parser",)
 
 #: Same package set as :data:`R1_OUT_OF_SCOPE_PACKAGES`, reused by
@@ -793,10 +808,13 @@ def find_verdict_types(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, ob
     regression pin against the live tree.
 
     This detector alone does NOT distinguish altitude -- as of TOO-45 R1c
-    it structurally finds THREE genuine hits on the real tree
+    it structurally found THREE genuine hits on the real tree
     (``RuntimeVerdict``, ``UnitVerdict``, ``tools.decision.Decision``), which
-    is correct (all three really do carry a decision + 2 aux fields) but not
-    yet what the R1 gate needs ("exactly one RUNTIME verdict type"). See
+    was correct (all three really did carry a decision + 2 aux fields) but not
+    what the R1 gate needs ("exactly one RUNTIME verdict type"). TOO-45 R6-S3
+    unified ``Decision`` into ``RuntimeVerdict``, so this now finds TWO
+    genuine hits (``RuntimeVerdict``, ``UnitVerdict``) -- fewer classes
+    because fewer classes exist, not a detector regression. See
     :func:`classify_verdict_altitudes`, which further splits this function's
     output by altitude -- and which ALSO finds a fourth altitude
     (``LevelMatch``, TOO-45 R1g) this function's own :data:`_VERDICT_MIN_AUX_FIELDS`
@@ -880,8 +898,10 @@ def _is_provenance_capable(fields: Set[str], field_types: Dict[str, str]) -> boo
     of :func:`find_verdict_types`' own threshold -- see that field's own
     rationale) because neither signal here inspects that field at all; both
     look only at whether a *provenance* field/reference exists. Every
-    genuine unit/runtime/tooling verdict type on this tree (``UnitVerdict``,
-    ``RuntimeVerdict``, ``tools.decision.Decision``) declares a field named
+    genuine unit/runtime verdict type on this tree (``UnitVerdict``,
+    ``RuntimeVerdict`` -- the TOOLING altitude's own former example,
+    ``tools.decision.Decision``, was unified into ``RuntimeVerdict`` by
+    TOO-45 R6-S3 and no longer exists) declares a field named
     ``provenance``, typed ``Optional["Provenance"]``; ``LevelMatch``
     structurally cannot have either -- it is built one layer below where any
     ``Provenance`` object exists in scope at all (see that class's own
@@ -961,10 +981,18 @@ def classify_verdict_altitudes(
        destroy the only structured record of what a compound command did.
     3. RUNTIME altitude: the type this predicate actually gates on being
        exactly one of (``RuntimeVerdict``).
-    4. TOOLING altitude: the replay/analysis layer's own DTO
-       (``tools.decision.Decision``), unified with the runtime altitude only
-       in TOO-45 R6 -- deferred because it is R6's api-surface territory (32
-       affected tests), not R1's.
+    4. TOOLING altitude: for the replay/analysis layer's own DTO, had one
+       existed, ``package`` (below) would have named the reason. On this
+       tree it USED TO be populated by ``tools.decision.Decision``, a
+       field-for-field re-render of ``RuntimeVerdict`` kept apart only
+       pending TOO-45 R6; R6-S3 unified it into ``RuntimeVerdict`` instead
+       (measured behavioural cost: zero), so this bucket is currently empty
+       on the real tree -- see ``TestClassifyVerdictAltitudes`` for the
+       regression pin proving it is empty by ABSENCE of a tooling-package
+       verdict class, not by the rule being unable to fire; the synthetic
+       ``test_class_under_tooling_package_is_tooling_not_runtime`` pins that
+       the rule itself still classifies a tooling-package verdict class
+       correctly if one is ever reintroduced.
 
     Three structural, DERIVED rules distinguish them -- no class name is
     hand-listed anywhere below, only the three RULES are, checked in this
@@ -986,7 +1014,8 @@ def classify_verdict_altitudes(
     - UNIT: a verdict-ish class that IS provenance-capable (did not classify
       LEVEL above) and is embedded via a ``List[...]`` field type INSIDE
       ANOTHER verdict-ish class -- e.g. ``sub_matches: List[UnitVerdict]`` on
-      ``RuntimeVerdict``, or ``Optional[List[UnitVerdict]]`` on ``Decision``.
+      ``RuntimeVerdict`` (before TOO-45 R6-S3, ALSO ``Optional[List[UnitVerdict]]``
+      on ``tools.decision.Decision``, which R6-S3 unified away).
       A class nested this way is, by construction, an ELEMENT of a compound
       record, not a standalone end-to-end verdict -- exactly the unit/
       runtime distinction the ideal picture draws. Detected by re-parsing
@@ -2210,48 +2239,500 @@ def find_import_cycles(
 
 
 # =============================================================================
-# --predicates: R6 -- private-name imports from the engine
+# --predicates: R6 -- private-name reaches into the config+engine layers
 # =============================================================================
 
-R6_GUARDED_MODULES = {"config", "permissions", "compound", "resolve"}
+#: R6's GUARDED side (TOO-45 R6-S0): every module belonging to one of these
+#: ``.pyscn.toml`` layers holds names that must never be reached from outside
+#: by their private (leading-underscore) spelling. This replaces a
+#: hand-maintained set (``{"config", "permissions", "compound", "resolve"}``)
+#: that named the PRE-TOO-45 architecture: it predated D1a's
+#: ``permission_resolution`` module and everything R1/R2 moved into
+#: ``config_types``, both of which were structurally invisible to the old
+#: detector even though both are squarely "the engine"/"the config model" by
+#: any reading of R6's own title (TOO-45 R6 reassessment, Defect A,
+#: DEMONSTRATED BY EXECUTION). Deriving the set from
+#: :func:`parse_architecture_config` instead means it cannot drift from the
+#: layer map silently again -- see :func:`_r6_guarded_modules`.
+R6_GUARDED_LAYERS = ("config", "engine")
+
+#: R6's REACH-FROM side (TOO-45 R6-S0): where a private reach into
+#: :data:`R6_GUARDED_LAYERS` counts as a violation. The previous detector
+#: hard-restricted this to files whose first path segment was literally
+#: ``tools`` or ``scripts`` -- a check confined to one directory, pinned by a
+#: test (``test_ignores_private_import_outside_tools_and_scripts``) that used
+#: ``hook.py`` as its own worked example of what NOT to catch. That directly
+#: contradicted R6's own stated extension, three lines below its predicate in
+#: the execution plan -- ``runtime`` must consume the same interface as
+#: tooling, not just ``tools/`` -- and on the real tree the runtime layer is
+#: where 4 of the 5 real private reaches live (TOO-45 R6 reassessment, Defect
+#: B, DEMONSTRATED BY EXECUTION). Deriving this from the layer map too means
+#: both sides come from the same single source of truth; see
+#: :func:`_r6_checked_modules`.
+R6_CHECKED_LAYERS = ("tooling", "runtime")
+
+#: Clauses of R6's stated predicate this detector CANNOT mechanically verify,
+#: printed explicitly rather than silently dropped -- same idiom as
+#: :data:`R2_UNCHECKED_CLAUSES` and R1's ``out_of_scope_excluded``: an
+#: exclusion the operator cannot see is indistinguishable from a bug. This is
+#: the direct answer to the ticket's "must report what it CANNOT check"
+#: requirement.
+R6_KNOWN_LIMITATIONS: Tuple[Dict[str, str], ...] = (
+    {
+        "clause": "value flowing through a non-import intermediate variable",
+        "reason": (
+            "aliases are traced back to an import statement only -- "
+            "`cfg = config; helper = cfg; helper._x` is not followed past "
+            "the second assignment, since that requires general dataflow "
+            "analysis, not AST pattern matching"
+        ),
+    },
+    {
+        "clause": "fully dynamic name access",
+        "reason": (
+            "`mod.__dict__['_x']`, `vars(mod)['_x']`, `globals()['_x']`, and "
+            "`importlib.import_module(...)` are not detected at all; "
+            "`getattr(mod, name_var)` with a non-literal second argument IS "
+            "detected as a site but cannot be resolved -- see `unresolvable`"
+        ),
+    },
+    {
+        "clause": "re-export bindings created inside a function/if/try body",
+        "reason": (
+            "`resolve_defining_module` only inspects a module's TOP-LEVEL "
+            "statements when following a re-export chain -- a conditional or "
+            "lazily-computed re-export is invisible to it"
+        ),
+    },
+    {
+        "clause": "a module `.pyscn.toml` does not map to any layer",
+        "reason": (
+            "invisible on either side (guarded or reach-from) of this "
+            "predicate -- see `--layers`' completeness check for what is "
+            "unmapped; a module that never made it into the layer map was "
+            "never in scope for R6 to begin with"
+        ),
+    },
+)
+
+
+def _r6_guarded_modules(arch: ArchitectureConfig) -> FrozenSet[str]:
+    """
+    Return every top-level module name in a :data:`R6_GUARDED_LAYERS` layer of
+    *arch*, MINUS :data:`R1_OUT_OF_SCOPE_PACKAGES`.
+
+    ``toolguard/parser/`` sits in the engine layer's package list (it is
+    decision-adjacent parsing code) -- so without this exclusion R6 would
+    newly start reaching into a package the TOO-45 execution plan puts
+    explicitly out of scope for the WHOLE ticket, the same reason R1 and R5
+    already exclude it (see :data:`R1_OUT_OF_SCOPE_PACKAGES`). Under the OLD
+    hardcoded guarded set this was true by accident (``parser`` was simply
+    never listed); under the layer-derived set it must be true on purpose, so
+    this function makes the exclusion explicit instead of leaving it to a
+    comment that goes stale the moment the guarded set changes shape -- which
+    is exactly what happened to the comment this one replaces.
+    """
+    return frozenset(
+        pkg
+        for layer in arch.layers
+        if layer.name in R6_GUARDED_LAYERS
+        for pkg in layer.packages
+        if pkg not in R1_OUT_OF_SCOPE_PACKAGES
+    )
+
+
+def _r6_checked_modules(arch: ArchitectureConfig) -> FrozenSet[str]:
+    """Return every top-level module name in a :data:`R6_CHECKED_LAYERS` layer of *arch*."""
+    return frozenset(
+        pkg
+        for layer in arch.layers
+        if layer.name in R6_CHECKED_LAYERS
+        for pkg in layer.packages
+    )
+
+
+def _is_private_name(name: str) -> bool:
+    """True for a leading-underscore, non-dunder name -- what this predicate treats as private."""
+    return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+
+
+def _module_source_path(module_rel: str, toolguard_dir: Path) -> Optional[Path]:
+    """
+    Return the source file for toolguard-relative dotted module *module_rel*
+    (as produced by :func:`resolve_toolguard_import`), or ``None`` if no such
+    file exists under *toolguard_dir*. Handles both a plain module
+    (``"config"`` -> ``config.py``) and a package (``"parser"`` ->
+    ``parser/__init__.py``).
+    """
+    if module_rel == "":
+        candidate = toolguard_dir / "__init__.py"
+        return candidate if candidate.exists() else None
+    parts = module_rel.split(".")
+    as_module = toolguard_dir.joinpath(*parts).with_suffix(".py")
+    if as_module.exists():
+        return as_module
+    as_package_init = toolguard_dir.joinpath(*parts, "__init__.py")
+    return as_package_init if as_package_init.exists() else None
+
+
+def _find_top_level_binding(
+    tree: ast.Module, name: str, module_rel: str
+) -> Tuple[str, Optional[Tuple[Optional[str], str]]]:
+    """
+    Find how *name* is bound at *tree*'s top level (*tree* being *module_rel*'s
+    own parsed source).
+
+    Returns a ``(kind, info)`` pair:
+
+    - ``("defined", None)`` -- *name* is a ``def``/``class``/assignment target
+      in this module, i.e. this module is where the name actually lives.
+    - ``("reexport", (origin_module, origin_name))`` -- *name* is bound by a
+      top-level ``from X import Y [as name]``; *origin_module* is ``X``
+      resolved to a toolguard-relative path (``None`` if ``X`` is outside
+      ``toolguard`` entirely, e.g. stdlib/third-party), *origin_name* is ``Y``
+      (the name as spelled in the origin module, before any ``as``).
+    - ``("undefined", None)`` -- *name* is not bound at this module's top
+      level at all (dynamic construction, or simply not present).
+
+    Only inspects module-level statements -- see :data:`R6_KNOWN_LIMITATIONS`
+    for why a binding created inside a function/``if``/``try`` is out of
+    scope, reported explicitly rather than silently missed.
+    """
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if stmt.name == name:
+                return "defined", None
+        elif isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return "defined", None
+        elif isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name) and stmt.target.id == name:
+                return "defined", None
+        elif isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                bound = alias.asname or alias.name
+                if bound == name:
+                    origin_module = resolve_toolguard_import(
+                        stmt.module, stmt.level, module_rel
+                    )
+                    return "reexport", (origin_module, alias.name)
+    return "undefined", None
+
+
+def resolve_defining_module(
+    module_rel: str,
+    name: str,
+    toolguard_dir: Path,
+    depth: int = 0,
+    visited: FrozenSet[Tuple[str, str]] = frozenset(),
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Follow re-exports to find where *name* is actually DEFINED, starting from
+    *module_rel* (a toolguard-relative dotted module path) -- the mechanism
+    that stops re-pointing an import at a pass-through module from laundering
+    a reach into a guarded module (TOO-45 R6 reassessment, Defect C: the
+    single reported violation on the pre-S0 detector vanished by re-pointing
+    ``tools.takeover_audit``'s import from ``config`` -- which re-exports
+    ``_strip_tool_wrapper`` -- straight at ``rule_entry``, where the name is
+    actually defined, with nothing about what tooling could reach having
+    changed at all).
+
+    Returns ``(defining_module, failure_reason)``: exactly one is ``None``.
+    *defining_module* is the toolguard-relative module that actually owns
+    *name*. *failure_reason* is a human-readable string explaining why no
+    defining module could be pinned down -- EXCEPT the sentinel
+    ``"reexport-external"``, which means the chain legitimately terminates
+    outside ``toolguard`` (e.g. a private helper re-exported from a
+    third-party library) and is therefore not a toolguard-internal reach at
+    all; callers must treat that as "not a violation", not "cannot check".
+
+    At *depth* 0 (the module the caller literally names), a source file that
+    cannot be found, or that does not define *name* at its top level, is NOT
+    reported as unresolvable -- it falls back to treating *module_rel* itself
+    as the defining module. Every real import statement on this tree could
+    not have executed otherwise, and this keeps a minimal synthetic test
+    fixture -- one that names a guarded module without also writing that
+    module's source file -- meaningful, the same way the pre-S0 detector
+    never needed the guarded module's source to exist either. Only a
+    FOLLOWED re-export hop (depth >= 1) that fails to resolve is genuinely
+    ambiguous, and is reported as unresolvable.
+    """
+    if (module_rel, name) in visited:
+        return None, f"cycle following re-export chain back to '{module_rel}.{name}'"
+    path = _module_source_path(module_rel, toolguard_dir)
+    if path is None:
+        if depth == 0:
+            return module_rel, None
+        return (
+            None,
+            f"re-export target module '{module_rel}' has no source file on disk",
+        )
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    kind, info = _find_top_level_binding(tree, name, module_rel)
+    if kind == "defined":
+        return module_rel, None
+    if kind == "reexport":
+        origin_module, origin_name = info  # type: ignore[misc]
+        if origin_module is None:
+            return None, "reexport-external"
+        return resolve_defining_module(
+            origin_module,
+            origin_name,
+            toolguard_dir,
+            depth + 1,
+            visited | {(module_rel, name)},
+        )
+    # kind == "undefined"
+    if depth == 0:
+        return module_rel, None
+    return (
+        None,
+        f"name '{name}' not found at the top level of re-export target '{module_rel}'",
+    )
+
+
+def _bind_module_aliases(
+    tree: ast.Module, importer_rel: str, toolguard_dir: Path
+) -> Dict[str, str]:
+    """
+    Return ``{local_name: toolguard-relative module path}`` for every
+    WHOLE-MODULE import binding anywhere in *tree* -- ``import
+    toolguard.config``, ``import toolguard.config as cfg``, ``from toolguard
+    import config``, ``from toolguard import config as cfg`` -- so a later
+    attribute/``getattr`` access can be traced back to the module it targets.
+
+    Does NOT track a from-import of a specific NAME (``from toolguard.config
+    import load_configuration``) -- that binds a name to a VALUE, not a
+    module; the from-import route in :func:`scan_private_reaches` handles
+    that case directly.
+
+    Walks the whole tree, not just the top level, matching
+    :func:`extract_toolguard_imports`'s own choice: the known
+    ``hook``<->``tools.decision`` cycle was a function-local import, so an
+    alias bound only inside a function must not be invisible here either.
+
+    For a ``from toolguard import X`` form, *X* is only bound as a module
+    alias when ``X`` genuinely has a source file on disk -- distinguishing
+    "importing the submodule ``toolguard.X``" from "importing a name defined
+    directly inside ``toolguard/__init__.py``", which the two forms are
+    syntactically identical (Python itself resolves this by trying the
+    submodule import first, which is the same rule applied here).
+    """
+    aliases: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    target = resolve_toolguard_import(alias.name, 0, importer_rel)
+                    if target is not None:
+                        aliases[alias.asname] = target
+                else:
+                    # Bare `import toolguard.config` binds only the FIRST
+                    # dotted component (`toolguard`); deeper access chains
+                    # through it are resolved step by step in
+                    # `_resolve_expr_to_module`.
+                    first = alias.name.split(".")[0]
+                    target = resolve_toolguard_import(first, 0, importer_rel)
+                    if target is not None:
+                        aliases[first] = target
+        elif isinstance(node, ast.ImportFrom):
+            module_target = resolve_toolguard_import(
+                node.module, node.level, importer_rel
+            )
+            if module_target is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                candidate = (
+                    f"{module_target}.{alias.name}" if module_target else alias.name
+                )
+                if _module_source_path(candidate, toolguard_dir) is not None:
+                    aliases[alias.asname or alias.name] = candidate
+    return aliases
+
+
+def _resolve_expr_to_module(
+    node: ast.expr, aliases: Dict[str, str], toolguard_dir: Path
+) -> Optional[str]:
+    """
+    Resolve *node* -- the object being attribute-accessed, or ``getattr``'s
+    first argument -- back to a toolguard-relative module path, using
+    *aliases* (:func:`_bind_module_aliases`). Returns ``None`` when *node* is
+    not a traceable module reference (an arbitrary object, a call result, an
+    instance attribute) -- deliberately conservative: this must never
+    manufacture a module path for an expression it did not actually trace
+    back to an import.
+
+    A multi-hop attribute chain (``toolguard.config.something``) is only
+    followed past the first hop when the accumulated path corresponds to a
+    REAL file on disk (:func:`_module_source_path`) -- otherwise an
+    expression like ``resolve.public_thing._private`` (an instance attribute
+    of a public module-level object, not a module) would be misread as a
+    reach into a fabricated sub-module path and produce a false positive.
+    """
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id)
+    if isinstance(node, ast.Attribute):
+        base = _resolve_expr_to_module(node.value, aliases, toolguard_dir)
+        if base is None:
+            return None
+        candidate = f"{base}.{node.attr}" if base else node.attr
+        return (
+            candidate
+            if _module_source_path(candidate, toolguard_dir) is not None
+            else None
+        )
+    return None
+
+
+@dataclass
+class PrivateReachReport:
+    """Result of :func:`scan_private_reaches`: violations plus what could not be checked."""
+
+    sites: List[Dict[str, object]] = field(default_factory=list)
+    unresolvable: List[Dict[str, object]] = field(default_factory=list)
+
+
+def scan_private_reaches(
+    toolguard_dir: Path = TOOLGUARD_DIR, arch: Optional[ArchitectureConfig] = None
+) -> PrivateReachReport:
+    """
+    The full TOO-45 R6-S0 scan: every private-name (leading-underscore,
+    non-dunder) reach from a :data:`R6_CHECKED_LAYERS` module (tooling +
+    runtime) into a :data:`R6_GUARDED_LAYERS` module (config + engine), by any
+    of three routes -- ``from mod import _x``, module-attribute access
+    (``mod._x``, including through an aliased or dotted import), and
+    ``getattr(mod, "_x")`` with a string-literal name. Follows re-exports to
+    the DEFINING module (:func:`resolve_defining_module`) so re-pointing an
+    import at a pass-through module cannot launder a reach into a guarded
+    module. Skips generated files, same as every other style/debt predicate
+    here (:func:`iter_source_files`).
+
+    Returns both the violations (``sites``) and everything the scan could not
+    resolve one way or the other (``unresolvable``) -- see the module
+    docstring's exclusion idiom and :data:`R6_KNOWN_LIMITATIONS`: a detector
+    that goes silent on what it cannot check is indistinguishable from one
+    with a bug.
+    """
+    if arch is None:
+        arch = parse_architecture_config()
+    package_map = arch.package_to_layer()
+    guarded = _r6_guarded_modules(arch)
+    checked = _r6_checked_modules(arch)
+    report = PrivateReachReport()
+
+    def record_reach(
+        importer: str, line: int, target_module: str, name: str, route: str
+    ) -> None:
+        defining_module, reason = resolve_defining_module(
+            target_module, name, toolguard_dir
+        )
+        if defining_module is not None:
+            if first_segment(defining_module) in guarded:
+                report.sites.append(
+                    {
+                        "importer": importer,
+                        "line": line,
+                        "target_module": target_module,
+                        "defining_module": defining_module,
+                        "private_name": name,
+                        "route": route,
+                        "layer": package_map.get(first_segment(defining_module)),
+                    }
+                )
+            return
+        if reason == "reexport-external":
+            return
+        report.unresolvable.append(
+            {
+                "importer": importer,
+                "line": line,
+                "target_module": target_module,
+                "private_name": name,
+                "route": route,
+                "reason": reason,
+            }
+        )
+
+    for py_file in iter_source_files(toolguard_dir):
+        rel = relative_module_path(py_file, toolguard_dir)
+        if first_segment(rel) not in checked:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        aliases = _bind_module_aliases(tree, rel, toolguard_dir)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                target = resolve_toolguard_import(node.module, node.level, rel)
+                if target is None:
+                    continue
+                for alias in node.names:
+                    if _is_private_name(alias.name):
+                        # `alias.lineno` (not `node.lineno`) so each name in a
+                        # multi-line `from X import (a, b, c)` is attributed
+                        # to its OWN line, not the statement's opening line --
+                        # `ast.alias` has carried its own lineno since Python
+                        # 3.10.
+                        record_reach(
+                            rel,
+                            alias.lineno,
+                            target,
+                            alias.name,
+                            "from_import",
+                        )
+            elif isinstance(node, ast.Attribute):
+                if not _is_private_name(node.attr):
+                    continue
+                base = _resolve_expr_to_module(node.value, aliases, toolguard_dir)
+                if base is not None:
+                    record_reach(rel, node.lineno, base, node.attr, "attribute_access")
+            elif isinstance(node, ast.Call):
+                if not (isinstance(node.func, ast.Name) and node.func.id == "getattr"):
+                    continue
+                if len(node.args) < 2:
+                    continue
+                base = _resolve_expr_to_module(node.args[0], aliases, toolguard_dir)
+                if base is None:
+                    continue
+                name_arg = node.args[1]
+                if isinstance(name_arg, ast.Constant) and isinstance(
+                    name_arg.value, str
+                ):
+                    if _is_private_name(name_arg.value):
+                        record_reach(rel, node.lineno, base, name_arg.value, "getattr")
+                else:
+                    report.unresolvable.append(
+                        {
+                            "importer": rel,
+                            "line": node.lineno,
+                            "target_module": base,
+                            "private_name": None,
+                            "route": "getattr",
+                            "reason": (
+                                "getattr() attribute name is not a string "
+                                "literal -- cannot verify statically"
+                            ),
+                        }
+                    )
+
+    report.sites.sort(key=lambda s: (str(s["importer"]), int(s["line"])))
+    report.unresolvable.sort(key=lambda s: (str(s["importer"]), int(s["line"])))
+    return report
 
 
 def find_private_imports(
     toolguard_dir: Path = TOOLGUARD_DIR,
 ) -> List[Dict[str, object]]:
     """
-    Return every ``tools/``/``scripts/`` import of a private (leading-underscore,
-    non-dunder) name from :data:`R6_GUARDED_MODULES`. Skips generated files
-    (moot in practice today -- nothing generated lives under ``tools/`` or
-    ``scripts/`` -- but consistent with every other detector).
+    Violations-only view of :func:`scan_private_reaches` -- see that
+    function's docstring for the routes covered, the guarded/checked scope,
+    and re-export following. Kept as a separate, narrower entry point because
+    every existing caller (including this module's own test suite) only ever
+    wanted the sites list, not the full report.
     """
-    sites: List[Dict[str, object]] = []
-    for py_file in iter_source_files(toolguard_dir):
-        rel = relative_module_path(py_file, toolguard_dir)
-        seg = first_segment(rel)
-        if seg not in ("tools", "scripts"):
-            continue
-        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            target = resolve_toolguard_import(node.module, node.level, rel)
-            if target not in R6_GUARDED_MODULES:
-                continue
-            for alias in node.names:
-                name = alias.name
-                if name.startswith("_") and not (
-                    name.startswith("__") and name.endswith("__")
-                ):
-                    sites.append(
-                        {
-                            "importer": rel,
-                            "target_module": target,
-                            "private_name": name,
-                            "line": node.lineno,
-                        }
-                    )
-    return sites
+    return scan_private_reaches(toolguard_dir).sites
 
 
 # =============================================================================
@@ -2400,7 +2881,8 @@ def compute_predicates(
     r5_cycles = find_import_cycles(
         graph, out_of_scope_packages=R5_OUT_OF_SCOPE_PACKAGES
     )
-    r6_sites = find_private_imports(toolguard_dir)
+    r6_arch = parse_architecture_config()
+    r6_report = scan_private_reaches(toolguard_dir, arch=r6_arch)
     r2_groups = find_parallel_arrays(toolguard_dir)
     r2_index_sites = find_index_parallel_access(toolguard_dir)
     r2_drift_guards = find_drift_guards(toolguard_dir)
@@ -2506,8 +2988,37 @@ def compute_predicates(
             },
         },
         "R6": {
-            "pass": len(r6_sites) == 0,
-            "sites": r6_sites,
+            # TOO-45 R6-S0: the gate now rests on `scan_private_reaches`,
+            # which derives the guarded (config+engine) and checked
+            # (tooling+runtime) sides from .pyscn.toml's layer map instead of
+            # a hand-maintained module set, catches attribute/getattr access
+            # as well as from-import, and follows re-exports to the DEFINING
+            # module -- see that function's docstring for the full rationale.
+            # `unresolvable` is reported alongside `sites`, never silently
+            # dropped, but does NOT gate `pass` -- an ambiguous case is not
+            # itself evidence of a violation.
+            "pass": len(r6_report.sites) == 0,
+            "sites": r6_report.sites,
+            "unresolvable": r6_report.unresolvable,
+            "guarded_layers": list(R6_GUARDED_LAYERS),
+            "guarded_modules": sorted(_r6_guarded_modules(r6_arch)),
+            "checked_layers": list(R6_CHECKED_LAYERS),
+            "checked_modules": sorted(_r6_checked_modules(r6_arch)),
+            "out_of_scope_excluded": {
+                # Same package list as R1's/R5's -- see r1_out_of_scope_modules'
+                # own docstring. `parser` sits inside the engine layer's
+                # package list in .pyscn.toml, so without this exclusion R6
+                # would newly start reaching into a package this ticket does
+                # not touch at all; see _r6_guarded_modules' own docstring.
+                "modules": r1_out_of_scope_modules(toolguard_dir),
+                "reason": (
+                    "toolguard/parser/ is explicitly out of scope for TOO-45 "
+                    "per the execution plan (the same exclusion R1/R5 apply); "
+                    "it is excluded from R6's guarded set explicitly, not by "
+                    "accident of an incomplete module list"
+                ),
+            },
+            "known_limitations": list(R6_KNOWN_LIMITATIONS),
         },
         "R2": {
             # TOO-45 R2-0: the gate now rests on the two STRUCTURAL,
@@ -2647,10 +3158,34 @@ def render_predicates_text(predicates: Dict[str, object]) -> str:
                     f"  (out of scope -- {oos['reason']}: {', '.join(oos['modules'])})"
                 )
         elif pid == "R6":
+            lines.append(
+                f"  guarded layers: {', '.join(data['guarded_layers'])} "
+                f"({len(data['guarded_modules'])} modules, derived from .pyscn.toml)"
+            )
+            lines.append(f"  checked layers: {', '.join(data['checked_layers'])}")
             for s in data["sites"]:
-                lines.append(
-                    f"  - {s['importer']}:{s['line']} imports private `{s['private_name']}` from {s['target_module']}"
+                via = (
+                    f" -- actually defined in {s['defining_module']} ({s['layer']})"
+                    if s["defining_module"] != s["target_module"]
+                    else f" ({s['layer']})"
                 )
+                lines.append(
+                    f"  - {s['importer']}:{s['line']} reaches private "
+                    f"`{s['private_name']}` via {s['target_module']} "
+                    f"[{s['route']}]{via}"
+                )
+            if data["unresolvable"]:
+                lines.append(f"  CANNOT VERIFY ({len(data['unresolvable'])}):")
+                for u in data["unresolvable"]:
+                    lines.append(f"    - {u['importer']}:{u['line']} -- {u['reason']}")
+            oos = data["out_of_scope_excluded"]
+            if oos["modules"]:
+                lines.append(
+                    f"  (out of scope -- {oos['reason']}: {', '.join(oos['modules'])})"
+                )
+            lines.append("  known limitations of this detector:")
+            for lim in data["known_limitations"]:
+                lines.append(f"    - {lim['clause']}: {lim['reason']}")
         elif pid == "R2":
             sites = data["index_parallel_access_sites"]
             lines.append(

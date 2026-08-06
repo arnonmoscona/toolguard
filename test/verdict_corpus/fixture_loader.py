@@ -7,7 +7,7 @@ Used by BOTH ``tools/corpus_build.py`` (the dev-only tool that regenerates
 and ``test/unit/test_verdict_corpus.py`` (the replay tests that guard the
 refactor), so the two can never drift on how a fixture's committed config
 files become a :class:`~toolguard.config.Configuration`, or on how a
-:class:`~toolguard.tools.decision.Decision` (or a raw hook JSON response)
+:class:`~toolguard.config_types.RuntimeVerdict` (or a raw hook JSON response)
 becomes a golden record. ``corpus_build.py --verify`` and the unit tests
 literally call the same :func:`compare_goldens` / :func:`compare_e2e_goldens`
 -- one prints a CLI diff and exits non-zero, the other asserts.
@@ -26,11 +26,14 @@ Two corpora live here, for two different seams:
   dominates), chosen to span the output-JSON surface rather than to
   re-exercise decision coverage the in-process corpus already has. It is
   ALSO the only place (TOO-45 audit follow-up) that can see
-  :class:`~toolguard.config.ConflictOverride`: it is dropped by
-  :func:`toolguard.tools.decision.decide` (:class:`~toolguard.tools.decision.Decision`
-  carries no such field) and never appears in the hook's JSON output either
-  -- it exists ONLY as an entry in ``logs/toolguard-conflict-*.md``, a THIRD
-  seam neither corpus's primary comparison touches. See
+  :class:`~toolguard.config.ConflictOverride`: since TOO-45 R6-S3 unified
+  ``Decision`` into :class:`~toolguard.config_types.RuntimeVerdict`,
+  :func:`toolguard.tools.decision.decide` DOES return it on its own
+  ``overrides`` field, but :func:`decision_to_golden` (see that function's
+  own docstring) deliberately excludes it from the golden schema, and it
+  never appears in the hook's JSON output either -- it exists ONLY as an
+  entry in ``logs/toolguard-conflict-*.md``, a THIRD seam neither corpus's
+  primary comparison touches. See
   :func:`_new_stream_log_text` and the ``conflict_logged``/``conflict_message``
   golden keys below -- the latter (TOO-45 D1a review debt item E) is also the
   only place the OVERRIDDEN deny's provenance is observable at all, since it
@@ -58,9 +61,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from toolguard.config import Configuration
+from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import FILE_PATH_TOOLS
 from toolguard.testing.sandbox import Sandbox, experiment
-from toolguard.tools.decision import Decision, decide
+from toolguard.tools.decision import decide
 
 CORPUS_DIR = Path(__file__).resolve().parent
 CONFIGS_DIR = CORPUS_DIR / "configs"
@@ -97,7 +101,7 @@ FIXTURE_IDS = (
 )
 
 #: Placeholders substituted for the sandbox's own (per-run, ephemeral)
-#: absolute paths before a Decision is serialized to a golden record. Without
+#: absolute paths before a verdict is serialized to a golden record. Without
 #: this, ``reason`` (which embeds a bracketed provenance suffix) and
 #: ``provenance.path`` would both contain a fresh ``tempfile`` directory name
 #: every run, and two regenerations of the same corpus would never be
@@ -277,7 +281,7 @@ def load_fixture_configuration(
         :class:`~toolguard.config.Configuration` and ``sanitize`` strips this
         sandbox's own ephemeral absolute paths out of a string (see
         :func:`_sanitize_ephemeral`), for use when serializing a
-        :class:`~toolguard.tools.decision.Decision` to a golden record.
+        :class:`~toolguard.config_types.RuntimeVerdict` to a golden record.
     """
     with _open_fixture_sandbox(fixture_id) as sandbox:
         config = sandbox.load_configuration()
@@ -342,15 +346,15 @@ def provenance_to_dict(
 
 def decision_to_golden(
     fixture_id: str,
-    decision: Decision,
+    decision: RuntimeVerdict,
     sanitize: Callable[[Optional[str]], Optional[str]],
 ) -> Dict[str, Any]:
     """
     Build one golden record (the schema stored in ``goldens.jsonl``) from a
-    replayed :class:`~toolguard.tools.decision.Decision`.
+    replayed :class:`~toolguard.config_types.RuntimeVerdict`.
 
-    ``sub_matches`` is intentionally NOT included -- the golden schema is
-    fixed by the TOO-45 spec to
+    ``sub_matches`` and ``overrides`` are intentionally NOT included -- the
+    golden schema is fixed by the TOO-45 spec to
     ``fixture/tool/target/verdict/reason/additional_context/provenance``,
     widened once (TOO-45 D1a review debt item E) to add ``matched_rule``:
     two independent mutations -- nulling ``matched_rule`` at its source in
@@ -360,8 +364,11 @@ def decision_to_golden(
     it did not observe either field at all. ``matched_rule`` is now tracked
     here; the overridden-deny-provenance half is tracked on the END-TO-END
     corpus instead (see :func:`e2e_decision_to_golden`), since
-    :class:`~toolguard.config.ConflictOverride` never reaches ``decide()``'s
-    return value at all -- see this module's own docstring.
+    :class:`~toolguard.config.ConflictOverride` -- while present on
+    ``decide()``'s return value's ``overrides`` field since TOO-45 R6-S3
+    unified ``Decision`` into ``RuntimeVerdict`` -- is deliberately excluded
+    from THIS golden schema, same as ``sub_matches``; see this module's own
+    docstring for where it IS observable.
 
     Args:
         fixture_id: The fixture this case was replayed against.
@@ -375,7 +382,7 @@ def decision_to_golden(
         "fixture": fixture_id,
         "tool": decision.tool,
         "target": decision.target,
-        "verdict": decision.verdict,
+        "verdict": decision.decision,
         "reason": sanitize(decision.reason),
         "additional_context": sanitize(decision.additional_context),
         "provenance": provenance_to_dict(decision.provenance, sanitize),
@@ -417,7 +424,7 @@ def generate_goldens_in_memory(cases: List[Dict[str, Any]]) -> List[Dict[str, An
     loaded exactly once regardless of how the fixtures are interleaved in
     *cases* -- this is the single choke point that both ``corpus_build.py``
     and the replay test go through, so they can never disagree on how a
-    Decision becomes a golden record.
+    verdict becomes a golden record.
 
     Args:
         cases: Records with ``fixture``/``tool``/``target`` keys (the
@@ -578,8 +585,8 @@ def e2e_decision_to_golden(
 
     Deliberately golds the FULL response shape (minus the two
     ``run_hook``-only diagnostic keys) rather than re-deriving fields from a
-    :class:`~toolguard.tools.decision.Decision` -- the presence or absence of
-    the ``additionalContext`` key is exactly the seam this corpus exists to
+    :class:`~toolguard.config_types.RuntimeVerdict` -- the presence or absence
+    of the ``additionalContext`` key is exactly the seam this corpus exists to
     guard, and only the real subprocess response can show it.
 
     Args:

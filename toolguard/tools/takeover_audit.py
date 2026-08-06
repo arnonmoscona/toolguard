@@ -84,12 +84,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import List, Optional, Set, Tuple
 
-from toolguard.config import (
-    Configuration,
-    Provenance,
-    TakeoverConfig,
-    _strip_tool_wrapper,
-)
+from toolguard.config import Configuration, Provenance, TakeoverConfig
+from toolguard.rule_entry import strip_tool_wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +240,7 @@ def _get_blanket_allows_in_native(
         for perm in permissions.get("allow", []):
             if not isinstance(perm, str):
                 continue
-            extracted = _strip_tool_wrapper(perm)
+            extracted = strip_tool_wrapper(perm)
             # A blanket allow is a native permission whose BODY is exactly "*"
             if extracted == "*":
                 # Check if this EXACT wrapper form is in the raw ignored set
@@ -275,7 +271,7 @@ def _has_any_blanket_allow_in_native(config: Configuration) -> bool:
         if not isinstance(permissions, dict):
             continue
         for perm in permissions.get("allow", []):
-            if isinstance(perm, str) and _strip_tool_wrapper(perm) == "*":
+            if isinstance(perm, str) and strip_tool_wrapper(perm) == "*":
                 return True
     return False
 

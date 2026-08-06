@@ -46,7 +46,6 @@ from toolguard.config_validation import validate_permissions
 from toolguard.issues import Issue
 from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 from toolguard.rule_entry import RuleEntry, entries_for_tool, normalize_entry
-from toolguard.rule_entry import _strip_tool_wrapper as _strip_tool_wrapper
 from toolguard.rule_entry import is_tool_wrapper as is_tool_wrapper
 from toolguard.rule_entry import normalize_entries_preserving
 from toolguard.toml_scan import find_multiline_structured_entry_line
@@ -64,15 +63,19 @@ from toolguard.toml_scan import find_multiline_structured_entry_line
 # the reverse -- so the regex and both predicates over it live there in
 # exactly one place. ``_TOOL_WRAPPER_RE`` itself is not re-imported here
 # since nothing in this module uses it directly any more (both former
-# call sites moved along with the functions); only the two predicates are
-# imported back and re-exported so existing importers
-# (``toolguard.config_divergence``'s ``is_tool_wrapper``,
-# ``toolguard.tools.takeover_audit``'s ``_strip_tool_wrapper``) keep working
-# unchanged. TOO-45 R2a: this module's own code no longer calls
-# ``_strip_tool_wrapper`` directly either -- every internal use now goes
-# through :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` -- so the
-# import here is a pure re-export as of this change (``as`` alias added to
-# say so explicitly, matching ``is_tool_wrapper``'s existing idiom).
+# call sites moved along with the functions); only ``is_tool_wrapper`` is
+# imported back and re-exported so the existing importer
+# (``toolguard.config_divergence``) keeps working unchanged. TOO-45 R2a:
+# this module's own code no longer calls ``_strip_tool_wrapper`` directly
+# either -- every internal use now goes through
+# :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` -- so the
+# ``is_tool_wrapper`` import here is a pure re-export as of that change
+# (``as`` alias added to say so explicitly). TOO-45 R6-S1: the
+# ``_strip_tool_wrapper`` re-export that used to sit alongside it was
+# deleted -- it existed only so ``toolguard.tools.takeover_audit`` could
+# reach a private name of a module it doesn't otherwise depend on; that
+# caller now imports the new public ``toolguard.rule_entry.strip_tool_wrapper``
+# directly instead, so nothing re-exports the private name any more.
 #
 # ``Provenance``, ``ConfigLayer``, ``ToolPatternLayer``,
 # ``TakeoverEnabledConflict``, ``TakeoverConfig``, and ``ConflictOverride``
@@ -836,7 +839,7 @@ def wrap_tool_pattern(tool: str, body: str) -> str:
     """
     Wrap a pattern body in its ``Tool(...)`` envelope.
 
-    The structural inverse of :func:`_strip_tool_wrapper`: given a tool name and a
+    The structural inverse of :func:`~toolguard.rule_entry._strip_tool_wrapper`: given a tool name and a
     wrapper-free body, produce the wrapped form as stored in config files (e.g.
     ``wrap_tool_pattern('Bash', 'git diff:*') -> 'Bash(git diff:*)'``).  This is
     the single source of truth for that construction so tooling never re-derives

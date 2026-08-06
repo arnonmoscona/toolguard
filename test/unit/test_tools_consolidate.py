@@ -430,7 +430,7 @@ class TestFamily1GitHappyPath(unittest.TestCase):
         )
         for cmd in ("git difftool", "git diffstat HEAD", "git diff-index HEAD"):
             self.assertEqual(
-                decide(config_b, "Bash", cmd).verdict,
+                decide(config_b, "Bash", cmd).decision,
                 "allow",
                 f"{cmd!r} should remain allowed after consolidation",
             )

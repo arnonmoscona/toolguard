@@ -108,7 +108,9 @@ class TestResolveEventAntiDrift(unittest.TestCase):
         ]:
             with self.subTest(command=command):
                 verdict = _resolve_event("Bash", {"command": command}, cfg, True)
-                self.assertEqual(verdict.decision, decide(cfg, "Bash", command).verdict)
+                self.assertEqual(
+                    verdict.decision, decide(cfg, "Bash", command).decision
+                )
 
     def test_file_path_verdicts_match_decide(self):
         """
@@ -121,7 +123,7 @@ class TestResolveEventAntiDrift(unittest.TestCase):
             with self.subTest(file_path=file_path):
                 verdict = _resolve_event("Read", {"file_path": file_path}, cfg, True)
                 self.assertEqual(
-                    verdict.decision, decide(cfg, "Read", file_path).verdict
+                    verdict.decision, decide(cfg, "Read", file_path).decision
                 )
 
 

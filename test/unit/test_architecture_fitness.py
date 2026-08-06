@@ -703,12 +703,13 @@ class TestFindVerdictTypes(unittest.TestCase):
         """
         Given the REAL toolguard/ tree, AFTER TOO-45 R1c collapsed
             ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict
-            and renamed SubMatch to UnitVerdict
+            and renamed SubMatch to UnitVerdict, and AFTER TOO-45 R6-S3
+            unified tools.decision.Decision into RuntimeVerdict
         When find_verdict_types is called
         Then UnitVerdict (missed by the old name-substring rule, under its
             old name SubMatch) is present, the genuine structurally-verdict
-            classes (RuntimeVerdict, UnitVerdict, Decision) are present, and
-            the three demonstrated-never-constructed-on-a-decision-path false
+            classes (RuntimeVerdict, UnitVerdict) are present, and the three
+            demonstrated-never-constructed-on-a-decision-path false
             positives the old rule reported (ProjectRootResolution,
             LedgerDecision, SingleDecision -- TOO-45 R1 scoping trace runtime
             census) are absent
@@ -718,15 +719,18 @@ class TestFindVerdictTypes(unittest.TestCase):
         positives and misses UnitVerdict) and PASSES against the structural
         one. Renamed and reduced from three genuine hits
         (ResolvedDecision/BashResolution/FileResolution) to one
-        (RuntimeVerdict) by the R1c collapse -- find_verdict_types is
-        STRUCTURAL, so it correctly reports fewer classes now that fewer
-        classes exist; see TestClassifyVerdictAltitudes below for the
-        altitude split this predicate's R1 gate actually uses.
+        (RuntimeVerdict) by the R1c collapse, then from two structural hits
+        (RuntimeVerdict, Decision) to one (RuntimeVerdict) by the R6-S3
+        unification -- find_verdict_types is STRUCTURAL, so it correctly
+        reports fewer classes now that fewer classes exist; see
+        TestClassifyVerdictAltitudes below for the altitude split this
+        predicate's R1 gate actually uses, and for the regression pin that
+        the TOOLING altitude rule itself still fires on a synthetic class.
         """
         found = {t["class"] for t in af.find_verdict_types()}
         self.assertIn("UnitVerdict", found)
-        for genuine in ("RuntimeVerdict", "Decision"):
-            self.assertIn(genuine, found)
+        self.assertIn("RuntimeVerdict", found)
+        self.assertNotIn("Decision", found)
         for false_positive in (
             "ProjectRootResolution",
             "LedgerDecision",
@@ -852,16 +856,26 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
     def test_real_tree_has_exactly_one_runtime_verdict_type(self):
         """
         Given the REAL toolguard/ tree, AFTER TOO-45 R1c collapsed
-            ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict
+            ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict,
+            and AFTER TOO-45 R6-S3 unified tools.decision.Decision into
+            RuntimeVerdict (deleting Decision entirely)
         When classify_verdict_altitudes is called
         Then RuntimeVerdict is the ONLY runtime-altitude type, UnitVerdict is
-            unit-altitude (nested inside RuntimeVerdict.sub_matches AND
-            Decision.sub_matches), and tools.decision.Decision is
-            tooling-altitude (package 'tools')
+            unit-altitude (nested inside RuntimeVerdict.sub_matches only --
+            Decision no longer exists to nest it a second way), and the
+            TOOLING altitude bucket is empty (no verdict-ish class remains
+            under a tooling package)
 
         This is the R1 gate's real-tree acceptance: exactly one RUNTIME
-        verdict type, with the other two altitudes DERIVED and justified,
-        not hand-listed.
+        verdict type, with the other altitudes DERIVED and justified, not
+        hand-listed. The TOOLING bucket being empty is the R6-S3 predicate
+        (P3 in the R6 reassessment's replacement predicate: "exactly one
+        verdict type at the runtime altitude, with no tooling-altitude
+        alias") -- an empty bucket here means the RULE never fires on this
+        tree today, not that the rule is incapable of firing; see
+        test_class_under_tooling_package_is_tooling_not_runtime above for the
+        synthetic regression pin proving the classifier still detects a
+        tooling-altitude verdict class if one is ever reintroduced.
         """
         alt = af.classify_verdict_altitudes()
         self.assertEqual([t["class"] for t in alt["runtime"]], ["RuntimeVerdict"])
@@ -869,11 +883,9 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
         unit_by_class = {t["class"]: t for t in alt["unit"]}
         self.assertIn("UnitVerdict", unit_by_class)
         containers = {n["container"] for n in unit_by_class["UnitVerdict"]["nested_in"]}
-        self.assertEqual(containers, {"RuntimeVerdict", "Decision"})
+        self.assertEqual(containers, {"RuntimeVerdict"})
 
-        tooling_by_class = {t["class"]: t for t in alt["tooling"]}
-        self.assertIn("Decision", tooling_by_class)
-        self.assertEqual(tooling_by_class["Decision"]["package"], "tools")
+        self.assertEqual(alt["tooling"], [])
 
     def test_real_tree_reports_levelmatch_as_a_visible_level_altitude(self):
         """
@@ -2231,7 +2243,21 @@ class TestFindReasonParsingSites(unittest.TestCase):
 
 
 class TestFindPrivateImports(unittest.TestCase):
-    """Tests for find_private_imports (R6)."""
+    """
+    Tests for find_private_imports/scan_private_reaches (R6, TOO-45 R6-S0).
+
+    R6-S0 replaced a hand-maintained guarded-module set and a
+    ``tools/``/``scripts/``-only scan with one derived from ``.pyscn.toml``'s
+    real layer map (config+engine guarded, tooling+runtime checked), added
+    two more reach routes (module-attribute access, ``getattr`` with a
+    string literal) alongside the original ``from ... import``, and added
+    re-export following so a private name reached through a pass-through
+    module is still caught. See the TOO-45 R6 reassessment for the defects
+    this closes (Defect A: the post-D1a ``permission_resolution`` engine
+    module; Defect B: the runtime-layer exclusion pinned by the old version
+    of `test_ignores_private_import_outside_tools_and_scripts`, inverted
+    below; Defect C: the `takeover_audit`/`rule_entry` re-export artefact).
+    """
 
     def test_flags_private_import_from_guarded_module(self):
         """
@@ -2248,6 +2274,8 @@ class TestFindPrivateImports(unittest.TestCase):
             self.assertEqual(len(sites), 1)
             self.assertEqual(sites[0]["private_name"], "_private_thing")
             self.assertEqual(sites[0]["target_module"], "config")
+            self.assertEqual(sites[0]["defining_module"], "config")
+            self.assertEqual(sites[0]["route"], "from_import")
 
     def test_allows_public_import_from_guarded_module(self):
         """
@@ -2276,20 +2304,29 @@ class TestFindPrivateImports(unittest.TestCase):
             )
             self.assertEqual(af.find_private_imports(root), [])
 
-    def test_ignores_private_import_outside_tools_and_scripts(self):
+    def test_flags_private_import_from_runtime_module(self):
         """
-        Given a private import from a module OUTSIDE tools/ or scripts/
+        Given hook.py (runtime layer) importing a private name from toolguard.config
         When find_private_imports is called
-        Then it is not reported (the predicate only guards tools/ and scripts/)
+        Then the site IS reported -- INVERTED from the pre-S0 test of the same
+            shape (`test_ignores_private_import_outside_tools_and_scripts`),
+            which used hook.py as its own worked example of what NOT to catch.
+            R6's own stated extension requires runtime to consume the same
+            interface as tooling (TOO-45 R6 reassessment, Defect B); a
+            detector that still excludes hook.py contradicts the ticket it
+            claims to check.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(root / "hook.py", "from toolguard.config import _private_thing\n")
-            self.assertEqual(af.find_private_imports(root), [])
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["importer"], "hook")
 
     def test_ignores_private_import_from_unguarded_module(self):
         """
-        Given tools/x.py importing a private name from a module NOT in R6_GUARDED_MODULES
+        Given tools/x.py importing a private name from a module not in a
+            guarded (config/engine) .pyscn.toml layer
         When find_private_imports is called
         Then it is not reported
         """
@@ -2313,6 +2350,296 @@ class TestFindPrivateImports(unittest.TestCase):
                 "# generated from x.peg\nfrom toolguard.config import _private_thing\n",
             )
             self.assertEqual(af.find_private_imports(root), [])
+
+    def test_excludes_parser_package_from_guarded_set(self):
+        """
+        Given tools/x.py importing a private name from toolguard.parser
+        When find_private_imports is called
+        Then it is NOT reported -- toolguard/parser/ is explicitly out of
+            scope for the whole TOO-45 ticket (the same exclusion R1/R5
+            already apply), even though `parser` is listed under the engine
+            layer's packages in .pyscn.toml and would otherwise be guarded
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "tools" / "x.py",
+                "from toolguard.parser import _internal_thing\n",
+            )
+            self.assertEqual(af.find_private_imports(root), [])
+
+    def test_flags_private_attribute_access_via_aliased_import(self):
+        """
+        Given tools/x.py doing `import toolguard.config as cfg` then reading
+            `cfg._private_thing` (module-attribute access, not a from-import)
+        When find_private_imports is called
+        Then the site is reported via the attribute_access route
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "tools" / "x.py",
+                "import toolguard.config as cfg\ncfg._private_thing()\n",
+            )
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["route"], "attribute_access")
+            self.assertEqual(sites[0]["private_name"], "_private_thing")
+            self.assertEqual(sites[0]["target_module"], "config")
+
+    def test_flags_private_attribute_access_via_dotted_bare_import(self):
+        """
+        Given tools/x.py doing `import toolguard.config` (no `as`) then
+            reading `toolguard.config._private_thing`
+        When find_private_imports is called
+        Then the site is reported -- the multi-hop chain resolves because
+            config.py genuinely exists on disk in this fixture
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "config.py", "_private_thing = 1\n")
+            _write(
+                root / "tools" / "x.py",
+                "import toolguard.config\nprint(toolguard.config._private_thing)\n",
+            )
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["route"], "attribute_access")
+            self.assertEqual(sites[0]["target_module"], "config")
+
+    def test_flags_private_attribute_access_via_from_toolguard_import(self):
+        """
+        Given tools/x.py doing `from toolguard import config` (binding the
+            SUBMODULE, not a value -- distinguished by config.py existing on
+            disk) then reading `config._private_thing`
+        When find_private_imports is called
+        Then the site is reported via the attribute_access route
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "config.py", "_private_thing = 1\n")
+            _write(
+                root / "tools" / "x.py",
+                "from toolguard import config\nprint(config._private_thing)\n",
+            )
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["route"], "attribute_access")
+            self.assertEqual(sites[0]["target_module"], "config")
+
+    def test_flags_getattr_with_literal_private_name(self):
+        """
+        Given tools/x.py calling getattr(config, "_private_thing") on a
+            module-aliased import, with a string-literal attribute name
+        When find_private_imports is called
+        Then the site is reported via the getattr route
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "tools" / "x.py",
+                "import toolguard.config as config\ngetattr(config, '_private_thing')\n",
+            )
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["route"], "getattr")
+            self.assertEqual(sites[0]["private_name"], "_private_thing")
+
+    def test_flags_private_import_from_permission_resolution(self):
+        """
+        Given tools/x.py importing a private name from
+            toolguard.permission_resolution (the engine module D1a created)
+        When find_private_imports is called
+        Then the site IS reported -- this module was NOT in the pre-S0
+            hardcoded guarded set (it postdates D1a, which created it after
+            the set was written), so this is the regression test for Defect A
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "tools" / "x.py",
+                "from toolguard.permission_resolution import _decide_internal\n",
+            )
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["target_module"], "permission_resolution")
+
+    def test_follows_reexport_through_unguarded_module_to_guarded_origin(self):
+        """
+        Given a foundation-layer module (constants) that re-exports a private
+            name originally defined in a guarded config-layer module
+            (rule_entry), and tools/x.py importing the private name from the
+            FOUNDATION module rather than the guarded one directly
+        When find_private_imports is called
+        Then the reach is still reported, attributed to the TRUE defining
+            module -- proves re-export following works generally, not only
+            for the one artefact named in the ticket (see
+            test_repointing_import_at_reexport_origin_does_not_clear_violation
+            below for that specific regression)
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "rule_entry.py", "def _strip_tool_wrapper(x):\n    return x\n"
+            )
+            _write(
+                root / "constants.py",
+                "from toolguard.rule_entry import _strip_tool_wrapper as _strip_tool_wrapper\n",
+            )
+            _write(
+                root / "tools" / "x.py",
+                "from toolguard.constants import _strip_tool_wrapper\n",
+            )
+            sites = af.find_private_imports(root)
+            self.assertEqual(len(sites), 1)
+            self.assertEqual(sites[0]["target_module"], "constants")
+            self.assertEqual(sites[0]["defining_module"], "rule_entry")
+
+    def test_repointing_import_at_reexport_origin_does_not_clear_violation(self):
+        """
+        Given the exact shape of the TOO-45 R6 reassessment's Defect C: a
+            config-layer module (config) that re-exports a private name
+            (_strip_tool_wrapper) actually defined in another guarded
+            config-layer module (rule_entry), plus a tooling module
+            (takeover_audit) importing the name from EITHER the re-exporting
+            module OR the true origin directly
+        When find_private_imports is called against each variant
+        Then BOTH variants report the violation -- on the pre-S0 detector,
+            re-pointing the import from `config` straight at `rule_entry`
+            (which was outside the hardcoded guarded set) took the count from
+            1 to 0 and R6 from FAIL to PASS with nothing about what tooling
+            could reach having changed at all (DEMONSTRATED in the
+            reassessment); that gaming move must no longer work
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "rule_entry.py", "def _strip_tool_wrapper(x):\n    return x\n"
+            )
+            _write(
+                root / "config.py",
+                "from toolguard.rule_entry import _strip_tool_wrapper as _strip_tool_wrapper\n",
+            )
+            _write(
+                root / "tools" / "takeover_audit.py",
+                "from toolguard.config import _strip_tool_wrapper\n",
+            )
+            via_reexport = af.find_private_imports(root)
+            self.assertEqual(len(via_reexport), 1)
+            self.assertEqual(via_reexport[0]["defining_module"], "rule_entry")
+
+            _write(
+                root / "tools" / "takeover_audit.py",
+                "from toolguard.rule_entry import _strip_tool_wrapper\n",
+            )
+            via_direct = af.find_private_imports(root)
+            self.assertEqual(
+                len(via_direct),
+                1,
+                "re-pointing the import at rule_entry must NOT clear the "
+                "violation -- doing so is the exact gaming move this "
+                "regression test exists to block",
+            )
+            self.assertEqual(via_direct[0]["target_module"], "rule_entry")
+            self.assertEqual(via_direct[0]["defining_module"], "rule_entry")
+
+    def test_reports_dynamic_getattr_as_unresolvable_not_a_violation(self):
+        """
+        Given tools/x.py calling getattr(config, name) where name is a
+            variable, not a string literal
+        When scan_private_reaches is called
+        Then it is NOT reported as a violation (cannot be verified
+            statically) but IS reported in `unresolvable`, per the ticket's
+            "report what it cannot check" requirement
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "tools" / "x.py",
+                "import toolguard.config as config\n"
+                "name = '_private_thing'\ngetattr(config, name)\n",
+            )
+            report = af.scan_private_reaches(root)
+            self.assertEqual(report.sites, [])
+            self.assertEqual(len(report.unresolvable), 1)
+            self.assertIn("literal", report.unresolvable[0]["reason"])
+
+    def test_reexport_cycle_reported_as_unresolvable(self):
+        """
+        Given two guarded-layer modules that re-export the same private name
+            from each other in a cycle
+        When scan_private_reaches is called
+        Then the reach is reported as unresolvable, not silently dropped and
+            not misattributed to either module
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "config.py", "from toolguard.resolve import _x as _x\n")
+            _write(root / "resolve.py", "from toolguard.config import _x as _x\n")
+            _write(root / "tools" / "y.py", "from toolguard.config import _x\n")
+            report = af.scan_private_reaches(root)
+            self.assertEqual(report.sites, [])
+            self.assertEqual(len(report.unresolvable), 1)
+            self.assertIn("cycle", report.unresolvable[0]["reason"])
+
+
+class TestR6GuardedAndCheckedModules(unittest.TestCase):
+    """
+    Tests for _r6_guarded_modules/_r6_checked_modules (TOO-45 R6-S0) against
+    the REAL .pyscn.toml -- these are the two derivations that replaced the
+    hand-maintained R6_GUARDED_MODULES set and the hardcoded tools/scripts
+    directory check.
+    """
+
+    def test_guarded_modules_includes_post_d1a_engine_module(self):
+        """
+        Given the real .pyscn.toml architecture config
+        When _r6_guarded_modules is called
+        Then permission_resolution (the engine module D1a created) is
+            included -- it was invisible to the old hardcoded set (Defect A)
+        """
+        arch = af.parse_architecture_config()
+        guarded = af._r6_guarded_modules(arch)
+        self.assertIn("permission_resolution", guarded)
+        self.assertIn("resolve", guarded)
+        self.assertIn("rule_entry", guarded)
+
+    def test_guarded_modules_excludes_parser(self):
+        """
+        Given the real .pyscn.toml architecture config, where `parser` is
+            listed under the engine layer's packages
+        When _r6_guarded_modules is called
+        Then parser is explicitly excluded (out of scope for the whole
+            TOO-45 ticket, same as R1/R5's R1_OUT_OF_SCOPE_PACKAGES)
+        """
+        arch = af.parse_architecture_config()
+        guarded = af._r6_guarded_modules(arch)
+        self.assertNotIn("parser", guarded)
+
+    def test_checked_modules_includes_runtime_and_tooling(self):
+        """
+        Given the real .pyscn.toml architecture config
+        When _r6_checked_modules is called
+        Then it includes both tooling (tools, scripts) and runtime (hook,
+            among others) modules -- the fix for Defect B
+        """
+        arch = af.parse_architecture_config()
+        checked = af._r6_checked_modules(arch)
+        self.assertIn("tools", checked)
+        self.assertIn("scripts", checked)
+        self.assertIn("hook", checked)
+
+    def test_checked_modules_excludes_config_and_engine(self):
+        """
+        Given the real .pyscn.toml architecture config
+        When _r6_checked_modules is called
+        Then config/engine-layer modules are not themselves in the
+            reach-from scope
+        """
+        arch = af.parse_architecture_config()
+        checked = af._r6_checked_modules(arch)
+        self.assertNotIn("config", checked)
+        self.assertNotIn("resolve", checked)
 
 
 class TestParseEntryPointModules(unittest.TestCase):
@@ -3213,6 +3540,42 @@ class TestComputePredicates(unittest.TestCase):
         self.assertIn("bare_verdict_tuples", predicates["R1"])
         self.assertIn("out_of_scope_excluded", predicates["R5"])
         self.assertIn("entry_point_modules", predicates["R5"])
+        # TOO-45 R6-S0: the derived scope and "cannot check" fields must be
+        # present and populated -- an exclusion the operator cannot see is
+        # indistinguishable from a bug (module docstring).
+        r6 = predicates["R6"]
+        for key in (
+            "sites",
+            "unresolvable",
+            "guarded_layers",
+            "guarded_modules",
+            "checked_layers",
+            "checked_modules",
+            "out_of_scope_excluded",
+            "known_limitations",
+        ):
+            self.assertIn(key, r6)
+        self.assertIn("permission_resolution", r6["guarded_modules"])
+        self.assertNotIn("parser", r6["guarded_modules"])
+        self.assertIn("hook", r6["checked_modules"])
+        self.assertTrue(
+            any(m.startswith("parser") for m in r6["out_of_scope_excluded"]["modules"])
+        )
+        self.assertTrue(r6["known_limitations"])
+
+    def test_r6_out_of_scope_module_list_matches_r1s(self):
+        """
+        Given the real tree
+        When compute_predicates is called
+        Then R6's out_of_scope_excluded names the same parser modules R1/R5
+            already exclude, via the same r1_out_of_scope_modules helper --
+            not a second, drifting scan
+        """
+        predicates = af.compute_predicates()
+        self.assertEqual(
+            predicates["R6"]["out_of_scope_excluded"]["modules"],
+            predicates["R1"]["out_of_scope_excluded"]["modules"],
+        )
 
     def test_r5_out_of_scope_excludes_the_parser_package(self):
         """
@@ -3423,16 +3786,19 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         """
         Given the real toolguard/ tree and the real .pyscn.toml
         When check_layers is called
-        Then it returns a LayerReport without raising, AND completeness holds
-             (report.unmapped == []) -- ratcheted from a smoke-only assertion
-             (TOO-45 D1a review debt item C) after removing
-             `permission_resolution` from .pyscn.toml's engine-layer packages
-             list left the 2,321-test suite green; only a manual --layers run
-             reported UNMAPPED (1). Deliberately does NOT assert report.ok --
-             that is False today because of 1 pre-existing DIRECTION
-             violation (hook -> tools.decision), deliberately left open for
-             R6 (moving decide() to the api layer); completeness-only is what
-             can land now without also fixing that. (TOO-45 R5b removed
+        Then it returns a LayerReport without raising, completeness holds
+             (report.unmapped == []), AND direction holds (report.ok is True
+             -- ratcheted here, TOO-45 R6-S2) -- completeness was ratcheted
+             from a smoke-only assertion earlier (TOO-45 D1a review debt item
+             C) after removing `permission_resolution` from .pyscn.toml's
+             engine-layer packages list left the 2,321-test suite green; only
+             a manual --layers run reported UNMAPPED (1). Direction could not
+             be ratcheted until now because of 1 pre-existing DIRECTION
+             violation (hook -> tools.decision, an upward runtime->tooling
+             import) -- TOO-45 R6-S2 cleared it by moving decide() into the
+             new `api` layer both `hook` (runtime) and `tools.decision`
+             (tooling) are allowed to import from downward, so report.ok is
+             genuinely True now, not merely un-asserted. (TOO-45 R5b removed
              auto_migrate -> scripts.migrate_permissions by moving the
              migration logic both modules needed into
              toolguard.permission_migration; TOO-45 R5d removed
@@ -3443,6 +3809,51 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         self.assertIsInstance(report.module_layer, dict)
         self.assertGreater(len(report.module_layer), 0)
         self.assertEqual(report.unmapped, [])
+        self.assertTrue(report.ok, report.violations)
+
+    def test_api_layer_is_seen_and_populated_in_real_tree_layer_map(self):
+        """
+        Given the real toolguard/ tree and the real .pyscn.toml, which
+            declares a dedicated "api" layer (TOO-45 R6-S2) directly above
+            "engine"
+        When check_layers is called
+        Then toolguard/api.py maps to the "api" layer specifically -- not
+             unmapped, not multiply-mapped, and not silently absorbed into a
+             neighbouring layer
+
+        This is the completeness caveat the R6-S2 task spec calls out
+        explicitly: pyscn's own compliance score stays plausible even when a
+        module maps to no layer at all, so a module that is declared but
+        never actually reached by the completeness scan would be invisible
+        exactly the way the docstring at the top of this file (`--layers`
+        section) warns about. Pinning the concrete module -> layer mapping,
+        not just report.unmapped == [], is what makes that failure mode
+        detectable here.
+        """
+        report = af.check_layers()
+        self.assertEqual(report.module_layer.get("api"), "api")
+        self.assertNotIn("api", report.unmapped)
+        self.assertNotIn("api", report.multiply_mapped)
+
+    def test_api_layer_rule_allows_only_engine_and_below(self):
+        """
+        Given the real .pyscn.toml's declared architecture rules
+        When the "api" layer's allow-list is read
+        Then it permits "api", "engine", "config", and "foundation" only --
+             NOT "runtime", "tooling", or "support"
+
+        Pins the direction of the new layer concretely (not just "today's
+        real tree happens to have zero violations"): if a future change
+        pointed `toolguard/api.py` at, say, `toolguard.hook`, this test fails
+        even before `--layers` would notice a real edge, because the RULE
+        itself would have to be loosened first to permit it.
+        """
+        arch = af.parse_architecture_config()
+        allowed = set(arch.allow_for("api"))
+        self.assertEqual(allowed, {"api", "engine", "config", "foundation"})
+        self.assertNotIn("runtime", allowed)
+        self.assertNotIn("tooling", allowed)
+        self.assertNotIn("support", allowed)
 
     def test_compute_predicates_runs_on_real_tree(self):
         """

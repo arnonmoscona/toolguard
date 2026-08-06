@@ -429,7 +429,7 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45
 
     changed = 0
     for cmd in probes:
-        if decide(config, tool, cmd).verdict != decide(config_b, tool, cmd).verdict:
+        if decide(config, tool, cmd).decision != decide(config_b, tool, cmd).decision:
             changed += 1
     if changed:
         return (
@@ -629,8 +629,8 @@ def _check_family2_safe(
     probes = [small_cmd, small_cmd + " --x"]
     pos_fail = 0
     for cmd in probes:
-        va = decide(config, tool, cmd).verdict
-        vb = decide(config_b, tool, cmd).verdict
+        va = decide(config, tool, cmd).decision
+        vb = decide(config_b, tool, cmd).decision
         if va != "allow" or vb != "allow":
             pos_fail += 1
 
@@ -890,8 +890,8 @@ def _broadening_probe_surface(
     surface = [
         cmd
         for cmd in probes
-        if decide(config_b, tool, cmd).verdict == "allow"
-        and decide(config_a, tool, cmd).verdict != "allow"
+        if decide(config_b, tool, cmd).decision == "allow"
+        and decide(config_a, tool, cmd).decision != "allow"
     ]
     return tuple(surface)
 

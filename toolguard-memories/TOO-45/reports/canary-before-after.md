@@ -144,17 +144,17 @@ Green = the reading means what it says. Red = the reading is misleading. Grey = 
 
 **Defect A — the file count is bounded below and could not register success.** Every one of the nine coupled files has a structural reason to name the field even in an ideal design (INFERRED BY READING, by inspecting each file's references):
 
-| file | why it must name enrichment |
-|---|---|
-| `rule_entry.py` | parses `additionalContext` out of TOML; the single accessor |
-| `config_types.py` | declares `RuntimeVerdict.additional_context` |
-| `hook.py` | renders it into `hookSpecificOutput.additionalContext` |
-| `log_writer.py` | persists and previews it in the log record |
-| `resolve.py` | hard-deny lookup produces it |
-| `permission_resolution.py` | engine selects the winning entry's value |
-| `compound.py` | accumulates it across sub-commands under a word budget |
-| `tools/decision.py` | declares it on the replay-layer DTO |
-| `testing/sandbox.py` | renders it in the test harness output |
+| file                       | why it must name enrichment                                 |
+| -------------------------- | ----------------------------------------------------------- |
+| `rule_entry.py`            | parses `additionalContext` out of TOML; the single accessor |
+| `config_types.py`          | declares `RuntimeVerdict.additional_context`                |
+| `hook.py`                  | renders it into `hookSpecificOutput.additionalContext`      |
+| `log_writer.py`            | persists and previews it in the log record                  |
+| `resolve.py`               | hard-deny lookup produces it                                |
+| `permission_resolution.py` | engine selects the winning entry's value                    |
+| `compound.py`              | accumulates it across sub-commands under a word budget      |
+| `tools/decision.py`        | declares it on the replay-layer DTO                         |
+| `testing/sandbox.py`       | renders it in the test harness output                       |
 
 The decision log put the floor at ~7; on inspection it is effectively 9 under the current design. Either way, a perfect R1 could move the file count by at most one or two while removing most of the real threading. **A pre-registered "flat = failure" criterion was set against exactly this number, and it would have produced a FALSE FAILURE on R1d — the step that actually delivered.** It did not, only because a scout checked what the metric could express *before* the step ran and added the occurrence count. That check is the reason the ticket has a defensible R1 result at all.
 

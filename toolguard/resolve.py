@@ -1,18 +1,31 @@
 """
-Pure, side-effect-free permission resolver layer for toolguard.
+Permission resolver layer for toolguard.
+
+Not pure, despite what an earlier version of this docstring claimed (TOO-45
+R6-S2 correction). Command-vs-pattern matching reads live filesystem state:
+``normalization.py``'s ``exists()``/``is_symlink()``/``resolve()`` calls
+(around lines 47-50 and 81), reached from ``permissions.py``'s pattern
+matching (around lines 146 and 194), which every resolver below calls into.
+A related check-to-use race in that disk read has been deliberately
+deprioritised as a design decision; it is not mitigated here and should not
+be chased as part of this correction. The narrower claim below IS still true
+and is the actual contract callers rely on.
 
 This module is the canonical, single source of truth for the core permission
 resolution algorithms.  It contains ONLY functions that are:
 
-- Pure (no logging, no stdin/stdout, no ``sys.exit``).
+- Side-effect-free in the sense callers actually depend on: no logging, no
+  stdin/stdout, no ``sys.exit``.
 - Self-contained at their level (they may import ``config``, ``permissions``,
   ``compound``, ``patterns``, and ``normalization``; they do NOT import
   ``hook``).
 
-Both the live hook (``toolguard.hook``) and the replay / tooling layer
-(``toolguard.tools.decision``) import from here, ensuring that what the hook
-decides at runtime is EXACTLY what the replay computes -- there is no separate
-copy of the logic to drift.
+Both the live hook (``toolguard.hook``) and the ``api``/tooling layer
+(``toolguard.api``, TOO-45 R6-S2's public decision interface; the previous
+name for this, ``toolguard.tools.decision``, is now a backward-compatible
+re-export -- see that module's docstring) import from here, ensuring that
+what the hook decides at runtime is EXACTLY what tooling computes -- there is
+no separate copy of the logic to drift.
 
 Functions moved here from ``hook.py`` (previously private helpers):
 - :func:`_anchor_file_pattern`

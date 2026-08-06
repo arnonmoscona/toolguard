@@ -519,7 +519,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         Then the [glob] prefix is preserved and the relative body is anchored to
             the project root
         """
-        from toolguard.hook import _anchor_file_pattern
+        from toolguard.resolve import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -532,7 +532,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         When _anchor_file_pattern runs
         Then the pattern is returned unchanged (never path-joined)
         """
-        from toolguard.hook import _anchor_file_pattern
+        from toolguard.resolve import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -545,7 +545,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         When _anchor_file_pattern runs
         Then the pattern is returned unchanged
         """
-        from toolguard.hook import _anchor_file_pattern
+        from toolguard.resolve import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -559,7 +559,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         Then the pattern is returned unchanged (tilde expansion happens downstream,
             it is NOT anchored to the project root)
         """
-        from toolguard.hook import _anchor_file_pattern
+        from toolguard.resolve import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)

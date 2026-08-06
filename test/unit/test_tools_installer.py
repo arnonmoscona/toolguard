@@ -1421,7 +1421,7 @@ class TestSeedSelfPerms(InstallerTestCase):
         )
         configuration = Configuration(layers=(layer,))
         decision = decide(configuration, "Bash", "rm -rf ~/.toolguard")
-        self.assertEqual(decision.verdict, "deny")
+        self.assertEqual(decision.decision, "deny")
 
     def test_running_twice_does_not_duplicate_hard_deny_patterns(self):
         """
@@ -1469,7 +1469,7 @@ class TestSeedSelfPerms(InstallerTestCase):
         for command in safe_forms:
             with self.subTest(command=command):
                 self.assertEqual(
-                    decide(configuration, "Bash", command).verdict, "allow"
+                    decide(configuration, "Bash", command).decision, "allow"
                 )
 
         unsafe_forms = [
@@ -1480,7 +1480,7 @@ class TestSeedSelfPerms(InstallerTestCase):
         for command in unsafe_forms:
             with self.subTest(command=command):
                 self.assertNotEqual(
-                    decide(configuration, "Bash", command).verdict, "allow"
+                    decide(configuration, "Bash", command).decision, "allow"
                 )
 
 

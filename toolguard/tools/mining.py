@@ -224,7 +224,7 @@ def mine_rule_candidates(
     buckets: Dict[Tuple[str, str, str], Dict] = {}
 
     for entry in corpus:
-        verdict = decide(config, entry.tool, entry.command).verdict
+        verdict = decide(config, entry.tool, entry.command).decision
         signal = _classify(verdict, entry.status)
         if signal == SIGNAL_CONSISTENT:
             continue
@@ -308,7 +308,7 @@ def evaluate_added_allow_rule(
     diff = replay(corpus, config, config_b)
 
     newly_allowed = sorted(
-        {d.entry.command for d in diff.broadened() if d.decision_b.verdict == "allow"}
+        {d.entry.command for d in diff.broadened() if d.decision_b.decision == "allow"}
     )
 
     return AddRuleEffect(

@@ -38,8 +38,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from toolguard.config import Configuration
+from toolguard.config_types import RuntimeVerdict
 from toolguard.constants import STATUS_EXECUTED, STATUS_REFUSED
-from toolguard.tools.decision import Decision, decide
+from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 
 
@@ -87,14 +88,14 @@ class EntryDiff:
 
     Attributes:
         entry: The original :class:`~toolguard.tools.log_harvest.LogEntry`.
-        decision_a: Decision under config A.
-        decision_b: Decision under config B.
+        decision_a: Verdict under config A.
+        decision_b: Verdict under config B.
         classification: ``'unchanged'``, ``'tightened'``, or ``'broadened'``.
     """
 
     entry: LogEntry
-    decision_a: Decision
-    decision_b: Decision
+    decision_a: RuntimeVerdict
+    decision_b: RuntimeVerdict
     classification: str
 
 
@@ -143,7 +144,7 @@ class SingleDecision:
 
     Attributes:
         entry: The original :class:`~toolguard.tools.log_harvest.LogEntry`.
-        decision: The decision under the single config.
+        decision: The verdict under the single config.
         matches_observed: Whether the replayed verdict matches the status
             recorded in the log (``True`` when the log says ``EXECUTED`` and
             the replay yields ``allow``, or the log says ``REFUSED`` and replay
@@ -151,7 +152,7 @@ class SingleDecision:
     """
 
     entry: LogEntry
-    decision: Decision
+    decision: RuntimeVerdict
     matches_observed: bool
 
 
@@ -196,7 +197,7 @@ def replay(
     for entry in corpus:
         da = decide(config_a, entry.tool, entry.command, extended_syntax)
         db = decide(config_b, entry.tool, entry.command, extended_syntax)
-        classification = classify_change(da.verdict, db.verdict)
+        classification = classify_change(da.decision, db.decision)
 
         diff = EntryDiff(
             entry=entry,
@@ -241,7 +242,7 @@ def replay_single(
 
     for entry in corpus:
         d = decide(config, entry.tool, entry.command, extended_syntax)
-        matches = _verdict_matches_status(d.verdict, entry.status)
+        matches = _verdict_matches_status(d.decision, entry.status)
         results.append(
             SingleDecision(entry=entry, decision=d, matches_observed=matches)
         )

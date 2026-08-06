@@ -304,7 +304,7 @@ class TestSandboxEvaluation(unittest.TestCase):
         Then the verdict is allow
         """
         with experiment(project_config=ALLOW_LS) as sandbox:
-            self.assertEqual(sandbox.evaluate("Bash", "ls -la").verdict, "allow")
+            self.assertEqual(sandbox.evaluate("Bash", "ls -la").decision, "allow")
 
     def test_unmatched_command_does_not_come_back_allow(self):
         """
@@ -314,7 +314,7 @@ class TestSandboxEvaluation(unittest.TestCase):
         """
         with experiment(project_config=ALLOW_LS) as sandbox:
             self.assertIn(
-                sandbox.evaluate("Bash", "curl example.com").verdict, {"ask", "deny"}
+                sandbox.evaluate("Bash", "curl example.com").decision, {"ask", "deny"}
             )
 
     def test_hard_deny_cannot_be_overridden_by_a_project_allow(self):
@@ -326,7 +326,7 @@ class TestSandboxEvaluation(unittest.TestCase):
         config = '[permissions]\nallow = ["Bash(curl *)"]\n'
         with experiment(project_config=config, hard_deny=["Bash(curl *)"]) as sandbox:
             self.assertEqual(
-                sandbox.evaluate("Bash", "curl example.com").verdict, "deny"
+                sandbox.evaluate("Bash", "curl example.com").decision, "deny"
             )
 
     def test_ask_floor_applies_to_inline_foreign_code(self):
@@ -340,7 +340,9 @@ class TestSandboxEvaluation(unittest.TestCase):
         """
         config = '[permissions]\nallow = ["Bash(*)", "Bash(python -c *)"]\n'
         with experiment(project_config=config) as sandbox:
-            self.assertEqual(sandbox.evaluate("Bash", "python -c 'x=1'").verdict, "ask")
+            self.assertEqual(
+                sandbox.evaluate("Bash", "python -c 'x=1'").decision, "ask"
+            )
 
     def test_rules_file_in_toolguard_rules_dir_is_discovered(self):
         """
@@ -352,7 +354,7 @@ class TestSandboxEvaluation(unittest.TestCase):
         with experiment(
             project_config=ALLOW_LS, rules_files={"sync.rules.toml": rules}
         ) as sandbox:
-            self.assertEqual(sandbox.evaluate("Bash", "rsync a b").verdict, "deny")
+            self.assertEqual(sandbox.evaluate("Bash", "rsync a b").decision, "deny")
 
     def test_rules_file_in_xdg_rules_dir_is_discovered(self):
         """
@@ -364,7 +366,7 @@ class TestSandboxEvaluation(unittest.TestCase):
         with experiment(
             project_config=ALLOW_LS, xdg_rules_files={"sync.rules.toml": rules}
         ) as sandbox:
-            self.assertEqual(sandbox.evaluate("Bash", "rsync a b").verdict, "deny")
+            self.assertEqual(sandbox.evaluate("Bash", "rsync a b").decision, "deny")
 
     def test_rewriting_the_config_changes_the_next_verdict(self):
         """
@@ -376,9 +378,9 @@ class TestSandboxEvaluation(unittest.TestCase):
         an explicit invalidation this would silently return the stale verdict.
         """
         with experiment(project_config=ALLOW_LS) as sandbox:
-            self.assertEqual(sandbox.evaluate("Bash", "ls -la").verdict, "allow")
+            self.assertEqual(sandbox.evaluate("Bash", "ls -la").decision, "allow")
             sandbox.write_config('[permissions]\ndeny = ["Bash(ls *)"]\n')
-            self.assertEqual(sandbox.evaluate("Bash", "ls -la").verdict, "deny")
+            self.assertEqual(sandbox.evaluate("Bash", "ls -la").decision, "deny")
 
     def test_write_config_and_config_text_round_trip(self):
         """

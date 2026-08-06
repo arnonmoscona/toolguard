@@ -520,13 +520,15 @@ _ASK_PROVENANCE_CASES: List[Tuple[str, str]] = [
 #: outright -- nothing to override). Registered here for the IN-PROCESS
 #: corpus too (the allow verdicts themselves are correct and worth pinning),
 #: but `permission_resolution._detect_override`'s actual firing is invisible
-#: to `decide()` -- :func:`toolguard.tools.decision.decide` never returns
-#: `ConflictOverride` at all (dropped at the `_decide_bash`/`_decide_file_path`
-#: adapters) and the hook's JSON output doesn't carry it either. It is
-#: observable ONLY via the conflict log side effect the end-to-end corpus can
-#: see (see :data:`E2E_CASES` and `fixture_loader.py`'s
-#: `conflict_logged`/`_new_stream_log_text`) -- the mutation test for
-#: this point must use the end-to-end corpus, not this one.
+#: to THIS corpus -- since TOO-45 R6-S3 unified `Decision` into
+#: `RuntimeVerdict`, :func:`toolguard.tools.decision.decide` DOES return
+#: `ConflictOverride` on its own `overrides` field, but
+#: `fixture_loader.decision_to_golden` deliberately excludes it from the
+#: golden schema (see that function's own docstring) and the hook's JSON
+#: output doesn't carry it either. It is observable ONLY via the conflict
+#: log side effect the end-to-end corpus can see (see :data:`E2E_CASES` and
+#: `fixture_loader.py`'s `conflict_logged`/`_new_stream_log_text`) -- the
+#: mutation test for this point must use the end-to-end corpus, not this one.
 _OVERRIDE_BREADTH_CASES: List[Tuple[str, str]] = [
     ("Bash", "git push origin main"),
     ("Bash", "git push --force origin main"),

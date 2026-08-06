@@ -578,7 +578,7 @@ class UnitVerdict:
     class's docstring's "Why this lives in config_types.py" note. Re-exported
     by :mod:`toolguard.resolve` for existing callers.
 
-    Callers (e.g. :func:`toolguard.tools.decision._decide_bash`) can use
+    Callers (e.g. :func:`toolguard.api._decide_bash`) can use
     ``sub_matches`` to identify WHICH sub-command of a compound command produced
     the verdict (first deny => compound deny, first ask => compound ask, else
     allow) and to surface per-sub-command provenance to tooling.
@@ -674,12 +674,15 @@ class RuntimeVerdict:
     the altitude language the R1 scoping trace uses and
     ``tools/architecture_fitness.py``'s predicate now enforces: this is the
     RUNTIME altitude, distinct from :class:`UnitVerdict` (the UNIT altitude
-    nested inside it via ``sub_matches``) and
-    :class:`~toolguard.tools.decision.Decision` (the TOOLING altitude,
-    deferred to R6 -- see that class's own docstring). "Exactly one type
-    represents a permission verdict end-to-end" was too blunt a predicate;
-    "exactly one RUNTIME verdict type, with the other altitudes declared and
-    justified" is what actually holds on this tree, and is what
+    nested inside it via ``sub_matches``). A fourth, TOOLING altitude used to
+    exist here too: :mod:`toolguard.tools.decision`'s own ``Decision`` DTO,
+    a field-for-field re-render of this class kept apart only pending TOO-45
+    R6. TOO-45 R6-S3 unified it into this class (measured behavioural cost:
+    zero, across the full verdict corpus and unit suite) -- ``decide()`` now
+    returns this type directly, and ``Decision`` no longer exists. "Exactly
+    one type represents a permission verdict end-to-end" was too blunt a
+    predicate; "exactly one RUNTIME verdict type, with the other altitudes
+    declared and justified" is what actually holds on this tree, and is what
     ``tools/architecture_fitness.py --predicates`` now reports.
 
     Why this lives in config_types.py, not resolve.py

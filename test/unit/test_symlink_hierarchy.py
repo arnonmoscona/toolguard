@@ -257,7 +257,7 @@ class TestEndToEndResolutionThroughSymlink(SymlinkHierarchyTestCase):
         config_module._parse_config_file_cached.cache_clear()
         config = load_configuration(str(project))
         return {
-            command: decide(config, "Bash", command, True).verdict
+            command: decide(config, "Bash", command, True).decision
             for command in ("ls -la", "curl example.com", "rsync a b")
         }
 
@@ -325,7 +325,7 @@ class TestSymlinkedRulesFile(SymlinkHierarchyTestCase):
         config_module._parse_config_file_cached.cache_clear()
         config = load_configuration(str(layout.project))
 
-        self.assertEqual(decide(config, "Bash", "rsync a b", True).verdict, "deny")
+        self.assertEqual(decide(config, "Bash", "rsync a b", True).decision, "deny")
 
 
 if __name__ == "__main__":

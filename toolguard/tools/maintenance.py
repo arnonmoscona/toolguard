@@ -882,8 +882,8 @@ def _replay_entry_to_dict(diff_entry: EntryDiff) -> Dict[str, str]:
     return {
         "tool": diff_entry.entry.tool,
         "command": diff_entry.entry.command,
-        "verdict_before": diff_entry.decision_a.verdict,
-        "verdict_after": diff_entry.decision_b.verdict,
+        "verdict_before": diff_entry.decision_a.decision,
+        "verdict_after": diff_entry.decision_b.decision,
     }
 
 
@@ -943,7 +943,7 @@ def _render_replay(diff: ReplayDiff, corpus_size: int, fmt: str = "markdown") ->
         )
         for d in diff.broadened():
             lines.append(f"  [{d.entry.tool}] {d.entry.command}")
-            lines.append(f"      {d.decision_a.verdict} -> {d.decision_b.verdict}")
+            lines.append(f"      {d.decision_a.decision} -> {d.decision_b.decision}")
     if diff.tightened_count:
         lines.append("")
         lines.append(
@@ -951,7 +951,7 @@ def _render_replay(diff: ReplayDiff, corpus_size: int, fmt: str = "markdown") ->
         )
         for d in diff.tightened():
             lines.append(f"  [{d.entry.tool}] {d.entry.command}")
-            lines.append(f"      {d.decision_a.verdict} -> {d.decision_b.verdict}")
+            lines.append(f"      {d.decision_a.decision} -> {d.decision_b.decision}")
 
     lines.append("")
     lines.append(

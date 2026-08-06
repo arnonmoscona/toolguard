@@ -70,10 +70,14 @@ RE_EXPORTED_TYPES = (
 
 #: TOO-45: this used to be GRANDFATHERED_LOCAL_IMPORTS, a three-entry allowance
 #: dating from TOO-19. The ratchet has reached zero, so it is gone. One of the
-#: three (hook -> tools.decision) is a genuine circular-import escape and now
-#: carries the PLC0415 suppression marker the convention always called for.
-#: The second (auto_migrate -> scripts.migrate_permissions) was resolved by
-#: R5b: the migration logic that both modules needed moved to
+#: three (hook -> tools.decision) was a genuine circular-import escape and
+#: carried the PLC0415 suppression marker the convention always called for --
+#: R6-S2 removed it entirely (not just relocated the marker) by moving
+#: ``decide()`` into ``toolguard.api``, the layer both ``hook`` (runtime) and
+#: ``tools.decision`` (now a re-export) are allowed to import from downward,
+#: so the local import is gone along with the layer violation it existed to
+#: paper over. The second (auto_migrate -> scripts.migrate_permissions) was
+#: resolved by R5b: the migration logic that both modules needed moved to
 #: toolguard.permission_migration, a module neither of them forms a cycle
 #: with, so auto_migrate now imports it as a normal top-level import and the
 #: local import + marker are gone entirely, not just relocated. The third --
@@ -227,15 +231,22 @@ class TestReExportIdentity(unittest.TestCase):
 
     def test_leaf_type_reexports_resolve_to_their_leaf_modules(self):
         """
-        Given Issue, RuleEntry and the tool-wrapper predicates re-exported by config
+        Given Issue, RuleEntry and is_tool_wrapper, re-exported by config
         When each is compared against its defining leaf module's attribute
         Then they are the identical object, not a duplicate definition
+
+        ``_strip_tool_wrapper`` was in this list until TOO-45 R6-S1 deleted
+        config's re-export of it -- that re-export existed only so
+        ``toolguard.tools.takeover_audit`` could reach a private name of a
+        module it doesn't otherwise depend on, and that caller now imports
+        the public ``toolguard.rule_entry.strip_tool_wrapper`` directly
+        instead. ``config`` no longer re-exports the private name at all, so
+        there is nothing left here for this identity check to make about it.
         """
         for name, owner in (
             ("Issue", issues),
             ("RuleEntry", rule_entry),
             ("is_tool_wrapper", rule_entry),
-            ("_strip_tool_wrapper", rule_entry),
         ):
             with self.subTest(name=name):
                 self.assertIs(getattr(config, name), getattr(owner, name))

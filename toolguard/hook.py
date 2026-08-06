@@ -20,6 +20,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
 from toolguard.compound import (
     FALLBACK_ALLOW_PLACEHOLDER,
@@ -34,10 +35,6 @@ from toolguard.log_writer import LogRecord, log_command, log_discovery
 from toolguard.resolve import (
     RuntimeVerdict,
     UnitVerdict,
-    _anchor_file_pattern,  # noqa: F401  re-exported for backwards compat
-    _check_file_path_hard_deny,  # noqa: F401  re-exported for backwards compat
-    _decide_file_path_at_level_detailed,  # noqa: F401  re-exported for backwards compat
-    _match_file_path_pattern,  # noqa: F401  re-exported for backwards compat
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
@@ -612,39 +609,6 @@ def _build_hook_argparser() -> argparse.ArgumentParser:
     return parser
 
 
-def _verdict_from_decision(result) -> RuntimeVerdict:
-    """
-    Adapt a :class:`~toolguard.tools.decision.Decision` (the TOOLING altitude)
-    into a :class:`~toolguard.config_types.RuntimeVerdict` (the RUNTIME
-    altitude) for :func:`_resolve_event`'s uniform return contract.
-
-    ``Decision`` and ``RuntimeVerdict`` are deliberately NOT unified (TOO-45
-    R6 territory -- see ``Decision``'s own docstring) but share every field
-    ``--eval`` needs: ``decision``/``verdict``, ``reason``, ``provenance``,
-    ``matched_rule``, ``additional_context``, ``tool``, ``target``.
-    ``overrides``/``fallback_warning`` have no ``Decision`` counterpart and
-    are left at ``RuntimeVerdict``'s defaults (``[]``/``False``) -- read-only
-    ``--eval`` never logs, so neither is ever consumed downstream of this call.
-
-    Args:
-        result: The :class:`~toolguard.tools.decision.Decision` returned by
-            :func:`toolguard.tools.decision.decide`.
-
-    Returns:
-        The equivalent :class:`~toolguard.config_types.RuntimeVerdict`.
-    """
-    return RuntimeVerdict(
-        decision=result.verdict,
-        reason=result.reason,
-        provenance=result.provenance,
-        sub_matches=result.sub_matches or [],
-        additional_context=result.additional_context,
-        matched_rule=result.matched_rule,
-        tool=result.tool,
-        target=result.target,
-    )
-
-
 def _resolve_event(
     tool_name: str,
     tool_input: Dict[str, Any],
@@ -657,15 +621,19 @@ def _resolve_event(
 
     This adds only the parts :func:`main` owns on top of the shared decision
     primitive -- the governed-tool check and the empty-input guard -- and then
-    delegates the actual resolution to :func:`toolguard.tools.decision.decide`, the
-    single side-effect-free primitive that also backs the replay harness and other
-    tooling.  Delegating (rather than re-copying the file-vs-command dispatch and
-    the ``[hard_deny]`` handling) makes the ``--eval`` verdict identical to the live
-    hook's by construction.  No logging, divergence checks, or auto-migration
-    happen here.  ``no_match_fallback`` (including the TOO-15 ``allow_with_warning``
-    auto-allow, whose deprecated legacy alias is ``warn_deny``) is resolved entirely
-    inside :func:`~toolguard.tools.decision.decide` via the shared config layer --
-    there is no separate reason-rewrite step here or in :func:`main` to keep in sync.
+    delegates the actual resolution to :func:`toolguard.api.decide`, the single
+    side-effect-free primitive that also backs the replay harness and other
+    tooling (TOO-45 R6-S2: ``decide`` moved into :mod:`toolguard.api`, the
+    layer both this module and the tooling layer are allowed to import from;
+    :mod:`toolguard.tools.decision` now re-exports the same function object
+    unchanged).  Delegating (rather than re-copying the file-vs-command
+    dispatch and the ``[hard_deny]`` handling) makes the ``--eval`` verdict
+    identical to the live hook's by construction.  No logging, divergence
+    checks, or auto-migration happen here.  ``no_match_fallback`` (including
+    the TOO-15 ``allow_with_warning`` auto-allow, whose deprecated legacy
+    alias is ``warn_deny``) is resolved entirely inside
+    :func:`~toolguard.api.decide` via the shared config layer -- there is no
+    separate reason-rewrite step here or in :func:`main` to keep in sync.
 
     TOO-19 Phase 1: the returned verdict's ``additional_context`` carries the
     winning rule's ``additionalContext`` enrichment, so ``--eval`` (whose whole
@@ -684,25 +652,6 @@ def _resolve_event(
         The resolved :class:`~toolguard.config_types.RuntimeVerdict`, whose
         ``decision`` is ``'allow'``, ``'deny'``, or ``'ask'``.
     """
-    # Local import. TOO-45 R5a removed the genuine cycle that used to justify it
-    # (tools.decision imported FILE_PATH_TOOLS from here; it now takes FILE_TOOLS
-    # from the foundation layer, as its sibling tooling modules already did).
-    # What remains is a LAYER violation -- runtime reaching up into tooling --
-    # deferred to R6, which resolves it by moving decide() into an api layer both
-    # callers can reach.
-    #
-    # An earlier version of this comment claimed hoisting the import "would load
-    # the whole tooling layer on the hot path". THAT WAS NEVER MEASURED AND IS
-    # FALSE: three independent measurements put it at +2 modules and well under
-    # 1 ms, ~1.7% of this module's own import time, because tools/__init__.py is
-    # a docstring and tools.decision's imports are already resident. Worse, the
-    # claim was beside the point -- hoisting does NOT clear the violation, it
-    # just moves it to the import block. The violation is the dependency, not
-    # its placement. Left local only because there is no reason to move it
-    # before R6; if you need it at module level, take it, and do not treat this
-    # comment as an objection.
-    from toolguard.tools.decision import decide  # noqa: PLC0415
-
     governed_tools = list(config.governed_tools())
     if tool_name not in governed_tools:
         return RuntimeVerdict(
@@ -723,8 +672,11 @@ def _resolve_event(
                 decision="deny", reason="No command provided in tool input"
             )
 
-    result = decide(config, tool_name, target, extended_syntax)
-    return _verdict_from_decision(result)
+    # TOO-45 R6-S3: decide() now returns a real RuntimeVerdict directly (the
+    # old Decision DTO it used to return, and the _verdict_from_decision
+    # adapter that re-rendered one into the other, are both gone), so no
+    # further conversion is needed here.
+    return decide(config, tool_name, target, extended_syntax)
 
 
 def _run_eval_mode() -> None:
@@ -1053,7 +1005,7 @@ def _handle_file_path_tool(
     resolves per ``no_match_fallback`` -- both are decided centrally inside
     ``resolve_file_path_permission_detailed`` /
     ``permission_resolution.resolve_permission_detailed``, so the hook and
-    ``toolguard.tools.decision.decide()`` cannot drift apart.
+    ``toolguard.api.decide()`` cannot drift apart.
 
     Args:
         tool_name: The file tool being invoked.
@@ -1142,7 +1094,7 @@ def _handle_command_tool(
     with a warning; 'allow' -- or its 'allow_with_no_warnings' alias, TOO-19 --
     auto-allows with NO warning) -- all decided centrally inside
     ``resolve_bash_permission_detailed`` / ``permission_resolution.resolve_permission_detailed``
-    so the hook and ``toolguard.tools.decision.decide()`` cannot drift apart.
+    so the hook and ``toolguard.api.decide()`` cannot drift apart.
 
     Resolution is more-specific-wins: each sub-command of a compound command
     cascades independently through the levels; the compound is allowed iff all

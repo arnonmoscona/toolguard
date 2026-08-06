@@ -267,8 +267,8 @@ class TestReplayTightening(unittest.TestCase):
         tightened = diff.tightened()
         self.assertEqual(1, len(tightened))
         self.assertEqual("ls -la", tightened[0].entry.command)
-        self.assertEqual("allow", tightened[0].decision_a.verdict)
-        self.assertEqual("ask", tightened[0].decision_b.verdict)
+        self.assertEqual("allow", tightened[0].decision_a.decision)
+        self.assertEqual("ask", tightened[0].decision_b.decision)
         self.assertEqual("tightened", tightened[0].classification)
 
     def test_adding_deny_rule_tightens_decisions(self):
@@ -379,8 +379,8 @@ class TestReplayBroadening(unittest.TestCase):
         broadened = diff.broadened()
         self.assertEqual(1, len(broadened))
         self.assertEqual("whoami", broadened[0].entry.command)
-        self.assertEqual("deny", broadened[0].decision_a.verdict)
-        self.assertEqual("allow", broadened[0].decision_b.verdict)
+        self.assertEqual("deny", broadened[0].decision_a.decision)
+        self.assertEqual("allow", broadened[0].decision_b.decision)
 
     def test_alembic_landmine_broadening_detected(self):
         """
@@ -470,16 +470,16 @@ class TestReplayBroadening(unittest.TestCase):
         # The safe commands should still be allowed (unchanged or still allowed in B)
         upgrade_diffs = [d for d in diff.diffs if "upgrade" in d.entry.command]
         self.assertEqual(1, len(upgrade_diffs))
-        self.assertEqual("allow", upgrade_diffs[0].decision_a.verdict)
-        self.assertEqual("allow", upgrade_diffs[0].decision_b.verdict)
+        self.assertEqual("allow", upgrade_diffs[0].decision_a.decision)
+        self.assertEqual("allow", upgrade_diffs[0].decision_b.decision)
         self.assertEqual("unchanged", upgrade_diffs[0].classification)
 
         # The DANGEROUS command should be classified as broadened:
         # config A denies it, config B allows it
         downgrade_diffs = [d for d in diff.diffs if "downgrade" in d.entry.command]
         self.assertEqual(1, len(downgrade_diffs))
-        self.assertEqual("deny", downgrade_diffs[0].decision_a.verdict)
-        self.assertEqual("allow", downgrade_diffs[0].decision_b.verdict)
+        self.assertEqual("deny", downgrade_diffs[0].decision_a.decision)
+        self.assertEqual("allow", downgrade_diffs[0].decision_b.decision)
         self.assertEqual("broadened", downgrade_diffs[0].classification)
 
         # Broadening should be detected
@@ -533,8 +533,8 @@ class TestReplayBroadening(unittest.TestCase):
 
         self.assertEqual(1, diff.broadened_count)
         broadened = diff.broadened()
-        self.assertEqual("deny", broadened[0].decision_a.verdict)
-        self.assertEqual("allow", broadened[0].decision_b.verdict)
+        self.assertEqual("deny", broadened[0].decision_a.decision)
+        self.assertEqual("allow", broadened[0].decision_b.decision)
 
 
 class TestReplaySummaryAndHelpers(unittest.TestCase):

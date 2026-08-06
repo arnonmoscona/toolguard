@@ -138,6 +138,34 @@ def is_tool_wrapper(pattern: object) -> bool:
     return isinstance(pattern, str) and _TOOL_WRAPPER_RE.fullmatch(pattern) is not None
 
 
+def strip_tool_wrapper(pattern: str) -> str:
+    """
+    Public sibling of :func:`_strip_tool_wrapper`, for callers with no ``RuleEntry``.
+
+    :attr:`RuleEntry.stripped_pattern` is the accessor when a caller already
+    owns a :class:`RuleEntry` (a toolguard rule read from ``toolguard_hook.toml``
+    or a structured entry). Some callers, though, strip a NATIVE Claude
+    settings permission string (e.g. a raw ``"Bash(*)"`` element read straight
+    out of a ``permissions.allow`` list in ``settings.json``) that was never
+    parsed into a :class:`RuleEntry` and has no reason to be -- constructing
+    one just to reach a single string transform would borrow a type modelling
+    a toolguard config rule (with enrichment metadata and raw-source
+    round-tripping) for a stateless piece of pattern syntax. This is that
+    caller's accessor: same structural rule (:data:`_TOOL_WRAPPER_RE`), same
+    single source of truth, just without a rule entry in scope (added
+    TOO-45 R6-S1 for :mod:`toolguard.tools.takeover_audit`, mirroring
+    :func:`is_tool_wrapper`'s existing public/private split over the same
+    regex).
+
+    Args:
+        pattern: A permission pattern, possibly wrapped in ``Tool(...)``.
+
+    Returns:
+        The pattern with any tool wrapper removed.
+    """
+    return _strip_tool_wrapper(pattern)
+
+
 @dataclass(frozen=True)
 class RuleEntry:
     """One allow/deny/ask entry, plain-string or structured form.

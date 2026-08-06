@@ -179,7 +179,7 @@ def evaluate_self_permissions(config: Configuration) -> List[SelfPermissionStatu
     statuses: List[SelfPermissionStatus] = []
     for permission in _SELF_PERMISSIONS:
         decision = decide(config, permission.tool, permission.probe)
-        statuses.append(_status_for(permission, decision.verdict))
+        statuses.append(_status_for(permission, decision.decision))
     return statuses
 
 

@@ -117,7 +117,7 @@ class TestNoDrift(unittest.TestCase):
         command = "git status"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Bash", command, extended_syntax).verdict
+        decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
         hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
@@ -145,7 +145,7 @@ class TestNoDrift(unittest.TestCase):
         command = "git status && ls -la"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Bash", command, extended_syntax).verdict
+        decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
         hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
@@ -172,7 +172,7 @@ class TestNoDrift(unittest.TestCase):
         command = "rm -rf /"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Bash", command, extended_syntax).verdict
+        decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
         hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
@@ -200,7 +200,7 @@ class TestNoDrift(unittest.TestCase):
         file_path = "/tmp/some/file.txt"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Read", file_path, extended_syntax).verdict
+        decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
@@ -228,7 +228,7 @@ class TestNoDrift(unittest.TestCase):
         file_path = "/etc/passwd"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Read", file_path, extended_syntax).verdict
+        decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
@@ -306,7 +306,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         command = "ls -la"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Bash", command, extended_syntax).verdict
+        decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
         hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
@@ -332,7 +332,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         file_path = "/tmp/some/file.txt"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Read", file_path, extended_syntax).verdict
+        decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
@@ -361,7 +361,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         command = "ls -la"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Bash", command, extended_syntax).verdict
+        decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
         hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
@@ -390,7 +390,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         file_path = "/etc/passwd"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Read", file_path, extended_syntax).verdict
+        decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
@@ -431,7 +431,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         command = "ls -la"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Bash", command, extended_syntax).verdict
+        decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
         hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
@@ -473,7 +473,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         file_path = "/etc/passwd"
         extended_syntax = True
 
-        decision_verdict = decide(config, "Read", file_path, extended_syntax).verdict
+        decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
@@ -524,11 +524,11 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         self.assertEqual(
             bash_result.decision,
-            decision.verdict,
+            decision.decision,
             f"Drift detected for Bash allow_with_warning: "
-            f"resolve={bash_result.decision}, decide={decision.verdict}",
+            f"resolve={bash_result.decision}, decide={decision.decision}",
         )
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
         self.assertIn("allow_with_warning", bash_result.reason)
 
     def test_read_allow_with_warning_fallback_allows_no_drift(self):
@@ -566,11 +566,11 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         self.assertEqual(
             file_result.decision,
-            decision.verdict,
+            decision.decision,
             f"Drift detected for Read allow_with_warning: "
-            f"resolve={file_result.decision}, decide={decision.verdict}",
+            f"resolve={file_result.decision}, decide={decision.decision}",
         )
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
         self.assertIn("allow_with_warning", file_result.reason)
 
     def test_bash_warn_deny_legacy_alias_allows_no_drift(self):
@@ -609,11 +609,11 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         self.assertEqual(
             bash_result.decision,
-            decision.verdict,
+            decision.decision,
             f"Drift detected for Bash warn_deny alias: "
-            f"resolve={bash_result.decision}, decide={decision.verdict}",
+            f"resolve={bash_result.decision}, decide={decision.decision}",
         )
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
         self.assertIn("allow_with_warning", bash_result.reason)
 
     def test_read_warn_deny_legacy_alias_allows_no_drift(self):
@@ -651,11 +651,11 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         self.assertEqual(
             file_result.decision,
-            decision.verdict,
+            decision.decision,
             f"Drift detected for Read warn_deny alias: "
-            f"resolve={file_result.decision}, decide={decision.verdict}",
+            f"resolve={file_result.decision}, decide={decision.decision}",
         )
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual("allow", decision.decision)
         self.assertIn("allow_with_warning", file_result.reason)
 
     def test_legacy_takeover_alias_warn_deny_honored_no_drift(self):
@@ -691,8 +691,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict)
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual(bash_result.decision, decision.decision)
+        self.assertEqual("allow", decision.decision)
         self.assertIn("allow_with_warning", bash_result.reason)
 
     def test_top_level_no_match_fallback_wins_over_legacy_alias_no_drift(self):
@@ -729,8 +729,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict)
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual(bash_result.decision, decision.decision)
+        self.assertEqual("deny", decision.decision)
 
     def test_takeover_enabled_no_match_fallback_deny_still_fails_closed_no_drift(self):
         """
@@ -766,8 +766,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict)
-        self.assertEqual("deny", decision.verdict)
+        self.assertEqual(bash_result.decision, decision.decision)
+        self.assertEqual("deny", decision.decision)
 
     def test_takeover_enabled_default_no_match_fallback_asks_no_drift(self):
         """
@@ -805,11 +805,11 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         self.assertEqual(
             bash_result.decision,
-            decision.verdict,
+            decision.decision,
             f"Drift detected for takeover-enabled default: "
-            f"resolve={bash_result.decision}, decide={decision.verdict}",
+            f"resolve={bash_result.decision}, decide={decision.decision}",
         )
-        self.assertEqual("ask", decision.verdict)
+        self.assertEqual("ask", decision.decision)
 
     def test_takeover_enabled_allow_with_warning_no_drift(self):
         """
@@ -848,8 +848,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             command, config, extended_syntax, hd_deny, hd_allow
         )
 
-        self.assertEqual(bash_result.decision, decision.verdict)
-        self.assertEqual("allow", decision.verdict)
+        self.assertEqual(bash_result.decision, decision.decision)
+        self.assertEqual("allow", decision.decision)
 
 
 class TestUndecidableFallbackThreading(unittest.TestCase):

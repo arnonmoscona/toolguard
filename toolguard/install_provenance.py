@@ -58,6 +58,20 @@ from typing import Mapping, Optional, Tuple
 from toolguard._git import run_git
 from toolguard.constants import DIST_NAME as _DEFAULT_NAME
 
+#: Failure modes of reading and parsing a candidate ``pyproject.toml``, all of
+#: which mean the same thing here: this is not a source checkout we can
+#: identify, so answer None rather than raising.
+#:
+#: Named rather than written inline as ``except A, B, C:`` because that bare
+#: 3.14 form is not parseable by every tool that reads this package -- `pyscn`
+#: silently EXCLUDED this whole file from its analysis because of it, so the
+#: metrics covered 58 of 59 modules with only a warning to say so. Parenthesising
+#: the clause does not survive: `ruff format` rewrites `except (A, B, C):` back
+#: to the bare form whenever there is no `as` binding to force the parens (the
+#: parenthesised clauses elsewhere in this package all bind `as e`, which is why
+#: they persist). Binding the tuple to a name sidesteps the syntax entirely.
+_PYPROJECT_READ_ERRORS = (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError)
+
 
 def governing_package_root() -> Path:
     """
@@ -112,7 +126,7 @@ def source_checkout_root(
         return None
     try:
         data = tomllib.loads(candidate.read_text(encoding="utf-8"))
-    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+    except _PYPROJECT_READ_ERRORS:
         return None
     if data.get("project", {}).get("name") != expected_name:
         return None

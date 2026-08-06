@@ -91,7 +91,7 @@ class TestAskResolution(unittest.TestCase):
         """
         config = _config(_layer(ask=["toolguard-maintain:*"]))
         self.assertEqual(
-            decide(config, "Bash", "toolguard-maintain --write").verdict, "ask"
+            decide(config, "Bash", "toolguard-maintain --write").decision, "ask"
         )
 
     def test_blanket_ask_with_no_allow_collapses_to_no_match_fallback(self):
@@ -105,7 +105,7 @@ class TestAskResolution(unittest.TestCase):
         separate hardcoded floor)
         """
         config = _config(_layer(ask=["*"]))
-        self.assertEqual(decide(config, "Bash", "rm -rf /").verdict, "ask")
+        self.assertEqual(decide(config, "Bash", "rm -rf /").decision, "ask")
 
     def test_more_specific_ask_gates_a_broad_allow(self):
         """
@@ -115,7 +115,7 @@ class TestAskResolution(unittest.TestCase):
         """
         config = _config(_layer(allow=["*"], ask=["toolguard-maintain:*"]))
         self.assertEqual(
-            decide(config, "Bash", "toolguard-maintain --write").verdict, "ask"
+            decide(config, "Bash", "toolguard-maintain --write").decision, "ask"
         )
 
     def test_more_specific_allow_bypasses_a_broad_ask(self):
@@ -126,7 +126,7 @@ class TestAskResolution(unittest.TestCase):
         the blanket ask is inert)
         """
         config = _config(_layer(allow=["git status:*"], ask=["*"]))
-        self.assertEqual(decide(config, "Bash", "git status").verdict, "allow")
+        self.assertEqual(decide(config, "Bash", "git status").decision, "allow")
 
     def test_specific_allow_vs_specific_ask_more_specific_wins_both_ways(self):
         """
@@ -136,8 +136,8 @@ class TestAskResolution(unittest.TestCase):
         'git status' resolves to 'allow' (only the broader allow matches)
         """
         config = _config(_layer(allow=["git:*"], ask=["git diff:*"]))
-        self.assertEqual(decide(config, "Bash", "git diff HEAD").verdict, "ask")
-        self.assertEqual(decide(config, "Bash", "git status").verdict, "allow")
+        self.assertEqual(decide(config, "Bash", "git diff HEAD").decision, "ask")
+        self.assertEqual(decide(config, "Bash", "git status").decision, "allow")
 
     def test_exact_tie_between_allow_and_ask_resolves_to_ask(self):
         """
@@ -150,7 +150,7 @@ class TestAskResolution(unittest.TestCase):
             _layer(allow=["toolguard-maintain:*"], ask=["toolguard-maintain:*"])
         )
         self.assertEqual(
-            decide(config, "Bash", "toolguard-maintain --write").verdict, "ask"
+            decide(config, "Bash", "toolguard-maintain --write").decision, "ask"
         )
 
     def test_deny_still_wins_over_ask(self):
@@ -163,7 +163,7 @@ class TestAskResolution(unittest.TestCase):
             _layer(deny=["toolguard-maintain:*"], ask=["toolguard-maintain:*"])
         )
         self.assertEqual(
-            decide(config, "Bash", "toolguard-maintain --write").verdict, "deny"
+            decide(config, "Bash", "toolguard-maintain --write").decision, "deny"
         )
 
     def test_more_specific_layer_ask_gates_less_specific_layer_allow(self):
@@ -179,7 +179,7 @@ class TestAskResolution(unittest.TestCase):
             _layer(specificity=1, allow=["*"]),
         )
         self.assertEqual(
-            decide(config, "Bash", "toolguard-maintain --write").verdict, "ask"
+            decide(config, "Bash", "toolguard-maintain --write").decision, "ask"
         )
 
     def test_compound_command_with_one_ask_subcommand_is_ask(self):
@@ -191,7 +191,7 @@ class TestAskResolution(unittest.TestCase):
         """
         config = _config(_layer(allow=["git status:*"], ask=["toolguard-maintain:*"]))
         self.assertEqual(
-            decide(config, "Bash", "git status && toolguard-maintain --write").verdict,
+            decide(config, "Bash", "git status && toolguard-maintain --write").decision,
             "ask",
         )
 
@@ -204,13 +204,13 @@ class TestAskResolution(unittest.TestCase):
         self.assertEqual(
             decide(
                 _config(_layer(allow=["git status:*"])), "Bash", "git status"
-            ).verdict,
+            ).decision,
             "allow",
         )
         self.assertEqual(
             decide(
                 _config(_layer(allow=["*"], deny=["rm -rf:*"])), "Bash", "rm -rf /"
-            ).verdict,
+            ).decision,
             "deny",
         )
 
@@ -228,7 +228,7 @@ class TestAskAllowTieBreak(unittest.TestCase):
         Then the more-specific ask wins and the decision is ask
         """
         cfg = _config(_layer(allow=["*"], ask=["git-status"]))
-        self.assertEqual(decide(cfg, "Bash", "git-status").verdict, "ask")
+        self.assertEqual(decide(cfg, "Bash", "git-status").decision, "ask")
 
     def test_extended_syntax_ask_scored_by_literal_lead_outranks_broad_allow(self):
         """
@@ -237,7 +237,7 @@ class TestAskAllowTieBreak(unittest.TestCase):
         Then the marker is stripped, the ask outscores the broad allow, and it asks
         """
         cfg = _config(_layer(allow=["*"], ask=["[regex]^gitx.*"]))
-        self.assertEqual(decide(cfg, "Bash", "gitx status").verdict, "ask")
+        self.assertEqual(decide(cfg, "Bash", "gitx status").decision, "ask")
 
 
 class TestFilePathAskResolution(unittest.TestCase):
@@ -255,7 +255,7 @@ class TestFilePathAskResolution(unittest.TestCase):
         Then the decision is ask (a specific ask with no allow yields a prompt)
         """
         cfg = _config(_file_layer(tool="Read", ask=["/secrets/**"]))
-        self.assertEqual(decide(cfg, "Read", "/secrets/key.txt").verdict, "ask")
+        self.assertEqual(decide(cfg, "Read", "/secrets/key.txt").decision, "ask")
 
     def test_blanket_file_ask_collapses_to_no_match_fallback(self):
         """
@@ -266,7 +266,7 @@ class TestFilePathAskResolution(unittest.TestCase):
         'ask' by default (TOO-15)
         """
         cfg = _config(_file_layer(tool="Read", ask=["*"]))
-        self.assertEqual(decide(cfg, "Read", "/etc/hosts").verdict, "ask")
+        self.assertEqual(decide(cfg, "Read", "/etc/hosts").decision, "ask")
 
     def test_more_specific_file_ask_gates_broad_allow(self):
         """
@@ -277,7 +277,7 @@ class TestFilePathAskResolution(unittest.TestCase):
         cfg = _config(
             _file_layer(tool="Read", allow=["/proj/**"], ask=["/proj/secret/**"])
         )
-        self.assertEqual(decide(cfg, "Read", "/proj/secret/x").verdict, "ask")
+        self.assertEqual(decide(cfg, "Read", "/proj/secret/x").decision, "ask")
 
     def test_broad_allow_survives_blanket_ask_for_non_gated_path(self):
         """
@@ -286,7 +286,7 @@ class TestFilePathAskResolution(unittest.TestCase):
         Then the blanket ask is ignored and the allow wins (allow)
         """
         cfg = _config(_file_layer(tool="Read", allow=["/proj/**"], ask=["*"]))
-        self.assertEqual(decide(cfg, "Read", "/proj/readme.md").verdict, "allow")
+        self.assertEqual(decide(cfg, "Read", "/proj/readme.md").decision, "allow")
 
 
 if __name__ == "__main__":

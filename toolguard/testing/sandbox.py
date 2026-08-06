@@ -14,8 +14,8 @@ happened twice in TOO-19; see the task memory
 This module makes the safe path the easy path::
 
     with experiment(project_config='[permissions]\\nallow = ["Bash(ls *)"]') as s:
-        print(s.evaluate("Bash", "ls -la").verdict)      # 'allow'
-        print(s.evaluate("Bash", "rm -rf /").verdict)    # 'deny' or 'ask'
+        print(s.evaluate("Bash", "ls -la").decision)      # 'allow'
+        print(s.evaluate("Bash", "rm -rf /").decision)    # 'deny' or 'ask'
 
 Isolation is STRUCTURAL, not by discipline
 ------------------------------------------
@@ -464,7 +464,7 @@ class Sandbox:
             extended_syntax: Whether extended regex/glob prefixes are honoured.
 
         Returns:
-            A :class:`toolguard.tools.decision.Decision`.
+            A :class:`~toolguard.config_types.RuntimeVerdict`.
         """
         return decide(self.load_configuration(), tool, target, extended_syntax)
 
@@ -701,14 +701,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         payload = {
             "tool": decision.tool,
             "target": decision.target,
-            "verdict": decision.verdict,
+            "verdict": decision.decision,
             "reason": decision.reason,
         }
         if decision.additional_context:
             payload["additionalContext"] = decision.additional_context
         print(json.dumps(payload, indent=2))
     else:
-        print(f"verdict: {decision.verdict}")
+        print(f"verdict: {decision.decision}")
         print(f"reason : {decision.reason}")
         if decision.additional_context:
             print(f"context: {decision.additional_context}")

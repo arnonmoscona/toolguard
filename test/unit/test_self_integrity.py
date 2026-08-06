@@ -123,7 +123,7 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(decide(self.config, "Bash", command).verdict, "deny")
+                self.assertEqual(decide(self.config, "Bash", command).decision, "deny")
 
     def test_find_delete_variants_targeting_toolguard_are_hard_denied(self):
         """
@@ -138,7 +138,7 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(decide(self.config, "Bash", command).verdict, "deny")
+                self.assertEqual(decide(self.config, "Bash", command).decision, "deny")
 
     def test_hard_deny_overrides_an_explicit_allow_rule(self):
         """
@@ -149,7 +149,7 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         level's normal allow, which is the whole point of using it here
         """
         self.assertEqual(
-            decide(self.config, "Bash", "rm -rf ~/.toolguard").verdict, "deny"
+            decide(self.config, "Bash", "rm -rf ~/.toolguard").decision, "deny"
         )
 
     def test_unrelated_rm_commands_are_not_affected(self):
@@ -161,7 +161,7 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         pattern must not over-reach into unrelated deletions
         """
         self.assertEqual(
-            decide(self.config, "Bash", "rm -rf /tmp/scratch").verdict, "allow"
+            decide(self.config, "Bash", "rm -rf /tmp/scratch").decision, "allow"
         )
 
     def test_read_only_access_to_toolguard_is_not_hard_denied(self):
@@ -176,7 +176,7 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         for command in ("ls ~/.toolguard", "cat ~/.toolguard/README.txt"):
             with self.subTest(command=command):
                 self.assertNotEqual(
-                    decide(self.config, "Bash", command).verdict, "deny"
+                    decide(self.config, "Bash", command).decision, "deny"
                 )
 
 
