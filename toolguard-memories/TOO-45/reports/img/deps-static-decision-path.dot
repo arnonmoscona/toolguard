@@ -1,0 +1,67 @@
+digraph G {
+  rankdir=TB;
+  graph [fontname="Helvetica", fontsize=11, labelloc=t, compound=true];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style=filled, fillcolor=white];
+  edge  [fontname="Helvetica", fontsize=8];
+  label="Static import graph -- the decision path\nfill = .pyscn.toml layer: grey foundation / blue config / green engine / orange runtime / purple tooling";
+
+  subgraph cluster_0 {
+    label="BEFORE (master 532de02)"; style=rounded; color="#999999";
+    "master_compound" [label="compound", style=filled, fillcolor="#dcf1e0"];
+    "master_config" [label="config", style=filled, fillcolor="#dce9f7"];
+    "master_config_types" [label="config_types", style=filled, fillcolor="#dce9f7"];
+    "master_hook" [label="hook", style=filled, fillcolor="#fbe6cf"];
+    "master_patterns" [label="patterns", style=filled, fillcolor="#e8e8e8"];
+    "master_permissions" [label="permissions", style=filled, fillcolor="#dcf1e0"];
+    "master_resolve" [label="resolve", style=filled, fillcolor="#dcf1e0"];
+    "master_rule_entry" [label="rule_entry", style=filled, fillcolor="#dce9f7"];
+    "master_tools.decision" [label="tools.decision", style=filled, fillcolor="#f0e0f2"];
+    "master_compound" -> "master_permissions";
+    "master_config" -> "master_config_types";
+    "master_config" -> "master_rule_entry";
+    "master_config_types" -> "master_rule_entry";
+    "master_hook" -> "master_compound";
+    "master_hook" -> "master_config";
+    "master_hook" -> "master_resolve";
+    "master_hook" -> "master_tools.decision" [style=dashed, label="local import", fontcolor="#b03030"];
+    "master_permissions" -> "master_patterns";
+    "master_resolve" -> "master_compound";
+    "master_resolve" -> "master_patterns";
+    "master_resolve" -> "master_permissions";
+    "master_tools.decision" -> "master_hook";
+    "master_tools.decision" -> "master_resolve";
+    "master_tools.decision" -> "master_config";
+  }
+  subgraph cluster_1 {
+    label="AFTER (branch a3e3f27)"; style=rounded; color="#999999";
+    "branch_compound" [label="compound", style=filled, fillcolor="#dcf1e0"];
+    "branch_config" [label="config", style=filled, fillcolor="#dce9f7"];
+    "branch_config_types" [label="config_types", style=filled, fillcolor="#dce9f7"];
+    "branch_hook" [label="hook", style=filled, fillcolor="#fbe6cf"];
+    "branch_patterns" [label="patterns", style=filled, fillcolor="#e8e8e8"];
+    "branch_permission_resolution" [label="permission_resolution", style=filled, fillcolor="#dcf1e0"];
+    "branch_permissions" [label="permissions", style=filled, fillcolor="#dcf1e0"];
+    "branch_resolve" [label="resolve", style=filled, fillcolor="#dcf1e0"];
+    "branch_rule_entry" [label="rule_entry", style=filled, fillcolor="#dce9f7"];
+    "branch_tools.decision" [label="tools.decision", style=filled, fillcolor="#f0e0f2"];
+    "branch_compound" -> "branch_config_types";
+    "branch_compound" -> "branch_permissions";
+    "branch_config" -> "branch_config_types";
+    "branch_config" -> "branch_rule_entry";
+    "branch_config_types" -> "branch_rule_entry";
+    "branch_hook" -> "branch_compound";
+    "branch_hook" -> "branch_config";
+    "branch_hook" -> "branch_resolve";
+    "branch_hook" -> "branch_tools.decision" [style=dashed, label="local import", fontcolor="#b03030"];
+    "branch_permission_resolution" -> "branch_config_types";
+    "branch_permissions" -> "branch_config_types";
+    "branch_permissions" -> "branch_patterns";
+    "branch_resolve" -> "branch_compound";
+    "branch_resolve" -> "branch_config_types";
+    "branch_resolve" -> "branch_patterns";
+    "branch_resolve" -> "branch_permission_resolution";
+    "branch_resolve" -> "branch_permissions";
+    "branch_tools.decision" -> "branch_resolve";
+    "branch_tools.decision" -> "branch_config";
+  }
+}

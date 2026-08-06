@@ -1,0 +1,71 @@
+digraph G {
+  rankdir=TB;
+  graph [fontname="Helvetica", fontsize=11, labelloc=t, compound=true];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style=filled, fillcolor=white];
+  edge  [fontname="Helvetica", fontsize=8];
+  label="Static import graph -- entry points and their logic (TOO-45 R5)\nconsole-script modules must be LEAVES: nothing inside toolguard may import them";
+
+  subgraph cluster_0 {
+    label="BEFORE (master 532de02)"; style=rounded; color="#999999";
+    "master__git" [label="_git", style=filled, fillcolor="#e8e8e8"];
+    "master_auto_migrate" [label="auto_migrate", style=filled, fillcolor="#dce9f7"];
+    "master_config_divergence" [label="config_divergence", style=filled, fillcolor="#dce9f7"];
+    "master_constants" [label="constants", style=filled, fillcolor="#e8e8e8"];
+    "master_error_log" [label="error_log", style=filled, fillcolor="#fbe6cf"];
+    "master_hook" [label="hook", style=filled, fillcolor="#fbe6cf"];
+    "master_scripts.migrate_permissions" [label="scripts.migrate_permissions", style=filled, fillcolor="#f0e0f2"];
+    "master_tools.decision" [label="tools.decision", style=filled, fillcolor="#f0e0f2"];
+    "master_tools.installer" [label="tools.installer", style=filled, fillcolor="#f0e0f2"];
+    "master_tools.rule_apply" [label="tools.rule_apply", style=filled, fillcolor="#f0e0f2"];
+    "master_update_check" [label="update_check", style=filled, fillcolor="#fbe6cf"];
+    "master__git" -> "master_constants";
+    "master_auto_migrate" -> "master_config_divergence";
+    "master_auto_migrate" -> "master_scripts.migrate_permissions" [style=dashed, label="local import", fontcolor="#b03030"];
+    "master_config_divergence" -> "master_error_log";
+    "master_hook" -> "master_auto_migrate";
+    "master_hook" -> "master_config_divergence";
+    "master_hook" -> "master_error_log";
+    "master_hook" -> "master_constants";
+    "master_hook" -> "master_tools.decision" [style=dashed, label="local import", fontcolor="#b03030"];
+    "master_scripts.migrate_permissions" -> "master_config_divergence";
+    "master_tools.decision" -> "master_hook";
+    "master_tools.installer" -> "master_scripts.migrate_permissions";
+    "master_tools.installer" -> "master_update_check";
+    "master_tools.rule_apply" -> "master_scripts.migrate_permissions";
+    "master_update_check" -> "master__git";
+    "master_update_check" -> "master_constants";
+  }
+  subgraph cluster_1 {
+    label="AFTER (branch a3e3f27)"; style=rounded; color="#999999";
+    "branch__git" [label="_git", style=filled, fillcolor="#e8e8e8"];
+    "branch_auto_migrate" [label="auto_migrate", style=filled, fillcolor="#dce9f7"];
+    "branch_config_divergence" [label="config_divergence", style=filled, fillcolor="#dce9f7"];
+    "branch_constants" [label="constants", style=filled, fillcolor="#e8e8e8"];
+    "branch_error_log" [label="error_log", style=filled, fillcolor="#fbe6cf"];
+    "branch_hook" [label="hook", style=filled, fillcolor="#fbe6cf"];
+    "branch_install_update" [label="install_update", style=filled, fillcolor="#e8e8e8"];
+    "branch_permission_migration" [label="permission_migration", style=filled, fillcolor="#dce9f7"];
+    "branch_scripts.migrate_permissions" [label="scripts.migrate_permissions", style=filled, fillcolor="#f0e0f2"];
+    "branch_tools.decision" [label="tools.decision", style=filled, fillcolor="#f0e0f2"];
+    "branch_tools.installer" [label="tools.installer", style=filled, fillcolor="#f0e0f2"];
+    "branch_tools.rule_apply" [label="tools.rule_apply", style=filled, fillcolor="#f0e0f2"];
+    "branch_update_check" [label="update_check", style=filled, fillcolor="#fbe6cf"];
+    "branch__git" -> "branch_constants";
+    "branch_auto_migrate" -> "branch_config_divergence";
+    "branch_auto_migrate" -> "branch_permission_migration";
+    "branch_hook" -> "branch_auto_migrate";
+    "branch_hook" -> "branch_config_divergence";
+    "branch_hook" -> "branch_error_log";
+    "branch_hook" -> "branch_constants";
+    "branch_hook" -> "branch_tools.decision" [style=dashed, label="local import", fontcolor="#b03030"];
+    "branch_install_update" -> "branch__git";
+    "branch_install_update" -> "branch_constants";
+    "branch_permission_migration" -> "branch_config_divergence";
+    "branch_scripts.migrate_permissions" -> "branch_permission_migration";
+    "branch_tools.decision" -> "branch_constants";
+    "branch_tools.installer" -> "branch_permission_migration";
+    "branch_tools.installer" -> "branch_install_update";
+    "branch_tools.rule_apply" -> "branch_permission_migration";
+    "branch_update_check" -> "branch_install_update";
+  }
+}

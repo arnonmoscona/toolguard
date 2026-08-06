@@ -1,0 +1,66 @@
+@startuml
+title ToolPatternLayer: parallel arrays -> derived properties
+
+skinparam backgroundColor transparent
+skinparam shadowing false
+skinparam class {
+  BackgroundColor #FDFDFD
+  BorderColor #444444
+  ArrowColor #444444
+  FontName Helvetica
+}
+hide empty members
+
+class "ToolPatternLayer  (before)" as Before #FFEBEB {
+  provenance
+  .. stored ..
+  allow   : Tuple[str]
+  deny    : Tuple[str]
+  ask     : Tuple[str]
+  .. stored ..
+  allow_entries : Tuple[RuleEntry]
+  deny_entries  : Tuple[RuleEntry]
+  ask_entries   : Tuple[RuleEntry]
+}
+
+note right of Before
+  **7 fields, 2 collections, 1 prose invariant**
+  "X[i] is the stripped form of X_entries[i]
+   -- same order, same membership,
+   index-for-index."
+
+  Defended by 2 runtime length guards.
+  Misaligned state IS constructible.
+end note
+
+class "ToolPatternLayer  (after)" as After #EEF6EE {
+  provenance
+  .. stored ..
+  allow_entries : Tuple[RuleEntry]
+  deny_entries  : Tuple[RuleEntry]
+  ask_entries   : Tuple[RuleEntry]
+  .. derived ..
+  {method} allow : property
+  {method} deny  : property
+  {method} ask   : property
+}
+
+class RuleEntry #EEF6EE {
+  pattern
+  {method} stripped_pattern : property
+}
+
+After --> RuleEntry : maps over
+note right of After
+  **4 fields, 1 collection, 0 invariants**
+  allow == tuple(e.stripped_pattern
+                 for e in allow_entries)
+
+  Length equality is a theorem,
+  not a promise. Misaligned state
+  is **unconstructible**.
+end note
+
+Before -[hidden]down- After
+
+@enduml

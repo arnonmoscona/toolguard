@@ -1,0 +1,74 @@
+@startuml canary-automode-touchpoints
+title allow_in_auto_mode: where the change lands, master vs branch
+skinparam backgroundColor #FFFFFF
+skinparam rectangle {
+  BackgroundColor #F4F4F4
+  BorderColor #888888
+}
+skinparam ArrowColor #555555
+
+left to right direction
+
+package "master (532de02)" {
+  rectangle "hook.py\nmain()\npermission_mode = hook_data.get(...)" as M1
+  rectangle "hook.py\n_handle_command_tool /\n_handle_file_path_tool" as M2
+  rectangle "resolve.py\nresolve_bash_permission_detailed /\nresolve_file_path_permission_detailed" as M3
+  rectangle "resolve.py\n_resolve_one closure\n(ALSO the ask-floor stub probe --\nno separate seam to exclude it)" as M4 #FFE0E0
+  rectangle "config.py\nConfiguration.resolve_permission_detailed\n(a METHOD -- test doubles must\nreimplement it)" as M5 #FFE8CC
+  rectangle "config.py\n_resolve_permission_detailed_unclamped\n<b>override decided here</b>\nreason rewritten; matched_rule\nstill embedded IN reason text" as M6 #FFE8CC
+  rectangle "hook.py\n_log_auto_mode_override_note\n(new WARNING-stream entry)" as M7
+
+  M1 --> M2
+  M2 --> M3
+  M3 --> M4
+  M4 --> M5
+  M5 --> M6
+  M6 --> M7
+}
+
+package "branch (a3e3f27)" {
+  rectangle "hook.py\nmain()\npermission_mode = hook_data.get(...)" as B1
+  rectangle "hook.py\n_handle_command_tool /\n_handle_file_path_tool" as B2
+  rectangle "resolve.py\nresolve_bash_permission_detailed /\nresolve_file_path_permission_detailed" as B3
+  rectangle "resolve.py\n_decide(cmd, mode) -- explicit param\n_resolve_one passes REAL mode\n_resolve_outer ALWAYS passes None" as B4 #E0FFE0
+  rectangle "permission_resolution.py\nresolve_permission_detailed\n(a FREE FUNCTION -- test doubles\nunaffected, only 4-method duck type)" as B5 #E0FFE0
+  rectangle "permission_resolution.py\n_resolve_unclamped\n<b>override decided here</b>\nreason rewritten; matched_rule stays\nCLEAN in its own RuntimeVerdict field" as B6 #E0FFE0
+  rectangle "hook.py\n_log_auto_mode_override_note\n(new WARNING-stream entry)" as B7
+  rectangle "test_architecture.py LAYERS +\n.pyscn.toml layer map\n(caught the new automode.py\nimport immediately)" as B8 #E0E0FF
+
+  B1 --> B2
+  B2 --> B3
+  B3 --> B4
+  B4 --> B5
+  B5 --> B6
+  B6 --> B7
+  B5 ..> B8 : enforced by
+}
+
+note bottom of M4
+  Master: no separate stub-probe
+  seam. Closing the ask-floor
+  hazard (deny rule matching an
+  unverified inline-code stub,
+  flagged allow_in_auto_mode)
+  would need NEW plumbing through
+  compound.py's resolve_one
+  contract (~18 dependent test
+  closures) -- documented as a
+  known limitation, not fixed.
+end note
+
+note bottom of B4
+  Branch: TOO-45 R1e had ALREADY
+  split resolve_one / resolve_outer
+  for an unrelated reason (audit-
+  trail correctness). That seam
+  let the SAME hazard be closed
+  with one explicit parameter and
+  a regression test -- demonstrated
+  by execution (temporarily
+  reverting the fix flips the test
+  from pass to fail).
+end note
+
+@enduml

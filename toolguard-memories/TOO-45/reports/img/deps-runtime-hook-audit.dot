@@ -1,0 +1,67 @@
+digraph G {
+  rankdir=TB;
+  graph [fontname="Helvetica", fontsize=11, labelloc=t, compound=true];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style=filled, fillcolor=white];
+  edge  [fontname="Helvetica", fontsize=8];
+  label="Runtime call graph -- 150 compound Bash commands through the real hook.main()\nedge label = calls; this is the audit-trail path decide() never reaches";
+
+  subgraph cluster_0 {
+    label="BEFORE (master 532de02)"; style=rounded; color="#999999";
+    "master_compound" [label="compound\n3,572 calls", style=filled, fillcolor="#dcf1e0"];
+    "master_config" [label="config\n190,605 calls", style=filled, fillcolor="#dce9f7"];
+    "master_config_divergence" [label="config_divergence\n6 calls", style=filled, fillcolor="#dce9f7"];
+    "master_config_types" [label="config_types\n26,040 calls", style=filled, fillcolor="#dce9f7"];
+    "master_env_config" [label="env_config\n900 calls", style=filled, fillcolor="#dce9f7"];
+    "master_hook" [label="hook\n2,417 calls", style=filled, fillcolor="#fbe6cf"];
+    "master_log_writer" [label="log_writer\n1,672 calls", style=filled, fillcolor="#fbe6cf"];
+    "master_resolve" [label="resolve\n1,485 calls", style=filled, fillcolor="#dcf1e0"];
+    "master_session_warnings" [label="session_warnings\n429 calls", style=filled, fillcolor="#fbe6cf"];
+    "master_subagent" [label="subagent\n150 calls", style=filled, fillcolor="#fbe6cf"];
+    "master_config" -> "master_config_types" [label="21,174", penwidth=5.5];
+    "master_config" -> "master_resolve" [label="883\n(no import)", penwidth=2.6, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "master_hook" -> "master_config" [label="752", penwidth=2.5];
+    "master_resolve" -> "master_config" [label="752\n(no import)", penwidth=2.5, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "master_compound" -> "master_resolve" [label="451\n(no import)", penwidth=2.3, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "master_hook" -> "master_log_writer" [label="392", penwidth=2.2];
+    "master_resolve" -> "master_compound" [label="300", penwidth=2.1];
+    "master_hook" -> "master_env_config" [label="150", penwidth=1.9];
+    "master_hook" -> "master_subagent" [label="150", penwidth=1.9];
+    "master_hook" -> "master_resolve" [label="150", penwidth=1.9];
+    "master_hook" -> "master_session_warnings" [label="142", penwidth=1.9];
+    "master_hook" -> "master_compound" [label="100", penwidth=1.8];
+    "master_config_divergence" -> "master_config" [label="3", penwidth=1.2];
+    "master_hook" -> "master_config_divergence" [label="1", penwidth=1.2];
+  }
+  subgraph cluster_1 {
+    label="AFTER (branch a3e3f27)"; style=rounded; color="#999999";
+    "branch_compound" [label="compound\n3,498 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_config" [label="config\n25,868 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_config_divergence" [label="config_divergence\n6 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_config_types" [label="config_types\n135,936 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_env_config" [label="env_config\n900 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_hook" [label="hook\n2,603 calls", style=filled, fillcolor="#fbe6cf"];
+    "branch_log_writer" [label="log_writer\n2,697 calls", style=filled, fillcolor="#fbe6cf"];
+    "branch_permission_resolution" [label="permission_resolution\n1,642 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_resolve" [label="resolve\n2,129 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_session_warnings" [label="session_warnings\n429 calls", style=filled, fillcolor="#fbe6cf"];
+    "branch_subagent" [label="subagent\n150 calls", style=filled, fillcolor="#fbe6cf"];
+    "branch_config" -> "branch_config_types" [label="26,776", penwidth=5.8];
+    "branch_permission_resolution" -> "branch_config" [label="1,198\n(no import)", penwidth=2.7, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_permission_resolution" -> "branch_resolve" [label="883\n(no import)", penwidth=2.6, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_hook" -> "branch_config" [label="752", penwidth=2.5];
+    "branch_resolve" -> "branch_permission_resolution" [label="600", penwidth=2.4];
+    "branch_hook" -> "branch_log_writer" [label="597", penwidth=2.4];
+    "branch_compound" -> "branch_resolve" [label="494\n(no import)", penwidth=2.3, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_resolve" -> "branch_compound" [label="300", penwidth=2.1];
+    "branch_permission_resolution" -> "branch_config_types" [label="226", penwidth=2.0];
+    "branch_resolve" -> "branch_config" [label="151\n(no import)", penwidth=1.9, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_hook" -> "branch_subagent" [label="150", penwidth=1.9];
+    "branch_hook" -> "branch_env_config" [label="150", penwidth=1.9];
+    "branch_hook" -> "branch_resolve" [label="150", penwidth=1.9];
+    "branch_hook" -> "branch_session_warnings" [label="142", penwidth=1.9];
+    "branch_hook" -> "branch_config_types" [label="70\n(no import)", penwidth=1.7, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_hook" -> "branch_compound" [label="9", penwidth=1.3];
+    "branch_config_divergence" -> "branch_config" [label="3", penwidth=1.2];
+    "branch_hook" -> "branch_config_divergence" [label="1", penwidth=1.2];
+  }
+}

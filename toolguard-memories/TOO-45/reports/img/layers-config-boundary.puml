@@ -1,0 +1,53 @@
+@startuml
+title The config layer -- the one that changed most (module level, config/engine only)
+
+skinparam defaultTextAlignment center
+skinparam ArrowFontSize 10
+skinparam rectangleFontSize 12
+
+package "BEFORE (master)" {
+  rectangle "engine" as EB #F0F0F0 {
+    rectangle "resolve" as r1
+    rectangle "compound" as c1
+    rectangle "permissions" as p1
+  }
+  rectangle "config" as CB #F0F0F0 {
+    rectangle "Configuration\n(config.py)\n**owns the cascade**" as cfg1 #FFF2CC
+    rectangle "config_divergence" as cd1
+    rectangle "auto_migrate" as am1
+    rectangle "config_types" as ct1
+  }
+  rectangle "error_log\n(runtime)" as el1 #FFE0E0
+  rectangle "scripts.migrate_permissions\n(tooling)" as mp1 #FFE0E0
+
+  cd1 -[#CC0000,thickness=2]-> el1 : import (VIOLATION)
+  am1 -[#CC0000,thickness=2]-> mp1 : local import (VIOLATION)
+  r1 .[#EE8800,thickness=2].> cfg1 : <color:#EE8800>duck-typed `config` param\n<color:#EE8800>**no import -- invisible**
+  cfg1 .[#EE8800,thickness=2].> r1 : <color:#EE8800>calls decide_detailed callback\n<color:#EE8800>**upward, invisible**
+}
+
+package "AFTER (branch)" {
+  rectangle "engine " as EA #F0F0F0 {
+    rectangle "permission_resolution\n**owns the cascade**" as pr2 #D5E8D4
+    rectangle "resolve " as r2
+    rectangle "compound " as c2
+    rectangle "permissions " as p2
+  }
+  rectangle "config " as CA #F0F0F0 {
+    rectangle "Configuration\n(config.py)\n*query object only*" as cfg2
+    rectangle "config_divergence " as cd2
+    rectangle "auto_migrate " as am2
+    rectangle "permission_migration\n**NEW**" as pm2 #D5E8D4
+    rectangle "config_types " as ct2
+  }
+  rectangle "hook (runtime)" as hk2
+
+  cd2 -[#009900]-> hk2 : returns warning_message;\ncaller logs it
+  am2 -[#009900]-> pm2 : import (intra-layer)
+  pr2 -[#009900,thickness=2]-> ct2 : import
+  r2 -[#009900]-> ct2 : import
+  c2 -[#009900]-> ct2 : import
+  p2 -[#009900]-> ct2 : import
+  pr2 .[#EE8800,thickness=2].> cfg2 : <color:#EE8800>duck-typed, 4 members\n<color:#EE8800>**still invisible**
+}
+@enduml

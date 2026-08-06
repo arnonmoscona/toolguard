@@ -1,0 +1,65 @@
+@startuml
+title Verdict altitudes after TOO-45 R1
+
+skinparam backgroundColor transparent
+skinparam shadowing false
+skinparam class {
+  BackgroundColor #FDFDFD
+  BorderColor #444444
+  ArrowColor #444444
+  FontName Helvetica
+}
+skinparam stereotypeCBackgroundColor #E8F0FE
+hide empty members
+
+class LevelMatch <<LEVEL>> #F5F5F5 {
+  decision
+  reason
+  matched_pattern
+  --
+  one hierarchy level
+  no provenance yet
+}
+
+class UnitVerdict <<UNIT>> #EEF6EE {
+  sub_command
+  decision
+  matched_rule
+  provenance
+  fallback_kind
+  --
+  one leaf of a compound
+}
+
+class RuntimeVerdict <<RUNTIME>> #E8F0FE {
+  decision
+  reason
+  provenance
+  matched_rule
+  sub_matches
+  --
+  the whole tool call
+  ** the only runtime verdict **
+}
+
+class Decision <<TOOLING>> #FFF6E5 {
+  tool / target
+  verdict
+  sub_matches
+  --
+  replay + analysis DTO
+  unification deferred to R6
+}
+
+LevelMatch ..> RuntimeVerdict : resolved into\n(+ provenance, override,\nASK floor)
+RuntimeVerdict "1" *-- "0..*" UnitVerdict : sub_matches
+Decision "1" o-- "0..*" UnitVerdict : sub_matches
+
+note bottom of LevelMatch
+  Classified LEVEL because it
+  **cannot carry a Provenance** --
+  none exists in scope yet.
+  Not a field-name rule.
+end note
+
+@enduml

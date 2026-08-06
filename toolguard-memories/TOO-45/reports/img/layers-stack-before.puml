@@ -1,0 +1,38 @@
+@startuml
+title BEFORE -- master 532de02: 3 direction violations
+
+skinparam defaultTextAlignment center
+skinparam rectangle {
+  BackgroundColor #F7F7F7
+  BorderColor #666666
+  FontSize 13
+}
+skinparam ArrowFontSize 11
+left to right direction
+
+rectangle "support\n(2)" as L6 #EEEEEE
+rectangle "tooling\n(33)" as L5 #EEEEEE
+rectangle "runtime\n(7)" as L4 #EEEEEE
+rectangle "engine\n(8)" as L3 #EEEEEE
+rectangle "config\n(9)" as L2 #EEEEEE
+rectangle "foundation\n(8)" as L1 #EEEEEE
+
+L6 -[#999999]down-> L5
+L5 -[#999999]down-> L4
+L4 -[#999999]down-> L3
+L3 -[#999999]down-> L2
+L2 -[#999999]down-> L1
+
+L2 -[#CC0000,thickness=2]up-> L4 : <color:#CC0000>**1.** config_divergence\n<color:#CC0000>-> error_log
+L2 -[#CC0000,thickness=2]up-> L5 : <color:#CC0000>**2.** auto_migrate\n<color:#CC0000>-> scripts.migrate_permissions\n<color:#CC0000>//[local import]//
+L4 -[#CC0000,thickness=2]up-> L5 : <color:#CC0000>**3.** hook\n<color:#CC0000>-> tools.decision\n<color:#CC0000>//[local import]//
+
+note bottom of L1
+  grey = declared direction (each layer may import
+  from itself and everything below)
+  red = violation reported by --layers
+  (n) = modules mapped to the layer
+  the stack reads RIGHT (foundation, bottom)
+  to LEFT (support, top)
+end note
+@enduml

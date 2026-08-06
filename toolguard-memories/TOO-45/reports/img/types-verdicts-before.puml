@@ -1,0 +1,69 @@
+@startuml
+title The same region before TOO-45 (commit 532de02)
+
+skinparam backgroundColor transparent
+skinparam shadowing false
+skinparam class {
+  BackgroundColor #FDFDFD
+  BorderColor #444444
+  ArrowColor #444444
+  FontName Helvetica
+}
+hide empty members
+
+package "config_types module" {
+  class ResolvedDecision #E8F0FE {
+    decision, reason, provenance
+    override : ConflictOverride
+    additional_context
+    fallback_warning
+  }
+}
+
+package "resolve module" {
+  class BashResolution #E8F0FE {
+    decision, reason
+    overrides : List
+    sub_matches
+    additional_context
+    fallback_warning
+    --
+    __iter__() <<tuple shim>>
+  }
+  class FileResolution #E8F0FE {
+    decision, reason
+    override : ConflictOverride
+    provenance
+    additional_context
+    fallback_warning
+    --
+    __iter__() <<tuple shim>>
+  }
+  class SubMatch #EEF6EE {
+    sub_command, decision
+    matched_rule, provenance
+  }
+}
+
+class "(decision, reason, ...)" as Tup #FFEBEB {
+  13 functions return a
+  bare verdict TUPLE
+  --
+  compound.py x6
+  hook.py x3
+  permissions.py x2
+  resolve.py x2
+}
+
+BashResolution *-- SubMatch : sub_matches
+ResolvedDecision .[#red].> BashResolution : same 6 fields,\ndifferent site
+ResolvedDecision .[#red].> FileResolution : same 6 fields,\ndifferent site
+Tup .[#red].> ResolvedDecision : positionally\ncoupled
+
+note bottom of Tup
+  No name, no type, no default.
+  Adding one field edits every
+  caller's unpacking.
+end note
+
+@enduml

@@ -1,0 +1,33 @@
+@startuml
+title What an `api` layer would and would not absorb\n(measured on the working tree: 43 distinct names cross into config+engine)
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontSize 12
+skinparam linetype ortho
+skinparam rectangle {
+  BackgroundColor<<proposed>> #E8F0FE
+  BorderColor<<proposed>> #1A73E8
+}
+
+rectangle "tooling\n21 of 33 modules reach down" as TOOL
+rectangle "runtime\nhook, log_writer, session_start" as RT
+rectangle "api  (proposed)\ndecide(), RuntimeVerdict" <<proposed>> as API
+rectangle "engine  -- 11 of the 43 names\nresolve (8), compound (3)\npermission_resolution: consumed by NOBODY" as ENG
+rectangle "config  -- 32 of the 43 names\nconfig (10), rule_sort (7), rule_entry (5),\npermission_migration (4), config_write_guard (3), ..." as CFG
+
+TOOL -[#1A73E8,bold]-> API
+RT   -[#1A73E8,bold]-> API
+API  -[#1A73E8,bold]-> ENG
+
+TOOL -[#B31412,dashed]-> CFG
+RT   -[#B31412,dashed]-> CFG
+ENG  --> CFG
+
+legend bottom
+  <b>blue</b>  what an api layer sited above `engine` can absorb: 11 names (26%)
+  <b><color:#B31412>red</color></b>  what it cannot, because the target is BELOW it: 32 names (74%)
+  R6 is titled "the ENGINE has a public interface". Three quarters of the
+  actual crossing surface is config-layer, not engine-layer.
+end legend
+@enduml

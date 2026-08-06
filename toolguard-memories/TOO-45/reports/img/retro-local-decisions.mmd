@@ -1,0 +1,25 @@
+flowchart TD
+    D1["<b>TOO-19</b><br/>widen resolve_one's 3-tuple?<br/>true local cost: ~20 test rewrites<br/><b>&rarr; disproportionate</b>"]
+    D2["<b>TOO-45 R3</b><br/>widen resolve_one's 3-tuple?<br/><b>&rarr; disproportionate</b>"]
+    D3["<b>TOO-45 R3</b><br/>widen _check_file_path_hard_deny?<br/><b>&rarr; disproportionate</b>"]
+
+    W1["workaround 1<br/>fallback_warning encoded<br/>into reason prose"]
+    W2["workaround 2<br/>ask-floor classification<br/>re-derived downstream"]
+    W3["workaround 3<br/>hard-deny pattern<br/>recovered by string split"]
+
+    D1 --> W1
+    D2 --> W2
+    D3 --> W3
+    W1 --> AGG
+    W2 --> AGG
+    W3 --> AGG
+
+    AGG["<b>AGGREGATE DEFECT</b><br/>one missing type, worked around 3 times<br/>1,943 sub-commands with no audit record"]
+
+    NOTE["each decision was CORRECT in isolation<br/>&mdash; ~20 tests actively pinned the narrow contract"]
+    NOTE -.-> D1
+    NOTE -.-> D2
+    NOTE -.-> D3
+
+    style AGG fill:#f8cecc,stroke:#b85450,stroke-width:2px
+    style NOTE fill:#fff2cc,stroke:#d6b656

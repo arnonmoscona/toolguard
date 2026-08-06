@@ -1,0 +1,23 @@
+---
+config:
+  theme: default
+---
+flowchart LR
+    subgraph GC["GUARD CANARIES -- 12 cases"]
+        direction TB
+        G1["architecture_fitness.py --guard"] --> G2["subprocess:<br/>~/.local/bin/toolguard v0.5.1<br/><b>= master code, NOT the branch</b>"]
+        G2 --> G3["live rule files on this machine:<br/>.claude/toolguard_hook.toml (symlink out of repo)<br/>~/.toolguard/rules/git.rules.toml (outside any repo)"]
+        G3 --> G4["12 permissionDecision strings"]
+    end
+
+    subgraph VC["GOLDEN CORPUS -- 6,401 + 61 cases"]
+        direction TB
+        C1["test_verdict_corpus / corpus_build.py --verify"] --> C2["in-process import of the<br/><b>working-tree</b> toolguard"]
+        C2 --> C3["fixture configs in a temp sandbox:<br/>test/verdict_corpus/configs/"]
+        C3 --> C4["6,401 (verdict, reason, provenance,<br/>matched_rule, additional_context)<br/>+ 61 full hook JSON responses"]
+    end
+
+    GC -.->|"no overlap:<br/>different code, different configs,<br/>different question"| VC
+
+    classDef box fill:#eef2fa,stroke:#3b5b92,color:#12233f
+    class G1,G2,G3,G4,C1,C2,C3,C4 box

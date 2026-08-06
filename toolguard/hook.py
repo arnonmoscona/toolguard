@@ -684,16 +684,23 @@ def _resolve_event(
         The resolved :class:`~toolguard.config_types.RuntimeVerdict`, whose
         ``decision`` is ``'allow'``, ``'deny'``, or ``'ask'``.
     """
-    # Local import, and the justification changed with TOO-45 R5a. The old one
-    # was a genuine cycle -- tools.decision imported FILE_PATH_TOOLS from here --
-    # which is gone: it now takes FILE_TOOLS from the foundation layer, as its
-    # sibling tooling modules already did. What remains is a LAYER violation, not
-    # a cycle: runtime reaching up into tooling. It stays local on purpose,
-    # because the hook is a per-process, per-tool-call binary and hoisting this
-    # would load the whole tooling layer on the hot path for every invocation.
-    # decide() is not on the live path at all -- toolguard.tools.decision only
-    # reaches sys.modules under --eval. R6 is the step that resolves this, by
-    # moving decide() into an api layer both callers can reach.
+    # Local import. TOO-45 R5a removed the genuine cycle that used to justify it
+    # (tools.decision imported FILE_PATH_TOOLS from here; it now takes FILE_TOOLS
+    # from the foundation layer, as its sibling tooling modules already did).
+    # What remains is a LAYER violation -- runtime reaching up into tooling --
+    # deferred to R6, which resolves it by moving decide() into an api layer both
+    # callers can reach.
+    #
+    # An earlier version of this comment claimed hoisting the import "would load
+    # the whole tooling layer on the hot path". THAT WAS NEVER MEASURED AND IS
+    # FALSE: three independent measurements put it at +2 modules and well under
+    # 1 ms, ~1.7% of this module's own import time, because tools/__init__.py is
+    # a docstring and tools.decision's imports are already resident. Worse, the
+    # claim was beside the point -- hoisting does NOT clear the violation, it
+    # just moves it to the import block. The violation is the dependency, not
+    # its placement. Left local only because there is no reason to move it
+    # before R6; if you need it at module level, take it, and do not treat this
+    # comment as an objection.
     from toolguard.tools.decision import decide  # noqa: PLC0415
 
     governed_tools = list(config.governed_tools())

@@ -1,0 +1,67 @@
+digraph G {
+  rankdir=TB;
+  graph [fontname="Helvetica", fontsize=11, labelloc=t, compound=true];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style=filled, fillcolor=white];
+  edge  [fontname="Helvetica", fontsize=8];
+  label="Runtime call graph -- 6,401 corpus cases through tools.decision.decide\nedge label = calls; RED DASHED = a runtime edge the import graph cannot see";
+
+  subgraph cluster_0 {
+    label="BEFORE (master 532de02)"; style=rounded; color="#999999";
+    "master_compound" [label="compound\n82,602 calls", style=filled, fillcolor="#dcf1e0"];
+    "master_config" [label="config\n2,941,971 calls", style=filled, fillcolor="#dce9f7"];
+    "master_config_types" [label="config_types\n457,426 calls", style=filled, fillcolor="#dce9f7"];
+    "master_normalization" [label="normalization\n114,104 calls", style=filled, fillcolor="#e8e8e8"];
+    "master_patterns" [label="patterns\n2,558,564 calls", style=filled, fillcolor="#e8e8e8"];
+    "master_permissions" [label="permissions\n453,049 calls", style=filled, fillcolor="#dcf1e0"];
+    "master_resolve" [label="resolve\n66,823 calls", style=filled, fillcolor="#dcf1e0"];
+    "master_rule_entry" [label="rule_entry\n7,977,941 calls", style=filled, fillcolor="#dce9f7"];
+    "master_tools.decision" [label="tools.decision\n12,802 calls", style=filled, fillcolor="#f0e0f2"];
+    "master_config" -> "master_rule_entry" [label="5,396,746", penwidth=6.0];
+    "master_permissions" -> "master_patterns" [label="2,543,164", penwidth=6.0];
+    "master_config" -> "master_config_types" [label="376,060", penwidth=6.0];
+    "master_config_types" -> "master_rule_entry" [label="67,805", penwidth=6.0];
+    "master_permissions" -> "master_normalization" [label="48,200", penwidth=6.0];
+    "master_resolve" -> "master_config" [label="28,801\n(no import)", penwidth=5.9, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "master_resolve" -> "master_permissions" [label="25,994", penwidth=5.8];
+    "master_config" -> "master_resolve" [label="17,680\n(no import)", penwidth=5.2, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "master_resolve" -> "master_patterns" [label="15,400", penwidth=5.0];
+    "master_patterns" -> "master_normalization" [label="15,370", penwidth=5.0];
+    "master_resolve" -> "master_compound" [label="12,032", penwidth=4.7];
+    "master_compound" -> "master_resolve" [label="8,314\n(no import)", penwidth=4.3, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "master_tools.decision" -> "master_resolve" [label="6,401", penwidth=4.0];
+    "master_tools.decision" -> "master_config" [label="5,631", penwidth=3.9];
+    "master_resolve" -> "master_normalization" [label="2,177", penwidth=3.1];
+  }
+  subgraph cluster_1 {
+    label="AFTER (branch a3e3f27)"; style=rounded; color="#999999";
+    "branch_compound" [label="compound\n82,755 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_config" [label="config\n380,483 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_config_types" [label="config_types\n2,438,282 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_normalization" [label="normalization\n114,104 calls", style=filled, fillcolor="#e8e8e8"];
+    "branch_patterns" [label="patterns\n2,558,564 calls", style=filled, fillcolor="#e8e8e8"];
+    "branch_permission_resolution" [label="permission_resolution\n40,864 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_permissions" [label="permissions\n453,049 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_resolve" [label="resolve\n81,231 calls", style=filled, fillcolor="#dcf1e0"];
+    "branch_rule_entry" [label="rule_entry\n9,327,086 calls", style=filled, fillcolor="#dce9f7"];
+    "branch_tools.decision" [label="tools.decision\n12,802 calls", style=filled, fillcolor="#f0e0f2"];
+    "branch_config" -> "branch_rule_entry" [label="3,094,067", penwidth=6.0];
+    "branch_permissions" -> "branch_patterns" [label="2,543,164", penwidth=6.0];
+    "branch_config_types" -> "branch_rule_entry" [label="1,884,384", penwidth=6.0];
+    "branch_config" -> "branch_config_types" [label="482,733", penwidth=6.0];
+    "branch_permissions" -> "branch_normalization" [label="48,200", penwidth=6.0];
+    "branch_resolve" -> "branch_permissions" [label="25,994", penwidth=5.8];
+    "branch_permission_resolution" -> "branch_config" [label="19,192\n(no import)", penwidth=5.3, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_permission_resolution" -> "branch_resolve" [label="17,680\n(no import)", penwidth=5.2, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_resolve" -> "branch_patterns" [label="15,400", penwidth=5.0];
+    "branch_patterns" -> "branch_normalization" [label="15,370", penwidth=5.0];
+    "branch_resolve" -> "branch_permission_resolution" [label="14,701", penwidth=5.0];
+    "branch_resolve" -> "branch_config" [label="14,086\n(no import)", penwidth=4.9, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_resolve" -> "branch_compound" [label="12,032", penwidth=4.7];
+    "branch_permission_resolution" -> "branch_config_types" [label="11,987", penwidth=4.7];
+    "branch_compound" -> "branch_resolve" [label="8,777\n(no import)", penwidth=4.3, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_tools.decision" -> "branch_resolve" [label="6,401", penwidth=4.0];
+    "branch_tools.decision" -> "branch_config" [label="5,631", penwidth=3.9];
+    "branch_permission_resolution" -> "branch_rule_entry" [label="3,982\n(no import)", penwidth=3.6, color="#c0392b", fontcolor="#c0392b", style=dashed];
+    "branch_resolve" -> "branch_normalization" [label="2,177", penwidth=3.1];
+  }
+}

@@ -1,0 +1,33 @@
+@startuml
+title AFTER -- branch a3e3f27: 1 direction violation, deliberately deferred to R6
+
+skinparam defaultTextAlignment center
+skinparam rectangle {
+  BackgroundColor #F7F7F7
+  BorderColor #666666
+  FontSize 13
+}
+skinparam ArrowFontSize 11
+left to right direction
+
+rectangle "support\n(2)" as L6 #EEEEEE
+rectangle "tooling\n(33)" as L5 #EEEEEE
+rectangle "runtime\n(7)" as L4 #EEEEEE
+rectangle "engine\n(9) +permission_resolution" as L3 #E8F4E8
+rectangle "config\n(10) +permission_migration" as L2 #E8F4E8
+rectangle "foundation\n(9) +install_update" as L1 #E8F4E8
+
+L6 -[#999999]down-> L5
+L5 -[#999999]down-> L4
+L4 -[#999999]down-> L3
+L3 -[#009900,thickness=2]down-> L2 : <color:#009900>**NEW** 4 edges\n<color:#009900>engine -> config_types\n<color:#009900>(was 0)
+L2 -[#999999]down-> L1
+
+L4 -[#CC0000,thickness=2]up-> L5 : <color:#CC0000>hook -> tools.decision\n<color:#CC0000>//[local import]//\n<color:#CC0000>deferred to R6
+
+note bottom of L1
+  green = layer gained a module and/or gained legal
+  downward edges. The 2 removed violations were both
+  config-sourced; the surviving one is runtime -> tooling.
+end note
+@enduml

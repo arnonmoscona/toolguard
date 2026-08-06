@@ -1,0 +1,13 @@
+flowchart LR
+    A["pair (config.py, resolve.py)<br/><b>co-changes 2 / min-touch 2</b>"]
+    G{"guard:<br/>min-touch &ge; 3?"}
+    A --> G
+    G -->|"2 &lt; 3 &mdash; suppressed"| N["NOT REPORTED<br/><i>coincidence filter working</i>"]
+    A --> T{{"<b>TOO-45</b><br/>ONE logical change<br/>23 production files<br/>touches BOTH"}}
+    T --> B["<b>co-changes 3 / min-touch 3</b><br/>numerator and denominator<br/>incremented together"]
+    B --> G2{"3 &ge; 3 AND<br/>3 == 3 ?"}
+    G2 -->|yes| R["<b>REPORTED: 100% coupled</b><br/>ratio survives, guard cleared"]
+
+    style T fill:#ffe6cc,stroke:#d79b00,stroke-width:2px
+    style R fill:#f8cecc,stroke:#b85450,stroke-width:2px
+    style N fill:#d5e8d4,stroke:#82b366

@@ -1,0 +1,29 @@
+@startuml
+title What the layer verdict actually rests on (branch tree, code held constant)
+
+skinparam defaultTextAlignment left
+skinparam rectangleFontSize 12
+skinparam ArrowFontSize 11
+
+rectangle "**toolguard/** (unchanged Python)\n173 import edges\n1 upward edge" as CODE #E8F4E8
+
+rectangle "**.pyscn.toml [architecture]**\n6 layers, 6 rules\nnot pinned by any test\nnot checked by --guard" as MAP #FFF2CC
+
+rectangle "--layers verdict" as V #F0F0F0
+
+CODE --> V
+MAP --> V
+
+rectangle "M1  add tooling to runtime.allow\nM2  move `hook` into tooling\nM3  move `tools` into runtime" as G1 #FFCCCC
+rectangle "M4  delete `tools` from the map\nM5  delete `hook` from the map" as G2 #D5E8D4
+
+G1 -[#CC0000,thickness=2]-> MAP : <color:#CC0000>violations 1 -> 0\n<color:#CC0000>**nothing catches it**
+G2 -[#009900,thickness=2]-> MAP : violations 1 -> 0\nbut unmapped 31 / 1\n**completeness catches it**
+
+note bottom of V
+  Every mutation is a hand edit to .pyscn.toml with ZERO Python change.
+  Run in memory against the real branch tree; no file in any tree was written.
+  Only the completeness half of --layers is pinned by a test
+  (test_check_layers_runs_on_real_tree asserts unmapped == [], not report.ok).
+end note
+@enduml

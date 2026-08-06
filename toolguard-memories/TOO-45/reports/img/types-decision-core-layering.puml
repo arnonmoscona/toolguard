@@ -1,0 +1,53 @@
+@startuml
+title Where the decision core lives (only the modules on the decision path)
+
+skinparam backgroundColor transparent
+skinparam shadowing false
+skinparam component {
+  BackgroundColor #FDFDFD
+  BorderColor #444444
+  ArrowColor #444444
+  FontName Helvetica
+}
+skinparam packageStyle rectangle
+
+package "runtime" #F2F6FF {
+  [hook] as HOOK
+  [log_writer] as LOG
+}
+
+package "engine" #EEF6EE {
+  [resolve] as RES
+  [compound] as CMP
+  [permissions] as PRM
+  [permission_resolution\n(360 lines)] as PR #D6EED6
+}
+
+package "config" #FFF8E5 {
+  [config\n(2 509 lines)] as CFG
+  [config_types\n(verdict types)] as CT #FFEFC2
+  [rule_entry] as RE
+}
+
+HOOK --> RES
+HOOK --> LOG
+RES --> CMP
+RES --> PR
+CMP --> PRM
+PR --> CT
+PR ..> CFG : duck-typed,\n**4 members**\nNEVER imported
+CFG --> CT
+CT --> RE
+LOG --> CT
+
+note right of PR
+  TOO-45 D1a moved decision
+  orchestration OUT of the
+  ``Configuration`` class.
+  ``permission_resolution``
+  imports ``config_types`` and
+  the stdlib -- never
+  ``toolguard.config``.
+end note
+
+@enduml

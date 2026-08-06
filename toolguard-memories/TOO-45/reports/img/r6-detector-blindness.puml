@@ -1,0 +1,32 @@
+@startuml
+title R6's detector: what it can and cannot express\n(eight routes, each probed by execution)
+
+skinparam shadowing false
+skinparam defaultFontSize 12
+
+legend top
+|= route tooling/runtime can take into an engine private |= detector |
+| <b>from toolguard.config import _x</b> | <color:#137333><b>SEEN</b></color> |
+| <b>from toolguard.config import _x as y</b> | <color:#137333><b>SEEN</b></color> |
+| <b>from toolguard import config</b> ... <b>config._x</b> | <color:#B31412><b>BLIND</b></color> |
+| <b>import toolguard.resolve as r</b> ... <b>r._x</b> | <color:#B31412><b>BLIND</b></color> |
+| <b>getattr(compound, "_x")</b> | <color:#B31412><b>BLIND</b></color> |
+| <b>from toolguard.permission_resolution import _x</b>  (post-D1a engine module) | <color:#B31412><b>BLIND</b></color> |
+| <b>from toolguard.config_types import _x</b> | <color:#B31412><b>BLIND</b></color> |
+| any private import in <b>hook.py</b> (runtime) -- <b>4 of the 5 real reaches</b> | <color:#B31412><b>BLIND</b></color>, pinned by a passing test |
+end legend
+
+note as N
+  <b>find_private_imports</b> matches <b>ast.ImportFrom</b> only, on files whose
+  first path segment is <b>tools</b> or <b>scripts</b>, against a hard-coded
+  target set <b>{config, permissions, compound, resolve}</b>.
+
+  The set predates D1a: <b>permission_resolution</b>, the module that now
+  holds the decision machinery, is not guarded at all.
+
+  Gaming move, DEMONSTRATED: the one reported violation imports a symbol
+  that <b>config re-exports</b>. Re-pointing that single import line at its
+  true owner (<b>rule_entry</b>, not in the guarded set) takes R6 to <b>PASS</b>
+  with the encapsulation completely unchanged.
+end note
+@enduml

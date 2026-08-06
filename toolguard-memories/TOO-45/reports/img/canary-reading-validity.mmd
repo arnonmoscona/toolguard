@@ -1,0 +1,20 @@
+---
+config:
+  theme: default
+---
+flowchart LR
+    M["master<br/>69"] --> B["R1b<br/>69<br/><i>instrument fixed</i>"]
+    B --> C["R1c<br/>68"]
+    C --> D["R1d<br/>53<br/><b>-15</b>"]
+    D --> E["R1e<br/>72<br/><b>+19</b>"]
+    E --> F["R1f<br/>72"]
+    F --> G["R2b<br/>72"]
+    G --> H["final<br/>72"]
+
+    classDef ok fill:#d7ecd9,stroke:#2f7d32,color:#12331a
+    classDef bad fill:#f8d7da,stroke:#a02128,color:#3d0e12
+    classDef mute fill:#e8e8ec,stroke:#77777f,color:#26262b
+
+    class D ok
+    class E,G bad
+    class M,B,C,F,H mute

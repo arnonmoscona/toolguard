@@ -1,0 +1,47 @@
+@startuml
+title Deciding one compound Bash command, after TOO-45
+
+skinparam backgroundColor transparent
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #444444
+  LifeLineBorderColor #888888
+  ParticipantBorderColor #444444
+  ParticipantBackgroundColor #FDFDFD
+  FontName Helvetica
+}
+
+participant "hook" as H <<runtime>>
+participant "resolve" as R <<engine>>
+participant "compound" as C <<engine>>
+participant "permission_\nresolution" as P <<engine>>
+participant "permissions" as PM <<engine>>
+participant "log_writer" as L <<runtime>>
+
+H -> R : resolve_bash_permission_detailed(cmd)
+R -> C : resolve_compound_permission_detailed(cmd, _resolve_one, record_unit)
+
+loop once per leaf
+  C -> R : _resolve_one(leaf)
+  R -> P : resolve_permission_detailed(config, "Bash", _decide_detailed)
+  P -> PM : _decide_detailed(allow, deny, ask)
+  PM --> P : **LevelMatch**(decision, reason, matched_pattern)
+  P -> P : provenance_for_pattern / entry_for_pattern\n+ override detect + ASK floor
+  P --> R : **RuntimeVerdict**
+  R -> C : record_unit(**UnitVerdict**)
+end
+
+C --> R : combined decision + reason
+R --> H : **RuntimeVerdict**(sub_matches = [UnitVerdict...])
+
+loop once per UnitVerdict
+  H -> L : log_command(**LogRecord**(...))
+end
+
+note over H, L
+  The audit loop reads **verdict.sub_matches** directly.
+  Before TOO-45 it regex-parsed the rendered reason string
+  back apart and dropped every segment without " -> ".
+end note
+
+@enduml
