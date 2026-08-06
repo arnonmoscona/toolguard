@@ -31,8 +31,11 @@ Two corpora live here, for two different seams:
   carries no such field) and never appears in the hook's JSON output either
   -- it exists ONLY as an entry in ``logs/toolguard-conflict-*.md``, a THIRD
   seam neither corpus's primary comparison touches. See
-  :func:`_count_stream_log_entries` and the ``conflict_logged`` golden key
-  below. (The ``allow_with_warning`` fallback's own WARNING-stream routing
+  :func:`_new_stream_log_text` and the ``conflict_logged``/``conflict_message``
+  golden keys below -- the latter (TOO-45 D1a review debt item E) is also the
+  only place the OVERRIDDEN deny's provenance is observable at all, since it
+  is embedded only in that log message's text.
+  (The ``allow_with_warning`` fallback's own WARNING-stream routing
   was investigated the same way and deliberately NOT instrumented here:
   ``toolguard-warning-*.md`` also receives an unrelated, pre-existing "tool
   not in governed_tools" advisory on every hook run for any fixture that
@@ -47,6 +50,7 @@ update it. This module deliberately does NOT start with ``test`` so
 """
 
 import json
+import re
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -347,7 +351,17 @@ def decision_to_golden(
 
     ``sub_matches`` is intentionally NOT included -- the golden schema is
     fixed by the TOO-45 spec to
-    ``fixture/tool/target/verdict/reason/additional_context/provenance``.
+    ``fixture/tool/target/verdict/reason/additional_context/provenance``,
+    widened once (TOO-45 D1a review debt item E) to add ``matched_rule``:
+    two independent mutations -- nulling ``matched_rule`` at its source in
+    ``permission_resolution._resolve_unclamped`` and nulling an overridden
+    deny's provenance in ``permission_resolution._detect_override`` -- each
+    failed unit tests but left this corpus reporting no differences, because
+    it did not observe either field at all. ``matched_rule`` is now tracked
+    here; the overridden-deny-provenance half is tracked on the END-TO-END
+    corpus instead (see :func:`e2e_decision_to_golden`), since
+    :class:`~toolguard.config.ConflictOverride` never reaches ``decide()``'s
+    return value at all -- see this module's own docstring.
 
     Args:
         fixture_id: The fixture this case was replayed against.
@@ -365,6 +379,7 @@ def decision_to_golden(
         "reason": sanitize(decision.reason),
         "additional_context": sanitize(decision.additional_context),
         "provenance": provenance_to_dict(decision.provenance, sanitize),
+        "matched_rule": sanitize(decision.matched_rule),
     }
 
 
@@ -442,47 +457,90 @@ _RUN_HOOK_DIAGNOSTIC_KEYS = ("_stderr", "_returncode")
 _HOOK_OUTPUT_PROSE_FIELDS = ("permissionDecisionReason", "additionalContext")
 
 
-#: Log streams (see ``toolguard/error_log.py``) whose entry counts this
-#: corpus observes as a SIDE EFFECT of ``run_hook``'s subprocess -- filename
-#: shape ``toolguard-<stream>-*.md`` under the sandbox's ``log_dir``, each
-#: entry starting a new ``## `` header line. Counting header lines (rather
-#: than parsing full entries) is enough to detect "did a new entry appear
-#: during this one case", which is all the ``conflict_logged`` golden key
-#: needs. ``'warning'`` is deliberately NOT included -- see the end-to-end
-#: corpus's module-level rationale above for why that stream is too noisy to
-#: use as a presence-only signal.
+#: Log streams (see ``toolguard/error_log.py``) whose content this corpus
+#: observes as a SIDE EFFECT of ``run_hook``'s subprocess -- filename shape
+#: ``toolguard-<stream>-*.md`` under the sandbox's ``log_dir``.
+#: ``'warning'`` is deliberately NOT included -- see the end-to-end corpus's
+#: module-level rationale above for why that stream is too noisy to use as a
+#: presence-only signal.
 _OBSERVED_LOG_STREAMS = ("conflict",)
 
 
-def _count_stream_log_entries(sandbox, stream: str) -> int:
-    """
-    Count ``## `` entry headers across all ``toolguard-<stream>-*.md`` files
-    in *sandbox*'s log directory.
+#: Matches the wall-clock timestamp at the start of a log entry header (see
+#: ``error_log.py``'s ``_log_entry``, e.g. ``## 2026-08-05 10:20:33 -
+#: CONFLICT``). Replaced with a fixed placeholder before a conflict-log
+#: message is stored in a golden -- otherwise every regeneration would embed
+#: the real wall-clock time it ran at, breaking the byte-identical-across-
+#: regenerations property this corpus otherwise guarantees (see README.md's
+#: "Sanitization" section), independently of the ephemeral-sandbox-path
+#: sanitization :func:`_sanitize_ephemeral` already does.
+_LOG_TIMESTAMP_RE = re.compile(
+    r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - ", re.MULTILINE
+)
 
-    Used to detect, by a before/after delta around one :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`
-    call, whether THAT case caused a new log entry -- the only way this
-    corpus can observe :class:`~toolguard.config.ConflictOverride` (routed to
-    the ``'conflict'`` stream), since it never reaches
-    :func:`toolguard.tools.decision.decide`'s return value or the hook's JSON
-    output (see the end-to-end corpus's module-level rationale above).
+
+def _normalize_log_timestamps(text: str) -> str:
+    """Replace every log-entry header timestamp in *text* with a fixed placeholder."""
+    return _LOG_TIMESTAMP_RE.sub("## <TIMESTAMP> - ", text)
+
+
+def _stream_log_snapshot(sandbox, stream: str) -> Dict[Path, str]:
+    """
+    Read the current full text of every ``toolguard-<stream>-*.md`` file in
+    *sandbox*'s log directory.
 
     Args:
         sandbox: The fixture's :class:`~toolguard.testing.sandbox.Sandbox`.
         stream: ``'conflict'`` (see :data:`_OBSERVED_LOG_STREAMS`).
 
     Returns:
-        Total entry count across every date-stamped file for *stream*
-        (there is realistically only one, for "today", but summing is
-        correct regardless).
+        ``{path: text}`` for every matching file (empty when none exist yet).
     """
-    total = 0
-    for path in sandbox.log_dir.glob(f"toolguard-{stream}-*.md"):
-        total += sum(
-            1
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.startswith("## ")
-        )
-    return total
+    return {
+        path: path.read_text(encoding="utf-8")
+        for path in sandbox.log_dir.glob(f"toolguard-{stream}-*.md")
+    }
+
+
+def _new_stream_log_text(before: Dict[Path, str], after: Dict[Path, str]) -> str:
+    """
+    Return the text APPENDED to a log stream between two
+    :func:`_stream_log_snapshot` calls taken immediately before/after one
+    :meth:`~toolguard.testing.sandbox.Sandbox.run_hook` call -- the only way
+    this corpus can observe :class:`~toolguard.config.ConflictOverride`
+    (routed to the ``'conflict'`` stream): it never reaches
+    :func:`toolguard.tools.decision.decide`'s return value or the hook's JSON
+    output (see the end-to-end corpus's module-level rationale above), and
+    (TOO-45 D1a review debt item E) neither does the OVERRIDDEN deny's
+    provenance specifically -- it is embedded only in this log message's text
+    (see ``hook._format_conflict_message``), so capturing the text (not just
+    "did a new entry appear", the previous behaviour) is what lets this
+    corpus notice a mutation that nulls it.
+
+    Log entries are always appended, never rewritten, so for each file the
+    new content is the after-text with the before-text's prefix removed
+    (an empty prefix for a file that did not exist yet in *before*).
+    Concatenated across files in stable (sorted-path) order.
+
+    Args:
+        before: Snapshot taken immediately before the ``run_hook`` call.
+        after: Snapshot taken immediately after it.
+
+    Returns:
+        The newly appended text, with log-entry timestamps normalized (see
+        :func:`_normalize_log_timestamps`) -- empty string when nothing new
+        appeared.
+    """
+    pieces = []
+    for path in sorted(after):
+        old = before.get(path, "")
+        new = after[path]
+        # Defensive: entries are append-only by construction (see
+        # error_log.py), but if a file were ever rewritten instead of
+        # appended, falling back to the whole new content is safer than
+        # silently dropping it.
+        pieces.append(new[len(old) :] if new.startswith(old) else new)
+    return _normalize_log_timestamps("".join(pieces))
 
 
 def build_hook_payload(tool: str, target: str) -> Dict[str, Any]:
@@ -512,7 +570,7 @@ def e2e_decision_to_golden(
     hook_result: Dict[str, Any],
     sanitize: Callable[[Optional[str]], Optional[str]],
     *,
-    conflict_logged: bool = False,
+    conflict_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build one end-to-end golden record from a real
@@ -531,22 +589,28 @@ def e2e_decision_to_golden(
         hook_result: The dict returned by
             :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`.
         sanitize: Ephemeral-path sanitizer from :func:`load_fixture_sandbox`.
-        conflict_logged: Whether THIS case caused a new entry in the
-            ``'conflict'`` log stream (see :func:`_count_stream_log_entries`)
-            -- the only observable trace of
-            :class:`~toolguard.config.ConflictOverride`. Included in the
-            golden ONLY when ``True`` (see below).
+        conflict_message: The text newly appended to the ``'conflict'`` log
+            stream by THIS case (see :func:`_new_stream_log_text`), already
+            sanitized, or ``None`` when no conflict was logged. This is the
+            only observable trace of a :class:`~toolguard.config.ConflictOverride`
+            -- and (TOO-45 D1a review debt item E) the only place the
+            OVERRIDDEN deny's provenance is observable at all, since it is
+            embedded in this message's text (see
+            ``hook._format_conflict_message``) and nowhere else this corpus
+            can see. Included in the golden ONLY when not ``None`` (see
+            below).
 
     Returns:
         ``{"fixture", "tool", "target", "response"}`` where ``response`` is
         the sanitized hook JSON output (``_stderr``/``_returncode`` dropped),
-        PLUS ``conflict_logged`` -- but ONLY when ``True``. Omitting the key
-        rather than always writing ``False`` keeps every case that predates
+        PLUS ``conflict_logged``/``conflict_message`` -- but ONLY when a
+        conflict WAS logged. Omitting both keys otherwise (rather than always
+        writing ``conflict_logged: False``) keeps every case that predates
         this instrumentation (none of which triggers a conflict-log entry)
         byte-identical after regeneration; a comparison reads a missing key
-        as ``False`` via ``dict.get`` (see :func:`compare_e2e_goldens`), so
-        the two representations are equivalent for every purpose that
-        matters here.
+        as ``False``/``None`` via ``dict.get`` (see
+        :func:`compare_e2e_goldens`), so the two representations are
+        equivalent for every purpose that matters here.
     """
     response = {
         key: value
@@ -566,8 +630,9 @@ def e2e_decision_to_golden(
         "target": target,
         "response": response,
     }
-    if conflict_logged:
+    if conflict_message:
         golden["conflict_logged"] = True
+        golden["conflict_message"] = conflict_message
     return golden
 
 
@@ -602,21 +667,24 @@ def generate_e2e_goldens_in_memory(cases: List[Dict[str, Any]]) -> List[Dict[str
                 case = cases[index]
                 tool, target = case["tool"], case["target"]
                 before = {
-                    stream: _count_stream_log_entries(sandbox, stream)
+                    stream: _stream_log_snapshot(sandbox, stream)
                     for stream in _OBSERVED_LOG_STREAMS
                 }
                 hook_result = sandbox.run_hook(build_hook_payload(tool, target))
                 after = {
-                    stream: _count_stream_log_entries(sandbox, stream)
+                    stream: _stream_log_snapshot(sandbox, stream)
                     for stream in _OBSERVED_LOG_STREAMS
                 }
+                conflict_text = _new_stream_log_text(
+                    before["conflict"], after["conflict"]
+                )
                 results[index] = e2e_decision_to_golden(
                     fixture_id,
                     tool,
                     target,
                     hook_result,
                     sanitize,
-                    conflict_logged=after["conflict"] > before["conflict"],
+                    conflict_message=sanitize(conflict_text) if conflict_text else None,
                 )
     return results
 
@@ -657,7 +725,9 @@ def _index_by_key(
 
 #: The golden fields tracked (not frozen) for equivalence -- a legitimate
 #: reword/refactor may change these; a hard invariant (verdict) never should.
-TRACKED_FIELDS = ("reason", "additional_context", "provenance")
+#: ``matched_rule`` added by TOO-45 D1a review debt item E (see
+#: :func:`decision_to_golden`'s docstring for why it was missing).
+TRACKED_FIELDS = ("reason", "additional_context", "provenance", "matched_rule")
 
 
 @dataclass(frozen=True)
@@ -795,6 +865,9 @@ class E2EHardMismatch:
             not written to the conflict log -- TOO-45 audit follow-up).
         expected: The committed golden's value for *kind*.
         actual: The freshly replayed value for *kind*.
+
+    ``conflict_message`` (the conflict-log entry's TEXT, present only when
+    both sides logged one) is tracked, not hard -- see :func:`compare_e2e_goldens`.
     """
 
     fixture: str
@@ -816,11 +889,13 @@ class E2EComparisonResult:
     - HARD (:attr:`hard_mismatches`): ``permissionDecision``, the
       PRESENCE/ABSENCE of the ``additionalContext`` key, and (TOO-45 audit
       follow-up) the presence/absence of a new ``'conflict'``-stream entry
-      (see :func:`_count_stream_log_entries`) -- presence-only, same
-      rationale as ``additionalContext``'s key.
+      (see :func:`_new_stream_log_text`) -- presence-only, same rationale as
+      ``additionalContext``'s key.
     - TRACKED (:attr:`prose_diffs`, reusing :class:`ProseDiff`):
-      ``permissionDecisionReason``'s text, and ``additionalContext``'s text
-      when present on both sides.
+      ``permissionDecisionReason``'s text, ``additionalContext``'s text when
+      present on both sides, and (TOO-45 D1a review debt item E)
+      ``conflict_message``'s text when both sides logged a conflict -- the
+      only place the overridden deny's provenance is observable at all.
     """
 
     hard_mismatches: List[E2EHardMismatch] = field(default_factory=list)
@@ -895,20 +970,19 @@ def compare_e2e_goldens(
                 )
             )
 
-        for kind in ("conflict_logged",):
-            expected_flag = expected_index[key].get(kind, False)
-            actual_flag = actual_index[key].get(kind, False)
-            if expected_flag != actual_flag:
-                result.hard_mismatches.append(
-                    E2EHardMismatch(
-                        fixture=fixture,
-                        tool=tool,
-                        target=target,
-                        kind=kind,
-                        expected=expected_flag,
-                        actual=actual_flag,
-                    )
+        expected_conflict_logged = expected_index[key].get("conflict_logged", False)
+        actual_conflict_logged = actual_index[key].get("conflict_logged", False)
+        if expected_conflict_logged != actual_conflict_logged:
+            result.hard_mismatches.append(
+                E2EHardMismatch(
+                    fixture=fixture,
+                    tool=tool,
+                    target=target,
+                    kind="conflict_logged",
+                    expected=expected_conflict_logged,
+                    actual=actual_conflict_logged,
                 )
+            )
 
         expected_reason = expected_hso.get("permissionDecisionReason")
         actual_reason = actual_hso.get("permissionDecisionReason")
@@ -936,6 +1010,26 @@ def compare_e2e_goldens(
                         field="additionalContext",
                         expected=expected_context,
                         actual=actual_context,
+                    )
+                )
+
+        # TOO-45 D1a review debt item E: conflict_message's TEXT (not just
+        # whether a conflict was logged at all, already checked above as a
+        # hard mismatch) is where the overridden deny's provenance is
+        # observable -- track it the same way additionalContext's text is
+        # tracked, only when both sides actually logged a conflict.
+        if expected_conflict_logged and actual_conflict_logged:
+            expected_message = expected_index[key].get("conflict_message")
+            actual_message = actual_index[key].get("conflict_message")
+            if expected_message != actual_message:
+                result.prose_diffs.append(
+                    ProseDiff(
+                        fixture=fixture,
+                        tool=tool,
+                        target=target,
+                        field="conflict_message",
+                        expected=expected_message,
+                        actual=actual_message,
                     )
                 )
     return result

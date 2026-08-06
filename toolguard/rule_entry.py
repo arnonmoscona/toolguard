@@ -204,6 +204,24 @@ class RuleEntry:
     synthesized_pattern: bool = field(default=False, compare=False, repr=False)
 
     @property
+    def stripped_pattern(self) -> str:
+        """
+        The wrapper-stripped form of :attr:`pattern` (see
+        :func:`_strip_tool_wrapper`).
+
+        TOO-45 R2a: the single accessor every consumer that wants the
+        wrapper-free pattern now goes through, so a stripped-pattern
+        collection (e.g. :class:`~toolguard.config_types.ToolPatternLayer`'s
+        ``allow``/``deny``/``ask`` properties) is always a live projection
+        over ``entries`` rather than a separately materialised, and
+        therefore driftable, copy.
+
+        Returns:
+            ``pattern`` with any ``Tool(...)`` wrapper removed.
+        """
+        return _strip_tool_wrapper(self.pattern)
+
+    @property
     def additional_context(self) -> Optional[str]:
         """
         The text to inject into Claude's context when this entry decides, if any.

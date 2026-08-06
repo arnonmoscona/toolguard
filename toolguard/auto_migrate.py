@@ -16,6 +16,7 @@ from toolguard.config_divergence import (
     get_native_permissions,
     get_toolguard_permissions,
 )
+from toolguard.permission_migration import migrate
 
 
 def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
@@ -169,8 +170,6 @@ def run_auto_migration(
         - Creates marker file
         - Prints status messages to stderr
     """
-    from toolguard.scripts.migrate_permissions import migrate
-
     # Check if we've already migrated today
     if not should_run_migration(logs_dir):
         return False

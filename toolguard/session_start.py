@@ -299,8 +299,9 @@ def _detect_broken_config_files(config: Configuration):
     """
     Return every governed config file that failed to parse (TOO-19).
 
-    A non-empty result means :meth:`~toolguard.config.Configuration.resolve_permission_detailed`
-    is clamping EVERY toolguard decision to ``'ask'`` (see that method's
+    A non-empty result means
+    :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+    is clamping EVERY toolguard decision to ``'ask'`` (see that function's
     docstring) until the file(s) are fixed -- the single most severe class of
     configuration problem, so it is surfaced unconditionally here, independent
     of (and in addition to) the existing static/dynamic conflict summary.

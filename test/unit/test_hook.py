@@ -18,24 +18,23 @@ from toolguard.config import (
     ConfigLayer,
     Configuration,
     Provenance,
-    ResolvedDecision,
     TakeoverConfig,
     TakeoverEnabledConflict,
 )
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
+from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import (
     FILE_PATH_TOOLS,
     _decide_file_path_at_level_detailed,
     _handle_command_tool,
     _handle_file_path_tool,
     _log_allowed_command,
-    _parse_compound_match_details,
-    _provenance_brief,
     create_hook_output,
     load_file_path_patterns,
     main,
     parse_hook_input,
 )
+from toolguard.log_writer import LogRecord
 from toolguard.resolve import resolve_bash_permission_detailed
 
 from test.unit._config_isolation import isolate_log_dir_for_module
@@ -88,8 +87,7 @@ def check_file_path_permission(
     )
     if result is None:
         return "deny", "Path does not match any allow patterns"
-    decision, reason, _matched = result
-    return decision, reason
+    return result.decision, result.reason
 
 
 def _fake_config(
@@ -145,42 +143,32 @@ def _fake_config(
             # No project root in the fake: relative paths returned unchanged.
             return raw_path
 
-        def resolve_permission_detailed(self_inner, tool_name, decide_detailed):
-            # API-sync with Configuration.resolve_permission_detailed (TOO-8
-            # Phase 4, TOO-15) -- the sole cascade entry point the hook now
-            # calls. The fake models a single hierarchy level per tool with no
-            # provenance, so no override (conflict) is ever produced here.
+        def permission_levels_with_provenance(self_inner, tool_name):
+            # API-sync with the real Configuration's engine query surface
+            # (TOO-45 D1a): the engine (toolguard.permission_resolution) now
+            # drives the cascade itself and calls this instead of a
+            # fake-owned resolve_permission_detailed. The fake models a
+            # single hierarchy level per tool with no provenance layers, so
+            # config_types.provenance_for_pattern/entry_for_pattern (called
+            # by the engine directly, TOO-45 R2d -- no longer reached
+            # through this fake at all) resolve to None against the empty
+            # layer tuple below.
             allow, deny = _patterns_for(tool_name)
-            if allow or deny:
-                # API-sync with Configuration.resolve_permission_detailed, whose
-                # callback now receives (allow, deny, ask); the fake models no ask.
-                result = decide_detailed(tuple(allow), tuple(deny), ())
-                if result is not None:
-                    decision, reason, _matched = result
-                    return ResolvedDecision(decision, reason, None, None)
-                # Rules ARE configured for this tool but none matched this
-                # specific command/path (TOO-15 case 4): default no_match_fallback
-                # is 'ask'. The fake does not model a configurable deny/
-                # allow_with_warning fallback -- tests that need those exercise
-                # a real Configuration (see TestNoMatchFallbackThroughMain).
-                return ResolvedDecision(
-                    "ask",
-                    "Command does not match any allow patterns; no_match_fallback=ask",
-                    None,
-                    None,
-                )
-            # No allow/deny configured at all for this tool anywhere (and the
-            # fake models no hard_deny/ask patterns either): TOO-15 case 3 --
-            # the tool is entirely unconfigured, so it ALWAYS resolves to 'ask'
-            # regardless of no_match_fallback (a fresh install must not be
-            # bricked).
-            return ResolvedDecision(
-                "ask",
-                f"No {tool_name} permission rules configured at any level; "
-                f"defaulting to 'ask'",
-                None,
-                None,
-            )
+            if not (allow or deny):
+                return ()
+            return ((tuple(allow), tuple(deny), (), ()),)
+
+        def has_any_rules(self_inner, tool_name):
+            allow, deny = _patterns_for(tool_name)
+            return bool(allow or deny)
+
+        def resolved_no_match_fallback(self_inner):
+            # The fake does not model a configurable deny/allow_with_warning
+            # fallback -- tests that need those exercise a real Configuration
+            # (see TestNoMatchFallbackThroughMain).
+            return "ask"
+
+        parse_failures = ()
 
         def describe_levels(self_inner):
             # API-sync: the fake exposes no real sources.
@@ -192,13 +180,6 @@ def _fake_config(
             # undecidable_fallback -- always 'ask' (the default); tests that
             # need other values exercise a real Configuration.
             return "ask"
-
-        def apply_parse_failure_floor(self_inner, decision, reason):
-            # API-sync with Configuration.apply_parse_failure_floor (TOO-19
-            # undecidable-segment bypass fix). The fake models no parse
-            # failures, so this is always a pass-through; tests that need the
-            # floor to actually clamp exercise a real Configuration.
-            return decision, reason
 
         def takeover_mode(self_inner):
             return takeover
@@ -535,11 +516,13 @@ class TestHookOutput(unittest.TestCase):
 
     def test_create_allow_output(self):
         """
-        Given an allow decision and a reason string
+        Given an allow verdict
         When create_hook_output() builds the response
-        Then the hookSpecificOutput carries decision 'allow' and the given reason
+        Then the hookSpecificOutput carries decision 'allow' and the verdict's reason
         """
-        output = create_hook_output("allow", "Command matches allow pattern")
+        output = create_hook_output(
+            RuntimeVerdict(decision="allow", reason="Command matches allow pattern")
+        )
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
         self.assertEqual(
             output["hookSpecificOutput"]["permissionDecisionReason"],
@@ -548,11 +531,13 @@ class TestHookOutput(unittest.TestCase):
 
     def test_create_deny_output(self):
         """
-        Given a deny decision and a reason string
+        Given a deny verdict
         When create_hook_output() builds the response
-        Then the hookSpecificOutput carries decision 'deny' and the given reason
+        Then the hookSpecificOutput carries decision 'deny' and the verdict's reason
         """
-        output = create_hook_output("deny", "Command matches deny pattern")
+        output = create_hook_output(
+            RuntimeVerdict(decision="deny", reason="Command matches deny pattern")
+        )
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(
             output["hookSpecificOutput"]["permissionDecisionReason"],
@@ -561,34 +546,44 @@ class TestHookOutput(unittest.TestCase):
 
     def test_no_additional_context_arg_omits_key_entirely(self):
         """
-        Given create_hook_output() called with NO additional_context argument
+        Given a verdict built with NO additional_context argument (defaults to None)
         When the output dict is inspected
         Then hookSpecificOutput has no 'additionalContext' key at all (not a
             key set to None -- an absent key, so old consumers see no new shape)
         """
-        output = create_hook_output("allow", "Command matches allow pattern")
+        output = create_hook_output(
+            RuntimeVerdict(decision="allow", reason="Command matches allow pattern")
+        )
         self.assertNotIn("additionalContext", output["hookSpecificOutput"])
 
     def test_none_additional_context_omits_key_entirely(self):
         """
-        Given create_hook_output() called with additional_context=None
+        Given a verdict with additional_context=None
         When the output dict is inspected
         Then hookSpecificOutput has no 'additionalContext' key
         """
         output = create_hook_output(
-            "allow", "Command matches allow pattern", additional_context=None
+            RuntimeVerdict(
+                decision="allow",
+                reason="Command matches allow pattern",
+                additional_context=None,
+            )
         )
         self.assertNotIn("additionalContext", output["hookSpecificOutput"])
 
     def test_empty_string_additional_context_omits_key_entirely(self):
         """
-        Given create_hook_output() called with additional_context="" (empty string)
+        Given a verdict with additional_context="" (empty string)
         When the output dict is inspected
         Then hookSpecificOutput has no 'additionalContext' key -- an empty
             string is treated the same as no enrichment, never injected
         """
         output = create_hook_output(
-            "allow", "Command matches allow pattern", additional_context=""
+            RuntimeVerdict(
+                decision="allow",
+                reason="Command matches allow pattern",
+                additional_context="",
+            )
         )
         self.assertNotIn("additionalContext", output["hookSpecificOutput"])
 
@@ -596,14 +591,16 @@ class TestHookOutput(unittest.TestCase):
         self,
     ):
         """
-        Given create_hook_output() called with a non-empty additional_context
+        Given a verdict with a non-empty additional_context
         When the output dict is inspected
         Then hookSpecificOutput carries 'additionalContext' with that exact text
         """
         output = create_hook_output(
-            "allow",
-            "Command matches allow pattern",
-            additional_context="prefer git status --short",
+            RuntimeVerdict(
+                decision="allow",
+                reason="Command matches allow pattern",
+                additional_context="prefer git status --short",
+            )
         )
         self.assertEqual(
             output["hookSpecificOutput"]["additionalContext"],
@@ -1301,7 +1298,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                             )
                             mock_log.assert_called_once()
                             self.assertEqual(
-                                mock_log.call_args.kwargs["permission_mode"],
+                                mock_log.call_args.args[0].permission_mode,
                                 "default",
                             )
 
@@ -1345,7 +1342,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
 
                             mock_log.assert_called_once()
                             self.assertIsNone(
-                                mock_log.call_args.kwargs["permission_mode"]
+                                mock_log.call_args.args[0].permission_mode
                             )
 
     def test_bash_takeover_enabled_default_no_match_fallback_asks_via_main(self):
@@ -1929,7 +1926,7 @@ class TestAdditionalContextThroughMain(unittest.TestCase):
                             )
                             mock_log.assert_called_once()
                             self.assertEqual(
-                                mock_log.call_args.kwargs["additional_context"],
+                                mock_log.call_args.args[0].additional_context,
                                 "prefer --short",
                             )
 
@@ -1990,7 +1987,7 @@ class TestAdditionalContextThroughMain(unittest.TestCase):
                             )
                             mock_log.assert_called_once()
                             self.assertEqual(
-                                mock_log.call_args.kwargs["additional_context"],
+                                mock_log.call_args.args[0].additional_context,
                                 "scratch only",
                             )
 
@@ -2351,82 +2348,276 @@ class TestLoadFilePathPatternsAdapter(unittest.TestCase):
             self.assertEqual(deny, ["/tmp/secret/**"])
 
 
-class TestParseCompoundMatchDetails(unittest.TestCase):
-    """
-    Test parsing of compound match details from reason strings.
-
-    TOO-45 R3 investigated replacing this with BashResolution.sub_matches
-    and found it is NOT a safe substitute for an ask-floor leaf (foreign
-    inline code / heredoc sink) -- see _parse_compound_match_details' own
-    docstring for the full reasoning. This function is deliberately
-    retained.
-    """
-
-    def test_parse_two_subcommands(self):
-        """
-        Given a compound allow reason listing two sub-command -> rule mappings
-        When _parse_compound_match_details parses it
-        Then it returns the two (command, rule) pairs in order
-        """
-        reason = "All 2 sub-commands allowed: [git status -> git *, git log -> git *]"
-        result = _parse_compound_match_details(reason)
-        self.assertEqual(result, [("git status", "git *"), ("git log", "git *")])
-
-    def test_parse_three_subcommands(self):
-        """
-        Given a compound allow reason listing three sub-command -> rule mappings
-        When _parse_compound_match_details parses it
-        Then it returns all three (command, rule) pairs in order
-        """
-        reason = "All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pattern -> grep *]"
-        result = _parse_compound_match_details(reason)
-        self.assertEqual(len(result), 3)
-        self.assertEqual(result[0], ("git status", "git *"))
-        self.assertEqual(result[1], ("cat file", "cat *"))
-        self.assertEqual(result[2], ("grep pattern", "grep *"))
-
-    def test_non_compound_reason_returns_none(self):
-        """
-        Given a simple (non-compound) command allow reason
-        When _parse_compound_match_details parses it
-        Then it returns None
-        """
-        reason = "Command matches allow pattern: git *"
-        result = _parse_compound_match_details(reason)
-        self.assertIsNone(result)
-
-    def test_simple_allow_reason_returns_none(self):
-        """
-        Given a simple path-match allow reason
-        When _parse_compound_match_details parses it
-        Then it returns None
-        """
-        reason = "Path matches allow pattern: /tmp/**"
-        result = _parse_compound_match_details(reason)
-        self.assertIsNone(result)
-
-
 class TestLogAllowedCommand(unittest.TestCase):
     """
     Test the _log_allowed_command helper function.
 
-    The single-leaf branch reads the structured matched_rule/provenance the
-    caller already resolved (see _matched_rule_for_single_command), rather
-    than extracting them by splitting *reason*. The compound branch is
-    unchanged (still driven by _parse_compound_match_details -- see that
-    function's docstring for why).
+    TOO-45 R1e: reads ``verdict.sub_matches`` directly instead of regex-
+    parsing ``verdict.reason``'s ``"All N sub-commands allowed: [...]"``
+    text (the retired ``_parse_compound_match_details``, which silently
+    dropped the audit-log entry for any sub-command whose allow came from
+    ``no_match_fallback`` -- see the module docstring / TOO-45 R1e
+    implementation report for the measured 813-of-975 under-logging this
+    fixed). Every test below drives the REAL ``resolve_bash_permission_detailed``
+    pipeline so ``sub_matches`` is populated the way production populates it,
+    rather than hand-constructing a verdict.
     """
+
+    @staticmethod
+    def _config(content):
+        """Build a single project-level toolguard_hook Configuration."""
+        return Configuration(
+            layers=(
+                ConfigLayer(
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/p/toolguard_hook.toml"),
+                        0,
+                    ),
+                    MappingProxyType(content),
+                ),
+            )
+        )
 
     @patch("toolguard.hook.log_command")
     def test_simple_command_logs_matched_rule(self, mock_log):
         """
         Given a real Configuration allowing 'Bash(ls)' and the REAL
-            BashResolution produced by resolving the command 'ls' against it
+            RuntimeVerdict produced by resolving the command 'ls' against it
             (not a hand-picked matched_rule/provenance)
         When _log_allowed_command logs that resolution
-        Then log_command is called once with status 'executed' and the exact
-            matched rule and provenance the resolver itself attributed --
-            pinning the real extraction pipeline, not a tautology
+        Then log_command is called once with a LogRecord carrying status
+            'executed' and the exact matched rule and provenance the
+            resolver itself attributed -- pinning the real extraction
+            pipeline, not a tautology
+        """
+        config = self._config({"permissions": {"allow": ["Bash(ls)"], "deny": []}})
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed("ls", config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+
+        _log_allowed_command(result, "ls", "main", {})
+        mock_log.assert_called_once_with(
+            LogRecord(
+                command_str="ls",
+                status="executed",
+                matched_rule="ls",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="main",
+                permission_mode=None,
+                additional_context=None,
+            ),
+            config={},
+        )
+
+    @patch("toolguard.hook.log_command")
+    def test_compound_command_logs_per_subcommand(self, mock_log):
+        """
+        Given a real Configuration allowing 'Bash(git *)' and the compound
+            command 'git status && git log'
+        When _log_allowed_command logs the REAL resolution
+        Then log_command is called once per sub-command, each with its own
+            matched rule and provenance -- one UnitVerdict per sub-command
+        """
+        config = self._config({"permissions": {"allow": ["Bash(git *)"], "deny": []}})
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "git status && git log", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(len(result.sub_matches), 2)
+
+        _log_allowed_command(result, "git status && git log", "main", {})
+        self.assertEqual(mock_log.call_count, 2)
+        mock_log.assert_any_call(
+            LogRecord(
+                command_str="git status",
+                status="executed",
+                matched_rule="git *",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="main",
+                permission_mode=None,
+                additional_context=None,
+            ),
+            config={},
+        )
+        mock_log.assert_any_call(
+            LogRecord(
+                command_str="git log",
+                status="executed",
+                matched_rule="git *",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="main",
+                permission_mode=None,
+                additional_context=None,
+            ),
+            config={},
+        )
+
+    @patch("toolguard.hook.log_command")
+    def test_compound_three_commands(self, mock_log):
+        """
+        Given a real Configuration allowing 'Bash(git *)', 'Bash(cat *)', and
+            'Bash(grep *)' and a three-sub-command compound command
+        When _log_allowed_command logs the REAL resolution
+        Then log_command is called three times, once per sub-command with its
+            own matched rule and the agent info threaded through
+        """
+        config = self._config(
+            {
+                "permissions": {
+                    "allow": ["Bash(git *)", "Bash(cat *)", "Bash(grep *)"],
+                    "deny": [],
+                }
+            }
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        command = "git status && cat file | grep pat"
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(len(result.sub_matches), 3)
+
+        _log_allowed_command(result, command, "sub-agent", {})
+        self.assertEqual(mock_log.call_count, 3)
+        mock_log.assert_any_call(
+            LogRecord(
+                command_str="git status",
+                status="executed",
+                matched_rule="git *",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="sub-agent",
+                permission_mode=None,
+                additional_context=None,
+            ),
+            config={},
+        )
+        mock_log.assert_any_call(
+            LogRecord(
+                command_str="cat file",
+                status="executed",
+                matched_rule="cat *",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="sub-agent",
+                permission_mode=None,
+                additional_context=None,
+            ),
+            config={},
+        )
+        mock_log.assert_any_call(
+            LogRecord(
+                command_str="grep pat",
+                status="executed",
+                matched_rule="grep *",
+                provenance="project: /p/toolguard_hook.toml",
+                extra_info="sub-agent",
+                permission_mode=None,
+                additional_context=None,
+            ),
+            config={},
+        )
+
+    @patch("toolguard.hook.log_command")
+    def test_mixed_rule_match_and_no_match_fallback_logs_one_entry_each(self, mock_log):
+        """
+        Given no_match_fallback='allow_with_warning' and a compound command
+            whose FIRST sub-command matches a real rule ('Bash(ls)') and
+            whose SECOND matches nothing at all (falls through to the
+            fallback)
+        When _log_allowed_command logs the REAL resolution
+        Then log_command is called TWICE -- once per sub-command -- which is
+            exactly the case the retired prose-parser dropped: the fallback
+            leaf's raw reason has no ' -> ' in it, so the old regex kept only
+            the FIRST entry. This is the regression test for the measured
+            813-of-975 under-logging defect (TOO-45 R1e).
+        """
+        config = self._config(
+            {
+                "no_match_fallback": "allow_with_warning",
+                "permissions": {"allow": ["Bash(ls)"], "deny": []},
+            }
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        command = "ls && cat README.md"
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(
+            len(result.sub_matches),
+            2,
+            "sub_matches must have one entry per sub-command",
+        )
+
+        _log_allowed_command(result, command, "main", {})
+        self.assertEqual(
+            mock_log.call_count,
+            2,
+            "one audit-log entry per sub-command -- the fallback-allowed "
+            "leaf must not be silently dropped",
+        )
+        logged = {
+            call.args[0].command_str: call.args[0] for call in mock_log.call_args_list
+        }
+        self.assertEqual(logged["ls"].matched_rule, "ls")
+        self.assertEqual(
+            logged["cat README.md"].matched_rule, FALLBACK_ALLOW_PLACEHOLDER
+        )
+
+    @patch("toolguard.hook.log_command")
+    def test_logged_matched_rule_never_carries_a_stray_bracket(self, mock_log):
+        """
+        Given a multi-leaf compound mixing a genuine rule match with an
+            undecidable_fallback escape-hatch leaf (the shape that used to
+            round-trip through the "All N sub-commands allowed: [...]"
+            bracketed summary text)
+        When _log_allowed_command logs the REAL resolution
+        Then no logged matched_rule value ends with a STRAY extra ']' after
+            the placeholder's own closing bracket -- the retired regex's
+            greedy capture used to append one, e.g.
+            '[fallback allow -- no rule matched]]' (measured on 79 corpus
+            cases, TOO-45 R1e). The placeholder's own single trailing ']' is
+            expected and correct; this pins the DOUBLE bracket is gone, not
+            that brackets vanished entirely.
+        """
+        config = self._config(
+            {
+                "undecidable_fallback": "allow_with_warning",
+                "permissions": {
+                    "allow": ["Bash(ls)", "Bash(python *)"],
+                    "deny": [],
+                },
+            }
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        command = 'ls && python -c "print(1)"'
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+
+        _log_allowed_command(result, command, "main", {})
+        for call in mock_log.call_args_list:
+            matched_rule = call.args[0].matched_rule
+            self.assertIsNotNone(matched_rule)
+            self.assertNotIn("]]", matched_rule)
+            self.assertFalse(matched_rule.endswith("]]"))
+
+    @patch("toolguard.hook.log_command")
+    def test_per_subcommand_provenance_is_present_in_the_compound_branch(
+        self, mock_log
+    ):
+        """
+        Given a compound command whose two sub-commands match rules declared
+            at two DIFFERENT config levels (so each carries its OWN
+            provenance)
+        When _log_allowed_command logs the REAL resolution
+        Then each logged entry carries its OWN sub-command's provenance --
+            previously the compound branch never logged provenance at all
+            (the docstring said so explicitly); TOO-45 R1e makes it available
         """
         config = Configuration(
             layers=(
@@ -2439,102 +2630,34 @@ class TestLogAllowedCommand(unittest.TestCase):
                         0,
                     ),
                     MappingProxyType(
-                        {"permissions": {"allow": ["Bash(ls)"], "deny": []}}
+                        {"permissions": {"allow": ["Bash(git *)"], "deny": []}}
+                    ),
+                ),
+                ConfigLayer(
+                    Provenance(
+                        "user", "toolguard_hook", "toml", Path("/home/u/tg.toml"), 1
+                    ),
+                    MappingProxyType(
+                        {"permissions": {"allow": ["Bash(cat *)"], "deny": []}}
                     ),
                 ),
             )
         )
         hd_deny, hd_allow = config.hard_deny("Bash")
-        result = resolve_bash_permission_detailed("ls", config, True, hd_deny, hd_allow)
+        command = "git status && cat file"
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
         self.assertEqual(result.decision, "allow")
 
-        _log_allowed_command(
-            "ls",
-            result.reason,
-            "main",
-            {},
-            matched_rule=result.matched_rule,
-            provenance=_provenance_brief(result.provenance),
+        _log_allowed_command(result, command, "main", {})
+        logged = {
+            call.args[0].command_str: call.args[0] for call in mock_log.call_args_list
+        }
+        self.assertEqual(
+            logged["git status"].provenance, "project: /p/toolguard_hook.toml"
         )
-        mock_log.assert_called_once_with(
-            "ls",
-            "executed",
-            matched_rule="ls",
-            provenance="project: /p/toolguard_hook.toml",
-            extra_info="main",
-            config={},
-            permission_mode=None,
-            additional_context=None,
-        )
-
-    @patch("toolguard.hook.log_command")
-    def test_compound_command_logs_per_subcommand(self, mock_log):
-        """
-        Given a compound allowed command with a two-sub-command allow reason
-        When _log_allowed_command runs
-        Then log_command is called once per sub-command with its own matched rule
-        """
-        reason = "All 2 sub-commands allowed: [git status -> git *, git log -> git *]"
-        _log_allowed_command("git status && git log", reason, "main", {})
-        self.assertEqual(mock_log.call_count, 2)
-        mock_log.assert_any_call(
-            "git status",
-            "executed",
-            matched_rule="git *",
-            extra_info="main",
-            config={},
-            permission_mode=None,
-            additional_context=None,
-        )
-        mock_log.assert_any_call(
-            "git log",
-            "executed",
-            matched_rule="git *",
-            extra_info="main",
-            config={},
-            permission_mode=None,
-            additional_context=None,
-        )
-
-    @patch("toolguard.hook.log_command")
-    def test_compound_three_commands(self, mock_log):
-        """
-        Given a compound allowed command with a three-sub-command allow reason
-        When _log_allowed_command runs
-        Then log_command is called three times, once per sub-command with its matched rule and agent
-        """
-        reason = "All 3 sub-commands allowed: [git status -> git *, cat file -> cat *, grep pat -> grep *]"
-        _log_allowed_command(
-            "git status && cat file | grep pat", reason, "sub-agent", {}
-        )
-        self.assertEqual(mock_log.call_count, 3)
-        mock_log.assert_any_call(
-            "git status",
-            "executed",
-            matched_rule="git *",
-            extra_info="sub-agent",
-            config={},
-            permission_mode=None,
-            additional_context=None,
-        )
-        mock_log.assert_any_call(
-            "cat file",
-            "executed",
-            matched_rule="cat *",
-            extra_info="sub-agent",
-            config={},
-            permission_mode=None,
-            additional_context=None,
-        )
-        mock_log.assert_any_call(
-            "grep pat",
-            "executed",
-            matched_rule="grep *",
-            extra_info="sub-agent",
-            config={},
-            permission_mode=None,
-            additional_context=None,
-        )
+        self.assertEqual(logged["cat file"].provenance, "user: /home/u/tg.toml")
 
 
 class TestHandleCommandToolAuditWiring(unittest.TestCase):
@@ -2573,10 +2696,11 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
         """
         Given a real Configuration allowing 'Bash(ls)'
         When _handle_command_tool resolves and logs 'ls'
-        Then log_command is called with matched_rule EXACTLY 'ls' and
-            provenance EXACTLY the config file's provenance -- a mutation
-            that swaps the matched_rule/provenance arguments at the
-            _log_allowed_command call site must fail this test
+        Then log_command is called with a LogRecord whose matched_rule is
+            EXACTLY 'ls' and whose provenance is EXACTLY the config file's
+            provenance -- a mutation that swaps the matched_rule/provenance
+            arguments at the _log_allowed_command call site must fail this
+            test
         """
         config = self._config(
             {
@@ -2584,14 +2708,12 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
                 "permissions": {"allow": ["Bash(ls)"], "deny": []},
             }
         )
-        decision, _reason, _ctx = _handle_command_tool(
-            {"command": "ls"}, config, {}, "main", None
-        )
-        self.assertEqual(decision, "allow")
+        verdict = _handle_command_tool({"command": "ls"}, config, {}, "main", None)
+        self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
-        kwargs = mock_log.call_args.kwargs
-        self.assertEqual(kwargs["matched_rule"], "ls")
-        self.assertEqual(kwargs["provenance"], "project: /p/toolguard_hook.toml")
+        record = mock_log.call_args.args[0]
+        self.assertEqual(record.matched_rule, "ls")
+        self.assertEqual(record.provenance, "project: /p/toolguard_hook.toml")
 
     @patch("toolguard.hook.log_command")
     def test_plain_deny_logs_the_exact_violated_rule_and_provenance(self, mock_log):
@@ -2599,8 +2721,9 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
         Given a real Configuration denying 'Bash(rm -rf *)' (allowing
             everything else)
         When _handle_command_tool resolves and logs 'rm -rf /tmp/x'
-        Then log_command is called with violated_rules EXACTLY
-            ['rm -rf *'] and provenance EXACTLY the config file's provenance
+        Then log_command is called with a LogRecord whose violated_rules is
+            EXACTLY ['rm -rf *'] and whose provenance is EXACTLY the config
+            file's provenance
         """
         config = self._config(
             {
@@ -2608,14 +2731,14 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
                 "permissions": {"allow": ["Bash(*)"], "deny": ["Bash(rm -rf *)"]},
             }
         )
-        decision, _reason, _ctx = _handle_command_tool(
+        verdict = _handle_command_tool(
             {"command": "rm -rf /tmp/x"}, config, {}, "main", None
         )
-        self.assertEqual(decision, "deny")
+        self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
-        call = mock_log.call_args
-        self.assertEqual(call.args[2], ["rm -rf *"])
-        self.assertEqual(call.kwargs["provenance"], "project: /p/toolguard_hook.toml")
+        record = mock_log.call_args.args[0]
+        self.assertEqual(record.violated_rules, ["rm -rf *"])
+        self.assertEqual(record.provenance, "project: /p/toolguard_hook.toml")
 
     @patch("toolguard.hook.log_command")
     def test_escape_hatch_allow_logs_placeholder_and_no_provenance(self, mock_log):
@@ -2625,13 +2748,16 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             ONLY via the escape hatch, even though its truncated stub
             genuinely matches 'Bash(python *)')
         When _handle_command_tool resolves and logs 'python -c "print(1)"'
-        Then log_command's matched_rule is the fallback placeholder (never
-            the misleading real 'python *' stub match) AND provenance is
-            None -- verified live that BashResolution.matched_rule/
-            provenance ARE the real, misleading 'python *' match at this
-            point (see resolve.py::_deciding_sub_match's docstring), so this
-            pins the allow-branch suppression guard in
-            hook.py::_log_allowed_command, not merely an already-None value
+        Then the logged LogRecord's matched_rule is the fallback placeholder
+            (never the misleading real 'python *' stub match) AND provenance
+            is None -- TOO-45 R1e fixed this at the SOURCE: the leaf's
+            recorded UnitVerdict (and therefore RuntimeVerdict.matched_rule/
+            provenance) is already None here, not the real 'python *' stub
+            match hook.py used to have to re-classify away at log time (see
+            resolve.py::_deciding_sub_match's docstring for the before/after).
+            This still pins hook.py::_log_allowed_command logging the
+            placeholder via UnitVerdict.fallback_kind, not merely forwarding
+            an already-None value from a differently-broken source.
         """
         config = self._config(
             {
@@ -2643,14 +2769,14 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
                 },
             }
         )
-        decision, _reason, _ctx = _handle_command_tool(
+        verdict = _handle_command_tool(
             {"command": 'python -c "print(1)"'}, config, {}, "main", None
         )
-        self.assertEqual(decision, "allow")
+        self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
-        kwargs = mock_log.call_args.kwargs
-        self.assertEqual(kwargs["matched_rule"], FALLBACK_ALLOW_PLACEHOLDER)
-        self.assertIsNone(kwargs["provenance"])
+        record = mock_log.call_args.args[0]
+        self.assertEqual(record.matched_rule, FALLBACK_ALLOW_PLACEHOLDER)
+        self.assertIsNone(record.provenance)
 
     @patch("toolguard.hook.log_command")
     def test_escape_hatch_deny_logs_placeholder_and_no_provenance(self, mock_log):
@@ -2662,14 +2788,20 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
         When _handle_command_tool resolves and logs
             'python -c "print(1)" && rm foo'
         Then the compound denies via the escape-hatch leaf (strictest-wins
-            picks the first denied leaf) while BashResolution.matched_rule/
-            provenance are attributed to the OTHER leaf's genuine 'rm *'
-            match (verified live -- _deciding_sub_match picks whichever
-            sub_match's OWN recorded decision equals the final one); the
-            logged violated_rules must still be the placeholder and
-            provenance must still be None, proving the deny-branch
-            suppression guard in hook.py::_log_non_allow_decision is
-            reason-driven, not merely forwarding an already-None value
+            picks the first denied leaf), and RuntimeVerdict.matched_rule/
+            provenance are BOTH None -- TOO-45 R1e fixed a misattribution
+            here: before the fix, the escape-hatch leaf's stale sub_match
+            still said 'allow' (its pre-floor stub decision), so
+            _deciding_sub_match skipped past it and mis-credited the deny to
+            the OTHER leaf's genuine 'rm *' match/provenance instead. Now the
+            escape-hatch leaf's own UnitVerdict correctly says 'deny', so
+            _deciding_sub_match attributes the deny to THAT leaf (matched_rule
+            None, provenance None) -- the correct leaf, not merely a
+            correct-looking value from the wrong one. The logged
+            LogRecord's violated_rules must still be the placeholder and
+            provenance must still be None either way, proving the
+            deny-branch suppression guard in hook.py::_log_non_allow_decision
+            is reason-driven, not merely forwarding an already-None value.
         """
         config = self._config(
             {
@@ -2681,14 +2813,14 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
                 },
             }
         )
-        decision, _reason, _ctx = _handle_command_tool(
+        verdict = _handle_command_tool(
             {"command": 'python -c "print(1)" && rm foo'}, config, {}, "main", None
         )
-        self.assertEqual(decision, "deny")
+        self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
-        call = mock_log.call_args
-        self.assertEqual(call.args[2], [FALLBACK_DENY_PLACEHOLDER])
-        self.assertIsNone(call.kwargs["provenance"])
+        record = mock_log.call_args.args[0]
+        self.assertEqual(record.violated_rules, [FALLBACK_DENY_PLACEHOLDER])
+        self.assertIsNone(record.provenance)
 
 
 class TestHandleFilePathToolAuditWiring(unittest.TestCase):
@@ -2724,8 +2856,9 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
         Given a real Configuration allowing 'Read(/tmp/x/**)'
         When _handle_file_path_tool resolves and logs a Read of
             '/tmp/x/foo.txt'
-        Then log_command is called with matched_rule EXACTLY '/tmp/x/**'
-            and provenance EXACTLY the config file's provenance
+        Then log_command is called with a LogRecord whose matched_rule is
+            EXACTLY '/tmp/x/**' and whose provenance is EXACTLY the config
+            file's provenance
         """
         config = self._config(
             {
@@ -2733,14 +2866,14 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
                 "permissions": {"allow": ["Read(/tmp/x/**)"], "deny": []},
             }
         )
-        decision, _reason, _ctx = _handle_file_path_tool(
+        verdict = _handle_file_path_tool(
             "Read", {"file_path": "/tmp/x/foo.txt"}, config, {}, "main", None
         )
-        self.assertEqual(decision, "allow")
+        self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
-        kwargs = mock_log.call_args.kwargs
-        self.assertEqual(kwargs["matched_rule"], "/tmp/x/**")
-        self.assertEqual(kwargs["provenance"], "project: /p/toolguard_hook.toml")
+        record = mock_log.call_args.args[0]
+        self.assertEqual(record.matched_rule, "/tmp/x/**")
+        self.assertEqual(record.provenance, "project: /p/toolguard_hook.toml")
 
     @patch("toolguard.hook.log_command")
     def test_file_path_deny_logs_the_exact_violated_rule_and_provenance(self, mock_log):
@@ -2749,9 +2882,9 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
             'Read(/secrets/**)'
         When _handle_file_path_tool resolves and logs a Read of
             '/secrets/x'
-        Then log_command is called with violated_rules EXACTLY
-            ['/secrets/**'] and provenance EXACTLY the config file's
-            provenance
+        Then log_command is called with a LogRecord whose violated_rules is
+            EXACTLY ['/secrets/**'] and whose provenance is EXACTLY the
+            config file's provenance
         """
         config = self._config(
             {
@@ -2762,14 +2895,14 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
                 },
             }
         )
-        decision, _reason, _ctx = _handle_file_path_tool(
+        verdict = _handle_file_path_tool(
             "Read", {"file_path": "/secrets/x"}, config, {}, "main", None
         )
-        self.assertEqual(decision, "deny")
+        self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
-        call = mock_log.call_args
-        self.assertEqual(call.args[2], ["/secrets/**"])
-        self.assertEqual(call.kwargs["provenance"], "project: /p/toolguard_hook.toml")
+        record = mock_log.call_args.args[0]
+        self.assertEqual(record.violated_rules, ["/secrets/**"])
+        self.assertEqual(record.provenance, "project: /p/toolguard_hook.toml")
 
 
 class TestHookArgparseAndIsatty(unittest.TestCase):

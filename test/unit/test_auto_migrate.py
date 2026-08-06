@@ -485,7 +485,7 @@ class TestRunAutoMigration(unittest.TestCase):
     @patch("toolguard.config_divergence.get_native_permissions")
     @patch("toolguard.config_divergence.get_toolguard_permissions")
     @patch("toolguard.config_divergence.find_divergent_patterns")
-    @patch("toolguard.scripts.migrate_permissions.migrate")
+    @patch("toolguard.auto_migrate.migrate")
     @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_success(
         self,
@@ -548,7 +548,7 @@ class TestRunAutoMigration(unittest.TestCase):
     @patch("toolguard.config_divergence.get_native_permissions")
     @patch("toolguard.config_divergence.get_toolguard_permissions")
     @patch("toolguard.config_divergence.find_divergent_patterns")
-    @patch("toolguard.scripts.migrate_permissions.migrate")
+    @patch("toolguard.auto_migrate.migrate")
     @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_custom_backup_dir(
         self,
@@ -613,7 +613,7 @@ class TestRunAutoMigration(unittest.TestCase):
     @patch("toolguard.config_divergence.get_native_permissions")
     @patch("toolguard.config_divergence.get_toolguard_permissions")
     @patch("toolguard.config_divergence.find_divergent_patterns")
-    @patch("toolguard.scripts.migrate_permissions.migrate")
+    @patch("toolguard.auto_migrate.migrate")
     @patch("toolguard.config.discover_config_files")
     def test_run_auto_migration_migrate_failure(
         self,

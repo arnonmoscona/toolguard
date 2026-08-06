@@ -14,6 +14,7 @@ resolves to ASK rather than a silent allow of an undecomposed blob.
 import logging
 from typing import Callable, List, Optional, Tuple
 
+from toolguard.config_types import RuntimeVerdict, UnitVerdict
 from toolguard.parser.command_extractor import (
     INLINE_FLAG_TOKEN_RE as _INLINE_FLAG_TOKEN_RE,
 )
@@ -26,6 +27,33 @@ from toolguard.parser.multiline import (
 from toolguard.permissions import check_permission
 
 logger = logging.getLogger(__name__)
+
+
+#: Pure decision-only probe of a single sub-command's outer-command STUB,
+#: used ONLY by :func:`_resolve_leaf_detailed`'s ask-floor branch (TOO-45
+#: R1e). Unlike the ``resolve_one`` contract (a plain 3-tuple, relied on by
+#: ~18 test-authored closures and therefore frozen), this callable exposes
+#: ``matched_rule``/``provenance`` too -- needed so the ask-floor branch can
+#: tell "the stub genuinely matched a deny/ask rule" (a real, attributable
+#: match) apart from "the stub happened to match an allow rule that the
+#: escape hatch overrides regardless" (never attributable). It must have NO
+#: side effect on ``sub_matches`` -- see :data:`RecordUnitVerdict`, the
+#: callback that records the leaf's TRUE final outcome once the floor is
+#: known.
+ResolveOuterProbe = Callable[
+    [str], Tuple[str, str, Optional[str], Optional[str], Optional[object]]
+]
+
+#: Records ONE :class:`~toolguard.config_types.UnitVerdict` for a leaf or
+#: undecidable segment whose true final outcome ``resolve_one``'s own
+#: recording (if any) does not or cannot reflect (TOO-45 R1e) -- an ask-floor
+#: leaf (whose ``resolve_one``/probe call, if made at all, only ever sees the
+#: truncated outer-command stub) or an :class:`~toolguard.parser.multiline.UndecidableSegment`
+#: (which never calls ``resolve_one`` at all). Optional everywhere it is
+#: threaded through: ``None`` for callers with no ``sub_matches`` concept at
+#: all (e.g. :func:`check_compound_permission`'s legacy ``resolve_one``,
+#: which wraps :func:`~toolguard.permissions.check_permission`).
+RecordUnitVerdict = Callable[[UnitVerdict], None]
 
 
 #: Maximum length (in characters) of the command portion shown in the
@@ -158,7 +186,7 @@ FALLBACK_DENY_PLACEHOLDER = "[fallback deny -- no rule matched]"
 #: shorter marker must never shadow the longer one; the ``deny`` marker has no
 #: such prefix collision, so its position relative to the ``allow`` ones does
 #: not matter. The ``allow``-side settings: the ``no_match_fallback`` wording
-#: is built by :meth:`~toolguard.config.Configuration.resolve_permission_detailed`
+#: is built by :func:`~toolguard.permission_resolution.resolve_permission_detailed`
 #: and reaches this module through ``resolve_one``; the ``undecidable_fallback``
 #: wording is built by this module itself and reaches ``hook.py`` as the FINAL
 #: reason of a single-leaf command (TOO-19 m5). The ``deny``-side marker
@@ -169,8 +197,8 @@ FALLBACK_DENY_PLACEHOLDER = "[fallback deny -- no rule matched]"
 #: undecidable_fallback=deny (...): <display>"`` -- with a single substring,
 #: since both contain it verbatim. There is no ``no_match_fallback=deny``
 #: marker: that reason (``"Command does not match any allow patterns"``,
-#: built by ``config.py``) never contains a ``": "`` at all, so it was never
-#: at risk of the fabrication this guards against.
+#: built by ``permission_resolution.py``) never contains a ``": "`` at all,
+#: so it was never at risk of the fabrication this guards against.
 _FALLBACK_REASON_MARKERS = (
     ("no_match_fallback=allow_with_warning", "warned", "allow"),
     ("undecidable_fallback=allow_with_warning", "warned", "allow"),
@@ -191,8 +219,8 @@ def fallback_kind_for_reason(decision: str, reason: str) -> Optional[str]:
     - an ordinary (non-ASK-floor) sub-command's ``resolve_one`` result. That
       callable's return type is a plain 3-tuple relied on by ~18 test-authored
       closures (see the TOO-19 implementation report), so the richer
-      ``ResolvedDecision.fallback_warning`` bit computed inside
-      :meth:`~toolguard.config.Configuration.resolve_permission_detailed` never
+      ``RuntimeVerdict.fallback_warning`` bit computed inside
+      :func:`~toolguard.permission_resolution.resolve_permission_detailed` never
       reaches this module -- only its already-tested, verbatim reason wording
       does. Only ``no_match_fallback`` markers can appear on that path.
     - ``hook.py``'s audit-log branch for a SINGLE-leaf command (TOO-19 m5 for
@@ -238,7 +266,9 @@ def _resolve_leaf_detailed(
     leaf: LeafCommand,
     resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str], Optional[str]]:
+    resolve_outer: Optional[ResolveOuterProbe] = None,
+    record_unit: Optional[RecordUnitVerdict] = None,
+) -> UnitVerdict:
     """Resolve a single leaf command through the grammar splitter then resolve_one.
 
     The leaf may still be a compound single-line command (``git status && echo x``).
@@ -264,7 +294,7 @@ def _resolve_leaf_detailed(
     genuinely-floored path (the floor actually raised the verdict) the rule
     match no longer determines the verdict (the floor does), so the context
     is dropped, consistent with how
-    :meth:`~toolguard.config.Configuration._apply_parse_failure_ask_floor`
+    :func:`~toolguard.permission_resolution._apply_ask_floor`
     clears it for the config-level ASK floor. TOO-19 code review m1: when
     ``resolve_one`` already returned ``'ask'`` from a real ``ask`` rule and
     the floor made no change (``floored == decision``), the floor decided
@@ -300,10 +330,33 @@ def _resolve_leaf_detailed(
             :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`.
             Defaults to ``'ask'`` so every pre-TOO-19 caller/test is
             unaffected.
+        resolve_outer: TOO-45 R1e. Pure decision-only probe of the leaf's
+            truncated outer-command stub, used ONLY on the ask-floor path
+            below INSTEAD of ``resolve_one`` -- unlike ``resolve_one`` it
+            exposes ``matched_rule``/``provenance`` and has no
+            ``sub_matches`` side effect, so the caller (:mod:`toolguard.resolve`)
+            never records a UnitVerdict for the stub itself; only the leaf's
+            TRUE final outcome is recorded, via *record_unit* below. Falls
+            back to wrapping ``resolve_one`` (with ``matched_rule``/
+            ``provenance`` unknown, hence ``None``) when not given, so every
+            caller that does not care about ``sub_matches`` correctness
+            (e.g. :func:`check_compound_permission`'s legacy path) is
+            unaffected.
+        record_unit: TOO-45 R1e. When given, called exactly once for an
+            ask-floor leaf with the leaf's real, full text and its TRUE
+            final decision/matched_rule/provenance/fallback_kind -- see
+            :data:`RecordUnitVerdict`. ``None`` (the default) is a no-op,
+            matching every caller that has no ``sub_matches`` list to
+            append to.
 
     Returns:
-        ``(decision, reason, additional_context, fallback_kind)`` for the
-        leaf, with the floor applied.
+        A :class:`~toolguard.config_types.UnitVerdict` for the leaf, with the
+        floor applied, and ``sub_command`` set to the leaf's real, full text
+        (TOO-45 R1e finishing pass -- this is the SAME object passed to
+        *record_unit* below on every branch that calls it; the two were
+        previously built separately from a short-lived second type,
+        ``LeafOutcome``, that carried no ``sub_command``/``matched_rule``/
+        ``provenance`` of its own).
     """
     # For ASK-floor leaves (foreign inline code, foreign heredoc sinks),
     # we need to check for explicit denies but floor allow/ask per
@@ -313,9 +366,27 @@ def _resolve_leaf_detailed(
     # payload) for deny checking.
     if leaf.ask_floor:
         outer_cmd = _extract_outer_command(leaf.text)
-        decision, reason, additional_context = resolve_one(outer_cmd)
+        probe = resolve_outer or (lambda cmd: (*resolve_one(cmd), None, None))
+        decision, reason, additional_context, matched_rule, provenance = probe(
+            outer_cmd
+        )
         if decision == "deny":
-            return "deny", reason, additional_context, None
+            # The stub's own deny IS the deciding match -- a real rule fired,
+            # so its matched_rule/provenance are genuine attributions, not an
+            # escape hatch (TOO-45 R1e). Only the recorded sub_command text
+            # needs correcting, from the stub to the leaf's real, full text.
+            unit = UnitVerdict(
+                sub_command=leaf.text,
+                decision="deny",
+                matched_rule=matched_rule,
+                provenance=provenance,
+                reason=reason,
+                additional_context=additional_context,
+                fallback_kind=None,
+            )
+            if record_unit is not None:
+                record_unit(unit)
+            return unit
         # allow or ask -> floor per undecidable_fallback.  Bound the command
         # shown in the reason so an unbounded inline-code blob never reaches
         # the permission prompt (the matching above still used the
@@ -329,25 +400,64 @@ def _resolve_leaf_detailed(
                 # explicit ask rule already decided 'ask' on its own before
                 # the floor was even consulted. Preserve the rule's own
                 # reason and context rather than overwriting them with floor
-                # language that misattributes the verdict's real cause.
-                return "ask", reason, additional_context, None
+                # language that misattributes the verdict's real cause. The
+                # rule genuinely decided, so matched_rule/provenance are
+                # genuine attributions here too (TOO-45 R1e) -- only the
+                # sub_command text needs correcting.
+                unit = UnitVerdict(
+                    sub_command=leaf.text,
+                    decision="ask",
+                    matched_rule=matched_rule,
+                    provenance=provenance,
+                    reason=reason,
+                    additional_context=additional_context,
+                    fallback_kind=None,
+                )
+                if record_unit is not None:
+                    record_unit(unit)
+                return unit
             # Genuine floor case: undecidable_fallback raised 'allow' to
             # 'ask'. Wording preserved verbatim from before TOO-19 so
-            # existing tests/log parsing do not churn.
-            return (
-                "ask",
-                f"ASK floor applied (inline/heredoc foreign code): {display_cmd}",
-                None,
-                None,
+            # existing tests/log parsing do not churn. The floor, not
+            # whatever the stub matched, decided -- matched_rule/provenance
+            # must NOT carry the stub's match (TOO-45 R1e).
+            unit = UnitVerdict(
+                sub_command=leaf.text,
+                decision="ask",
+                matched_rule=None,
+                provenance=None,
+                reason=f"ASK floor applied (inline/heredoc foreign code): {display_cmd}",
+                additional_context=None,
+                fallback_kind=None,
             )
+            if record_unit is not None:
+                record_unit(unit)
+            return unit
         if floored == "deny":
-            return (
-                "deny",
-                "Denied by undecidable_fallback=deny (inline/heredoc foreign "
-                f"code, unable to safely verify): {display_cmd}",
-                None,
-                None,
+            # TOO-45 R1e finishing pass: fallback_kind='denied' here (unlike
+            # the plain None the LeafOutcome-typed return used before this
+            # merge, even though record_unit's own value was already
+            # 'denied') -- safe because the OUTER combine (_combine_strictest)
+            # discards
+            # fallback_kind entirely for any non-allow decision (see its
+            # `denied = [... for ..., _fk in results ...]` unpacking below);
+            # a real, attributable tag is strictly more informative for the
+            # audit record with no behavioural change to the compound reason.
+            unit = UnitVerdict(
+                sub_command=leaf.text,
+                decision="deny",
+                matched_rule=None,
+                provenance=None,
+                reason=(
+                    "Denied by undecidable_fallback=deny (inline/heredoc "
+                    f"foreign code, unable to safely verify): {display_cmd}"
+                ),
+                additional_context=None,
+                fallback_kind="denied",
             )
+            if record_unit is not None:
+                record_unit(unit)
+            return unit
         # floored == "allow": undecidable_fallback is either 'allow_with_warning'
         # or 'allow' (TOO-19) -- both are the deliberate no-floor escape hatch,
         # differing only in whether a warning is logged. Branch on the ACTUAL
@@ -355,27 +465,54 @@ def _resolve_leaf_detailed(
         # 'allow' never claims a warning was emitted. fallback_kind is known
         # STRUCTURALLY here -- no text matching needed (TOO-19 code review M1).
         if undecidable_fallback == "allow_with_warning":
-            return (
-                "allow",
-                "Allowed with a warning by undecidable_fallback=allow_with_warning "
-                f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}",
-                None,
-                "warned",
+            unit = UnitVerdict(
+                sub_command=leaf.text,
+                decision="allow",
+                matched_rule=None,
+                provenance=None,
+                reason=(
+                    "Allowed with a warning by undecidable_fallback=allow_with_warning "
+                    f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
+                ),
+                additional_context=None,
+                fallback_kind="warned",
             )
-        return (
-            "allow",
-            "Allowed with no warning by undecidable_fallback=allow "
-            f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}",
-            None,
-            "silent",
+            if record_unit is not None:
+                record_unit(unit)
+            return unit
+        unit = UnitVerdict(
+            sub_command=leaf.text,
+            decision="allow",
+            matched_rule=None,
+            provenance=None,
+            reason=(
+                "Allowed with no warning by undecidable_fallback=allow "
+                f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
+            ),
+            additional_context=None,
+            fallback_kind="silent",
         )
+        if record_unit is not None:
+            record_unit(unit)
+        return unit
 
     # Use the PEG grammar to further split the leaf into sub-commands
     sub_commands = extract_commands(leaf.text)
     if not sub_commands:
-        # Empty leaf -- treat as no-op; should not normally happen
+        # Empty leaf -- treat as no-op; should not normally happen. Not
+        # recorded via record_unit (unchanged from before the LeafOutcome/
+        # UnitVerdict merge): this is a defensive edge case, not a real
+        # sub-command that ran.
         logger.debug("Empty leaf command after grammar extraction: %r", leaf.text)
-        return "deny", "No valid commands found in leaf", None, None
+        return UnitVerdict(
+            sub_command=leaf.text,
+            decision="deny",
+            matched_rule=None,
+            provenance=None,
+            reason="No valid commands found in leaf",
+            additional_context=None,
+            fallback_kind=None,
+        )
 
     # Resolve each sub-command and build (decision, reason, cmd, context,
     # fallback_kind) quintuples. For deny/ask, pre-format the reason with the
@@ -409,12 +546,22 @@ def _resolve_leaf_detailed(
     # (see _combine_strictest), so the outer combine needs only to know
     # whether to count this leaf toward the WARNING stream, not to re-gate
     # fabrication for it.
-    decision, reason, additional_context, fallback_warning = _combine_strictest(quads)
-    return (
-        decision,
-        reason,
-        additional_context,
-        ("warned" if fallback_warning else None),
+    combined = _combine_strictest(quads)
+    # No single decider to attribute across potentially several inner
+    # sub-commands (mirrors resolve.py's _deciding_sub_match for the same
+    # reason) -- matched_rule/provenance stay None. Not recorded via
+    # record_unit: each inner sub-command was already recorded independently
+    # by resolve_one's own side effect (see the loop above), so this
+    # aggregate-for-the-whole-leaf value has no separate sub_matches entry of
+    # its own.
+    return UnitVerdict(
+        sub_command=leaf.text,
+        decision=combined.decision,
+        matched_rule=None,
+        provenance=None,
+        reason=combined.reason,
+        additional_context=combined.additional_context,
+        fallback_kind=("warned" if combined.fallback_warning else None),
     )
 
 
@@ -422,15 +569,27 @@ def _resolve_leaf(
     leaf: LeafCommand,
     resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str]]:
-    """Resolve a single leaf command -- backwards-compatible 3-tuple wrapper.
+) -> RuntimeVerdict:
+    """Resolve a single leaf command -- thin wrapper dropping the structured detail.
 
     Thin wrapper around :func:`_resolve_leaf_detailed` (TOO-19 code review
-    M1) that drops the structured ``fallback_kind`` 4th element. Kept as a
-    separate, unchanged-signature function because it is called directly (not
+    M1) that drops the ``fallback_kind`` element. Kept as a separate,
+    unchanged-PARAMETER-signature function because it is called directly (not
     just transitively) by many existing tests; :func:`resolve_compound_permission_detailed`
     calls :func:`_resolve_leaf_detailed` directly instead, to get the
     structured flag without widening this function's contract.
+
+    TOO-45 R1e: returns a :class:`~toolguard.config_types.RuntimeVerdict`
+    instead of a bare ``(decision, reason, additional_context)`` 3-tuple --
+    reused rather than a new type since this genuinely IS "the runtime
+    verdict for this one leaf" (``matched_rule``/``provenance``/etc. simply
+    stay at their defaults, the same pattern
+    :func:`~toolguard.permission_resolution._apply_ask_floor` already uses
+    for a comparable partial construction). Callers unpacking this as a
+    3-tuple must move to attribute access (``.decision``/``.reason``/
+    ``.additional_context``) -- neither ``RuntimeVerdict`` nor any other
+    verdict dataclass in this codebase supports tuple unpacking (TOO-45
+    R1a).
 
     Args:
         leaf: A :class:`~toolguard.parser.multiline.LeafCommand` to resolve.
@@ -440,13 +599,15 @@ def _resolve_leaf(
             :func:`_resolve_leaf_detailed`.
 
     Returns:
-        ``(decision, reason, additional_context)`` for the leaf, with the
-        floor applied.
+        A :class:`~toolguard.config_types.RuntimeVerdict` for the leaf, with
+        the floor applied.
     """
-    decision, reason, additional_context, _fallback_kind = _resolve_leaf_detailed(
-        leaf, resolve_one, undecidable_fallback
+    outcome = _resolve_leaf_detailed(leaf, resolve_one, undecidable_fallback)
+    return RuntimeVerdict(
+        decision=outcome.decision,
+        reason=outcome.reason,
+        additional_context=outcome.additional_context,
     )
-    return decision, reason, additional_context
 
 
 def _extract_outer_command(leaf_text: str) -> str:
@@ -646,7 +807,7 @@ def cap_context_words(
 
 def _combine_strictest(
     results: List[Tuple[str, str, str, Optional[str], Optional[str]]],
-) -> Tuple[str, str, Optional[str], bool]:
+) -> RuntimeVerdict:
     """Combine (decision, reason, leaf_text, context, fallback_kind) tuples, strictest-wins.
 
     Priority: deny > ask > allow.
@@ -683,12 +844,12 @@ def _combine_strictest(
     fabricated pattern name; this is exactly what previously logged
     ``python -c "print(1)" -> python -c`` for a command no ``python -c`` rule
     ever matched). Such leaves get an explicit, honest placeholder instead: an
-    absent/generic record is preferred over a false one. The placeholder is
-    deliberately comma-free: ``hook.py``'s ``_parse_compound_match_details``
-    splits this same bracketed list on ``", "`` to build its own per-sub-command
-    log breakdown, so a placeholder containing a comma would itself be
-    mis-split into two bogus entries there -- caught by end-to-end
-    verification against the real hook, not by this module's own tests.
+    absent/generic record is preferred over a false one. This placeholder
+    text is deliberately comma-free even though nothing downstream re-splits
+    it any more (TOO-45 R1e retired the ``hook.py`` reason-parse that used
+    to): keeping the two placeholders (see :data:`FALLBACK_DENY_PLACEHOLDER`)
+    to the same shape is cheaper than reasoning about whether that stays
+    true.
 
     Args:
         results: List of ``(decision, reason, leaf_text, additional_context,
@@ -698,7 +859,15 @@ def _combine_strictest(
             :func:`_resolve_leaf_detailed`).
 
     Returns:
-        ``(decision, reason, additional_context, fallback_warning)``.
+        A :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45 R1e;
+        reused rather than a new type -- ``decision``/``reason``/
+        ``additional_context``/``fallback_warning`` is exactly this
+        function's shape) with ``matched_rule``/``provenance``/``sub_matches``
+        left at their defaults: this function combines already-decided
+        REASON TEXT for the verdict's own wording, never structured
+        per-sub-command data -- that lives on ``RuntimeVerdict.sub_matches``,
+        populated independently by :mod:`toolguard.resolve`'s recording
+        closures (see :data:`RecordUnitVerdict`), not by this function.
     """
     denied = [(d, r, t, c) for d, r, t, c, _fk in results if d == "deny"]
     asked = [(d, r, t, c) for d, r, t, c, _fk in results if d == "ask"]
@@ -706,10 +875,10 @@ def _combine_strictest(
 
     if denied:
         _d, r, _t, c = denied[0]
-        return "deny", r, c, False
+        return RuntimeVerdict(decision="deny", reason=r, additional_context=c)
     if asked:
         _d, r, _t, c = asked[0]
-        return "ask", r, c, False
+        return RuntimeVerdict(decision="ask", reason=r, additional_context=c)
     if allowed:
         accumulated_context = _accumulate_contexts(
             [c for _d, _r, _t, c, _fk in allowed]
@@ -717,7 +886,12 @@ def _combine_strictest(
         fallback_warning = any(fk == "warned" for _d, _r, _t, _c, fk in allowed)
         if len(allowed) == 1:
             _d, r, _t, _c, _fk = allowed[0]
-            return "allow", r, accumulated_context, fallback_warning
+            return RuntimeVerdict(
+                decision="allow",
+                reason=r,
+                additional_context=accumulated_context,
+                fallback_warning=fallback_warning,
+            )
         # Multiple allowed leaves: build "cmd -> pattern" summary.
         match_details = []
         for _d, r, leaf_text, _c, fk in allowed:
@@ -747,13 +921,13 @@ def _combine_strictest(
                 match_details.append(f"{cmd_part} -> {pattern_part}")
             else:
                 match_details.append(r)
-        return (
-            "allow",
-            f"All {len(allowed)} sub-commands allowed: [{', '.join(match_details)}]",
-            accumulated_context,
-            fallback_warning,
+        return RuntimeVerdict(
+            decision="allow",
+            reason=f"All {len(allowed)} sub-commands allowed: [{', '.join(match_details)}]",
+            additional_context=accumulated_context,
+            fallback_warning=fallback_warning,
         )
-    return "deny", "No commands to evaluate", None, False
+    return RuntimeVerdict(decision="deny", reason="No commands to evaluate")
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +942,7 @@ def check_compound_permission(
     ask_patterns: List[str] = None,
     extended_syntax: bool = True,
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str]]:
+) -> RuntimeVerdict:
     """Check permissions for a compound bash command.
 
     Extracts individual commands from a compound command line and checks each
@@ -797,9 +971,15 @@ def check_compound_permission(
             or ``'allow'``. See :func:`resolve_compound_permission`.
 
     Returns:
-        ``(decision, reason, additional_context)`` where *decision* is
+        A :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45 R1e; reused
+        rather than a new type -- this function's shape genuinely is
+        ``decision``/``reason``/``additional_context``, ``RuntimeVerdict``'s
+        own three required-in-spirit fields) where ``decision`` is
         ``'allow'``, ``'deny'``, or ``'ask'``. ``additional_context`` is
-        always ``None`` here since ``check_permission`` carries no enrichment.
+        always ``None`` here since ``check_permission`` carries no
+        enrichment; ``sub_matches`` is always empty -- this legacy caller has
+        no ``UnitVerdict`` concept (``check_permission`` returns a plain
+        2-tuple, not a resolved-with-provenance result).
     """
     return resolve_compound_permission(
         command,
@@ -815,13 +995,16 @@ def resolve_compound_permission_detailed(
     command: str,
     resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str], bool]:
+    resolve_outer: Optional[ResolveOuterProbe] = None,
+    record_unit: Optional[RecordUnitVerdict] = None,
+) -> RuntimeVerdict:
     """Resolve a compound command where each sub-command cascades independently.
 
     Each extracted sub-command is resolved through ``resolve_one`` -- typically
     a closure over
-    :meth:`toolguard.config.Configuration.resolve_permission_detailed`, so every
-    sub-command independently runs the full more-specific-wins level cascade.
+    :func:`toolguard.permission_resolution.resolve_permission_detailed`, so
+    every sub-command independently runs the full more-specific-wins level
+    cascade.
     The compound is allowed iff ALL sub-commands resolve to allow; otherwise the
     strictest outcome wins (any deny -> deny, then any ask -> ask).
 
@@ -861,22 +1044,38 @@ def resolve_compound_permission_detailed(
             never runs through ``resolve_one`` at all -- there is no
             underlying decision to floor. Defaults to ``'ask'`` so every
             pre-TOO-19 caller/test is unaffected.
+        resolve_outer: TOO-45 R1e -- see :func:`_resolve_leaf_detailed`.
+            Threaded straight through to it; ``None`` for callers with no
+            ``sub_matches`` concept.
+        record_unit: TOO-45 R1e -- see :data:`RecordUnitVerdict`. Threaded
+            through to :func:`_resolve_leaf_detailed` for ask-floor leaves,
+            and called directly here (below) for an
+            :class:`~toolguard.parser.multiline.UndecidableSegment`, which
+            never calls ``resolve_one``/*resolve_outer* at all and so has no
+            other path to ``sub_matches``.
 
     Returns:
-        ``(decision, reason, additional_context, fallback_warning)``. For an
-        all-allowed compound the reason lists per-sub-command matched rules,
-        matching the legacy format the hook logs; ``additional_context`` is
-        the accumulated ``additionalContext`` block (TOO-19 Phase 1) -- see
-        :func:`_combine_strictest` and :func:`_accumulate_contexts` -- or
-        ``None`` when nothing survived; ``fallback_warning`` is ``True`` iff
-        the decision is ``'allow'`` and at least one contributing leaf's
+        A :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45 R1e). For
+        an all-allowed compound the reason lists per-sub-command matched
+        rules, matching the legacy format the hook logs; ``additional_context``
+        is the accumulated ``additionalContext`` block (TOO-19 Phase 1) --
+        see :func:`_combine_strictest` and :func:`_accumulate_contexts` --
+        or ``None`` when nothing survived; ``fallback_warning`` is ``True``
+        iff the decision is ``'allow'`` and at least one contributing leaf's
         verdict came from the WARNED value of ``no_match_fallback`` or
-        ``undecidable_fallback`` (TOO-19 code review M1).
+        ``undecidable_fallback`` (TOO-19 code review M1). ``sub_matches`` is
+        always empty on the RETURNED verdict -- the per-sub-command
+        breakdown is recorded as a SIDE EFFECT via *record_unit* (and, for
+        ordinary sub-commands, via *resolve_one*'s own recording), into
+        whatever list the caller (:mod:`toolguard.resolve`) closed over, not
+        accumulated here.
     """
     structured = extract_structured(command)
 
     if not structured:
-        return "deny", "No valid commands found in command line", None, False
+        return RuntimeVerdict(
+            decision="deny", reason="No valid commands found in command line"
+        )
 
     # Resolve each element and collect results.
     # Each entry is (decision, reason, leaf_text, additional_context,
@@ -933,11 +1132,48 @@ def resolve_compound_permission_detailed(
                 )
                 fallback_kind = "silent"
             all_results.append((floored, reason, element.original, None, fallback_kind))
+            if record_unit is not None:
+                # TOO-45 R1e: an UndecidableSegment never calls resolve_one
+                # at all, so it has no other path onto sub_matches -- before
+                # this fix it produced NO audit-log entry whatsoever, not
+                # merely a misleading one. matched_rule/provenance are always
+                # None here: nothing was ever attempted against a rule. The
+                # UnitVerdict.fallback_kind recorded here is the FULL
+                # 'warned'/'silent'/'denied' tri-plus-state (matching
+                # fallback_kind_for_reason's contract), unlike the local
+                # `fallback_kind` variable above (which only ever needs
+                # 'warned'/'silent'/None for the allow-side "cmd -> pattern"
+                # fabrication guard) -- a floored-to-'deny' segment is just as
+                # much an escape-hatch outcome as a floored-to-'allow' one.
+                unit_fallback_kind = "denied" if floored == "deny" else fallback_kind
+                record_unit(
+                    UnitVerdict(
+                        sub_command=element.original,
+                        decision=floored,
+                        matched_rule=None,
+                        provenance=None,
+                        reason=reason,
+                        additional_context=None,
+                        fallback_kind=unit_fallback_kind,
+                    )
+                )
         elif isinstance(element, LeafCommand):
-            d, r, c, fk = _resolve_leaf_detailed(
-                element, resolve_one, undecidable_fallback
+            outcome = _resolve_leaf_detailed(
+                element,
+                resolve_one,
+                undecidable_fallback,
+                resolve_outer=resolve_outer,
+                record_unit=record_unit,
             )
-            all_results.append((d, r, element.text, c, fk))
+            all_results.append(
+                (
+                    outcome.decision,
+                    outcome.reason,
+                    element.text,
+                    outcome.additional_context,
+                    outcome.fallback_kind,
+                )
+            )
         else:
             # Should not happen
             logger.warning("Unknown extraction result type: %r", type(element))
@@ -952,17 +1188,27 @@ def resolve_compound_permission(
     command: str,
     resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
     undecidable_fallback: str = "ask",
-) -> Tuple[str, str, Optional[str]]:
-    """Resolve a compound command -- backwards-compatible 3-tuple wrapper.
+) -> RuntimeVerdict:
+    """Resolve a compound command -- thin wrapper dropping the structured detail.
 
     Thin wrapper around :func:`resolve_compound_permission_detailed` (TOO-19
-    code review M1) that drops the structured ``fallback_warning`` 4th
-    element. Kept as a separate, unchanged-signature function because many
-    existing tests (``test_compound.py``, ``test_hierarchical.py``,
-    ``test_hard_deny.py``, ``test_multiline_bash.py``) unpack its result as a
-    3-tuple directly; :func:`toolguard.resolve.resolve_bash_permission_detailed`
+    code review M1). Kept as a separate, unchanged-PARAMETER-signature
+    function because many existing tests (``test_compound.py``,
+    ``test_hierarchical.py``, ``test_hard_deny.py``, ``test_multiline_bash.py``)
+    call it directly; :func:`toolguard.resolve.resolve_bash_permission_detailed`
     calls :func:`resolve_compound_permission_detailed` directly instead, to
-    get the structured flag without widening this function's contract.
+    get the ``resolve_outer``/``record_unit`` plumbing (TOO-45 R1e) this
+    function does not expose.
+
+    TOO-45 R1e: returns the full :class:`~toolguard.config_types.RuntimeVerdict`
+    from :func:`resolve_compound_permission_detailed` directly (that
+    function already returns exactly this type -- there was never a
+    ``fallback_warning`` element to strip once both "detailed" and
+    "non-detailed" variants share one return type) -- reused, not a new
+    type, for the same reason :func:`check_compound_permission` reuses it.
+    Callers unpacking this as a 3-tuple must move to attribute access
+    (TOO-45 R1a: no verdict dataclass in this codebase supports tuple
+    unpacking).
 
     Args:
         command: The bash command line (may be compound or multi-line).
@@ -972,14 +1218,11 @@ def resolve_compound_permission(
             :func:`resolve_compound_permission_detailed`.
 
     Returns:
-        ``(decision, reason, additional_context)``.
+        A :class:`~toolguard.config_types.RuntimeVerdict`.
     """
-    decision, reason, additional_context, _fallback_warning = (
-        resolve_compound_permission_detailed(
-            command, resolve_one, undecidable_fallback=undecidable_fallback
-        )
+    return resolve_compound_permission_detailed(
+        command, resolve_one, undecidable_fallback=undecidable_fallback
     )
-    return decision, reason, additional_context
 
 
 def get_command_breakdown(command: str) -> List[str]:

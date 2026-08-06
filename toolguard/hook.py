@@ -17,7 +17,6 @@ Exit code: Always 0 (errors communicated via JSON output)
 import argparse
 import json
 import os
-import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,8 +30,10 @@ from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
-from toolguard.log_writer import log_command, log_discovery
+from toolguard.log_writer import LogRecord, log_command, log_discovery
 from toolguard.resolve import (
+    RuntimeVerdict,
+    UnitVerdict,
     _anchor_file_pattern,  # noqa: F401  re-exported for backwards compat
     _check_file_path_hard_deny,  # noqa: F401  re-exported for backwards compat
     _decide_file_path_at_level_detailed,  # noqa: F401  re-exported for backwards compat
@@ -44,9 +45,12 @@ from toolguard.constants import FILE_TOOLS
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 
-# Tools that operate on file paths (use GLOB matching).  Alias of the shared
-# constant, kept under this name for backward compatibility with importers
-# (e.g. toolguard.tools.decision, tests).
+# Tools that operate on file paths (use GLOB matching). Alias of the shared
+# foundation constant. TOO-45 R5a removed the production importer
+# (toolguard.tools.decision now takes FILE_TOOLS from toolguard.constants
+# directly, as its sibling tooling modules already did, which broke the
+# hook <-> tools.decision cycle). Only tests import this name now; prefer
+# toolguard.constants.FILE_TOOLS in new code.
 FILE_PATH_TOOLS = FILE_TOOLS
 
 # Tools that execute commands (use compound command parsing)
@@ -170,38 +174,46 @@ def parse_hook_input() -> Dict[str, Any]:
         raise json.JSONDecodeError(f"Invalid JSON from stdin: {e.msg}", e.doc, e.pos)
 
 
-def create_hook_output(
-    decision: str, reason: str, additional_context: Optional[str] = None
-) -> Dict[str, Any]:
+def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
     """
     Create hook output in the format expected by Claude Code.
 
+    TOO-45 R1d: takes the whole :class:`~toolguard.config_types.RuntimeVerdict`
+    instead of a bare ``(decision, reason, additional_context)`` triple, so
+    every call site (including the error/guard paths that build a synthetic
+    verdict inline, e.g. ``RuntimeVerdict(decision="deny", reason=...)``) goes
+    through the same, single construction shape. Only ``decision``,
+    ``reason``, and ``additional_context`` are consumed here -- the hook's
+    JSON response is a projection of the verdict, not the whole of it (see
+    the TOO-45 R1 scoping trace's Q2: this projection is faithful across the
+    entire verdict corpus, unlike the audit-log path).
+
     Args:
-        decision: Permission decision ('allow', 'ask', or 'deny')
-        reason: Human-readable reason for the decision
-        additional_context: The winning rule's ``additionalContext`` enrichment
-            (TOO-19 Phase 1) to inject back to Claude, or ``None``/empty when
-            there is nothing to add. Only decision call sites that have a
-            matched rule pass this -- error/guard paths (parse failure, no
-            command provided, ungoverned tool, etc.) have no matched rule and
-            always use the default.
+        verdict: The resolved permission verdict. ``verdict.decision`` becomes
+            ``permissionDecision``; ``verdict.reason`` becomes
+            ``permissionDecisionReason``; ``verdict.additional_context`` (see
+            below) becomes ``additionalContext``. Every OTHER field
+            (``provenance``, ``matched_rule``, ``sub_matches``, ``overrides``,
+            ``fallback_warning``, ``tool``, ``target``) is intentionally
+            ignored here -- those drive the audit log, not the hook's JSON
+            response to Claude.
 
     Returns:
         Dictionary formatted for JSON output to Claude Code. The
         ``"additionalContext"`` key is present inside ``hookSpecificOutput``
-        ONLY when ``additional_context`` is a non-empty string -- omitted
-        entirely (not set to ``null``) otherwise, so existing consumers that
-        don't know about the field see no change in shape.
+        ONLY when ``verdict.additional_context`` is a non-empty string --
+        omitted entirely (not set to ``null``) otherwise, so existing
+        consumers that don't know about the field see no change in shape.
     """
     output: Dict[str, Any] = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason,
+            "permissionDecision": verdict.decision,
+            "permissionDecisionReason": verdict.reason,
         }
     }
-    if additional_context:
-        output["hookSpecificOutput"]["additionalContext"] = additional_context
+    if verdict.additional_context:
+        output["hookSpecificOutput"]["additionalContext"] = verdict.additional_context
     return output
 
 
@@ -324,9 +336,7 @@ def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) ->
     :func:`toolguard.error_log.log_warning`'s dedicated WARNING stream.
 
     *fallback_warning* is real data carried by the resolver result
-    (:attr:`~toolguard.config_types.ResolvedDecision.fallback_warning` /
-    :attr:`~toolguard.resolve.FileResolution.fallback_warning` /
-    :attr:`~toolguard.resolve.BashResolution.fallback_warning`) -- this
+    (:attr:`~toolguard.config_types.RuntimeVerdict.fallback_warning`) -- this
     function does not inspect *reason* itself to decide whether to log. For
     the Bash path, that structured flag is computed per-sub-command inside
     :func:`toolguard.compound.resolve_compound_permission_detailed` (TOO-19
@@ -402,10 +412,13 @@ def _reason_suffix_or_placeholder(
     that text to a rule would fabricate an attribution for a rule that does
     not exist in the config (TOO-19 m5 allow-side / deny-side fix).
     :func:`~toolguard.compound.fallback_kind_for_reason` is the ONE
-    mechanism that tells the two shapes apart, and this helper is the ONE
-    place that acts on it, shared by :func:`_matched_rule_for_single_command`
-    (allow) and :func:`_log_non_allow_decision` (deny) so the two call sites
-    cannot drift into separate conventions.
+    mechanism that tells the two shapes apart. Used by
+    :func:`_log_non_allow_decision` (deny) -- the allow side no longer needs
+    this reason-text classification (TOO-45 R1e:
+    :class:`~toolguard.config_types.UnitVerdict.fallback_kind` now carries
+    the SAME classification structurally, computed once at the point each
+    unit's outcome is decided rather than re-derived from *reason* at log
+    time -- see :func:`_log_allowed_command`).
 
     Args:
         decision: The decision *reason* accompanies (``'allow'`` or
@@ -427,30 +440,6 @@ def _reason_suffix_or_placeholder(
     return matched_rule
 
 
-def _matched_rule_for_single_command(
-    reason: str, matched_rule: Optional[str]
-) -> Optional[str]:
-    """
-    Derive the ``Matched Rule`` audit-log field for a SINGLE-leaf allow.
-
-    Thin wrapper around :func:`_reason_suffix_or_placeholder` pinned to
-    ``decision='allow'`` and :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER`.
-
-    Args:
-        reason: The final allow reason for a non-compound (single-leaf)
-            result -- consulted only for the escape-hatch classification.
-        matched_rule: The structured matched-rule value for this result
-            (e.g. ``BashResolution.matched_rule``), or ``None``.
-
-    Returns:
-        The placeholder when *reason* names a fallback escape hatch,
-        otherwise *matched_rule* unchanged.
-    """
-    return _reason_suffix_or_placeholder(
-        "allow", reason, FALLBACK_ALLOW_PLACEHOLDER, matched_rule
-    )
-
-
 def _provenance_brief(provenance: Optional[Any]) -> Optional[str]:
     """
     Render a resolution's winning provenance for the audit log, or ``None``.
@@ -467,149 +456,120 @@ def _provenance_brief(provenance: Optional[Any]) -> Optional[str]:
     return provenance.describe_brief() if provenance is not None else None
 
 
-_COMPOUND_MATCH_PATTERN = re.compile(r"All \d+ sub-commands allowed: \[(.+)\]")
-
-
-def _parse_compound_match_details(reason: str):
+def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
     """
-    Parse per-sub-command match details from a compound command's allow reason.
+    Derive the ``Matched Rule`` audit-log field for ONE sub-command's unit verdict.
 
-    TOO-45 R3 investigated replacing this with ``BashResolution.sub_matches``
-    (one structured :class:`~toolguard.resolve.SubMatch` per extracted
-    sub-command) and found it is NOT a safe substitute for THIS purpose,
-    specifically for an ask-floor leaf (foreign inline code / heredoc sink,
-    see ``compound.py::_resolve_leaf_detailed``):
-
-    - ``SubMatch.sub_command`` for such a leaf is the TRUNCATED outer-command
-      stub :func:`~toolguard.compound._extract_outer_command` resolves for
-      the explicit-deny check (e.g. ``python -c``), not the leaf's real
-      original text (e.g. ``python -c "print(1)"``) that this reason -- and
-      the audit log -- must show.
-    - ``SubMatch.matched_rule`` for such a leaf reflects whether that
-      TRUNCATED STUB happened to match a real allow rule (e.g. a broad
-      ``Bash(python *)`` allow matches the stub ``python -c``) -- but
-      ``_resolve_leaf_detailed`` overrides ANY non-deny outcome for an
-      ask-floor leaf with the undecidable-fallback escape hatch regardless,
-      because a stub match does not verify the unread inline payload. So a
-      genuinely non-``None`` ``matched_rule`` can still need the fallback
-      placeholder here, and ``sub_matches`` alone cannot tell the two apart
-      -- that classification happens entirely inside ``compound.py``, AFTER
-      ``resolve_one`` (and therefore ``SubMatch`` construction) already
-      returned, and is never threaded back through the ``resolve_one``
-      3-tuple contract (:func:`~toolguard.compound.fallback_kind_for_reason`'s
-      own docstring already documents that contract as intentionally thin;
-      widening it was judged disproportionate once already, for the
-      structurally identical case pinned by
-      :attr:`~toolguard.resolve.BashResolution.fallback_warning`'s
-      docstring).
-
-    ``compound.py:722``'s ``_combine_strictest`` already builds this same
-    determination as a ``match_details`` LIST before joining it into the
-    ``"All N sub-commands allowed: [...]"`` reason string this function then
-    splits back apart -- so consuming that list directly, instead of this
-    round trip, is a viable follow-up NOT done here: building the list still
-    parses each leaf's reason (``compound.py:738-747``), so it would move the
-    parse rather than remove it, and removing it needs ``resolve_one``'s
-    3-tuple contract widened, out of scope for this fix (see R1). Confirmed
-    live by two TOO-19 m5 regression tests failing the moment ``sub_matches``
-    was substituted here instead.
+    TOO-45 R1e: replaces the reason-text classification
+    (``fallback_kind_for_reason``) with a direct read of
+    :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`, computed once
+    where the unit's outcome is decided (see ``compound.py``/``resolve.py``)
+    rather than re-derived here from *reason* text.
 
     Args:
-        reason: The reason string from check_compound_permission, e.g.
-                "All 2 sub-commands allowed: [git status -> git *, git log -> git *]"
+        unit: The sub-command's resolved :class:`~toolguard.config_types.UnitVerdict`.
 
     Returns:
-        List of (sub_command, matched_rule) tuples, or None if not a compound match reason.
+        :data:`~toolguard.compound.FALLBACK_ALLOW_PLACEHOLDER` when
+        ``unit.fallback_kind`` names an allow-side escape hatch (``'warned'``
+        or ``'silent'``), otherwise ``unit.matched_rule`` unchanged (which
+        may itself be ``None`` -- an absent record beats a false one).
     """
-    m = _COMPOUND_MATCH_PATTERN.match(reason)
-    if not m:
-        return None
-
-    details = []
-    for part in m.group(1).split(", "):
-        if " -> " in part:
-            cmd, rule = part.rsplit(" -> ", 1)
-            details.append((cmd.strip(), rule.strip()))
-    return details if details else None
+    if unit.fallback_kind in ("warned", "silent"):
+        return FALLBACK_ALLOW_PLACEHOLDER
+    return unit.matched_rule
 
 
 def _log_allowed_command(
+    verdict: RuntimeVerdict,
     command: str,
-    reason: str,
     agent_info: str,
     env_config: dict,
     permission_mode: Optional[str] = None,
-    additional_context: Optional[str] = None,
-    matched_rule: Optional[str] = None,
-    provenance: Optional[str] = None,
 ) -> None:
     """
-    Log an allowed command, handling compound commands by logging each sub-command separately.
+    Log an allowed command, one entry per sub-command in ``verdict.sub_matches``.
 
-    For a simple (single-leaf) command, logs one entry with the STRUCTURED
-    matched rule (see :func:`_matched_rule_for_single_command`). For a
-    compound command, logs a separate entry per sub-command, recovered from
-    *reason*'s own breakdown via :func:`_parse_compound_match_details` --
-    see that function's docstring for why the compound case could not also
-    be converted to read ``BashResolution.sub_matches`` directly. Because
-    of that, per-sub-command *provenance* is not available in the compound
-    branch either, so it is logged only in the single-leaf case.
+    TOO-45 R1e: reads ``verdict.sub_matches`` (one
+    :class:`~toolguard.config_types.UnitVerdict` per extracted sub-command,
+    ALREADY correct for every case the reason string can hold, including an
+    ask-floor leaf's escape-hatch outcome and an
+    :class:`~toolguard.parser.multiline.UndecidableSegment` -- see
+    ``compound.py``'s ``resolve_outer``/``record_unit`` plumbing) directly,
+    instead of regex-parsing the ``"All N sub-commands allowed: [...]"``
+    reason string back apart. That regex-parse (the retired
+    ``_parse_compound_match_details``) kept only segments containing
+    ``" -> "``, silently DROPPING the audit-log entry for any sub-command
+    whose allow came from ``no_match_fallback`` (no ``" -> "`` in its raw
+    reason) -- measured at 813 of 975 compound-allow corpus cases
+    under-logging, 1,943 sub-commands with no audit entry at all. This also
+    unifies the single-leaf and compound cases into ONE loop: a simple
+    command has exactly one ``UnitVerdict`` in ``sub_matches``, so it was
+    never a genuinely different case, just the OLD mechanism's inability to
+    parse a non-compound reason.
+
+    TOO-45 R1d: takes the whole *verdict* instead of its fields threaded
+    through as separate parameters -- the caller (:func:`_handle_command_tool`)
+    already has the verdict in scope.
 
     Args:
-        command: The original command string
-        reason: The allow reason from permission checking. Drives the
-            compound branch via :func:`_parse_compound_match_details`, and
-            (for the single-leaf branch) the fallback-escape-hatch guard in
-            :func:`_matched_rule_for_single_command`.
-        agent_info: Agent identification string
-        env_config: Environment configuration dict
-        permission_mode: Claude Code's own ``permission_mode`` from the hook input,
-            if present -- recorded for diagnosis only, see ``log_command``.
-        additional_context: The accumulated ``additionalContext`` enrichment
-            (TOO-19 Phase 1) for the WHOLE compound command, or ``None``. It is
+        verdict: The resolved 'allow' verdict for *command*.
+            ``additional_context`` is the accumulated ``additionalContext``
+            enrichment (TOO-19 Phase 1) for the WHOLE compound command; it is
             not attributable to a single sub-command (it may combine several
             sub-commands' contexts, see ``compound.py::_accumulate_contexts``),
             so it is recorded on every logged sub-command entry the same way
             the hook injects one accumulated block for the whole command.
-        matched_rule: ``BashResolution.matched_rule`` for this command --
-            used only in the single-leaf case (see
-            :func:`_matched_rule_for_single_command`).
-        provenance: ``BashResolution.provenance``, rendered via
-            :func:`_provenance_brief` -- used only in the single-leaf case,
-            and only when *matched_rule* survived the fallback-escape-hatch
-            guard unchanged (a placeholder must never be paired with a real
-            provenance from the leaf whose rule it replaced).
+        command: The original command string -- used ONLY as a defensive
+            fallback (see below) when ``sub_matches`` is empty, which should
+            not happen for a real 'allow' verdict produced by
+            :func:`~toolguard.resolve.resolve_bash_permission_detailed`
+            (every 'allow' path populates at least one entry).
+        agent_info: Agent identification string.
+        env_config: Environment configuration dict.
+        permission_mode: Claude Code's own ``permission_mode`` from the hook input,
+            if present -- recorded for diagnosis only, see ``log_command``.
     """
-    compound_details = _parse_compound_match_details(reason)
-    if compound_details:
-        # Compound command: log each sub-command separately.
-        for sub_cmd, sub_matched_rule in compound_details:
-            log_command(
-                sub_cmd,
-                "executed",
-                matched_rule=sub_matched_rule,
-                extra_info=agent_info,
-                config=env_config,
-                permission_mode=permission_mode,
-                additional_context=additional_context,
-            )
-    else:
-        # Simple command: use the structured matched rule -- but never
-        # fabricate one for a fallback escape hatch (TOO-19 m5). Suppress
-        # provenance the same way when the guard replaced matched_rule with
-        # the placeholder, so the log never pairs a real provenance with a
-        # rule that did not actually decide the verdict.
-        single_matched_rule = _matched_rule_for_single_command(reason, matched_rule)
-        single_provenance = provenance if single_matched_rule == matched_rule else None
+    if not verdict.sub_matches:
+        # Defensive fallback for a synthetic/hand-built verdict with no
+        # sub_matches (should not occur for a real resolver result) -- log
+        # what is in hand without the placeholder guard, since there is no
+        # per-unit fallback_kind to consult.
         log_command(
-            command,
-            "executed",
-            matched_rule=single_matched_rule,
-            provenance=single_provenance,
-            extra_info=agent_info,
+            LogRecord(
+                command_str=command,
+                status="executed",
+                matched_rule=verdict.matched_rule,
+                provenance=_provenance_brief(verdict.provenance),
+                extra_info=agent_info,
+                permission_mode=permission_mode,
+                additional_context=verdict.additional_context,
+            ),
             config=env_config,
-            permission_mode=permission_mode,
-            additional_context=additional_context,
+        )
+        return
+
+    for unit in verdict.sub_matches:
+        matched_rule = _unit_matched_rule_for_log(unit)
+        # Never pair a real provenance with a rule that did not actually
+        # decide the verdict (TOO-19 m5) -- suppressed the same way the
+        # placeholder substitution above signals an escape hatch.
+        provenance = (
+            _provenance_brief(unit.provenance)
+            if matched_rule == unit.matched_rule
+            else None
+        )
+        log_command(
+            LogRecord(
+                command_str=unit.sub_command,
+                status="executed",
+                matched_rule=matched_rule,
+                provenance=provenance,
+                extra_info=agent_info,
+                permission_mode=permission_mode,
+                additional_context=verdict.additional_context,
+            ),
+            config=env_config,
         )
 
 
@@ -652,15 +612,48 @@ def _build_hook_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+def _verdict_from_decision(result) -> RuntimeVerdict:
+    """
+    Adapt a :class:`~toolguard.tools.decision.Decision` (the TOOLING altitude)
+    into a :class:`~toolguard.config_types.RuntimeVerdict` (the RUNTIME
+    altitude) for :func:`_resolve_event`'s uniform return contract.
+
+    ``Decision`` and ``RuntimeVerdict`` are deliberately NOT unified (TOO-45
+    R6 territory -- see ``Decision``'s own docstring) but share every field
+    ``--eval`` needs: ``decision``/``verdict``, ``reason``, ``provenance``,
+    ``matched_rule``, ``additional_context``, ``tool``, ``target``.
+    ``overrides``/``fallback_warning`` have no ``Decision`` counterpart and
+    are left at ``RuntimeVerdict``'s defaults (``[]``/``False``) -- read-only
+    ``--eval`` never logs, so neither is ever consumed downstream of this call.
+
+    Args:
+        result: The :class:`~toolguard.tools.decision.Decision` returned by
+            :func:`toolguard.tools.decision.decide`.
+
+    Returns:
+        The equivalent :class:`~toolguard.config_types.RuntimeVerdict`.
+    """
+    return RuntimeVerdict(
+        decision=result.verdict,
+        reason=result.reason,
+        provenance=result.provenance,
+        sub_matches=result.sub_matches or [],
+        additional_context=result.additional_context,
+        matched_rule=result.matched_rule,
+        tool=result.tool,
+        target=result.target,
+    )
+
+
 def _resolve_event(
     tool_name: str,
     tool_input: Dict[str, Any],
     config,
     extended_syntax: bool,
-) -> Tuple[str, str, Optional[str]]:
+) -> RuntimeVerdict:
     """
-    Resolve a single hook event to a ``(decision, reason, additional_context)``
-    triple, READ-ONLY.
+    Resolve a single hook event to a :class:`~toolguard.config_types.RuntimeVerdict`,
+    READ-ONLY.
 
     This adds only the parts :func:`main` owns on top of the shared decision
     primitive -- the governed-tool check and the empty-input guard -- and then
@@ -674,11 +667,12 @@ def _resolve_event(
     inside :func:`~toolguard.tools.decision.decide` via the shared config layer --
     there is no separate reason-rewrite step here or in :func:`main` to keep in sync.
 
-    TOO-19 Phase 1: the third element carries the winning rule's
-    ``additionalContext`` enrichment, so ``--eval`` (whose whole purpose is
-    previewing what the live hook would do) doesn't silently omit a real output
-    field. The two synthetic guard verdicts above (ungoverned tool, missing
-    target) have no matched rule and always report ``None``.
+    TOO-19 Phase 1: the returned verdict's ``additional_context`` carries the
+    winning rule's ``additionalContext`` enrichment, so ``--eval`` (whose whole
+    purpose is previewing what the live hook would do) doesn't silently omit a
+    real output field. The two synthetic guard verdicts below (ungoverned
+    tool, missing target) have no matched rule and leave every optional field
+    at :class:`~toolguard.config_types.RuntimeVerdict`'s defaults.
 
     Args:
         tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
@@ -687,34 +681,43 @@ def _resolve_event(
         extended_syntax: Whether extended (regex/glob) prefixes are honoured.
 
     Returns:
-        A ``(decision, reason, additional_context)`` triple where decision is
-        ``'allow'``, ``'deny'``, or ``'ask'``, and ``additional_context`` is the
-        matched rule's enrichment text or ``None``.
+        The resolved :class:`~toolguard.config_types.RuntimeVerdict`, whose
+        ``decision`` is ``'allow'``, ``'deny'``, or ``'ask'``.
     """
-    # Local import: toolguard.tools.decision imports FILE_PATH_TOOLS from this
-    # module, so importing decide() at module top-level would be a circular import.
-    # This documented cycle is the sanctioned exception to the no-local-imports rule.
-    from toolguard.tools.decision import decide
+    # Local import, and the justification changed with TOO-45 R5a. The old one
+    # was a genuine cycle -- tools.decision imported FILE_PATH_TOOLS from here --
+    # which is gone: it now takes FILE_TOOLS from the foundation layer, as its
+    # sibling tooling modules already did. What remains is a LAYER violation, not
+    # a cycle: runtime reaching up into tooling. It stays local on purpose,
+    # because the hook is a per-process, per-tool-call binary and hoisting this
+    # would load the whole tooling layer on the hot path for every invocation.
+    # decide() is not on the live path at all -- toolguard.tools.decision only
+    # reaches sys.modules under --eval. R6 is the step that resolves this, by
+    # moving decide() into an api layer both callers can reach.
+    from toolguard.tools.decision import decide  # noqa: PLC0415
 
     governed_tools = list(config.governed_tools())
     if tool_name not in governed_tools:
-        return (
-            "allow",
-            f"Not a governed tool (governed: {', '.join(governed_tools)})",
-            None,
+        return RuntimeVerdict(
+            decision="allow",
+            reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
         )
 
     if tool_name in FILE_PATH_TOOLS:
         target = tool_input.get("file_path", "")
         if not target:
-            return "deny", "No file_path provided in tool input", None
+            return RuntimeVerdict(
+                decision="deny", reason="No file_path provided in tool input"
+            )
     else:
         target = tool_input.get("command", "")
         if not target:
-            return "deny", "No command provided in tool input", None
+            return RuntimeVerdict(
+                decision="deny", reason="No command provided in tool input"
+            )
 
     result = decide(config, tool_name, target, extended_syntax)
-    return result.verdict, result.reason, result.additional_context
+    return _verdict_from_decision(result)
 
 
 def _run_eval_mode() -> None:
@@ -740,18 +743,26 @@ def _run_eval_mode() -> None:
         config = load_configuration(cwd, ignore_env_override=True)
         env_config = get_env_config(start_dir=cwd)
         extended_syntax = env_config.get("extended_syntax", True)
-        decision, reason, additional_context = _resolve_event(
-            tool_name, tool_input, config, extended_syntax
-        )
-        print(json.dumps(create_hook_output(decision, reason, additional_context)))
+        verdict = _resolve_event(tool_name, tool_input, config, extended_syntax)
+        print(json.dumps(create_hook_output(verdict)))
     except json.JSONDecodeError as e:
-        output = create_hook_output("deny", f"Failed to parse hook input: {str(e)}")
+        output = create_hook_output(
+            RuntimeVerdict(
+                decision="deny", reason=f"Failed to parse hook input: {str(e)}"
+            )
+        )
         print(json.dumps(output), file=sys.stderr)
     except ValueError as e:
-        output = create_hook_output("deny", f"Invalid hook input: {str(e)}")
+        output = create_hook_output(
+            RuntimeVerdict(decision="deny", reason=f"Invalid hook input: {str(e)}")
+        )
         print(json.dumps(output), file=sys.stderr)
     except Exception as e:
-        output = create_hook_output("deny", f"Unexpected error in hook: {str(e)}")
+        output = create_hook_output(
+            RuntimeVerdict(
+                decision="deny", reason=f"Unexpected error in hook: {str(e)}"
+            )
+        )
         print(json.dumps(output), file=sys.stderr)
 
 
@@ -874,9 +885,12 @@ def _run_divergence_check(
     """
     Check for config divergence once per session, auto-migrating when configured.
 
-    When divergent patterns are found and ``config_sync.auto_migrate`` is set,
-    consolidation runs; otherwise the warning has already been shown by
-    :func:`check_and_warn_divergence`.
+    :func:`check_and_warn_divergence` (``config``-layer) only DETECTS
+    divergence and prints an immediate stderr notice -- it deliberately does
+    not write to the structured error log itself (TOO-45 R5d: that would make
+    a config-layer module depend on error_log, a runtime-layer module). This
+    function, which already legitimately imports :mod:`toolguard.error_log`,
+    does that write on its behalf when a new warning is due.
 
     Args:
         config: The resolved configuration.
@@ -895,8 +909,10 @@ def _run_divergence_check(
     if project_root is None:
         return
 
-    divergent_patterns = check_and_warn_divergence(project_root, log_dir, takeover_dict)
-    if not divergent_patterns:
+    divergence = check_and_warn_divergence(project_root, log_dir, takeover_dict)
+    if divergence.warning_message is not None:
+        log_warning(divergence.warning_message, divergence.corrective_steps, log_dir)
+    if not divergence.divergent_patterns:
         return
 
     config_sync = config.config_sync_settings()
@@ -923,63 +939,63 @@ def _agent_info_for(hook_data: Dict[str, Any]) -> str:
 
 
 def _log_non_allow_decision(
+    verdict: RuntimeVerdict,
     log_target: str,
-    decision: str,
-    reason: str,
     agent_info: str,
     env_config: Dict[str, Any],
     permission_mode: Optional[str],
-    additional_context: Optional[str],
-    matched_rule: Optional[str] = None,
-    provenance: Optional[str] = None,
 ) -> None:
     """
     Write the resolution-log entry for an 'ask' or 'deny' verdict.
+
+    TOO-45 R1d: takes the whole *verdict* instead of its ``decision``/
+    ``reason``/``additional_context``/``matched_rule``/``provenance`` fields
+    threaded through as five separate parameters (the change that let the
+    ``# noqa: PLR0913`` marker this replaced come off -- see ``log_command``'s
+    own R1d note).
 
     Identical for file-path tools and command tools, so both call this. An
     'ask' is recorded under ``note`` (it is not a violation) with the FULL
     reason text -- never split, so it carries no fabrication risk regardless
     of the reason's shape. A deny records the violated rule from
-    *matched_rule* via :func:`_reason_suffix_or_placeholder` (the SAME
-    mechanism the allow side uses, via :func:`_matched_rule_for_single_command`,
-    so the two call sites cannot diverge into two conventions -- see that
-    function's docstring for the fabrication risk this guards against).
-    Unlike the allow side, when *matched_rule* is ``None`` and *reason* is
-    not a recognised escape hatch, the FULL reason is used (not ``None``) --
-    this preserves the pre-TOO-19 behaviour for reasons like ``"No commands
-    to evaluate"`` that never named a rule at all.
+    ``verdict.matched_rule`` via :func:`_reason_suffix_or_placeholder` (the
+    SAME mechanism the allow side uses, via
+    :func:`_matched_rule_for_single_command`, so the two call sites cannot
+    diverge into two conventions -- see that function's docstring for the
+    fabrication risk this guards against). Unlike the allow side, when
+    ``verdict.matched_rule`` is ``None`` and ``verdict.reason`` is not a
+    recognised escape hatch, the FULL reason is used (not ``None``) -- this
+    preserves the pre-TOO-19 behaviour for reasons like ``"No commands to
+    evaluate"`` that never named a rule at all.
 
     Args:
-        log_target: What is being logged -- a command, or ``Tool(path)``.
-        decision: ``'ask'`` or the deny verdict.
-        reason: The permission-decision reason string -- consulted only for
-            :func:`_reason_suffix_or_placeholder`'s fallback-escape-hatch
-            classification (the 'ask' branch also uses it verbatim as the
-            log note).
-        agent_info: Agent identification string.
-        env_config: Environment configuration dict.
-        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
-        additional_context: The winning rule's ``additionalContext`` enrichment.
-        matched_rule: The structured matched-rule value for this deny (e.g.
-            ``BashResolution.matched_rule`` / ``FileResolution.matched_rule``),
-            or ``None`` when no rule matched (fail-closed default deny, hard
-            deny, or a fallback escape hatch).
-        provenance: ``BashResolution.provenance`` / ``FileResolution.provenance``,
-            rendered via :func:`_provenance_brief` -- suppressed the same way
-            as *matched_rule* when *reason* names a fallback escape hatch
+        verdict: The resolved 'ask' or deny verdict. ``reason`` is consulted
+            only for :func:`_reason_suffix_or_placeholder`'s
+            fallback-escape-hatch classification (the 'ask' branch also uses
+            it verbatim as the log note). ``matched_rule`` is ``None`` when
+            no rule matched (fail-closed default deny, hard deny, or a
+            fallback escape hatch). ``provenance`` is rendered via
+            :func:`_provenance_brief`, suppressed the same way as
+            ``matched_rule`` when ``reason`` names a fallback escape hatch
             (never paired with a rule that did not actually decide the
             verdict), and naturally absent for a hard deny (pooled across
             levels, no single provenance).
+        log_target: What is being logged -- a command, or ``Tool(path)``.
+        agent_info: Agent identification string.
+        env_config: Environment configuration dict.
+        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
     """
-    if decision == "ask":
+    if verdict.decision == "ask":
         log_command(
-            log_target,
-            "ask",
-            note=reason,
-            extra_info=agent_info,
+            LogRecord(
+                command_str=log_target,
+                status="ask",
+                note=verdict.reason,
+                extra_info=agent_info,
+                permission_mode=permission_mode,
+                additional_context=verdict.additional_context,
+            ),
             config=env_config,
-            permission_mode=permission_mode,
-            additional_context=additional_context,
         )
         return
 
@@ -988,19 +1004,28 @@ def _log_non_allow_decision(
     # rather than a matched rule. Provenance is suppressed the same way
     # (see the Args docstring above).
     suffix = _reason_suffix_or_placeholder(
-        decision, reason, FALLBACK_DENY_PLACEHOLDER, matched_rule
+        verdict.decision,
+        verdict.reason,
+        FALLBACK_DENY_PLACEHOLDER,
+        verdict.matched_rule,
     )
-    violated_rules = [suffix if suffix is not None else reason]
-    logged_provenance = provenance if suffix == matched_rule else None
+    violated_rules = [suffix if suffix is not None else verdict.reason]
+    logged_provenance = (
+        _provenance_brief(verdict.provenance)
+        if suffix == verdict.matched_rule
+        else None
+    )
     log_command(
-        log_target,
-        "refused",
-        violated_rules,
-        extra_info=agent_info,
+        LogRecord(
+            command_str=log_target,
+            status="refused",
+            violated_rules=violated_rules,
+            extra_info=agent_info,
+            permission_mode=permission_mode,
+            additional_context=verdict.additional_context,
+            provenance=logged_provenance,
+        ),
         config=env_config,
-        permission_mode=permission_mode,
-        additional_context=additional_context,
-        provenance=logged_provenance,
     )
 
 
@@ -1011,7 +1036,7 @@ def _handle_file_path_tool(
     env_config: Dict[str, Any],
     agent_info: str,
     permission_mode: Optional[str],
-) -> Tuple[str, str, Optional[str]]:
+) -> RuntimeVerdict:
     """
     Resolve and log a file-path tool event (Read, Write, Edit).
 
@@ -1020,7 +1045,7 @@ def _handle_file_path_tool(
     unconfigured tool resolves to 'ask' and a configured-but-non-matching tool
     resolves per ``no_match_fallback`` -- both are decided centrally inside
     ``resolve_file_path_permission_detailed`` /
-    ``Configuration.resolve_permission_detailed``, so the hook and
+    ``permission_resolution.resolve_permission_detailed``, so the hook and
     ``toolguard.tools.decision.decide()`` cannot drift apart.
 
     Args:
@@ -1032,20 +1057,26 @@ def _handle_file_path_tool(
         permission_mode: Claude Code's own permission mode, recorded for diagnosis.
 
     Returns:
-        A ``(decision, reason, additional_context)`` triple for the caller to
-        render as the hook's JSON output.
+        The resolved :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45
+        R1d -- previously a bare ``(decision, reason, additional_context)``
+        tuple that discarded ``provenance``/``matched_rule``/``overrides``/
+        ``fallback_warning``/``sub_matches``/``tool``/``target``).
     """
     file_path = tool_input.get("file_path", "")
     if not file_path:
         log_command(
-            f"{tool_name}()",
-            "refused",
-            ["no file_path provided"],
-            extra_info=agent_info,
+            LogRecord(
+                command_str=f"{tool_name}()",
+                status="refused",
+                violated_rules=["no file_path provided"],
+                extra_info=agent_info,
+                permission_mode=permission_mode,
+            ),
             config=env_config,
-            permission_mode=permission_mode,
         )
-        return "deny", "No file_path provided in tool input", None
+        return RuntimeVerdict(
+            decision="deny", reason="No file_path provided in tool input"
+        )
 
     extended_syntax = env_config.get("extended_syntax", True)
     result = resolve_file_path_permission_detailed(
@@ -1054,35 +1085,36 @@ def _handle_file_path_tool(
     log_target = f"{tool_name}({file_path})"
 
     if result.decision == "allow":
-        # Conflict: a more-specific allow overrode a less-specific deny.
-        _log_conflict_override(log_target, result.override, env_config.get("log_dir"))
+        # Conflict: a more-specific allow overrode a less-specific deny. A
+        # file-path result carries 0 or 1 overrides (TOO-45 R1c;
+        # RuntimeVerdict.overrides is always a list -- see its docstring's
+        # "overrides" reconciliation) -- this loop runs 0 or 1 times, same
+        # behaviour as the old single `_log_conflict_override(log_target,
+        # result.override, ...)` call (which was already a no-op when
+        # `override` was None).
+        for _, override in result.overrides:
+            _log_conflict_override(log_target, override, env_config.get("log_dir"))
         _log_fallback_allow_warning(
             result.fallback_warning, result.reason, env_config.get("log_dir")
         )
         log_command(
-            log_target,
-            "executed",
-            matched_rule=result.matched_rule,
-            provenance=_provenance_brief(result.provenance),
-            extra_info=agent_info,
+            LogRecord(
+                command_str=log_target,
+                status="executed",
+                matched_rule=result.matched_rule,
+                provenance=_provenance_brief(result.provenance),
+                extra_info=agent_info,
+                permission_mode=permission_mode,
+                additional_context=result.additional_context,
+            ),
             config=env_config,
-            permission_mode=permission_mode,
-            additional_context=result.additional_context,
         )
     else:
         _log_non_allow_decision(
-            log_target,
-            result.decision,
-            result.reason,
-            agent_info,
-            env_config,
-            permission_mode,
-            result.additional_context,
-            result.matched_rule,
-            _provenance_brief(result.provenance),
+            result, log_target, agent_info, env_config, permission_mode
         )
 
-    return result.decision, result.reason, result.additional_context
+    return result
 
 
 def _handle_command_tool(
@@ -1091,7 +1123,7 @@ def _handle_command_tool(
     env_config: Dict[str, Any],
     agent_info: str,
     permission_mode: Optional[str],
-) -> Tuple[str, str, Optional[str]]:
+) -> RuntimeVerdict:
     """
     Resolve and log a command tool event (Bash, MCP terminals).
 
@@ -1102,7 +1134,7 @@ def _handle_command_tool(
     'allow_with_warning' -- or its deprecated 'warn_deny' alias -- auto-allows
     with a warning; 'allow' -- or its 'allow_with_no_warnings' alias, TOO-19 --
     auto-allows with NO warning) -- all decided centrally inside
-    ``resolve_bash_permission_detailed`` / ``Configuration.resolve_permission_detailed``
+    ``resolve_bash_permission_detailed`` / ``permission_resolution.resolve_permission_detailed``
     so the hook and ``toolguard.tools.decision.decide()`` cannot drift apart.
 
     Resolution is more-specific-wins: each sub-command of a compound command
@@ -1118,20 +1150,26 @@ def _handle_command_tool(
         permission_mode: Claude Code's own permission mode, recorded for diagnosis.
 
     Returns:
-        A ``(decision, reason, additional_context)`` triple for the caller to
-        render as the hook's JSON output.
+        The resolved :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45
+        R1d -- previously a bare ``(decision, reason, additional_context)``
+        tuple that discarded ``provenance``/``matched_rule``/``overrides``/
+        ``fallback_warning``/``sub_matches``/``tool``/``target``).
     """
     command = tool_input.get("command", "")
     if not command:
         log_command(
-            command,
-            "refused",
-            ["no command provided"],
-            extra_info=agent_info,
+            LogRecord(
+                command_str=command,
+                status="refused",
+                violated_rules=["no command provided"],
+                extra_info=agent_info,
+                permission_mode=permission_mode,
+            ),
             config=env_config,
-            permission_mode=permission_mode,
         )
-        return "deny", "No command provided in tool input", None
+        return RuntimeVerdict(
+            decision="deny", reason="No command provided in tool input"
+        )
 
     extended_syntax = env_config.get("extended_syntax", True)
     hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1148,30 +1186,13 @@ def _handle_command_tool(
         _log_fallback_allow_warning(
             result.fallback_warning, result.reason, conflict_log_dir
         )
-        _log_allowed_command(
-            command,
-            result.reason,
-            agent_info,
-            env_config,
-            permission_mode,
-            result.additional_context,
-            result.matched_rule,
-            _provenance_brief(result.provenance),
-        )
+        _log_allowed_command(result, command, agent_info, env_config, permission_mode)
     else:
         _log_non_allow_decision(
-            command,
-            result.decision,
-            result.reason,
-            agent_info,
-            env_config,
-            permission_mode,
-            result.additional_context,
-            result.matched_rule,
-            _provenance_brief(result.provenance),
+            result, command, agent_info, env_config, permission_mode
         )
 
-    return result.decision, result.reason, result.additional_context
+    return result
 
 
 def main() -> None:
@@ -1253,7 +1274,10 @@ def main() -> None:
         if tool_name not in governed_tools:
             # Not a governed tool - allow (other hooks handle other tools)
             output = create_hook_output(
-                "allow", f"Not a governed tool (governed: {', '.join(governed_tools)})"
+                RuntimeVerdict(
+                    decision="allow",
+                    reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
+                )
             )
             print(json.dumps(output))
             sys.exit(0)
@@ -1268,18 +1292,19 @@ def main() -> None:
 
         # Resolve and log the event: file path tools (Read, Write, Edit) and
         # command tools (Bash, MCP terminals) differ only in how the target is
-        # extracted and resolved; both return the same decision triple.
+        # extracted and resolved; both return the same RuntimeVerdict shape
+        # (TOO-45 R1d).
         if tool_name in FILE_PATH_TOOLS:
-            decision, reason, additional_context = _handle_file_path_tool(
+            verdict = _handle_file_path_tool(
                 tool_name, tool_input, config, env_config, agent_info, permission_mode
             )
         else:
-            decision, reason, additional_context = _handle_command_tool(
+            verdict = _handle_command_tool(
                 tool_input, config, env_config, agent_info, permission_mode
             )
 
         # Create and output decision
-        output = create_hook_output(decision, reason, additional_context)
+        output = create_hook_output(verdict)
         print(json.dumps(output))
         sys.exit(0)
 
@@ -1295,7 +1320,9 @@ def main() -> None:
     except json.JSONDecodeError as e:
         # JSON parsing error - deny with error message
         error_reason = f"Failed to parse hook input: {str(e)}"
-        output = create_hook_output("deny", error_reason)
+        output = create_hook_output(
+            RuntimeVerdict(decision="deny", reason=error_reason)
+        )
         print(json.dumps(output), file=sys.stderr)
         crash_context = _build_crash_context(locals())
         crash_context["raw_stdin"] = e.doc
@@ -1305,7 +1332,9 @@ def main() -> None:
     except ValueError as e:
         # Validation error - deny with error message
         error_reason = f"Invalid hook input: {str(e)}"
-        output = create_hook_output("deny", error_reason)
+        output = create_hook_output(
+            RuntimeVerdict(decision="deny", reason=error_reason)
+        )
         print(json.dumps(output), file=sys.stderr)
         log_crash(e, _build_crash_context(locals()), caught_as="ValueError")
         sys.exit(0)
@@ -1313,7 +1342,9 @@ def main() -> None:
     except Exception as e:
         # Unexpected error - deny and log
         error_reason = f"Unexpected error in hook: {str(e)}"
-        output = create_hook_output("deny", error_reason)
+        output = create_hook_output(
+            RuntimeVerdict(decision="deny", reason=error_reason)
+        )
         print(json.dumps(output), file=sys.stderr)
         print(f"Error: {error_reason}", file=sys.stderr)
         log_crash(e, _build_crash_context(locals()), caught_as="unexpected Exception")

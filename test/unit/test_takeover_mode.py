@@ -26,6 +26,7 @@ from toolguard.config import (
     load_configuration,
 )
 from toolguard.hook import load_file_path_patterns
+from toolguard.permission_resolution import resolve_permission_detailed
 from toolguard.permissions import decide_command_at_level_detailed
 
 
@@ -295,7 +296,7 @@ class TestBashTakeoverFiltering(unittest.TestCase):
                 ask_patterns=list(ask_patterns),
             )
 
-        resolved = config.resolve_permission_detailed("Bash", _decide)
+        resolved = resolve_permission_detailed(config, "Bash", _decide)
         return resolved.decision, resolved.reason
 
     def test_native_blanket_bash_allow_suppressed_when_takeover_enabled(self):

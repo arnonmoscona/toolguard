@@ -240,8 +240,11 @@ This applies uniformly to:
   the full level cascade; the compound is allowed iff every sub-command is.
 - File-path tools (Read/Write/Edit).
 
-The level cascade is orchestrated by `Configuration.resolve_permission_detailed`
-(fed by `Configuration.permission_levels_with_provenance(tool)`). Pattern
+The level cascade is orchestrated by
+`permission_resolution.resolve_permission_detailed` (TOO-45 D1a; fed by
+`Configuration.permission_levels_with_provenance(tool)` through a narrow,
+duck-typed query surface -- the engine module never imports `toolguard.config`
+itself). Pattern
 MATCHING stays in `permissions.py`/`compound.py` (and the file-path matcher in
 `hook.py`); those provide a per-level
 `decide(allow, deny) -> (decision, reason, matched_pattern) | None` callable.
@@ -362,8 +365,8 @@ log citing BOTH sides' provenance (winning allow's file/level + the overridden
 deny's file/level) and the command. `hard_deny` denials are **not** conflicts --
 they are recorded in the resolution log (with provenance), never the conflict log.
 
-Detection lives in `Configuration.resolve_permission_detailed` /
-`Configuration._detect_override`: when the winning decision is an `allow` at level
+Detection lives in `permission_resolution.resolve_permission_detailed` /
+`permission_resolution._detect_override`: when the winning decision is an `allow` at level
 *k*, the LESS-specific levels are scanned for a `deny` match on the same command;
 the first match becomes a `ConflictOverride`. The hook
 (`_log_conflict_override` / `_format_conflict_message`) routes it to the conflict
@@ -375,10 +378,16 @@ stream.
 view (per level: `(allow, deny, ToolPatternLayer[])`). The detailed deciders
 (`permissions.decide_command_at_level_detailed`,
 `hook._decide_file_path_at_level_detailed`) report the matched pattern, which
-`Configuration._provenance_for_pattern` maps back to the owning
-`ToolPatternLayer.provenance` for exact file/level precision.
-`resolve_permission_detailed` returns a `ResolvedDecision`
-(decision, reason, provenance, optional override). For **backward compatibility**,
+`config_types.provenance_for_pattern` maps back to the owning
+`ToolPatternLayer.provenance` for exact file/level precision. (TOO-45 R2d moved
+this off `Configuration` -- it held no configuration state -- to live beside
+`ToolPatternLayer` in `toolguard.config_types`; `permission_resolution.py`
+imports and calls it directly.)
+`resolve_permission_detailed` returns a `RuntimeVerdict`
+(decision, reason, provenance, overrides, ...) -- TOO-45 R1c collapsed the former
+`ResolvedDecision`/`BashResolution`/`FileResolution` into this one type, the single
+runtime verdict every governed-tool resolution returns; see
+`toolguard.config_types.RuntimeVerdict`'s own docstring. For **backward compatibility**,
 provenance is appended to the reason as a bracketed suffix
 (`_append_provenance` -> `Provenance.describe_brief`), e.g.
 `Command matches allow pattern: git *  [project: /p/.claude/toolguard_hook.toml]`,
@@ -1056,9 +1065,10 @@ in SORTED RELATIVE order (not filesystem iteration order, and not tied to either
 absolute path), so two directories with the same internal layout hash identically regardless of
 creation order or where they happen to live on disk.
 
-This is intentionally a DIFFERENT comparison from `toolguard/update_check.py` (TOO-16), which
-compares a local checkout's git HEAD against `git ls-remote origin HEAD` -- a git-history
-freshness question. `stale_install_report()` compares ACTUAL FILE CONTENT currently sitting in
+This is intentionally a DIFFERENT comparison from the `toolguard-update-check` console script
+(TOO-16; CLI in `toolguard/update_check.py`, detection/comparison logic in
+`toolguard/install_update.py` since TOO-45 R5c), which compares a local checkout's git HEAD
+against `git ls-remote origin HEAD` -- a git-history freshness question. `stale_install_report()` compares ACTUAL FILE CONTENT currently sitting in
 site-packages against the checkout's current content, which is the only check that has any
 signal for the specific scenario this was built for: a machine deliberately governed by a local,
 unpushed build (`uv tool install /local/path toolguard`), where there IS no useful remote to

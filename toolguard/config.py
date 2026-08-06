@@ -35,7 +35,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Set, Tuple
 from toolguard.config_types import ConfigLayer as ConfigLayer
 from toolguard.config_types import ConflictOverride as ConflictOverride
 from toolguard.config_types import Provenance as Provenance
-from toolguard.config_types import ResolvedDecision as ResolvedDecision
+from toolguard.config_types import RuntimeVerdict as RuntimeVerdict
 from toolguard.config_types import TakeoverConfig as TakeoverConfig
 from toolguard.config_types import TakeoverEnabledConflict as TakeoverEnabledConflict
 from toolguard.config_types import ToolPatternLayer as ToolPatternLayer
@@ -46,7 +46,7 @@ from toolguard.config_validation import validate_permissions
 from toolguard.issues import Issue
 from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 from toolguard.rule_entry import RuleEntry, entries_for_tool, normalize_entry
-from toolguard.rule_entry import _strip_tool_wrapper
+from toolguard.rule_entry import _strip_tool_wrapper as _strip_tool_wrapper
 from toolguard.rule_entry import is_tool_wrapper as is_tool_wrapper
 from toolguard.rule_entry import normalize_entries_preserving
 from toolguard.toml_scan import find_multiline_structured_entry_line
@@ -67,18 +67,26 @@ from toolguard.toml_scan import find_multiline_structured_entry_line
 # call sites moved along with the functions); only the two predicates are
 # imported back and re-exported so existing importers
 # (``toolguard.config_divergence``'s ``is_tool_wrapper``,
-# ``toolguard.tools.takeover_audit``'s ``_strip_tool_wrapper``, and this
-# module's own internal use below) keep working unchanged.
+# ``toolguard.tools.takeover_audit``'s ``_strip_tool_wrapper``) keep working
+# unchanged. TOO-45 R2a: this module's own code no longer calls
+# ``_strip_tool_wrapper`` directly either -- every internal use now goes
+# through :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` -- so the
+# import here is a pure re-export as of this change (``as`` alias added to
+# say so explicitly, matching ``is_tool_wrapper``'s existing idiom).
 #
 # ``Provenance``, ``ConfigLayer``, ``ToolPatternLayer``,
-# ``TakeoverEnabledConflict``, ``TakeoverConfig``, ``ConflictOverride``, and
-# ``ResolvedDecision`` similarly moved to ``toolguard.config_types`` (TOO-19
-# structural refactor): these are thin data types with no discovery/parsing
-# logic, so they now live apart from ``Configuration`` and the machinery that
-# builds and resolves them. Imported back and re-exported here (same
-# ``import x as x`` idiom as above) so existing
-# ``from toolguard.config import Provenance`` (etc.) call sites keep working
-# unchanged.
+# ``TakeoverEnabledConflict``, ``TakeoverConfig``, and ``ConflictOverride``
+# similarly moved to ``toolguard.config_types`` (TOO-19 structural refactor):
+# these are thin data types with no discovery/parsing logic, so they now live
+# apart from ``Configuration`` and the machinery that builds and resolves
+# them. Imported back and re-exported here (same ``import x as x`` idiom as
+# above) so existing ``from toolguard.config import Provenance`` (etc.) call
+# sites keep working unchanged.
+#
+# ``ResolvedDecision`` (the type formerly here) was collapsed into
+# ``RuntimeVerdict`` by TOO-45 R1c, along with ``BashResolution``/
+# ``FileResolution`` (formerly in ``toolguard.resolve``) -- see
+# ``RuntimeVerdict``'s own docstring. Re-exported the same way.
 
 # Default blanket ignored-allow patterns for takeover mode. These seed the
 # union of ``ignored_allow_patterns`` so that, when takeover is enabled, the
@@ -844,32 +852,6 @@ def wrap_tool_pattern(tool: str, body: str) -> str:
     return f"{tool}({body})"
 
 
-def _append_provenance(reason: str, provenance) -> str:
-    """
-    Append matched-rule provenance to a reason as a bracketed suffix.
-
-    Keeps backward compatibility with existing reason consumers: the suffix is
-    appended AFTER the original reason so ``reason.split(': ', 1)`` and
-    "matches allow pattern: X" substring assertions still hold. Two spaces
-    separate the original reason from the suffix, e.g.::
-
-        Command matches allow pattern: git *  [project: /p/.claude/toolguard_hook.toml]
-
-    When ``provenance`` is None (no rule matched / mapping unavailable), the
-    reason is returned unchanged.
-
-    Args:
-        reason: The base reason string from the matcher.
-        provenance: A :class:`Provenance`, or None.
-
-    Returns:
-        The reason with a ``  [<level: path>]`` suffix, or unchanged.
-    """
-    if provenance is None:
-        return reason
-    return f"{reason}  [{provenance.describe_brief()}]"
-
-
 @dataclass(frozen=True)
 class Configuration:
     """
@@ -899,10 +881,11 @@ class Configuration:
             object/table (same silent-information-loss failure mode) both
             count. Non-empty is a severe safety-floor condition: EVERY
             governed decision is clamped to ``'ask'`` by
-            :meth:`resolve_permission_detailed` (see
-            :meth:`_apply_parse_failure_ask_floor`) until the file(s) are
-            fixed, because a broken file may have silently dropped a
-            deny/hard_deny rule with no other visible trace.
+            :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+            (see :func:`~toolguard.permission_resolution._apply_ask_floor`)
+            until the file(s) are fixed, because a broken file may have
+            silently dropped a deny/hard_deny rule with no other visible
+            trace.
             :meth:`validation_issues` also reports one ``'error'`` Issue per
             entry, and ``toolguard-session-start`` surfaces it at the start of
             every session while it remains non-empty. Defaults to ``()`` so
@@ -1136,9 +1119,7 @@ class Configuration:
         (e.g. ``additionalContext``). This mirrors :class:`RuleEntry`'s own
         ``.pattern``-only "same rule" comparison (see
         :meth:`~toolguard.rule_entry.RuleEntry.identity` for why that differs
-        from full ``identity()`` equality or a future merge) and keeps the
-        pooled entries index-aligned with :meth:`hard_deny`'s pattern tuples,
-        which dedupe on the same (stripped) pattern. Because
+        from full ``identity()`` equality or a future merge). Because
         ``entries_for_tool`` already scopes to one tool's wrapper prefix, two
         distinct wrapped patterns can never collide after stripping, so this
         is the identical de-dup behaviour as before, just keyed pre-strip.
@@ -1166,13 +1147,13 @@ class Configuration:
             if not isinstance(section, dict):
                 continue
 
-            _deny_patterns, deny_entries = self._extract_tool_entries(
+            deny_entries = self._extract_tool_entries(
                 section.get("deny", []), tool_name, layer.is_native
             )
             for entry in deny_entries:
                 seen_deny.setdefault(entry.pattern, entry)
 
-            _allow_patterns, allow_entries = self._extract_tool_entries(
+            allow_entries = self._extract_tool_entries(
                 section.get("allow", []), tool_name, layer.is_native
             )
             for entry in allow_entries:
@@ -1222,8 +1203,8 @@ class Configuration:
         """
         deny_entries, allow_entries = self._pool_hard_deny_entries(tool_name)
         return (
-            tuple(_strip_tool_wrapper(entry.pattern) for entry in deny_entries),
-            tuple(_strip_tool_wrapper(entry.pattern) for entry in allow_entries),
+            tuple(entry.stripped_pattern for entry in deny_entries),
+            tuple(entry.stripped_pattern for entry in allow_entries),
         )
 
     def hard_deny_entries(
@@ -1239,10 +1220,13 @@ class Configuration:
         both methods project from), but returns the entries themselves rather
         than stripped pattern strings, so a structured entry's metadata
         (e.g. an ``additionalContext`` reinforcing why a command is hard-denied
-        and what to use instead) is reachable. Index-aligned with
-        :meth:`hard_deny`: ``hard_deny(tool_name)[i]`` is always the
-        wrapper-stripped form of ``hard_deny_entries(tool_name)[i].pattern``,
-        for both the deny and allow tuples.
+        and what to use instead) is reachable. ``hard_deny(tool_name)`` is a
+        pure projection of this same pool (each pattern is
+        ``entry.stripped_pattern`` for the corresponding entry here) -- TOO-45
+        R2c: no caller relies on positional alignment between the two methods'
+        *return values* any more (the one that used to,
+        ``resolve._hard_deny_additional_context``, now searches this method's
+        result directly), so there is nothing left to keep in sync by hand.
 
         Not yet wired into any decision path -- this increment only makes the
         metadata reachable. A later TOO-19 phase uses it to surface
@@ -1256,24 +1240,29 @@ class Configuration:
         Returns:
             Tuple of (deny_entries, allow_entries): immutable, de-duplicated,
             wrapper-intact :class:`RuleEntry` tuples pooled across all
-            toolguard_hook layers, index-aligned with :meth:`hard_deny`.
+            toolguard_hook layers.
         """
         return self._pool_hard_deny_entries(tool_name)
 
     @staticmethod
     def _extract_tool_entries(
         raw_list: object, tool_name: str, is_native: bool
-    ) -> Tuple[Tuple[str, ...], Tuple[RuleEntry, ...]]:
+    ) -> Tuple[RuleEntry, ...]:
         """
-        Normalize, scope, and strip one raw permissions list for a tool.
+        Normalize and scope one raw permissions list for a tool.
 
         The shared per-list worker behind :meth:`permission_layers`: runs every
         raw element through :func:`toolguard.rule_entry.normalize_entry` (shape
         normalization -- plain string or structured ``{match = ..., ...}``
-        table), keeps the ones that scope to ``tool_name`` via
-        :func:`toolguard.rule_entry.entries_for_tool`, then strips each
-        survivor's ``Tool(...)`` wrapper via
-        :func:`toolguard.rule_entry._strip_tool_wrapper`.
+        table), then keeps the ones that scope to ``tool_name`` via
+        :func:`toolguard.rule_entry.entries_for_tool`.
+
+        TOO-45 R2a: returns entries only -- callers that also want the
+        wrapper-stripped pattern form read it off each entry's
+        :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` property
+        instead of this method separately materialising a parallel
+        ``patterns`` tuple, which used to be index-aligned with (and could
+        drift from) the entries it was derived from.
 
         ``normalize_entry`` also returns issues (e.g. a malformed structured
         entry, or an unknown enrichment key); they are INTENTIONALLY discarded
@@ -1300,8 +1289,7 @@ class Configuration:
                 layer).
 
         Returns:
-            A ``(patterns, entries)`` pair, index-aligned: ``patterns[i]`` is
-            always the wrapper-stripped form of ``entries[i].pattern``.
+            The entries scoped to ``tool_name``, in source order.
         """
         if not isinstance(raw_list, list):
             raw_list = []
@@ -1312,24 +1300,21 @@ class Configuration:
             if entry is not None:
                 normalized.append(entry)
 
-        scoped = entries_for_tool(tuple(normalized), tool_name)
-        patterns = tuple(_strip_tool_wrapper(entry.pattern) for entry in scoped)
-        return patterns, scoped
+        return entries_for_tool(tuple(normalized), tool_name)
 
     def permission_layers(self, tool_name: str) -> Tuple[ToolPatternLayer, ...]:
         """
         Return per-layer allow/deny patterns for a tool, most-specific first.
 
-        Each layer carries provenance and the extracted (wrapper-free) patterns
-        for ``tool_name`` from that source, including patterns contributed by
+        Each layer carries provenance and the entries extracted for
+        ``tool_name`` from that source, including entries contributed by
         structured (``{match = ..., ...}``) entries (TOO-19 Phase 0a, increment
-        2) -- both the stripped pattern tuples and their backing
-        :class:`RuleEntry` objects are populated (see the index invariant
-        documented on :class:`ToolPatternLayer`). Takeover filtering is
-        already applied: when takeover mode is enabled, blanket ignored allow
-        patterns are removed from native ('claude') layers only -- from both
-        ``allow`` and ``allow_entries``, keeping them index-aligned. Deny and
-        ask patterns are never filtered.
+        2) -- ``ToolPatternLayer``'s wrapper-stripped ``allow``/``deny``/``ask``
+        pattern tuples are derived properties over these entries (TOO-45 R2),
+        not separately populated. Takeover filtering is already applied: when
+        takeover mode is enabled, blanket ignored allow patterns are removed
+        from native ('claude') layers only, filtered directly on
+        ``allow_entries``. Deny and ask entries are never filtered.
 
         Phase 1 callers flatten+union these (see :meth:`allow_deny_for`),
         preserving current behaviour. The per-layer shape supports a future
@@ -1353,31 +1338,26 @@ class Configuration:
             if not isinstance(permissions, dict):
                 permissions = {}
 
-            allow, allow_entries = self._extract_tool_entries(
+            allow_entries = self._extract_tool_entries(
                 permissions.get("allow", []), tool_name, layer.is_native
             )
             if takeover.enabled and layer.is_native:
-                kept = [
-                    (pattern, entry)
-                    for pattern, entry in zip(allow, allow_entries)
-                    if pattern not in ignored
-                ]
-                allow = tuple(pattern for pattern, _entry in kept)
-                allow_entries = tuple(entry for _pattern, entry in kept)
+                allow_entries = tuple(
+                    entry
+                    for entry in allow_entries
+                    if entry.stripped_pattern not in ignored
+                )
 
-            deny, deny_entries = self._extract_tool_entries(
+            deny_entries = self._extract_tool_entries(
                 permissions.get("deny", []), tool_name, layer.is_native
             )
-            ask, ask_entries = self._extract_tool_entries(
+            ask_entries = self._extract_tool_entries(
                 permissions.get("ask", []), tool_name, layer.is_native
             )
 
             result.append(
                 ToolPatternLayer(
                     provenance=layer.provenance,
-                    allow=allow,
-                    deny=deny,
-                    ask=ask,
                     allow_entries=allow_entries,
                     deny_entries=deny_entries,
                     ask_entries=ask_entries,
@@ -1434,353 +1414,6 @@ class Configuration:
                 tuple(grouped[s][3]),
             )
             for s in order
-        )
-
-    @staticmethod
-    def _provenance_for_pattern(
-        layers: Tuple[ToolPatternLayer, ...], pattern: str, kind: str
-    ) -> Optional["Provenance"]:
-        """
-        Find the provenance of the layer that contributed a matched pattern.
-
-        Args:
-            layers: The contributing layers for one level (most-specific first).
-            pattern: The exact (wrapper-free) pattern string that matched.
-            kind: 'allow' or 'deny' -- which side of the layer to search.
-
-        Returns:
-            The provenance of the first layer whose ``kind`` list contains the
-            pattern, or None when not found (e.g. format drift).
-        """
-        for layer in layers:
-            if kind == "allow":
-                candidates = layer.allow
-            elif kind == "ask":
-                candidates = layer.ask
-            else:
-                candidates = layer.deny
-            if pattern in candidates:
-                return layer.provenance
-        return None
-
-    @staticmethod
-    def _entry_for_pattern(
-        layers: Tuple[ToolPatternLayer, ...], pattern: str, kind: str
-    ) -> Optional[RuleEntry]:
-        """
-        Find the :class:`~toolguard.rule_entry.RuleEntry` behind a matched pattern.
-
-        Companion to :meth:`_provenance_for_pattern` (same first-layer-wins
-        search), kept as a separate method rather than folded into it: the
-        other caller of ``_provenance_for_pattern`` (:meth:`_detect_override`,
-        for the OVERRIDDEN deny) has no use for the entry, so merging the two
-        would hand every call site an unused value. The two methods do re-walk
-        the same (small, per-level) layer list, but that repeat scan is cheap
-        relative to the readability cost of a combined return type.
-
-        ``pattern`` is matched against ``layer.allow``/``deny``/``ask`` --
-        the WRAPPER-STRIPPED tuples -- exactly like ``_provenance_for_pattern``,
-        because that is the form ``matched_pattern`` arrives in from
-        ``decide_detailed`` (it is drawn from the stripped ``allow``/``deny``/
-        ``ask`` tuples threaded through
-        :meth:`permission_levels_with_provenance`). The corresponding
-        ``RuleEntry`` is then read off ``allow_entries``/``deny_entries``/
-        ``ask_entries`` at the SAME index -- never by comparing against
-        ``entry.pattern`` (wrapper-INTACT) -- per the index-for-index
-        invariant documented on :class:`ToolPatternLayer`.
-
-        Args:
-            layers: The contributing layers for one level (most-specific first).
-            pattern: The exact (wrapper-free) pattern string that matched.
-            kind: 'allow', 'ask', or 'deny' -- which side of the layer to search.
-
-        Returns:
-            The :class:`RuleEntry` behind the first layer whose ``kind`` list
-            contains the pattern, or None when not found (e.g. format drift
-            OR the pattern's own layer has drifted parallel lists -- see
-            below).
-        """
-        for layer in layers:
-            if kind == "allow":
-                candidates, entries = layer.allow, layer.allow_entries
-            elif kind == "ask":
-                candidates, entries = layer.ask, layer.ask_entries
-            else:
-                candidates, entries = layer.deny, layer.deny_entries
-            if pattern in candidates:
-                # TOO-19 code review m4: the alignment check must gate an
-                # immediate return, not just skip this layer. The pattern
-                # string was found in the layer THAT ACTUALLY CONTRIBUTED IT
-                # (patterns are unique per level's flattened pool by
-                # construction); if that layer's parallel lists have
-                # drifted, there is no reliable entry to return -- falling
-                # through to a LESS-specific layer that happens to contain
-                # the same pattern string would attribute enrichment to a
-                # rule that did not win. Stop here instead. This only
-                # affects which entry (if any) feeds additionalContext --
-                # never the decision/reason/provenance already resolved by
-                # the caller, so it cannot change any verdict.
-                if len(entries) != len(candidates):
-                    return None
-                return entries[candidates.index(pattern)]
-        return None
-
-    def resolve_permission_detailed(
-        self, tool_name: str, decide_detailed
-    ) -> ResolvedDecision:
-        """
-        Resolve a decision with provenance and allow-over-deny conflict detection.
-
-        Drives a most-specific-wins cascade over the hierarchy levels (evaluated
-        MOST-SPECIFIC -> LEAST-SPECIFIC, first level that matches anything wins;
-        no match at any level => fail-closed deny). ``decide_detailed`` must
-        return ``(decision, reason, matched_pattern)``
-        (or None) so the matched rule can be mapped to its source provenance. The
-        returned :class:`ResolvedDecision` carries the winning rule's provenance
-        (with provenance appended to the reason as a bracketed suffix) and, when
-        the winning decision is an ``allow`` that overrides a ``deny`` in a
-        LESS-specific level, a :class:`ConflictOverride` describing both sides.
-
-        Conflict detection (Phase 4): only allow-over-deny overrides are
-        conflicts. ``hard_deny`` denials are handled by the caller BEFORE this
-        runs and are NOT conflicts.
-
-        This is THE single chokepoint every governed tool's decision passes
-        through -- both Bash/MCP-terminal (per sub-command) and file-path
-        (Read/Write/Edit) resolution call this method (see
-        :mod:`toolguard.resolve`), and both the live hook and the read-only
-        ``--eval``/replay path (:mod:`toolguard.tools.decision`) call those in
-        turn. That makes it the right place -- not the Bash-specific compound
-        pipeline in :mod:`toolguard.compound` -- to apply the config-level ASK
-        floor (TOO-19 fail-open fix, see :meth:`_apply_parse_failure_ask_floor`)
-        so it covers every governed tool uniformly. ``hard_deny`` matches never
-        reach this method (checked by the caller first) and so are naturally
-        unaffected -- consistent with the floor never weakening a deny.
-
-        Args:
-            tool_name: Tool whose levels to evaluate.
-            decide_detailed: Callable
-                ``(allow, deny, ask) -> (decision, reason, matched_pattern) | None``.
-
-        Returns:
-            A :class:`ResolvedDecision`, with the TOO-19 ASK floor already
-            applied (see :meth:`_apply_parse_failure_ask_floor`).
-        """
-        resolved = self._resolve_permission_detailed_unclamped(
-            tool_name, decide_detailed
-        )
-        return self._apply_parse_failure_ask_floor(resolved)
-
-    def apply_parse_failure_floor(self, decision: str, reason: str) -> Tuple[str, str]:
-        """
-        Clamp a plain ``(decision, reason)`` pair to 'ask' on a broken config.
-
-        This is the CORE clamp, extracted (TOO-19 fail-open-via-undecidable-
-        segments fix) so it can be applied both at the single-sub-command
-        chokepoint (:meth:`resolve_permission_detailed`, via
-        :meth:`_apply_parse_failure_ask_floor`) AND at the compound-command
-        boundary (:func:`toolguard.resolve.resolve_bash_permission_detailed`),
-        which can produce a verdict from segments -- grammar-level
-        :class:`~toolguard.parser.multiline.UndecidableSegment` instances --
-        that never reach ``resolve_permission_detailed`` at all and so never
-        see the per-leaf clamp. There must be exactly ONE implementation of
-        this clamp so the two call sites cannot drift.
-
-        HARD INVARIANT (TOO-19): this clamp is UNCONDITIONAL and takes no
-        settings-driven parameter -- in particular it never consults
-        ``undecidable_fallback`` (see :meth:`resolved_undecidable_fallback`),
-        and no future setting may be threaded in to relax it. A parse failure
-        means toolguard does not know what its rules ARE, so it has no basis
-        for any verdict at all; it is not a policy question a config value
-        can answer, unlike ``undecidable_fallback``'s "I read the command but
-        could not safely decompose it". Keep this method's signature free of
-        any fallback-selection parameter.
-
-        Args:
-            decision: The unclamped decision string (``'allow'``, ``'ask'``,
-                or ``'deny'``).
-            reason: The unclamped reason string, ignored and replaced when
-                the clamp fires.
-
-        Returns:
-            *(decision, reason)* unchanged when there are no parse failures
-            or *decision* is already ``'deny'`` (the floor never weakens a
-            deny); otherwise ``('ask', self._parse_failure_reason())``.
-        """
-        if not self.parse_failures or decision == "deny":
-            return decision, reason
-        return "ask", self._parse_failure_reason()
-
-    def _apply_parse_failure_ask_floor(
-        self, resolved: ResolvedDecision
-    ) -> ResolvedDecision:
-        """
-        Clamp *resolved* to 'ask' when any governed config file failed to parse.
-
-        Mirrors the ASK floor already implemented for foreign inline code in
-        ``toolguard/compound.py`` (``_resolve_leaf``, lines ~65-71): an
-        explicit ``'deny'`` is preserved unchanged; ``'allow'`` and ``'ask'``
-        are both clamped to ``'ask'`` with a reason naming every broken file
-        (matching that floor's own choice to always rewrite the reason for a
-        non-deny decision, not only for 'allow'). This is the config-level
-        counterpart of that floor: it lives here, in the single chokepoint
-        shared by every governed tool's resolution, rather than in the
-        Bash-specific compound pipeline.
-
-        Delegates the actual clamp decision to :meth:`apply_parse_failure_floor`
-        (TOO-19 fail-open-via-undecidable-segments fix) so there is a single
-        implementation shared with the compound-boundary call site in
-        :mod:`toolguard.resolve`; this method's own job is just translating
-        to/from :class:`ResolvedDecision` and clearing the fields that
-        describe a rule match that no longer determines the verdict.
-
-        Args:
-            resolved: The unclamped decision.
-
-        Returns:
-            *resolved* unchanged when there are no parse failures or the
-            decision is already ``'deny'``; otherwise a new
-            :class:`ResolvedDecision` with ``decision='ask'``, the ASK-floor
-            reason, and ``provenance``/``override``/``additional_context``
-            cleared (they describe a rule match that no longer determines the
-            verdict).
-        """
-        if not self.parse_failures or resolved.decision == "deny":
-            return resolved
-        decision, reason = self.apply_parse_failure_floor(
-            resolved.decision, resolved.reason
-        )
-        return ResolvedDecision(decision, reason, None, None, None)
-
-    def _parse_failure_reason(self) -> str:
-        """
-        Build the user-visible ASK-floor reason naming every broken config file.
-
-        This is the ``permissionDecisionReason`` Claude Code shows the user in
-        the permission prompt, so it must be both compact and actionable: it
-        names each broken file with its specific parse error and states the
-        corrective action.
-
-        Returns:
-            The multi-line ASK-floor reason string.
-        """
-        files = "\n".join(
-            f"  {path}: {message}" for path, message in self.parse_failures
-        )
-        return (
-            "toolguard config is BROKEN -- falling back to ask for every tool "
-            "call.\nUnparseable file(s):\n"
-            f"{files}\n"
-            "Rules in these files are NOT being enforced. Fix the file(s) to "
-            "restore normal permission handling."
-        )
-
-    def _resolve_permission_detailed_unclamped(
-        self, tool_name: str, decide_detailed
-    ) -> ResolvedDecision:
-        """
-        The raw more-specific-wins resolution, BEFORE the TOO-19 ASK floor.
-
-        Extracted from :meth:`resolve_permission_detailed` (formerly its
-        entire body, unchanged) so the floor can be applied uniformly at a
-        single wrapping point rather than at each of this method's several
-        return statements.
-
-        Args:
-            tool_name: Tool whose levels to evaluate.
-            decide_detailed: Callable
-                ``(allow, deny, ask) -> (decision, reason, matched_pattern) | None``.
-
-        Returns:
-            A :class:`ResolvedDecision`, without the ASK floor applied.
-        """
-        levels = self.permission_levels_with_provenance(tool_name)
-        for index, (allow, deny, ask, layers) in enumerate(levels):
-            result = decide_detailed(allow, deny, ask)
-            if result is None:
-                continue
-            decision, reason, matched_pattern = result
-            # decision is 'allow' | 'ask' | 'deny'; map it to the list the matched
-            # pattern lives in so provenance resolves to the right rule.
-            kind = decision
-            prov = self._provenance_for_pattern(layers, matched_pattern, kind)
-            reason_with_prov = _append_provenance(reason, prov)
-            winning_entry = self._entry_for_pattern(layers, matched_pattern, kind)
-            additional_context = (
-                winning_entry.additional_context if winning_entry is not None else None
-            )
-
-            override = None
-            if decision == "allow":
-                override = self._detect_override(
-                    levels, index, matched_pattern, prov, decide_detailed
-                )
-            return ResolvedDecision(
-                decision,
-                reason_with_prov,
-                prov,
-                override,
-                additional_context,
-                # TOO-45 R3: carry the matched pattern instead of discarding it
-                # into `reason_with_prov` for callers to parse back out. It is
-                # already in hand here -- both lookups above key off it.
-                matched_rule=matched_pattern,
-            )
-
-        # No level matched anything for this command/path (TOO-15). Two distinct
-        # cases share this fail-closed branch:
-        #
-        # - The tool has NO permission rules configured anywhere (no allow, deny,
-        #   ask, or hard_deny at any level): the tool is entirely unconfigured, so
-        #   this ALWAYS resolves to 'ask' -- regardless of no_match_fallback -- so
-        #   a fresh install is never bricked by a blanket deny. A user who wants
-        #   fail-closed-on-empty writes their own catch-all deny rule, which then
-        #   flows through the normal matched-deny branch above.
-        # - Rules ARE configured but simply did not match: governed by
-        #   no_match_fallback -- 'ask' (the default), 'deny', 'allow_with_warning'
-        #   (allow, with a warning reason instead of blocking), or 'allow' (TOO-19;
-        #   allow with NO warning anywhere). The deprecated legacy value
-        #   'warn_deny' is normalized to 'allow_with_warning', and the deliberate
-        #   long-form synonym 'allow_with_no_warnings' is normalized to 'allow',
-        #   both by resolved_no_match_fallback() before this branch ever sees them.
-        if not self.has_any_rules(tool_name):
-            return ResolvedDecision(
-                "ask",
-                f"No {tool_name} permission rules configured at any level; "
-                f"defaulting to 'ask'",
-                None,
-                None,
-            )
-        fallback = self.resolved_no_match_fallback()
-        if fallback == "allow_with_warning":
-            return ResolvedDecision(
-                "allow",
-                "Command does not match any allow patterns; allowed with a "
-                "warning by no_match_fallback=allow_with_warning (add an "
-                "explicit rule to silence this)",
-                None,
-                None,
-                fallback_warning=True,
-            )
-        if fallback == "allow":
-            return ResolvedDecision(
-                "allow",
-                "Command does not match any allow patterns; allowed with no "
-                "warning by no_match_fallback=allow (add an explicit rule to "
-                "silence this)",
-                None,
-                None,
-            )
-        if fallback == "ask":
-            return ResolvedDecision(
-                "ask",
-                "Command does not match any allow patterns; awaiting a "
-                "decision (no_match_fallback=ask)",
-                None,
-                None,
-            )
-        return ResolvedDecision(
-            "deny", "Command does not match any allow patterns", None, None
         )
 
     def has_any_rules(self, tool_name: str) -> bool:
@@ -1992,9 +1625,9 @@ class Configuration:
 
         This setting is NOT consulted by, and has NO effect on, the
         config-level parse-failure ASK floor
-        (:meth:`_apply_parse_failure_ask_floor`): a broken config file is
-        never a policy question this (or any) setting can relax -- see that
-        method's docstring for the rationale.
+        (:func:`~toolguard.permission_resolution._apply_ask_floor`): a broken
+        config file is never a policy question this (or any) setting can
+        relax -- see that function's docstring for the rationale.
 
         Shares its layer-scan and validation with
         :meth:`resolved_no_match_fallback` via
@@ -2090,45 +1723,6 @@ class Configuration:
                     )
                 )
         return tuple(found)
-
-    @staticmethod
-    def _detect_override(
-        levels, winning_index, winning_pattern, winning_prov, decide_detailed
-    ):
-        """
-        Scan LESS-specific levels for a deny overridden by the winning allow.
-
-        Args:
-            levels: All levels (most-specific first) as returned by
-                :meth:`permission_levels_with_provenance`.
-            winning_index: Index of the level whose allow won.
-            winning_pattern: The winning allow pattern.
-            winning_prov: Provenance of the winning allow.
-            decide_detailed: The same per-level decider (used to test less-specific
-                levels for a deny match on the same command).
-
-        Returns:
-            A :class:`ConflictOverride` for the first less-specific deny match, or
-            None when no less-specific level denies the command.
-        """
-        for allow, deny, ask, layers in levels[winning_index + 1 :]:
-            if not deny:
-                continue
-            result = decide_detailed(allow, deny, ask)
-            # We only care about a DENY at this less-specific level. ``decide``
-            # is deny-first, so a deny here surfaces as decision == 'deny'.
-            if result is not None and result[0] == "deny":
-                _decision, _reason, overridden_pattern = result
-                overridden_prov = Configuration._provenance_for_pattern(
-                    layers, overridden_pattern, "deny"
-                )
-                return ConflictOverride(
-                    winning_pattern=winning_pattern,
-                    winning_provenance=winning_prov,
-                    overridden_pattern=overridden_pattern,
-                    overridden_provenance=overridden_prov,
-                )
-        return None
 
     def allow_deny_for(self, tool_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
         """
@@ -2308,8 +1902,8 @@ class Configuration:
         issues: List[Issue] = []
 
         # 0) A governed config file failed to parse entirely (TOO-19). This is
-        #    an 'error', not a 'warning': resolve_permission_detailed() clamps
-        #    EVERY decision to 'ask' while any entry remains (see
+        #    an 'error', not a 'warning': permission_resolution's ASK floor
+        #    clamps EVERY decision to 'ask' while any entry remains (see
         #    Configuration.parse_failures's docstring), so a rule in this file
         #    -- possibly a deny or hard_deny -- may be silently unenforced.
         for path, message in self.parse_failures:
@@ -2320,8 +1914,9 @@ class Configuration:
                     corrective_steps=(
                         "Fix the file's syntax. Until it parses, EVERY toolguard "
                         "permission decision is clamped to 'ask' (see "
-                        "Configuration.resolve_permission_detailed) so no rule -- "
-                        "including deny/hard_deny -- in this file is silently lost."
+                        "toolguard.permission_resolution.resolve_permission_detailed) "
+                        "so no rule -- including deny/hard_deny -- in this file is "
+                        "silently lost."
                     ),
                 )
             )
@@ -2665,11 +2260,12 @@ def _parse_source_recording_failures(
 
     Used only by :func:`load_configuration`'s call sites, i.e. the sources
     that actually feed the returned :class:`Configuration` (and therefore
-    :meth:`Configuration.resolve_permission_detailed`'s ASK-floor clamp):
-    the main hierarchy-discovery loop and the ``CLAUDE_SETTINGS_PATH``
-    explicit-override branch. A file that simply does not exist on disk is
-    NOT recorded -- it is not "broken" configuration, just absent -- even
-    though the warning is still printed unchanged (the pre-existing
+    :func:`~toolguard.permission_resolution.resolve_permission_detailed`'s
+    ASK-floor clamp): the main hierarchy-discovery loop and the
+    ``CLAUDE_SETTINGS_PATH`` explicit-override branch. A file that simply
+    does not exist on disk is NOT recorded -- it is not "broken"
+    configuration, just absent -- even though the warning is still printed
+    unchanged (the pre-existing
     diagnostic for a missing/misconfigured path). This matters only for the
     explicit branch: files reached via the hierarchy-discovery loop are
     always known to exist (discovery only yields paths it already found on

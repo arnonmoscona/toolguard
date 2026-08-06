@@ -12,6 +12,7 @@ Replicates the exact matching logic from checked_bash.py including:
 import fnmatch
 from typing import List, Optional, Tuple
 
+from .config_types import LevelMatch
 from .patterns import parse_pattern, match_pattern, PatternType
 from .normalization import normalize_command, normalize_path
 
@@ -129,11 +130,12 @@ def match_command(
 
         COUPLING: ``matched_pattern`` is the RAW, un-normalized list element from
         ``patterns`` (prefixes such as ``[regex]``/``[glob]`` included), not the
-        parsed/stripped form. Provenance lookup in hook.py
-        (``_provenance_for_pattern``) relies on this identity -- it does
-        ``pattern in candidates`` against the very layer lists passed in here. If
-        this is ever changed to return a normalized/wrapper-stripped pattern,
-        provenance lookup will silently return None.
+        parsed/stripped form. Provenance lookup
+        (:func:`toolguard.config_types.provenance_for_pattern`) relies on
+        this identity -- it searches for a layer entry whose
+        ``stripped_pattern`` equals this value. If this is ever changed to
+        return a normalized/wrapper-stripped pattern, provenance lookup will
+        silently return None.
     """
     # TOO-17: If the command contains a newline, skip DEFAULT/GLOB matching
     # (defense-in-depth: after the pre-pass leaves should be newline-free, but
@@ -227,7 +229,7 @@ def check_hard_deny(
     deny_patterns: List[str],
     allow_patterns: List[str],
     extended_syntax: bool = True,
-) -> Optional[Tuple[str, str, str]]:
+) -> Optional[LevelMatch]:
     """
     Apply the unoverridable hard-deny rule to a single command.
 
@@ -245,11 +247,14 @@ def check_hard_deny(
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
 
     Returns:
-        ``('deny', reason, matched_pattern)`` when the command is hard-denied,
-        otherwise ``None`` (no hard-deny match, so the caller falls through to
-        the normal cascade). ``matched_pattern`` is returned as its own
-        element (TOO-19 code review m3) rather than requiring a caller to
-        recover it by stripping a fixed prefix/suffix off ``reason`` -- that
+        A :class:`~toolguard.config_types.LevelMatch` with
+        ``decision='deny'`` when the command is hard-denied, otherwise
+        ``None`` (no hard-deny match, so the caller falls through to the
+        normal cascade). ``matched_pattern`` is carried as its own field
+        (TOO-19 code review m3; TOO-45 R1f converted the bare
+        ``(decision, reason, matched_pattern)`` tuple this used to return
+        into this dataclass) rather than requiring a caller to recover it
+        by stripping a fixed prefix/suffix off ``reason`` -- that
         round-trip is fragile against any future wording change here.
     """
     if not deny_patterns:
@@ -265,10 +270,10 @@ def check_hard_deny(
         if exempt:
             return None
 
-    return (
-        "deny",
-        f"Command matches hard_deny pattern: {pattern} (cannot be overridden)",
-        pattern,
+    return LevelMatch(
+        decision="deny",
+        reason=f"Command matches hard_deny pattern: {pattern} (cannot be overridden)",
+        matched_pattern=pattern,
     )
 
 
@@ -391,16 +396,17 @@ def decide_command_at_level_detailed(
     deny_patterns: List[str],
     extended_syntax: bool = True,
     ask_patterns: Optional[List[str]] = None,
-) -> Optional[Tuple[str, str, str]]:
+) -> Optional[LevelMatch]:
     """
     Decide a command's outcome against ONE hierarchy level's patterns.
 
-    Deny-first within the level: a deny match yields ``('deny', reason, pattern)``.
-    Otherwise the allow and ask lists are combined by more-specific-wins (a
-    more-specific allow bypasses a matching ask; a more-specific or tied ask gates
-    the allow into an ``ask`` prompt), with blanket ``*``-class ask patterns
-    ignored (a broad ask does not, alone, grant a prompt).  When the level matches
-    NOTHING, returns ``None`` so the more-specific-wins cascade can fall through to
+    Deny-first within the level: a deny match yields a ``decision='deny'``
+    :class:`~toolguard.config_types.LevelMatch`. Otherwise the allow and ask
+    lists are combined by more-specific-wins (a more-specific allow bypasses
+    a matching ask; a more-specific or tied ask gates the allow into an
+    ``ask`` prompt), with blanket ``*``-class ask patterns ignored (a broad
+    ask does not, alone, grant a prompt).  When the level matches NOTHING,
+    returns ``None`` so the more-specific-wins cascade can fall through to
     the next (less-specific) level.  The matched pattern is reported so the
     provenance-aware resolver can map it back to the
     :class:`~toolguard.config.ToolPatternLayer` (and thus the source file/level).
@@ -415,13 +421,22 @@ def decide_command_at_level_detailed(
             their exact allow/deny behavior.
 
     Returns:
-        ``(decision, reason, matched_pattern)`` when this level matches, else
-        ``None`` so the cascade falls through to the next level.
+        A :class:`~toolguard.config_types.LevelMatch` when this level
+        matches (TOO-45 R1f converted the bare ``(decision, reason,
+        matched_pattern)`` tuple this used to return into this dataclass --
+        this is also the ``decide_detailed`` callback contract
+        :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+        consumes), else ``None`` so the cascade falls through to the next
+        level.
     """
     if deny_patterns:
         matched, pattern = match_command(command, deny_patterns, extended_syntax)
         if matched:
-            return "deny", f"Command matches deny pattern: {pattern}", pattern
+            return LevelMatch(
+                decision="deny",
+                reason=f"Command matches deny pattern: {pattern}",
+                matched_pattern=pattern,
+            )
 
     allow_hit = match_command(command, allow_patterns, extended_syntax)
 
@@ -435,8 +450,8 @@ def decide_command_at_level_detailed(
     if combined is None:
         return None
     decision, matched_pattern = combined
-    return (
-        decision,
-        f"Command matches {decision} pattern: {matched_pattern}",
-        matched_pattern,
+    return LevelMatch(
+        decision=decision,
+        reason=f"Command matches {decision} pattern: {matched_pattern}",
+        matched_pattern=matched_pattern,
     )

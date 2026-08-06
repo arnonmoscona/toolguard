@@ -16,6 +16,7 @@ from unittest.mock import patch
 from toolguard.log_writer import (
     _LOG_CONTEXT_PREVIEW_WORDS,
     LOG_FORMAT_JSONLINES,
+    LogRecord,
     _preview_additional_context,
     log_command,
 )
@@ -36,7 +37,9 @@ class TestLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             # Log a command
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             # Check that log file was created with correct name
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -56,7 +59,9 @@ class TestLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             # Log a command
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             # Read the log file
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -83,9 +88,11 @@ class TestLogging(unittest.TestCase):
             # Log a refused command with violated rules
             violated_rules = ["git push:*", "**/.env/**"]
             log_command(
-                "git push origin main",
-                "refused",
-                violated_rules=violated_rules,
+                LogRecord(
+                    command_str="git push origin main",
+                    status="refused",
+                    violated_rules=violated_rules,
+                ),
                 log_dir=log_dir,
             )
 
@@ -113,10 +120,19 @@ class TestLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             # Log multiple commands
-            log_command("git status", "executed", log_dir=log_dir)
-            log_command("ls -la", "executed", log_dir=log_dir)
             log_command(
-                "rm file.txt", "refused", violated_rules=["rm *"], log_dir=log_dir
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
+            log_command(
+                LogRecord(command_str="ls -la", status="executed"), log_dir=log_dir
+            )
+            log_command(
+                LogRecord(
+                    command_str="rm file.txt",
+                    status="refused",
+                    violated_rules=["rm *"],
+                ),
+                log_dir=log_dir,
             )
 
             # Read the log file
@@ -147,8 +163,7 @@ class TestLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             log_command(
-                "git status",
-                "executed",
+                LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 config={"logging_enabled": False, "log_dir": log_dir},
             )
@@ -176,7 +191,9 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             log_files = list(log_dir.glob("toolguard-*.md"))
             self.assertEqual(
@@ -212,7 +229,10 @@ class TestLogging(unittest.TestCase):
                     "CHECKED_BASH_LOGGING_FORMAT": "jsonlines",
                 },
             ):
-                log_command("git status", "executed", log_dir=log_dir)
+                log_command(
+                    LogRecord(command_str="git status", status="executed"),
+                    log_dir=log_dir,
+                )
 
             self.assertEqual(
                 len(list(log_dir.glob("toolguard-*.md"))),
@@ -238,8 +258,7 @@ class TestLogging(unittest.TestCase):
 
             # Set logging format to jsonlines
             log_command(
-                "git status",
-                "executed",
+                LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -280,7 +299,9 @@ class TestLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             # Log a command without violated rules
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             # Read the log file
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -309,7 +330,10 @@ class TestLogging(unittest.TestCase):
             with contextlib.redirect_stderr(stderr_capture):
                 # Attempt to log - should exit with error
                 with self.assertRaises(SystemExit) as cm:
-                    log_command("git status", "executed", log_dir=log_dir)
+                    log_command(
+                        LogRecord(command_str="git status", status="executed"),
+                        log_dir=log_dir,
+                    )
 
                 self.assertEqual(
                     cm.exception.code,
@@ -335,7 +359,12 @@ class TestMatchedRuleLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            log_command("git status", "executed", matched_rule="git *", log_dir=log_dir)
+            log_command(
+                LogRecord(
+                    command_str="git status", status="executed", matched_rule="git *"
+                ),
+                log_dir=log_dir,
+            )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             content = (log_dir / expected_filename).read_text()
@@ -354,9 +383,9 @@ class TestMatchedRuleLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
+                LogRecord(
+                    command_str="git status", status="executed", matched_rule="git *"
+                ),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -380,7 +409,9 @@ class TestMatchedRuleLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             content = (log_dir / expected_filename).read_text()
@@ -398,8 +429,7 @@ class TestMatchedRuleLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
+                LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -423,7 +453,12 @@ class TestMatchedRuleLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            log_command("rm -rf /", "refused", violated_rules=["rm *"], log_dir=log_dir)
+            log_command(
+                LogRecord(
+                    command_str="rm -rf /", status="refused", violated_rules=["rm *"]
+                ),
+                log_dir=log_dir,
+            )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             content = (log_dir / expected_filename).read_text()
@@ -443,10 +478,12 @@ class TestMatchedRuleLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
-                extra_info="main",
+                LogRecord(
+                    command_str="git status",
+                    status="executed",
+                    matched_rule="git *",
+                    extra_info="main",
+                ),
                 log_dir=log_dir,
             )
 
@@ -467,10 +504,12 @@ class TestMatchedRuleLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
-                extra_info="main",
+                LogRecord(
+                    command_str="git status",
+                    status="executed",
+                    matched_rule="git *",
+                    extra_info="main",
+                ),
                 log_dir=log_dir,
             )
 
@@ -506,10 +545,12 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
-                provenance="project: /p/toolguard_hook.toml",
+                LogRecord(
+                    command_str="git status",
+                    status="executed",
+                    matched_rule="git *",
+                    provenance="project: /p/toolguard_hook.toml",
+                ),
                 log_dir=log_dir,
             )
 
@@ -528,10 +569,12 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "rm -rf /tmp/x",
-                "refused",
-                violated_rules=["rm -rf *"],
-                provenance="project: /p/toolguard_hook.toml",
+                LogRecord(
+                    command_str="rm -rf /tmp/x",
+                    status="refused",
+                    violated_rules=["rm -rf *"],
+                    provenance="project: /p/toolguard_hook.toml",
+                ),
                 log_dir=log_dir,
             )
 
@@ -551,9 +594,11 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "curl http://x",
-                "refused",
-                violated_rules=["curl:*"],
+                LogRecord(
+                    command_str="curl http://x",
+                    status="refused",
+                    violated_rules=["curl:*"],
+                ),
                 log_dir=log_dir,
             )
 
@@ -572,10 +617,12 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
-                provenance="project: /p/toolguard_hook.toml",
+                LogRecord(
+                    command_str="git status",
+                    status="executed",
+                    matched_rule="git *",
+                    provenance="project: /p/toolguard_hook.toml",
+                ),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -597,9 +644,9 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
+                LogRecord(
+                    command_str="git status", status="executed", matched_rule="git *"
+                ),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -621,11 +668,13 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
-                matched_rule="git *",
-                provenance="project: /p/toolguard_hook.toml",
-                extra_info="main",
+                LogRecord(
+                    command_str="git status",
+                    status="executed",
+                    matched_rule="git *",
+                    provenance="project: /p/toolguard_hook.toml",
+                    extra_info="main",
+                ),
                 log_dir=log_dir,
             )
 
@@ -656,11 +705,13 @@ class TestProvenanceLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "rm -rf /tmp/x",
-                "refused",
-                violated_rules=["rm -rf *"],
-                provenance="project: /p/toolguard_hook.toml",
-                extra_info="main",
+                LogRecord(
+                    command_str="rm -rf /tmp/x",
+                    status="refused",
+                    violated_rules=["rm -rf *"],
+                    provenance="project: /p/toolguard_hook.toml",
+                    extra_info="main",
+                ),
                 log_dir=log_dir,
             )
 
@@ -700,11 +751,13 @@ class TestPermissionModeLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "cd /tmp",
-                "ask",
-                note="no match",
+                LogRecord(
+                    command_str="cd /tmp",
+                    status="ask",
+                    note="no match",
+                    permission_mode="default",
+                ),
                 log_dir=log_dir,
-                permission_mode="default",
             )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -724,11 +777,13 @@ class TestPermissionModeLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "cd /tmp",
-                "ask",
-                note="no match",
+                LogRecord(
+                    command_str="cd /tmp",
+                    status="ask",
+                    note="no match",
+                    permission_mode="default",
+                ),
                 log_dir=log_dir,
-                permission_mode="default",
                 log_format=LOG_FORMAT_JSONLINES,
             )
 
@@ -751,7 +806,9 @@ class TestPermissionModeLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             content = (log_dir / expected_filename).read_text()
@@ -769,8 +826,7 @@ class TestPermissionModeLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
+                LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -850,11 +906,13 @@ class TestAdditionalContextLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git push",
-                "executed",
-                matched_rule="git *",
+                LogRecord(
+                    command_str="git push",
+                    status="executed",
+                    matched_rule="git *",
+                    additional_context="prefer git status --short",
+                ),
                 log_dir=log_dir,
-                additional_context="prefer git status --short",
             )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -876,11 +934,13 @@ class TestAdditionalContextLogging(unittest.TestCase):
             log_dir = Path(tmpdir)
             long_text = " ".join(f"word{i}" for i in range(100))
             log_command(
-                "git push",
-                "executed",
-                matched_rule="git *",
+                LogRecord(
+                    command_str="git push",
+                    status="executed",
+                    matched_rule="git *",
+                    additional_context=long_text,
+                ),
                 log_dir=log_dir,
-                additional_context=long_text,
             )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -901,11 +961,13 @@ class TestAdditionalContextLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git push",
-                "executed",
-                matched_rule="git *",
+                LogRecord(
+                    command_str="git push",
+                    status="executed",
+                    matched_rule="git *",
+                    additional_context="prefer git status --short",
+                ),
                 log_dir=log_dir,
-                additional_context="prefer git status --short",
                 log_format=LOG_FORMAT_JSONLINES,
             )
 
@@ -928,7 +990,9 @@ class TestAdditionalContextLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             content = (log_dir / expected_filename).read_text()
@@ -947,8 +1011,7 @@ class TestAdditionalContextLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
+                LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
@@ -1003,15 +1066,17 @@ class TestLogFormatGoldenFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git push origin main",
-                "refused",
-                violated_rules=["git push:*", "**/.env/**"],
-                extra_info="main-agent",
+                LogRecord(
+                    command_str="git push origin main",
+                    status="refused",
+                    violated_rules=["git push:*", "**/.env/**"],
+                    extra_info="main-agent",
+                    matched_rule="git push *",
+                    note="pushed to protected branch",
+                    permission_mode="default",
+                    additional_context="be careful",
+                ),
                 log_dir=log_dir,
-                matched_rule="git push *",
-                note="pushed to protected branch",
-                permission_mode="default",
-                additional_context="be careful",
             )
 
             content = (log_dir / "toolguard-2026-01-15.md").read_text()
@@ -1039,7 +1104,9 @@ class TestLogFormatGoldenFile(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            log_command("git status", "executed", log_dir=log_dir)
+            log_command(
+                LogRecord(command_str="git status", status="executed"), log_dir=log_dir
+            )
 
             content = (log_dir / "toolguard-2026-01-15.md").read_text()
 
@@ -1064,15 +1131,17 @@ class TestLogFormatGoldenFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git push origin main",
-                "refused",
-                violated_rules=["git push:*", "**/.env/**"],
-                extra_info="main-agent",
+                LogRecord(
+                    command_str="git push origin main",
+                    status="refused",
+                    violated_rules=["git push:*", "**/.env/**"],
+                    extra_info="main-agent",
+                    matched_rule="git push *",
+                    note="pushed to protected branch",
+                    permission_mode="default",
+                    additional_context="be careful",
+                ),
                 log_dir=log_dir,
-                matched_rule="git push *",
-                note="pushed to protected branch",
-                permission_mode="default",
-                additional_context="be careful",
                 log_format=LOG_FORMAT_JSONLINES,
             )
 
@@ -1104,8 +1173,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             log_command(
-                "git status",
-                "executed",
+                LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )

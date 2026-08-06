@@ -22,14 +22,14 @@ Design notes
 ------------
 - Every mutating subcommand backs up any file it is about to replace/edit into
   ``~/.toolguard/backups/`` (reusing
-  :func:`toolguard.scripts.migrate_permissions.create_backup`) and appends exactly one
+  :func:`toolguard.permission_migration.create_backup`) and appends exactly one
   numbered, reversible entry to ``~/.toolguard/install-journal.md`` (see
   :func:`_append_journal_entry`), matching the format documented in
   ``docs/install.md`` ("The install journal").
 - All file writes are atomic (write to a sibling ``.tmp`` file, then ``Path.replace``)
   so a failure never leaves a half-written config, settings file, or journal.
 - TOML writing reuses
-  :func:`toolguard.scripts.migrate_permissions.write_toml_config` (preserves
+  :func:`toolguard.permission_migration.write_toml_config` (preserves
   everything outside the ``[permissions]`` section) and
   :func:`toolguard.rule_sort.find_section_boundaries` (generic TOML section locator,
   reused here for ``[takeover_mode]``) rather than hand-rolling a TOML parser/writer.
@@ -58,18 +58,18 @@ from toolguard.config_write_guard import (
     patterns_in_config_text,
     verified_write_config,
 )
+from toolguard.permission_migration import create_backup, write_toml_config
 from toolguard.rule_entry import RuleEntry, normalize_entries_preserving, real_patterns
 from toolguard.rule_sort import (
     RuleEntryOrStr,
     find_section_boundaries,
     render_toml_entry,
 )
-from toolguard.scripts.migrate_permissions import create_backup, write_toml_config
 from toolguard.tools.recommended_protections import required_hard_deny_patterns
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
-from toolguard.update_check import (
+from toolguard.install_update import (
     InstallKind,
     detect_install,
     local_remote_head,
@@ -868,7 +868,7 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
     # a self-permission already present in structured form, re-adding it as a
     # duplicate bare string on every run. normalize_entries_preserving never
     # drops an element (even one that fails to normalize is preserved
-    # verbatim), matching migrate_permissions._build_merged_permissions and
+    # verbatim), matching permission_migration._build_merged_permissions and
     # rule_apply._read_raw_permissions, which fixed this same defect class.
     original_text = config_path.read_text()
     current = tomllib.loads(original_text)
@@ -1479,7 +1479,7 @@ def _backup_directory(source_dir: Path, backups_dir: Path, name_prefix: str) -> 
     """
     Copy *source_dir* whole-tree into ``~/.toolguard/backups/<name_prefix>-<timestamp>/``.
 
-    Mirrors :func:`toolguard.scripts.migrate_permissions.create_backup`'s timestamp
+    Mirrors :func:`toolguard.permission_migration.create_backup`'s timestamp
     format and same-second collision handling, generalized to a directory backup
     (``create_backup`` only handles single files).
 
@@ -1841,7 +1841,7 @@ READ-ONLY: makes no backup and appends no journal entry.
 
 Reports three things, side by side:
   - binary install status: the install kind (git/local/unknown), via
-    toolguard.update_check.detect_install(), and whether a newer commit is
+    toolguard.install_update.detect_install(), and whether a newer commit is
     available upstream. A network-unreachable or undeterminable remote is
     reported plainly as "unknown" -- this subcommand never hangs or fails
     just because the remote could not be reached.
@@ -1909,9 +1909,9 @@ def _binary_status() -> dict:
     """
     Summarize toolguard's own binary install freshness.
 
-    Reuses :func:`toolguard.update_check.detect_install` for install-kind
-    detection and :func:`toolguard.update_check.remote_head` /
-    :func:`toolguard.update_check.local_remote_head` for the remote
+    Reuses :func:`toolguard.install_update.detect_install` for install-kind
+    detection and :func:`toolguard.install_update.remote_head` /
+    :func:`toolguard.install_update.local_remote_head` for the remote
     comparison -- no git/network logic is reimplemented here, only the same
     up-to-date comparison ``toolguard-update-check`` itself performs.
 

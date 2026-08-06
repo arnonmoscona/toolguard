@@ -471,7 +471,7 @@ _PARSE_FAILURE_EXTRA_CASES: List[Tuple[str, str]] = [
 #: level (specificity 0), the user level's own toolguard_hook.toml (12 + 9
 #: cases respectively), and a rules-dir file merged into that SAME user level
 #: as a second, distinct layer (4 cases) -- so
-#: `Configuration._provenance_for_pattern` / `_entry_for_pattern` take their
+#: `config_types.provenance_for_pattern` / `entry_for_pattern` take their
 #: `kind == "ask"` branch across more than one hierarchy level AND across
 #: more than one layer within the user level. See
 #: `configs/ask_provenance/*/.claude/toolguard_hook.toml` and
@@ -519,13 +519,13 @@ _ASK_PROVENANCE_CASES: List[Tuple[str, str]] = [
 #: all; `sudo reboot`: home-level deny with NO project rule, so deny wins
 #: outright -- nothing to override). Registered here for the IN-PROCESS
 #: corpus too (the allow verdicts themselves are correct and worth pinning),
-#: but `_detect_override`'s actual firing is invisible to `decide()` --
-#: :func:`toolguard.tools.decision.decide` never returns
+#: but `permission_resolution._detect_override`'s actual firing is invisible
+#: to `decide()` -- :func:`toolguard.tools.decision.decide` never returns
 #: `ConflictOverride` at all (dropped at the `_decide_bash`/`_decide_file_path`
 #: adapters) and the hook's JSON output doesn't carry it either. It is
 #: observable ONLY via the conflict log side effect the end-to-end corpus can
 #: see (see :data:`E2E_CASES` and `fixture_loader.py`'s
-#: `conflict_logged`/`_count_stream_log_entries`) -- the mutation test for
+#: `conflict_logged`/`_new_stream_log_text`) -- the mutation test for
 #: this point must use the end-to-end corpus, not this one.
 _OVERRIDE_BREADTH_CASES: List[Tuple[str, str]] = [
     ("Bash", "git push origin main"),
@@ -783,7 +783,7 @@ E2E_CASES: List[Tuple[str, str, str]] = [
     ("realistic", "Bash", "gh status"),
     # --- TOO-45 audit follow-up (point 7): every override_breadth case,
     # end-to-end -- this is the ONLY corpus that can observe
-    # `Configuration._detect_override` firing at all (see
+    # `permission_resolution._detect_override` firing at all (see
     # `fixture_loader.py`'s `conflict_logged` golden key and its module
     # docstring for why). Includes the 3 negative controls (echo hello /
     # ls -R / sudo reboot) so the mutation battery can also confirm the

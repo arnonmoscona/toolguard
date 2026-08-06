@@ -110,15 +110,31 @@ def _preview_additional_context(
 
 
 @dataclass(frozen=True)
-class _LogRecord:
+class LogRecord:
     """
     The fields of a single resolution-log entry, in one value.
 
-    Exists only to keep the two format writers
-    (:func:`_write_jsonlines_entry` / :func:`_write_markdown_entry`) from each
-    taking eight positional arguments; it carries no behaviour and is never
-    part of the public API. Field names mirror :func:`log_command`'s
-    parameters, whose docstring documents their meaning.
+    TOO-45 R1d: hoisted from a module-private class built at the WRITER
+    boundary (inside :func:`log_command`, out of 12 loose parameters) to a
+    public one built at the CALLER boundary (``toolguard.hook``). The shape
+    was already right -- it existed "only to keep the two format writers
+    (:func:`_build_jsonlines_entry` / :func:`_render_markdown_entry`) from
+    each taking eight positional arguments" -- it was just constructed one
+    hop too late, forcing :func:`log_command` itself to carry the same 12
+    loose parameters its own docstring named as TOO-45 R1's target. Callers
+    (``toolguard.hook``) now build this directly from the
+    :class:`~toolguard.config_types.RuntimeVerdict` fields they already have
+    in scope, instead of threading each field through as its own argument.
+
+    Deliberately NOT the same type as ``RuntimeVerdict``: this is a
+    log-RENDERING record (``status`` is ``'executed'``/``'refused'``/
+    ``'ask'``, not ``RuntimeVerdict.decision``'s ``'allow'``/``'deny'``/
+    ``'ask'``; ``violated_rules``/``note`` are call-site judgement calls --
+    e.g. the fallback-escape-hatch placeholder substitution in
+    ``hook.py::_reason_suffix_or_placeholder`` -- not raw verdict fields) and
+    it also carries per-sub-command data (one compound command logs several
+    of these, one per sub-command) that has no 1:1 correspondence with the
+    single ``RuntimeVerdict`` the whole compound resolution produced.
     """
 
     command_str: str
@@ -265,7 +281,7 @@ def _resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optiona
     return _log_dir_from_environment()
 
 
-def _build_jsonlines_entry(record: _LogRecord) -> dict:
+def _build_jsonlines_entry(record: LogRecord) -> dict:
     """
     Render one log entry as a JSONLines-ready dict. Pure: no IO, no side
     effects other than reading the current time (see the timestamp note
@@ -317,7 +333,7 @@ def _build_jsonlines_entry(record: _LogRecord) -> dict:
     return entry
 
 
-def _render_markdown_entry(record: _LogRecord, timestamp: str) -> str:
+def _render_markdown_entry(record: LogRecord, timestamp: str) -> str:
     """
     Render one log entry in the default Markdown format. Pure: returns the
     text, performs no IO.
@@ -378,19 +394,9 @@ def _render_markdown_entry(record: _LogRecord, timestamp: str) -> str:
 
 
 def log_command(
-    command_str: str,
-    status: str,
-    violated_rules: Optional[List[str]] = None,
+    record: LogRecord,
     log_dir: Optional[Path] = None,
-    extra_info: Optional[str] = None,
     config: Optional[dict] = None,
-    matched_rule: Optional[str] = None,
-    # NOTE: this parameter list is already wide; TOO-45 R1 (a verdict object)
-    # is the planned fix. Do not add another one-off field without it.
-    provenance: Optional[str] = None,
-    note: Optional[str] = None,
-    permission_mode: Optional[str] = None,
-    additional_context: Optional[str] = None,
     log_format: str = LOG_FORMAT_MARKDOWN,
 ) -> None:
     """
@@ -399,45 +405,21 @@ def log_command(
     Uses the same logging format as checked_bash.py for compatibility.
     Logs to logs/toolguard-YYYY-MM-DD.md by default.
 
+    TOO-45 R1d: takes the entry's data as one :class:`LogRecord`, built by
+    the caller (``toolguard.hook``), instead of the 12 loose parameters this
+    function used to carry (the ``# noqa: PLR0913`` marker this replaced was
+    R1's own pre-registered acceptance test). *log_dir*/*config*/*log_format*
+    stay as separate parameters -- they are ROUTING concerns (where/how to
+    write), not part of the entry's own data, so bundling them into
+    *record* would conflate two different kinds of information the way the
+    old flat parameter list did.
+
     Args:
-        command_str: The command that was executed, refused, or left pending a prompt
-        status: 'executed', 'refused', or 'ask' (TOO-15: the command was not
-            outright blocked but requires an interactive permission prompt)
-        violated_rules: List of rules that were violated (for 'refused' commands
-            only -- NOT used for 'ask', which is not a violation; see ``note``)
+        record: The entry's data -- see :class:`LogRecord` for field meanings
+            (they mirror this function's former parameter names exactly).
         log_dir: Optional directory path for logs (for testing). If provided, uses this
                  directory directly instead of resolving from environment or project root.
-        extra_info: Optional additional info to include in the log entry (e.g., agent identification)
         config: Optional environment config dict (from get_env_config())
-        matched_rule: Optional pattern string that permitted the command (for allowed commands)
-        provenance: Optional brief origin ("level: path") of the rule named by
-            ``matched_rule`` / the deny it violated (TOO-45 R3 follow-up --
-            e.g. :meth:`~toolguard.config_types.Provenance.describe_brief`).
-            Rendered in its OWN field, never folded back into
-            ``matched_rule`` or ``violated_rules`` text -- see
-            :class:`~toolguard.config_types.ResolvedDecision.matched_rule`
-            for why those two must stay parse-free. ``None`` when the caller
-            has no single provenance to attribute (e.g. a hard-deny match,
-            pooled across levels).
-        note: Optional free-text note for a non-violation outcome (e.g. WHY an
-            'ask' verdict was reached). Rendered under its own field, distinct
-            from ``violated_rules``, so an 'ask' outcome is never mislabeled as
-            a rule violation.
-        permission_mode: Claude Code's own ``permission_mode`` field from the hook
-            input (e.g. ``'default'``, ``'plan'``, ``'auto'``/similar), when present.
-            Toolguard's ``ask``/``allow``/``deny`` verdict is independent of this --
-            it never changes the decision -- but recording it makes it possible to
-            later tell whether Claude Code's own mode (e.g. an auto-mode override of
-            a hook ``ask``, see anthropics/claude-code changelog v2.1.211) was a
-            factor in what actually happened to a command after toolguard decided.
-        additional_context: The winning rule's accumulated ``additionalContext``
-            enrichment (TOO-19 Phase 1), or ``None`` when there was none. Answers
-            "why did Claude get this nudge" after the fact. Rendered under its
-            own field in both formats, CAPPED to a short word-budget preview
-            (see :func:`_preview_additional_context`) rather than logged in
-            full -- the full text already reached Claude via the hook's JSON
-            output for that invocation; logging it in full on every matching
-            command would make the log unreadable for a human scanning it.
         log_format: :data:`LOG_FORMAT_MARKDOWN` (the default, and what every
             production caller uses) or :data:`LOG_FORMAT_JSONLINES`. TOO-19
             m5: this used to be read from a legacy
@@ -468,19 +450,10 @@ def log_command(
         log_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.{extension}"
         log_file = log_dir_path / log_filename
 
-        # Prepare log entry
+        # Prepare log entry timestamp (markdown heading only -- see
+        # _build_jsonlines_entry's docstring for why JSONLines computes its
+        # own, separate timestamp instead of reusing this one).
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        record = _LogRecord(
-            command_str=command_str,
-            status=status,
-            violated_rules=violated_rules or [],
-            extra_info=extra_info,
-            matched_rule=matched_rule,
-            provenance=provenance,
-            note=note,
-            permission_mode=permission_mode,
-            additional_context=additional_context,
-        )
 
         # Render the entry first, then write it in a single f.write() call.
         # This narrows the interleaving window when two hook processes

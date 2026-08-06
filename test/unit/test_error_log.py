@@ -89,7 +89,7 @@ class TestLogCrash(unittest.TestCase):
         Then two distinct files are written and the first crash report's
         content is left completely untouched by the second call (the same
         "prove no data loss" shape as create_backup's collision fix in
-        toolguard/scripts/migrate_permissions.py)
+        toolguard/permission_migration.py)
         """
         fixed_now = datetime(2026, 7, 9, 10, 15, 0)
         with TemporaryDirectory() as tmpdir:

@@ -11,6 +11,7 @@ only that each mode runs without crashing and returns a sane shape.
 """
 
 import ast
+import inspect
 import io
 import json
 import stat
@@ -27,7 +28,7 @@ from unittest import mock
 # this file also runs standalone via ``python -m unittest test.unit....``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools import architecture_fitness as af  # noqa: E402
+from tools import architecture_fitness as af
 
 
 def _write(path: Path, content: str) -> None:
@@ -569,6 +570,38 @@ class TestGraphAlgorithms(unittest.TestCase):
         self.assertEqual(len(cycles), 1)
         self.assertEqual(set(cycles[0]), {"x", "y"})
 
+    def test_find_import_cycles_drops_an_out_of_scope_cycle_entirely(self):
+        """
+        Given a graph with a cycle entirely inside an out-of-scope package
+            AND a genuine in-scope cycle (TOO-45 R5a-0: reproduces the real
+            defect -- parser.command_extractor <-> parser.multiline vs.
+            hook <-> tools.decision)
+        When find_import_cycles is called with out_of_scope_packages naming
+            the first cycle's package
+        Then only the in-scope cycle is reported
+        """
+        graph = {
+            "parser.a": {"parser.b"},
+            "parser.b": {"parser.a"},
+            "hook": {"tools.decision"},
+            "tools.decision": {"hook"},
+        }
+        cycles = af.find_import_cycles(graph, out_of_scope_packages=("parser",))
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(set(cycles[0]), {"hook", "tools.decision"})
+
+    def test_find_import_cycles_default_out_of_scope_packages_is_unfiltered(self):
+        """
+        Given the same out-of-scope-package cycle as above
+        When find_import_cycles is called WITHOUT out_of_scope_packages
+        Then it is still reported -- the default reproduces the original,
+            unfiltered behaviour exactly, so every pre-existing caller is
+            unaffected
+        """
+        graph = {"parser.a": {"parser.b"}, "parser.b": {"parser.a"}}
+        cycles = af.find_import_cycles(graph)
+        self.assertEqual(len(cycles), 1)
+
     def test_fan_in_counts_distinct_importers(self):
         """
         Given two modules importing a shared third module
@@ -610,22 +643,96 @@ class TestGraphAlgorithms(unittest.TestCase):
 class TestFindVerdictTypes(unittest.TestCase):
     """Tests for find_verdict_types."""
 
-    def test_finds_decision_and_resolution_classes(self):
+    def test_finds_verdict_types_by_structure_not_by_name(self):
         """
-        Given classes named Decision, Resolution, and an unrelated Foo
+        Given a class whose NAME says nothing about verdicts but declares a
+            decision-like field plus 2 aux fields (structurally a verdict),
+            and a class whose NAME looks verdict-ish (matches the OLD
+            name-substring rule) but declares no fields at all
         When find_verdict_types is called
-        Then only the verdict-ish names are returned
+        Then only the structurally-verdict-ish class is returned
+
+        TOO-45 R1b: this replaces a test that pinned the OLD name-substring
+        rule (`class FileResolution: pass` / `class Decision: pass` used to
+        be reported purely because of their names). That rule was
+        demonstrated wrong in both directions on the real tree (R1 scoping
+        trace runtime census): it reported `ProjectRootResolution`,
+        `LedgerDecision`, `SingleDecision` -- never constructed on any
+        decision path -- and missed `SubMatch` (8,314 constructions on the
+        hook decision path) entirely, because "SubMatch" contains none of
+        the three magic name words. This scenario is the minimal
+        reproduction of exactly that failure mode: a fieldless class whose
+        NAME alone used to be sufficient, and a class whose fields alone are
+        now sufficient regardless of name.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(
                 root / "a.py",
-                "class FileResolution:\n    pass\n\n"
-                "class Decision:\n    pass\n\n"
-                "class Foo:\n    pass\n",
+                "class TotallyUnrelatedName:\n"
+                "    decision: str\n"
+                "    matched_rule: str\n"
+                "    provenance: object\n\n"
+                "class FileResolution:\n"
+                "    pass\n\n"
+                "class Decision:\n"
+                "    pass\n",
             )
             found = {t["class"] for t in af.find_verdict_types(root)}
-            self.assertEqual(found, {"FileResolution", "Decision"})
+            self.assertEqual(found, {"TotallyUnrelatedName"})
+
+    def test_verdict_field_requires_at_least_two_aux_fields(self):
+        """
+        Given a class with a decision-like field but only ONE aux field
+            (below the :data:`_VERDICT_MIN_AUX_FIELDS` threshold)
+        When find_verdict_types is called
+        Then it is NOT reported -- a bare "decision" field alone (or with a
+            single incidental aux field) is not enough to call a class a
+            verdict; this is what keeps LedgerDecision/SingleDecision (each
+            0 aux fields) and any similarly thin future class excluded
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Thin:\n    decision: str\n    reason: str\n",
+            )
+            self.assertEqual(af.find_verdict_types(root), [])
+
+    def test_unitverdict_included_and_false_positives_excluded_on_real_tree(self):
+        """
+        Given the REAL toolguard/ tree, AFTER TOO-45 R1c collapsed
+            ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict
+            and renamed SubMatch to UnitVerdict
+        When find_verdict_types is called
+        Then UnitVerdict (missed by the old name-substring rule, under its
+            old name SubMatch) is present, the genuine structurally-verdict
+            classes (RuntimeVerdict, UnitVerdict, Decision) are present, and
+            the three demonstrated-never-constructed-on-a-decision-path false
+            positives the old rule reported (ProjectRootResolution,
+            LedgerDecision, SingleDecision -- TOO-45 R1 scoping trace runtime
+            census) are absent
+
+        This is the regression pin for the fix: it FAILS against the old
+        name-substring implementation (which finds all three false
+        positives and misses UnitVerdict) and PASSES against the structural
+        one. Renamed and reduced from three genuine hits
+        (ResolvedDecision/BashResolution/FileResolution) to one
+        (RuntimeVerdict) by the R1c collapse -- find_verdict_types is
+        STRUCTURAL, so it correctly reports fewer classes now that fewer
+        classes exist; see TestClassifyVerdictAltitudes below for the
+        altitude split this predicate's R1 gate actually uses.
+        """
+        found = {t["class"] for t in af.find_verdict_types()}
+        self.assertIn("UnitVerdict", found)
+        for genuine in ("RuntimeVerdict", "Decision"):
+            self.assertIn(genuine, found)
+        for false_positive in (
+            "ProjectRootResolution",
+            "LedgerDecision",
+            "SingleDecision",
+        ):
+            self.assertNotIn(false_positive, found)
 
     def test_excludes_generated_files(self):
         """
@@ -654,6 +761,526 @@ class TestFindVerdictTypes(unittest.TestCase):
                 "class SomeResolution:\n    pass\n",
             )
             self.assertEqual(af.find_verdict_types(root), [])
+
+
+class TestClassifyVerdictAltitudes(unittest.TestCase):
+    """
+    Tests for classify_verdict_altitudes (TOO-45 R1c) -- the altitude split
+    the R1 gate uses to require exactly one RUNTIME verdict type without
+    hand-listing class names.
+    """
+
+    def test_nested_list_field_class_is_unit_not_runtime(self):
+        """
+        Given a verdict-ish class ("Container") whose sub_matches field is
+            typed List[Leaf], and Leaf is ITSELF a verdict-ish class
+        When classify_verdict_altitudes is called
+        Then Leaf is reported as UNIT (nested inside Container.sub_matches),
+            Container is reported as RUNTIME, and neither is reported TOOLING
+
+        This is the structural rule that replaces hand-listing "UnitVerdict"
+        by name: nesting is DERIVED from re-parsing each verdict-ish class's
+        own field type annotations, not asserted.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Container:\n"
+                "    decision: str\n"
+                "    matched_rule: str\n"
+                "    provenance: object\n"
+                "    sub_matches: List[Leaf]\n\n"
+                "class Leaf:\n"
+                "    decision: str\n"
+                "    matched_rule: str\n"
+                "    provenance: object\n",
+            )
+            alt = af.classify_verdict_altitudes(root)
+            self.assertEqual([t["class"] for t in alt["runtime"]], ["Container"])
+            self.assertEqual([t["class"] for t in alt["unit"]], ["Leaf"])
+            self.assertEqual(alt["tooling"], [])
+            self.assertEqual(
+                alt["unit"][0]["nested_in"],
+                [{"container": "Container", "field": "sub_matches"}],
+            )
+
+    def test_class_under_tooling_package_is_tooling_not_runtime(self):
+        """
+        Given a verdict-ish class defined under a tools/ package (R1_TOOLING_PACKAGES)
+        When classify_verdict_altitudes is called
+        Then it is reported as TOOLING, with its package recorded, and NOT
+            reported as RUNTIME
+
+        Package-derived, mirroring R1_OUT_OF_SCOPE_PACKAGES's shape: one
+        hand-declared PACKAGE name with a printed reason, not a per-class list.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "tools" / "b.py",
+                "class ToolingThing:\n"
+                "    decision: str\n"
+                "    matched_rule: str\n"
+                "    provenance: object\n",
+            )
+            alt = af.classify_verdict_altitudes(root)
+            self.assertEqual(alt["runtime"], [])
+            self.assertEqual(alt["unit"], [])
+            self.assertEqual([t["class"] for t in alt["tooling"]], ["ToolingThing"])
+            self.assertEqual(alt["tooling"][0]["package"], "tools")
+
+    def test_unrelated_verdict_ish_class_is_runtime(self):
+        """
+        Given a verdict-ish class that is neither nested inside another
+            verdict-ish class nor under a tooling package
+        When classify_verdict_altitudes is called
+        Then it is reported as RUNTIME
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Standalone:\n"
+                "    decision: str\n"
+                "    matched_rule: str\n"
+                "    provenance: object\n",
+            )
+            alt = af.classify_verdict_altitudes(root)
+            self.assertEqual([t["class"] for t in alt["runtime"]], ["Standalone"])
+
+    def test_real_tree_has_exactly_one_runtime_verdict_type(self):
+        """
+        Given the REAL toolguard/ tree, AFTER TOO-45 R1c collapsed
+            ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict
+        When classify_verdict_altitudes is called
+        Then RuntimeVerdict is the ONLY runtime-altitude type, UnitVerdict is
+            unit-altitude (nested inside RuntimeVerdict.sub_matches AND
+            Decision.sub_matches), and tools.decision.Decision is
+            tooling-altitude (package 'tools')
+
+        This is the R1 gate's real-tree acceptance: exactly one RUNTIME
+        verdict type, with the other two altitudes DERIVED and justified,
+        not hand-listed.
+        """
+        alt = af.classify_verdict_altitudes()
+        self.assertEqual([t["class"] for t in alt["runtime"]], ["RuntimeVerdict"])
+
+        unit_by_class = {t["class"]: t for t in alt["unit"]}
+        self.assertIn("UnitVerdict", unit_by_class)
+        containers = {n["container"] for n in unit_by_class["UnitVerdict"]["nested_in"]}
+        self.assertEqual(containers, {"RuntimeVerdict", "Decision"})
+
+        tooling_by_class = {t["class"]: t for t in alt["tooling"]}
+        self.assertIn("Decision", tooling_by_class)
+        self.assertEqual(tooling_by_class["Decision"]["package"], "tools")
+
+    def test_real_tree_reports_levelmatch_as_a_visible_level_altitude(self):
+        """
+        Given the REAL toolguard/ tree, where LevelMatch (config_types.py)
+            carries (decision, reason, matched_pattern) -- only 1 aux field
+            under find_verdict_types' own 2-field threshold, so it never
+            appeared in find_verdict_types' output at all
+        When classify_verdict_altitudes is called
+        Then LevelMatch is present, classified LEVEL (not silently absent,
+            and not miscounted as RUNTIME), and RuntimeVerdict remains the
+            only RUNTIME-altitude type
+
+        TOO-45 R1g regression pin: before this fix, LevelMatch was invisible
+        to this whole predicate -- not merely excluded with a reason, simply
+        never discovered, because it slipped under find_verdict_types' own
+        aux-field-count floor. This is what makes R1's "RUNTIME verdict
+        types (1)" PASS honest rather than a technicality: a real fourth
+        altitude now shows up somewhere in the report.
+        """
+        alt = af.classify_verdict_altitudes()
+        level_by_class = {t["class"]: t for t in alt["level"]}
+        self.assertIn("LevelMatch", level_by_class)
+        self.assertIn("Provenance", level_by_class["LevelMatch"]["reason"])
+        self.assertEqual([t["class"] for t in alt["runtime"]], ["RuntimeVerdict"])
+        self.assertNotIn("LevelMatch", [t["class"] for t in alt["runtime"]])
+
+    def test_class_with_no_provenance_field_is_level_not_runtime(self):
+        """
+        Given a synthetic class shaped exactly like LevelMatch --
+            (decision, reason, matched_pattern), no provenance field or
+            reference anywhere on the class
+        When classify_verdict_altitudes is called
+        Then it is classified LEVEL, with a reason explaining why, and it is
+            NOT reported as RUNTIME, UNIT, or TOOLING
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class SyntheticLevelMatch:\n"
+                "    decision: str\n"
+                "    reason: str\n"
+                "    matched_pattern: str\n",
+            )
+            alt = af.classify_verdict_altitudes(root)
+            self.assertEqual(
+                [t["class"] for t in alt["level"]], ["SyntheticLevelMatch"]
+            )
+            self.assertTrue(alt["level"][0]["reason"])
+            self.assertEqual(alt["runtime"], [])
+            self.assertEqual(alt["unit"], [])
+            self.assertEqual(alt["tooling"], [])
+
+    def test_provenance_bearing_class_is_never_classified_level(self):
+        """
+        Given a synthetic RUNTIME-shaped class carrying a genuine
+            provenance-typed field (decision, matched_rule, provenance)
+        When classify_verdict_altitudes is called
+        Then it is classified RUNTIME and NEVER appears in the LEVEL bucket
+
+        Companion to test_class_with_no_provenance_field_is_level_not_runtime:
+        together they pin BOTH directions of the LEVEL/RUNTIME boundary this
+        predicate must get right -- a provenance-capable class must never be
+        swept into LEVEL just because it happens to also carry a
+        winning-pattern-shaped field.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class SyntheticRuntimeVerdict:\n"
+                "    decision: str\n"
+                "    matched_rule: str\n"
+                "    provenance: object\n",
+            )
+            alt = af.classify_verdict_altitudes(root)
+            self.assertEqual(
+                [t["class"] for t in alt["runtime"]], ["SyntheticRuntimeVerdict"]
+            )
+            self.assertEqual(alt["level"], [])
+
+    def test_level_classification_is_invariant_to_matched_pattern_vs_matched_rule_rename(
+        self,
+    ):
+        """
+        Given two otherwise-identical synthetic classes shaped like
+            LevelMatch, one spelling its winning-pattern field
+            "matched_pattern" (today's real spelling, 1 aux field under
+            find_verdict_types' own threshold) and the other spelling it
+            "matched_rule" (the ONE OTHER real aux-field name -- 2 aux
+            fields, which WOULD clear find_verdict_types' own threshold)
+        When classify_verdict_altitudes is called on each tree separately
+        Then BOTH are classified LEVEL, and NEITHER is classified RUNTIME --
+            proving the detector does not depend on which of the two
+            spellings was chosen
+
+        This is the TOO-45 R1g hard requirement: the whole point of this
+        predicate was gamed once already by a field-name choice
+        (matched_pattern was picked specifically so the OLD detector
+        wouldn't count it -- see LevelMatch's own docstring). A detector
+        that still depends on that same field's spelling would just move the
+        gaming surface, not close it. This test fails loudly if it ever
+        does: renaming to matched_rule pushes the class over
+        find_verdict_types' own 2-aux-field bar, so if LEVEL classification
+        were still keyed off that field, the renamed variant would flip to
+        RUNTIME here instead of staying LEVEL.
+        """
+        with tempfile.TemporaryDirectory() as tmp_a:
+            root_a = Path(tmp_a)
+            _write(
+                root_a / "a.py",
+                "class SyntheticLevelMatch:\n"
+                "    decision: str\n"
+                "    reason: str\n"
+                "    matched_pattern: str\n",
+            )
+            alt_a = af.classify_verdict_altitudes(root_a)
+
+        with tempfile.TemporaryDirectory() as tmp_b:
+            root_b = Path(tmp_b)
+            _write(
+                root_b / "a.py",
+                "class SyntheticLevelMatch:\n"
+                "    decision: str\n"
+                "    reason: str\n"
+                "    matched_rule: str\n",
+            )
+            alt_b = af.classify_verdict_altitudes(root_b)
+
+        for label, alt in (
+            ("matched_pattern spelling", alt_a),
+            ("matched_rule spelling", alt_b),
+        ):
+            self.assertEqual(
+                [t["class"] for t in alt["level"]],
+                ["SyntheticLevelMatch"],
+                f"expected LEVEL classification with the {label}",
+            )
+            self.assertEqual(
+                alt["runtime"],
+                [],
+                f"expected NOT RUNTIME with the {label}",
+            )
+
+
+class TestFindBareVerdictTuples(unittest.TestCase):
+    """
+    Tests for find_bare_verdict_tuples (TOO-45 R1b2): the half of R1's "one
+    verdict type end-to-end" problem find_verdict_types cannot see at all,
+    since that detector only ever inspects class definitions -- a verdict
+    that was never a class (a bare ``(decision, reason, ...)`` tuple
+    literal) is structurally invisible to it.
+    """
+
+    def test_flags_a_literal_decision_tuple_return(self):
+        """
+        Given a function whose return type is a 3-element Tuple[str, str, ...]
+            and whose body literally returns ("deny", reason, pattern)
+        When find_bare_verdict_tuples is called
+        Then it is reported, with basis "literal decision-tuple return"
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "from typing import Optional, Tuple\n\n"
+                "def check(cmd: str) -> Optional[Tuple[str, str, str]]:\n"
+                "    if cmd == 'rm':\n"
+                "        return 'deny', 'blocked', 'rm *'\n"
+                "    return None\n",
+            )
+            found = af.find_bare_verdict_tuples(root)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0]["function"], "check")
+            self.assertEqual(found[0]["module"], "a")
+            self.assertEqual(found[0]["basis"], "literal decision-tuple return")
+
+    def test_does_not_flag_a_strict_pair(self):
+        """
+        Given a function returning a strict ("decision", reason) PAIR (arity 2)
+        When find_bare_verdict_tuples is called
+        Then it is NOT reported -- a strict pair must never be flagged
+            (Arnon's standing preference, quoted in the TOO-45 R1b2 brief:
+            "A strict pair is fine and must NOT be flagged")
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "from typing import Tuple\n\n"
+                "def check(cmd: str) -> Tuple[str, str]:\n"
+                "    return 'deny', 'blocked'\n",
+            )
+            self.assertEqual(af.find_bare_verdict_tuples(root), [])
+
+    def test_does_not_flag_a_non_verdict_three_tuple(self):
+        """
+        Given a function whose return annotation is shaped like a verdict
+            (Optional[Tuple[str, str, List[str]]], first element str, arity
+            3) but whose actual return carries no decision at all -- a
+            (timestamp, project_root, levels) parse result, mirroring the
+            real toolguard.log_writer._parse_discovery_line
+        When find_bare_verdict_tuples is called
+        Then it is NOT reported
+
+        This is the real false-positive risk the shape-only signal
+        (_is_verdict_shaped_annotation) cannot rule out by itself --
+        demonstrated against the actual function this scenario mirrors in
+        test_does_not_flag_parse_discovery_line_on_real_tree below. Nothing
+        here is a decision literal and nothing delegates to a known verdict
+        function, so neither of find_bare_verdict_tuples' two signals fires.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "from typing import Optional, Tuple, List\n\n"
+                "def parse_line(line: str) -> Optional[Tuple[str, str, List[str]]]:\n"
+                "    parts = line.split('\\t', 2)\n"
+                "    if len(parts) != 3:\n"
+                "        return None\n"
+                "    timestamp, project_root, levels_blob = parts\n"
+                "    return timestamp, project_root, [levels_blob]\n",
+            )
+            self.assertEqual(af.find_bare_verdict_tuples(root), [])
+
+    def test_flags_wrapper_functions_by_two_round_delegation(self):
+        """
+        Given three functions shaped exactly like compound.py's real chain:
+            _detailed() has a literal decision-tuple return (a seed);
+            _wrapper() unpacks _detailed()'s 4-tuple and repacks 3 of its
+            names into its own return (delegation via unpack-then-repack);
+            _outer() directly returns _wrapper(...) (delegation via a
+            direct call, only resolvable once _wrapper is itself known --
+            i.e. this REQUIRES a second fixpoint round)
+        When find_bare_verdict_tuples is called
+        Then all three are reported: _detailed with basis "literal
+            decision-tuple return", _wrapper and _outer with basis
+            "delegates to a known verdict function"
+
+        This is the regression pin for the propagation mechanism
+        toolguard.compound.check_compound_permission /
+        resolve_compound_permission / resolve_compound_permission_detailed
+        need on the real tree (TOO-45 R1b2) -- a single-pass "does this
+        function itself construct a decision literal" scan would only catch
+        the middle function of a two-hop wrapper chain, never the outer one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "from typing import Optional, Tuple\n\n"
+                "def _detailed(x: str) -> Tuple[str, str, Optional[str], bool]:\n"
+                "    if x:\n"
+                "        return 'deny', 'no', None, False\n"
+                "    return 'allow', 'ok', None, True\n\n"
+                "def _wrapper(x: str) -> Tuple[str, str, Optional[str]]:\n"
+                "    decision, reason, ctx, _fw = _detailed(x)\n"
+                "    return decision, reason, ctx\n\n"
+                "def _outer(x: str) -> Tuple[str, str, Optional[str]]:\n"
+                "    return _wrapper(x)\n",
+            )
+            found = {
+                h["function"]: h["basis"] for h in af.find_bare_verdict_tuples(root)
+            }
+            self.assertEqual(
+                found,
+                {
+                    "_detailed": "literal decision-tuple return",
+                    "_wrapper": "delegates to a known verdict function",
+                    "_outer": "delegates to a known verdict function",
+                },
+            )
+
+    def test_does_not_flag_an_unrelated_wrapper_with_no_decision_evidence(self):
+        """
+        Given a verdict-shaped-annotation function that neither constructs a
+            decision literal itself NOR delegates to any known verdict
+            function (it wraps an ordinary helper instead)
+        When find_bare_verdict_tuples is called
+        Then it is NOT reported -- the annotation shape alone
+            (_is_verdict_shaped_annotation) is never sufficient by itself
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "from typing import Tuple\n\n"
+                "def helper(x: str) -> Tuple[str, str, str]:\n"
+                "    return x, x.upper(), x.lower()\n\n"
+                "def wrapper(x: str) -> Tuple[str, str, str]:\n"
+                "    a, b, c = helper(x)\n"
+                "    return a, b, c\n",
+            )
+            self.assertEqual(af.find_bare_verdict_tuples(root), [])
+
+    def test_excludes_generated_files(self):
+        """
+        Given a bare verdict-tuple-returning function defined in a file
+            carrying a generated-code banner
+        When find_bare_verdict_tuples is called
+        Then it is not reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "gen.py",
+                "# generated from x.peg\n"
+                "from typing import Tuple\n\n"
+                "def check(x: str) -> Tuple[str, str, str]:\n"
+                "    return 'deny', 'no', 'p'\n",
+            )
+            self.assertEqual(af.find_bare_verdict_tuples(root), [])
+
+    def test_excludes_r1_out_of_scope_packages(self):
+        """
+        Given a bare verdict-tuple-returning function defined under
+            toolguard/parser/ (out of scope for TOO-45)
+        When find_bare_verdict_tuples is called
+        Then it is not reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "parser" / "x.py",
+                "from typing import Tuple\n\n"
+                "def check(x: str) -> Tuple[str, str, str]:\n"
+                "    return 'deny', 'no', 'p'\n",
+            )
+            self.assertEqual(af.find_bare_verdict_tuples(root), [])
+
+    def test_real_tree_no_longer_flags_any_compound_function_after_r1e(self):
+        """
+        Given the REAL toolguard/ tree, AFTER TOO-45 R1e converted all 6
+            compound.py functions the R1 scoping trace named
+            (_resolve_leaf_detailed, _resolve_leaf, _combine_strictest,
+            check_compound_permission, resolve_compound_permission_detailed,
+            resolve_compound_permission) to return
+            UnitVerdict/RuntimeVerdict instead of a bare tuple
+        When find_bare_verdict_tuples is called
+        Then compound.py contributes ZERO hits
+
+        This test previously pinned the opposite (all 6 flagged, TOO-45
+        R1b2's acceptance criterion for the detector itself seeing them at
+        all) -- the same shape as
+        test_real_tree_no_longer_flags_the_three_hook_functions_after_r1d
+        above, one stage later: the detector correctly stops matching once
+        the literal tuple returns/delegation chain it was built to catch are
+        gone. The remaining 4 real-tree bare tuples (permissions.py's 2,
+        resolve.py's 2) are out of scope for this step -- see
+        TestComputePredicates.test_r1_gate_fails_on_the_real_tree_because_of_bare_verdict_tuples.
+        """
+        found = {
+            h["function"]
+            for h in af.find_bare_verdict_tuples()
+            if h["module"] == "compound"
+        }
+        self.assertEqual(found, set())
+
+    def test_real_tree_no_longer_flags_the_three_hook_functions_after_r1d(self):
+        """
+        Given the REAL toolguard/ tree, AFTER TOO-45 R1d made
+            _resolve_event/_handle_file_path_tool/_handle_command_tool return
+            a RuntimeVerdict object instead of a bare (decision, reason, ...)
+            tuple
+        When find_bare_verdict_tuples is called
+        Then hook.py contributes ZERO hits -- this test previously pinned the
+            opposite (all 3 flagged, TOO-45 R1b2), which was the defect R1d
+            was scoped to fix; the detector correctly stops matching once the
+            literal tuple returns/delegation are gone, which is the acceptance
+            signal for the bare-tuple count dropping 13 -> 10 (compound.py's
+            6, out of scope until R1e, plus permissions.py's 2 and resolve.py's
+            2, out of scope for a later stage, still remain)
+        """
+        found = {
+            h["function"]
+            for h in af.find_bare_verdict_tuples()
+            if h["module"] == "hook"
+        }
+        self.assertEqual(found, set())
+
+    def test_does_not_flag_parse_discovery_line_on_real_tree(self):
+        """
+        Given the REAL toolguard/ tree, which includes
+            toolguard.log_writer._parse_discovery_line (annotated
+            Optional[Tuple[str, str, List[str]]] -- verdict-SHAPED, but a
+            (timestamp, project_root, levels) parse result, not a decision)
+        When find_bare_verdict_tuples is called
+        Then it is NOT reported -- the real-tree pin for
+            test_does_not_flag_a_non_verdict_three_tuple's synthetic
+            scenario above
+        """
+        found = {h["function"] for h in af.find_bare_verdict_tuples()}
+        self.assertNotIn("_parse_discovery_line", found)
+
+    def test_does_not_flag_strict_pair_functions_on_real_tree(self):
+        """
+        Given the REAL toolguard/ tree, which includes several genuine
+            strict-pair (decision, reason) returns --
+            toolguard.permissions.check_permission and
+            toolguard.permission_resolution.apply_parse_failure_floor
+        When find_bare_verdict_tuples is called
+        Then neither is reported
+        """
+        found = {h["function"] for h in af.find_bare_verdict_tuples()}
+        self.assertNotIn("check_permission", found)
+        self.assertNotIn("apply_parse_failure_floor", found)
 
 
 class TestFindIterShims(unittest.TestCase):
@@ -772,6 +1399,127 @@ class TestFindIterShims(unittest.TestCase):
             _write(root / "hook.py", "x = 1\n")
             self.assertEqual(af.r1_out_of_scope_modules(root), ["parser.a", "parser.b"])
 
+    def test_default_extra_caller_dirs_matches_old_toolguard_only_scan(self):
+        """
+        Given a producer/caller pair entirely inside toolguard_dir and NO
+            extra_caller_dirs argument (the default)
+        When find_iter_shims is called
+        Then behaviour is unchanged from before extra_caller_dirs existed --
+            one caller found, tagged with area "production"
+
+        Pins backward compatibility: every pre-existing call site of this
+        function (and every other test in this class) must keep working
+        unmodified after TOO-45 R1b widened the caller scan.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Res:\n    def __iter__(self):\n        yield self.x\n\n"
+                "def make():\n    return Res()\n",
+            )
+            _write(
+                root / "b.py",
+                "def caller():\n    x, y = make()\n    return x, y\n",
+            )
+            shims = af.find_iter_shims(root)
+            self.assertEqual(len(shims), 1)
+            callers = shims[0]["callers"]
+            self.assertEqual(len(callers), 1)
+            self.assertEqual(callers[0]["area"], "production")
+            self.assertEqual(shims[0]["caller_counts_by_area"], {"production": 1})
+
+    def test_extra_caller_dirs_finds_callers_outside_toolguard_dir(self):
+        """
+        Given a shim + producer inside toolguard_dir, and a tuple-unpacking
+            caller living in a SEPARATE directory passed via
+            extra_caller_dirs (simulating test/)
+        When find_iter_shims is called with that extra_caller_dirs entry
+        Then the outside caller is found and tagged with the given area
+            label, distinct from the "production" area
+
+        This is the regression pin for the fix: :func:`find_iter_shims`'s
+        ORIGINAL implementation only ever scanned toolguard_dir, so it
+        reported 0 callers for a shim whose only caller lives elsewhere --
+        demonstrated on the real tree by TOO-45 R1 scoping trace (deleting
+        both shims broke 10 tests the old instrument said had 0 callers).
+        This test fails against that original implementation (which has no
+        extra_caller_dirs parameter at all, and would raise a TypeError) and
+        passes against the widened one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            toolguard_dir = root / "toolguard"
+            outside_dir = root / "outside"
+            _write(
+                toolguard_dir / "a.py",
+                "class Res:\n    def __iter__(self):\n        yield self.x\n\n"
+                "def make():\n    return Res()\n",
+            )
+            _write(
+                outside_dir / "test_a.py",
+                "def caller():\n    x, y = make()\n    return x, y\n",
+            )
+            shims = af.find_iter_shims(
+                toolguard_dir, extra_caller_dirs=[("test", outside_dir)]
+            )
+            self.assertEqual(len(shims), 1)
+            callers = shims[0]["callers"]
+            self.assertEqual(len(callers), 1)
+            self.assertEqual(callers[0]["area"], "test")
+            self.assertEqual(
+                shims[0]["caller_counts_by_area"], {"production": 0, "test": 1}
+            )
+
+    def test_extra_caller_dirs_missing_directory_is_skipped_not_an_error(self):
+        """
+        Given an extra_caller_dirs entry pointing at a directory that does
+            not exist
+        When find_iter_shims is called
+        Then it does not raise, and simply contributes 0 callers for that area
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Res:\n    def __iter__(self):\n        yield 1\n",
+            )
+            shims = af.find_iter_shims(
+                root, extra_caller_dirs=[("nowhere", root / "does_not_exist")]
+            )
+            self.assertEqual(shims[0]["callers"], [])
+
+    def test_no_iter_shims_remain_on_real_tree_after_r1a(self):
+        """
+        Given the REAL toolguard/ tree PLUS test/ passed as an extra
+            "test"-area caller directory, AFTER TOO-45 R1a deleted the
+            __iter__ tuple-compatibility shims on BashResolution and
+            FileResolution and converted their 8 test call sites to
+            attribute access
+        When find_iter_shims is called
+        Then neither BashResolution nor FileResolution is reported as an
+            __iter__ shim any more
+
+        Before R1a this test (then named
+        test_shims_with_callers_only_in_test_area_on_real_tree) asserted the
+        OPPOSITE on purpose: it demonstrated the real-tree finding the old
+        instrument (scan confined to toolguard_dir, no extra_caller_dirs at
+        all) could not see -- "0 callers" for both shims, when in fact
+        deleting them broke 10 tests (TOO-45 R1 scoping trace, demonstrated
+        by execution). Now that R1a has actually deleted both shims and their
+        callers, this is the regression guard: R1's shim list must stay
+        empty, per the R1a acceptance criterion for
+        `tools/architecture_fitness.py --predicates`.
+        """
+        shims = {
+            s["class"]: s
+            for s in af.find_iter_shims(
+                extra_caller_dirs=[("test", af.REPO_ROOT / "test")]
+            )
+        }
+        self.assertNotIn("BashResolution", shims)
+        self.assertNotIn("FileResolution", shims)
+
 
 class TestFindParallelArrays(unittest.TestCase):
     """Tests for find_parallel_arrays."""
@@ -826,6 +1574,475 @@ class TestFindParallelArrays(unittest.TestCase):
                 "class ToolPatternLayer:\n    allow: tuple\n    allow_entries: tuple\n",
             )
             self.assertEqual(af.find_parallel_arrays(root), [])
+
+
+class TestFindIndexParallelAccess(unittest.TestCase):
+    """
+    Tests for find_index_parallel_access -- the TOO-45 R2-0 structural,
+    class/field-name-agnostic replacement gate for R2.
+
+    The nine fixtures below reproduce the nine synthetic gaming variants from
+    the TOO-45 R2 scoping trace (section 1's acceptance table), each pairing
+    a declaration-shape gaming move with a companion function that performs
+    the SAME index-parallel lookup the real code
+    (Configuration.entry_for_pattern / _hard_deny_additional_context) does,
+    adapted to that variant's shape. Variants 0-7 must all be DETECTED
+    (the old find_parallel_arrays caught only variant 0); variant 8, the
+    real fix, must NOT be.
+    """
+
+    def test_variant_0_control_todays_shape_is_detected(self):
+        """
+        Given today's real shape: annotated allow/allow_entries fields plus
+            an entries[candidates.index(pattern)] lookup
+        When find_index_parallel_access is called
+        Then the index-lookup site is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                "    allow: tuple\n"
+                "    allow_entries: tuple\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["kind"], "index_lookup")
+
+    def test_variant_1_entries_renamed_to_rules_is_still_detected(self):
+        """
+        Given the `_entries` suffix renamed to `_rules` (a `sed`-only gaming
+            move against the old name-based check) with the same index lookup
+        When find_index_parallel_access is called
+        Then the site is still detected -- the rename changes nothing here
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                "    allow: tuple\n"
+                "    allow_rules: tuple\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_rules[layer.allow.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_2_dict_of_lists_keyed_by_kind_is_detected(self):
+        """
+        Given the parallel arrays reshaped into two dicts keyed by kind
+        When find_index_parallel_access is called
+        Then the index-lookup site is still detected
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                "    def __init__(self):\n"
+                "        self.patterns_by_kind = {}\n"
+                "        self.entries_by_kind = {}\n"
+                "\n"
+                "def lookup(layer, kind, pattern):\n"
+                "    return layer.entries_by_kind[kind][\n"
+                "        layer.patterns_by_kind[kind].index(pattern)\n"
+                "    ]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_3_entries_behind_property_is_detected(self):
+        """
+        Given `allow` computed as a @property over `allow_entries`, but the
+            lookup code still indexes into it manually
+        When find_index_parallel_access is called
+        Then the index-lookup site is still detected -- the hazard survives
+            the property wrapper because the USE SITE is unchanged
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                "    allow_entries: tuple = ()\n"
+                "\n"
+                "    @property\n"
+                "    def allow(self):\n"
+                "        return tuple(e.pattern for e in self.allow_entries)\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_4_renamed_class_shape_identical_is_detected(self):
+        """
+        Given the class renamed away from ToolPatternLayer, shape unchanged
+        When find_index_parallel_access is called
+        Then the index-lookup site is still detected -- no class name is
+            ever inspected
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternPairing:\n"
+                "    allow: tuple\n"
+                "    allow_entries: tuple\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_5_arrays_moved_to_sibling_class_is_detected(self):
+        """
+        Given the two arrays split across two sibling classes
+        When find_index_parallel_access is called
+        Then the index-lookup site is still detected -- the two sequences
+            need not live on the same object
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Patterns:\n"
+                "    allow: tuple\n"
+                "\n"
+                "class Entries:\n"
+                "    allow: tuple\n"
+                "\n"
+                "def lookup(patterns, entries, pattern):\n"
+                "    return entries.allow[patterns.allow.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_6_prose_only_invariant_unpaired_names_is_detected(self):
+        """
+        Given two fields with unrelated (non-suffix-paired) names, related
+            only by a prose docstring invariant, still consumed by index
+        When find_index_parallel_access is called
+        Then the index-lookup site is still detected -- no field-name
+            spelling convention is ever inspected
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                '    """Invariant: order[i] corresponds to meta[i], index-for-index."""\n'
+                "\n"
+                "    order: tuple\n"
+                "    meta: tuple\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.meta[layer.order.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_7_init_assignment_instead_of_annotation_is_detected(self):
+        """
+        Given the two fields assigned in __init__ rather than declared as
+            class-level annotations
+        When find_index_parallel_access is called
+        Then the index-lookup site is still detected -- only USE sites are
+            inspected, never how a field was populated
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                "    def __init__(self, allow, allow_entries):\n"
+                "        self.allow = allow\n"
+                "        self.allow_entries = allow_entries\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+
+    def test_variant_8_real_fix_entries_only_derived_pattern_is_not_detected(self):
+        """
+        Given only `allow_entries` stored, `allow` a derived @property, and
+            the lookup finding the entry by a direct predicate search rather
+            than by shared index
+        When find_index_parallel_access is called
+        Then nothing is reported -- this is the actual fix, not a gaming move
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class ToolPatternLayer:\n"
+                "    allow_entries: tuple = ()\n"
+                "\n"
+                "    @property\n"
+                "    def allow(self):\n"
+                "        return tuple(e.pattern for e in self.allow_entries)\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return next(\n"
+                "        e for e in layer.allow_entries if e.pattern == pattern\n"
+                "    )\n",
+            )
+            self.assertEqual(af.find_index_parallel_access(root), [])
+
+    def test_method_pair_instance_is_detected_without_class_or_field_hint(self):
+        """
+        Given a method-pair shape (hard_deny/hard_deny_entries-like): two
+            methods, not two fields, each returning a sequence, consumed by
+            a separate function via index -- the shape the old
+            find_parallel_arrays (which only ever inspects annotated CLASS
+            FIELDS) is structurally blind to
+        When find_index_parallel_access is called
+        Then the index-lookup site is detected
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "class Configuration:\n"
+                "    def hard_deny(self, tool_name):\n"
+                "        return ()\n"
+                "\n"
+                "    def hard_deny_entries(self, tool_name):\n"
+                "        return ()\n"
+                "\n"
+                "def lookup(config, tool_name, matched):\n"
+                "    deny_patterns = config.hard_deny(tool_name)\n"
+                "    deny_entries = config.hard_deny_entries(tool_name)\n"
+                "    return deny_entries[deny_patterns.index(matched)]\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["kind"], "index_lookup")
+
+    def test_two_arg_zip_over_different_sequences_is_detected(self):
+        """
+        Given code that zips two different sequences together (the
+            takeover-filter shape) rather than indexing one via .index()
+        When find_index_parallel_access is called
+        Then the zip site is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "def rebuild(allow, allow_entries, ignored):\n"
+                "    kept = [\n"
+                "        (p, e)\n"
+                "        for p, e in zip(allow, allow_entries)\n"
+                "        if p not in ignored\n"
+                "    ]\n"
+                "    return kept\n",
+            )
+            hits = af.find_index_parallel_access(root)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["kind"], "zip")
+
+    def test_zip_over_the_same_expression_twice_is_not_detected(self):
+        """
+        Given zip called with the literal SAME expression on both sides (not
+            a parallel-array hazard -- there is only one sequence involved)
+        When find_index_parallel_access is called
+        Then nothing is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "def self_pairs(xs):\n    return list(zip(xs, xs))\n",
+            )
+            self.assertEqual(af.find_index_parallel_access(root), [])
+
+    def test_index_call_on_the_same_expression_is_not_detected(self):
+        """
+        Given A[A.index(x)] -- subscripting and indexing the SAME sequence
+            (a trivial, harmless self-lookup, not a parallel-array hazard)
+        When find_index_parallel_access is called
+        Then nothing is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "def first_after(xs, pattern):\n    return xs[xs.index(pattern)]\n",
+            )
+            self.assertEqual(af.find_index_parallel_access(root), [])
+
+    def test_excludes_generated_files(self):
+        """
+        Given an index-parallel access site in a file carrying a
+            generated-code banner
+        When find_index_parallel_access is called
+        Then it is not reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "gen.py",
+                "# generated from x.peg\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            self.assertEqual(af.find_index_parallel_access(root), [])
+
+    def test_rename_invariance_field_suffix_and_class_name_do_not_change_verdict(self):
+        """
+        Given two fixtures that are IDENTICAL except one uses the
+            ToolPatternLayer/_entries spelling and the other a renamed class
+            with an unrelated field-name suffix
+        When find_index_parallel_access is called on each
+        Then both report exactly one, structurally equivalent, hit -- proving
+            a rename-only gaming move (TOO-45 R2's `sed`-only exploit) cannot
+            change the verdict, the TOO-45 R2-0 acceptance criterion
+            equivalent to R5a-0's .pyscn.toml-relabelling regression guard
+        """
+        with (
+            tempfile.TemporaryDirectory() as tmp_a,
+            tempfile.TemporaryDirectory() as tmp_b,
+        ):
+            original_root = Path(tmp_a)
+            renamed_root = Path(tmp_b)
+            _write(
+                original_root / "original.py",
+                "class ToolPatternLayer:\n"
+                "    allow: tuple\n"
+                "    allow_entries: tuple\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            _write(
+                renamed_root / "renamed.py",
+                "class GatedPatternSet:\n"
+                "    allow: tuple\n"
+                "    allow_backing: tuple\n"
+                "\n"
+                "def lookup(layer, pattern):\n"
+                "    return layer.allow_backing[layer.allow.index(pattern)]\n",
+            )
+            original_hits = af.find_index_parallel_access(original_root)
+            renamed_hits = af.find_index_parallel_access(renamed_root)
+            self.assertEqual(len(original_hits), 1)
+            self.assertEqual(len(renamed_hits), 1)
+            self.assertEqual(original_hits[0]["kind"], renamed_hits[0]["kind"])
+
+    def test_real_tree_finds_no_instances_after_r2(self):
+        """
+        Given the real toolguard/ tree AFTER TOO-45 R2 (the three instances
+            this test used to pin -- config.py's entry_for_pattern lookup,
+            resolve.py's _hard_deny_additional_context lookup, and config.py's
+            permission_layers takeover-filter zip -- were all fixed by making
+            the stripped-pattern tuples derived properties over RuleEntry
+            and searching entries directly instead of indexing a second,
+            parallel collection)
+        When find_index_parallel_access is called with no directory override
+        Then it reports nothing -- there is no longer a second, independently
+            populated sequence anywhere on this tree for an index or a zip to
+            correlate against
+        """
+        hits = af.find_index_parallel_access()
+        self.assertEqual(hits, [])
+
+
+class TestFindDriftGuards(unittest.TestCase):
+    """Tests for find_drift_guards -- the co-located proxy for R2's clause 3."""
+
+    def test_guard_co_located_with_index_access_is_detected(self):
+        """
+        Given a len(A) != len(B) guard in the SAME function as an
+            index-parallel read of A and B
+        When find_drift_guards is called
+        Then the guard is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "def lookup(layer, pattern):\n"
+                "    candidates, entries = layer.allow, layer.allow_entries\n"
+                "    if len(entries) != len(candidates):\n"
+                "        return None\n"
+                "    return entries[candidates.index(pattern)]\n",
+            )
+            hits = af.find_drift_guards(root)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["function"], "lookup")
+
+    def test_guard_not_co_located_with_any_index_access_is_not_detected(self):
+        """
+        Given a len(A) != len(B) guard in a function that performs NO
+            index-parallel read at all (an unrelated length check, e.g. a
+            string-prefix boundary test)
+        When find_drift_guards is called
+        Then nothing is reported -- an unscoped scan would false-positive on
+            this shape (see the function's own docstring for the confirmed
+            real-tree false positive this scoping avoids)
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "def boundary(bn, prefix):\n"
+                "    return len(bn) == len(prefix) or not bn[len(prefix):]\n",
+            )
+            self.assertEqual(af.find_drift_guards(root), [])
+
+    def test_duplicate_check_shape_is_not_a_drift_guard(self):
+        """
+        Given len(set(x)) != len(x) (a duplicate-value check on ONE sequence)
+            co-located with an unrelated index-parallel read in the same
+            function
+        When find_drift_guards is called
+        Then the duplicate-check comparison itself is not reported as a
+            drift guard, even though the function also contains a real one
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "def lookup(layer, pattern, varying_tokens):\n"
+                "    if len(set(varying_tokens)) != len(varying_tokens):\n"
+                "        pass\n"
+                "    if len(layer.allow_entries) != len(layer.allow):\n"
+                "        return None\n"
+                "    return layer.allow_entries[layer.allow.index(pattern)]\n",
+            )
+            hits = af.find_drift_guards(root)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["left"], "layer.allow_entries")
+
+    def test_real_tree_finds_no_drift_guards_after_r2(self):
+        """
+        Given the real toolguard/ tree AFTER TOO-45 R2 (config.py's
+            entry_for_pattern and resolve.py's _hard_deny_additional_context
+            no longer index-parallel-lookup at all, so the length guards that
+            used to defend against their drift were deleted along with the
+            hazard they protected against -- misaligned state is now
+            unconstructible instead of merely guarded)
+        When find_drift_guards is called with no directory override
+        Then it reports nothing -- in particular NOT tools/consolidate.py's
+            duplicate-check shape or parser/command_extractor.py's unrelated
+            boundary check, both confirmed real-tree false positives an
+            unscoped scan would catch (see
+            test_guard_not_co_located_with_any_index_access_is_not_detected /
+            test_duplicate_check_shape_is_not_a_drift_guard above for the
+            synthetic reproductions of each)
+        """
+        self.assertEqual(af.find_drift_guards(), [])
 
 
 class TestFindReasonParsingSites(unittest.TestCase):
@@ -1098,94 +2315,323 @@ class TestFindPrivateImports(unittest.TestCase):
             self.assertEqual(af.find_private_imports(root), [])
 
 
-class TestFindNonLeafEntryPoints(unittest.TestCase):
-    """Tests for find_non_leaf_entry_points (R5)."""
+class TestParseEntryPointModules(unittest.TestCase):
+    """
+    Tests for parse_entry_point_modules (TOO-45 R5a-0): derives R5's notion of
+    "entry point" from pyproject.toml's [project.scripts] block, replacing the
+    editable .pyscn.toml layer label.
+    """
 
-    SYNTHETIC_TOML = """
-[architecture]
-enabled = true
-
-[[architecture.layers]]
-name = "runtime"
-packages = ["hook"]
-
-[[architecture.layers]]
-name = "tooling"
-packages = ["tools", "scripts"]
-
-[[architecture.rules]]
-from = "runtime"
-allow = ["runtime"]
-
-[[architecture.rules]]
-from = "tooling"
-allow = ["tooling", "runtime"]
-"""
-
-    def test_flags_runtime_module_imported_by_another(self):
+    def test_strips_toolguard_prefix_and_function_suffix(self):
         """
-        Given hook.py (runtime) imported by tools/decision.py (tooling)
+        Given a [project.scripts] block naming three toolguard-implemented
+            console scripts, one of them nested two packages deep
+        When parse_entry_point_modules is called
+        Then it returns each target's module path with the leading
+            "toolguard." stripped and the ":function" suffix dropped
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pyproject = Path(tmp) / "pyproject.toml"
+            pyproject.write_text(
+                "[project.scripts]\n"
+                'toolguard = "toolguard.hook:main"\n'
+                'toolguard-migrate = "toolguard.scripts.migrate_permissions:main"\n'
+                'toolguard-audit = "toolguard.tools.security_audit:main"\n',
+                encoding="utf-8",
+            )
+            modules = af.parse_entry_point_modules(pyproject)
+            self.assertEqual(
+                modules,
+                frozenset(
+                    {"hook", "scripts.migrate_permissions", "tools.security_audit"}
+                ),
+            )
+
+    def test_skips_a_target_outside_the_toolguard_package(self):
+        """
+        Given a [project.scripts] target implemented by a module outside the
+            toolguard package
+        When parse_entry_point_modules is called
+        Then that target is silently skipped, not raised on
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pyproject = Path(tmp) / "pyproject.toml"
+            pyproject.write_text(
+                '[project.scripts]\nother-tool = "some_other_package.cli:main"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(af.parse_entry_point_modules(pyproject), frozenset())
+
+    def test_matches_the_real_pyproject_toml(self):
+        """
+        Given this repo's real pyproject.toml
+        When parse_entry_point_modules is called
+        Then it returns exactly the 7 declared console-script modules (TOO-45
+            R5 scoping trace I-2's table), including the 3 tooling entry
+            points the old layer-based predicate missed entirely
+            (tools.installer, tools.maintenance, tools.security_audit)
+        """
+        modules = af.parse_entry_point_modules()
+        self.assertEqual(
+            modules,
+            frozenset(
+                {
+                    "hook",
+                    "session_start",
+                    "update_check",
+                    "tools.security_audit",
+                    "tools.maintenance",
+                    "tools.installer",
+                    "scripts.migrate_permissions",
+                }
+            ),
+        )
+
+
+class TestFindNonLeafEntryPoints(unittest.TestCase):
+    """Tests for find_non_leaf_entry_points (R5, TOO-45 R5a-0)."""
+
+    def test_flags_declared_entry_point_module_imported_by_another(self):
+        """
+        Given hook.py, declared as a pyproject.toml console-script entry
+            point, imported by tools/decision.py
         When find_non_leaf_entry_points is called
-        Then hook is reported as a non-leaf with tools.decision as its importer
+        Then hook is reported as a non-leaf entry point with tools.decision
+            as its importer
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            toml_path = root / ".pyscn.toml"
-            toml_path.write_text(self.SYNTHETIC_TOML, encoding="utf-8")
-            arch = af.parse_architecture_config(toml_path)
             _write(root / "hook.py", "x = 1\n")
             _write(root / "tools" / "decision.py", "from toolguard.hook import x\n")
             graph = af.build_import_graph(root)
-            results = af.find_non_leaf_entry_points(graph, arch)
+            results = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
             modules = {r["module"] for r in results}
             self.assertIn("hook", modules)
+            hit = next(r for r in results if r["module"] == "hook")
+            self.assertEqual(hit["reason"], "entry_point")
+            self.assertEqual(hit["importers"], ["tools.decision"])
 
-    def test_leaf_runtime_module_not_flagged(self):
+    def test_leaf_entry_point_module_not_flagged(self):
         """
-        Given hook.py (runtime) with no importers
+        Given hook.py, declared as an entry point, with no importers
         When find_non_leaf_entry_points is called
         Then it is not reported
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            toml_path = root / ".pyscn.toml"
-            toml_path.write_text(self.SYNTHETIC_TOML, encoding="utf-8")
-            arch = af.parse_architecture_config(toml_path)
             _write(root / "hook.py", "x = 1\n")
             graph = af.build_import_graph(root)
-            results = af.find_non_leaf_entry_points(graph, arch)
+            results = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
             self.assertEqual(results, [])
+
+    def test_flags_scripts_package_module_imported_by_another_even_when_not_a_declared_entry_point(
+        self,
+    ):
+        """
+        Given scripts/helper.py, NOT itself a declared [project.scripts]
+            target, imported by another module
+        When find_non_leaf_entry_points is called
+        Then it is still reported as a non-leaf -- scripts/ package
+            membership is a second, independent criterion, not subsumed by
+            the declared-entry-point set
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "scripts" / "helper.py", "x = 1\n")
+            _write(root / "hook.py", "from toolguard.scripts.helper import x\n")
+            graph = af.build_import_graph(root)
+            results = af.find_non_leaf_entry_points(graph, frozenset())
+            modules = {r["module"] for r in results}
+            self.assertIn("scripts.helper", modules)
+            hit = next(r for r in results if r["module"] == "scripts.helper")
+            self.assertEqual(hit["reason"], "scripts_package")
+
+    def test_intra_runtime_service_module_is_not_flagged_even_though_imported_by_an_entry_point(
+        self,
+    ):
+        """
+        Given hook.py (a declared entry point) importing log_writer.py (a
+            plain service module, NOT itself a declared entry point and NOT
+            under scripts/) -- the ideal picture's "runtime = ingest, record,
+            externalise" shape (TOO-45 R5 scoping trace defect I-3)
+        When find_non_leaf_entry_points is called
+        Then log_writer is NOT reported as a non-leaf -- only a module that is
+            ITSELF an entry point (or a scripts/ package member) is judged;
+            an entry point importing a plain service module is not a
+            violation of anything
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "log_writer.py", "x = 1\n")
+            _write(root / "hook.py", "from toolguard.log_writer import x\n")
+            graph = af.build_import_graph(root)
+            results = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
+            modules = {r["module"] for r in results}
+            self.assertNotIn("log_writer", modules)
+            self.assertEqual(modules, set())
+
+    def test_relabeling_the_pyscn_toml_layer_map_has_no_effect(self):
+        """
+        Given the exact gaming move the TOO-45 R5 scoping trace demonstrated
+            against the OLD predicate -- moving a module's .pyscn.toml layer
+            label around -- reproduced here as two DIFFERENT
+            ArchitectureConfig objects (one with hook in "runtime", one with
+            hook relabeled into a different layer entirely)
+        When find_non_leaf_entry_points is called with the SAME graph and
+            entry_point_modules against both configs (in fact: it is never
+            even given the ArchitectureConfig at all)
+        Then the result is byte-identical either way -- .pyscn.toml content
+            cannot influence this predicate any more, because the function no
+            longer accepts an ArchitectureConfig parameter at all
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "hook.py", "x = 1\n")
+            _write(root / "tools" / "decision.py", "from toolguard.hook import x\n")
+            graph = af.build_import_graph(root)
+            self.assertNotIn(
+                "arch",
+                inspect.signature(af.find_non_leaf_entry_points).parameters,
+            )
+            before = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
+            # The "relabeling" -- had this function still accepted an
+            # ArchitectureConfig, this is the shape of the gaming edit
+            # (moving hook out of the runtime layer). Parsed here purely to
+            # show it exists and could be built; it is never passed below.
+            gamed_toml = root / "gamed.pyscn.toml"
+            gamed_toml.write_text(
+                "[architecture]\nenabled = true\n\n"
+                '[[architecture.layers]]\nname = "foundation"\npackages = ["hook"]\n',
+                encoding="utf-8",
+            )
+            af.parse_architecture_config(gamed_toml)  # must not raise; unused below
+            after = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
+            self.assertEqual(before, after)
 
 
 class TestFindEnrichmentFootprint(unittest.TestCase):
-    """Tests for find_enrichment_footprint."""
+    """
+    Tests for find_enrichment_footprint (TOO-45 D1a review debt item J: the
+    old raw-substring scan counted a docstring mention exactly like a real
+    call, over-reporting; this now tokenizes and separates NAME-token
+    references -- real code coupling -- from STRING/COMMENT-token mentions
+    -- prose only).
+    """
 
-    def test_finds_files_referencing_either_spelling(self):
+    def test_finds_files_with_a_real_identifier_reference_as_coupled(self):
         """
-        Given one file using additional_context and one using additionalContext
+        Given a file that USES additional_context as a real Python identifier
+            (an assignment target -- a NAME token)
         When find_enrichment_footprint is called
-        Then both files are reported
+        Then that file is reported in the coupled bucket, not the prose bucket
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(root / "a.py", "additional_context = None\n")
-            _write(root / "b.py", 'x = {"additionalContext": None}\n')
             _write(root / "c.py", "x = 1\n")
-            found = set(af.find_enrichment_footprint(root))
-            self.assertEqual(found, {"a", "b"})
+            footprint = af.find_enrichment_footprint(root)
+            self.assertEqual(set(footprint.coupled), {"a"})
+            self.assertEqual(set(footprint.prose_only), set())
+
+    def test_finds_files_with_only_a_string_mention_as_prose_only(self):
+        """
+        Given a file that mentions additionalContext ONLY inside a string
+            literal (a dict key, e.g. how the hook's JSON output is built --
+            there is no Python NAME token spelled 'additionalContext'
+            anywhere in real production code, only the string form)
+        When find_enrichment_footprint is called
+        Then that file is reported in the prose_only bucket, not coupled --
+            this is the over-reporting case item J exists to fix: the old
+            raw-substring scan would have counted this file as coupled
+
+        Regression note: this file used to be asserted as COUPLED, matching
+        the OLD (over-reporting) implementation. This assertion changed
+        deliberately as part of item J's authorized fix -- the ticket's own
+        text: "Fix it to count identifier-level references only".
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "b.py", 'x = {"additionalContext": None}\n')
+            footprint = af.find_enrichment_footprint(root)
+            self.assertEqual(set(footprint.coupled), set())
+            self.assertEqual(set(footprint.prose_only), {"b"})
+
+    def test_docstring_only_mention_lands_in_prose_bucket_not_coupling(self):
+        """
+        Given a synthetic file whose ONLY reference to additional_context is
+            inside its module docstring (prose narration, no real code
+            reference anywhere)
+        When find_enrichment_footprint is called
+        Then it is reported in the prose_only bucket and NOT in the coupled
+            bucket -- the exact synthetic case item J's brief calls for
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "d.py",
+                '"""This module used to reference additional_context here."""\nx = 1\n',
+            )
+            footprint = af.find_enrichment_footprint(root)
+            self.assertEqual(set(footprint.coupled), set())
+            self.assertEqual(set(footprint.prose_only), {"d"})
 
     def test_excludes_generated_files(self):
         """
         Given a file referencing additional_context but carrying a generated-code banner
         When find_enrichment_footprint is called
-        Then it is not reported
+        Then it is not reported in either bucket
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(
                 root / "gen.py", "# generated from x.peg\nadditional_context = None\n"
             )
-            self.assertEqual(af.find_enrichment_footprint(root), [])
+            footprint = af.find_enrichment_footprint(root)
+            self.assertEqual(footprint.coupled, [])
+            self.assertEqual(footprint.prose_only, [])
+
+    def test_occurrence_count_per_file_and_total(self):
+        """
+        Given one file with THREE real identifier-level references and
+            another with ONE
+        When find_enrichment_footprint is called
+        Then occurrences_by_file reports the exact per-file count and
+            total_occurrences reports their sum -- TOO-45 R1b item C: the
+            coupled-file COUNT alone cannot show a step that removes most
+            threading references but not the last file-level mention (R1 is
+            predicted to move the file count from 9 to 8 at best, while
+            removing ~44 of 59 identifier-level references), so this adds an
+            occurrence count alongside the existing file-level buckets
+            without changing what "coupled"/"prose_only" mean.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "a.py",
+                "additional_context = None\n"
+                "def f(additional_context):\n"
+                "    return additional_context\n",
+            )
+            _write(root / "b.py", "additional_context = 1\n")
+            footprint = af.find_enrichment_footprint(root)
+            self.assertEqual(footprint.occurrences_by_file["a"], 3)
+            self.assertEqual(footprint.occurrences_by_file["b"], 1)
+            self.assertEqual(footprint.total_occurrences, 4)
+
+    def test_occurrence_count_excludes_prose_only_files(self):
+        """
+        Given a file that mentions additionalContext only inside a string
+        When find_enrichment_footprint is called
+        Then it does not appear in occurrences_by_file at all (0 identifier
+            references, by definition -- occurrences_by_file only covers the
+            coupled bucket)
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "b.py", 'x = {"additionalContext": None}\n')
+            footprint = af.find_enrichment_footprint(root)
+            self.assertNotIn("b", footprint.occurrences_by_file)
+            self.assertEqual(footprint.total_occurrences, 0)
 
 
 # =============================================================================
@@ -1740,15 +3186,17 @@ class TestComputePredicates(unittest.TestCase):
 
     def test_assembles_all_predicate_keys(self):
         """
-        Given a trivial synthetic toolguard tree and a matching architecture config
-        When compute_predicates is called (with the real .pyscn.toml, since the
-            R5/R6 helpers need SOME layer map)
+        Given the real tree
+        When compute_predicates is called against it (its detectors read the
+            real toolguard/, pyproject.toml and, for R1 only via
+            classify_verdict_altitudes, no layer map at all -- R5 as of
+            TOO-45 R5a-0 no longer reads .pyscn.toml either)
         Then every documented predicate key and the enrichment footprint are present
         """
-        # compute_predicates() takes no toolguard_dir override for the architecture
-        # parse (it always reads the real .pyscn.toml), so exercise it against the
-        # real tree here rather than trying to fabricate a matching pair -- this is
-        # one of the "couple of smoke tests" the brief allows.
+        # compute_predicates() takes no toolguard_dir override for R1/R2/R3/R6's
+        # scans, so exercise it against the real tree here rather than trying
+        # to fabricate a matching synthetic pair -- this is one of the "couple
+        # of smoke tests" the brief allows.
         predicates = af.compute_predicates()
         for key in (
             "R1",
@@ -1762,6 +3210,167 @@ class TestComputePredicates(unittest.TestCase):
             self.assertIn(key, predicates)
         self.assertIn("pass", predicates["R3"])
         self.assertIn("out_of_scope_excluded", predicates["R1"])
+        self.assertIn("bare_verdict_tuples", predicates["R1"])
+        self.assertIn("out_of_scope_excluded", predicates["R5"])
+        self.assertIn("entry_point_modules", predicates["R5"])
+
+    def test_r5_out_of_scope_excludes_the_parser_package(self):
+        """
+        Given the real tree, which has a genuine import cycle entirely inside
+            toolguard/parser/ (parser.command_extractor <-> parser.multiline,
+            out of scope for TOO-45 per the execution plan)
+        When compute_predicates is called
+        Then R5's out_of_scope_excluded names the parser modules explicitly
+            (mirroring R1's own out_of_scope_excluded), and R5's reported
+            cycles contain no parser-only component
+        """
+        predicates = af.compute_predicates()
+        r5 = predicates["R5"]
+        self.assertTrue(
+            any(m.startswith("parser.") for m in r5["out_of_scope_excluded"]["modules"])
+        )
+        for cycle in r5["cycles"]:
+            self.assertFalse(all(m.startswith("parser.") for m in cycle))
+
+    def test_r5_entry_point_modules_match_pyproject_toml(self):
+        """
+        Given the real tree
+        When compute_predicates is called
+        Then R5's entry_point_modules matches parse_entry_point_modules'
+            output exactly -- compute_predicates' default wiring is correct
+        """
+        predicates = af.compute_predicates()
+        self.assertEqual(
+            predicates["R5"]["entry_point_modules"],
+            sorted(af.parse_entry_point_modules()),
+        )
+
+    def test_relabeling_pyscn_toml_layer_map_does_not_change_r5_verdict(self):
+        """
+        Given the real tree's R5 result under the REAL .pyscn.toml
+        When .pyscn.toml is replaced (via PYSCN_TOML, never touching the real
+            file on disk) with the EXACT gaming move the TOO-45 R5 scoping
+            trace demonstrated against the OLD predicate -- moving
+            error_log/session_warnings/subagent/update_check out of the
+            "runtime" layer into "foundation", and log_writer into "config" --
+            and compute_predicates is called again
+        Then R5's non_leaf_entry_points, cycles, and pass verdict are BYTE-
+            IDENTICAL to the un-gamed run: relabeling .pyscn.toml can no
+            longer move R5's verdict at all, because compute_predicates no
+            longer reads .pyscn.toml for R5 in the first place (entry-point
+            status now comes from pyproject.toml, not from any layer label)
+        """
+        baseline = af.compute_predicates()["R5"]
+        real_toml_text = af.PYSCN_TOML.read_text(encoding="utf-8")
+        gamed_text = (
+            real_toml_text.replace(
+                'packages = ["hook", "session_start", "log_writer", "error_log", '
+                '"session_warnings", "subagent", "update_check"]',
+                'packages = ["hook", "session_start"]',
+            )
+            .replace(
+                'packages = ["constants", "issues", "path_utils", "normalization", '
+                '"patterns", "toml_scan", "_git", "install_provenance", '
+                '"install_update"]',
+                'packages = ["constants", "issues", "path_utils", "normalization", '
+                '"patterns", "toml_scan", "_git", "install_provenance", '
+                '"install_update", "error_log", '
+                '"session_warnings", "subagent", "update_check"]',
+            )
+            .replace(
+                'packages = ["rule_entry", "config_types", "config", '
+                '"config_validation", "config_write_guard", "env_config", '
+                '"rule_sort", "auto_migrate", "config_divergence", '
+                '"permission_migration"]',
+                'packages = ["rule_entry", "config_types", "config", '
+                '"config_validation", "config_write_guard", "env_config", '
+                '"rule_sort", "auto_migrate", "config_divergence", '
+                '"permission_migration", "log_writer"]',
+            )
+        )
+        # Sanity: the replacements above must actually have matched something,
+        # or this test would silently pass by comparing the baseline to itself.
+        self.assertNotEqual(gamed_text, real_toml_text)
+        with tempfile.TemporaryDirectory() as tmp:
+            gamed_path = Path(tmp) / "gamed.pyscn.toml"
+            gamed_path.write_text(gamed_text, encoding="utf-8")
+            with mock.patch.object(af, "PYSCN_TOML", gamed_path):
+                gamed = af.compute_predicates()["R5"]
+        self.assertEqual(baseline["pass"], gamed["pass"])
+        self.assertEqual(
+            baseline["non_leaf_entry_points"], gamed["non_leaf_entry_points"]
+        )
+        self.assertEqual(baseline["cycles"], gamed["cycles"])
+
+    def test_r5_out_of_scope_packages_matches_r1s(self):
+        """
+        Given the module-level constants
+        When compared
+        Then R5_OUT_OF_SCOPE_PACKAGES is the same tuple as
+            R1_OUT_OF_SCOPE_PACKAGES -- both express "packages out of scope
+            for the whole TOO-45 ticket", not a predicate-specific list
+        """
+        self.assertEqual(af.R5_OUT_OF_SCOPE_PACKAGES, af.R1_OUT_OF_SCOPE_PACKAGES)
+
+    def test_r1_shims_list_is_empty_after_r1a(self):
+        """
+        Given the real tree, AFTER TOO-45 R1a deleted the __iter__
+            tuple-compatibility shims on BashResolution and FileResolution
+        When compute_predicates is called
+        Then R1's iter_shims list is empty
+
+        Before R1a this test (then named
+        test_r1_shims_are_scanned_for_test_and_tools_callers) asserted that
+        at least one shim was present with a nonzero "test" caller count --
+        TOO-45 R1b item B, demonstrating compute_predicates correctly wires
+        test/ and tools/ into the caller scan. That demonstration's premise
+        (a shim existing on the real tree) is now gone by design: R1a is the
+        step whose whole point is to make this list empty, and this is the
+        acceptance criterion for `tools/architecture_fitness.py --predicates`
+        from the R1a brief.
+        """
+        predicates = af.compute_predicates()
+        shims = predicates["R1"]["iter_shims"]
+        self.assertEqual(shims, [])
+
+    def test_enrichment_footprint_reports_total_occurrences(self):
+        """
+        Given the real tree
+        When compute_predicates is called
+        Then enrichment_footprint carries total_occurrences and
+            occurrences_by_file alongside the existing coupled/prose-only
+            file counts, and the total is at least as large as the coupled
+            file count (every coupled file has at least 1 occurrence)
+        """
+        predicates = af.compute_predicates()
+        ef = predicates["enrichment_footprint"]
+        self.assertIn("total_occurrences", ef)
+        self.assertIn("occurrences_by_file", ef)
+        self.assertGreaterEqual(ef["total_occurrences"], ef["coupled_count"])
+
+    def test_r1_gate_passes_on_the_real_tree_after_r1f_closes_the_last_four(self):
+        """
+        Given the real tree, AFTER TOO-45 R1f converted the last 4 bare
+            verdict-tuple returns -- permissions.py's check_hard_deny and
+            decide_command_at_level_detailed, resolve.py's
+            _check_file_path_hard_deny and _decide_file_path_at_level_detailed
+            -- to LevelMatch (a frozen dataclass, not a class the R1 verdict-
+            type detector counts -- see LevelMatch's own docstring for why)
+        When compute_predicates is called
+        Then R1's "bare_verdict_tuples" key is EMPTY and R1's own "pass" is
+            True
+
+        This test previously pinned the opposite (4 remaining hits in
+        permissions.py/resolve.py, "pass" False) -- the R1e acceptance
+        criterion for the gate not collapsing into a false PASS while real
+        bare tuples stood elsewhere. R1e closed compound.py's 6; this is the
+        R1f acceptance criterion for the gate finally, honestly, passing:
+        exactly one RUNTIME verdict type (RuntimeVerdict), zero __iter__
+        shims, and zero bare verdict tuples anywhere on the real tree.
+        """
+        predicates = af.compute_predicates()
+        self.assertEqual(predicates["R1"]["bare_verdict_tuples"], [])
+        self.assertTrue(predicates["R1"]["pass"])
 
 
 # =============================================================================
@@ -1814,11 +3423,26 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         """
         Given the real toolguard/ tree and the real .pyscn.toml
         When check_layers is called
-        Then it returns a LayerReport without raising
+        Then it returns a LayerReport without raising, AND completeness holds
+             (report.unmapped == []) -- ratcheted from a smoke-only assertion
+             (TOO-45 D1a review debt item C) after removing
+             `permission_resolution` from .pyscn.toml's engine-layer packages
+             list left the 2,321-test suite green; only a manual --layers run
+             reported UNMAPPED (1). Deliberately does NOT assert report.ok --
+             that is False today because of 1 pre-existing DIRECTION
+             violation (hook -> tools.decision), deliberately left open for
+             R6 (moving decide() to the api layer); completeness-only is what
+             can land now without also fixing that. (TOO-45 R5b removed
+             auto_migrate -> scripts.migrate_permissions by moving the
+             migration logic both modules needed into
+             toolguard.permission_migration; TOO-45 R5d removed
+             config_divergence -> error_log by having config_divergence
+             return the warning text instead of logging it directly.)
         """
         report = af.check_layers()
         self.assertIsInstance(report.module_layer, dict)
         self.assertGreater(len(report.module_layer), 0)
+        self.assertEqual(report.unmapped, [])
 
     def test_compute_predicates_runs_on_real_tree(self):
         """

@@ -107,10 +107,8 @@ class TestResolveEventAntiDrift(unittest.TestCase):
             "ls",
         ]:
             with self.subTest(command=command):
-                decision, _reason, _ctx = _resolve_event(
-                    "Bash", {"command": command}, cfg, True
-                )
-                self.assertEqual(decision, decide(cfg, "Bash", command).verdict)
+                verdict = _resolve_event("Bash", {"command": command}, cfg, True)
+                self.assertEqual(verdict.decision, decide(cfg, "Bash", command).verdict)
 
     def test_file_path_verdicts_match_decide(self):
         """
@@ -121,10 +119,10 @@ class TestResolveEventAntiDrift(unittest.TestCase):
         cfg = _config(tool="Read", allow=["/proj/**"], ask=["/proj/secret/**"])
         for file_path in ["/proj/readme.md", "/proj/secret/key"]:
             with self.subTest(file_path=file_path):
-                decision, _reason, _ctx = _resolve_event(
-                    "Read", {"file_path": file_path}, cfg, True
+                verdict = _resolve_event("Read", {"file_path": file_path}, cfg, True)
+                self.assertEqual(
+                    verdict.decision, decide(cfg, "Read", file_path).verdict
                 )
-                self.assertEqual(decision, decide(cfg, "Read", file_path).verdict)
 
 
 class TestResolveEventEdgeCases(unittest.TestCase):
@@ -137,12 +135,10 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is allowed with a 'Not a governed tool' reason
         """
         cfg = _config(tool="Bash", allow=["ls:*"])
-        decision, reason, additional_context = _resolve_event(
-            "WebFetch", {"command": "x"}, cfg, True
-        )
-        self.assertEqual(decision, "allow")
-        self.assertIn("Not a governed tool", reason)
-        self.assertIsNone(additional_context)
+        verdict = _resolve_event("WebFetch", {"command": "x"}, cfg, True)
+        self.assertEqual(verdict.decision, "allow")
+        self.assertIn("Not a governed tool", verdict.reason)
+        self.assertIsNone(verdict.additional_context)
 
     def test_empty_command_fails_closed(self):
         """
@@ -151,12 +147,10 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is denied (fail-closed)
         """
         cfg = _config(tool="Bash", allow=["ls:*"])
-        decision, reason, additional_context = _resolve_event(
-            "Bash", {"command": ""}, cfg, True
-        )
-        self.assertEqual(decision, "deny")
-        self.assertIn("No command provided", reason)
-        self.assertIsNone(additional_context)
+        verdict = _resolve_event("Bash", {"command": ""}, cfg, True)
+        self.assertEqual(verdict.decision, "deny")
+        self.assertIn("No command provided", verdict.reason)
+        self.assertIsNone(verdict.additional_context)
 
     def test_empty_file_path_fails_closed(self):
         """
@@ -165,12 +159,10 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is denied (fail-closed)
         """
         cfg = _config(tool="Read", allow=["/proj/**"])
-        decision, reason, additional_context = _resolve_event(
-            "Read", {"file_path": ""}, cfg, True
-        )
-        self.assertEqual(decision, "deny")
-        self.assertIn("No file_path provided", reason)
-        self.assertIsNone(additional_context)
+        verdict = _resolve_event("Read", {"file_path": ""}, cfg, True)
+        self.assertEqual(verdict.decision, "deny")
+        self.assertIn("No file_path provided", verdict.reason)
+        self.assertIsNone(verdict.additional_context)
 
 
 class TestEvalModeMain(unittest.TestCase):
@@ -328,8 +320,9 @@ class TestEvalModeMain(unittest.TestCase):
             parse), and --eval mode
         When main() probes that command
         Then --eval prints 'ask', not 'allow' -- the ASK floor applies inside
-            Configuration.resolve_permission_detailed, the single chokepoint
-            both the live hook and --eval delegate to, so the cross-project
+            permission_resolution.resolve_permission_detailed, the single
+            chokepoint both the live hook and --eval delegate to, so the
+            cross-project
             security-audit skill never reports a safety floor the live hook
             does not actually have
         """

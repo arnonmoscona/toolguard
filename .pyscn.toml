@@ -162,17 +162,17 @@ strict_mode = true
 [[architecture.layers]]
 name = "foundation"
 # Leaves: no toolguard imports at all, or only other foundation modules.
-packages = ["constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance"]
+packages = ["constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance", "install_update"]
 
 [[architecture.layers]]
 name = "config"
 # Owns the configuration model, discovery, validation, and the write path.
-packages = ["rule_entry", "config_types", "config", "config_validation", "config_write_guard", "env_config", "rule_sort", "auto_migrate", "config_divergence"]
+packages = ["rule_entry", "config_types", "config", "config_validation", "config_write_guard", "env_config", "rule_sort", "auto_migrate", "config_divergence", "permission_migration"]
 
 [[architecture.layers]]
 name = "engine"
 # Pure decision logic: pattern matching, command decomposition, resolution.
-packages = ["permissions", "compound", "resolve", "parser"]
+packages = ["permissions", "compound", "resolve", "parser", "permission_resolution"]
 
 [[architecture.layers]]
 name = "runtime"

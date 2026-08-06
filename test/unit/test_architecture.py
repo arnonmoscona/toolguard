@@ -46,6 +46,15 @@ LAYERS = (
         "toolguard.config_types",
         frozenset({"toolguard.issues", "toolguard.rule_entry"}),
     ),
+    (
+        # TOO-45 D1a review debt (item B): the module's own docstring claims
+        # it never imports toolguard.config -- that claim is the entire
+        # justification for extracting it out of config.py, and nothing
+        # enforced it until this entry was added (a reviewer added the
+        # forbidden import and the suite stayed green).
+        "toolguard.permission_resolution",
+        frozenset({"toolguard.config_types"}),
+    ),
 )
 
 #: Types that live in ``config_types`` and are re-exported by ``config``.
@@ -56,23 +65,21 @@ RE_EXPORTED_TYPES = (
     "TakeoverEnabledConflict",
     "TakeoverConfig",
     "ConflictOverride",
-    "ResolvedDecision",
+    "RuntimeVerdict",
 )
 
-#: Pre-existing function-level imports, as of TOO-19. Local imports are a
-#: project anti-pattern (see rules/python.md): permitted only for a documented,
-#: approved circular dependency, which by convention carries a PLC0415 noqa
-#: marker. These three predate that convention and carry none. They are grandfathered
-#: so this test can ratchet -- it blocks NEW ones without forcing unrelated
-#: modules to be refactored inside TOO-19's scope. Shrinking this set is good;
-#: growing it needs a real justification.
-GRANDFATHERED_LOCAL_IMPORTS = frozenset(
-    {
-        ("log_writer.py", "json"),
-        ("hook.py", "toolguard.tools.decision"),
-        ("auto_migrate.py", "toolguard.scripts.migrate_permissions"),
-    }
-)
+#: TOO-45: this used to be GRANDFATHERED_LOCAL_IMPORTS, a three-entry allowance
+#: dating from TOO-19. The ratchet has reached zero, so it is gone. One of the
+#: three (hook -> tools.decision) is a genuine circular-import escape and now
+#: carries the PLC0415 suppression marker the convention always called for.
+#: The second (auto_migrate -> scripts.migrate_permissions) was resolved by
+#: R5b: the migration logic that both modules needed moved to
+#: toolguard.permission_migration, a module neither of them forms a cycle
+#: with, so auto_migrate now imports it as a normal top-level import and the
+#: local import + marker are gone entirely, not just relocated. The third --
+#: ("log_writer.py", "json") -- NO LONGER EXISTED: the test had been carrying
+#: a dead entry, which is why hand-maintained lists of known exceptions are a
+#: liability.
 
 
 def _module_imports(path: Path) -> set:
@@ -254,10 +261,15 @@ class TestNoNewLocalImports(unittest.TestCase):
         """
         Given the project rule banning imports inside function bodies
         When every module under toolguard/ is parsed for indented imports
-        Then only the grandfathered pre-existing ones are found
+        Then none are found that lack the documented-exception marker
 
         Imports marked '# noqa: PLC0415' are the documented, approved
         circular-dependency exception and are ignored.
+
+        ruff enforces PLC0415 too (TOO-45). That is deliberate redundancy, not
+        duplicated logic: this test runs in the suite on every change, while
+        ruff runs when someone remembers. Removing either leaves the other
+        firing.
         """
         found = set()
         for path in sorted(TOOLGUARD_ROOT.rglob("*.py")):
@@ -266,13 +278,12 @@ class TestNoNewLocalImports(unittest.TestCase):
             for module_name, _lineno in _local_imports(path):
                 found.add((path.name, module_name))
 
-        new = found - GRANDFATHERED_LOCAL_IMPORTS
         self.assertEqual(
-            new,
+            found,
             set(),
             "New function-level import(s) introduced. Move them to module level, "
             "or -- if a genuine documented circular dependency -- mark the line "
-            f"'# noqa: PLC0415'. Offenders: {sorted(new)}",
+            f"'# noqa: PLC0415'. Offenders: {sorted(found)}",
         )
 
 

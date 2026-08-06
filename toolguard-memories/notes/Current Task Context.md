@@ -10,8 +10,12 @@ tags:
 
 The task currently being worked on:
 
-- [[TOO-19 Structured Rule Entries - Rule-Match Enrichment]]
-  (on resume read first: [[TOO-19 RESUME HERE - state after Phase 0 commit]])
+- [[TOO-45 architecture overhaul execution plan]]
+  (TOO-45, branch `too-45` — architecture overhaul via judge-gated autonomous loop.
+  Status: plan drafted, awaiting Arnon's approval before the P phase / CP1.)
+
+Previous: [[TOO-19 Structured Rule Entries - Rule-Match Enrichment]] — merged and pushed
+as 0.5.1 @ 532de02.
 
 ## History
 - 2026-07-24: switched from TOO-30 (XDG rules directory; landed) to TOO-19 (structured

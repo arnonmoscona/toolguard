@@ -31,9 +31,10 @@ Four modes
     components, not a bare boolean. Every generated file (banner-detected, see
     below) is excluded from every predicate here and named explicitly in the
     output -- a predicate only satisfiable by hand-editing generated code is a
-    trap this project's own rules forbid walking into. R1 additionally
-    excludes ``toolguard/parser/`` (out of scope for this ticket), also named
-    explicitly.
+    trap this project's own rules forbid walking into. R1 and R5 additionally
+    exclude ``toolguard/parser/`` (out of scope for this ticket), also named
+    explicitly, from their respective checks (R1's verdict-type/shim scan;
+    R5's import-cycle check).
 
 Generated code
     A file whose first ~10 lines carry a banner such as "generated from",
@@ -76,11 +77,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
 import re
 import shutil
 import subprocess
 import sys
+import tokenize
 import tomllib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -618,7 +621,55 @@ def longest_dependency_chain(graph: Dict[str, Set[str]]) -> List[str]:
 # --predicates: R1 -- one verdict type
 # =============================================================================
 
-VERDICT_NAME_RE_WORDS = ("decision", "resolution", "verdict")
+#: Field names that mark a class as carrying the DECISION ITSELF. Spelled
+#: ``decision`` on every runtime verdict type except
+#: :class:`~toolguard.tools.decision.Decision`, which spells its own verdict
+#: field ``verdict`` (see that class's docstring: "a richer ``verdict`` field
+#: that distinguishes ``ask`` from ``allow`` and ``deny``") -- both count.
+_VERDICT_DECISION_FIELD_NAMES = frozenset({"decision", "verdict"})
+
+#: Field names that mark a class as carrying VERDICT-SUPPORTING data, on top
+#: of the decision-like field above. A class needs a decision-like field
+#: TOGETHER WITH at least :data:`_VERDICT_MIN_AUX_FIELDS` of these to count
+#: -- see :func:`find_verdict_types`'s docstring for the runtime census
+#: (TOO-45 R1 scoping trace) this list and threshold were calibrated
+#: against, on the real tree, not guessed.
+_VERDICT_AUX_FIELD_NAMES = frozenset(
+    {"reason", "provenance", "matched_rule", "additional_context"}
+)
+
+#: How many of :data:`_VERDICT_AUX_FIELD_NAMES` a class must declare, in
+#: addition to a decision-like field, to count as a verdict type. 2 is the
+#: number that separates ``SubMatch`` (``matched_rule`` + ``provenance`` = 2,
+#: must be INCLUDED) from ``LedgerDecision`` and ``SingleDecision`` (0 each,
+#: must be EXCLUDED) -- 1 would still separate them on today's tree, but 2
+#: leaves a field of slack against a future class that happens to name a
+#: single incidental field ``reason`` for an unrelated purpose while also
+#: having a ``decision`` field that means something else entirely.
+_VERDICT_MIN_AUX_FIELDS = 2
+
+
+def _class_field_names(node: ast.ClassDef) -> Set[str]:
+    """
+    Return the class-level annotated-assignment field names declared
+    DIRECTLY in *node*'s body -- the shape both a ``@dataclass`` and a
+    ``typing.NamedTuple`` subclass use (``name: type`` or
+    ``name: type = default``), and the same detection
+    :func:`find_parallel_arrays` already relies on for R2.
+
+    KNOWN LIMIT, stated rather than silently missed: inherited fields are
+    NOT resolved (this is a single-file AST scan, no type inference/MRO
+    walk). Every verdict-ish class in this codebase declares its own fields
+    directly with no base class, so this is not a gap on the real tree today,
+    but a future verdict type built by subclassing would need its fields
+    re-declared (or this helper extended) to be seen.
+    """
+    return {
+        stmt.target.id
+        for stmt in node.body
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+    }
+
 
 #: Packages the TOO-45 ticket explicitly puts OUT OF SCOPE ("Out of scope,
 #: unchanged: ... toolguard/parser/ including the generated parser" -- the
@@ -626,11 +677,30 @@ VERDICT_NAME_RE_WORDS = ("decision", "resolution", "verdict")
 #: UndecidableSegment -- both hand-written; TreeNode, generated, already
 #: excluded separately by :func:`iter_source_files`) is not evidence toward or
 #: against "one verdict type end-to-end", because this ticket is not touching
-#: that package at all. R1 is the only predicate this applies to today -- R5's
-#: cycle check and R6's private-import check both have their own, different
-#: reasons to look at (or past) parser/, so this is deliberately NOT a global
-#: exclusion list.
+#: that package at all.
+#:
+#: R1 was the first predicate to need this exclusion, but the reasoning is not
+#: R1-specific: it is "the execution plan puts this package out of scope for
+#: the whole ticket". A previous version of this comment claimed R5's cycle
+#: check had "its own, different reasons to look at (or past) parser/" without
+#: ever stating what they were -- measurement (TOO-45 R5a-0 scoping trace)
+#: found no such reason: R5's cycle check had simply never had an out-of-scope
+#: filter applied at all, which made R5 unpassable (an intra-parser import
+#: cycle -- ``parser.command_extractor <-> parser.multiline`` -- was reported
+#: as an R5 finding no in-scope change could ever clear). R5 now applies this
+#: same exclusion via :data:`R5_OUT_OF_SCOPE_PACKAGES` below, kept as a
+#: separate name (not a rename of this constant) to avoid a blast-radius edit
+#: across every docstring in this module that already names
+#: ``R1_OUT_OF_SCOPE_PACKAGES``. R6's private-import check does not apply it:
+#: R6 only ever looks at ``tools/``/``scripts/`` importers (see
+#: :data:`R6_GUARDED_MODULES`), so it never reaches ``parser/`` regardless.
 R1_OUT_OF_SCOPE_PACKAGES = ("parser",)
+
+#: Same package set as :data:`R1_OUT_OF_SCOPE_PACKAGES`, reused by
+#: :func:`find_import_cycles` (via :func:`compute_predicates`) for R5's cycle
+#: check -- see that constant's own docstring for why this is a separate name
+#: rather than every R5 caller reaching for the R1-named constant directly.
+R5_OUT_OF_SCOPE_PACKAGES = R1_OUT_OF_SCOPE_PACKAGES
 
 
 def r1_out_of_scope_modules(toolguard_dir: Path = TOOLGUARD_DIR) -> List[str]:
@@ -638,6 +708,11 @@ def r1_out_of_scope_modules(toolguard_dir: Path = TOOLGUARD_DIR) -> List[str]:
     Return every toolguard-relative module (including generated ones) under an
     :data:`R1_OUT_OF_SCOPE_PACKAGES` package, for explicit reporting -- an
     exclusion the operator can't see is indistinguishable from a bug.
+
+    Reused verbatim by R5's own ``out_of_scope_excluded`` report (see
+    :func:`compute_predicates`): :data:`R5_OUT_OF_SCOPE_PACKAGES` is the same
+    tuple as :data:`R1_OUT_OF_SCOPE_PACKAGES`, so the module list is identical
+    and a second, near-duplicate scan is not needed.
     """
     return sorted(
         relative_module_path(p, toolguard_dir)
@@ -647,12 +722,20 @@ def r1_out_of_scope_modules(toolguard_dir: Path = TOOLGUARD_DIR) -> List[str]:
     )
 
 
-def find_verdict_types(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, object]]:
+def _scan_decision_classes(
+    toolguard_dir: Path, min_aux_fields: int
+) -> List[Dict[str, object]]:
     """
-    Return every class whose name suggests it represents a permission verdict.
-
-    Skips generated files and :data:`R1_OUT_OF_SCOPE_PACKAGES` -- see
-    :func:`iter_source_files` and :data:`R1_OUT_OF_SCOPE_PACKAGES`.
+    Shared engine behind :func:`find_verdict_types` (called at
+    :data:`_VERDICT_MIN_AUX_FIELDS`) and :func:`classify_verdict_altitudes`'s
+    LEVEL-altitude candidate pool (called at the lower
+    :data:`_LEVEL_MIN_AUX_FIELDS`, TOO-45 R1g) -- same walk, same
+    decision-field-plus-aux-fields structural test
+    (:data:`_VERDICT_DECISION_FIELD_NAMES` / :data:`_VERDICT_AUX_FIELD_NAMES`),
+    parameterized only by how many aux fields must be present. Extracted so
+    the two thresholds can never drift apart by accident (one hand-edited
+    copy of this loop updated, the other forgotten) -- see each caller's own
+    docstring for why its particular threshold was chosen.
     """
     found = []
     for py_file in iter_source_files(toolguard_dir):
@@ -661,14 +744,344 @@ def find_verdict_types(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, ob
             continue
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef) and any(
-                w in node.name.lower() for w in VERDICT_NAME_RE_WORDS
-            ):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            fields = _class_field_names(node)
+            has_decision_field = bool(fields & _VERDICT_DECISION_FIELD_NAMES)
+            aux_hits = fields & _VERDICT_AUX_FIELD_NAMES
+            if has_decision_field and len(aux_hits) >= min_aux_fields:
                 found.append({"class": node.name, "module": rel, "line": node.lineno})
     return found
 
 
-def find_iter_shims(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, object]]:
+def find_verdict_types(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, object]]:
+    """
+    Return every class that STRUCTURALLY represents a permission verdict: one
+    declaring a decision-like field (:data:`_VERDICT_DECISION_FIELD_NAMES`)
+    together with at least :data:`_VERDICT_MIN_AUX_FIELDS` of
+    :data:`_VERDICT_AUX_FIELD_NAMES`.
+
+    Replaces a NAME-SUBSTRING match (any class whose NAME contained
+    "decision"/"resolution"/"verdict") -- deliberately NOT a hand-maintained
+    allowlist either; both were tried and rejected for this project (TOO-45
+    has already caught two hand-maintained lists silently drifting, each
+    claiming more coverage than existed). A runtime census (TOO-45 R1
+    scoping trace: instrumented ``__init__`` over the full corpus + suite)
+    showed the name rule wrong in BOTH directions on the real tree:
+
+    - It reported ``ProjectRootResolution``, ``LedgerDecision``, and
+      ``SingleDecision`` as verdict types. None is ever constructed on a
+      decision path, and none has the shape a verdict needs:
+      ``ProjectRootResolution`` has no ``decision``/``verdict`` field at all
+      (it carries ``status``/``root``/``candidates``/``reason`` -- a
+      migration-gate classification); ``LedgerDecision`` and
+      ``SingleDecision`` both declare a field literally named ``decision``,
+      but neither declares a single one of :data:`_VERDICT_AUX_FIELD_NAMES`
+      (a persisted maintenance-ledger row and a replay-diagnostic row,
+      respectively -- see each class's own docstring).
+    - It MISSED ``SubMatch`` entirely -- 8,314 constructions on the hook
+      decision path, carrying ``(sub_command, decision, matched_rule,
+      provenance)``, invisible to a name rule because "SubMatch" contains
+      none of the three magic words.
+
+    Verified against the real tree (not just asserted): ``SubMatch`` (renamed
+    ``UnitVerdict`` by TOO-45 R1c, once this detector's structural rule made
+    its altitude visible) is structurally included (``decision`` +
+    ``matched_rule`` + ``provenance`` = 2 aux fields) and all three false
+    positives are structurally excluded, by the field lists above -- see
+    ``test.unit.test_architecture_fitness.TestFindVerdictTypes`` for the
+    regression pin against the live tree.
+
+    This detector alone does NOT distinguish altitude -- as of TOO-45 R1c
+    it structurally finds THREE genuine hits on the real tree
+    (``RuntimeVerdict``, ``UnitVerdict``, ``tools.decision.Decision``), which
+    is correct (all three really do carry a decision + 2 aux fields) but not
+    yet what the R1 gate needs ("exactly one RUNTIME verdict type"). See
+    :func:`classify_verdict_altitudes`, which further splits this function's
+    output by altitude -- and which ALSO finds a fourth altitude
+    (``LevelMatch``, TOO-45 R1g) this function's own :data:`_VERDICT_MIN_AUX_FIELDS`
+    threshold does not reach at all under its current field spelling (one
+    aux field, ``reason`` -- ``matched_pattern`` is not in
+    :data:`_VERDICT_AUX_FIELD_NAMES`), by scanning at a lower threshold via
+    the same :func:`_scan_decision_classes` engine this function delegates
+    to.
+
+    Skips generated files and :data:`R1_OUT_OF_SCOPE_PACKAGES` -- see
+    :func:`iter_source_files` and :data:`R1_OUT_OF_SCOPE_PACKAGES`.
+    """
+    return _scan_decision_classes(toolguard_dir, _VERDICT_MIN_AUX_FIELDS)
+
+
+#: Packages holding the TOOLING verdict altitude (R6, deferred) -- see
+#: :func:`classify_verdict_altitudes`. Structurally derived, the same way
+#: :data:`R1_OUT_OF_SCOPE_PACKAGES` is: ONE hand-declared PACKAGE name with a
+#: printed reason, not a hand-maintained list of individual CLASS names. The
+#: package boundary itself is not invented for this predicate -- it is the
+#: one :mod:`toolguard.resolve`'s own module docstring already names: "the
+#: replay / tooling layer (``toolguard.tools.decision``)".
+R1_TOOLING_PACKAGES = ("tools",)
+
+#: Aux-field floor for :func:`classify_verdict_altitudes`'s LEVEL-altitude
+#: candidate pool (TOO-45 R1g) -- deliberately LOWER than
+#: :data:`_VERDICT_MIN_AUX_FIELDS` (1 vs. 2). ``LevelMatch`` (see
+#: :class:`~toolguard.config_types.LevelMatch`) carries only ONE aux field
+#: under its current spelling (``reason``; its winning-pattern field is
+#: named ``matched_pattern``, which is not in :data:`_VERDICT_AUX_FIELD_NAMES`
+#: -- see that class's own docstring for why), so :func:`find_verdict_types`'
+#: threshold of 2 never reaches it at all. Lowering the floor to 1 does NOT
+#: reintroduce ``LedgerDecision``/``SingleDecision`` (the two false positives
+#: :data:`_VERDICT_MIN_AUX_FIELDS`\ =2 was calibrated against): both declare
+#: ZERO aux fields, not one (verified against the real tree -- see
+#: ``test.unit.test_architecture_fitness.TestClassifyVerdictAltitudes``'s
+#: level tests). The aux-field floor here does none of the actual
+#: LEVEL-vs-other-altitude DISTINGUISHING work by itself -- that is
+#: :func:`_is_provenance_capable`'s job below; this floor exists only
+#: to keep a completely bare "decision"-only class out of the candidate pool
+#: in the first place.
+_LEVEL_MIN_AUX_FIELDS = 1
+
+
+def _class_field_type_sources(node: ast.ClassDef) -> Dict[str, str]:
+    """
+    Map each field name declared DIRECTLY in *node*'s body to the unparsed
+    source text of its type annotation (e.g. ``"Optional[List[UnitVerdict]]"``).
+
+    Companion to :func:`_class_field_names`, which returns only the names;
+    :func:`classify_verdict_altitudes` needs the annotation TEXT for two
+    things: finding a ``List[OtherVerdictClass]`` embedding (the UNIT
+    altitude), and -- as of TOO-45 R1g -- testing whether ANY field
+    references :class:`~toolguard.config_types.Provenance` at all (the LEVEL
+    altitude, see :func:`_is_provenance_capable`).
+    """
+    return {
+        stmt.target.id: ast.unparse(stmt.annotation)
+        for stmt in node.body
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+    }
+
+
+def _is_provenance_capable(fields: Set[str], field_types: Dict[str, str]) -> bool:
+    """
+    Return True when *fields*/*field_types* (from :func:`_class_field_names`
+    and :func:`_class_field_type_sources` on the same class) show the class
+    CAN carry a matched rule's provenance: either a field literally named
+    ``provenance`` (the same aux-field-name signal
+    :data:`_VERDICT_AUX_FIELD_NAMES` already uses elsewhere in this module --
+    every real ``provenance``-carrying verdict type on this tree spells it
+    exactly this way), or -- generalising past that one spelling -- any
+    field whose type annotation TEXT references ``Provenance`` at all (e.g.
+    a hypothetical future ``winning_provenance: Optional["Provenance"]``,
+    the shape :class:`~toolguard.config_types.ConflictOverride` already uses
+    for a non-verdict class).
+
+    This is the LEVEL-altitude test (TOO-45 R1g). It is invariant to
+    renaming the WINNING-PATTERN field from ``matched_pattern`` to
+    ``matched_rule`` (the one spelling choice that keeps ``LevelMatch`` out
+    of :func:`find_verdict_types`' own threshold -- see that field's own
+    rationale) because neither signal here inspects that field at all; both
+    look only at whether a *provenance* field/reference exists. Every
+    genuine unit/runtime/tooling verdict type on this tree (``UnitVerdict``,
+    ``RuntimeVerdict``, ``tools.decision.Decision``) declares a field named
+    ``provenance``, typed ``Optional["Provenance"]``; ``LevelMatch``
+    structurally cannot have either -- it is built one layer below where any
+    ``Provenance`` object exists in scope at all (see that class's own
+    docstring: "before any provenance lookup ... is attached"), so this is
+    not an incidental difference this detector happens to exploit, it is the
+    architectural reason the type is a genuinely different, lower altitude.
+
+    Two alternative candidate signals were evaluated and rejected in favour
+    of this one (TOO-45 R1g investigation, see the basic-memory report for
+    the full comparison):
+
+    - "no ``tool``/``target`` field": insufficient ALONE -- ``UnitVerdict``
+      (already correctly classified UNIT-altitude) also declares no
+      ``tool``/``target`` fields, so this signal does not distinguish LEVEL
+      from UNIT and would misclassify ``UnitVerdict`` too if used by itself.
+    - "returned ``Optional`` from the per-level ``decide_detailed`` callback
+      contract": would require enumerating the specific function names that
+      construct a ``LevelMatch`` (``check_hard_deny``,
+      ``decide_command_at_level_detailed``, and two more) -- exactly the
+      hand-maintained-list anti-pattern this ticket has already caught
+      drifting twice, and this AST-only tool has no reliable cross-function
+      return-type/call-graph tracing to derive it structurally instead.
+
+    Type-annotation-ONLY (dropping the field-name check) was also tried and
+    rejected: it broke ``TestClassifyVerdictAltitudes``' own pre-existing
+    synthetic fixtures, which spell their provenance-bearing field
+    ``provenance: object`` (a placeholder type, since those fixtures predate
+    this function and were only ever exercising :func:`_class_field_names`'
+    NAME-based aux-field counting, never a type check) -- an existing test
+    this project's own rules forbid weakening or rewriting to fit new
+    production code. The combined name-or-type check accepts both real
+    production spellings and that placeholder-typed fixture shape.
+    """
+    return "provenance" in fields or any(
+        "Provenance" in type_src for type_src in field_types.values()
+    )
+
+
+#: Human-readable reason attached to every LEVEL-altitude entry
+#: :func:`classify_verdict_altitudes` returns, printed verbatim by
+#: ``--predicates`` -- an exclusion the operator cannot see why is
+#: indistinguishable from a bug, the same standing rule every other R1
+#: exclusion in this module already follows.
+_LEVEL_ALTITUDE_REASON = (
+    "no field named or typed as a Provenance reference -- this is the raw "
+    "match at one hierarchy level or hard-deny pool, before any provenance "
+    "lookup is attached one layer up (see the class's own docstring). "
+    "The winning-pattern field is never inspected by this check, so "
+    "classification is unchanged whether it is spelled matched_pattern or "
+    "matched_rule."
+)
+
+
+def classify_verdict_altitudes(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> Dict[str, List[Dict[str, object]]]:
+    """
+    Split :func:`find_verdict_types`' structural hits, PLUS the additional
+    lower-threshold candidates :func:`_scan_decision_classes` finds via
+    :data:`_LEVEL_MIN_AUX_FIELDS`, into FOUR ALTITUDES, so the R1 gate can
+    require exactly one RUNTIME verdict type without hand-listing class names
+    (TOO-45 R1c; LEVEL added R1g).
+
+    R1's plan text said "exactly one type represents a permission verdict
+    end-to-end". The R1 scoping trace measured that as too blunt: there are
+    four distinct, LEGITIMATE altitudes on this tree, and flattening them
+    would be worse design, not better --
+
+    1. LEVEL altitude (TOO-45 R1g): the raw match at ONE hierarchy level or
+       hard-deny pool (``LevelMatch``), before any provenance lookup is
+       attached one layer up -- structurally cannot carry a
+       :class:`~toolguard.config_types.Provenance` reference at all, since
+       none is in scope yet at the point it is built. See that class's own
+       docstring and :func:`_is_provenance_capable` below.
+    2. UNIT altitude: one decidable unit inside a compound (``UnitVerdict``,
+       formerly ``SubMatch``) -- collapsing it into the runtime verdict would
+       destroy the only structured record of what a compound command did.
+    3. RUNTIME altitude: the type this predicate actually gates on being
+       exactly one of (``RuntimeVerdict``).
+    4. TOOLING altitude: the replay/analysis layer's own DTO
+       (``tools.decision.Decision``), unified with the runtime altitude only
+       in TOO-45 R6 -- deferred because it is R6's api-surface territory (32
+       affected tests), not R1's.
+
+    Three structural, DERIVED rules distinguish them -- no class name is
+    hand-listed anywhere below, only the three RULES are, checked in this
+    order (LEVEL first: it is the more fundamental fact -- can this class
+    attach a provenance at all -- so it takes priority over the nesting/
+    package checks below, which only matter once a class is capable of
+    carrying one):
+
+    - LEVEL (TOO-45 R1g): a verdict-ish candidate (this time drawn from
+      :func:`_scan_decision_classes` at :data:`_LEVEL_MIN_AUX_FIELDS`, a
+      SUPERSET of :func:`find_verdict_types`' own pool, since ``LevelMatch``
+      does not clear that function's own higher threshold under its current
+      field spelling) for which :func:`_is_provenance_capable` is False.
+      That check never looks at the WINNING-PATTERN field at all (only at
+      whether a ``provenance`` field/reference exists), which is what makes
+      it invariant to renaming that field from ``matched_pattern`` to
+      ``matched_rule`` -- see that function's own docstring for the full
+      rationale and the two alternative signals it rejected.
+    - UNIT: a verdict-ish class that IS provenance-capable (did not classify
+      LEVEL above) and is embedded via a ``List[...]`` field type INSIDE
+      ANOTHER verdict-ish class -- e.g. ``sub_matches: List[UnitVerdict]`` on
+      ``RuntimeVerdict``, or ``Optional[List[UnitVerdict]]`` on ``Decision``.
+      A class nested this way is, by construction, an ELEMENT of a compound
+      record, not a standalone end-to-end verdict -- exactly the unit/
+      runtime distinction the ideal picture draws. Detected by re-parsing
+      every candidate's OWN field annotations
+      (:func:`_class_field_type_sources`) and searching each for another
+      candidate's name inside a ``List[...]`` subscript.
+    - TOOLING: a provenance-capable, non-nested verdict-ish class whose
+      module lives under :data:`R1_TOOLING_PACKAGES` -- a PACKAGE-level
+      exclusion (one name, printed with its reason), the same shape as
+      :data:`R1_OUT_OF_SCOPE_PACKAGES`, not a per-class list.
+    - RUNTIME: everything left over that is neither of the above.
+
+    Every exclusion reason is carried on each returned entry (``reason`` for
+    level, ``nested_in`` for unit, ``package`` for tooling) so
+    ``--predicates`` can print WHY a class was excluded, not just its name --
+    an exclusion the operator cannot see is indistinguishable from a bug (the
+    same standing rule :func:`r1_out_of_scope_modules` already follows).
+
+    Returns:
+        ``{"runtime": [...], "unit": [...], "tooling": [...], "level": [...]}``,
+        each a list of the same per-class dicts :func:`_scan_decision_classes`
+        returns, with ``level`` entries additionally carrying ``reason``,
+        ``unit`` entries additionally carrying ``nested_in`` (a list of
+        ``{"container": class_name, "field": field_name}``), and ``tooling``
+        entries additionally carrying ``package``.
+    """
+    # The candidate pool is a SUPERSET of find_verdict_types' own output:
+    # scanned at the lower _LEVEL_MIN_AUX_FIELDS threshold so a class that
+    # never clears find_verdict_types' own 2-aux-field bar under its current
+    # field spelling (LevelMatch, today: 1 aux field, "reason") still gets a
+    # chance to be classified LEVEL below.
+    by_class: Dict[str, Dict[str, object]] = {
+        c["class"]: c
+        for c in _scan_decision_classes(toolguard_dir, _LEVEL_MIN_AUX_FIELDS)
+    }
+    verdict_names = set(by_class)
+
+    provenance_capable: Dict[str, bool] = {}
+    nested_in: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for py_file in iter_source_files(toolguard_dir):
+        rel = relative_module_path(py_file, toolguard_dir)
+        if first_segment(rel) in R1_OUT_OF_SCOPE_PACKAGES:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or node.name not in verdict_names:
+                continue
+            field_types = _class_field_type_sources(node)
+            provenance_capable[node.name] = _is_provenance_capable(
+                _class_field_names(node), field_types
+            )
+            for field_name, type_src in field_types.items():
+                for other_name in verdict_names:
+                    if other_name == node.name:
+                        continue
+                    if re.search(rf"List\[[^\]]*\b{re.escape(other_name)}\b", type_src):
+                        nested_in[other_name].append(
+                            {"container": node.name, "field": field_name}
+                        )
+
+    runtime: List[Dict[str, object]] = []
+    unit: List[Dict[str, object]] = []
+    tooling: List[Dict[str, object]] = []
+    level: List[Dict[str, object]] = []
+    for name, info in by_class.items():
+        if not provenance_capable.get(name, False):
+            level.append({**info, "reason": _LEVEL_ALTITUDE_REASON})
+        elif name in nested_in:
+            unit.append({**info, "nested_in": nested_in[name]})
+        elif first_segment(str(info["module"])) in R1_TOOLING_PACKAGES:
+            tooling.append({**info, "package": first_segment(str(info["module"]))})
+        else:
+            runtime.append(info)
+    return {"runtime": runtime, "unit": unit, "tooling": tooling, "level": level}
+
+
+def _best_effort_label(py_file: Path, repo_root: Path = REPO_ROOT) -> str:
+    """
+    Return *py_file*'s path relative to *repo_root*, POSIX-style, when it is
+    actually inside *repo_root* (the real ``test/``/``tools/`` case); falls
+    back to the absolute path string otherwise (a synthetic-fixture test's
+    temp directory, which lives outside the repo entirely) -- a caller-site
+    label must never raise just because the caller lives somewhere this
+    repo-relative spelling doesn't apply.
+    """
+    try:
+        return py_file.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return str(py_file)
+
+
+def find_iter_shims(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+    extra_caller_dirs: Sequence[Tuple[str, Path]] = (),
+) -> List[Dict[str, object]]:
     """
     Return every class defining ``__iter__`` (a tuple-compatibility shim, by
     convention in this codebase -- see :class:`~toolguard.resolve.BashResolution`),
@@ -678,24 +1091,57 @@ def find_iter_shims(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, objec
     do, but catches the common ``result = Producer(...)`` / ``return Producer(...)``
     shape used throughout this codebase).
 
+    Caller-scan area (TOO-45 R1b item B)
+    -------------------------------------
+    The caller scan (pass 2b) ALWAYS covers *toolguard_dir* itself, reported
+    under area ``"production"``, and additionally covers every
+    ``(area_label, directory)`` pair in *extra_caller_dirs* -- each caller
+    site is tagged with its area, and every shim's ``caller_counts_by_area``
+    dict reports one count per area (``0`` when an area has none, so an area
+    the operator expects to see is never silently absent from the dict).
+
+    This exists because the ORIGINAL implementation (``toolguard_dir``-only,
+    no *extra_caller_dirs* parameter at all) reported BOTH real shims on this
+    codebase (``BashResolution``, ``FileResolution``) as having 0 callers,
+    when in fact deleting either one breaks 10 tests (TOO-45 R1 scoping
+    trace, demonstrated by execution: real deletion + full suite run) --
+    every one of those callers lives in ``test/``, invisible to a scan
+    confined to ``toolguard_dir``. R1's own predicate requires the shims to
+    be gone "along with their callers", so an instrument blind to test
+    callers cannot score that step; :func:`compute_predicates` passes
+    ``test/`` and ``tools/`` here for exactly that reason.
+
+    The default (``extra_caller_dirs=()``) reproduces the ORIGINAL
+    ``toolguard_dir``-only scan exactly -- every existing caller of this
+    function keeps its old ``callers`` list unchanged; only
+    ``caller_counts_by_area`` (a new, additive key) and each caller's new
+    ``"area"`` key are new.
+
     Skips generated files and :data:`R1_OUT_OF_SCOPE_PACKAGES` when collecting
-    ``__iter__``-defining classes (pass 1 below) -- see :func:`find_verdict_types`.
-    Trees are still parsed for every in-scope file for the producer/caller
-    passes, since a caller of an in-scope shim could live anywhere in scope.
+    ``__iter__``-defining classes (pass 1 below, *toolguard_dir* only -- a
+    shim can only ever be DEFINED in the engine, never in a test or a tooling
+    script) -- see :func:`find_verdict_types`. Trees are still parsed for
+    every in-scope file (and every file under each *extra_caller_dirs* entry)
+    for the producer/caller passes, since a caller of an in-scope shim could
+    live anywhere being scanned. A missing *extra_caller_dirs* directory is
+    silently skipped for that area (contributes 0 callers), not an error --
+    a dev-tool argument pointing at a directory that doesn't exist yet (e.g.
+    a fresh checkout with no ``test/`` populated) shouldn't crash the scan.
     """
     shims: List[Dict[str, object]] = []
     producers_by_class: Dict[str, Set[str]] = defaultdict(set)
 
-    # Pass 1: parse every in-scope file once (trees cached for pass 2) and
-    # record every class defining __iter__ -- a producer function may live in
-    # a different module than a caller, so the class map must be complete
-    # before pass 2 looks for producers/callers.
-    trees: Dict[str, ast.Module] = {}
+    # Pass 1: parse every in-scope PRODUCTION file once (trees cached for
+    # pass 2) and record every class defining __iter__ -- a producer function
+    # may live in a different module than a caller, so the class map must be
+    # complete before pass 2 looks for producers/callers. Production-only:
+    # a shim class is only ever DEFINED in toolguard_dir.
+    production_trees: Dict[str, ast.Module] = {}
     class_defs: Dict[str, Dict[str, object]] = {}
     for py_file in iter_source_files(toolguard_dir):
         rel = relative_module_path(py_file, toolguard_dir)
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-        trees[rel] = tree
+        production_trees[rel] = tree
         if first_segment(rel) in R1_OUT_OF_SCOPE_PACKAGES:
             continue
         for node in ast.walk(tree):
@@ -714,7 +1160,12 @@ def find_iter_shims(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, objec
     # Pass 2a: a function is a "producer" of ClassName when its body directly
     # constructs it (``ClassName(...)`` anywhere inside), the common
     # construct-and-return shape used throughout this codebase.
-    for rel, tree in trees.items():
+    # PRODUCTION-ONLY, deliberately: a shim class can only legitimately be
+    # constructed by the engine that owns it -- a test never constructs
+    # BashResolution(...) directly, it calls the producer function -- so
+    # searching for producers outside toolguard_dir would be searching for
+    # something that structurally cannot exist here.
+    for rel, tree in production_trees.items():
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
@@ -726,43 +1177,396 @@ def find_iter_shims(toolguard_dir: Path = TOOLGUARD_DIR) -> List[Dict[str, objec
                 ):
                     producers_by_class[inner.func.id].add(node.name)
 
-    # Pass 2b: a caller of the shim tuple-unpacks the result of a producer call.
-    callers: Dict[str, List[Dict[str, object]]] = defaultdict(list)
-    for rel, tree in trees.items():
-        for node in ast.walk(tree):
-            targets = None
-            call = None
-            if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                target = node.targets[0]
-                if isinstance(target, (ast.Tuple, ast.List)) and len(target.elts) >= 2:
-                    targets = target.elts
-                    call = node.value
-            elif isinstance(node, ast.For):
-                if (
-                    isinstance(node.target, (ast.Tuple, ast.List))
-                    and len(node.target.elts) >= 2
-                ):
-                    targets = node.target.elts
-                    call = node.iter
-            if targets is None or not isinstance(call, ast.Call):
-                continue
-            func = call.func
-            func_name = (
-                func.id
-                if isinstance(func, ast.Name)
-                else (func.attr if isinstance(func, ast.Attribute) else None)
+    # Build the area list the caller scan (pass 2b) walks: "production"
+    # (toolguard_dir, already parsed above) plus one entry per
+    # extra_caller_dirs pair. Extra-area files are labelled by their
+    # repo-relative POSIX path (e.g. "test/unit/test_resolve.py"), not a
+    # toolguard-relative dotted path, since they aren't inside toolguard_dir.
+    areas: List[Tuple[str, Dict[str, ast.Module]]] = [("production", production_trees)]
+    for area_label, directory in extra_caller_dirs:
+        if not directory.is_dir():
+            continue
+        area_trees: Dict[str, ast.Module] = {}
+        for py_file in iter_python_files(directory):
+            area_trees[_best_effort_label(py_file)] = ast.parse(
+                py_file.read_text(encoding="utf-8"), filename=str(py_file)
             )
-            if func_name is None:
-                continue
-            for class_name, producer_funcs in producers_by_class.items():
-                if func_name in producer_funcs and class_name in class_defs:
-                    callers[class_name].append(
-                        {"module": rel, "line": node.lineno, "unpack_via": func_name}
-                    )
+        areas.append((area_label, area_trees))
+
+    # Pass 2b: a caller of the shim tuple-unpacks the result of a producer
+    # call, across every area built above.
+    callers: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    counts_by_area: Dict[str, Dict[str, int]] = {
+        class_name: {area_label: 0 for area_label, _ in areas}
+        for class_name in class_defs
+    }
+    for area_label, trees in areas:
+        for rel, tree in trees.items():
+            for node in ast.walk(tree):
+                targets = None
+                call = None
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    target = node.targets[0]
+                    if (
+                        isinstance(target, (ast.Tuple, ast.List))
+                        and len(target.elts) >= 2
+                    ):
+                        targets = target.elts
+                        call = node.value
+                elif isinstance(node, ast.For):
+                    if (
+                        isinstance(node.target, (ast.Tuple, ast.List))
+                        and len(node.target.elts) >= 2
+                    ):
+                        targets = node.target.elts
+                        call = node.iter
+                if targets is None or not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                func_name = (
+                    func.id
+                    if isinstance(func, ast.Name)
+                    else (func.attr if isinstance(func, ast.Attribute) else None)
+                )
+                if func_name is None:
+                    continue
+                for class_name, producer_funcs in producers_by_class.items():
+                    if func_name in producer_funcs and class_name in class_defs:
+                        callers[class_name].append(
+                            {
+                                "module": rel,
+                                "line": node.lineno,
+                                "unpack_via": func_name,
+                                "area": area_label,
+                            }
+                        )
+                        counts_by_area[class_name][area_label] += 1
 
     for class_name, info in class_defs.items():
-        shims.append({**info, "callers": callers.get(class_name, [])})
+        shims.append(
+            {
+                **info,
+                "callers": callers.get(class_name, []),
+                "caller_counts_by_area": counts_by_area[class_name],
+            }
+        )
     return shims
+
+
+# =============================================================================
+# --predicates: R1 -- bare verdict TUPLES (TOO-45 R1b2)
+# =============================================================================
+#
+# find_verdict_types (above) inspects CLASS definitions -- structurally blind
+# to a verdict that was never a class at all. The TOO-45 R1 scoping trace
+# found 16 functions under toolguard/ returning a bare `(decision, reason,
+# ...)` tuple literal instead (6 in compound.py alone), invisible to that
+# scan. This section adds that missing half, WITHOUT a hand-maintained list
+# of function names (this ticket has already caught two such lists silently
+# drifting) -- every hit below is derived from two structural signals, a
+# literal one and a propagated one, described on find_bare_verdict_tuples.
+
+#: Decision-verdict string literals this codebase's engine actually returns
+#: (see e.g. :mod:`toolguard.permissions`, :mod:`toolguard.compound`). A
+#: function that literally constructs and returns a tuple whose first
+#: element is one of these three IS building a verdict tuple, independent of
+#: whatever return annotation it does or doesn't carry.
+_VERDICT_TUPLE_DECISION_LITERALS = frozenset({"allow", "deny", "ask"})
+
+#: Minimum tuple width counted as a possible verdict record rather than a
+#: strict pair. Arnon's standing preference (quoted in the TOO-45 R1b2
+#: brief): "I personally sort of dislike tuples except in cases of a strict
+#: pair value return... A strict pair is fine and must NOT be flagged." A
+#: 2-tuple is never reported by this detector, no matter its content.
+_VERDICT_TUPLE_MIN_ARITY = 3
+
+
+def _tuple_elements(node: Optional[ast.expr]) -> Optional[List[ast.expr]]:
+    """
+    Return the element-annotation expressions of *node* when it is a
+    ``Tuple[...]``/``tuple[...]`` SUBSCRIPT, after stripping at most one
+    outer ``Optional[...]`` -- so ``Optional[Tuple[str, str, str]]`` and
+    ``Tuple[str, str, str]`` both yield the same 3-element list.
+
+    Returns ``None`` for anything else, including a variadic/homogeneous
+    tuple (``Tuple[str, ...]`` -- ONE element type plus a bare ``Ellipsis``):
+    that shape is an arbitrary-length sequence of one type (e.g.
+    :meth:`~toolguard.config.Configuration.governed_tools`'s
+    ``Tuple[str, ...]``), a different animal from a fixed-arity verdict
+    record, and must never be mistaken for one.
+    """
+    if node is None:
+        return None
+    inner = node
+    if (
+        isinstance(inner, ast.Subscript)
+        and isinstance(inner.value, ast.Name)
+        and inner.value.id == "Optional"
+    ):
+        inner = inner.slice
+    if not (
+        isinstance(inner, ast.Subscript)
+        and isinstance(inner.value, ast.Name)
+        and inner.value.id in ("Tuple", "tuple")
+    ):
+        return None
+    elts = inner.slice.elts if isinstance(inner.slice, ast.Tuple) else [inner.slice]
+    if any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elts):
+        return None
+    return elts
+
+
+def _is_verdict_shaped_annotation(node: Optional[ast.expr]) -> bool:
+    """
+    Return True when *node* is a fixed-arity ``Tuple``/``tuple`` return
+    annotation (see :func:`_tuple_elements`) with at least
+    :data:`_VERDICT_TUPLE_MIN_ARITY` elements whose FIRST element is
+    annotated exactly ``str`` -- the shape every real ``(decision, reason,
+    ...)`` verdict tuple in this codebase shares.
+
+    Checking only the first element (not the second too) is deliberate and
+    verified against the real tree, not assumed: it alone already excludes
+    every OTHER fixed-arity 3+-tuple return annotation this codebase has --
+    ``toolguard.toml_scan._locate_subsection ->
+    Optional[Tuple[int, int, int]]`` (a parsed span: ints, not strs) and
+    ``toolguard.tools.sorters.sort_layer_rules ->
+    Tuple[List[str], List[str], Optional[List[str]]]`` (R2's OWN parallel-array
+    target: the first element is ``List[str]``, not ``str``) both fail this
+    check. This test ALONE is still not sufficient to call a function a
+    verdict, though: ``toolguard.log_writer._parse_discovery_line ->
+    Optional[Tuple[str, str, List[str]]]`` (a timestamp/project-root/levels
+    triple, no decision anywhere in it) PASSES this shape check and is a
+    real false-positive risk on this tree -- which is exactly why
+    :func:`find_bare_verdict_tuples` never treats this function alone as
+    sufficient; it only narrows the CANDIDATE set that detector then
+    requires actual decision evidence for (a literal decision-tuple return,
+    or delegation to a function that has one).
+    """
+    elts = _tuple_elements(node)
+    if elts is None or len(elts) < _VERDICT_TUPLE_MIN_ARITY:
+        return False
+    return ast.unparse(elts[0]) == "str"
+
+
+def _is_literal_decision_tuple(value: ast.expr) -> bool:
+    """
+    Return True when *value* is a tuple LITERAL of arity >=
+    :data:`_VERDICT_TUPLE_MIN_ARITY` whose first element is a string
+    constant in :data:`_VERDICT_TUPLE_DECISION_LITERALS`. The unambiguous
+    case: a function that writes ``return "deny", reason, pattern`` in its
+    own body IS constructing a bare verdict tuple, regardless of whatever
+    return annotation it does or doesn't carry -- several real hits on this
+    tree had none at all (e.g. ``toolguard.resolve._check_file_path_hard_deny``,
+    before TOO-45 R1f converted it to a
+    :class:`~toolguard.config_types.LevelMatch` return).
+    """
+    return (
+        isinstance(value, ast.Tuple)
+        and len(value.elts) >= _VERDICT_TUPLE_MIN_ARITY
+        and isinstance(value.elts[0], ast.Constant)
+        and value.elts[0].value in _VERDICT_TUPLE_DECISION_LITERALS
+    )
+
+
+def _call_target_name(call: ast.Call) -> Optional[str]:
+    """Return a `Call`'s bare called-name (``f(...)`` -> ``"f"``, ``self.f(...)`` -> ``"f"``)."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _delegates_to_known_verdict(
+    func_node: ast.AST, known_verdict_names: Set[str]
+) -> bool:
+    """
+    Return True when *func_node* (already confirmed :func:`_is_verdict_shaped_annotation`
+    by the caller) returns, directly or via a same-function tuple-unpack-then-repack, the
+    result of a call to a function whose BARE name is in *known_verdict_names*.
+
+    Two delegation shapes, both real on this tree and neither involving a
+    hand-listed function name -- only the ALREADY-DISCOVERED verdict-function
+    name set, which grows by fixpoint in :func:`find_bare_verdict_tuples`:
+
+    1. ``return other_function(...)`` -- a direct pass-through, e.g.
+       ``toolguard.compound.check_compound_permission`` returning
+       ``resolve_compound_permission(...)`` once that name is known.
+    2. ``a, b, c, d = other_function(...)`` followed later by
+       ``return a, b, c`` -- an unpack-then-partial-repack, e.g.
+       ``toolguard.compound.resolve_compound_permission`` unpacking
+       ``resolve_compound_permission_detailed(...)`` into 4 names and
+       returning 3 of them. Detected by scanning the function's own
+       ``Assign`` statements for a tuple/list target (arity >=
+       :data:`_VERDICT_TUPLE_MIN_ARITY`) assigned from a call to a known
+       verdict function, then checking that every ``Name`` in a later
+       ``return`` tuple is among that assignment's target names.
+
+    Name resolution is BY BARE IDENTIFIER only -- no cross-module import
+    resolution -- the same pragmatic approximation :func:`find_iter_shims`
+    already uses for its own producer/caller matching in this module. A
+    same-named unrelated function elsewhere in toolguard/ could only ever
+    cause a false positive here if it ALSO independently satisfied
+    :func:`_is_verdict_shaped_annotation`; verified against the real tree
+    (see this function's own regression test) that no such collision exists
+    today.
+
+    KNOWN LIMIT, stated rather than silently missed: this is a single-pass
+    scan of *func_node* via :func:`ast.walk`, so it does not distinguish a
+    ``return``/``Assign`` inside a NESTED function or lambda from one
+    directly in *func_node*'s own body. No function on the real tree today
+    is affected (verified: every hit's own regression test is against the
+    real tree, not just a synthetic fixture) but a future nested closure
+    with its own unrelated repack could, in principle, produce a false
+    match.
+    """
+    repacked_from_verdict: Set[str] = set()
+    for stmt in ast.walk(func_node):
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], (ast.Tuple, ast.List))
+            and len(stmt.targets[0].elts) >= _VERDICT_TUPLE_MIN_ARITY
+            and isinstance(stmt.value, ast.Call)
+            and _call_target_name(stmt.value) in known_verdict_names
+        ):
+            for elt in stmt.targets[0].elts:
+                if isinstance(elt, ast.Name):
+                    repacked_from_verdict.add(elt.id)
+
+    for stmt in ast.walk(func_node):
+        if not isinstance(stmt, ast.Return) or stmt.value is None:
+            continue
+        value = stmt.value
+        if isinstance(value, ast.Call):
+            if _call_target_name(value) in known_verdict_names:
+                return True
+        elif (
+            isinstance(value, ast.Tuple) and len(value.elts) >= _VERDICT_TUPLE_MIN_ARITY
+        ):
+            names_in_return = [e.id for e in value.elts if isinstance(e, ast.Name)]
+            if names_in_return and all(
+                n in repacked_from_verdict for n in names_in_return
+            ):
+                return True
+    return False
+
+
+def find_bare_verdict_tuples(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> List[Dict[str, object]]:
+    """
+    Return every function under *toolguard_dir* that returns a BARE verdict
+    tuple -- ``(decision, reason, ...)`` as a plain tuple literal, never
+    wrapped in a class -- the half of R1's "one verdict type end-to-end"
+    problem :func:`find_verdict_types` cannot see at all, since it only
+    inspects class definitions (TOO-45 R1 scoping trace: 16 such functions
+    found, 6 in ``compound.py``).
+
+    Combines two structural signals, computed to a FIXPOINT (never a
+    hand-maintained list of function names, per the TOO-45 R1b2 brief):
+
+    1. **Literal seed** (:func:`_is_literal_decision_tuple`): a function
+       with >= 1 ``return`` statement that is a tuple literal, arity >=
+       :data:`_VERDICT_TUPLE_MIN_ARITY`, first element a decision string
+       constant. Sufficient on its own, independent of any annotation --
+       e.g. ``toolguard.permissions.check_hard_deny`` and
+       ``toolguard.hook._resolve_event``, before TOO-45 R1f/R1d converted
+       them respectively.
+    2. **Delegation** (:func:`_delegates_to_known_verdict`): a function
+       whose return annotation is verdict-SHAPED
+       (:func:`_is_verdict_shaped_annotation` -- necessary but NOT
+       sufficient alone, see that function's docstring for the real
+       false-positive it guards against) AND that returns, directly or via
+       an unpack-then-repack, the result of a call to a function ALREADY
+       classified verdict (seed or previously-propagated). Computed to a
+       fixpoint since propagation can chain more than one hop deep on this
+       tree: ``toolguard.compound.check_compound_permission`` calls
+       ``resolve_compound_permission``, which itself only qualifies by
+       unpack-then-repack of ``resolve_compound_permission_detailed`` (a
+       literal seed) -- two rounds, neither hand-named here, only derived.
+
+    Every one of the 6 ``compound.py`` functions the R1 scoping trace named
+    is reachable this way: ``_resolve_leaf_detailed``, ``_combine_strictest``,
+    and ``resolve_compound_permission_detailed`` are literal seeds;
+    ``_resolve_leaf`` and ``resolve_compound_permission`` qualify by
+    unpack-then-repack of a seed; ``check_compound_permission`` qualifies by
+    direct delegation to ``resolve_compound_permission`` once THAT is known
+    (round 2). See ``test.unit.test_architecture_fitness.TestFindBareVerdictTuples``
+    for the regression pin against the live tree, and the TOO-45 R1b2
+    report (basic-memory) for the honest count against all 16 and what this
+    detector does and does not reach.
+
+    Skips generated files and :data:`R1_OUT_OF_SCOPE_PACKAGES`, same as
+    :func:`find_verdict_types`. A function nested inside another (a closure)
+    is still discovered by :func:`ast.walk` and reported at its own
+    ``lineno`` -- this codebase has none of those among the real hits today.
+
+    Returns:
+        A list of ``{"module": ..., "function": ..., "line": ..., "basis":
+        ...}`` dicts, sorted by ``(module, line, function)`` for stable
+        output -- ``basis`` is a short human-readable string naming which of
+        the two signals matched, for transparent reporting (the same
+        standing rule :func:`classify_verdict_altitudes` already follows
+        for its own exclusion reasons: a classification the operator cannot
+        see why is indistinguishable from a bug).
+    """
+    functions: Dict[Tuple[str, str], Dict[str, object]] = {}
+    for py_file in iter_source_files(toolguard_dir):
+        rel = relative_module_path(py_file, toolguard_dir)
+        if first_segment(rel) in R1_OUT_OF_SCOPE_PACKAGES:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            key = (rel, node.name)
+            functions[key] = {
+                "node": node,
+                "module": rel,
+                "line": node.lineno,
+                "annotation_candidate": _is_verdict_shaped_annotation(node.returns),
+            }
+
+    verdict_keys: Set[Tuple[str, str]] = set()
+    basis: Dict[Tuple[str, str], str] = {}
+
+    # Pass 1 (seed): literal decision-tuple return, independent of annotation.
+    for key, info in functions.items():
+        for stmt in ast.walk(info["node"]):
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                if _is_literal_decision_tuple(stmt.value):
+                    verdict_keys.add(key)
+                    basis[key] = "literal decision-tuple return"
+                    break
+
+    # Pass 2 (propagation to fixpoint): an annotation-candidate function that
+    # delegates to an already-classified verdict function joins the set too
+    # -- see find_bare_verdict_tuples' own docstring for why this can take
+    # more than one round on this tree.
+    changed = True
+    while changed:
+        changed = False
+        known_names = {name for (_mod, name) in verdict_keys}
+        for key, info in functions.items():
+            if key in verdict_keys or not info["annotation_candidate"]:
+                continue
+            if _delegates_to_known_verdict(info["node"], known_names):
+                verdict_keys.add(key)
+                basis[key] = "delegates to a known verdict function"
+                changed = True
+
+    found = [
+        {
+            "module": key[0],
+            "function": key[1],
+            "line": functions[key]["line"],
+            "basis": basis[key],
+        }
+        for key in verdict_keys
+    ]
+    return sorted(found, key=lambda d: (d["module"], d["line"], d["function"]))
 
 
 # =============================================================================
@@ -779,6 +1583,18 @@ def find_parallel_arrays(
     "for each of the three allow/deny/ask pairs, X[i] is always the
     wrapper-stripped form of X_entries[i].pattern -- same order, same
     membership, index-for-index").
+
+    KNOWN LIMIT (TOO-45 R2-0 scoping trace, demonstrated by execution): this
+    is a NAME-based check -- a hardcoded class name plus an ``_entries``
+    field-name suffix -- and fires on exactly ONE of nine synthetic hazard
+    variants that carry the identical hazard under a different spelling or
+    container shape (a rename, a dict-of-lists, a ``@property``, a renamed
+    class, a sibling class, ``__init__`` assignment, or unpaired field
+    names), and is structurally blind to the same hazard expressed as a
+    METHOD pair (``Configuration.hard_deny``/``hard_deny_entries``). Kept for
+    continuity/comparison against past runs, but as of TOO-45 R2-0 it is NO
+    LONGER the sole gate for R2's ``pass`` -- see
+    :func:`find_index_parallel_access`, which is.
     """
     groups: List[Dict[str, object]] = []
     for py_file in iter_source_files(toolguard_dir):
@@ -807,6 +1623,273 @@ def find_parallel_arrays(
                             }
                         )
     return groups
+
+
+def _expr_key(expr: ast.expr) -> str:
+    """
+    Return a normalized source-level string for *expr*, used only to decide
+    whether two AST expressions denote the "same" thing (e.g. both are the
+    local name ``pattern``) or genuinely different ones (``entries`` vs
+    ``candidates``). Falls back to ``ast.dump`` for anything ``ast.unparse``
+    cannot render (should not happen for the Name/Attribute/Subscript/Call
+    shapes this module ever inspects, but the fallback costs nothing and
+    never raises).
+    """
+    try:
+        return ast.unparse(expr)
+    except Exception:
+        return ast.dump(expr)
+
+
+def _index_call_receiver(node: ast.expr) -> Optional[ast.expr]:
+    """
+    If *node* is a call of the exact shape ``<receiver>.index(<arg>, ...)``,
+    return the receiver expression; otherwise return ``None``.
+    """
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "index"
+        and node.args
+    ):
+        return node.func.value
+    return None
+
+
+def _is_two_different_index_lookup(node: ast.AST) -> bool:
+    """
+    Return ``True`` when *node* is an ``A[B.index(x)]`` Subscript where the
+    subscripted expression ``A`` and the ``.index()`` receiver ``B`` are
+    syntactically different -- shared by :func:`find_index_parallel_access`
+    and :func:`find_drift_guards` (the latter uses it only to decide whether
+    a function is even IN SCOPE for the drift-guard proxy, never to report a
+    hit itself).
+    """
+    if not isinstance(node, ast.Subscript):
+        return False
+    receiver = _index_call_receiver(node.slice)
+    if receiver is None:
+        return False
+    return _expr_key(node.value) != _expr_key(receiver)
+
+
+def find_index_parallel_access(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> List[Dict[str, object]]:
+    """
+    Return every use site where code reads TWO DIFFERENT sequences by a
+    SHARED, derived index -- the R2 hazard ITSELF, independent of how the two
+    sequences happen to be declared (annotated dataclass fields, a
+    dict-of-lists keyed by kind, a ``@property``, a sibling class,
+    ``__init__`` assignment) or what the class/method/field is named. This is
+    the primary structural criterion behind R2's ``pass``/``fail`` gate as of
+    TOO-45 R2-0 -- see :func:`find_parallel_arrays` for the superseded
+    name-based check kept alongside it for continuity.
+
+    Two shapes are recognised, both modelled directly on the real instances
+    measured on this tree (TOO-45 R2 scoping trace):
+
+    - ``A[B.index(x)]`` -- a ``Subscript`` whose slice is itself a call to
+      ``.index()`` on a DIFFERENT expression than the one being subscripted.
+      Before TOO-45 R2 fixed both, this was ``Configuration.entry_for_pattern``'s
+      ``entries[candidates.index(pattern)]`` and
+      ``_hard_deny_additional_context``'s
+      ``deny_entries[deny_patterns.index(matched_pattern)]`` shape -- the
+      latter being the method-pair (``hard_deny``/``hard_deny_entries``)
+      instance the old name-based check could never reach; this shape catches
+      it with no special-casing at all, because this function never looks at
+      where ``deny_entries``/``deny_patterns`` came from.
+    - ``zip(A, B, ...)`` with two or more syntactically different sequence
+      arguments -- before R2, ``Configuration.permission_layers``'s
+      takeover-filter ``zip(allow, allow_entries)`` re-derived BOTH tuples
+      from one zipped-and-filtered pass. This was a THIRD real instance on
+      this tree the scoping trace's ``.index(``-only grep did not surface
+      (it calls no ``.index()`` at all); it was the same "two collections,
+      one shared index" hazard in a filtering guise rather than a lookup
+      one.
+
+    "Different expression" is a plain source-text comparison
+    (:func:`_expr_key`, essentially ``ast.unparse``), not full alias
+    resolution to an originating attribute chain. This is deliberate, not an
+    oversight: every real instance on this tree, and every one of the nine
+    synthetic gaming variants this predicate is tested against (see
+    ``TestFindIndexParallelAccess``), already uses two DIFFERENTLY-NAMED
+    locals or attribute chains at the point of indexing -- nothing observed
+    aliases both sides to the identical name. Alias resolution would only
+    improve REPORTING (showing an attribute chain instead of a local
+    variable name), never DETECTION, so it is left out.
+
+    Neither a class name nor a field-name suffix is inspected anywhere in
+    this function -- it is exactly as blind to a ``ToolPatternLayer``-to-
+    ``FooLayer`` rename, an ``_entries``-to-``_rules`` rename, or a
+    fields-to-dict-of-lists reshape as the underlying hazard itself is,
+    which is the whole point.
+    """
+    hits: List[Dict[str, object]] = []
+    for py_file in iter_source_files(toolguard_dir):
+        rel = relative_module_path(py_file, toolguard_dir)
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript):
+                receiver = _index_call_receiver(node.slice)
+                if receiver is not None:
+                    container_key = _expr_key(node.value)
+                    index_key = _expr_key(receiver)
+                    if container_key != index_key:
+                        hits.append(
+                            {
+                                "module": rel,
+                                "line": node.lineno,
+                                "kind": "index_lookup",
+                                "container": container_key,
+                                "index_source": index_key,
+                            }
+                        )
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "zip"
+                and len(node.args) >= 2
+            ):
+                arg_keys = [_expr_key(a) for a in node.args]
+                if len(set(arg_keys)) >= 2:
+                    hits.append(
+                        {
+                            "module": rel,
+                            "line": node.lineno,
+                            "kind": "zip",
+                            "sequences": arg_keys,
+                        }
+                    )
+    return sorted(hits, key=lambda d: (d["module"], d["line"]))
+
+
+def _len_call_arg(expr: ast.expr) -> Optional[ast.expr]:
+    """If *expr* is exactly ``len(<x>)``, return ``<x>``; otherwise ``None``."""
+    if (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Name)
+        and expr.func.id == "len"
+        and len(expr.args) == 1
+    ):
+        return expr.args[0]
+    return None
+
+
+def _unwrap_set_call(expr: ast.expr) -> ast.expr:
+    """If *expr* is exactly ``set(<x>)``, return ``<x>``; otherwise *expr* unchanged."""
+    if (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Name)
+        and expr.func.id == "set"
+        and len(expr.args) == 1
+    ):
+        return expr.args[0]
+    return expr
+
+
+def find_drift_guards(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> List[Dict[str, object]]:
+    """
+    Return every ``if len(A) != len(B)`` (or ``== ``) style comparison
+    CO-LOCATED, in the same function, with an index-parallel read
+    (:func:`find_index_parallel_access`'s ``A[B.index(x)]`` shape) -- a
+    MACHINE-VISIBLE PROXY for clause 3 of R2's stated predicate, "no
+    prose-defended index-alignment invariant remains" (TOO-45 R2 scoping
+    trace, section 1, "What the instrument would need to become
+    trustworthy", item 4).
+
+    This is a proxy, not a check of the prose itself -- nothing here reads a
+    docstring. It is sound in one direction only: code that defensively
+    compares two sequences' lengths before trusting an index-parallel read of
+    them is exactly the shape a hand-written index-alignment invariant
+    produces once someone has worried about it drifting (before TOO-45 R2
+    deleted both, ``Configuration.entry_for_pattern`` and
+    ``_hard_deny_additional_context`` did precisely this, and both were
+    found here -- see ``TestFindDriftGuards.test_real_tree_finds_no_drift_guards_after_r2``
+    in ``test/unit/test_architecture_fitness.py`` for the post-R2 real-tree
+    regression). It is NOT sound in the other direction: a prose invariant
+    with no defensive length check at all (the scoping trace's synthetic
+    variant 6, "prose-only invariant, unpaired field names") is invisible to
+    this function, same as it is invisible to every detector in this module
+    -- see :data:`R2_UNCHECKED_CLAUSES` for that explicit admission, rather
+    than a silent gap.
+
+    The co-location requirement (same enclosing function as an actual
+    index-parallel read) is deliberate, not incidental: an UNSCOPED
+    ``len(A) != len(B)`` scan produces at least one confirmed false positive
+    on this tree -- ``tools/consolidate.py``'s
+    ``len(set(varying_tokens)) != len(varying_tokens)`` (a duplicate-value
+    check on ONE sequence, filtered out separately by
+    :func:`_unwrap_set_call`) and
+    ``toolguard/parser/command_extractor.py``'s
+    ``len(bn) == len(prefix)`` (a string-prefix boundary check, unrelated to
+    any index-parallel array) -- neither of which sits in a function that
+    also performs an index-parallel read. Scoping to "same function as the
+    hazard itself" is what makes the proxy usable without also re-introducing
+    a name-based heuristic to tell those apart.
+    """
+    hits: List[Dict[str, object]] = []
+    for py_file in iter_source_files(toolguard_dir):
+        rel = relative_module_path(py_file, toolguard_dir)
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            has_index_access = any(
+                _is_two_different_index_lookup(n) for n in ast.walk(func)
+            )
+            if not has_index_access:
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Compare):
+                    continue
+                if len(node.ops) != 1 or not isinstance(
+                    node.ops[0], (ast.NotEq, ast.Eq)
+                ):
+                    continue
+                left = _len_call_arg(node.left)
+                right = _len_call_arg(node.comparators[0])
+                if left is None or right is None:
+                    continue
+                if _expr_key(_unwrap_set_call(left)) == _expr_key(
+                    _unwrap_set_call(right)
+                ):
+                    continue  # `len(set(x)) != len(x)` duplicate-check shape, not an alignment guard
+                hits.append(
+                    {
+                        "module": rel,
+                        "function": func.name,
+                        "line": node.lineno,
+                        "left": _expr_key(left),
+                        "right": _expr_key(right),
+                    }
+                )
+    return sorted(hits, key=lambda d: (d["module"], d["line"]))
+
+
+#: Clauses of R2's stated predicate that this module CANNOT mechanically
+#: verify, printed explicitly rather than silently dropped -- the same idiom
+#: R1's ``out_of_scope_excluded`` and R3's ``sanctioned_exclusions`` already
+#: use elsewhere in this file (see the module docstring's "generated code"
+#: section for the rationale: "a predicate only satisfiable by ... is a
+#: trap"; an exclusion the operator cannot see is indistinguishable from a
+#: bug). Judged by human/judge-subagent review, not by this tool.
+R2_UNCHECKED_CLAUSES: Tuple[Dict[str, str], ...] = (
+    {
+        "clause": "stripped patterns are a derived property of RuleEntry",
+        "reason": (
+            "not mechanically checkable by AST inspection alone -- would "
+            "require confirming a stripped-pattern collection is PRODUCED "
+            "BY mapping over RuleEntry objects (e.g. a "
+            "RuleEntry.stripped_pattern property consumed via a "
+            "comprehension/property) rather than independently constructed "
+            "and merely co-located; both the real fix and a same-shaped "
+            "rename read identically to this detector's siblings"
+        ),
+    },
+)
 
 
 # =============================================================================
@@ -964,21 +2047,97 @@ def find_reason_parsing_sites(
 # =============================================================================
 
 
+#: Default location of the project manifest whose ``[project.scripts]`` block
+#: :func:`parse_entry_point_modules` reads.
+PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
+
+
+def parse_entry_point_modules(
+    pyproject_toml_path: Path = PYPROJECT_TOML,
+) -> FrozenSet[str]:
+    """
+    Return every toolguard-relative module dotted path
+    (:func:`relative_module_path`'s spelling, e.g. ``"hook"``,
+    ``"tools.security_audit"``, ``"scripts.migrate_permissions"``) that
+    *pyproject_toml_path*'s ``[project.scripts]`` block names as a console
+    script's IMPLEMENTING module -- the left-hand side of each
+    ``"module.path:function"`` target, with the leading ``toolguard.``
+    stripped.
+
+    This is what :func:`find_non_leaf_entry_points` (TOO-45 R5a-0) now treats
+    as "entry point", replacing "module lives in the ``.pyscn.toml`` layer
+    named ``runtime``". The layer label is an editable annotation a step's own
+    implementer can move a module out of without touching a line of Python
+    (TOO-45 R5 scoping trace, DEMONSTRATED: relabelling four modules out of
+    ``runtime`` in ``.pyscn.toml`` alone shrank R5's non-leaf list 7 -> 2, with
+    every architecture test still passing). ``[project.scripts]`` is not: it
+    is the actual, executable fact of what this package ships as a console
+    entry point, so relabelling it changes what ``pip``/``uv`` install, not
+    just what a predicate reads. A module reachable only via
+    ``console_scripts`` here structurally CANNOT also be safely imported by
+    another module for its logic -- the whole reason R5 cares whether an entry
+    point has fan-in in the first place.
+
+    Every ``[project.scripts]`` target on this project points inside
+    ``toolguard`` (verified against the real ``pyproject.toml`` by
+    ``test.unit.test_architecture_fitness``); a target that did not would be
+    silently skipped here rather than raising, since a console script
+    implemented by a *different* package is not something this repo's entry-
+    point-fan-in predicate has any business judging.
+    """
+    with pyproject_toml_path.open("rb") as fh:
+        data = tomllib.load(fh)
+    scripts = data.get("project", {}).get("scripts", {})
+    modules: Set[str] = set()
+    for target in scripts.values():
+        module_path = target.split(":", 1)[0]
+        if module_path == "toolguard":
+            modules.add("")
+        elif module_path.startswith("toolguard."):
+            modules.add(module_path[len("toolguard.") :])
+    return frozenset(modules)
+
+
 def find_non_leaf_entry_points(
     graph: Dict[str, Set[str]],
-    arch: ArchitectureConfig,
-    layer_names: Sequence[str] = ("runtime", "scripts"),
+    entry_point_modules: FrozenSet[str],
 ) -> List[Dict[str, object]]:
     """
-    Return every module in a layer named in *layer_names* that has fan-in > 0
-    (something else in toolguard imports it), i.e. is NOT a leaf, with its
-    importers. ``scripts`` is a package name, not a layer name in
-    ``.pyscn.toml`` (it lives inside the ``tooling`` layer alongside ``tools``)
-    -- resolved here by package membership, not by layer name, so both the
-    ``runtime`` layer and the ``scripts`` package are covered as the predicate
-    names them.
+    Return every module that is EITHER a declared console-script entry point
+    (*entry_point_modules*, from :func:`parse_entry_point_modules`) OR a
+    member of the ``scripts`` package, that has fan-in > 0 (something else in
+    toolguard imports it) -- i.e. is NOT a leaf -- with its importers.
+
+    TOO-45 R5a-0 replaced the previous criterion ("module lives in the
+    ``.pyscn.toml`` layer named ``runtime``") with this one -- see
+    :func:`parse_entry_point_modules` for why the layer label was the wrong
+    signal. This function no longer looks at ``.pyscn.toml``/
+    :class:`ArchitectureConfig` AT ALL, which is deliberate, not an oversight:
+    it is what makes the layer-relabelling move structurally unable to affect
+    this predicate's verdict any more (see
+    ``test.unit.test_architecture_fitness.TestFindNonLeafEntryPoints`` for the
+    regression test demonstrating this against the exact relabelling shape
+    the R5a-0 scoping trace used).
+
+    This also fixes a second defect the layer-based version had: it flagged
+    every module the ideal picture placed in ``runtime`` alongside an entry
+    point (``hook -> {log_writer, error_log, session_warnings, subagent}``)
+    as a violation, even though intra-layer fan-in to a service module is
+    exactly what "runtime = ingest, record, externalise" (the ideal picture's
+    own design) requires. None of those four service modules is itself a
+    declared console-script entry point or a ``scripts`` package member, so
+    none is judged by this function any more -- only a module that IS an
+    entry point (and therefore should never legitimately be importED, only
+    invoked as a process) is judged.
+
+    ``scripts`` remains a second, independent criterion (package membership,
+    not layer name, exactly as before this change) because not every module
+    under ``toolguard/scripts/`` is necessarily a declared
+    ``[project.scripts]`` target (e.g. a future shared ``scripts/__init__.py``
+    helper) -- the package boundary itself is a real fact about the repo
+    layout, worth keeping as a leafness check independent of what
+    ``pyproject.toml`` happens to declare today.
     """
-    package_map = arch.package_to_layer()
     incoming: Dict[str, List[str]] = defaultdict(list)
     for source, targets in graph.items():
         for target in targets:
@@ -986,29 +2145,68 @@ def find_non_leaf_entry_points(
 
     results = []
     for module in sorted(graph.keys()):
-        seg = first_segment(module)
-        layer = package_map.get(seg)
-        in_runtime = layer == "runtime"
-        in_scripts = seg == "scripts"
-        if not (in_runtime and "runtime" in layer_names) and not (
-            in_scripts and "scripts" in layer_names
-        ):
+        is_entry_point = module in entry_point_modules
+        is_scripts_pkg = first_segment(module) == "scripts"
+        if not (is_entry_point or is_scripts_pkg):
             continue
         importers = sorted(incoming.get(module, []))
         if importers:
             results.append(
                 {
                     "module": module,
-                    "layer_or_package": "scripts" if in_scripts else "runtime",
+                    "reason": "scripts_package" if is_scripts_pkg else "entry_point",
                     "importers": importers,
                 }
             )
     return results
 
 
-def find_import_cycles(graph: Dict[str, Set[str]]) -> List[List[str]]:
-    """Return every strongly connected component of size > 1 (an import cycle)."""
-    return [comp for comp in tarjan_scc(graph) if len(comp) > 1]
+def _drop_packages_from_graph(
+    graph: Dict[str, Set[str]], packages: Sequence[str]
+) -> Dict[str, Set[str]]:
+    """
+    Return a copy of *graph* with every node -- and every edge into or out of
+    it -- whose :func:`first_segment` is in *packages* removed entirely, as if
+    that package had never been scanned at all.
+
+    Mirrors how :func:`iter_source_files` already treats a generated file for
+    every other style/debt detector (dropped from the node set, not merely
+    hidden from the report): an exclusion built this way cannot leave a
+    stray, all-excluded-package cycle standing, because none of that
+    package's edges exist in the returned graph to form one.
+    """
+    return {
+        source: {t for t in targets if first_segment(t) not in packages}
+        for source, targets in graph.items()
+        if first_segment(source) not in packages
+    }
+
+
+def find_import_cycles(
+    graph: Dict[str, Set[str]], out_of_scope_packages: Sequence[str] = ()
+) -> List[List[str]]:
+    """
+    Return every strongly connected component of size > 1 (an import cycle) in
+    *graph*, after dropping every module under an *out_of_scope_packages*
+    package entirely (:func:`_drop_packages_from_graph`).
+
+    TOO-45 R5a-0: the previous version applied no out-of-scope filter at all,
+    which made R5 unpassable -- ``parser.command_extractor <-> parser.multiline``
+    (entirely inside ``toolguard/parser/``, which the execution plan puts
+    explicitly out of scope for this ticket) was reported as an R5 cycle no
+    in-scope change could ever clear (TOO-45 R5 scoping trace, DEMONSTRATED:
+    removing the real ``hook <-> tools.decision`` cycle left this one
+    standing, R5 still FAIL). :func:`compute_predicates` passes
+    :data:`R5_OUT_OF_SCOPE_PACKAGES` here for that reason. The default `()`
+    reproduces the original, unfiltered behaviour exactly, so every existing
+    caller that does not pass *out_of_scope_packages* is unaffected.
+    """
+    scoped_graph = (
+        _drop_packages_from_graph(graph, out_of_scope_packages)
+        if out_of_scope_packages
+        else graph
+    )
+    return [comp for comp in tarjan_scc(scoped_graph) if len(comp) > 1]
 
 
 # =============================================================================
@@ -1061,20 +2259,87 @@ def find_private_imports(
 # =============================================================================
 
 
-def find_enrichment_footprint(toolguard_dir: Path = TOOLGUARD_DIR) -> List[str]:
+#: Both spellings this footprint tracks: the Python identifier (snake_case,
+#: used for the dataclass field/property/parameter name throughout the
+#: engine) and the JSON field (camelCase, used only as a string literal --
+#: Claude Code's hookSpecificOutput key).
+_ENRICHMENT_SPELLINGS = ("additional_context", "additionalContext")
+
+
+@dataclass
+class EnrichmentFootprint:
     """
-    Return every production file referencing ``additional_context`` or
-    ``additionalContext``. NOT a pass/fail predicate -- see the module
-    docstring and the TOO-45 plan section 2: this is evidence about whether
-    the canary will move, tracked so a flat count at a step boundary is a
-    finding, not a silent non-event. Skips generated files.
+    Identifier-level vs. prose-only references to the enrichment feature.
+
+    A raw substring scan over whole file text (the previous implementation)
+    counts a docstring mention exactly like a real call -- demonstrated to
+    over-report: it found 15 files, but only 9 had real identifier-level
+    coupling; ``config.py`` retained 5 docstring mentions and 0 real
+    references after TOO-45 D1a moved the resolution engine out of it, yet
+    still counted. This tokenizes instead: a ``NAME`` token spelled
+    ``additional_context``/``additionalContext`` is real code coupling; a
+    mention inside a ``STRING`` or ``COMMENT`` token (docstring, comment, or
+    a dict-key string literal) is prose -- worth seeing, but not coupling.
+
+    Attributes:
+        coupled: Files with at least one real ``NAME``-token reference.
+        prose_only: Files that mention either spelling ONLY inside a
+            ``STRING``/``COMMENT`` token -- reported separately rather than
+            dropped, so a file that talks about enrichment but no longer
+            participates in it doesn't vanish silently.
+        occurrences_by_file: ``{coupled file: NAME-token occurrence count}``
+            (TOO-45 R1b item C). The FILE count above is bounded below by
+            files that must legitimately name the field (declare it, produce
+            it, or render it) even after a refactor removes every
+            pure-threading reference, so a step that removes most of the
+            THREADING but leaves one file-level mention would look flat on
+            ``coupled``/``coupled_count`` alone. This counts every
+            occurrence, not just file presence, so that kind of change is
+            still visible. Only coupled files appear here -- a prose-only
+            file has, by definition, zero ``NAME``-token occurrences.
     """
-    hits = []
+
+    coupled: List[str] = field(default_factory=list)
+    prose_only: List[str] = field(default_factory=list)
+    occurrences_by_file: Dict[str, int] = field(default_factory=dict)
+
+    @property
+    def total_occurrences(self) -> int:
+        """Sum of :attr:`occurrences_by_file` -- the total identifier-level reference count."""
+        return sum(self.occurrences_by_file.values())
+
+
+def find_enrichment_footprint(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> EnrichmentFootprint:
+    """
+    Classify every production file's enrichment references as real
+    identifier-level coupling or prose-only mentions. NOT a pass/fail
+    predicate -- see the module docstring and the TOO-45 plan section 2:
+    this is evidence about whether the canary will move, tracked so a flat
+    count at a step boundary is a finding, not a silent non-event. Skips
+    generated files.
+    """
+    footprint = EnrichmentFootprint()
     for py_file in iter_source_files(toolguard_dir):
         text = py_file.read_text(encoding="utf-8")
-        if "additional_context" in text or "additionalContext" in text:
-            hits.append(relative_module_path(py_file, toolguard_dir))
-    return hits
+        code_ref_count = 0
+        has_prose_ref = False
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        for tok in tokens:
+            if tok.type == tokenize.NAME and tok.string in _ENRICHMENT_SPELLINGS:
+                code_ref_count += 1
+            elif tok.type in (tokenize.STRING, tokenize.COMMENT) and any(
+                spelling in tok.string for spelling in _ENRICHMENT_SPELLINGS
+            ):
+                has_prose_ref = True
+        rel = relative_module_path(py_file, toolguard_dir)
+        if code_ref_count > 0:
+            footprint.coupled.append(rel)
+            footprint.occurrences_by_file[rel] = code_ref_count
+        elif has_prose_ref:
+            footprint.prose_only.append(rel)
+    return footprint
 
 
 # =============================================================================
@@ -1082,7 +2347,12 @@ def find_enrichment_footprint(toolguard_dir: Path = TOOLGUARD_DIR) -> List[str]:
 # =============================================================================
 
 
-def compute_predicates(toolguard_dir: Path = TOOLGUARD_DIR) -> Dict[str, object]:
+def compute_predicates(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+    test_dir: Path = REPO_ROOT / "test",
+    tools_dir: Path = REPO_ROOT / "tools",
+    entry_point_modules: Optional[FrozenSet[str]] = None,
+) -> Dict[str, object]:
     """
     Compute every R-predicate's components plus the enrichment footprint.
 
@@ -1090,20 +2360,50 @@ def compute_predicates(toolguard_dir: Path = TOOLGUARD_DIR) -> Dict[str, object]
     explicitly rather than silently, per the module docstring's generated-code
     section: generated files (:func:`list_generated_files`) never count toward
     a style/debt predicate, since a predicate only satisfiable by hand-editing
-    generated output is a trap, not evidence. R1 additionally excludes
-    :data:`R1_OUT_OF_SCOPE_PACKAGES` (``toolguard/parser/``), which this
-    ticket does not touch at all.
+    generated output is a trap, not evidence. R1 and R5 additionally exclude
+    :data:`R1_OUT_OF_SCOPE_PACKAGES`/:data:`R5_OUT_OF_SCOPE_PACKAGES`
+    (``toolguard/parser/``, the same package for both), which this ticket does
+    not touch at all.
+
+    *test_dir*/*tools_dir* feed :func:`find_iter_shims`' *extra_caller_dirs*
+    (TOO-45 R1b item B) so R1's shim callers are counted across the whole
+    repo, not just *toolguard_dir* -- see that function's docstring for why
+    the original toolguard_dir-only scan under-reported. Defaulted to this
+    repo's real ``test/``/``tools/`` since this predicate is only ever
+    exercised against the real tree (overridable for a future synthetic-repo
+    test of this assembly function specifically).
+
+    *entry_point_modules* feeds R5's :func:`find_non_leaf_entry_points`
+    (TOO-45 R5a-0); ``None`` (the default) parses the real ``pyproject.toml``
+    via :func:`parse_entry_point_modules`, overridable for a synthetic-tree
+    test of this assembly function. As of R5a-0 this function no longer reads
+    ``.pyscn.toml``/:class:`ArchitectureConfig` for R5 AT ALL -- only for
+    :func:`check_layers`, a separate mode -- which is what makes the
+    ``.pyscn.toml`` layer-relabelling move (TOO-45 R5 scoping trace) unable to
+    affect R5's verdict computed here any more; see
+    ``test.unit.test_architecture_fitness.TestComputePredicates`` for the
+    regression test.
     """
-    arch = parse_architecture_config()
     graph = build_import_graph(toolguard_dir)
+    if entry_point_modules is None:
+        entry_point_modules = parse_entry_point_modules()
 
     r3_sites = find_reason_parsing_sites(toolguard_dir)
     r1_types = find_verdict_types(toolguard_dir)
-    r1_shims = find_iter_shims(toolguard_dir)
-    r5_non_leaves = find_non_leaf_entry_points(graph, arch)
-    r5_cycles = find_import_cycles(graph)
+    r1_altitudes = classify_verdict_altitudes(toolguard_dir)
+    r1_shims = find_iter_shims(
+        toolguard_dir,
+        extra_caller_dirs=(("test", test_dir), ("tools", tools_dir)),
+    )
+    r1_bare_tuples = find_bare_verdict_tuples(toolguard_dir)
+    r5_non_leaves = find_non_leaf_entry_points(graph, entry_point_modules)
+    r5_cycles = find_import_cycles(
+        graph, out_of_scope_packages=R5_OUT_OF_SCOPE_PACKAGES
+    )
     r6_sites = find_private_imports(toolguard_dir)
     r2_groups = find_parallel_arrays(toolguard_dir)
+    r2_index_sites = find_index_parallel_access(toolguard_dir)
+    r2_drift_guards = find_drift_guards(toolguard_dir)
     footprint = find_enrichment_footprint(toolguard_dir)
     generated = list_generated_files(toolguard_dir)
 
@@ -1125,9 +2425,60 @@ def compute_predicates(toolguard_dir: Path = TOOLGUARD_DIR) -> Dict[str, object]
             ),
         },
         "R1": {
-            "pass": len(r1_shims) == 0,
+            # THREE parts of R1's stated predicate now, not just the shims.
+            # Gating on `len(r1_shims) == 0` alone made this report PASS the
+            # moment the two tuple-compatibility shims were deleted -- while
+            # five verdict types were still standing, i.e. with the
+            # substance of the step untouched (TOO-45 R1a, 2026-08-05). A
+            # predicate that can declare victory on the cheap half of its
+            # own definition is worse than no predicate.
+            #
+            # TOO-45 R1c refined the FIRST part again: "exactly one type
+            # represents a permission verdict end-to-end" (the plan's own
+            # words) is too blunt -- the R1 scoping trace measured three
+            # legitimate altitudes (unit / runtime / tooling), and flattening
+            # them would be worse design. The gate is now "exactly one
+            # RUNTIME verdict type", with the other two altitudes DERIVED
+            # (never hand-listed by class name -- see
+            # classify_verdict_altitudes) and reported below with their
+            # exclusion reason, the same way out_of_scope_excluded already
+            # reports the parser exclusion.
+            #
+            # TOO-45 R1g added a FOURTH altitude, LEVEL (LevelMatch): it was
+            # invisible to this whole predicate before, not merely excluded
+            # -- find_verdict_types' own 2-aux-field threshold never counted
+            # it at all under its current field spelling (matched_pattern,
+            # not matched_rule -- see LevelMatch's own docstring for why that
+            # was chosen). classify_verdict_altitudes now scans a superset
+            # pool at a lower threshold and classifies LEVEL by the
+            # PROVENANCE-CAPABILITY of the class (structural -- does it
+            # declare a provenance field/reference at all, never inspecting
+            # the winning-pattern field, hence invariant to that field-name
+            # choice -- see _is_provenance_capable), so LevelMatch is detected,
+            # classified, and printed with its reason exactly like unit/
+            # tooling always were. The RUNTIME gate below is UNCHANGED --
+            # LEVEL is excluded from the count, same as unit/tooling, only
+            # now it is never silently absent from the report.
+            #
+            # TOO-45 R1b2 added the THIRD part: find_verdict_types only ever
+            # inspects CLASS definitions, so a verdict that was never a class
+            # -- a bare `(decision, reason, ...)` tuple literal, see
+            # find_bare_verdict_tuples -- was structurally invisible to this
+            # gate. R1 correctly returns to FAIL here: 13 such functions
+            # remain on the real tree (6 in compound.py, all confirmed by
+            # the R1 scoping trace) as of this predicate's addition -- see
+            # the TOO-45 R1b2 report for the honest count against all 16 the
+            # trace estimated and what this detector does and does not
+            # reach.
+            "pass": (
+                len(r1_altitudes["runtime"]) == 1
+                and len(r1_shims) == 0
+                and len(r1_bare_tuples) == 0
+            ),
             "verdict_types": r1_types,
+            "altitudes": r1_altitudes,
             "iter_shims": r1_shims,
+            "bare_verdict_tuples": r1_bare_tuples,
             "out_of_scope_excluded": {
                 "modules": r1_out_of_scope_modules(toolguard_dir),
                 "reason": (
@@ -1140,18 +2491,49 @@ def compute_predicates(toolguard_dir: Path = TOOLGUARD_DIR) -> Dict[str, object]
             "pass": len(r5_non_leaves) == 0 and len(r5_cycles) == 0,
             "non_leaf_entry_points": r5_non_leaves,
             "cycles": r5_cycles,
+            "entry_point_modules": sorted(entry_point_modules),
+            "out_of_scope_excluded": {
+                # Same package list as R1's -- see R1_OUT_OF_SCOPE_PACKAGES'
+                # own docstring and r1_out_of_scope_modules' docstring for why
+                # this is not a second, near-duplicate scan.
+                "modules": r1_out_of_scope_modules(toolguard_dir),
+                "reason": (
+                    "toolguard/parser/ is explicitly out of scope for TOO-45 "
+                    "per the execution plan (the same exclusion R1 applies); "
+                    "an intra-parser import cycle is not evidence toward or "
+                    "against R5's leafness/cycle predicate"
+                ),
+            },
         },
         "R6": {
             "pass": len(r6_sites) == 0,
             "sites": r6_sites,
         },
         "R2": {
-            "pass": len(r2_groups) == 0,
+            # TOO-45 R2-0: the gate now rests on the two STRUCTURAL,
+            # class/field-name-agnostic checks -- find_index_parallel_access
+            # (the hazard itself: two different sequences read by a shared
+            # derived index) and find_drift_guards (a proxy for the
+            # prose-defended-invariant clause, scoped to guards co-located
+            # with an actual index-parallel read). `r2_groups` (the old
+            # hardcoded-class-name / `_entries`-suffix scan) is kept in the
+            # report for continuity/comparison but no longer gates `pass` --
+            # see find_parallel_arrays' own docstring for why it cannot be
+            # trusted alone (fires on 1 of 9 known gaming variants and is
+            # structurally blind to a method-pair instance).
+            "pass": len(r2_index_sites) == 0 and len(r2_drift_guards) == 0,
+            "index_parallel_access_sites": r2_index_sites,
+            "drift_guards": r2_drift_guards,
             "parallel_array_groups": r2_groups,
+            "unchecked_predicate_clauses": list(R2_UNCHECKED_CLAUSES),
         },
         "enrichment_footprint": {
-            "count": len(footprint),
-            "files": footprint,
+            "coupled_count": len(footprint.coupled),
+            "coupled_files": footprint.coupled,
+            "prose_only_count": len(footprint.prose_only),
+            "prose_only_files": footprint.prose_only,
+            "occurrences_by_file": footprint.occurrences_by_file,
+            "total_occurrences": footprint.total_occurrences,
         },
     }
 
@@ -1179,17 +2561,69 @@ def render_predicates_text(predicates: Dict[str, object]) -> str:
                     f"  (excluded as sanctioned: {', '.join(data['sanctioned_exclusions'])})"
                 )
         elif pid == "R1":
-            lines.append(f"  verdict-ish types ({len(data['verdict_types'])}):")
-            for t in data["verdict_types"]:
+            alt = data["altitudes"]
+            lines.append(
+                f"  RUNTIME verdict types ({len(alt['runtime'])}) -- must be exactly 1:"
+            )
+            for t in alt["runtime"]:
                 lines.append(f"    - {t['class']} ({t['module']}:{t['line']})")
+            lines.append(
+                f"  UNIT verdict types, excluded ({len(alt['unit'])}) -- one "
+                f"decidable unit inside a compound, not a standalone verdict:"
+            )
+            for t in alt["unit"]:
+                nested = ", ".join(
+                    f"{n['container']}.{n['field']}" for n in t["nested_in"]
+                )
+                lines.append(
+                    f"    - {t['class']} ({t['module']}:{t['line']}) -- "
+                    f"nested inside: {nested}"
+                )
+            lines.append(
+                f"  TOOLING verdict types, excluded ({len(alt['tooling'])}) -- "
+                f"the replay/analysis layer's own DTO, unified only in R6:"
+            )
+            for t in alt["tooling"]:
+                lines.append(
+                    f"    - {t['class']} ({t['module']}:{t['line']}) -- "
+                    f"package '{t['package']}'"
+                )
+            lines.append(
+                f"  LEVEL verdict types, excluded ({len(alt['level'])}) -- "
+                f"a raw match at one hierarchy level, not a standalone verdict:"
+            )
+            for t in alt["level"]:
+                lines.append(
+                    f"    - {t['class']} ({t['module']}:{t['line']}) -- {t['reason']}"
+                )
             lines.append(f"  __iter__ shims ({len(data['iter_shims'])}):")
             for shim in data["iter_shims"]:
+                by_area = ", ".join(
+                    f"{area}={count}"
+                    for area, count in shim["caller_counts_by_area"].items()
+                )
                 lines.append(
-                    f"    - {shim['class']} ({shim['module']}:{shim['line']}), callers: {len(shim['callers'])}"
+                    f"    - {shim['class']} ({shim['module']}:{shim['line']}), "
+                    f"callers: {len(shim['callers'])} ({by_area})"
                 )
                 for c in shim["callers"]:
                     lines.append(
-                        f"        {c['module']}:{c['line']} via {c['unpack_via']}(...)"
+                        f"        [{c['area']}] {c['module']}:{c['line']} via {c['unpack_via']}(...)"
+                    )
+            bare_tuples = data["bare_verdict_tuples"]
+            lines.append(
+                f"  bare verdict-tuple returns ({len(bare_tuples)}) -- functions "
+                f"returning a (decision, reason, ...) tuple, never a class, "
+                f"grouped by module:"
+            )
+            by_module: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+            for hit in bare_tuples:
+                by_module[str(hit["module"])].append(hit)
+            for module in sorted(by_module):
+                lines.append(f"    {module}:")
+                for hit in by_module[module]:
+                    lines.append(
+                        f"      - {hit['function']}():{hit['line']} -- {hit['basis']}"
                     )
             oos = data["out_of_scope_excluded"]
             if oos["modules"]:
@@ -1197,29 +2631,79 @@ def render_predicates_text(predicates: Dict[str, object]) -> str:
                     f"  (out of scope -- {oos['reason']}: {', '.join(oos['modules'])})"
                 )
         elif pid == "R5":
+            lines.append(
+                f"  entry point modules ({len(data['entry_point_modules'])}, from "
+                f"pyproject.toml [project.scripts]): {', '.join(data['entry_point_modules'])}"
+            )
             for nl in data["non_leaf_entry_points"]:
                 lines.append(
-                    f"  - {nl['module']} ({nl['layer_or_package']}) imported by: {', '.join(nl['importers'])}"
+                    f"  - {nl['module']} ({nl['reason']}) imported by: {', '.join(nl['importers'])}"
                 )
             for cyc in data["cycles"]:
                 lines.append(f"  - cycle: {' <-> '.join(cyc)}")
+            oos = data["out_of_scope_excluded"]
+            if oos["modules"]:
+                lines.append(
+                    f"  (out of scope -- {oos['reason']}: {', '.join(oos['modules'])})"
+                )
         elif pid == "R6":
             for s in data["sites"]:
                 lines.append(
                     f"  - {s['importer']}:{s['line']} imports private `{s['private_name']}` from {s['target_module']}"
                 )
         elif pid == "R2":
-            for g in data["parallel_array_groups"]:
+            sites = data["index_parallel_access_sites"]
+            lines.append(
+                f"  index-parallel access sites ({len(sites)}) -- the hazard "
+                f"itself, class/field-name-agnostic (gates 'pass'):"
+            )
+            for h in sites:
+                if h["kind"] == "index_lookup":
+                    lines.append(
+                        f"    - {h['module']}:{h['line']} -- "
+                        f"{h['container']}[{h['index_source']}.index(...)]"
+                    )
+                else:
+                    lines.append(
+                        f"    - {h['module']}:{h['line']} -- "
+                        f"zip({', '.join(h['sequences'])})"
+                    )
+            guards = data["drift_guards"]
+            lines.append(
+                f'  drift guards ({len(guards)}) -- proxy for "no '
+                f'prose-defended index-alignment invariant remains" (gates '
+                f"'pass'; one-directional proxy, see find_drift_guards):"
+            )
+            for g in guards:
                 lines.append(
-                    f"  - {g['module']}:{g['class']}: {g['base_field']} / {g['entries_field']}"
+                    f"    - {g['module']}:{g['line']} in {g['function']}(): "
+                    f"len({g['left']}) != len({g['right']})"
                 )
+            legacy = data["parallel_array_groups"]
+            lines.append(
+                f"  legacy class/suffix-name scan ({len(legacy)}, "
+                f"informational only -- does NOT gate 'pass', see "
+                f"find_parallel_arrays):"
+            )
+            for g in legacy:
+                lines.append(
+                    f"    - {g['module']}:{g['class']}: {g['base_field']} / {g['entries_field']}"
+                )
+            lines.append("  predicate clauses this module cannot mechanically check:")
+            for c in data["unchecked_predicate_clauses"]:
+                lines.append(f'    - "{c["clause"]}" -- {c["reason"]}')
         lines.append("")
     ef = predicates["enrichment_footprint"]
     lines.append(
-        f"=== enrichment footprint (tracked, not a predicate): {ef['count']} files ==="
+        f"=== enrichment footprint (tracked, not a predicate): "
+        f"{ef['coupled_count']} coupled (real code), "
+        f"{ef['prose_only_count']} prose-only, "
+        f"{ef['total_occurrences']} total identifier-level occurrences ==="
     )
-    for f in ef["files"]:
-        lines.append(f"  - {f}")
+    for f in ef["coupled_files"]:
+        lines.append(f"  [coupled] {f}: {ef['occurrences_by_file'][f]} occurrence(s)")
+    for f in ef["prose_only_files"]:
+        lines.append(f"  [prose]   {f}")
     return "\n".join(lines)
 
 

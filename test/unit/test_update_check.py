@@ -1,10 +1,15 @@
 """
-Unit tests for toolguard.update_check (TOO-16).
+Unit tests for toolguard.install_update (TOO-16; split from toolguard.update_check
+by TOO-45 R5c).
 
 Cover the update-check exit-code contract (0 up-to-date / 1 update-available /
 2 unknown), the ``--upgrade`` and ``--quiet`` flags, the offline/not-a-git-install
 fallbacks, and the parsing of installed origin and remote HEAD. All side effects
 (metadata, git, uv) are stubbed -- no real network, subprocess, or install runs.
+
+toolguard.update_check itself is now a thin CLI wrapper (argument parsing,
+exit-code plumbing) around toolguard.install_update._check -- see TestMain,
+the only class here that still exercises toolguard.update_check directly.
 
 New in this update (local-kind support):
 - ``detect_install`` resolves git / local / unknown from direct_url.json.
@@ -20,8 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from toolguard import update_check
-from toolguard.update_check import InstallInfo, InstallKind
+from toolguard import install_update, update_check
+from toolguard.install_update import InstallInfo, InstallKind
 
 
 class TestInstalledOrigin(unittest.TestCase):
@@ -42,12 +47,12 @@ class TestInstalledOrigin(unittest.TestCase):
             '"vcs_info":{"vcs":"git","commit_id":"abc123"}}'
         )
         with patch.object(
-            update_check.importlib.metadata,
+            install_update.importlib.metadata,
             "distribution",
             return_value=self._dist_returning(payload),
         ):
             self.assertEqual(
-                update_check.installed_origin(),
+                install_update.installed_origin(),
                 ("https://github.com/x/toolguard", "abc123"),
             )
 
@@ -59,11 +64,11 @@ class TestInstalledOrigin(unittest.TestCase):
         """
         payload = '{"url":"file:///somewhere","dir_info":{"editable":true}}'
         with patch.object(
-            update_check.importlib.metadata,
+            install_update.importlib.metadata,
             "distribution",
             return_value=self._dist_returning(payload),
         ):
-            self.assertIsNone(update_check.installed_origin())
+            self.assertIsNone(install_update.installed_origin())
 
     def test_missing_direct_url_returns_none(self):
         """
@@ -72,11 +77,11 @@ class TestInstalledOrigin(unittest.TestCase):
         Then it returns None
         """
         with patch.object(
-            update_check.importlib.metadata,
+            install_update.importlib.metadata,
             "distribution",
             return_value=self._dist_returning(None),
         ):
-            self.assertIsNone(update_check.installed_origin())
+            self.assertIsNone(install_update.installed_origin())
 
     def test_metadata_lookup_failure_returns_none(self):
         """
@@ -85,13 +90,13 @@ class TestInstalledOrigin(unittest.TestCase):
         Then it returns None rather than propagating the error
         """
         with patch.object(
-            update_check.importlib.metadata,
+            install_update.importlib.metadata,
             "distribution",
-            side_effect=update_check.importlib.metadata.PackageNotFoundError(
+            side_effect=install_update.importlib.metadata.PackageNotFoundError(
                 "toolguard"
             ),
         ):
-            self.assertIsNone(update_check.installed_origin())
+            self.assertIsNone(install_update.installed_origin())
 
 
 class TestDetectInstall(unittest.TestCase):
@@ -115,11 +120,11 @@ class TestDetectInstall(unittest.TestCase):
             '"vcs_info":{"vcs":"git","commit_id":"gitcommit1"}}'
         )
         with patch.object(
-            update_check.importlib.metadata,
+            install_update.importlib.metadata,
             "distribution",
             return_value=self._dist_returning(payload),
         ):
-            info = update_check.detect_install()
+            info = install_update.detect_install()
         self.assertEqual(info.kind, InstallKind.GIT)
         self.assertEqual(info.url, "https://github.com/x/toolguard")
         self.assertEqual(info.installed_commit, "gitcommit1")
@@ -133,14 +138,14 @@ class TestDetectInstall(unittest.TestCase):
         payload = '{"url":"file:///home/user/toolguard","dir_info":{"editable":false}}'
         with (
             patch.object(
-                update_check.importlib.metadata,
+                install_update.importlib.metadata,
                 "distribution",
                 return_value=self._dist_returning(payload),
             ),
-            patch.object(update_check, "is_git_worktree", return_value=True),
-            patch.object(update_check, "local_repo_head", return_value="localhead1"),
+            patch.object(install_update, "is_git_worktree", return_value=True),
+            patch.object(install_update, "local_repo_head", return_value="localhead1"),
         ):
-            info = update_check.detect_install()
+            info = install_update.detect_install()
         self.assertEqual(info.kind, InstallKind.LOCAL)
         self.assertEqual(info.repo_path, Path("/home/user/toolguard"))
         self.assertEqual(info.installed_commit, "localhead1")
@@ -155,14 +160,14 @@ class TestDetectInstall(unittest.TestCase):
         payload = '{"url":"file:///home/user/toolguard","dir_info":{"editable":true}}'
         with (
             patch.object(
-                update_check.importlib.metadata,
+                install_update.importlib.metadata,
                 "distribution",
                 return_value=self._dist_returning(payload),
             ),
-            patch.object(update_check, "is_git_worktree", return_value=True),
-            patch.object(update_check, "local_repo_head", return_value="edithead1"),
+            patch.object(install_update, "is_git_worktree", return_value=True),
+            patch.object(install_update, "local_repo_head", return_value="edithead1"),
         ):
-            info = update_check.detect_install()
+            info = install_update.detect_install()
         self.assertEqual(info.kind, InstallKind.LOCAL)
         self.assertTrue(info.editable)
 
@@ -175,13 +180,13 @@ class TestDetectInstall(unittest.TestCase):
         payload = '{"url":"file:///some/non-git/path","dir_info":{"editable":false}}'
         with (
             patch.object(
-                update_check.importlib.metadata,
+                install_update.importlib.metadata,
                 "distribution",
                 return_value=self._dist_returning(payload),
             ),
-            patch.object(update_check, "is_git_worktree", return_value=False),
+            patch.object(install_update, "is_git_worktree", return_value=False),
         ):
-            info = update_check.detect_install()
+            info = install_update.detect_install()
         self.assertEqual(info.kind, InstallKind.UNKNOWN)
 
     def test_no_direct_url_falls_back_to_file_walk_up(self):
@@ -193,15 +198,17 @@ class TestDetectInstall(unittest.TestCase):
         fake_repo = Path("/home/user/toolguard")
         with (
             patch.object(
-                update_check.importlib.metadata,
+                install_update.importlib.metadata,
                 "distribution",
                 return_value=self._dist_returning(None),
             ),
-            patch.object(update_check, "_walk_up_to_git_root", return_value=fake_repo),
-            patch.object(update_check, "is_git_worktree", return_value=True),
-            patch.object(update_check, "local_repo_head", return_value="walkuphead1"),
+            patch.object(
+                install_update, "_walk_up_to_git_root", return_value=fake_repo
+            ),
+            patch.object(install_update, "is_git_worktree", return_value=True),
+            patch.object(install_update, "local_repo_head", return_value="walkuphead1"),
         ):
-            info = update_check.detect_install()
+            info = install_update.detect_install()
         self.assertEqual(info.kind, InstallKind.LOCAL)
         self.assertEqual(info.repo_path, fake_repo)
         self.assertEqual(info.installed_commit, "walkuphead1")
@@ -214,13 +221,13 @@ class TestDetectInstall(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check.importlib.metadata,
+                install_update.importlib.metadata,
                 "distribution",
                 return_value=self._dist_returning(None),
             ),
-            patch.object(update_check, "_walk_up_to_git_root", return_value=None),
+            patch.object(install_update, "_walk_up_to_git_root", return_value=None),
         ):
-            info = update_check.detect_install()
+            info = install_update.detect_install()
         self.assertEqual(info.kind, InstallKind.UNKNOWN)
 
 
@@ -236,9 +243,9 @@ class TestRemoteHead(unittest.TestCase):
         completed = SimpleNamespace(
             returncode=0, stdout="deadbeef0123\tHEAD\n", stderr=""
         )
-        with patch.object(update_check.subprocess, "run", return_value=completed):
+        with patch.object(install_update.subprocess, "run", return_value=completed):
             self.assertEqual(
-                update_check.remote_head("https://example/x"), "deadbeef0123"
+                install_update.remote_head("https://example/x"), "deadbeef0123"
             )
 
     def test_nonzero_exit_returns_none(self):
@@ -248,8 +255,8 @@ class TestRemoteHead(unittest.TestCase):
         Then it returns None
         """
         completed = SimpleNamespace(returncode=128, stdout="", stderr="fatal")
-        with patch.object(update_check.subprocess, "run", return_value=completed):
-            self.assertIsNone(update_check.remote_head("https://example/x"))
+        with patch.object(install_update.subprocess, "run", return_value=completed):
+            self.assertIsNone(install_update.remote_head("https://example/x"))
 
     def test_subprocess_exception_returns_none(self):
         """
@@ -258,9 +265,9 @@ class TestRemoteHead(unittest.TestCase):
         Then it returns None rather than raising (offline-safe)
         """
         with patch.object(
-            update_check.subprocess, "run", side_effect=OSError("no git")
+            install_update.subprocess, "run", side_effect=OSError("no git")
         ):
-            self.assertIsNone(update_check.remote_head("https://example/x"))
+            self.assertIsNone(install_update.remote_head("https://example/x"))
 
     def test_empty_output_returns_none(self):
         """
@@ -269,8 +276,8 @@ class TestRemoteHead(unittest.TestCase):
         Then it returns None
         """
         completed = SimpleNamespace(returncode=0, stdout="\n", stderr="")
-        with patch.object(update_check.subprocess, "run", return_value=completed):
-            self.assertIsNone(update_check.remote_head("https://example/x"))
+        with patch.object(install_update.subprocess, "run", return_value=completed):
+            self.assertIsNone(install_update.remote_head("https://example/x"))
 
 
 class TestLocalRepoHead(unittest.TestCase):
@@ -283,8 +290,8 @@ class TestLocalRepoHead(unittest.TestCase):
         Then it returns the HEAD sha
         """
         completed = SimpleNamespace(returncode=0, stdout="localsha123\n", stderr="")
-        with patch.object(update_check.subprocess, "run", return_value=completed):
-            result = update_check.local_repo_head(Path("/repo"))
+        with patch.object(install_update.subprocess, "run", return_value=completed):
+            result = install_update.local_repo_head(Path("/repo"))
         self.assertEqual(result, "localsha123")
 
     def test_nonzero_exit_returns_none(self):
@@ -294,8 +301,8 @@ class TestLocalRepoHead(unittest.TestCase):
         Then it returns None
         """
         completed = SimpleNamespace(returncode=128, stdout="", stderr="fatal")
-        with patch.object(update_check.subprocess, "run", return_value=completed):
-            self.assertIsNone(update_check.local_repo_head(Path("/repo")))
+        with patch.object(install_update.subprocess, "run", return_value=completed):
+            self.assertIsNone(install_update.local_repo_head(Path("/repo")))
 
     def test_subprocess_exception_returns_none(self):
         """
@@ -304,9 +311,9 @@ class TestLocalRepoHead(unittest.TestCase):
         Then it returns None without raising
         """
         with patch.object(
-            update_check.subprocess, "run", side_effect=OSError("no git")
+            install_update.subprocess, "run", side_effect=OSError("no git")
         ):
-            self.assertIsNone(update_check.local_repo_head(Path("/repo")))
+            self.assertIsNone(install_update.local_repo_head(Path("/repo")))
 
 
 class TestLocalRemoteHead(unittest.TestCase):
@@ -321,8 +328,8 @@ class TestLocalRemoteHead(unittest.TestCase):
         completed = SimpleNamespace(
             returncode=0, stdout="remotesha456\tHEAD\n", stderr=""
         )
-        with patch.object(update_check.subprocess, "run", return_value=completed):
-            result = update_check.local_remote_head(Path("/repo"))
+        with patch.object(install_update.subprocess, "run", return_value=completed):
+            result = install_update.local_remote_head(Path("/repo"))
         self.assertEqual(result, "remotesha456")
 
     def test_nonzero_exit_returns_none(self):
@@ -332,8 +339,8 @@ class TestLocalRemoteHead(unittest.TestCase):
         Then it returns None
         """
         completed = SimpleNamespace(returncode=128, stdout="", stderr="fatal")
-        with patch.object(update_check.subprocess, "run", return_value=completed):
-            self.assertIsNone(update_check.local_remote_head(Path("/repo")))
+        with patch.object(install_update.subprocess, "run", return_value=completed):
+            self.assertIsNone(install_update.local_remote_head(Path("/repo")))
 
     def test_subprocess_exception_returns_none(self):
         """
@@ -342,9 +349,9 @@ class TestLocalRemoteHead(unittest.TestCase):
         Then it returns None without raising (offline-safe)
         """
         with patch.object(
-            update_check.subprocess, "run", side_effect=OSError("no git")
+            install_update.subprocess, "run", side_effect=OSError("no git")
         ):
-            self.assertIsNone(update_check.local_remote_head(Path("/repo")))
+            self.assertIsNone(install_update.local_remote_head(Path("/repo")))
 
 
 class TestCheck(unittest.TestCase):
@@ -354,7 +361,7 @@ class TestCheck(unittest.TestCase):
         """Run _check capturing (exit_code, stdout, stderr)."""
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = update_check._check(quiet=quiet, do_upgrade=do_upgrade)
+            code = install_update._check(quiet=quiet, do_upgrade=do_upgrade)
         return code, out.getvalue(), err.getvalue()
 
     def _git_info(self, commit="installed123"):
@@ -384,12 +391,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("same")
+                install_update, "detect_install", return_value=self._git_info("same")
             ),
-            patch.object(update_check, "remote_head", return_value="same"),
+            patch.object(install_update, "remote_head", return_value="same"),
         ):
             code, out, _ = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UP_TO_DATE)
+        self.assertEqual(code, install_update.EXIT_UP_TO_DATE)
         self.assertIn("up to date", out)
 
     def test_git_quiet_suppresses_up_to_date_output(self):
@@ -400,12 +407,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("same")
+                install_update, "detect_install", return_value=self._git_info("same")
             ),
-            patch.object(update_check, "remote_head", return_value="same"),
+            patch.object(install_update, "remote_head", return_value="same"),
         ):
             code, out, _ = self._run_check(quiet=True)
-        self.assertEqual(code, update_check.EXIT_UP_TO_DATE)
+        self.assertEqual(code, install_update.EXIT_UP_TO_DATE)
         self.assertEqual(out, "")
 
     def test_git_update_available_returns_one_and_prints_command(self):
@@ -416,13 +423,15 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("oldcommit")
+                install_update,
+                "detect_install",
+                return_value=self._git_info("oldcommit"),
             ),
-            patch.object(update_check, "remote_head", return_value="newcommit"),
-            patch.object(update_check, "distribution_name", return_value="toolguard"),
+            patch.object(install_update, "remote_head", return_value="newcommit"),
+            patch.object(install_update, "distribution_name", return_value="toolguard"),
         ):
             code, out, _ = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UPDATE_AVAILABLE)
+        self.assertEqual(code, install_update.EXIT_UPDATE_AVAILABLE)
         self.assertIn("update available", out)
         self.assertIn("uv tool upgrade toolguard", out)
 
@@ -434,12 +443,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("old")
+                install_update, "detect_install", return_value=self._git_info("old")
             ),
-            patch.object(update_check, "remote_head", return_value="new"),
+            patch.object(install_update, "remote_head", return_value="new"),
         ):
             code, out, _ = self._run_check(quiet=True)
-        self.assertEqual(code, update_check.EXIT_UPDATE_AVAILABLE)
+        self.assertEqual(code, install_update.EXIT_UPDATE_AVAILABLE)
         self.assertIn("update available", out)
 
     def test_git_printed_command_uses_distribution_name(self):
@@ -450,11 +459,11 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("old")
+                install_update, "detect_install", return_value=self._git_info("old")
             ),
-            patch.object(update_check, "remote_head", return_value="new"),
+            patch.object(install_update, "remote_head", return_value="new"),
             patch.object(
-                update_check, "distribution_name", return_value="claude-toolguard"
+                install_update, "distribution_name", return_value="claude-toolguard"
             ),
         ):
             _, out, _ = self._run_check()
@@ -468,12 +477,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("commit")
+                install_update, "detect_install", return_value=self._git_info("commit")
             ),
-            patch.object(update_check, "remote_head", return_value=None),
+            patch.object(install_update, "remote_head", return_value=None),
         ):
             code, _, err = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UNKNOWN)
+        self.assertEqual(code, install_update.EXIT_UNKNOWN)
         self.assertIn("Could not reach", err)
 
     def test_git_upgrade_flag_runs_upgrade_only_when_behind(self):
@@ -484,10 +493,10 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("old")
+                install_update, "detect_install", return_value=self._git_info("old")
             ),
-            patch.object(update_check, "remote_head", return_value="new"),
-            patch.object(update_check, "run_upgrade", return_value=0) as mock_upgrade,
+            patch.object(install_update, "remote_head", return_value="new"),
+            patch.object(install_update, "run_upgrade", return_value=0) as mock_upgrade,
         ):
             code, _, _ = self._run_check(do_upgrade=True)
         mock_upgrade.assert_called_once()
@@ -501,14 +510,14 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._git_info("same")
+                install_update, "detect_install", return_value=self._git_info("same")
             ),
-            patch.object(update_check, "remote_head", return_value="same"),
-            patch.object(update_check, "run_upgrade") as mock_upgrade,
+            patch.object(install_update, "remote_head", return_value="same"),
+            patch.object(install_update, "run_upgrade") as mock_upgrade,
         ):
             code, _, _ = self._run_check(do_upgrade=True)
         mock_upgrade.assert_not_called()
-        self.assertEqual(code, update_check.EXIT_UP_TO_DATE)
+        self.assertEqual(code, install_update.EXIT_UP_TO_DATE)
 
     # --- local kind tests ---
 
@@ -520,13 +529,15 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._local_info("same")
+                install_update,
+                "detect_install",
+                return_value=self._local_info("same"),
             ),
-            patch.object(update_check, "local_repo_head", return_value="same"),
-            patch.object(update_check, "local_remote_head", return_value="same"),
+            patch.object(install_update, "local_repo_head", return_value="same"),
+            patch.object(install_update, "local_remote_head", return_value="same"),
         ):
             code, out, _ = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UP_TO_DATE)
+        self.assertEqual(code, install_update.EXIT_UP_TO_DATE)
         self.assertIn("up to date", out)
 
     def test_local_quiet_suppresses_up_to_date_output(self):
@@ -537,13 +548,15 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._local_info("same")
+                install_update,
+                "detect_install",
+                return_value=self._local_info("same"),
             ),
-            patch.object(update_check, "local_repo_head", return_value="same"),
-            patch.object(update_check, "local_remote_head", return_value="same"),
+            patch.object(install_update, "local_repo_head", return_value="same"),
+            patch.object(install_update, "local_remote_head", return_value="same"),
         ):
             code, out, _ = self._run_check(quiet=True)
-        self.assertEqual(code, update_check.EXIT_UP_TO_DATE)
+        self.assertEqual(code, install_update.EXIT_UP_TO_DATE)
         self.assertEqual(out, "")
 
     def test_local_behind_returns_one_and_prints_git_pull(self):
@@ -554,13 +567,13 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._local_info("old")
+                install_update, "detect_install", return_value=self._local_info("old")
             ),
-            patch.object(update_check, "local_repo_head", return_value="old"),
-            patch.object(update_check, "local_remote_head", return_value="new"),
+            patch.object(install_update, "local_repo_head", return_value="old"),
+            patch.object(install_update, "local_remote_head", return_value="new"),
         ):
             code, out, _ = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UPDATE_AVAILABLE)
+        self.assertEqual(code, install_update.EXIT_UPDATE_AVAILABLE)
         self.assertIn("update available", out)
         self.assertIn("git", out.lower())
         self.assertIn("pull", out.lower())
@@ -573,12 +586,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check,
+                install_update,
                 "detect_install",
                 return_value=self._local_info("old", editable=False),
             ),
-            patch.object(update_check, "local_repo_head", return_value="old"),
-            patch.object(update_check, "local_remote_head", return_value="new"),
+            patch.object(install_update, "local_repo_head", return_value="old"),
+            patch.object(install_update, "local_remote_head", return_value="new"),
         ):
             _, out, _ = self._run_check()
         self.assertIn("uv tool install --force", out)
@@ -591,12 +604,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check,
+                install_update,
                 "detect_install",
                 return_value=self._local_info("old", editable=True),
             ),
-            patch.object(update_check, "local_repo_head", return_value="old"),
-            patch.object(update_check, "local_remote_head", return_value="new"),
+            patch.object(install_update, "local_repo_head", return_value="old"),
+            patch.object(install_update, "local_remote_head", return_value="new"),
         ):
             _, out, _ = self._run_check()
         self.assertNotIn("uv tool install --force", out)
@@ -609,15 +622,15 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._local_info("old")
+                install_update, "detect_install", return_value=self._local_info("old")
             ),
-            patch.object(update_check, "local_repo_head", return_value="old"),
-            patch.object(update_check, "local_remote_head", return_value="new"),
-            patch.object(update_check, "run_upgrade") as mock_upgrade,
+            patch.object(install_update, "local_repo_head", return_value="old"),
+            patch.object(install_update, "local_remote_head", return_value="new"),
+            patch.object(install_update, "run_upgrade") as mock_upgrade,
         ):
             code, _, err = self._run_check(do_upgrade=True)
         mock_upgrade.assert_not_called()
-        self.assertEqual(code, update_check.EXIT_UPDATE_AVAILABLE)
+        self.assertEqual(code, install_update.EXIT_UPDATE_AVAILABLE)
         # A note about not auto-running should be in stderr
         self.assertIn("manual", err.lower())
 
@@ -629,13 +642,13 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._local_info("head")
+                install_update, "detect_install", return_value=self._local_info("head")
             ),
-            patch.object(update_check, "local_repo_head", return_value="head"),
-            patch.object(update_check, "local_remote_head", return_value=None),
+            patch.object(install_update, "local_repo_head", return_value="head"),
+            patch.object(install_update, "local_remote_head", return_value=None),
         ):
             code, _, err = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UNKNOWN)
+        self.assertEqual(code, install_update.EXIT_UNKNOWN)
         self.assertIn("Could not reach", err)
 
     def test_local_head_unreadable_returns_unknown(self):
@@ -646,12 +659,12 @@ class TestCheck(unittest.TestCase):
         """
         with (
             patch.object(
-                update_check, "detect_install", return_value=self._local_info()
+                install_update, "detect_install", return_value=self._local_info()
             ),
-            patch.object(update_check, "local_repo_head", return_value=None),
+            patch.object(install_update, "local_repo_head", return_value=None),
         ):
             code, _, err = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UNKNOWN)
+        self.assertEqual(code, install_update.EXIT_UNKNOWN)
         # Error message should mention the checkout
         self.assertTrue(len(err) > 0)
 
@@ -664,12 +677,12 @@ class TestCheck(unittest.TestCase):
         Then it returns exit code 2 with guidance on manual update
         """
         with patch.object(
-            update_check,
+            install_update,
             "detect_install",
             return_value=InstallInfo(kind=InstallKind.UNKNOWN),
         ):
             code, _, err = self._run_check()
-        self.assertEqual(code, update_check.EXIT_UNKNOWN)
+        self.assertEqual(code, install_update.EXIT_UNKNOWN)
         # Error message should guide the user
         self.assertTrue(len(err) > 0)
 
@@ -684,11 +697,11 @@ class TestRunUpgrade(unittest.TestCase):
         Then it returns 0
         """
         with patch.object(
-            update_check.subprocess,
+            install_update.subprocess,
             "run",
             return_value=SimpleNamespace(returncode=0),
         ):
-            self.assertEqual(update_check.run_upgrade("toolguard"), 0)
+            self.assertEqual(install_update.run_upgrade("toolguard"), 0)
 
     def test_uv_missing_returns_unknown(self):
         """
@@ -696,9 +709,11 @@ class TestRunUpgrade(unittest.TestCase):
         When run_upgrade runs
         Then it returns EXIT_UNKNOWN instead of raising
         """
-        with patch.object(update_check.subprocess, "run", side_effect=OSError("no uv")):
+        with patch.object(
+            install_update.subprocess, "run", side_effect=OSError("no uv")
+        ):
             self.assertEqual(
-                update_check.run_upgrade("toolguard"), update_check.EXIT_UNKNOWN
+                install_update.run_upgrade("toolguard"), install_update.EXIT_UNKNOWN
             )
 
 
@@ -770,9 +785,9 @@ class TestInstalledOriginLegacyBehavior(unittest.TestCase):
         payload = '{"url":"file:///home/user/toolguard","dir_info":{"editable":true}}'
         dist = SimpleNamespace(read_text=lambda name: payload)
         with patch.object(
-            update_check.importlib.metadata, "distribution", return_value=dist
+            install_update.importlib.metadata, "distribution", return_value=dist
         ):
-            self.assertIsNone(update_check.installed_origin())
+            self.assertIsNone(install_update.installed_origin())
 
 
 if __name__ == "__main__":

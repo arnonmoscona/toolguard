@@ -646,7 +646,8 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         Given matching native settings and toolguard_hook configs in a project
         When check_and_warn_divergence runs
-        Then it returns an empty list (no divergence to warn about)
+        Then it returns a DivergenceCheckResult with an empty divergent_patterns
+             list and no warning_message/corrective_steps (nothing to warn about)
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
@@ -673,13 +674,18 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
 
             # No divergence
-            self.assertEqual(result, [])
+            self.assertEqual(result.divergent_patterns, [])
+            self.assertIsNone(result.warning_message)
+            self.assertIsNone(result.corrective_steps)
 
     def test_with_divergence(self):
         """
         Given native settings allowing a pattern that the toolguard_hook config lacks
         When check_and_warn_divergence runs
-        Then the divergent pattern is included in the returned list
+        Then the divergent pattern is included in divergent_patterns, and
+             warning_message/corrective_steps are populated (TOO-45 R5d: this
+             module hands the warning text to its caller rather than logging
+             it itself)
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
@@ -707,13 +713,17 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
 
             # Should find divergence
-            self.assertIn("Bash(git push:*)", result)
+            self.assertIn("Bash(git push:*)", result.divergent_patterns)
+            self.assertIsNotNone(result.warning_message)
+            self.assertIn("Bash(git push:*)", result.warning_message)
+            self.assertIsNotNone(result.corrective_steps)
 
     def test_deduplication(self):
         """
         Given a divergent native pattern with no matching toolguard config
         When check_and_warn_divergence runs twice in a row
-        Then the first call reports the divergence and the second is deduplicated to an empty list
+        Then the first call reports the divergence and the second is deduplicated to
+             an empty divergent_patterns list with no warning_message
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
@@ -733,11 +743,12 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
 
             # First call should find divergence
             result1 = check_and_warn_divergence(project_root, logs_dir, takeover_config)
-            self.assertIn("Bash(git push:*)", result1)
+            self.assertIn("Bash(git push:*)", result1.divergent_patterns)
 
             # Second call should be deduplicated
             result2 = check_and_warn_divergence(project_root, logs_dir, takeover_config)
-            self.assertEqual(result2, [])
+            self.assertEqual(result2.divergent_patterns, [])
+            self.assertIsNone(result2.warning_message)
 
     def test_takeover_mode_ignored_patterns(self):
         """
@@ -770,8 +781,8 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
 
             # Should only find git push, not pytest
-            self.assertIn("Bash(git push:*)", result)
-            self.assertNotIn("Bash(uv run pytest:*)", result)
+            self.assertIn("Bash(git push:*)", result.divergent_patterns)
+            self.assertNotIn("Bash(uv run pytest:*)", result.divergent_patterns)
 
 
 if __name__ == "__main__":

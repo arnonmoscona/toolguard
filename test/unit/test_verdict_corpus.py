@@ -62,8 +62,8 @@ from test.verdict_corpus.fixture_loader import (
     read_jsonl,
 )
 
-#: Set to "1" to acknowledge reviewed reason/additional_context/provenance
-#: differences without regenerating goldens.jsonl. See README.md.
+#: Set to "1" to acknowledge reviewed reason/additional_context/provenance/
+#: matched_rule differences without regenerating goldens.jsonl. See README.md.
 _ACCEPT_PROSE_ENV_VAR = "TOOLGUARD_CORPUS_ACCEPT_PROSE"
 
 
@@ -157,7 +157,8 @@ class TestVerdictCorpus(unittest.TestCase):
     def test_tracked_fields_unchanged_or_acknowledged(self):
         """
         Given every corpus case, replayed right now through decide()
-        When its reason/additional_context/provenance are compared to the committed golden
+        When its reason/additional_context/provenance/matched_rule are compared
+             to the committed golden
         Then either nothing differs, or TOOLGUARD_CORPUS_ACCEPT_PROSE=1 explicitly
              acknowledges the (already reviewed) differences
 
@@ -184,9 +185,10 @@ class TestVerdictCorpus(unittest.TestCase):
             lines.append(f"    actual  : {diff.actual!r}")
         self.fail(
             f"{len(self.result.prose_diffs)} tracked (reason/additional_context/"
-            "provenance) difference(s) found. These are NOT verdict changes. Review "
-            "them, then either regenerate goldens.jsonl (once the change is confirmed "
-            f"legitimate) or set {_ACCEPT_PROSE_ENV_VAR}=1 to acknowledge without "
+            "provenance/matched_rule) difference(s) found. These are NOT verdict "
+            "changes. Review them, then either regenerate goldens.jsonl (once the "
+            f"change is confirmed legitimate) or set {_ACCEPT_PROSE_ENV_VAR}=1 to "
+            "acknowledge without "
             "regenerating.\n" + "\n".join(lines)
         )
 
@@ -283,8 +285,9 @@ class TestVerdictCorpusEndToEnd(unittest.TestCase):
     def test_e2e_tracked_fields_unchanged_or_acknowledged(self):
         """
         Given every end-to-end case, replayed right now through the real hook subprocess
-        When permissionDecisionReason's text and additionalContext's text (when
-             present on both sides) are compared to the committed golden
+        When permissionDecisionReason's text, additionalContext's text (when
+             present on both sides), and conflict_message's text (when both
+             sides logged a conflict) are compared to the committed golden
         Then either nothing differs, or TOOLGUARD_CORPUS_ACCEPT_PROSE=1 explicitly
              acknowledges the (already reviewed) differences
 
@@ -303,8 +306,9 @@ class TestVerdictCorpusEndToEnd(unittest.TestCase):
             lines.append(f"    expected: {diff.expected!r}")
             lines.append(f"    actual  : {diff.actual!r}")
         self.fail(
-            f"{len(self.result.prose_diffs)} tracked end-to-end (reason/additionalContext "
-            "text) difference(s) found. These are NOT hard-output changes. Review them, "
+            f"{len(self.result.prose_diffs)} tracked end-to-end "
+            "(reason/additionalContext/conflict_message text) difference(s) found. "
+            "These are NOT hard-output changes. Review them, "
             "then either regenerate e2e_goldens.jsonl (once the change is confirmed "
             f"legitimate) or set {_ACCEPT_PROSE_ENV_VAR}=1 to acknowledge without "
             "regenerating.\n" + "\n".join(lines)

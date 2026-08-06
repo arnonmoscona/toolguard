@@ -33,7 +33,7 @@ from toolguard.tools.installer import main
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
-from toolguard.update_check import InstallInfo, InstallKind
+from toolguard.install_update import InstallInfo, InstallKind
 
 # Numbered journal entry header, e.g. "## [3] 2026-07-07 14:12 local -- register hooks".
 _JOURNAL_HEADER_RE = re.compile(

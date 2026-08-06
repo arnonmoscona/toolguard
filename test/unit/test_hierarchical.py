@@ -6,9 +6,9 @@ These tests exercise the new behavior introduced in Phase 2:
 
 - ``_discover_levels`` walks from the project root up to (and including) ``~``,
   assigning a specificity index per level (0 = most specific).
-- ``Configuration.resolve_permission_detailed`` evaluates levels most-specific
-  first; the first level that matches anything decides (deny-first within a
-  level); no match anywhere => fail-closed deny.
+- ``permission_resolution.resolve_permission_detailed`` evaluates levels
+  most-specific first; the first level that matches anything decides
+  (deny-first within a level); no match anywhere => fail-closed deny.
 - Relative config paths always resolve against the project root.
 
 Tests use the standard-library ``unittest`` framework. Every test carries a
@@ -24,6 +24,7 @@ from unittest.mock import patch
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import _discover_levels, load_configuration
+from toolguard.permission_resolution import resolve_permission_detailed
 from toolguard.permissions import decide_command_at_level_detailed
 
 
@@ -245,11 +246,11 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         """
         Resolve a single command through the Bash level cascade.
 
-        Returns ``(decision, reason)`` extracted from the ``ResolvedDecision``
+        Returns ``(decision, reason)`` extracted from the ``RuntimeVerdict``
         so existing Given/When/Then assertions remain unchanged.
         """
-        resolved = config.resolve_permission_detailed(
-            "Bash", self._detailed_decider(command)
+        resolved = resolve_permission_detailed(
+            config, "Bash", self._detailed_decider(command)
         )
         return resolved.decision, resolved.reason
 
@@ -336,13 +337,16 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         config = self._config((["git *"], []), ([], ["rm *"]))
 
         def _resolve_one(sub):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._detailed_decider(sub)
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._detailed_decider(sub)
             )
             return resolved.decision, resolved.reason, resolved.additional_context
 
-        decision, _reason, _context = resolve_compound_permission(
-            "git status && rm -rf /", _resolve_one
+        _verdict = resolve_compound_permission("git status && rm -rf /", _resolve_one)
+        decision, _reason, _context = (
+            _verdict.decision,
+            _verdict.reason,
+            _verdict.additional_context,
         )
         self.assertEqual(decision, "deny")
 
@@ -357,13 +361,16 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         )
 
         def _resolve_one(sub):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._detailed_decider(sub)
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._detailed_decider(sub)
             )
             return resolved.decision, resolved.reason, resolved.additional_context
 
-        decision, _reason, _context = resolve_compound_permission(
-            "git status && ls -l", _resolve_one
+        _verdict = resolve_compound_permission("git status && ls -l", _resolve_one)
+        decision, _reason, _context = (
+            _verdict.decision,
+            _verdict.reason,
+            _verdict.additional_context,
         )
         self.assertEqual(decision, "allow")
 
@@ -474,10 +481,8 @@ class TestRelativeFilePathPatterns(ConfigIsolationMixin, unittest.TestCase):
 
         target_file = str(project / "src" / "x.py")
         config = load_configuration(project)
-        decision, _reason, _override = resolve_file_path_permission_detailed(
-            "Read", target_file, config
-        )
-        return decision
+        result = resolve_file_path_permission_detailed("Read", target_file, config)
+        return result.decision
 
     def test_relative_read_pattern_at_project_level(self):
         """
@@ -582,10 +587,8 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         # A path named src/x.py but OUTSIDE the project root (in an ancestor).
         outside_file = str(home / "a" / "src" / "x.py")
         config = load_configuration(project)
-        decision, _reason, _override = resolve_file_path_permission_detailed(
-            "Read", outside_file, config
-        )
-        self.assertEqual(decision, "ask")
+        result = resolve_file_path_permission_detailed("Read", outside_file, config)
+        self.assertEqual(result.decision, "ask")
 
 
 class TestConfigLayerSpecificity(ConfigIsolationMixin, unittest.TestCase):
@@ -628,8 +631,11 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
         When resolve_compound_permission runs
         Then it denies with a 'no valid commands' reason
         """
-        decision, reason, _context = resolve_compound_permission(
-            "", lambda _c: ("allow", "x", None)
+        _verdict = resolve_compound_permission("", lambda _c: ("allow", "x", None))
+        decision, reason, _context = (
+            _verdict.decision,
+            _verdict.reason,
+            _verdict.additional_context,
         )
         self.assertEqual(decision, "deny")
         self.assertIn("No valid commands", reason)
@@ -646,8 +652,11 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
                 return "ask", "Command requires approval: rm *", None
             return "allow", "Command matches allow pattern: git *", None
 
-        decision, reason, _context = resolve_compound_permission(
-            "git status && rm x", _resolve_one
+        _verdict = resolve_compound_permission("git status && rm x", _resolve_one)
+        decision, reason, _context = (
+            _verdict.decision,
+            _verdict.reason,
+            _verdict.additional_context,
         )
         self.assertEqual(decision, "ask")
         self.assertIn("requiring approval", reason)

@@ -52,8 +52,13 @@ def _resolve(command: str, allow: list[str], deny: list[str]) -> str:
     Mirrors how the hook resolves one hierarchy level: each extracted sub-command is run
     through ``check_permission`` and the compound result is combined strictest-wins.
     """
-    decision, _reason, _context = resolve_compound_permission(
+    _verdict = resolve_compound_permission(
         command, lambda c: (*check_permission(c, allow, deny), None)
+    )
+    decision, _reason, _context = (
+        _verdict.decision,
+        _verdict.reason,
+        _verdict.additional_context,
     )
     return decision
 

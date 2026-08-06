@@ -214,22 +214,27 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
   so it is the most likely thing to go stale silently. Don't skip it because a change looks
   small -- several of this project's own doc bugs came from small, individually reasonable
   edits.
-* *After* the push, ask whether to reinstall the governing toolguard. **`uv tool upgrade` is
-  the wrong command as of 2026-08-02** -- upgrade tracks the original install source, and the
-  current install is a local build from this repo, not the git URL. Use:
+* *After* the push, ask whether to refresh the governing toolguard:
 
   ```bash
-  uv tool install --force --from /home/arnon/projects/toolguard toolguard   # local build
-  uv tool install --force git+https://github.com/arnonmoscona/toolguard@<ref>  # once pushed
+  uv tool upgrade toolguard      # re-resolves master; correct again as of 2026-08-03
   ```
 
-  **Open commitment (Arnon, 2026-08-02): raise this unprompted once a pushed, safe version
-  exists.** The machine is currently governed by an unreleased local build on purpose -- the
-  previously installed v0.5.0 predates TOO-19 and *fails open on an unparseable config file*
-  (no parse-failure ASK floor). Two things to say when raising it: the install affects **every**
-  project toolguard governs on this machine, and installing from a local path snapshots the
-  working tree *including uncommitted changes*, so commit first. The safe version does not need
-  to include TOO-28.
+  Then **smoke-test it**, because a hook that cannot launch fails SILENTLY -- Claude Code treats
+  only exit code 2 as blocking, so a broken registration means no permission hook at all, with
+  no error anywhere:
+
+  ```bash
+  echo '{"session_id":"t","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"'$PWD'"}' | ~/.local/bin/toolguard
+  ```
+
+  Worth keeping: between 2026-08-02 and 2026-08-03 the install was a **local path** build, and
+  `uv tool upgrade` was the WRONG command for that window, because upgrade tracks the original
+  install source. Resolved -- the source is `git+https://github.com/arnonmoscona/toolguard`
+  again (0.5.1 @ 532de02; `install` pins the resolved commit, `upgrade` re-resolves). If it is
+  ever a local path again, `upgrade` silently does the wrong thing: check `uv tool list` first.
+  The SessionStart check now also raises staleness by itself when the tree is clean and differs
+  from the installed copy, so this no longer depends solely on remembering.
 * **Open commitment (Arnon, 2026-08-02): after pushing TOO-19, remove the hooks and config that
   are no longer needed** -- both configuration entries and hook code. Known candidate:
   `.claude/toolguard_hook.toml:58` is marked *"TEMPORARY -- TOO-19 Phase 0 unattended

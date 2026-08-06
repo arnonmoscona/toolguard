@@ -25,7 +25,7 @@ from toolguard.config import (
     Configuration,
     Provenance,
 )
-from toolguard.resolve import SubMatch
+from toolguard.resolve import UnitVerdict
 from toolguard.tools.decision import Decision, decide
 
 
@@ -593,6 +593,55 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         )
         self.assertEqual("project", result.provenance.level)
 
+    def test_bash_compound_mixed_escape_hatch_provenance_matches_matched_rule(self):
+        """
+        Given a config allowing 'Bash(ls)' and 'Bash(python *)' (so the
+            ask-floor leaf's own truncated stub also allows) with
+            undecidable_fallback set to 'allow_with_warning'
+        When decide() is called with the two-leaf compound
+            'python -c "print(1)" && ls' (the escape-hatch ask-floor leaf
+            extracts FIRST, the genuine match 'ls' second)
+        Then Decision.provenance is non-None and identifies the project
+            layer, consistent with Decision.matched_rule ('ls') -- NOT None
+
+        TOO-45 R1e finishing pass regression guard: this adapter used to
+        derive Decision.provenance independently as "the first sub-command's
+        provenance" rather than reusing RuntimeVerdict.provenance (which
+        already carries the correct, matched_rule-consistent attribution).
+        Extraction order is exactly why that was wrong: with the
+        escape-hatch leaf first, the old code returned the ESCAPE HATCH's
+        provenance -- None -- even though 'ls' genuinely matched and
+        Decision.matched_rule already correctly said so, an inconsistency
+        confirmed by temporarily reintroducing the old logic and watching
+        this test fail. See test_resolve.
+        TestUndecidableFallbackMultiLeafWarningParity's sibling test for the
+        RuntimeVerdict-level guard, and 'diff <(cat a) <(cat b) && ls -la' in
+        the corpus for the real-traffic case this shape was found in.
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow_with_warning",
+                        "permissions": {
+                            "allow": ["Bash(ls)", "Bash(python *)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        result = decide(config, "Bash", 'python -c "print(1)" && ls')
+        self.assertEqual("allow", result.verdict)
+        self.assertEqual(result.matched_rule, "ls")
+        self.assertIsNotNone(
+            result.provenance,
+            "provenance must be non-None and consistent with matched_rule",
+        )
+        self.assertEqual("project", result.provenance.level)
+
     def test_bash_compound_sub_matches_populated(self):
         """
         Given a config that allows 'git:*' and 'ls:*'
@@ -621,7 +670,7 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         self.assertEqual(2, len(result.sub_matches))
 
         for sm in result.sub_matches:
-            self.assertIsInstance(sm, SubMatch)
+            self.assertIsInstance(sm, UnitVerdict)
             self.assertEqual("allow", sm.decision)
             self.assertIsNotNone(
                 sm.matched_rule,
@@ -717,8 +766,7 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
     """
     TOO-19 Phase 1, increment 6: Decision.additional_context is populated by
     decide() for both the file-path and Bash branches, sourced directly from
-    FileResolution.additional_context / BashResolution.additional_context with
-    no re-derivation in decision.py.
+    RuntimeVerdict.additional_context with no re-derivation in decision.py.
     """
 
     def test_file_allow_structured_entry_surfaces_additional_context(self):

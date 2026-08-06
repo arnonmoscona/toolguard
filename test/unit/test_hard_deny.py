@@ -27,7 +27,9 @@ from unittest.mock import patch
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
+from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.hook import resolve_file_path_permission_detailed
+from toolguard.permission_resolution import resolve_permission_detailed
 from toolguard.permissions import check_hard_deny, decide_command_at_level_detailed
 from toolguard.rule_entry import _strip_tool_wrapper
 
@@ -373,12 +375,13 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         def _resolve_one(sub):
             hard = check_hard_deny(sub, list(hd_deny), list(hd_allow))
             if hard is not None:
-                # check_hard_deny returns (decision, reason, matched_pattern)
-                # as of TOO-19 code review m3; this helper's callers want the
-                # legacy (decision, reason, additional_context) shape, and
-                # none of them exercise additional_context, so it is None.
-                hard_decision, hard_reason, _matched_pattern = hard
-                return hard_decision, hard_reason, None
+                # check_hard_deny returns a LevelMatch (decision, reason,
+                # matched_pattern) as of TOO-45 R1f (a bare tuple before
+                # that, TOO-19 code review m3); this helper's callers want
+                # the legacy (decision, reason, additional_context) shape,
+                # and none of them exercise additional_context, so it is
+                # None.
+                return hard.decision, hard.reason, None
 
             def _decide(allow_patterns, deny_patterns, ask_patterns=()):
                 return decide_command_at_level_detailed(
@@ -388,10 +391,15 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
                     ask_patterns=list(ask_patterns),
                 )
 
-            resolved = config.resolve_permission_detailed("Bash", _decide)
+            resolved = resolve_permission_detailed(config, "Bash", _decide)
             return resolved.decision, resolved.reason, resolved.additional_context
 
-        decision, reason, _context = resolve_compound_permission(command, _resolve_one)
+        _verdict = resolve_compound_permission(command, _resolve_one)
+        decision, reason, _context = (
+            _verdict.decision,
+            _verdict.reason,
+            _verdict.additional_context,
+        )
         return decision, reason
 
     def test_hard_deny_overrides_more_specific_allow(self):
@@ -567,14 +575,14 @@ class TestCheckHardDenyUnit(unittest.TestCase):
         Given a command matching a hard_deny.deny pattern and no carve-out
         When check_hard_deny runs
         Then it returns a deny decision with an unoverridable reason and the
-            matched pattern as its own element (TOO-19 code review m3)
+            matched pattern as its own field (TOO-19 code review m3; a
+            LevelMatch field as of TOO-45 R1f)
         """
         result = check_hard_deny("curl http://x", ["curl *"], [])
         self.assertIsNotNone(result)
-        decision, reason, matched_pattern = result
-        self.assertEqual(decision, "deny")
-        self.assertIn("cannot be overridden", reason)
-        self.assertEqual(matched_pattern, "curl *")
+        self.assertEqual(result.decision, "deny")
+        self.assertIn("cannot be overridden", result.reason)
+        self.assertEqual(result.matched_pattern, "curl *")
 
     def test_carveout_returns_none(self):
         """
@@ -629,11 +637,9 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
 
         target_file = str(project / ".env")
         config = load_configuration(project)
-        decision, reason, _override = resolve_file_path_permission_detailed(
-            "Read", target_file, config
-        )
-        self.assertEqual(decision, "deny")
-        self.assertIn("hard_deny", reason)
+        result = resolve_file_path_permission_detailed("Read", target_file, config)
+        self.assertEqual(result.decision, "deny")
+        self.assertIn("hard_deny", result.reason)
 
     def test_write_hard_deny_allow_carveout(self):
         """
@@ -653,14 +659,14 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         allowed_file = str(project / "scratch" / "x.txt")
         denied_file = str(project / "src" / "y.txt")
         config = load_configuration(project)
-        allow_decision, _, _ = resolve_file_path_permission_detailed(
+        allow_result = resolve_file_path_permission_detailed(
             "Write", allowed_file, config
         )
-        deny_decision, _, _ = resolve_file_path_permission_detailed(
+        deny_result = resolve_file_path_permission_detailed(
             "Write", denied_file, config
         )
-        self.assertEqual(allow_decision, "allow")
-        self.assertEqual(deny_decision, "deny")
+        self.assertEqual(allow_result.decision, "allow")
+        self.assertEqual(deny_result.decision, "deny")
 
     def test_edit_hard_deny_relative_pattern_anchors_to_project_root(self):
         """
@@ -690,24 +696,20 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         inside = str(project / "secrets" / "key.txt")
         outside = str(home / "secrets" / "key.txt")
         config = load_configuration(project)
-        inside_decision, _, _ = resolve_file_path_permission_detailed(
-            "Edit", inside, config
-        )
+        inside_result = resolve_file_path_permission_detailed("Edit", inside, config)
         # Outside the project root the anchored hard_deny must NOT
         # match; with no allow match either, it falls through to the
         # shared no_match_fallback ('ask' by default) -- but
         # crucially not via the hard_deny path.
-        outside_decision, outside_reason, _ = resolve_file_path_permission_detailed(
-            "Edit", outside, config
-        )
+        outside_result = resolve_file_path_permission_detailed("Edit", outside, config)
         # Security-relevant assertion: the hard_deny match itself (inside
         # the project root) still denies, unoverridably.
-        self.assertEqual(inside_decision, "deny")
+        self.assertEqual(inside_result.decision, "deny")
         # Anchoring assertion: outside the project root, the pattern does
         # not leak into a hard-deny match -- it resolves via the ordinary
         # (non-hard-deny) no_match_fallback path.
-        self.assertEqual(outside_decision, "ask")
-        self.assertNotIn("hard_deny", outside_reason)
+        self.assertEqual(outside_result.decision, "ask")
+        self.assertNotIn("hard_deny", outside_result.reason)
 
     def test_no_hard_deny_leaves_file_path_cascade_unchanged(self):
         """
@@ -723,10 +725,8 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         )
         target_file = str(project / "src" / "x.py")
         config = load_configuration(project)
-        decision, _, _ = resolve_file_path_permission_detailed(
-            "Read", target_file, config
-        )
-        self.assertEqual(decision, "allow")
+        result = resolve_file_path_permission_detailed("Read", target_file, config)
+        self.assertEqual(result.decision, "allow")
 
 
 class TestHardDenyThroughMain(ConfigIsolationMixin, _IsolatedEnvTestCase):
@@ -768,7 +768,7 @@ class TestHardDenyThroughMain(ConfigIsolationMixin, _IsolatedEnvTestCase):
                 with patch("toolguard.hook.log_command"):
                     with patch(
                         "toolguard.hook.check_and_warn_divergence",
-                        return_value=[],
+                        return_value=DivergenceCheckResult(divergent_patterns=[]),
                     ):
                         try:
                             main()

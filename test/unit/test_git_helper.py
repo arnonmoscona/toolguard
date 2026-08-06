@@ -16,6 +16,11 @@ than folded into either call site's own test file: neither
 for a cross-module identity/delegation guarantee about a module neither of
 them owns.
 
+TOO-45 R5c split ``update_check.py``'s git/metadata logic into
+:mod:`toolguard.install_update` (``update_check.py`` itself is now a thin CLI
+wrapper with no git calls of its own), so the ``update_check`` side of this
+module's assertions now targets :mod:`toolguard.install_update`.
+
 No config-isolation machinery needed: every test here either patches
 ``toolguard._git.subprocess.run`` directly or compares object identity, with
 zero file I/O and no ``toolguard.config`` discovery involved.
@@ -25,7 +30,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toolguard import _git, constants, install_provenance, update_check
+from toolguard import _git, constants, install_provenance, install_update
 
 
 class TestSharedConstants(unittest.TestCase):
@@ -33,11 +38,12 @@ class TestSharedConstants(unittest.TestCase):
 
     def test_update_check_dist_name_is_the_shared_constant(self):
         """
-        Given update_check.py's distribution_name() fallback
+        Given install_update.py's distribution_name() fallback (the library
+            update_check.py's CLI now delegates to)
         When compared to toolguard.constants.DIST_NAME
         Then it is the identical object (not a re-declared duplicate)
         """
-        self.assertIs(update_check._DEFAULT_DIST_NAME, constants.DIST_NAME)
+        self.assertIs(install_update._DEFAULT_DIST_NAME, constants.DIST_NAME)
 
     def test_install_provenance_dist_name_is_the_shared_constant(self):
         """
@@ -66,14 +72,15 @@ class TestRunGitSharedHelper(unittest.TestCase):
 
     def test_update_check_local_repo_head_uses_run_git(self):
         """
-        Given local_repo_head() is called
+        Given local_repo_head() is called (now in toolguard.install_update,
+            the library update_check.py's CLI delegates to)
         When toolguard._git.run_git is patched to a spy
         Then it is invoked with a "-C <repo> rev-parse HEAD" argv, proving
-            update_check.py no longer runs its own subprocess.run for this
+            install_update.py no longer runs its own subprocess.run for this
         """
-        with patch("toolguard.update_check.run_git", wraps=_git.run_git) as spy:
+        with patch("toolguard.install_update.run_git", wraps=_git.run_git) as spy:
             spy.return_value = None  # short-circuit: no real git needed
-            update_check.local_repo_head(Path("/nonexistent-repo"))
+            install_update.local_repo_head(Path("/nonexistent-repo"))
         spy.assert_called_once()
         (args,), _kwargs = spy.call_args
         self.assertEqual(args, ["-C", "/nonexistent-repo", "rev-parse", "HEAD"])

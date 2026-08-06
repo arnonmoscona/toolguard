@@ -29,8 +29,9 @@ from toolguard.config import (
     ConfigLayer,
     Configuration,
     Provenance,
-    ResolvedDecision,
+    RuntimeVerdict,
 )
+from toolguard.config_types import provenance_for_pattern
 from toolguard.error_log import log_conflict, log_error, log_warning
 from toolguard.log_writer import (
     _DISCOVERY_LOG_FILENAME,
@@ -38,6 +39,7 @@ from toolguard.log_writer import (
     _parse_discovery_line,
     log_discovery,
 )
+from toolguard.permission_resolution import resolve_permission_detailed
 from toolguard.permissions import decide_command_at_level_detailed
 
 
@@ -138,7 +140,7 @@ class TestTakeoverNoticeNotPersisted(unittest.TestCase):
 
 
 class TestProvenanceInReasons(unittest.TestCase):
-    """resolve_permission_detailed appends matched-rule provenance to the reason."""
+    """The engine's resolve_permission_detailed appends matched-rule provenance to the reason."""
 
     def test_allow_reason_carries_provenance_and_stays_compatible(self):
         """
@@ -151,10 +153,10 @@ class TestProvenanceInReasons(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = config.resolve_permission_detailed(
-            "Bash", _detailed_decider("git status")
+        resolved = resolve_permission_detailed(
+            config, "Bash", _detailed_decider("git status")
         )
-        self.assertIsInstance(resolved, ResolvedDecision)
+        self.assertIsInstance(resolved, RuntimeVerdict)
         self.assertEqual(resolved.decision, "allow")
         # Backward-compatible substring still present.
         self.assertIn("matches allow pattern: git *", resolved.reason)
@@ -175,8 +177,8 @@ class TestProvenanceInReasons(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = config.resolve_permission_detailed(
-            "Bash", _detailed_decider("rm -rf /")
+        resolved = resolve_permission_detailed(
+            config, "Bash", _detailed_decider("rm -rf /")
         )
         self.assertEqual(resolved.decision, "ask")
         self.assertIsNone(resolved.provenance)
@@ -188,7 +190,7 @@ class TestProvenanceInReasons(unittest.TestCase):
 
 
 class TestConflictDetection(unittest.TestCase):
-    """Allow-over-deny override detection in resolve_permission_detailed."""
+    """Allow-over-deny override detection in the engine's resolve_permission_detailed."""
 
     def test_allow_over_deny_records_override_with_both_provenances(self):
         """
@@ -204,15 +206,21 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer([], ["git *"], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = config.resolve_permission_detailed(
-            "Bash", _detailed_decider("git push")
+        resolved = resolve_permission_detailed(
+            config, "Bash", _detailed_decider("git push")
         )
         self.assertEqual(resolved.decision, "allow")
-        self.assertIsNotNone(resolved.override)
-        self.assertEqual(resolved.override.winning_pattern, "git *")
-        self.assertEqual(resolved.override.overridden_pattern, "git *")
-        self.assertEqual(resolved.override.winning_provenance.specificity, 0)
-        self.assertEqual(resolved.override.overridden_provenance.specificity, 1)
+        # RuntimeVerdict.overrides (TOO-45 R1c) is a list of (identifier,
+        # ConflictOverride) pairs -- at this internal per-level layer the
+        # identifier is always None (no sub_command/target in scope here;
+        # see RuntimeVerdict's docstring's "overrides" reconciliation).
+        self.assertEqual(len(resolved.overrides), 1)
+        identifier, override = resolved.overrides[0]
+        self.assertIsNone(identifier)
+        self.assertEqual(override.winning_pattern, "git *")
+        self.assertEqual(override.overridden_pattern, "git *")
+        self.assertEqual(override.winning_provenance.specificity, 0)
+        self.assertEqual(override.overridden_provenance.specificity, 1)
 
     def test_no_override_when_no_less_specific_deny(self):
         """
@@ -223,11 +231,11 @@ class TestConflictDetection(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = config.resolve_permission_detailed(
-            "Bash", _detailed_decider("git push")
+        resolved = resolve_permission_detailed(
+            config, "Bash", _detailed_decider("git push")
         )
         self.assertEqual(resolved.decision, "allow")
-        self.assertIsNone(resolved.override)
+        self.assertEqual(resolved.overrides, [])
 
     def test_deny_decision_reports_no_override(self):
         """
@@ -241,11 +249,11 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer(["rm *"], [], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = config.resolve_permission_detailed(
-            "Bash", _detailed_decider("rm -rf /")
+        resolved = resolve_permission_detailed(
+            config, "Bash", _detailed_decider("rm -rf /")
         )
         self.assertEqual(resolved.decision, "deny")
-        self.assertIsNone(resolved.override)
+        self.assertEqual(resolved.overrides, [])
 
 
 class TestProvenanceHelpers(unittest.TestCase):
@@ -257,23 +265,22 @@ class TestProvenanceHelpers(unittest.TestCase):
         When _append_provenance is called
         Then the reason is returned unchanged (no bracketed suffix)
         """
-        from toolguard.config import _append_provenance
+        from toolguard.permission_resolution import _append_provenance
 
         self.assertEqual(_append_provenance("some reason", None), "some reason")
 
     def test_provenance_for_pattern_returns_none_on_miss(self):
         """
         Given layers that do not contain the queried pattern
-        When _provenance_for_pattern is called
+        When provenance_for_pattern is called
         Then None is returned
         """
         layer = _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml")
-        from toolguard.config import Configuration as _Cfg
 
-        # The ToolPatternLayer view is what _provenance_for_pattern consumes.
+        # The ToolPatternLayer view is what provenance_for_pattern consumes.
         cfg = Configuration(layers=(layer,))
         tool_layers = cfg.permission_layers("Bash")
-        self.assertIsNone(_Cfg._provenance_for_pattern(tool_layers, "no-such", "allow"))
+        self.assertIsNone(provenance_for_pattern(tool_layers, "no-such", "allow"))
 
     def test_override_skips_level_without_deny_then_finds_deeper_deny(self):
         """
@@ -290,12 +297,12 @@ class TestProvenanceHelpers(unittest.TestCase):
                 _bash_layer([], ["git *"], 2, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = config.resolve_permission_detailed(
-            "Bash", _detailed_decider("git push")
+        resolved = resolve_permission_detailed(
+            config, "Bash", _detailed_decider("git push")
         )
         self.assertEqual(resolved.decision, "allow")
-        self.assertIsNotNone(resolved.override)
-        self.assertEqual(resolved.override.overridden_provenance.specificity, 2)
+        self.assertEqual(len(resolved.overrides), 1)
+        self.assertEqual(resolved.overrides[0][1].overridden_provenance.specificity, 2)
 
 
 class TestDiscoveryDiagnostic(unittest.TestCase):
@@ -797,6 +804,53 @@ class TestM1SingleSourceWarning(ConfigIsolationMixin, unittest.TestCase):
         # Not routed to error/conflict streams.
         self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
         self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
+
+
+class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
+    """
+    TOO-45 R5d: config_divergence.check_and_warn_divergence no longer writes
+    to the structured error log itself -- a config-layer module must not
+    depend on error_log, a runtime-layer module. It returns the warning text
+    (DivergenceCheckResult) and toolguard.hook does the logging. This is the
+    end-to-end regression test for that hand-off actually happening: every
+    OTHER test touching this path mocks check_and_warn_divergence entirely,
+    so none of them would notice hook.py forgetting to log the result.
+    """
+
+    def test_divergence_check_writes_warning_log_via_hook(self):
+        """
+        Given a project whose settings.local.json allows a Bash pattern absent
+            from its toolguard config
+        When toolguard.hook._run_divergence_check runs for that project
+        Then a toolguard-warning-*.md file is written containing the divergent
+             pattern -- proving hook.py, not config_divergence.py, performs
+             the structured log write
+        """
+        from toolguard import hook as hook_mod
+        from toolguard.config import load_configuration
+
+        _home, proj_root = self.isolate_config_environment()
+        claude = proj_root / ".claude"
+        claude.mkdir()
+        (claude / "settings.local.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+        )
+        (claude / "toolguard_hook.json").write_text(
+            json.dumps({"permissions": {"allow": []}})
+        )
+
+        log_dir = proj_root / "logs"
+        env_config = {"log_dir": log_dir}
+        config = load_configuration(proj_root, ignore_env_override=True)
+        takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
+
+        # Reset the once-per-session guard so the check runs here.
+        hook_mod._divergence_check_done = False
+        hook_mod._run_divergence_check(config, env_config, takeover_dict)
+
+        warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+        self.assertEqual(len(warning_files), 1)
+        self.assertIn("Bash(git push:*)", warning_files[0].read_text())
 
 
 class TestValidationIssueRoutingByLevel(unittest.TestCase):

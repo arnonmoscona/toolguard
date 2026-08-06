@@ -34,7 +34,8 @@ toolguard/                      # Project root
 |   |-- hook.py                 # PreToolUse hook entry point (reads stdin, writes stdout)
 |   |-- session_start.py        # SessionStart conflict-alert hook entry point
 |   |-- update_check.py         # toolguard-update-check entry point
-|   |-- config.py               # Configuration loading, hierarchy, and resolution
+|   |-- config.py               # Configuration loading and hierarchy (query object; see
+|   |                           # permission_resolution.py for the resolution engine)
 |   |-- config_types.py         # Frozen dataclasses for the resolved configuration
 |   |-- rule_entry.py           # RuleEntry plus the single normalize/merge chokepoint
 |   |-- issues.py               # The Issue type reported by validation
@@ -47,6 +48,9 @@ toolguard/                      # Project root
 |   |-- env_config.py           # Environment configuration (.env loading)
 |   |-- constants.py            # Shared constants
 |   |-- permissions.py          # Permission checking logic
+|   |-- permission_resolution.py  # Decision-resolution engine (TOO-45 D1): the
+|   |                           # more-specific-wins cascade and the TOO-19 parse-
+|   |                           # failure ASK floor, decoupled from config.py
 |   |-- resolve.py              # Bash and file-path resolution with provenance
 |   |-- patterns.py             # Pattern type parsing and matching
 |   |-- normalization.py        # Path normalization functions

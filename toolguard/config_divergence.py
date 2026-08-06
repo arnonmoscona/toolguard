@@ -3,17 +3,25 @@ Config divergence detection for toolguard.
 
 Detects when Claude adds permissions to settings.local.json that are not
 present in toolguard config, helping users identify configuration drift.
+
+This module DETECTS divergence; it does not write to toolguard's structured
+error log itself (TOO-45 R5d). ``config_divergence`` is a ``config``-layer
+module, and :mod:`toolguard.error_log` is ``runtime``-layer -- a config-layer
+module depending on it would be an upward layer violation. The caller
+(:mod:`toolguard.hook`, which already legitimately imports ``error_log``) is
+responsible for logging the warning message :func:`check_and_warn_divergence`
+returns. See :class:`DivergenceCheckResult`.
 """
 
 import json
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from toolguard.config import is_tool_wrapper, load_configuration
 from toolguard.config_validation import extract_tool_name
-from toolguard.error_log import log_warning
 
 
 def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
@@ -235,14 +243,54 @@ def find_divergent_patterns(
     return result
 
 
+@dataclass(frozen=True)
+class DivergenceCheckResult:
+    """
+    Outcome of a single :func:`check_and_warn_divergence` call.
+
+    ``check_and_warn_divergence`` DETECTS divergence and decides whether a
+    new warning is due (once-per-day, via the marker file); it deliberately
+    does NOT write to toolguard's structured error log itself -- doing so
+    would make this ``config``-layer module depend on
+    :mod:`toolguard.error_log`, a ``runtime``-layer module (TOO-45 R5d). The
+    caller (:mod:`toolguard.hook`, which already legitimately depends on
+    ``error_log``) is responsible for calling
+    :func:`toolguard.error_log.log_warning` with ``warning_message`` and
+    ``corrective_steps`` when they are not ``None``.
+
+    Attributes:
+        divergent_patterns: Patterns found in native config but not in
+            toolguard config (flattened across allow/deny/ask), or an empty
+            list when there is nothing to report -- either no divergence was
+            found, or a warning was already issued today (marker file
+            present).
+        warning_message: The human-readable warning text to log, or ``None``
+            when there is nothing new to warn about.
+        corrective_steps: Suggested corrective-action text to log alongside
+            ``warning_message``, or ``None`` under the same conditions.
+    """
+
+    divergent_patterns: List[str]
+    warning_message: Optional[str] = None
+    corrective_steps: Optional[str] = None
+
+
 def check_and_warn_divergence(
     project_root: Path, logs_dir: Path, takeover_config: Dict
-) -> List[str]:
+) -> DivergenceCheckResult:
     """
-    Check for config divergence and issue warning if found.
+    Check for config divergence and prepare a warning if found.
 
     Scans settings.local.json for patterns not present in toolguard config.
-    Warning is deduplicated using date-stamped marker files (once per day).
+    A new warning is deduplicated using date-stamped marker files (once per
+    day) -- when a marker already exists for today, this returns an empty
+    result without doing any further work.
+
+    This function DETECTS divergence, prints an immediate stderr notice, and
+    marks that a warning has been issued (creates today's marker file). It
+    does NOT write to toolguard's structured error log -- see
+    :class:`DivergenceCheckResult`'s docstring for why; the caller is
+    responsible for that.
 
     Args:
         project_root: Path to project root
@@ -250,11 +298,13 @@ def check_and_warn_divergence(
         takeover_config: Takeover mode configuration dict with ignored_allow_patterns
 
     Returns:
-        List of divergent patterns found (for testing), or empty list if none
+        A :class:`DivergenceCheckResult`. ``divergent_patterns`` is empty,
+        and ``warning_message``/``corrective_steps`` are ``None``, when there
+        is nothing new to report.
     """
     # Check if we've already warned today
     if marker_exists_for_today(logs_dir):
-        return []
+        return DivergenceCheckResult(divergent_patterns=[])
 
     # Load native permissions from settings.local.json
     settings_path = project_root / ".claude" / "settings.local.json"
@@ -289,7 +339,7 @@ def check_and_warn_divergence(
         all_divergent.extend(divergent[perm_type])
 
     if not all_divergent:
-        return []
+        return DivergenceCheckResult(divergent_patterns=[])
 
     # Format warning message
     warning_lines = [
@@ -304,18 +354,20 @@ def check_and_warn_divergence(
     warning_message = "\n".join(warning_lines)
     corrective_steps = "Consider migrating to toolguard config. Run: toolguard-migrate"
 
-    # Write to stdout
+    # Immediate, direct stderr notice -- independent of the structured error
+    # log the caller writes via log_warning (see DivergenceCheckResult).
     print(warning_message, file=sys.stderr)
-
-    # Write to error log with deduplication
-    log_warning(warning_message, corrective_steps, logs_dir)
 
     # Create marker file
     try:
         create_marker_file(logs_dir)
         cleanup_old_markers(logs_dir, days=7)
     except OSError:
-        # If we can't create marker, continue (warning was still logged)
+        # If we can't create marker, continue (warning was still surfaced)
         pass
 
-    return all_divergent
+    return DivergenceCheckResult(
+        divergent_patterns=all_divergent,
+        warning_message=warning_message,
+        corrective_steps=corrective_steps,
+    )

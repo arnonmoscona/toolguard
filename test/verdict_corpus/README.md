@@ -40,18 +40,21 @@ differently, in BOTH corpora (the exact fields differ; the principle doesn't):
 
 - **HARD invariant. ANY change is a test failure, full stop, and is NEVER "fixed"
   by regenerating a goldens file.** For the in-process corpus this is `verdict`
-  (allow/ask/deny). For the end-to-end corpus this is `permissionDecision` AND
-  the PRESENCE/ABSENCE of the `additionalContext` key in the hook's JSON output
-  (its TEXT is tracked -- see below -- but whether the key exists at all is not).
+  (allow/ask/deny). For the end-to-end corpus this is `permissionDecision`, the
+  PRESENCE/ABSENCE of the `additionalContext` key in the hook's JSON output,
+  and the PRESENCE/ABSENCE of a conflict-log entry (`conflict_logged`) --
+  whether each of those exists at all is hard; their TEXT (`additionalContext`,
+  `conflict_message`) is tracked -- see below.
   **If `test_no_verdict_changed` or `test_no_hard_output_changed` fails, STOP and
   investigate a real behaviour change in the engine.** If you believe the change
   is a deliberate, reviewed bug fix (not a refactor artifact), see "Updating
   goldens after a deliberate fix" below -- that is the only legitimate path, and
   it goes through review, not through a test quietly turning green again.
 - **TRACKED, not frozen.** For the in-process corpus: `reason`,
-  `additional_context`, `provenance`. For the end-to-end corpus:
-  `permissionDecisionReason`'s text, and `additionalContext`'s text when present
-  on both sides. A refactor step may legitimately reword a reason string, move
+  `additional_context`, `provenance`, `matched_rule`. For the end-to-end corpus:
+  `permissionDecisionReason`'s text, `additionalContext`'s text when present
+  on both sides, and `conflict_message`'s text when both sides logged a
+  conflict. A refactor step may legitimately reword a reason string, move
   code between modules (changing a provenance path's incidental detail), or
   restructure how context is composed, without changing what the hook actually
   decides or outputs. A single-tier golden would either block that legitimate
@@ -74,13 +77,16 @@ test/verdict_corpus/
       home/.toolguard/rules/*.rules.toml     hierarchy_conflict
   cases.jsonl         one JSON object per line: {"fixture", "tool", "target"}
   goldens.jsonl       one JSON object per line: {"fixture", "tool", "target",
-                      "verdict", "reason", "additional_context", "provenance"}
+                      "verdict", "reason", "additional_context", "provenance",
+                      "matched_rule"}
   e2e_cases.jsonl     same shape as cases.jsonl -- a small, hand-picked subset
   e2e_goldens.jsonl   one JSON object per line: {"fixture", "tool", "target",
                       "response"}, where "response" is the full hook JSON output
                       (hookSpecificOutput.permissionDecision/
                       permissionDecisionReason/additionalContext), minus the two
-                      run_hook-only diagnostic keys (_stderr, _returncode)
+                      run_hook-only diagnostic keys (_stderr, _returncode), PLUS
+                      "conflict_logged"/"conflict_message" when (and only when)
+                      this case caused a new conflict-log entry
   README.md       this file
 ```
 
@@ -108,7 +114,7 @@ a golden record.
 | `fallback_ask` / `fallback_deny` / `fallback_allow_warning` / `fallback_allow_silent` | Each `no_match_fallback` value (the last one uses the `allow_with_no_warnings` alias spelling deliberately, to exercise alias resolution). All four share the same 15 hand-written cases, so replaying one case across all four fixtures shows how the SAME command's outcome changes per setting. |
 | `undecidable_ask` / `undecidable_deny` / `undecidable_allow` | Each `undecidable_fallback` value, exercised with commands the parser genuinely cannot decompose (process substitution). |
 | `hard_deny` | `[hard_deny]` entries for both Bash and file paths, including a `hard_deny.allow` carve-out (an exception to a hard-deny pattern, not a normal allow). |
-| `parse_failure` | A valid project-level config paired with a deliberately malformed user-level TOML file, to exercise `Configuration.apply_parse_failure_floor` clamping a would-be allow down to `ask` -- while a `hard_deny` case shows `deny` is never weakened by the floor. |
+| `parse_failure` | A valid project-level config paired with a deliberately malformed user-level TOML file, to exercise `permission_resolution.apply_parse_failure_floor` clamping a would-be allow down to `ask` -- while a `hard_deny` case shows `deny` is never weakened by the floor. |
 | `hierarchy_conflict` | Project-allow vs user-deny AND the reverse, for two different patterns, PLUS a rules-dir file that agrees with the project level for both -- a genuine three-way conflict for more-specific-wins resolution. |
 | `pattern_forms` | Native syntax, the explicit `[native]` spelling, `[regex]`, and `[glob]` prefixes, for both Bash and file-path tools. |
 | `enrichment` | `additionalContext` on allow, ask, deny, and hard_deny entries (the `{ match = "...", additionalContext = "..." }` structured form), including the multi-part accumulation case for a compound command whose allowed sub-commands each carry their own context. |

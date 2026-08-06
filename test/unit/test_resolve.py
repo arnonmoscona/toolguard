@@ -27,12 +27,10 @@ from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.hook import (
     _log_allowed_command,
     _log_non_allow_decision,
-    _parse_compound_match_details,
 )
 from toolguard.tools.decision import decide
 from toolguard.resolve import (
-    BashResolution,
-    FileResolution,
+    RuntimeVerdict,
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
@@ -125,7 +123,7 @@ class TestNoDrift(unittest.TestCase):
         bash_result = resolve_bash_permission_detailed(
             command, config, extended_syntax, hd_deny, hd_allow
         )
-        self.assertIsInstance(bash_result, BashResolution)
+        self.assertIsInstance(bash_result, RuntimeVerdict)
         resolve_verdict = bash_result.decision
 
         self.assertEqual(
@@ -153,7 +151,7 @@ class TestNoDrift(unittest.TestCase):
         bash_result = resolve_bash_permission_detailed(
             command, config, extended_syntax, hd_deny, hd_allow
         )
-        self.assertIsInstance(bash_result, BashResolution)
+        self.assertIsInstance(bash_result, RuntimeVerdict)
         resolve_verdict = bash_result.decision
 
         self.assertEqual(
@@ -180,7 +178,7 @@ class TestNoDrift(unittest.TestCase):
         bash_result = resolve_bash_permission_detailed(
             command, config, extended_syntax, hd_deny, hd_allow
         )
-        self.assertIsInstance(bash_result, BashResolution)
+        self.assertIsInstance(bash_result, RuntimeVerdict)
         resolve_verdict = bash_result.decision
 
         self.assertEqual(
@@ -207,7 +205,7 @@ class TestNoDrift(unittest.TestCase):
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
         )
-        self.assertIsInstance(file_result, FileResolution)
+        self.assertIsInstance(file_result, RuntimeVerdict)
         resolve_verdict = file_result.decision
 
         self.assertEqual(
@@ -235,7 +233,7 @@ class TestNoDrift(unittest.TestCase):
         file_result = resolve_file_path_permission_detailed(
             "Read", file_path, config, extended_syntax
         )
-        self.assertIsInstance(file_result, FileResolution)
+        self.assertIsInstance(file_result, RuntimeVerdict)
         resolve_verdict = file_result.decision
 
         self.assertEqual(
@@ -992,8 +990,9 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         """
         HARD INVARIANT (TOO-19) end to end: an ask_floor leaf (foreign inline
         code) whose OUTER command resolution goes through
-        Configuration.resolve_permission_detailed -- and therefore through
-        the parse-failure ASK floor -- cannot be downgraded below 'ask' by
+        permission_resolution.resolve_permission_detailed -- and therefore
+        through the parse-failure ASK floor -- cannot be downgraded below
+        'ask' by
         undecidable_fallback, even when set to the most permissive
         'allow_with_warning'.
 
@@ -1144,39 +1143,68 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
                 self.assertFalse(result.fallback_warning)
                 self.assertNotIn("-> python -c", result.reason)
 
-    def test_multi_leaf_reason_round_trips_through_hooks_own_log_breakdown(self):
+    def test_multi_leaf_sub_matches_now_holds_the_real_leaf_text_and_placeholder(self):
         """
-        Given the same multi-leaf compound reason
-        When hook.py's own _parse_compound_match_details() (used to build the
-            per-sub-command resolution-log breakdown) parses it
-        Then the fallback-allow leaf's entry survives as ONE (cmd, rule) pair
-            with the honest placeholder as the rule -- discovered live against
-            the real hook: a comma inside the placeholder text would have been
-            split into two bogus entries by this function's ", " delimiter,
-            which is exactly what a first version of this fix did
-
-        TOO-45 R3 tried substituting result.sub_matches for this reason-parse
-        and found it is NOT a safe substitute: for this exact leaf,
-        result.sub_matches records 'python -c' (the truncated outer-command
-        stub, not the leaf's real 'python -c "print(1)"' text) with a
-        matched_rule of 'python *' -- config.py(Bash(python *)) genuinely
-        matches the STUB, even though the leaf's real payload was never
-        verified and compound.py deliberately floors it to the escape hatch
-        regardless. See hook.py::_parse_compound_match_details' docstring for
-        the full reasoning; this test is the reason it was kept.
+        Given the same multi-leaf compound with an ask-floor escape-hatch leaf
+        When resolving 'ls && python -c "print(1)"'
+        Then result.sub_matches records the leaf's REAL, full text (NOT the
+            truncated outer-command stub 'python -c') with matched_rule=None
+            and fallback_kind='warned' -- TOO-45 R1e closed the exact gap the
+            retired hook.py::_parse_compound_match_details (and this test,
+            previously) worked around: before the fix, this same UnitVerdict
+            held the truncated stub 'python -c' with a matched_rule of
+            'python *' (config.py(Bash(python *)) genuinely matches the STUB,
+            even though the leaf's real payload was never verified and
+            compound.py deliberately floors it to the escape hatch
+            regardless) -- the reason a reason-string round trip was needed
+            at all. sub_matches is now the complete, correct record.
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
             'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
         )
-        details = _parse_compound_match_details(result.reason)
-        self.assertIsNotNone(details)
-        commands = [cmd for cmd, _rule in details]
-        self.assertIn('python -c "print(1)"', commands)
-        for cmd, rule in details:
-            if cmd == 'python -c "print(1)"':
-                self.assertEqual(rule, "[fallback allow -- no rule matched]")
+        self.assertEqual(result.decision, "allow")
+        by_command = {sm.sub_command: sm for sm in result.sub_matches}
+        self.assertIn(
+            'python -c "print(1)"',
+            by_command,
+            "sub_matches must key on the leaf's real text, not the truncated stub",
+        )
+        escape_hatch_unit = by_command['python -c "print(1)"']
+        self.assertIsNone(escape_hatch_unit.matched_rule)
+        self.assertEqual(escape_hatch_unit.fallback_kind, "warned")
+        self.assertEqual(escape_hatch_unit.decision, "allow")
+
+    def test_multi_leaf_matched_rule_attributes_the_sole_genuine_match(self):
+        """
+        Given the same two-leaf compound 'ls && python -c "print(1)"' -- one
+            leaf ('ls') a genuine rule match, the other an escape-hatch allow
+        When resolving it
+        Then result.matched_rule is 'ls' (the sole genuine match) and
+            result.provenance is non-None and identifies the project layer --
+            NOT None for either field
+
+        TOO-45 R1e finishing pass regression guard: ``_deciding_sub_match``'s
+        old "exactly one entry in sub_matches" test for "there is a single
+        decider" broke the moment ``sub_matches`` correctly grew a SECOND
+        entry for the escape-hatch leaf (closing a separate audit-loss gap
+        this same step fixed) -- a genuinely two-entry ``sub_matches`` list
+        does not mean there is no single decider any more, because ONE of
+        those two entries is an ambient escape hatch that never competed for
+        attribution before the audit-loss fix made it visible at all. The
+        right test is "exactly one entry with a real matched_rule", not
+        "exactly one entry, full stop".
+        """
+        config = self._repro_config("allow_with_warning")
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "ls")
+        self.assertIsNotNone(result.provenance)
+        self.assertEqual(result.provenance.level, "project")
 
     def test_three_leaf_compound_warns_when_any_leaf_is_an_escape_hatch(self):
         """
@@ -1241,21 +1269,15 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
             command, config, True, hd_deny, hd_allow
         )
         self.assertEqual(result.decision, "allow")
+        # TOO-45 R1e: `_log_allowed_command` is now driven entirely by
+        # `result.sub_matches` (both single-leaf and compound), so the REAL
+        # `result` -- not a hand-trimmed copy carrying only reason/
+        # matched_rule -- must be passed through. TOO-45 R1d: it takes the
+        # whole verdict object instead of loose matched_rule/reason args.
         with patch("toolguard.hook.log_command") as mock_log:
-            # TOO-45 R3: matched_rule is now structured data already on
-            # `result` -- the single-leaf branch of _log_allowed_command no
-            # longer re-parses it out of `result.reason`. The compound
-            # branch is still driven by *reason* itself -- see
-            # _parse_compound_match_details' docstring for why.
-            _log_allowed_command(
-                command,
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                matched_rule=result.matched_rule,
-            )
+            _log_allowed_command(result, command, "main", {"logging_enabled": True})
         return [
-            (call.args[0], call.kwargs.get("matched_rule"))
+            (call.args[0].command_str, call.args[0].matched_rule)
             for call in mock_log.call_args_list
         ]
 
@@ -1277,16 +1299,22 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
         )
         self.assertEqual(matched_rule, FALLBACK_ALLOW_PLACEHOLDER)
 
-    def test_single_leaf_escape_hatch_raw_matched_rule_is_the_misleading_stub_match(
+    def test_single_leaf_escape_hatch_raw_matched_rule_is_already_correct(
         self,
     ):
         """
         Given the same undecidable_fallback='allow_with_warning' escape hatch
         When 'python -c "print(1)"' is resolved (BEFORE logging)
-        Then BashResolution.matched_rule is the REAL 'python *' stub match --
-            proving the placeholder substitution in the previous test happens
-            at LOG time (the fabrication guard doing real suppression work),
-            not because the raw field was already None
+        Then RuntimeVerdict.matched_rule is ALREADY None -- TOO-45 R1e fixed
+            this at the source: before the fix this was the REAL, misleading
+            'python *' stub match, and the placeholder substitution in the
+            previous test happened only at LOG time via a reason-text
+            re-classification. Now compound.py corrects the leaf's own
+            UnitVerdict (sub_command/decision/matched_rule) to its TRUE final
+            outcome at the point the undecidable_fallback floor is applied,
+            so `_deciding_sub_match` (see resolve.py) never sees the
+            misleading stub match in the first place -- this pins the fix at
+            its source, not merely its downstream symptom.
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1294,7 +1322,7 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
             'python -c "print(1)"', config, True, hd_deny, hd_allow
         )
         self.assertEqual(result.decision, "allow")
-        self.assertEqual(result.matched_rule, "python *")
+        self.assertIsNone(result.matched_rule)
 
     def test_compound_escape_hatch_leaf_logs_the_same_placeholder(self):
         """
@@ -1370,14 +1398,10 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
         self.assertEqual(result.decision, "allow")
         with patch("toolguard.hook.log_command") as mock_log:
             _log_allowed_command(
-                "cat README.md",
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                matched_rule=result.matched_rule,
+                result, "cat README.md", "main", {"logging_enabled": True}
             )
         self.assertEqual(
-            mock_log.call_args_list[0].kwargs.get("matched_rule"),
+            mock_log.call_args_list[0].args[0].matched_rule,
             FALLBACK_ALLOW_PLACEHOLDER,
         )
 
@@ -1423,19 +1447,18 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         result = resolve_bash_permission_detailed(
             command, config, True, hd_deny, hd_allow
         )
+        # TOO-45 R3: matched_rule is now structured data already on `result`
+        # -- _log_non_allow_decision no longer re-parses it out of
+        # `result.reason`. TOO-45 R1d: it now takes the whole verdict object.
+        verdict = RuntimeVerdict(
+            decision=result.decision,
+            reason=result.reason,
+            matched_rule=result.matched_rule,
+            additional_context=result.additional_context,
+        )
         with patch("toolguard.hook.log_command") as mock_log:
-            # TOO-45 R3: matched_rule is now structured data already on
-            # `result` -- _log_non_allow_decision no longer re-parses it out
-            # of `result.reason`.
             _log_non_allow_decision(
-                command,
-                result.decision,
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                None,
-                result.additional_context,
-                result.matched_rule,
+                verdict, command, "main", {"logging_enabled": True}, None
             )
         self.assertEqual(len(mock_log.call_args_list), 1)
         return result, mock_log.call_args_list[0]
@@ -1455,10 +1478,10 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         # Unlike the allow-side escape hatch (whose raw matched_rule is the
         # real, misleading 'python *' stub match), the deny floor's own
         # sub_match here never agrees with the final 'deny' decision, so
-        # BashResolution.matched_rule is None on the raw field itself -- not
+        # RuntimeVerdict.matched_rule is None on the raw field itself -- not
         # just at log time.
         self.assertIsNone(result.matched_rule)
-        violated_rules = call.args[2]
+        violated_rules = call.args[0].violated_rules
         self.assertNotEqual(
             violated_rules, ["python -c"], "the fabricated rule attribution regressed"
         )
@@ -1475,22 +1498,37 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             not two, matching the single-leaf case
 
         This is also the exact scenario ``resolve._deciding_sub_match``'s
-        docstring cites for a genuine sub_matches/final-decision divergence:
-        BOTH sub-commands' recorded SubMatch.decision is 'allow' ('ls'
-        genuinely, 'python -c' via its misleading stub match), while the
-        floor makes the compound 'deny' -- so nothing agrees and
-        BashResolution.matched_rule must be None on the raw field itself.
+        docstring used to cite for a genuine sub_matches/final-decision
+        divergence: before TOO-45 R1e, BOTH sub-commands' recorded
+        UnitVerdict.decision were 'allow' ('ls' genuinely, 'python -c' via
+        its misleading pre-floor stub match), while the floor made the
+        compound 'deny' -- nothing agreed, and RuntimeVerdict.matched_rule
+        was None only because ``_deciding_sub_match`` found no matching
+        decision to attribute to. R1e closes that divergence: the
+        escape-hatch leaf's recorded UnitVerdict now correctly says 'deny'
+        (its TRUE final outcome), so ``_deciding_sub_match`` attributes the
+        compound's 'deny' to THAT leaf -- matched_rule is still None, but
+        now because it is a genuine escape-hatch attribution to the correct
+        leaf, not an attribution failure.
         """
         config = self._repro_config("deny")
         result, call = self._log_and_capture(config, 'ls && python -c "print(1)"')
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.matched_rule)
-        self.assertTrue(
-            all(sm.decision == "allow" for sm in result.sub_matches),
-            "both recorded sub_matches should say 'allow' -- the divergence "
-            "this test pins",
+        by_command = {sm.sub_command: sm for sm in result.sub_matches}
+        self.assertEqual(by_command["ls"].decision, "allow")
+        self.assertEqual(
+            by_command['python -c "print(1)"'].decision,
+            "deny",
+            "the escape-hatch leaf's UnitVerdict must reflect its TRUE "
+            "final decision, not the pre-floor stub match -- the exact gap "
+            "TOO-45 R1e closed",
         )
-        self.assertEqual(call.args[2], [FALLBACK_DENY_PLACEHOLDER])
+        self.assertEqual(
+            by_command['python -c "print(1)"'].fallback_kind,
+            "denied",
+        )
+        self.assertEqual(call.args[0].violated_rules, [FALLBACK_DENY_PLACEHOLDER])
 
     def test_undecidable_segment_deny_logs_the_placeholder_not_the_command(self):
         """
@@ -1520,7 +1558,7 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         result, call = self._log_and_capture(config, "diff <(sort a) <(sort b)")
         self.assertEqual(result.decision, "deny")
         self.assertIn("undecidable_fallback=deny", result.reason)
-        self.assertEqual(call.args[2], [FALLBACK_DENY_PLACEHOLDER])
+        self.assertEqual(call.args[0].violated_rules, [FALLBACK_DENY_PLACEHOLDER])
 
     def test_a_genuine_deny_still_records_its_real_pattern(self):
         """
@@ -1548,7 +1586,7 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         result, call = self._log_and_capture(config, "rm -rf /tmp/x")
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "rm -rf *")
-        violated_rules = call.args[2]
+        violated_rules = call.args[0].violated_rules
         self.assertEqual(violated_rules, ["rm -rf *"])
 
     def test_a_genuine_hard_deny_still_records_its_real_pattern(self):
@@ -1572,9 +1610,9 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         result, call = self._log_and_capture(config, "curl http://x")
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "curl:*")
-        self.assertEqual(call.args[2], ["curl:*"])
+        self.assertEqual(call.args[0].violated_rules, ["curl:*"])
         # Hard-deny is pooled across levels -- there is no single provenance
-        # to attribute (see BashResolution.provenance's docstring).
+        # to attribute (see RuntimeVerdict.provenance's docstring).
         self.assertIsNone(result.provenance)
 
     def test_no_match_fallback_deny_has_no_colon_and_is_unaffected(self):
@@ -1611,19 +1649,20 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         result = resolve_file_path_permission_detailed("Read", "README.md", config)
         self.assertEqual(result.decision, "deny")
         self.assertNotIn(": ", result.reason)
+        verdict = RuntimeVerdict(
+            decision=result.decision,
+            reason=result.reason,
+            matched_rule=result.matched_rule,
+            additional_context=result.additional_context,
+        )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                "Read(README.md)",
-                result.decision,
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                None,
-                result.additional_context,
-                result.matched_rule,
+                verdict, "Read(README.md)", "main", {"logging_enabled": True}, None
             )
         self.assertEqual(len(mock_log.call_args_list), 1)
-        self.assertEqual(mock_log.call_args_list[0].args[2], [result.reason])
+        self.assertEqual(
+            mock_log.call_args_list[0].args[0].violated_rules, [result.reason]
+        )
 
     def test_ask_side_is_unaffected_full_reason_is_always_the_note(self):
         """
@@ -1641,30 +1680,31 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             'python -c "print(1)"', config, True, hd_deny, hd_allow
         )
         self.assertEqual(result.decision, "ask")
+        verdict = RuntimeVerdict(
+            decision=result.decision,
+            reason=result.reason,
+            matched_rule=result.matched_rule,
+            additional_context=result.additional_context,
+        )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                'python -c "print(1)"',
-                result.decision,
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                None,
-                result.additional_context,
-                result.matched_rule,
+                verdict, 'python -c "print(1)"', "main", {"logging_enabled": True}, None
             )
         self.assertEqual(len(mock_log.call_args_list), 1)
         call = mock_log.call_args_list[0]
-        self.assertEqual(call.kwargs.get("note"), result.reason)
-        # 'ask' never populates violated_rules (positional arg 3 of
-        # log_command) -- there is no violation to name a rule for.
-        self.assertEqual(len(call.args), 2, "ask must not pass violated_rules")
+        self.assertEqual(call.args[0].note, result.reason)
+        # 'ask' never populates violated_rules on the logged record --
+        # there is no violation to name a rule for.
+        self.assertEqual(
+            call.args[0].violated_rules, [], "ask must not pass violated_rules"
+        )
 
 
 class TestAuditLogProvenanceThreading(unittest.TestCase):
     """
     TOO-45 R3 review follow-up: provenance was silently LOST from the audit
     log once matched_rule/violated_rules stopped carrying it as a bracketed
-    text suffix (see BashResolution.provenance's docstring). These tests
+    text suffix (see RuntimeVerdict.provenance's docstring). These tests
     drive the REAL resolve.py -> hook.py -> log_command pipeline end to end
     and pin that the log's Provenance field gets the right value for allow,
     deny, and hard-deny -- rendering itself is covered separately by
@@ -1686,17 +1726,16 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
         result = resolve_bash_permission_detailed("ls", config, True, hd_deny, hd_allow)
         self.assertEqual(result.decision, "allow")
         self.assertIsNotNone(result.provenance)
+        verdict = RuntimeVerdict(
+            decision="allow",
+            reason=result.reason,
+            matched_rule=result.matched_rule,
+            provenance=result.provenance,
+        )
         with patch("toolguard.hook.log_command") as mock_log:
-            _log_allowed_command(
-                "ls",
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                matched_rule=result.matched_rule,
-                provenance=result.provenance.describe_brief(),
-            )
+            _log_allowed_command(verdict, "ls", "main", {"logging_enabled": True})
         self.assertEqual(
-            mock_log.call_args_list[0].kwargs.get("provenance"),
+            mock_log.call_args_list[0].args[0].provenance,
             result.provenance.describe_brief(),
         )
 
@@ -1716,20 +1755,19 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNotNone(result.provenance)
+        verdict = RuntimeVerdict(
+            decision=result.decision,
+            reason=result.reason,
+            matched_rule=result.matched_rule,
+            additional_context=result.additional_context,
+            provenance=result.provenance,
+        )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                "rm -rf /tmp/x",
-                result.decision,
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                None,
-                result.additional_context,
-                result.matched_rule,
-                result.provenance.describe_brief(),
+                verdict, "rm -rf /tmp/x", "main", {"logging_enabled": True}, None
             )
         self.assertEqual(
-            mock_log.call_args_list[0].kwargs.get("provenance"),
+            mock_log.call_args_list[0].args[0].provenance,
             result.provenance.describe_brief(),
         )
 
@@ -1747,28 +1785,27 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.provenance)
+        verdict = RuntimeVerdict(
+            decision=result.decision,
+            reason=result.reason,
+            matched_rule=result.matched_rule,
+            additional_context=result.additional_context,
+            provenance=result.provenance,
+        )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                "curl http://x",
-                result.decision,
-                result.reason,
-                "main",
-                {"logging_enabled": True},
-                None,
-                result.additional_context,
-                result.matched_rule,
-                None,
+                verdict, "curl http://x", "main", {"logging_enabled": True}, None
             )
-        self.assertIsNone(mock_log.call_args_list[0].kwargs.get("provenance"))
+        self.assertIsNone(mock_log.call_args_list[0].args[0].provenance)
 
 
 class TestFallbackWarningField(unittest.TestCase):
     """
-    TOO-19 allow/allow_with_no_warnings work: FileResolution.fallback_warning
-    and BashResolution.fallback_warning correctly distinguish an 'allow'
-    produced by ``allow_with_warning`` (True -- route to the WARNING log
-    stream) from one produced by ``allow``/``allow_with_no_warnings`` (False
-    -- no warning anywhere), for both settings and both the file-path and
+    TOO-19 allow/allow_with_no_warnings work: RuntimeVerdict.fallback_warning
+    correctly distinguishes an 'allow' produced by ``allow_with_warning``
+    (True -- route to the WARNING log stream) from one produced by
+    ``allow``/``allow_with_no_warnings`` (False -- no warning anywhere), for
+    both settings and both the file-path and
     Bash resolution paths. Also guards the marker-safety property
     hook.py/resolve.py rely on: the newer no-warning reason text must never
     accidentally contain the ``allow_with_warning`` marker substring.
@@ -2029,8 +2066,8 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
     """
     TOO-19 fail-open fix: a grammar-level UndecidableSegment (process
     substitution, an unparseable control structure) has NO leaves and so
-    never calls Configuration.resolve_permission_detailed -- unlike an
-    ask_floor LEAF (foreign inline code / heredoc), which does. Before this
+    never calls permission_resolution.resolve_permission_detailed -- unlike
+    an ask_floor LEAF (foreign inline code / heredoc), which does. Before this
     fix, that meant the parse-failure ASK floor never ran for it, and a
     broken config combined with undecidable_fallback='allow_with_warning'
     resolved such commands to 'allow'. See
@@ -2178,9 +2215,10 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
         self.assertIn("toolguard config is BROKEN", result.reason)
 
 
-class TestFileResolutionMatchedRuleExact(unittest.TestCase):
+class TestFilePathMatchedRuleExact(unittest.TestCase):
     """
-    TOO-45 R3 review follow-up: pin FileResolution.matched_rule to the exact
+    TOO-45 R3 review follow-up: pin RuntimeVerdict.matched_rule (for a
+    file-path resolution) to the exact
     pattern text, not merely non-None/substring, so a mutation that swaps in
     a wrong-but-plausible value (e.g. the reason string) fails these tests.
     """
@@ -2189,7 +2227,7 @@ class TestFileResolutionMatchedRuleExact(unittest.TestCase):
         """
         Given a config allowing 'Read(/tmp/x/**)'
         When a path under that tree is resolved
-        Then FileResolution.matched_rule is EXACTLY '/tmp/x/**'
+        Then RuntimeVerdict.matched_rule is EXACTLY '/tmp/x/**'
         """
         config = _make_config(
             [
@@ -2208,7 +2246,7 @@ class TestFileResolutionMatchedRuleExact(unittest.TestCase):
         """
         Given a config denying 'Read(/secrets/**)'
         When a path under that tree is resolved
-        Then FileResolution.matched_rule is EXACTLY '/secrets/**'
+        Then RuntimeVerdict.matched_rule is EXACTLY '/secrets/**'
         """
         config = _make_config(
             [
@@ -2236,7 +2274,7 @@ class TestFileResolutionMatchedRuleExact(unittest.TestCase):
             available to attribute -- see resolve_file_path_permission_detailed's
             hard-deny branch)
         When a path under that tree is resolved
-        Then FileResolution.matched_rule and .provenance are both None --
+        Then RuntimeVerdict.matched_rule and .provenance are both None --
             deliberately, not by omission
         """
         config = _make_config(
@@ -2256,7 +2294,7 @@ class TestFileResolutionMatchedRuleExact(unittest.TestCase):
 
 class TestFilePathAdditionalContext(unittest.TestCase):
     """
-    TOO-19 Phase 1, increment 2: FileResolution.additional_context is threaded
+    TOO-19 Phase 1, increment 2: RuntimeVerdict.additional_context is threaded
     through from the winning RuleEntry's additional_context property (or, for
     a hard-deny match, from the matched hard_deny entry) for Read/Write/Edit.
 
@@ -2428,39 +2466,14 @@ class TestFilePathAdditionalContext(unittest.TestCase):
         self.assertIn("hard_deny", result.reason)
         self.assertEqual(result.additional_context, "never read secrets")
 
-    def test_file_resolution_three_tuple_unpacking_still_works(self):
-        """
-        Given a FileResolution returned for a Read allow match
-        When it is unpacked as a 3-tuple (decision, reason, override), the
-            legacy calling convention
-        Then unpacking succeeds and yields exactly (decision, reason,
-            override) -- additional_context is a NEW field and must NOT be
-            yielded, or every legacy 3-tuple call site would break
-        """
-        config = _make_config(
-            [
-                (
-                    "project",
-                    "toolguard_hook",
-                    {"permissions": {"allow": ["Read(/tmp/**)"]}},
-                )
-            ]
-        )
-        result = resolve_file_path_permission_detailed(
-            "Read", "/tmp/some/file.txt", config, True
-        )
-        decision, reason, override = result
-        self.assertEqual(decision, result.decision)
-        self.assertEqual(reason, result.reason)
-        self.assertEqual(override, result.override)
-
 
 class TestBashAdditionalContext(unittest.TestCase):
     """
-    TOO-19 Phase 1, increments 3 and 5: BashResolution.additional_context is
+    TOO-19 Phase 1, increments 3 and 5: RuntimeVerdict.additional_context is
     threaded through resolve_bash_permission_detailed -> resolve_compound_permission,
-    sourcing the per-sub-command context from ResolvedDecision.additional_context
-    (already populated by increment 2's Configuration._resolve_permission_detailed_unclamped).
+    sourcing the per-sub-command context from the internal per-level
+    RuntimeVerdict.additional_context (already populated by increment 2's
+    permission_resolution._resolve_unclamped).
     """
 
     def _resolve(self, config, command, extended_syntax=True):
@@ -2591,30 +2604,6 @@ class TestBashAdditionalContext(unittest.TestCase):
         result = self._resolve(config, "git status")
         self.assertEqual(result.decision, "allow")
         self.assertIsNone(result.additional_context)
-
-    def test_bash_resolution_three_tuple_unpacking_still_works(self):
-        """
-        Given a BashResolution returned for a Bash allow match
-        When it is unpacked as a 3-tuple (decision, reason, overrides), the
-            legacy calling convention
-        Then unpacking succeeds and yields exactly (decision, reason,
-            overrides) -- additional_context is a NEW field and must NOT be
-            yielded, or every legacy 3-tuple call site would break
-        """
-        config = _make_config(
-            [
-                (
-                    "project",
-                    "toolguard_hook",
-                    {"permissions": {"allow": ["Bash(git *)"]}},
-                )
-            ]
-        )
-        result = self._resolve(config, "git status")
-        decision, reason, overrides = result
-        self.assertEqual(decision, result.decision)
-        self.assertEqual(reason, result.reason)
-        self.assertEqual(overrides, result.overrides)
 
     def test_bash_hard_deny_carries_additional_context(self):
         """

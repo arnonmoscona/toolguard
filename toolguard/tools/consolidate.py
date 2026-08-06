@@ -359,7 +359,7 @@ def _generate_extension_probes(
     return probes
 
 
-def _check_family1_safe(
+def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45 scope
     config: Configuration,
     tool: str,
     provenance: Provenance,

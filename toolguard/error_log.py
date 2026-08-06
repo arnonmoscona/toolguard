@@ -140,8 +140,10 @@ def log_crash(
     monotonically increasing ``-2``, ``-3``, ... suffix is appended so an
     earlier crash report is never silently overwritten (same disambiguation
     scheme as ``create_backup`` in
-    :mod:`toolguard.scripts.migrate_permissions`, reimplemented locally here to
-    avoid a runtime-path dependency on that CLI-script module).
+    :mod:`toolguard.permission_migration`, reimplemented locally here to
+    avoid pulling in that module's config-resolution machinery from a path
+    that must keep working even when config resolution itself is what
+    failed).
 
     Never raises: if writing the report fails for any reason (permissions, disk
     full, etc.), the failure is caught, a short warning is printed to stderr,

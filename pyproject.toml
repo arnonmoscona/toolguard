@@ -27,6 +27,68 @@ dev = [
 [tool.uv]
 exclude-newer = "1 week"
 
+[tool.ruff.lint]
+# Preview is required for PLC0415 only, and is scoped to the LINTER deliberately.
+# Setting `preview` under [tool.ruff] instead turns on the preview FORMATTER too,
+# which reformatted 55 files that `ruff format` had previously called clean.
+preview = true
+
+# Stock defaults (E4/E7/E9 + F) PLUS four rules, each enforcing a convention this
+# project already states in prose but had no way to check. Deliberately small:
+# every rule here must name the convention it enforces, and a rule that stops
+# earning its keep should be removed rather than accumulated (TOO-45).
+#
+# Considered and REJECTED, so nobody re-litigates them from scratch:
+#   PLC2701 -- structurally cannot see a cross-module private import inside a
+#              single package, so it reports zero on the exact R6 violation
+#              `architecture_fitness.py` already finds. A rule that is green on a
+#              known violation is worse than no rule.
+#   D (pydocstyle) -- 11,010 findings, ~98% pure docstring FORMATTING. No D rule
+#              measures verbosity, which is the actual concern here. The right
+#              instrument for docstring bloat is a metric, not a linter.
+#   C901/PLR0912/PLR0915 -- measure function BODY size; most hits are the
+#              generated parser. pyscn already covers this ground.
+# Full analysis: basic-memory note "TOO-45 ruff configuration proposal".
+# `select` is pinned rather than extended. `preview = true` (needed for PLC0415)
+# widens ruff's DEFAULT selection considerably -- 2,164 findings when this was
+# written as `extend-select`, almost all of them pyupgrade/simplify churn nobody
+# asked for. Listing the stock defaults explicitly keeps preview from silently
+# changing what this project lints for.
+select = [
+    "E4",       # \
+    "E7",       #  |- ruff's stock defaults, pinned so preview cannot widen them
+    "E9",       #  |
+    "F",        # /
+    "PLC0415",  # no function-level imports -- rules/python.md bans them outright
+    "PLR0913",  # too many arguments -- TOO-45 R1 targets exactly this
+    "RUF100",   # unused noqa -- makes every suppression below self-cleaning
+    "TID251",   # banned imports -- see flake8-tidy-imports.banned-api
+]
+
+# `# noqa: BLE001` markers in this tree are aimed at flake8-blind-except (flake8 is
+# a dev dependency here). BLE001 is a ruff rule name too, so without this RUF100
+# reports those markers as "non-enabled" and would have us delete another tool's
+# suppressions.
+external = ["BLE001"]
+
+[tool.ruff.lint.pylint]
+max-args = 8
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# rules/python.md prohibits these outright without explicit approval: these are
+# low-concurrency tools where concurrency buys nothing and costs readability.
+# Zero occurrences today -- this is a ratchet, not a cleanup.
+"threading".msg = "Prohibited by rules/python.md -- sequential code only. Ask before introducing concurrency."
+"asyncio".msg = "Prohibited by rules/python.md -- no async/await in this project. Ask first."
+"multiprocessing".msg = "Prohibited by rules/python.md -- sequential code only. Ask before introducing concurrency."
+"concurrent.futures".msg = "Prohibited by rules/python.md -- sequential code only. Ask before introducing concurrency."
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import inside functions deliberately -- for config isolation, and to
+# import a module under a patched environment. That is correct there and would
+# be noise to suppress line by line.
+"test/**/*.py" = ["PLC0415"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

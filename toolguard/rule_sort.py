@@ -182,7 +182,7 @@ def _escape_toml_string(value: str) -> str:
 
     The single source of this escaping -- previously duplicated inline at
     each pattern-emission call site in this module and in
-    ``migrate_permissions.generate_permissions_section``.
+    ``permission_migration.generate_permissions_section``.
 
     Args:
         value: The raw string to escape.
@@ -278,7 +278,7 @@ def render_toml_entry(entry: RuleEntryOrStr) -> str:
     This is the ONE point where a :class:`RuleEntry` is actually emitted as
     TOML (``entry.to_source()``), shared by both
     :func:`reassemble_permissions_section`'s synthesize-fallback and
-    ``migrate_permissions.generate_permissions_section`` (the from-scratch
+    ``permission_migration.generate_permissions_section`` (the from-scratch
     writer), so there is exactly one TOML serialization of a structured entry
     in the codebase.
 

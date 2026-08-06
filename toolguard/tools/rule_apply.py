@@ -11,8 +11,8 @@ the user's approval are the SKILL's responsibility, not this module's.
 Reuse (no reimplementation)
 ---------------------------
 - The comment-preserving file writers
-  :func:`~toolguard.scripts.migrate_permissions.write_toml_config` and
-  :func:`~toolguard.scripts.migrate_permissions.write_json_config` perform the
+  :func:`~toolguard.permission_migration.write_toml_config` and
+  :func:`~toolguard.permission_migration.write_json_config` perform the
   actual section rewrite (TOML comments are preserved via
   :mod:`toolguard.rule_sort`; JSON is rewritten structurally).
 - Current (raw, unresolved) permissions are read with the canonical
@@ -43,6 +43,7 @@ from typing import Dict, List, Optional, Tuple
 
 from toolguard.config import load_config_file, wrap_tool_pattern
 from toolguard.config_write_guard import verified_write_config
+from toolguard.permission_migration import write_json_config, write_toml_config
 from toolguard.rule_entry import (
     RuleEntry,
     merge_entries,
@@ -50,7 +51,6 @@ from toolguard.rule_entry import (
     normalize_entry,
     real_patterns,
 )
-from toolguard.scripts.migrate_permissions import write_json_config, write_toml_config
 from toolguard.tools.consolidate import ConsolidationProposal
 
 

@@ -31,6 +31,8 @@ from toolguard.config import (
     config_sync_settings_from_sources,
     load_configuration,
 )
+from toolguard.config_types import LevelMatch, entry_for_pattern
+from toolguard.permission_resolution import resolve_permission_detailed
 from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry, _strip_tool_wrapper
 
 
@@ -2813,10 +2815,11 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
 
 class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
     """
-    Existing generic Configuration methods (permission_levels_with_provenance,
-    resolve_permission_detailed, hard_deny, toolguard_permissions, allow_deny_for)
-    correctly treat rules-dir-sourced layers as ordinary user-level layers once
-    such layers exist -- no new code is needed in those methods (TOO-30 item 9).
+    Existing generic Configuration surfaces (permission_levels_with_provenance,
+    the engine's resolve_permission_detailed, hard_deny, toolguard_permissions,
+    allow_deny_for) correctly treat rules-dir-sourced layers as ordinary
+    user-level layers once such layers exist -- no new code is needed for
+    that (TOO-30 item 9).
 
     Most tests here construct Configuration directly from hand-built layers
     (zero filesystem I/O, no isolation needed); ConfigIsolationMixin is only
@@ -2906,9 +2909,17 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
 
         def _decide(allow, deny, ask):
             if "gh *" in deny:
-                return ("deny", "Command matches deny pattern: gh *", "gh *")
+                return LevelMatch(
+                    decision="deny",
+                    reason="Command matches deny pattern: gh *",
+                    matched_pattern="gh *",
+                )
             if "gh *" in allow:
-                return ("allow", "Command matches allow pattern: gh *", "gh *")
+                return LevelMatch(
+                    decision="allow",
+                    reason="Command matches allow pattern: gh *",
+                    matched_pattern="gh *",
+                )
             return None
 
         with patch.object(
@@ -2916,7 +2927,7 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed("Bash", _decide)
+            resolved = resolve_permission_detailed(config, "Bash", _decide)
         self.assertEqual(resolved.decision, "deny")
 
     def test_rules_dir_deny_beats_claude_allow_within_user_level(self):
@@ -2939,9 +2950,17 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
 
         def _decide(allow, deny, ask):
             if "gh *" in deny:
-                return ("deny", "Command matches deny pattern: gh *", "gh *")
+                return LevelMatch(
+                    decision="deny",
+                    reason="Command matches deny pattern: gh *",
+                    matched_pattern="gh *",
+                )
             if "gh *" in allow:
-                return ("allow", "Command matches allow pattern: gh *", "gh *")
+                return LevelMatch(
+                    decision="allow",
+                    reason="Command matches allow pattern: gh *",
+                    matched_pattern="gh *",
+                )
             return None
 
         with patch.object(
@@ -2949,7 +2968,7 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed("Bash", _decide)
+            resolved = resolve_permission_detailed(config, "Bash", _decide)
         self.assertEqual(resolved.decision, "deny")
 
     def test_rules_dir_hard_deny_pooled_with_claude_hard_deny(self):
@@ -3265,7 +3284,11 @@ class TestRulesDirectoryValidationAndProvenance(
 
         def _decide(allow, deny, ask):
             if "gh *" in allow:
-                return ("allow", "Command matches allow pattern: gh *", "gh *")
+                return LevelMatch(
+                    decision="allow",
+                    reason="Command matches allow pattern: gh *",
+                    matched_pattern="gh *",
+                )
             return None
 
         with patch.object(
@@ -3273,7 +3296,7 @@ class TestRulesDirectoryValidationAndProvenance(
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed("Bash", _decide)
+            resolved = resolve_permission_detailed(config, "Bash", _decide)
         self.assertIn(str(rules_path), resolved.reason)
         self.assertIn("user:", resolved.reason)
 
@@ -3311,12 +3334,13 @@ class TestRulesDirectoryExplicitModeBypass(ConfigIsolationMixin, unittest.TestCa
 
 class TestParseFailureAskFloor(unittest.TestCase):
     """
-    TOO-19 fail-open fix: Configuration.resolve_permission_detailed() clamps
-    every decision to 'ask' when Configuration.parse_failures is non-empty (a
-    governed config file failed to parse), mirroring the ASK floor already
-    implemented for foreign inline code in toolguard/compound.py:65-71 -- an
-    explicit 'deny' (including hard_deny, which never reaches this method --
-    see resolve.py, checked before resolve_permission_detailed is called) is
+    TOO-19 fail-open fix: permission_resolution.resolve_permission_detailed()
+    clamps every decision to 'ask' when Configuration.parse_failures is
+    non-empty (a governed config file failed to parse), mirroring the ASK
+    floor already implemented for foreign inline code in
+    toolguard/compound.py:65-71 -- an explicit 'deny' (including hard_deny,
+    which never reaches this function -- see resolve.py, checked before
+    resolve_permission_detailed is called) is
     preserved unchanged; 'allow' and 'ask' are clamped to 'ask' with a reason
     naming the broken file(s). Closes the hole where a single TOML syntax
     error silently dropped every rule (including deny/hard_deny) in that
@@ -3354,14 +3378,22 @@ class TestParseFailureAskFloor(unittest.TestCase):
     def _decide_allow_git(allow, deny, ask):
         """A decide_detailed closure that allows 'git *' when configured."""
         if "git *" in allow:
-            return ("allow", "Command matches allow pattern: git *", "git *")
+            return LevelMatch(
+                decision="allow",
+                reason="Command matches allow pattern: git *",
+                matched_pattern="git *",
+            )
         return None
 
     @staticmethod
     def _decide_deny_rm(allow, deny, ask):
         """A decide_detailed closure that denies 'rm -rf /' when configured."""
         if "rm -rf /" in deny:
-            return ("deny", "Command matches deny pattern: rm -rf /", "rm -rf /")
+            return LevelMatch(
+                decision="deny",
+                reason="Command matches deny pattern: rm -rf /",
+                matched_pattern="rm -rf /",
+            )
         return None
 
     def test_allow_clamped_to_ask_when_config_broken(self):
@@ -3382,8 +3414,8 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._decide_allow_git
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._decide_allow_git
             )
 
         self.assertEqual(resolved.decision, "ask")
@@ -3409,8 +3441,8 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._decide_allow_git
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._decide_allow_git
             )
 
         self.assertEqual(resolved.decision, "ask")
@@ -3434,7 +3466,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed("Bash", self._decide_deny_rm)
+            resolved = resolve_permission_detailed(config, "Bash", self._decide_deny_rm)
 
         self.assertEqual(resolved.decision, "deny")
         self.assertIn("Command matches deny pattern: rm -rf /", resolved.reason)
@@ -3456,8 +3488,8 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._decide_allow_git
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._decide_allow_git
             )
 
         self.assertEqual(resolved.decision, "allow")
@@ -3497,8 +3529,8 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._decide_allow_git
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._decide_allow_git
             )
 
         self.assertEqual(resolved.decision, "ask")
@@ -3550,8 +3582,8 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = config.resolve_permission_detailed(
-                "Bash", self._decide_allow_git
+            resolved = resolve_permission_detailed(
+                config, "Bash", self._decide_allow_git
             )
 
         self.assertEqual(resolved.decision, "ask")
@@ -3560,9 +3592,9 @@ class TestParseFailureAskFloor(unittest.TestCase):
 
 class TestAdditionalContextResolution(unittest.TestCase):
     """
-    TOO-19 Phase 1, increment 2: Configuration._resolve_permission_detailed_unclamped
+    TOO-19 Phase 1, increment 2: permission_resolution._resolve_unclamped
     surfaces the winning RuleEntry's additional_context property onto
-    ResolvedDecision.additional_context.
+    RuntimeVerdict.additional_context.
 
     These tests build Configuration directly from hand-constructed
     ConfigLayer/Provenance objects with zero file I/O, so no ConfigIsolationMixin
@@ -3608,11 +3640,23 @@ class TestAdditionalContextResolution(unittest.TestCase):
     def _decide(allow, deny, ask):
         """A decide_detailed closure that deny-first/ask/allow-matches 'git *'."""
         if "git *" in deny:
-            return ("deny", "Command matches deny pattern: git *", "git *")
+            return LevelMatch(
+                decision="deny",
+                reason="Command matches deny pattern: git *",
+                matched_pattern="git *",
+            )
         if "git *" in ask:
-            return ("ask", "Command matches ask pattern: git *", "git *")
+            return LevelMatch(
+                decision="ask",
+                reason="Command matches ask pattern: git *",
+                matched_pattern="git *",
+            )
         if "git *" in allow:
-            return ("allow", "Command matches allow pattern: git *", "git *")
+            return LevelMatch(
+                decision="allow",
+                reason="Command matches allow pattern: git *",
+                matched_pattern="git *",
+            )
         return None
 
     def _resolve(self, config):
@@ -3622,7 +3666,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            return config.resolve_permission_detailed("Bash", self._decide)
+            return resolve_permission_detailed(config, "Bash", self._decide)
 
     def test_structured_allow_entry_surfaces_additional_context(self):
         """
@@ -3691,16 +3735,29 @@ class TestAdditionalContextResolution(unittest.TestCase):
         self.assertIsNone(resolved.additional_context)
 
 
-class TestEntryForPatternDrift(unittest.TestCase):
+class TestEntryForPatternLookup(unittest.TestCase):
     """
-    Configuration._entry_for_pattern on a layer with DRIFTED parallel lists
-    (TOO-19 code review m4): allow/allow_entries of different lengths.
+    ``config_types.entry_for_pattern`` (TOO-45 R2d: moved off ``Configuration``,
+    beside :class:`ToolPatternLayer`, which it searches).
 
     Built directly from hand-constructed ToolPatternLayer objects with zero
     file I/O (no ConfigIsolationMixin needed, per test/unit/CLAUDE.md's
-    checklist) -- this is a defensive-programming corner case (parallel-list
-    drift should never happen from normal config authoring), not something
-    reachable via a real TOML file.
+    checklist).
+
+    TOO-45 R2 note: the pre-R2 version of this class (``TestEntryForPatternDrift``)
+    also covered a DRIFTED-parallel-lists corner case (TOO-19 code review m4):
+    ``ToolPatternLayer`` used to store ``allow``/``allow_entries`` as two
+    independent, positionally-correlated fields, so a caller could construct
+    one with mismatched lengths and the lookup had to defensively guard
+    against that. R2 made ``allow``/``deny``/``ask`` derived properties over
+    ``allow_entries``/``deny_entries``/``ask_entries`` -- the only stored
+    fields -- so that drifted state is no longer constructible at all (see
+    ``test_layer_rejects_a_separately_supplied_pattern_tuple`` below). The two
+    tests that existed only to fire that now-deleted defensive guard
+    (``test_misaligned_layer_returns_none_instead_of_falling_through``,
+    ``test_drift_does_not_change_the_resolved_verdict``) were deleted along
+    with it; the remaining (never-drifted) lookup test is kept, adapted to
+    the new call target.
     """
 
     @staticmethod
@@ -3710,98 +3767,38 @@ class TestEntryForPatternDrift(unittest.TestCase):
         )
         return RuleEntry(pattern=pattern, metadata=metadata)
 
-    def test_misaligned_layer_returns_none_instead_of_falling_through(self):
+    def test_aligned_layer_resolves_normally(self):
         """
-        Given a MORE-specific layer whose allow/allow_entries have drifted
-            (2 patterns, 1 entry) and contains the winning pattern, and a
-            LESS-specific layer that also happens to contain the SAME
-            pattern string (aligned)
-        When _entry_for_pattern searches for the winning pattern
-        Then it returns None -- NOT the less-specific layer's entry -- so a
-            list-drift bug can never misattribute enrichment to a rule that
-            did not actually win
-        """
-        drifted_layer = ToolPatternLayer(
-            provenance=Provenance("project", "toolguard_hook", "toml", Path("/p.toml")),
-            allow=("git *", "ls *"),
-            deny=(),
-            allow_entries=(self._entry("git *", "should never surface"),),
-        )
-        less_specific_layer = ToolPatternLayer(
-            provenance=Provenance("user", "toolguard_hook", "toml", Path("/u.toml")),
-            allow=("git *",),
-            deny=(),
-            allow_entries=(self._entry("git *", "wrong attribution"),),
-        )
-        result = Configuration._entry_for_pattern(
-            (drifted_layer, less_specific_layer), "git *", "allow"
-        )
-        self.assertIsNone(result)
-
-    def test_aligned_layer_still_resolves_normally(self):
-        """
-        Given a normally-aligned layer (no drift)
-        When _entry_for_pattern searches for a pattern it contains
-        Then it returns that layer's own entry, unaffected by the m4 fix
+        Given a layer with one allow entry
+        When entry_for_pattern searches for the pattern it contains
+        Then it returns that layer's own entry
         """
         layer = ToolPatternLayer(
             provenance=Provenance("project", "toolguard_hook", "toml", Path("/p.toml")),
-            allow=("git *",),
-            deny=(),
             allow_entries=(self._entry("git *", "normal context"),),
         )
-        result = Configuration._entry_for_pattern((layer,), "git *", "allow")
+        result = entry_for_pattern((layer,), "git *", "allow")
         self.assertIsNotNone(result)
         self.assertEqual(result.additional_context, "normal context")
 
-    def test_drift_does_not_change_the_resolved_verdict(self):
+    def test_layer_rejects_a_separately_supplied_pattern_tuple(self):
         """
-        Given the same drifted-vs-less-specific layer pair as
-            test_misaligned_layer_returns_none_instead_of_falling_through,
-            wired through a real resolve_permission_detailed('Bash', ...) call
-        When the winning command is resolved end to end
-        Then the decision, reason, and provenance are exactly what the
-            matched-pattern/provenance resolution already determined --
-            _entry_for_pattern's fix changes ONLY additional_context
-            attribution, never the verdict (TOO-19 code review m4's gate)
+        Given an attempt to construct a ToolPatternLayer the OLD way, with a
+            separately-supplied `allow` pattern tuple alongside `allow_entries`
+        When the constructor call is made
+        Then it raises TypeError -- `allow` is a derived property, not a
+            constructor field, so a hand-drifted pair of parallel lists (the
+            defect the deleted TestEntryForPatternDrift tests existed to
+            guard against) can no longer be built at all
         """
-        drifted_layer = ToolPatternLayer(
-            provenance=Provenance("project", "toolguard_hook", "toml", Path("/p.toml")),
-            allow=("git *", "ls *"),
-            deny=(),
-            allow_entries=(self._entry("git *", "should never surface"),),
-        )
-        less_specific_layer = ToolPatternLayer(
-            provenance=Provenance("user", "toolguard_hook", "toml", Path("/u.toml")),
-            allow=("git *",),
-            deny=(),
-            allow_entries=(self._entry("git *", "wrong attribution"),),
-        )
-
-        class _FakeConfig(Configuration):
-            def permission_levels_with_provenance(self, tool_name):
-                return [
-                    (
-                        ("git *", "ls *"),
-                        (),
-                        (),
-                        (drifted_layer, less_specific_layer),
-                    )
-                ]
-
-        def decide(allow, deny, ask=()):
-            if "git *" in allow:
-                return "allow", "Command matches allow pattern: git *", "git *"
-            return None
-
-        resolved = _FakeConfig(layers=()).resolve_permission_detailed("Bash", decide)
-        self.assertEqual(resolved.decision, "allow")
-        self.assertEqual(
-            resolved.reason, "Command matches allow pattern: git *  [project: /p.toml]"
-        )
-        self.assertEqual(resolved.provenance.level, "project")
-        # The one thing the m4 fix DOES change: no misattributed context.
-        self.assertIsNone(resolved.additional_context)
+        with self.assertRaises(TypeError):
+            ToolPatternLayer(
+                provenance=Provenance(
+                    "project", "toolguard_hook", "toml", Path("/p.toml")
+                ),
+                allow=("git *", "ls *"),
+                allow_entries=(self._entry("git *"),),
+            )
 
 
 class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
