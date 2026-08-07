@@ -173,6 +173,31 @@ name = "foundation"
 packages = ["constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance", "install_update"]
 
 [[architecture.layers]]
+name = "observability"
+# Cross-cutting side-effecting services: logging, error reporting, session
+# warnings, update notices. These sit LOW deliberately (TOO-45, after Arnon's
+# reading of the MR-08 canary). They were previously in "runtime", whose own
+# comment gave the game away -- "entry points AND side-effecting concerns"
+# conflates two unrelated criteria. `hook`/`session_start` belong high because
+# they ORCHESTRATE; these four are leaves that happen to have side effects, and
+# side-effect-ness is orthogonal to dependency direction.
+#
+# What the old placement cost, measured: config-layer code could not legally
+# reach a logging or warning module, so four config modules hand-rolled 16
+# direct stderr writes instead (config 3, env_config 2, auto_migrate 6,
+# config_divergence 5). The layering was not being obeyed there, it was being
+# routed around -- and a zero-violation report could never show that, because
+# the map matched the code. Consolidating those onto the real warning path is
+# separate, larger, and deliberately not done here.
+#
+# error_log and session_warnings import NOTHING from toolguard; update_check
+# imports only foundation; log_writer took exactly one config-layer import
+# (config.find_project_root), a thin wrapper over a foundation primitive, now
+# path_utils.require_project_root. Configuration reaches log_writer by
+# INJECTION already -- a plain dict parameter -- not by import.
+packages = ["log_writer", "error_log", "session_warnings", "update_check"]
+
+[[architecture.layers]]
 name = "config"
 # Owns the configuration model, discovery, validation, and the write path.
 packages = ["rule_entry", "config_types", "config", "config_validation", "config_write_guard", "env_config", "rule_sort", "auto_migrate", "config_divergence", "permission_migration"]
@@ -190,8 +215,10 @@ packages = ["api"]
 
 [[architecture.layers]]
 name = "runtime"
-# Entry points and side-effecting session/logging concerns.
-packages = ["hook", "session_start", "log_writer", "error_log", "session_warnings", "subagent", "update_check"]
+# Entry points only: the modules that ORCHESTRATE a hook invocation. The
+# side-effecting logging/warning services that used to share this layer now sit
+# in "observability", below "config" -- see the note there.
+packages = ["hook", "session_start", "subagent"]
 
 [[architecture.layers]]
 name = "tooling"
@@ -206,36 +233,45 @@ packages = ["testing"]
 [[architecture.rules]]
 from = "foundation"
 allow = ["foundation"]
-deny = ["config", "engine", "runtime", "tooling", "support"]
+deny = ["observability", "config", "engine", "api", "runtime", "tooling", "support"]
+
+# "observability" sits directly above "foundation" and BELOW "config" (TOO-45).
+# That placement is the whole point: config-layer code must be able to log and
+# warn through the real modules instead of hand-rolling stderr writes, which is
+# what the old placement forced in four config modules.
+[[architecture.rules]]
+from = "observability"
+allow = ["observability", "foundation"]
+deny = ["config", "engine", "api", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "config"
-allow = ["config", "foundation"]
-deny = ["engine", "runtime", "tooling", "support"]
+allow = ["config", "observability", "foundation"]
+deny = ["engine", "api", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "engine"
-allow = ["engine", "config", "foundation"]
+allow = ["engine", "config", "observability", "foundation"]
 deny = ["api", "runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "api"
-allow = ["api", "engine", "config", "foundation"]
+allow = ["api", "engine", "config", "observability", "foundation"]
 deny = ["runtime", "tooling", "support"]
 
 [[architecture.rules]]
 from = "runtime"
-allow = ["runtime", "api", "engine", "config", "foundation"]
+allow = ["runtime", "api", "engine", "config", "observability", "foundation"]
 deny = ["tooling", "support"]
 
 [[architecture.rules]]
 from = "tooling"
-allow = ["tooling", "runtime", "api", "engine", "config", "foundation"]
+allow = ["tooling", "runtime", "api", "engine", "config", "observability", "foundation"]
 deny = ["support"]
 
 [[architecture.rules]]
 from = "support"
-allow = ["support", "tooling", "runtime", "api", "engine", "config", "foundation"]
+allow = ["support", "tooling", "runtime", "api", "engine", "config", "observability", "foundation"]
 
 
 # =============================================================================

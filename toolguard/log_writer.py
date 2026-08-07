@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from toolguard.config import find_project_root
+from toolguard.path_utils import require_project_root
 
 #: The two resolution-log output formats :func:`log_command` can render.
 #: Markdown is the default and the only one any production caller selects; the
@@ -249,12 +249,13 @@ def _log_dir_from_environment() -> Path:
         The resolved log directory.
 
     Raises:
-        RuntimeError: Propagated from :func:`toolguard.config.find_project_root`
-            when no project root can be found. :func:`log_command` catches
-            this specifically and treats it as fatal (prints and exits 1),
-            so it is not swallowed here.
+        RuntimeError: Propagated from
+            :func:`toolguard.path_utils.require_project_root` when no project
+            root can be found. :func:`log_command` catches this specifically
+            and treats it as fatal (prints and exits 1), so it is not
+            swallowed here.
     """
-    log_dir_path = find_project_root() / "logs"
+    log_dir_path = require_project_root() / "logs"
     _require_existing_log_dir(log_dir_path)
     return log_dir_path
 

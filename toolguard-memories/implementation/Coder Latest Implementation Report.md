@@ -8,6 +8,107 @@ tags:
 - implementation-report
 ---
 
+## UPDATE: adversarial-review response addressed (same session)
+
+`touch_set_score.py` no longer computes any score/rate/ratio (Monte Carlo proof that both the
+count and the rate are granularity-biased -- see `touch-set-adversarial-report.md`). It is now a
+pure set comparator producing auditable lists. Twelve D-series defects fixed: D6 (duplicate JSON
+keys, fatal via `object_pairs_hook`), D7 (resolved by the D9 redesign), D8 (NFKC/whitespace/
+backslash normalisation), D5 (validator widened to class/module-level assignment targets, hard
+gate downgraded to advisory with nearest-match suggestions), D4 (abstention gets its own
+`kind_abstained` list, never folded into mismatches), D9 (two-judge format replaced with two
+separate ordinary actuals files, reconciled by the tool, with a new `location_set_disagreements`
+bucket), D10 (empty-after-normalisation location rejected), D11 (safe file reads, symlink dedup),
+D12 (best-effort stdlib-only gitignore support, explicitly NO subprocess -- preserves the
+blindness guarantee an audit hook verified). D3/D2 documented in KNOWN_LIMITATIONS per explicit
+instruction, no code needed.
+
+Test suites rewritten: 42 tests in `test_touch_set_score.py` (includes a structural guard against
+ever reintroducing a "rate" field), 47 in `test_touch_set_inventory.py`. Full project suite: 2586
+tests, clean. Report updated with an honest account of the retraction. Same four files throughout
+-- no fifth module.
+
+## UPDATE: second course correction addressed (same session)
+
+Three changes requested and implemented, all within the original four files: (1) surprise/miss are now primary COUNT+LIST, rates demoted to a secondary tier with per-rate warnings, kind_mismatch_rate stays primary since its denominator does not scale with factoring granularity; (2) new `--validate-predictions` mode on `touch_set_inventory.py` checks a predictions file against a tree's FULL location set (any nesting/visibility) at authoring time, keeping `touch_set_score.py` completely tree-agnostic; (3) actuals now support two independent judges (`kind_1`/`kind_2`), with disagreement counted/listed explicitly and excluded from `kind_mismatches`, never silently reconciled.
+
+New tests: 12 added to `test_touch_set_inventory.py` (27 total), 8 added to `test_touch_set_score.py` (36 total). Full suite: 2547 tests, clean. Also fixed two pre-existing local imports found during this pass (moved to module level, per project convention) -- present since the tool's first version, not introduced by either course correction.
+
+Naive-vs-real hazard demonstration re-verified against the final tool: same 6/7 result holds.
+
+Full detail in the report update section at `toolguard/too-45/reports/touch-set-harness-report`.
+
+---
+
+# LATEST SESSION (2026-08-06): TOO-45 M2 expected-touch-set harness
+
+(Everything below this line down to the next `---` is this session's report; older content
+below belongs to a previous task and is retained only for history.)
+
+## Summary
+
+Built `tools/touch_set_inventory.py` (blind-predictor structural inventory, one tree only, never
+a diff) and `tools/touch_set_score.py` (scorer for the M2 "expected touch set" measure). Mid-task,
+the coordinator withdrew the original directive to derive ACTUAL kinds mechanically from
+`tools/change_role_classifier.py` after an adversarial review found its role labels
+anti-correlated with code quality. Redesigned `touch_set_score.py` into a pure comparator between
+two hand/judge-authored files (predictions + actuals, symmetric shape), with zero dependency on
+any tree, diff, subprocess, or AST classifier. Also dropped `touch_set_inventory.py`'s incidental
+reuse of two helpers from the classifier module, reimplementing them locally.
+
+## Files created
+
+- `tools/touch_set_inventory.py`
+- `tools/touch_set_score.py`
+- `test/unit/test_touch_set_inventory.py` (15 tests)
+- `test/unit/test_touch_set_score.py` (28 tests, doubles as the committed hazard suite)
+
+No existing files modified.
+
+## Key decisions
+
+See the full report at basic-memory `toolguard/too-45/reports/touch-set-harness-report` (also
+`toolguard-memories/TOO-45/reports/touch-set-harness-report.md` in-repo) for: predictions/actuals
+file format, every location-matching decision and its rationale, the 7-scenario hazard suite
+(6/7 fail-then-pass against a deliberately naive, never-committed comparator; the 7th, "H4 plain",
+is a documented case where naive coincidentally succeeds), and the three-part adversarial exposure
+review the coordinator requested (sed-vulnerability, silent-loss, factoring-scale-sensitivity).
+
+## Deviations from the original plan
+
+The single largest deviation is the mid-task redesign described above -- not something I chose,
+but a course correction from the coordinator that I implemented in full, including rewriting both
+tools' dependency surface and both test suites. The original spec's "predicted location does not
+exist in the tree at all" hazard case genuinely lost its distinguishing capability in the
+redesign (no tree access remains to check existence against) -- collapsed into an honest
+`ordinary_misses` bucket with the loss stated as KNOWN LIMITATION #1 in the tool's own output,
+not silently absorbed.
+
+## Known limitations / follow-up
+
+Documented exhaustively in the tool's own `KNOWN_LIMITATIONS` output and the full report. The one
+NOT mitigated: location granularity (file + function/class) still scales with how finely a tree
+factors its logic, which can shift miss/surprise-rate denominators between two trees for reasons
+unrelated to prediction quality. This is a documentation-level ask (grain `actuals.json`
+consistently across trees), not something the tool can enforce.
+
+## Self-review results
+
+`uv run ruff format` / `uv run ruff check` clean on all four files. No async/threading/local
+imports. `git status` confirms only the four intended files were created. All 43 new tests pass
+reliably in isolation, run repeatedly. The full project suite showed transient failures during
+this session traced to a DIFFERENT, concurrently-active agent modifying
+`tools/change_role_classifier.py` (untracked, very recent mtime) in the same working tree --
+confirmed via repeated isolated/held-out reruns, not a regression from this work. One disclosed
+process anti-pattern: a single early sanity-check command used an undisclosed `python -c` pipe
+before I re-grounded in the project's intent-disclosure convention; every subsequent script
+execution used the proper disclosure block.
+
+## Time/cost estimate
+
+~50 minutes elapsed end to end (see the full report's "Time and cost" section for the phase
+breakdown). Estimated cost: Sonnet 5, moderate session with a full mid-task redesign; rough order
+of magnitude USD 3-6, not precisely measured.
 ## Task
 TOO-15 completion-gate item: `toolguard-install skills-status` read-only diagnostic subcommand
 (binary-install freshness + bundled-skill install state at user/project scope, robust to broken

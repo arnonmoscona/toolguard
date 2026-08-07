@@ -3839,18 +3839,25 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         """
         Given the real .pyscn.toml's declared architecture rules
         When the "api" layer's allow-list is read
-        Then it permits "api", "engine", "config", and "foundation" only --
-             NOT "runtime", "tooling", or "support"
+        Then it permits "api", "engine", "config", "observability" and
+             "foundation" only -- NOT "runtime", "tooling", or "support"
 
         Pins the direction of the new layer concretely (not just "today's
         real tree happens to have zero violations"): if a future change
         pointed `toolguard/api.py` at, say, `toolguard.hook`, this test fails
         even before `--layers` would notice a real edge, because the RULE
         itself would have to be loosened first to permit it.
+
+        "observability" joined the allow-list in TOO-45 when logging, error
+        reporting and session warnings moved BELOW "config" -- see the layer's
+        own note in .pyscn.toml. The negative assertions below carry this
+        test's real intent and are unchanged; only the downward set grew.
         """
         arch = af.parse_architecture_config()
         allowed = set(arch.allow_for("api"))
-        self.assertEqual(allowed, {"api", "engine", "config", "foundation"})
+        self.assertEqual(
+            allowed, {"api", "engine", "config", "observability", "foundation"}
+        )
         self.assertNotIn("runtime", allowed)
         self.assertNotIn("tooling", allowed)
         self.assertNotIn("support", allowed)

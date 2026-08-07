@@ -361,3 +361,43 @@ def resolve_project_root(
             "CLAUDE.md file, first."
         ),
     )
+
+
+def require_project_root(start_dir: Optional[Path] = None) -> Path:
+    """
+    Resolve a project root in the config/runtime shape, or raise.
+
+    Climbs from *start_dir* (or the current directory) to the nearest marker --
+    a strong project anchor (``.git``/``.hg``/``.jj``/``.claude``/``CLAUDE.md``)
+    or ``pyproject.toml`` -- stopping at the home directory or filesystem root.
+    A thin wrapper around :func:`resolve_project_root` in its ``strict=True``
+    ("nearest marker of any kind wins") shape (TOO-15).
+
+    This lives in the foundation layer deliberately (TOO-45). Callers that need
+    a project root are spread across layers -- configuration discovery and the
+    logging path both need one -- and routing them through a config-layer
+    helper is what pinned :mod:`toolguard.log_writer` above ``config`` and made
+    a cross-cutting concern unreachable from below it. Wrapping a foundation
+    primitive is not a reason for a caller to inherit a config-layer
+    dependency.
+
+    Args:
+        start_dir: Directory to start searching from. Defaults to the current
+            working directory.
+
+    Returns:
+        Path to the project root.
+
+    Raises:
+        RuntimeError: If no project root can be established.
+    """
+    start = Path(start_dir) if start_dir else Path.cwd()
+    resolution = resolve_project_root(
+        start, strict=True, indicators=CONFIG_ROOT_INDICATORS
+    )
+    if resolution.root is None:
+        raise RuntimeError(
+            "Project root not found. Searched for pyproject.toml or .git directory "
+            f"from {start} up to {Path.home()}. Something is badly wrong."
+        )
+    return resolution.root

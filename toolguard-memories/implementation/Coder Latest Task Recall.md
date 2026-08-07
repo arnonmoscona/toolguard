@@ -8,6 +8,329 @@ tags:
 - implementation
 ---
 
+## THIRD COURSE CORRECTION (2026-08-06, ~19:54 EDT) -- READ THIS FIRST IF RESUMING
+
+Adversarial report at `toolguard-memories/TOO-45/reports/touch-set-adversarial-report.md` (READ
+IT FIRST). Headline: Monte Carlo proof that `surprises = leaked_concepts + n(1-p)` -- the
+promoted COUNT carries noise proportional to n (location count, which scales with factoring
+granularity); the demoted RATE divides the genuine signal by that same n. Both are unsafe. Coord's
+own words: "I told you to promote counts and demote rates. I promoted the biased one."
+
+## New purpose: evidence, not scoring. Mechanical scoring abandoned.
+
+Remove ALL derived numbers: no surprise_rate, miss_rate, kind_mismatch_rate, confusion matrix, no
+headline anything. KNOWN_LIMITATIONS #2's "counts are immune to this bias" claim is FALSE, must
+be replaced with the formula + Monte Carlo citation + a plain statement that no per-location
+number compares two trees fairly.
+
+Tool becomes a **set comparator producing auditable LISTS**: predicted-and-changed,
+changed-but-not-predicted, predicted-but-not-changed, kind agreements, kind mismatches, kind
+disagreements (between judges), kind abstentions (NEW, D4), location-set disagreements (NEW, D9),
+every ambiguity bucket already present. `len()` of each list may be printed as a count. NO ratio,
+score, or cross-tree comparison anywhere.
+
+## Defects to fix (corrupt the evidence itself, not just the scoring)
+
+- **D6/D7 duplicate JSON keys, silent last-wins.** Detect duplicate keys within one JSON object
+  via `object_pairs_hook`, make fatal. D7 (duplicate ACTUALS location silently reconciling a real
+  disagreement) is resolved AS A CONSEQUENCE of the D9 redesign below, not a separate patch --
+  explain this in the report, don't just claim it's fixed.
+- **D8 near-miss locations** (case/whitespace/NFC-vs-NFD/path-separator) each cost a phantom
+  surprise+miss pair. NFKC-normalize the qualname, collapse whitespace around `.`, normalize `\`
+  to `/`. Leave case alone (Python is case-sensitive) but consider a near-miss warning.
+- **D5 validator too narrow.** Only FunctionDef/AsyncFunctionDef/ClassDef -- rejects dataclass
+  fields, lambda-assigned names, runtime names (the tool's OWN docstring example location is
+  rejected). Widen the walk to include class/module-level AnnAssign/Assign targets. Downgrade the
+  hard exit-1 gate to a warning naming nearest real locations (false-negative cost now exceeds
+  false-positive cost).
+- **D4 abstention scored as wrong.** A location where the judge (or one of two judges) abstained
+  must go in its OWN list (kind_abstained), never counted as a kind_mismatch. Old field name
+  `matched_with_known_kind` was false (only subtracted disagreements, never unknowns) -- gone
+  along with the rate it fed.
+- **D9 structural: single actuals file with kind_1/kind_2 cannot express location-SET
+  disagreement, only kind disagreement -- and location-set disagreement is what judges will
+  disagree about most.** FIX IMPLEMENTED: replace the single-file kind_1/kind_2 format entirely
+  with TWO SEPARATE ordinary (single-kind) actuals files, one per judge (`--actuals-judge-1`,
+  `--actuals-judge-2`), reconciled by the tool. A location listed by only one judge goes in a new
+  `location_set_disagreements` bucket, distinct from a kind disagreement on a location both
+  listed.
+- **D10** `"/"`/`"./"` normalizing to empty string and matching each other -- move the non-empty
+  check to AFTER normalization.
+- **D11** unguarded `Path.read_text`/`ast.parse` crash the whole tool on a broken symlink,
+  directory named `*.py`, latin-1-with-PEP263-cookie file, mode-000 file. Wrap in a safe-read
+  helper catching OSError/UnicodeError, report as a named failure, never crash. Also: a module
+  reachable through a file symlink is inventoried twice -- dedupe by resolved real path.
+- **D12 -- "the worst of these."** Inventory hands the blind predictor 11 gitignored `tmp/`
+  modules including one whose FILENAME leaks the requirement's subject matter
+  (`scan_auto_mode.py`). Must respect gitignore. **Constraint: NO subprocess** -- the audit
+  specifically verified 0 subprocess/socket/exec events and praised the blindness guarantee;
+  coordinator explicitly says do not weaken it while fixing this. Implement a best-effort,
+  stdlib-only `.gitignore` pattern matcher (not full spec compliance -- document exactly what
+  subset is supported).
+- **D3 needs NO code** -- unbounded prediction volume is visible to a human judge reading a
+  4,800-item list; note in KNOWN_LIMITATIONS and move on, per coordinator's explicit instruction.
+- **D2** (graining mismatch between files, nothing validates it) -- best-effort: compute and
+  print a graining-check warning (fraction of bare-path vs qualname locations on each side) next
+  to location_counts; do NOT gate/refuse (we're not scoring/blocking anymore, just presenting
+  evidence).
+
+## What must NOT be weakened
+
+The blindness guarantee (170 file opens during a real audit-hook test, 0 outside the tree, 0
+under .git, 0 subprocess/socket/exec) survived and was explicitly praised. Do not introduce
+subprocess/git/VCS access anywhere in touch_set_inventory.py while fixing D12.
+
+## Report
+
+Update `toolguard-memories/TOO-45/reports/touch-set-harness-report.md` with an HONEST account of
+why scoring was removed (cite the formula and the 64.7%/0.333-vs-0.125 Monte Carlo findings
+directly, don't soften them) and the D-series fixes. Same four files, no fifth module.
+## SECOND COURSE CORRECTION (2026-08-06, ~19:20 EDT) -- READ THIS FIRST IF RESUMING
+
+Coordinator approved the redesign above and requested three further changes, still within the
+same four files (`tools/touch_set_inventory.py`, `tools/touch_set_score.py`,
+`test/unit/test_touch_set_inventory.py`, `test/unit/test_touch_set_score.py` -- no fifth shared
+module, per "keep to your four files").
+
+### 1. Surprise/miss become primary COUNTS + LISTS, not rates
+
+Rate denominators (surprise_rate, miss_rate) scale with how finely a tree factors its logic --
+same defect shape as the OTHER broken TOO-45 instrument, now identified in THIS one before
+shipping. Fix: report the surprise COUNT and full LIST (location + observed kind) as primary
+output; same for miss count + list. Demote surprise_rate/miss_rate to a secondary section, each
+annotated with an explicit one-line warning that comparing these rates across trees with
+materially different location counts is unsound. kind_mismatch_rate stays primary/undemoted --
+its denominator is matched-locations-only (both sides agree it changed), which does not scale
+with factoring granularity the same way; expected to discriminate most. Also: print predicted
+vs. actual UNIQUE LOCATION COUNTS prominently near the top of the report, so a large disparity
+between trees is visible immediately, not something inferred.
+
+Interpretive choice made: "annotate every rate with a one-line warning" is satisfied by giving
+each rate ONE line of annotation, but the annotation TEXT differs -- surprise_rate/miss_rate get
+the factoring-bias caution; kind_mismatch_rate gets an accurate note about why its denominator
+does NOT have the same problem (attaching the identical caution to a rate the coordinator
+explicitly said doesn't suffer the bias would be dishonest in the other direction).
+
+### 2. Prediction-existence validation moves to touch_set_inventory.py, at authoring time
+
+New CLI mode on the INVENTORY tool: `--validate-predictions PATH` (used with `--tree`). Reports
+every predicted location absent from that tree. Requires reintroducing AST span-collection logic
+(collect every FunctionDef/AsyncFunctionDef/ClassDef at ANY nesting level, any visibility -- NOT
+the same restricted "public top-level only" set shown to the blind predictor) purely for this
+validation existence-check, kept separate from the printed/JSON inventory output. The scorer
+(`touch_set_score.py`) stays completely tree-agnostic -- this fixes limitation 1 upstream instead
+of trying to preserve tree access in the scorer.
+
+### 3. Two-judge actuals, disagreement never silently reconciled
+
+Actuals entries may use EITHER `"kind"` (single-judge, unchanged, backward compatible) OR
+`"kind_1"` + `"kind_2"` (dual-judge) -- decided PER FILE (whichever style ANY entry uses, the
+WHOLE file must use consistently; mixing is a fatal schema error). Each of kind_1/kind_2 may
+independently be null/omitted (that judge abstained -> KIND_UNKNOWN for them). Agreement
+(kind_1==kind_2, including both KIND_UNKNOWN) resolves normally, feeding matching/kind-mismatch
+as before. Disagreement (kind_1!=kind_2): the location's own "actual kind" for matrix/reporting
+purposes becomes a NEW sentinel (not a guess at which judge is right), the pair is EXCLUDED from
+kind_mismatches and from the kind_mismatch_rate denominator, and is instead counted + LISTED
+(both verdicts) in its own disagreements bucket. Report states which mode
+(`single_judge`/`dual_judge`) was used. Predictions NEVER support kind_1/kind_2 (a predictor is
+one entity) -- an entry with those keys in a predictions file is a fatal schema error, not a
+silently-ignored extra key.
+
+### Then
+
+Re-run synthetic demonstrations, update `tools/touch_set_score.py`'s KNOWN_LIMITATIONS entry
+about factoring-scale-sensitivity from "documented" to "documented-and-partially-mitigated"
+(mitigated by demoting the affected rates and by kind_mismatch_rate's more robust denominator;
+NOT fully closed -- the count-vs-rate demotion reduces the harm of the bias but the underlying
+sensitivity of location-count denominators to factoring granularity is still real for anyone who
+reads the demoted rate anyway). Update the basic-memory report with all of the above and an
+updated hazard-suite run reflecting the new report shape.
+## MID-TASK COURSE CORRECTION (2026-08-06, ~19:03 EDT) -- READ THIS FIRST IF RESUMING
+
+The coordinator withdrew the directive to source ACTUAL kinds mechanically from
+`tools/change_role_classifier.py`. An adversarial agent showed the classifier's role labels are
+anti-correlated with code quality (identical logic copy-pasted inline at 4 sites scores DECISION;
+the same logic factored behind one predicate scores pure CONDUIT -- `_governing_role` stops at
+call/attribute boundaries, never reaches the governing `if`). Importing that as "the actual kind"
+would bake a preference for unfactored code into the headline measure.
+
+**New design, replacing everything under "Design decisions locked in" below that mentions
+change_role_classifier for KIND derivation:**
+
+- `touch_set_score.py` becomes a PURE COMPARATOR between two files, both in the SAME
+  (location, kind, optional rationale) shape: `--predictions <file>` and `--actuals <file>`.
+  NO `--old`/`--new`/`--repo` tree modes, NO AST parsing, NO import of
+  `tools.change_role_classifier` at all (also fixes a real `reportMissingImports` pyright
+  finding on both new files -- drop the dependency everywhere, including
+  `touch_set_inventory.py`'s reuse of `discover_python_files`/`is_test_path`; reimplement those
+  two tiny helpers locally there instead).
+- Actuals are supplied by a blinded human judge looking at the diff -- "what kind of change is
+  this" is a judgement call, not a mechanical fact. Kind determination is now an INPUT, not
+  something either tool computes.
+- Symmetry: actuals use the SAME kind vocabulary as predictions (all six: decide/record/
+  parse_validate/transport/display/test) -- this actually FIXES the old mechanical limitation
+  that parse_validate/display could never be an actual kind; a human judge can assign them.
+- A location in actuals with kind omitted/null -> KIND_UNKNOWN sentinel, assigned by the tool,
+  never inferred. The literal string "kind_unknown" is REJECTED by schema validation on BOTH
+  files (closes a gaming vector: a predictor can never claim it, so it can never trivially
+  "match" a judge who also somehow writes it).
+- DROPPED: the tree-based "guessed name vs ordinary miss" existence-check (no tree access
+  anymore, so this distinction is undecidable) -- collapses into a single miss bucket. Documented
+  explicitly as a KNOWN LIMITATION, not silently lost.
+- DROPPED: the AssertionError-on-duplicate-actual-location design. Duplicates in actuals are now
+  reported via an `ambiguous_actuals` bucket, symmetric with `ambiguous_predictions` (first-wins
+  for scoring) -- a crash on adversarial input is a DoS vector, not a report.
+- KEPT unchanged (the coordinator confirmed this is "the hard part" and unaffected): exact
+  (path, qualname) string matching, no fuzzy/file-only fallback, module-level bare-path
+  locations, ambiguous-prediction handling, confusion matrix construction, rate-with-
+  zero-denominator handling.
+
+**Three adversarial-exposure questions the coordinator explicitly asked to be addressed in the
+report** (the same three shapes that broke a DIFFERENT TOO-45 instrument): (a) a headline number
+a one-line sed could move from worst to best, (b) silent loss where a real location vanishes with
+no honesty-bucket entry, (c) a growth rule whose output scales with how finely code is factored,
+putting two trees on different scales. Answers drafted during redesign:
+(a) Largely CLOSED by the redesign -- the old design's single point of leverage (the
+DECISION>WRITE>CONDUIT precedence tuple, a one-line reorder away from reclassifying every
+location project-wide) is gone entirely now that kind is externally supplied. Residual: the
+`KIND_UNKNOWN` sentinel string must never collide with a real kind string -- add a module-load
+assertion (`assert KIND_UNKNOWN not in PREDICTION_KINDS`) as cheap insurance.
+(b) Fixed via ambiguous_actuals bucket (see above) instead of a crash; every prediction and every
+actual is still guaranteed to land in exactly one of matched/miss/surprise, enforced by the
+confusion-matrix construction touching every one of them.
+(c) NOT fully closed, and I should say so plainly: location granularity is still function/class-
+based, so a tree that expresses the same requirement as one function has one location where a
+more-factored tree with four small functions has four, inflating that tree's actual-location
+count and shifting its miss/surprise rate denominators for reasons unrelated to prediction
+quality. The tool cannot correct for this -- it can only ask whoever authors actuals.json to grain
+consistently across trees, which is upstream of anything code can enforce. Document this as an
+open, unmitigated limitation, not a solved problem.
+
+Files affected by this pivot: `tools/touch_set_score.py` (full rewrite), `tools/
+touch_set_inventory.py` (drop the classifier import, inline two tiny helpers),
+`test/unit/test_touch_set_score.py` (rewrite -- no more tempfile two-tree fixtures needed, actuals
+are now plain JSON like predictions, much simpler), `test/unit/test_touch_set_inventory.py`
+(minor -- confirm still passes after the inline-helpers change), the naive-comparator demo script
+in scratchpad (rewrite against the new two-file shape), and the report (add the actuals-file
+format doc + the three exposure answers above).
+---
+
+# LATEST SESSION (2026-08-06): TOO-45 M2 expected-touch-set harness (touch_set_inventory.py / touch_set_score.py)
+
+(Everything below this line down to the next `---` is this session's recall; older content
+below belongs to a previous task and is retained only for history.)
+
+## Context
+
+TOO-45 architecture experiment. Building the SECOND measuring instrument (M2, "expected touch
+set") for the micro-canary protocol at `toolguard-memories/TOO-45/reports/micro-canary-protocol.md`.
+M1 already exists as `tools/change_role_classifier.py` (DO NOT MODIFY -- read-only reference for
+conventions and for reuse of its public functions).
+
+M1 was demoted to supporting; M2 is now the load-bearing headline measure of the whole suite (per
+the protocol doc's 2026-08-06 amendment -- M1 didn't discriminate on the auto-mode canary).
+
+## What to build
+
+1. `tools/touch_set_inventory.py` -- blind-predictor input. For ONE tree (never a diff, never
+   VCS, never a second tree): per module, emit path, first line of module docstring, line count,
+   and public top-level symbols (functions/classes not prefixed `_`) each with first line of own
+   docstring. Text + JSON output.
+
+2. `tools/touch_set_score.py` -- scores a hand-written predictions file against an actual change
+   (two-tree or git-diff mode, reusing `--old/--new` and `--repo/--base/--head` semantics from
+   M1). Reports: surprise rate, miss rate, kind-mismatch rate, a per-kind confusion matrix, and
+   explicit counts of anything unmatched/ambiguous/kind_unknown.
+
+**Prediction unit is (location, kind), NEVER file.** Central design constraint -- both trees in
+the earlier auto-mode canary touched `config.py`; a file-level score would have called that
+identical when the KIND of change differed. Location granularity = file + function/class (via a
+qualname), not line.
+
+Kinds: `decide`, `record`, `parse_validate`, `transport`, `display`, `test`. Actual kind must come
+mechanically from `tools/change_role_classifier.py` where derivable; otherwise `kind_unknown` --
+never guessed, never silently scored as a match.
+
+## Non-negotiables from the spec
+
+1. Nothing silently dropped -- every unmatched prediction, every unresolvable changed location,
+   every kind_unknown appears as an explicit count.
+2. KNOWN LIMITATIONS block in the tool's own OUTPUT (not just docstring).
+3. Hazard suite (synthetic cases) demonstrating fail-then-pass against a deliberately naive
+   implementation that is NOT committed. Minimum hazards: prediction naming a nonexistent
+   function; changed file with no prediction; correctly-predicted location with wrong kind;
+   function moved between files; module-level change; prediction matching by file but not
+   function. Report hazard pass rate honestly including failures.
+4. Tests in `test/unit/`, `unittest` (NOT pytest), Given/When/Then docstrings.
+5. Scoring symmetric and blind to tree identity -- no special-casing of a path, no "old is worse"
+   framing baked into logic.
+
+## Do NOT fabricate
+
+No real predictions exist yet (no blind predictor has run). Demonstrate tools only on SYNTHETIC
+data, clearly labeled synthetic in the report. May use `/tmp/toolguard-master-copy` and
+`/tmp/toolguard-branch-copy` (read-only, throwaway) to exercise the inventory tool on real input
+and sanity-check location-matching against real code -- but never present a resulting score as a
+real measurement.
+
+## Report
+
+Write to `toolguard-memories/TOO-45/reports/touch-set-harness-report.md` with the frontmatter
+block given verbatim in the prompt (title/type/permalink/tags). Markdown: never hard-wrap
+paragraphs (one paragraph = one line, however long).
+
+Cover: predictions file format, every location-matching decision and why, hazard suite + results
+including failures, known limitations.
+
+## Design decisions locked in during planning
+
+- Location string format: bare `"<path>"` for module-level, `"<path>::<Qual.Name>"` (dot-joined
+  nesting) for function/class-attributed changes. Paths POSIX-relative to tree root, normalized
+  (no leading `./`).
+- Predictions file: bare JSON array of `{"location": ..., "kind": ..., "rationale": <optional>}`.
+  Strict schema validation, fails loud (exit 2) on any malformed entry -- never silently skips a
+  bad prediction.
+- Actual-location resolution: reuse `compute_changed_lines` (new-side insert/replace opcodes only
+  -- pure deletions invisible, inherited limitation) and `is_test_path` from
+  `change_role_classifier.py`. Build per-file AST span list of (qualname, lineno, end_lineno) for
+  every FunctionDef/AsyncFunctionDef/ClassDef (including nested); a changed line's location =
+  smallest containing span, else bare path (module-level).
+- Kind derivation: collect every identifier-bearing node (Name/Attribute/arg/alias/keyword/
+  ExceptHandler/MatchAs/MatchStar/MatchMapping/Global/Nonlocal/def-name) whose line is in the
+  file's changed-line set, feed as `subjects` into `change_role_classifier.analyze_source`
+  restricted via `allowed_lines`, group returned occurrences by resolved location, reduce per
+  location via DECISION>WRITE>CONDUIT precedence -> decide/record/transport; CEREMONY/
+  UNCLASSIFIED/no-occurrence -> kind_unknown. `is_test_path(file)` short-circuits to kind="test"
+  regardless of role signal (test is a per-file bucket, not a role). `parse_validate`/`display`
+  can never be mechanically produced on the actual side -- documented limitation; predictions
+  using them can only match by landing on kind_unknown (never counted as a match) or by pure miss.
+- Existence check for "predictor guessed a name": location string checked against the UNION of
+  all (path, path::qualname) strings present in the OLD tree and the NEW tree (both parsed
+  independently of the diff). Not present in either -> reported in a distinct "prediction names a
+  location absent from both trees" bucket, separate from ordinary miss.
+- Moved/renamed function: no special-case code. Falls out of the general mechanism -- old
+  location only "exists" (via the existence check) but is never in the actual-changed set
+  (deletions invisible), so a prediction of the old location is an ordinary miss; a prediction of
+  the new location is an ordinary match if the arriving lines are classified there. Documented
+  explicitly as a limitation, not silently different behavior.
+- Confusion matrix rows = predicted kinds union {NOT_PREDICTED}; columns = actual kinds union
+  {NOT_CHANGED}; every prediction and every actual location appears exactly once -- guarantees
+  nothing is dropped.
+- Duplicate predictions for the same location: reported explicitly in an "ambiguous_predictions"
+  bucket; first-in-file-order used for scoring, never silently merged/overwritten without a
+  report line.
+
+## Files planned (kept under scope-inflation limits)
+
+- `tools/touch_set_inventory.py` (new)
+- `tools/touch_set_score.py` (new)
+- `test/unit/test_touch_set_inventory.py` (new)
+- `test/unit/test_touch_set_score.py` (new)
+- `toolguard-memories/TOO-45/reports/touch-set-harness-report.md` (new, memory)
+
+No existing files modified. Naive comparison script for the hazard demo lives in scratchpad only,
+never committed.
+
 ---
 
 # LATEST SESSION (2026-08-05): TOO-45 step R1b -- fix the measuring instruments before R1 runs

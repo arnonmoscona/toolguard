@@ -44,7 +44,7 @@ from toolguard.config_types import (
 )
 from toolguard.config_validation import validate_permissions
 from toolguard.issues import Issue
-from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
+from toolguard.path_utils import require_project_root
 from toolguard.rule_entry import RuleEntry, entries_for_tool, normalize_entry
 from toolguard.rule_entry import is_tool_wrapper as is_tool_wrapper
 from toolguard.rule_entry import normalize_entries_preserving
@@ -295,16 +295,12 @@ def find_project_root(start_dir: Path = None) -> Path:
     Raises:
         RuntimeError: If project root cannot be found
     """
-    start = Path(start_dir) if start_dir else Path.cwd()
-    resolution = resolve_project_root(
-        start, strict=True, indicators=CONFIG_ROOT_INDICATORS
-    )
-    if resolution.root is None:
-        raise RuntimeError(
-            "Project root not found. Searched for pyproject.toml or .git directory "
-            f"from {start} up to {Path.home()}. Something is badly wrong."
-        )
-    return resolution.root
+    # Delegates rather than re-deriving. The identical body used to live here
+    # AND be imported by toolguard.log_writer, which is what pinned the logging
+    # module above the "config" layer -- see require_project_root's own note
+    # (TOO-45). Kept as a public name here because callers and the test sandbox
+    # both patch `toolguard.config.find_project_root` by that path.
+    return require_project_root(start_dir)
 
 
 def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]:

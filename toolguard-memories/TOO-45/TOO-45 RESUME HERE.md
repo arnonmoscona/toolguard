@@ -10,89 +10,88 @@ tags:
 
 # TOO-45 RESUME HERE
 
-Rewritten at each stop. **Read this first**, then [[TOO-45 decision log]] (the long-form record) and [[TOO-45 architecture overhaul execution plan]]. Written 2026-08-05, end of the first full working day on this ticket.
+Rewritten at each stop. **Read this first**, then the reports in `toolguard-memories/TOO-45/reports/` and [[TOO-45 decision log]]. Written 2026-08-06, just before Arnon commits R6 and compacts the session.
 
 ## FIRST, ON A COLD RESTART
 
-**Remind Arnon that this session must be put back into auto-mode.** A restart drops it, it is easy to forget, and unattended progress is the whole execution model here. Say it before anything else. Then re-create an anti-stall reminder if the session will run unattended — cron jobs are session-only and do not survive a restart.
+**Remind Arnon that this session must be put back into auto-mode.** A restart drops it, it is easy to forget, and unattended progress depends on it. Say it before anything else. Re-create an anti-stall cron if the session will run unattended — cron jobs are session-only and do not survive a restart. **Telegram MCP is DOWN**; the terminal is the only channel.
 
-## State: the approved scope is COMPLETE and UNCOMMITTED
+## State: R6 COMPLETE. Everything green. Awaiting Arnon's review of the reports.
 
 ```
-R1: PASS   R2: PASS   R3: PASS   R5: PASS   R6: FAIL (its own ticket, agreed with Arnon)
-suite 2,387 OK      corpus 6,401 in-process + 61 e2e, no differences
---guard PASS 12/12  ruff clean (--no-cache)    doc links resolve
---layers completeness 100%, 1 direction violation: hook -> tools.decision (R6-deferred, deliberate)
+R1 PASS   R2 PASS   R3 PASS   R5 PASS   R6 PASS
+suite 2,409 OK          corpus 6,401 in-process + 61 e2e, no differences
+--layers  0 violations, completeness 100%      ruff clean (--no-cache)
+pyscn     73/100 (C), all 59 files parsed, no warnings
 ```
 
-**~58 modified/added files are uncommitted, spanning fifteen completed stages.** Committed baseline is still `11d1fd0`.
+Arnon is committing R6 now. Before that commit the tree held: the four R6 stages, plus two disclosed production edits beyond R6's scope (`_PYPROJECT_READ_ERRORS` in `install_provenance.py`; the `resolve.py` false-purity docstring correction), plus a new `test/unit/test_static_analysis_coverage.py`, plus the reports directory.
 
-```bash
-git add -A && git commit -m "TOO-45: verdict unification, audit-trail fix, leaf entry points, one rule representation"
-```
+## What R6 actually was
 
-**This is the biggest outstanding risk and it is my process failure.** I offered a commit command after D1a and never re-offered one at each subsequent green checkpoint. It already cost real time: when R1e half-failed there was no clean rollback point, because reverting it alone would have taken D1a through R1d with it. **Commit at every verified-green checkpoint.**
+**The plan was replaced, on evidence.** R6-as-scoped was satisfiable by re-pointing a single import at the module where the symbol actually lives, with encapsulation unchanged — its one reported violation was an artefact. See [[r6-reassessment]]. What was done instead:
 
-## Verify after any restart
-
-```bash
-uv run python -m unittest discover -s test -t .            # 2387 OK
-uv run python tools/corpus_build.py --verify               # no differences
-uv run python tools/architecture_fitness.py --guard        # PASS, 12 canaries
-uv run python tools/architecture_fitness.py --predicates   # R1/R2/R3/R5 PASS, R6 FAIL
-uv run ruff check --no-cache .                             # NOTE: --no-cache always
-echo '{"session_id":"t","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"'$PWD'"}' | PYTHONPATH=. uv run python -m toolguard.hook
-```
-
-## What was done
-
-| step | result |
+| stage | outcome |
 |---|---|
-| **R3** | zero production sites parse structured data out of reason prose |
-| **D4** | one undecidable floor, not two — proven by a mutation that flipped MISSED -> CAUGHT |
-| **D1a** | decision orchestration out of `Configuration` into `permission_resolution` (engine layer, imports only `config_types`) |
-| **R1** | one runtime verdict type (`RuntimeVerdict`); `UnitVerdict`/`Decision`/`LevelMatch` are declared altitudes; 2 `__iter__` shims and 13 bare verdict tuples gone; `log_command` 12 params -> 4 |
-| **R5** | entry points are leaves; `permission_migration` and `install_update` split out of their console scripts; `hook <-> tools.decision` cycle gone |
-| **R2** | index-parallel access 3 -> 0; prose invariant statements 4 -> 0; both drift guards deleted; misaligned `ToolPatternLayer` state now **unconstructible** |
+| **S0** | rewrote the private-reach detector: derives its guarded set from `.pyscn.toml` instead of a hardcoded list, follows re-exports so an import re-point cannot launder a violation, catches attribute access and `getattr`, and **publishes a known-limitations block** naming four things it cannot see |
+| **S1** | deleted all 5 real private reaches. `takeover_audit` got a new public `strip_tool_wrapper` rather than the `RuleEntry.stripped_pattern` I suggested — the agent checked and was right: those call sites handle raw native settings strings that are never `RuleEntry`s |
+| **S3** | unified `Decision` into `RuntimeVerdict`; `_verdict_from_decision` deleted outright. `Decision` was 7/8 fields verbatim plus one rename — a copy that drifted, not an altitude |
+| **S2** | `decide()` moved into a new `toolguard/api.py` in a new `api` layer between `engine` and `runtime`; both `hook.py` and `tools/` consume it; the last layer violation is gone |
 
-**The single most important outcome is not a predicate.** The compound audit trail was **83% lossy** — 813 of 975 compound-allow cases under-logged, 1,943 sub-commands executed with no audit record — because `hook.py` recovered the breakdown by regex over reason prose and silently dropped every segment without `" -> "`. It is now **0 of 978**. Fixing it exposed a second, independent bug: `resolve._deciding_sub_match` and `tools.decision._decide_bash` both attributed provenance with heuristics that only worked *because* escape-hatch leaves were missing.
+**S4 (the 32-name config facade) was dropped deliberately** — no measured pain, and it is not what R6 described.
 
-## NEXT
+## OPEN — needs Arnon
 
-1. **Commit.** See above.
-2. **Pre-push checklist** (global CLAUDE.md + project additions): coverage (`uv run python tools/coverage_stdlib.py`), documentation updates, version bump in `pyproject.toml`, release notes, `pyscn analyze` on the main package, and the two project-specific questions — do the changes require updates to the **maintenance skill** or the **security-audit skill**, and to `install.md`? Anything under `docs/`, `README.md`, `AGENTS.md` or `llms.txt` that changed needs `/documentation-review`.
-3. **The audit-log format changed** (R3 added a `Provenance` field, narrowed `Matched Rule`; R1e added per-sub-command entries and provenance). Arnon's standing call: log it as an additional step after the main refactor, plus the maintenance-skill question and release notes.
-4. **R6 is its own ticket.** Its groundwork is done: the engine's config surface is provably all-public, and `hook -> tools.decision` is the one remaining layer violation, deliberately parked with a comment explaining that it stays a *local* import because the hook is a per-process-per-call binary and hoisting it would load the tooling layer on the hot path.
-5. **Carry into R6's brief:** `decide()` belongs in an `api` layer both callers can reach. Demonstrated by execution that `decide()` is **not on the live path** — `toolguard.tools.decision` reaches `sys.modules` only under `--eval`.
-6. **Deferred, evidence recorded:** `compound.py::fallback_kind_for_reason` remains R3's one sanctioned exclusion. Both its call sites were assessed by execution and prose/structural classification always agree; site 1's real fix is blocked by 20 test closures hand-built against the narrow 3-tuple `resolve_one` contract. Re-earned on evidence, not grandfathered.
+**1. `tools/decision.py` is now a 38-line re-export**, and ~8 production modules still import `decide` from it rather than from `toolguard.api`. The layer graph is clean (tooling -> api is downward) and identity is pinned by tests, but the import statements do not say what the architecture means. Arnon said he will look closely and get back before push. My recommendation: do the ~15-edit sweep.
 
-## Ruff configuration is now in force
+**2. pyscn reports `Architecture: 84% compliant` while our own checker reports 0 violations and 100% completeness.** Unresolved on purpose — Arnon warned against rat-holing, and the two are probably not measuring the same thing. Logged as an open question, not a blocker.
 
-Four rules on top of the stock defaults: **PLC0415** (no function-level imports), **TID251** (bans `threading`/`asyncio`/`multiprocessing`/`concurrent.futures`), **PLR0913** (`max-args = 8`), **RUF100** (unused noqa, making every suppression self-cleaning). `select` is pinned explicitly — `preview = true` is scoped to `[tool.ruff.lint]` because setting it at `[tool.ruff]` turns on the preview **formatter** and reformats 55 files. Full analysis and the rejected list: [[TOO-45 ruff configuration proposal]].
+## Reports delivered — Arnon is partway through reading them
 
----
+In `toolguard-memories/TOO-45/reports/`:
 
-## Operating rules that have already cost time
+| file | subject |
+|---|---|
+| `end-state-summary.md` | orientation; **note it self-corrects four numbers I originally got wrong** |
+| `dependencies-before-after.md` | static AND runtime dependency pictures, and where they contradict |
+| `layer-separation-before-after.md` | measured + judged, including how gameable the map is |
+| `canary-before-after.md` | both canaries, and what should replace the change-cost one |
+| `core-types-and-clarity.md` | types introduced, the altitude argument, waste eliminated |
+| `canary-automode-experiment.md` | the controlled before/after feature experiment |
+| `retrospective.md` | 100 KB, 12 sections, TOC — lessons and principles |
+| `r6-reassessment.md` | why R6 was replaced |
+| `change-challenges.md` | 8 future-change tests, by an agent kept **blind** to this ticket |
+| `follow-up-queue.md` | **what happens next — read this one with the summary** |
 
-- **Git: `add` and `commit` only, on branch `too-45`.** Everything else denied by rule. **NEVER tell a subagent to revert with `git checkout`/`restore`/`stash`** — one hung on an ASK prompt for 85 minutes and had to be killed with the tree failing. Tell them: back up original bytes to a scratch file, copy back, verify with `sha256sum`. **And make them populate the backup directory BEFORE editing** — two agents created it and skipped the snapshots.
-- **Watch for silent agent stalls.** Check file mtimes rather than waiting on a notification. The 85-minute stall was found that way; its last transcript line showed it mid-verification.
-- **`uv run ruff check .` can report clean FROM CACHE against a tree that has an error.** Always `--no-cache` when the result is evidence.
-- **Subagent repo copies must exclude `.git`/`.venv` and be deleted after.** Accumulated copies filled the temp filesystem; every Bash command then returned **empty** rather than erroring.
-- **Mutation runs: state the target.** A mutation "MISSED" against the corpus may be fully pinned by unit tests. Harness at `scratchpad/mutation_gate.py` prints its target.
-- Both permission files are **denied to the agent** — Arnon edits them. Telegram chat_id **8205417538**.
+## 2026-08-06 (later): the micro-canary suite, and what it produced instead
 
-## The method, as it actually works
+Arnon's feedback on the reports identified the big canary's measures as wrong — file count measured the SIZE OF THE REQUIREMENT, not the difference between the trees, and co-change was poisoned because the requirement itself coupled the files. Agreed and acted on. The replacement design is `reports/micro-canary-protocol.md`: many small requirements instead of one big one, measures about maintainability and reviewability rather than volume.
 
-- **Scope every step with an executed trace before implementing.** Used on D1, R1, R5 and R2; it changed the plan every time, and twice it deleted more work than it created.
-- **Fix the measuring instrument BEFORE the step it scores**, as its own isolated task so no refactor can tune its own metric.
-- **Two judges with deliberately different questions** — architect: *what does this contain?*; blinded: *what would notice if it were wrong?* Neither lens sees the other's findings.
-- **Mutate what you just built.** Acceptance is "make it wrong on purpose and confirm something fails", never "did I add assertions".
-- **Record a prediction before a step**, then score it honestly. I lost several; the losses were the most informative results.
+**Twelve micro-requirements were authored by an agent kept blind to all source** (`reports/micro-requirements-blind.md`). Nothing was dropped in triage; the suite is stratified into **home ground** (code TOO-45 reworked) and **neutral ground** (code it never touched), reported separately and never pooled, because a win on home ground is circular.
 
-## Standing failures of mine, with today's evidence
+**No canary has been run.** Four measuring instruments were built and adversarially attacked first, and the attacks produced two results that ended the mechanical approach:
 
-1. **Claims derived from a representation rather than from execution.** Every correction all day came from something that ran.
+1. **Any per-location rate is unsound for comparing codebases that differ in factoring granularity** — the denominator moves with the variable under test. And **any AST-level count of "where the logic lives" rewards duplication**, because abstraction moves logic out of syntactic view. Demonstrated end to end: the same requirement inlined four times scored perfect; factored behind one predicate scored worst-possible.
+2. **`surprises = leaked_concepts + n(1-p)`.** The count carries noise proportional to n; the rate divides the signal by n. Verified by Monte Carlo. Neither is granularity-invariant, and they disagree at every realistic prediction quality. **I had promoted the count and demoted the rate — I promoted the biased one.**
+
+**Mechanical scoring is therefore abandoned. Tools gather evidence; judges score.** The surviving artefacts are the surprise LIST (adjudicated blind, one question per location), the classifier as an exact occurrence finder (identity matching independently proven exact twice), and the inventory's blindness guarantee (audit-hook verified: 170 opens, none outside the tree, no subprocess, no VCS path). Where a number is still wanted it is a count of adjudicated leaked CONCEPTS, with the concept mapping fixed before unblinding.
+
+**Cost and worth**: four agents, zero implementations. The alternative was twelve requirements implemented twice and scored by two instruments that both, independently and for different reasons, preferred monoliths. Both passed their own hazard suites. Both were validated on real data. Both produced plausible numbers. **I accepted a result from one of them before the adversary ran.**
+
+Tools now in the tree, all evidence-only: `tools/change_role_classifier.py`, `tools/touch_set_inventory.py`, `tools/touch_set_score.py`, plus their tests. Suite verified at **2,586 OK**.
+
+## NEXT, in order
+
+1. **Wait for Arnon's report feedback.** He is mid-review and pausing overnight. Do not start new work on his behalf without it.
+2. **Bug-fix ticket** (accepted, ticket not yet created): `log_writer`'s `sys.exit(1)` fail-open first, then the pattern-string join key, the three failed once-per-session attempts, the `docs/config-sync.md` marker-path mismatch. Detail in [[follow-up-queue]].
+3. **Change challenges** — CC-1 and CC-4 as a pair, then CC-2 immediately after CC-1 as a **controlled contrast**, plus the semver calibration control. These are **throwaway measuring instruments**, implemented in copies and discarded, never merged.
+4. **Pre-push checklist — deferred by Arnon until much closer to a push.** Coverage (done, numbers in the log), version bump, release notes, `/documentation-review`, the maintenance/security-audit skill questions, `install.md`, the audit-log format change step, and the post-push `uv tool upgrade` + smoke test.
+
+## Standing failures of mine, with this ticket's evidence
+
+1. **Claims from a representation rather than execution.** Every correction all day came from something that ran — including four wrong numbers in my own end-state summary, written *about* this very lesson.
 2. **I fix instances, not classes.**
 3. **A turn that ends with intentions ends.** Unattended stretches need a pending agent or a scheduled wakeup.
-4. **NEW — I trusted instruments without checking they could express the outcome.** *Seven* instrument defects in one day: name-substring matching; a caller scan confined to one directory; a gate on half a predicate's own definition; a scan that could only see classes; a footprint metric blind to positional coupling; a field deliberately named to dodge a detector; and a class-name-hardcoded scan a `sed` could defeat. Every one reported success or failure it had not earned. **Six of seven were caught only by running something.**
-5. **NEW — rename-and-count measures NAME COUPLING, not work.** Renaming `hard_deny` breaks 106 tests; the actual R2c change to the same code breaks 0. R5b's "88" and R5c's "180" both resolved to zero net suite change. **Report mechanical versus behavioural separately, or do not report the number.**
+4. **I trusted instruments without checking they could express the outcome.** Eleven instrument defects now. The worst was mine: **`--guard PASS 12/12` was quoted as a safety signal after every step and was measuring the INSTALLED v0.5.1 binary, i.e. master, the whole time.** The SessionStart hook printed "INSTALLED COPY IS STALE" in the first message of the session.
+5. **Rename-and-count measures NAME COUPLING, not work.** Renaming `hard_deny` breaks 106 tests; the real change to the same code breaks 0.
+6. **NEW: blindness beat context.** An agent forbidden from reading this ticket's analysis found six real defects that seven directed agents missed. Deliberately un-brief at least one reviewer on any long effort.
