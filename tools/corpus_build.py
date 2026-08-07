@@ -45,11 +45,14 @@ Modes
 ``--verify``
     Replay every case IN MEMORY and diff the result against the committed
     goldens (both corpora). Writes nothing. Exits non-zero on any hard
-    difference (verdict; for the end-to-end corpus, also the presence/absence
-    of the ``additionalContext`` key) or corpus data-integrity problem (a case
-    with no golden, or a golden with no case); prints tracked-field
-    (reason/context/provenance) differences for human review without failing
-    the exit code, UNLESS ``--strict-prose`` is also given.
+    difference (verdict; the compound sub-command breakdown --
+    ``sub_matches``/``overrides``, TOO-45 corpus sub-verdict extension, see
+    ``test/verdict_corpus/README.md``; for the end-to-end corpus, also the
+    presence/absence of the ``additionalContext`` key) or corpus
+    data-integrity problem (a case with no golden, or a golden with no case);
+    prints tracked-field (reason/context/provenance/matched_rule) differences
+    for human review without failing the exit code, UNLESS ``--strict-prose``
+    is also given.
 
 Usage::
 
@@ -905,6 +908,17 @@ def _print_comparison(result) -> None:
                 f"  [{mismatch.fixture}] {mismatch.tool}({mismatch.target!r}): "
                 f"expected={mismatch.expected_verdict!r} actual={mismatch.actual_verdict!r}"
             )
+    if result.breakdown_mismatches:
+        print(
+            f"\n{len(result.breakdown_mismatches)} SUB-COMMAND BREAKDOWN MISMATCH(ES) "
+            "-- STOP AND INVESTIGATE, do not regenerate:"
+        )
+        for mismatch in result.breakdown_mismatches:
+            print(
+                f"  [{mismatch.fixture}] {mismatch.tool}({mismatch.target!r}).{mismatch.field}:"
+            )
+            print(f"    expected: {mismatch.expected!r}")
+            print(f"    actual  : {mismatch.actual!r}")
     if result.prose_diffs:
         print(
             f"\n{len(result.prose_diffs)} tracked (reason/context/provenance) "

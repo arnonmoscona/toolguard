@@ -40,16 +40,18 @@ differently, in BOTH corpora (the exact fields differ; the principle doesn't):
 
 - **HARD invariant. ANY change is a test failure, full stop, and is NEVER "fixed"
   by regenerating a goldens file.** For the in-process corpus this is `verdict`
-  (allow/ask/deny). For the end-to-end corpus this is `permissionDecision`, the
-  PRESENCE/ABSENCE of the `additionalContext` key in the hook's JSON output,
-  and the PRESENCE/ABSENCE of a conflict-log entry (`conflict_logged`) --
-  whether each of those exists at all is hard; their TEXT (`additionalContext`,
-  `conflict_message`) is tracked -- see below.
-  **If `test_no_verdict_changed` or `test_no_hard_output_changed` fails, STOP and
-  investigate a real behaviour change in the engine.** If you believe the change
-  is a deliberate, reviewed bug fix (not a refactor artifact), see "Updating
-  goldens after a deliberate fix" below -- that is the only legitimate path, and
-  it goes through review, not through a test quietly turning green again.
+  AND the compound sub-command breakdown (`sub_matches`/`overrides` -- see
+  "Sub-command breakdown" below). For the end-to-end corpus this is
+  `permissionDecision`, the PRESENCE/ABSENCE of the `additionalContext` key in
+  the hook's JSON output, and the PRESENCE/ABSENCE of a conflict-log entry
+  (`conflict_logged`) -- whether each of those exists at all is hard; their
+  TEXT (`additionalContext`, `conflict_message`) is tracked -- see below.
+  **If `test_no_verdict_changed`, `test_no_sub_command_breakdown_changed`, or
+  `test_no_hard_output_changed` fails, STOP and investigate a real behaviour
+  change in the engine.** If you believe the change is a deliberate, reviewed
+  bug fix (not a refactor artifact), see "Updating goldens after a deliberate
+  fix" below -- that is the only legitimate path, and it goes through review,
+  not through a test quietly turning green again.
 - **TRACKED, not frozen.** For the in-process corpus: `reason`,
   `additional_context`, `provenance`, `matched_rule`. For the end-to-end corpus:
   `permissionDecisionReason`'s text, `additionalContext`'s text when present
@@ -65,6 +67,60 @@ differently, in BOTH corpora (the exact fields differ; the principle doesn't):
   goldens file after reviewing the diff once the change is confirmed
   intentional.
 
+## Sub-command breakdown (`sub_matches`/`overrides`) -- what it guards, and what it doesn't
+
+The in-process golden schema also pins `RuntimeVerdict.sub_matches` (one entry
+per extracted Bash sub-command, in order -- `sub_command`/`decision`/
+`matched_rule`/`provenance`, deliberately narrower than the full
+`UnitVerdict`; see `fixture_loader.py::unit_verdict_to_dict`'s docstring) and
+`RuntimeVerdict.overrides` (one entry per allow-over-deny override, in order
+-- `identifier`/`winning_pattern`/`winning_provenance`/`overridden_pattern`/
+`overridden_provenance`; see `override_to_dict`). Both keys are ALWAYS present
+as a list, empty (never omitted) when a verdict genuinely has none -- every
+file-path verdict for `sub_matches` (file paths are never compound), the
+common case for `overrides` -- so a regression that drops a genuinely
+non-empty breakdown down to `[]` is a visible list-shrank diff, not a key that
+quietly stops appearing. Unlike `provenance`/`matched_rule` at the top level,
+these are HARD, not TRACKED (see the two-tier comparison above): the entire
+point of this extension is to catch STRUCTURAL loss -- a dropped, reordered,
+or garbled entry -- and none of the four captured fields is prose a
+legitimate refactor has a reason to reword.
+
+**Why this exists**: this is precisely the structural data whose silent loss
+was TOO-45's headline audit-trail defect -- `hook.py`'s audit-log writer used
+to reconstruct which sub-commands of an allowed compound ran by regex-parsing
+the combined `reason` string, silently dropping 813 of 975 compound-allow
+corpus cases' audit entries (1,943 sub-commands with no log record at all).
+`_log_allowed_command` now reads `verdict.sub_matches` structurally instead
+(TOO-45 R1e), but nothing pinned that fix against a future regression
+reintroducing the loss until this extension. Verified to actually catch a
+regression: a controlled mutation dropping every second recorded
+`UnitVerdict` inside `resolve.py::resolve_bash_permission_detailed`'s
+`_resolve_one` made `tools/corpus_build.py --verify` fail with 992 named
+sub-command-breakdown mismatches (each showing the exact dropped sub-command);
+reverting the mutation restored a clean `--verify`. See the TOO-45
+implementation report for the exact run.
+
+**What this does NOT guard** (a real, residual gap -- deliberately not closed
+by this extension): whether `hook.py::_log_allowed_command`'s own write loop
+over `verdict.sub_matches` correctly emits ONE audit-log entry per unit
+without skipping any. That is the literal seam the historical defect lived
+in, one step downstream of what `decide()` returns. The in-process corpus
+calls `decide()` directly and never reaches `_log_allowed_command` at all
+(same reason the end-to-end corpus exists for `additionalContext` -- see
+above), and the end-to-end corpus's golden captures only the hook's real JSON
+*response*, which never carries `sub_matches`/`overrides` in any form -- the
+only observable trace of what actually got written to the audit log is the
+log file itself, which this corpus does not currently snapshot for the main
+decision-log stream (only for the `conflict` stream, via
+`conflict_logged`/`conflict_message`). Closing this residual gap would mean
+extending the end-to-end corpus to snapshot `toolguard-YYYY-MM-DD.md`
+before/after each `run_hook` call, parallel to the existing
+`conflict`-stream mechanism -- deliberately out of scope here (see the TOO-45
+implementation report for why: it is new instrumentation, not an additive
+schema widening, and the launching task gave an explicit option to document
+the gap instead of closing it).
+
 ## Layout
 
 ```
@@ -78,7 +134,10 @@ test/verdict_corpus/
   cases.jsonl         one JSON object per line: {"fixture", "tool", "target"}
   goldens.jsonl       one JSON object per line: {"fixture", "tool", "target",
                       "verdict", "reason", "additional_context", "provenance",
-                      "matched_rule"}
+                      "matched_rule", "sub_matches", "overrides"} -- the last
+                      two are the TOO-45 sub-verdict extension (see
+                      "Sub-command breakdown" below); each is a list, always
+                      present, empty when there is nothing to record
   e2e_cases.jsonl     same shape as cases.jsonl -- a small, hand-picked subset
   e2e_goldens.jsonl   one JSON object per line: {"fixture", "tool", "target",
                       "response"}, where "response" is the full hook JSON output

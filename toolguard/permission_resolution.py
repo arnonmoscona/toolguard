@@ -6,8 +6,9 @@ engine that DECIDES, driving the more-specific-wins cascade and applying the
 TOO-19 parse-failure ASK floor. It is deliberately decoupled from
 :mod:`toolguard.config`: it imports only :mod:`toolguard.config_types` and the
 stdlib, never ``toolguard.config`` itself. Everything THIS MODULE needs from a
-configuration arrives through the ``config`` argument, duck-typed against a
-narrow four-member surface:
+configuration arrives through the ``config`` argument, typed against
+:class:`~toolguard.config_types.ResolutionConfig` -- a narrow four-member
+Protocol (TOO-45 D2), not the concrete ``Configuration`` class:
 
 - ``permission_levels_with_provenance(tool_name)``
 - ``has_any_rules(tool_name)``
@@ -23,21 +24,32 @@ directly rather than reaching them through ``config``, shrinking the
 duck-typed surface below from six members to four.)
 
 A test double built for THIS module's own functions only needs to implement
-these four members. That is NOT true of a double driven through
-:mod:`toolguard.resolve` (the module's real caller): it additionally calls
-``config.resolve_config_path`` and ``config.resolved_undecidable_fallback``
-directly, for reasons outside this module's own scope.
+these four members -- and, as of TOO-45 D2, pyright checks that claim
+structurally via :class:`~toolguard.config_types.ResolutionConfig`, rather
+than it resting solely on this paragraph. That is NOT true of a double
+driven through :mod:`toolguard.resolve` (the module's real caller): it
+additionally calls ``config.resolve_config_path`` and
+``config.resolved_undecidable_fallback`` directly, for reasons outside this
+module's own scope -- which is exactly why ``resolve.py``'s own ``config``
+parameters are NOT typed against ``ResolutionConfig`` (too narrow for what
+that module needs); see that Protocol's own docstring.
+
+The other half of this seam -- the ``decide_detailed`` callable THIS
+module receives back from ``resolve.py`` rather than importing -- is
+likewise a Protocol now, not a bare ``Callable`` alias: see
+:class:`~toolguard.config_types.DecideDetailed`.
 
 This is THE single chokepoint every governed tool's decision passes through
 (see :mod:`toolguard.resolve`) -- both Bash/MCP-terminal (per sub-command) and
 file-path (Read/Write/Edit) resolution call :func:`resolve_permission_detailed`.
 """
 
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 from toolguard.config_types import (
     ConflictOverride,
-    LevelMatch,
+    DecideDetailed,
+    ResolutionConfig,
     RuntimeVerdict,
     entry_for_pattern,
     provenance_for_pattern,
@@ -146,20 +158,6 @@ def _apply_ask_floor(
     return RuntimeVerdict(decision=decision, reason=reason, provenance=None)
 
 
-#: The ``decide_detailed`` callback contract every caller of
-#: :func:`resolve_permission_detailed` supplies: given one hierarchy level's
-#: (or hard-deny pool's) allow/deny/ask pattern lists, return the level's
-#: match, or ``None`` when nothing there matched. TOO-45 R1f: this used to be
-#: documented as returning a bare ``(decision, reason, matched_pattern)``
-#: tuple; the real implementations
-#: (:func:`toolguard.permissions.decide_command_at_level_detailed`,
-#: :func:`toolguard.permissions.check_hard_deny`,
-#: :func:`toolguard.resolve._decide_file_path_at_level_detailed`,
-#: :func:`toolguard.resolve._check_file_path_hard_deny`) now all return
-#: :class:`~toolguard.config_types.LevelMatch` instead.
-DecideDetailed = Callable[[object, object, object], Optional[LevelMatch]]
-
-
 def _detect_override(
     levels,
     winning_index,
@@ -191,7 +189,10 @@ def _detect_override(
 
 
 def _resolve_unclamped(
-    config, tool_name: str, decide_detailed: DecideDetailed, subject: str = "Command"
+    config: ResolutionConfig,
+    tool_name: str,
+    decide_detailed: DecideDetailed,
+    subject: str = "Command",
 ) -> RuntimeVerdict:
     """
     The raw more-specific-wins resolution, BEFORE the TOO-19 ASK floor.
@@ -201,10 +202,11 @@ def _resolve_unclamped(
     the TOO-15 branch below (unconfigured tool vs. no_match_fallback).
 
     Args:
-        config: The resolved configuration (duck-typed, see the module
-            docstring).
+        config: The resolved configuration -- see
+            :class:`~toolguard.config_types.ResolutionConfig` for the exact
+            (duck-typed) surface this function needs.
         tool_name: ``'Bash'``, ``'Read'``, ``'Write'``, or ``'Edit'``.
-        decide_detailed: See :data:`DecideDetailed`.
+        decide_detailed: See :class:`~toolguard.config_types.DecideDetailed`.
         subject: The noun the no-match-fallback reason (below) opens with --
             ``"Command"`` for Bash, ``"Path"`` for a file-path tool. TOO-45
             R3: this lets each caller get its own correctly-phrased reason
@@ -324,7 +326,7 @@ def _resolve_unclamped(
 
 
 def resolve_permission_detailed(
-    config,
+    config: ResolutionConfig,
     tool_name: str,
     decide_detailed: DecideDetailed,
     subject: str = "Command",
@@ -334,15 +336,17 @@ def resolve_permission_detailed(
 
     ``decide_detailed`` must return a
     :class:`~toolguard.config_types.LevelMatch` (or ``None``) so the matched
-    rule can be mapped to its source provenance -- see :data:`DecideDetailed`.
-    Only allow-over-deny overrides are conflicts here -- ``hard_deny``
-    denials are handled by the caller BEFORE this runs and never reach it.
+    rule can be mapped to its source provenance -- see
+    :class:`~toolguard.config_types.DecideDetailed`. Only allow-over-deny
+    overrides are conflicts here -- ``hard_deny`` denials are handled by the
+    caller BEFORE this runs and never reach it.
 
     Args:
-        config: The resolved configuration (duck-typed, see the module
-            docstring).
+        config: The resolved configuration -- see
+            :class:`~toolguard.config_types.ResolutionConfig` for the exact
+            (duck-typed) surface this function needs.
         tool_name: ``'Bash'``, ``'Read'``, ``'Write'``, or ``'Edit'``.
-        decide_detailed: See :data:`DecideDetailed`.
+        decide_detailed: See :class:`~toolguard.config_types.DecideDetailed`.
         subject: Forwarded to :func:`_resolve_unclamped` -- see that
             parameter's own docstring (TOO-45 R3). Defaults to ``"Command"``,
             matching every caller before this parameter existed; only

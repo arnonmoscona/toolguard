@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from typing import Optional, Sequence
 from unittest.mock import patch
 
 import toolguard.config as config_module
@@ -2907,7 +2908,9 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         )
         config = Configuration(layers=layers)
 
-        def _decide(allow, deny, ask):
+        def _decide(
+            allow: Sequence[str], deny: Sequence[str], ask: Sequence[str]
+        ) -> Optional[LevelMatch]:
             if "gh *" in deny:
                 return LevelMatch(
                     decision="deny",
@@ -2948,7 +2951,9 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         )
         config = Configuration(layers=layers)
 
-        def _decide(allow, deny, ask):
+        def _decide(
+            allow: Sequence[str], deny: Sequence[str], ask: Sequence[str]
+        ) -> Optional[LevelMatch]:
             if "gh *" in deny:
                 return LevelMatch(
                     decision="deny",
@@ -3282,7 +3287,9 @@ class TestRulesDirectoryValidationAndProvenance(
         )
         config = Configuration(layers=(layer,))
 
-        def _decide(allow, deny, ask):
+        def _decide(
+            allow: Sequence[str], deny: Sequence[str], ask: Sequence[str]
+        ) -> Optional[LevelMatch]:
             if "gh *" in allow:
                 return LevelMatch(
                     decision="allow",
@@ -3375,7 +3382,9 @@ class TestParseFailureAskFloor(unittest.TestCase):
         return Configuration(layers=(layer,), parse_failures=parse_failures)
 
     @staticmethod
-    def _decide_allow_git(allow, deny, ask):
+    def _decide_allow_git(
+        allow: Sequence[str], deny: Sequence[str], ask: Sequence[str]
+    ) -> Optional[LevelMatch]:
         """A decide_detailed closure that allows 'git *' when configured."""
         if "git *" in allow:
             return LevelMatch(
@@ -3386,7 +3395,9 @@ class TestParseFailureAskFloor(unittest.TestCase):
         return None
 
     @staticmethod
-    def _decide_deny_rm(allow, deny, ask):
+    def _decide_deny_rm(
+        allow: Sequence[str], deny: Sequence[str], ask: Sequence[str]
+    ) -> Optional[LevelMatch]:
         """A decide_detailed closure that denies 'rm -rf /' when configured."""
         if "rm -rf /" in deny:
             return LevelMatch(
@@ -3637,7 +3648,9 @@ class TestAdditionalContextResolution(unittest.TestCase):
         return Configuration(layers=(layer,))
 
     @staticmethod
-    def _decide(allow, deny, ask):
+    def _decide(
+        allow: Sequence[str], deny: Sequence[str], ask: Sequence[str]
+    ) -> Optional[LevelMatch]:
         """A decide_detailed closure that deny-first/ask/allow-matches 'git *'."""
         if "git *" in deny:
             return LevelMatch(

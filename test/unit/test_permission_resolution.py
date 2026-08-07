@@ -17,9 +17,11 @@ Run with:
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from typing import Optional, Sequence
 from unittest.mock import patch
 
 from toolguard.config import Configuration, ConfigLayer, Provenance, TakeoverConfig
+from toolguard.config_types import LevelMatch
 from toolguard.permission_resolution import resolve_permission_detailed
 from toolguard.permissions import decide_command_at_level_detailed
 
@@ -34,7 +36,11 @@ def _detailed_decider(command):
     trailing-wildcard ``rm -rf *`` form) is exercised for real.
     """
 
-    def _decide(allow, deny, ask=()):
+    def _decide(
+        allow: Sequence[str],
+        deny: Sequence[str],
+        ask: Sequence[str] = (),
+    ) -> Optional[LevelMatch]:
         return decide_command_at_level_detailed(
             command, list(allow), list(deny), ask_patterns=list(ask)
         )

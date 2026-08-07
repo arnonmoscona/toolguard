@@ -60,8 +60,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from toolguard.config import Configuration
-from toolguard.config_types import RuntimeVerdict
+from toolguard.config import Configuration, ConflictOverride
+from toolguard.config_types import RuntimeVerdict, UnitVerdict
 from toolguard.hook import FILE_PATH_TOOLS
 from toolguard.testing.sandbox import Sandbox, experiment
 from toolguard.tools.decision import decide
@@ -344,6 +344,77 @@ def provenance_to_dict(
     }
 
 
+def unit_verdict_to_dict(
+    unit: UnitVerdict, sanitize: Callable[[Optional[str]], Optional[str]]
+) -> Dict[str, Any]:
+    """
+    Convert one :class:`~toolguard.config_types.UnitVerdict` (one entry of
+    ``RuntimeVerdict.sub_matches``) to a JSON-safe, sandbox-path-sanitized
+    dict, for the golden schema's ``sub_matches`` list (TOO-45 corpus
+    sub-verdict extension -- see :func:`decision_to_golden`'s docstring).
+
+    Deliberately narrower than the full :class:`~toolguard.config_types.UnitVerdict`:
+    only the four fields the extension's spec calls for --
+    ``sub_command``/``decision``/``matched_rule``/``provenance``. ``reason``
+    and ``additional_context`` are per-unit PROSE, not the structural
+    identity this extension exists to pin (the compound-command's own
+    ``reason``/``additional_context`` are already TRACKED at the top level),
+    and ``fallback_kind`` is a rendering aid for ``hook.py``'s log
+    substitution, not part of the audit-loss surface (a dropped/garbled
+    ``UnitVerdict`` is detectable here regardless of ``fallback_kind``).
+
+    Args:
+        unit: One entry from ``RuntimeVerdict.sub_matches``.
+        sanitize: Ephemeral-path sanitizer from :func:`load_fixture_configuration`.
+
+    Returns:
+        ``{"sub_command", "decision", "matched_rule", "provenance"}``.
+    """
+    return {
+        "sub_command": sanitize(unit.sub_command),
+        "decision": unit.decision,
+        "matched_rule": sanitize(unit.matched_rule),
+        "provenance": provenance_to_dict(unit.provenance, sanitize),
+    }
+
+
+def override_to_dict(
+    identifier: Optional[str],
+    override: ConflictOverride,
+    sanitize: Callable[[Optional[str]], Optional[str]],
+) -> Dict[str, Any]:
+    """
+    Convert one ``(identifier, ConflictOverride)`` pair (one entry of
+    ``RuntimeVerdict.overrides``) to a JSON-safe, sandbox-path-sanitized dict,
+    for the golden schema's ``overrides`` list (TOO-45 corpus sub-verdict
+    extension -- see :func:`decision_to_golden`'s docstring).
+
+    Args:
+        identifier: The deciding sub-command string (Bash) or the target
+            path (file-path); see :class:`~toolguard.config_types.RuntimeVerdict`'s
+            ``overrides`` docstring for the identifier convention. Never
+            ``None`` in practice for a golden produced from ``decide()``'s
+            return value (only the internal, never-returned per-level
+            verdict pairs a bare override with ``None``), but sanitized
+            defensively the same way every other optional string here is.
+        override: The :class:`~toolguard.config.ConflictOverride`.
+        sanitize: Ephemeral-path sanitizer from :func:`load_fixture_configuration`.
+
+    Returns:
+        ``{"identifier", "winning_pattern", "winning_provenance",
+        "overridden_pattern", "overridden_provenance"}``.
+    """
+    return {
+        "identifier": sanitize(identifier),
+        "winning_pattern": override.winning_pattern,
+        "winning_provenance": provenance_to_dict(override.winning_provenance, sanitize),
+        "overridden_pattern": override.overridden_pattern,
+        "overridden_provenance": provenance_to_dict(
+            override.overridden_provenance, sanitize
+        ),
+    }
+
+
 def decision_to_golden(
     fixture_id: str,
     decision: RuntimeVerdict,
@@ -353,22 +424,54 @@ def decision_to_golden(
     Build one golden record (the schema stored in ``goldens.jsonl``) from a
     replayed :class:`~toolguard.config_types.RuntimeVerdict`.
 
-    ``sub_matches`` and ``overrides`` are intentionally NOT included -- the
-    golden schema is fixed by the TOO-45 spec to
-    ``fixture/tool/target/verdict/reason/additional_context/provenance``,
-    widened once (TOO-45 D1a review debt item E) to add ``matched_rule``:
-    two independent mutations -- nulling ``matched_rule`` at its source in
+    ``sub_matches``/``overrides`` (TOO-45 corpus sub-verdict extension)
+    -----------------------------------------------------------------------
+    Originally excluded on purpose (see git history for this docstring's
+    prior text) -- this corpus is exactly the safety net this project relies
+    on, and it did not capture the compound sub-command breakdown, which is
+    precisely the structural data whose loss was TOO-45's headline defect:
+    ``hook.py``'s audit-log writer used to reconstruct which sub-commands of
+    an allowed compound ran by regex-parsing the combined ``reason`` string,
+    silently dropping 813 of 975 compound-allow corpus cases' audit entries
+    (1,943 sub-commands with no log record at all). ``_log_allowed_command``
+    now reads ``verdict.sub_matches`` structurally instead (TOO-45 R1e), but
+    nothing pinned that fix against a future regression reintroducing the
+    loss -- this extension is that pin, at the ``decide()``-return-value
+    altitude (whether ``sub_matches``/``overrides`` themselves are computed
+    correctly; NOT whether ``_log_allowed_command``'s own write loop over
+    them is correct -- see ``README.md``'s "Sub-command breakdown" section
+    for that residual gap and why the end-to-end corpus does not close it
+    either).
+
+    Included fields, via :func:`unit_verdict_to_dict`/:func:`override_to_dict`:
+    exactly the four fields the extension's spec calls for per
+    :class:`~toolguard.config_types.UnitVerdict` (``sub_command``,
+    ``decision``, ``matched_rule``, ``provenance``), and the full
+    :class:`~toolguard.config.ConflictOverride` shape per override entry.
+    Both keys are ALWAYS present as a list -- empty (never omitted) when a
+    verdict genuinely has none (every file-path verdict for ``sub_matches``;
+    the common case for ``overrides``) -- so a regression that drops a
+    genuinely non-empty compound's breakdown down to ``[]`` is a visible
+    ``[...N entries...]`` -> ``[]`` diff, not a key that silently stops
+    appearing. Both are treated as a NEW HARD comparison tier (see
+    :class:`CompoundBreakdownMismatch`/:data:`ComparisonResult.breakdown_mismatches`),
+    not the existing TRACKED tier: unlike ``reason``/``additional_context``,
+    these are structural facts a legitimate refactor has no reason to reword,
+    and the entire point of this extension is to catch STRUCTURAL loss
+    (dropped/reordered/malformed entries), the exact failure mode of the
+    defect being guarded against.
+
+    ``matched_rule`` (top-level, unrelated to the above) was widened in
+    separately (TOO-45 D1a review debt item E): two independent mutations --
+    nulling ``matched_rule`` at its source in
     ``permission_resolution._resolve_unclamped`` and nulling an overridden
     deny's provenance in ``permission_resolution._detect_override`` -- each
     failed unit tests but left this corpus reporting no differences, because
-    it did not observe either field at all. ``matched_rule`` is now tracked
-    here; the overridden-deny-provenance half is tracked on the END-TO-END
-    corpus instead (see :func:`e2e_decision_to_golden`), since
-    :class:`~toolguard.config.ConflictOverride` -- while present on
-    ``decide()``'s return value's ``overrides`` field since TOO-45 R6-S3
-    unified ``Decision`` into ``RuntimeVerdict`` -- is deliberately excluded
-    from THIS golden schema, same as ``sub_matches``; see this module's own
-    docstring for where it IS observable.
+    it did not observe either field at all. ``matched_rule`` is tracked here;
+    the overridden-deny-provenance half is tracked on the END-TO-END corpus
+    instead (see :func:`e2e_decision_to_golden`), since it is observable only
+    via the conflict-log message's text, not via ``decide()``'s return value
+    at all.
 
     Args:
         fixture_id: The fixture this case was replayed against.
@@ -387,6 +490,13 @@ def decision_to_golden(
         "additional_context": sanitize(decision.additional_context),
         "provenance": provenance_to_dict(decision.provenance, sanitize),
         "matched_rule": sanitize(decision.matched_rule),
+        "sub_matches": [
+            unit_verdict_to_dict(unit, sanitize) for unit in decision.sub_matches
+        ],
+        "overrides": [
+            override_to_dict(identifier, override, sanitize)
+            for identifier, override in decision.overrides
+        ],
     }
 
 
@@ -736,6 +846,13 @@ def _index_by_key(
 #: :func:`decision_to_golden`'s docstring for why it was missing).
 TRACKED_FIELDS = ("reason", "additional_context", "provenance", "matched_rule")
 
+#: The golden fields compared as a HARD invariant, same tier as ``verdict``
+#: (TOO-45 corpus sub-verdict extension) -- see :func:`decision_to_golden`'s
+#: docstring for why ``sub_matches``/``overrides`` are HARD rather than
+#: TRACKED, unlike the structurally-similar ``provenance``/``matched_rule``
+#: above.
+BREAKDOWN_FIELDS = ("sub_matches", "overrides")
+
 
 @dataclass(frozen=True)
 class ProseDiff:
@@ -760,6 +877,29 @@ class VerdictMismatch:
     actual_verdict: str
 
 
+@dataclass(frozen=True)
+class CompoundBreakdownMismatch:
+    """
+    One HARD difference in the compound sub-command breakdown (TOO-45 corpus
+    sub-verdict extension) -- always a test failure, same tier as
+    :class:`VerdictMismatch`. See :func:`decision_to_golden`'s docstring for
+    why ``sub_matches``/``overrides`` are HARD rather than TRACKED.
+
+    Attributes:
+        field: ``"sub_matches"`` or ``"overrides"`` -- which golden list
+            differed.
+        expected: The committed golden's full list value for *field*.
+        actual: The freshly replayed value.
+    """
+
+    fixture: str
+    tool: str
+    target: str
+    field: str
+    expected: Any
+    actual: Any
+
+
 @dataclass
 class ComparisonResult:
     """
@@ -769,6 +909,10 @@ class ComparisonResult:
     Attributes:
         verdict_mismatches: HARD failures -- any change here means STOP and
             investigate (see README.md); never regenerate to "fix" these.
+        breakdown_mismatches: HARD failures in the compound sub-command
+            breakdown (``sub_matches``/``overrides``, TOO-45 corpus
+            sub-verdict extension) -- same "STOP and investigate" rule as
+            ``verdict_mismatches``; see :class:`CompoundBreakdownMismatch`.
         prose_diffs: TRACKED, not frozen -- reason/additional_context/provenance
             differences. Reported for human review; acknowledgeable via
             ``TOOLGUARD_CORPUS_ACCEPT_PROSE=1``.
@@ -781,20 +925,24 @@ class ComparisonResult:
     """
 
     verdict_mismatches: List[VerdictMismatch] = field(default_factory=list)
+    breakdown_mismatches: List[CompoundBreakdownMismatch] = field(default_factory=list)
     prose_diffs: List[ProseDiff] = field(default_factory=list)
     missing_goldens: List[Tuple[str, str, str]] = field(default_factory=list)
     extra_goldens: List[Tuple[str, str, str]] = field(default_factory=list)
 
     @property
     def has_hard_failures(self) -> bool:
-        """True if verdicts changed or the corpus data itself is inconsistent."""
+        """True if verdicts (or the sub-command breakdown) changed, or the corpus data itself is inconsistent."""
         return bool(
-            self.verdict_mismatches or self.missing_goldens or self.extra_goldens
+            self.verdict_mismatches
+            or self.breakdown_mismatches
+            or self.missing_goldens
+            or self.extra_goldens
         )
 
     @property
     def has_prose_diffs(self) -> bool:
-        """True if any tracked (non-verdict) field differs."""
+        """True if any tracked (non-verdict, non-breakdown) field differs."""
         return bool(self.prose_diffs)
 
 
@@ -836,6 +984,23 @@ def compare_goldens(
                     actual_verdict=actual["verdict"],
                 )
             )
+        for breakdown_field in BREAKDOWN_FIELDS:
+            # .get(..., []) tolerates a golden written before this extension
+            # (none should remain committed, but this keeps an old golden a
+            # clean breakdown_mismatch rather than a KeyError).
+            expected_breakdown = expected.get(breakdown_field, [])
+            actual_breakdown = actual.get(breakdown_field, [])
+            if expected_breakdown != actual_breakdown:
+                result.breakdown_mismatches.append(
+                    CompoundBreakdownMismatch(
+                        fixture=fixture,
+                        tool=tool,
+                        target=target,
+                        field=breakdown_field,
+                        expected=expected_breakdown,
+                        actual=actual_breakdown,
+                    )
+                )
         for tracked_field in TRACKED_FIELDS:
             if expected[tracked_field] != actual[tracked_field]:
                 result.prose_diffs.append(

@@ -8,6 +8,36 @@ tags:
 - implementation-report
 ---
 
+# LATEST SESSION (2026-08-07): TOO-45 compound/resolve cycle removal
+
+(Everything below this line down to the next `---` is this session's report; older content below belongs to previous tasks and is retained only for history.)
+
+## Summary
+
+Implemented TOO-45 Plan B (compound/resolve cycle removal) with all 5 judgment refinements (R1-R5), in 7 verified steps. Abandon gate NOT taken. Full detail, including "what turned out wrong" and the dynamic cycle-verification trace, is in the ticket-scoped report: `toolguard-memories/TOO-45/reports/compound-cycle-implementation.md` (permalink `toolguard/too-45/reports/compound-cycle-implementation`).
+
+## Files changed
+
+- `toolguard/compound.py` -- added `CommandUnit` (with `audits_as_one: bool`, judgment R1), `decompose`, `judge_unit` (absorbs old `_resolve_leaf_detailed` + the `UndecidableSegment` branch, no callbacks), `_unit_from_tuple`. `_combine_strictest` now takes `List[UnitVerdict]`. `_resolve_leaf_detailed` deleted. `resolve_outer`/`record_unit` parameters and their type aliases deleted from the legacy driver.
+- `toolguard/resolve.py` -- `resolve_bash_permission_detailed` now drives `compound.decompose`/`judge_unit`/`_combine_strictest` directly; `_decide` returns a strict `(UnitVerdict, Optional[ConflictOverride])` pair; `_resolve_one`/`_resolve_outer`/`_record_unit` deleted.
+- `toolguard/hook.py`, `toolguard/config_types.py` -- docstring-only fixes (stale references to the deleted mechanism).
+- `test/unit/test_compound_resolve_seam.py` -- new, 17 tests: sub_matches characterization (Plan B step 0, the corpus does NOT track this field), the 12-cell ask-floor fallback matrix (judgment R3), the stub-override-never-leaks test (judgment R3), `_unit_from_tuple`'s own test + judge_unit's two new raise conditions (judgment R5).
+
+## Verification
+
+Cycle gone: verified both structurally (`judge_unit` takes zero `Callable` params; `resolve.py` no longer imports `resolve_compound_permission_detailed`) and dynamically (`sys.settrace` trace across 3 real decisions: 0 calls from `toolguard.compound` back into `toolguard.resolve`).
+
+Full gate: 2604 unit tests OK; corpus `--verify` OK, no differences (6401 in-process + 61 end-to-end); architecture fitness `--layers` 100% complete / 0 violations; `--predicates` R1/R2/R3/R5/R6 all PASS; `ruff check .` clean. No golden regenerated, no pre-existing test modified.
+
+## Note on concurrent work
+
+`toolguard/config.py` and `toolguard/permission_resolution.py` show modified in git status but from a concurrent coder-subagent session (mtimes 10:16-10:22, before my edits started at 10:44) -- not my work, flagged in the ticket report, not touched by me. That other session's own report may be the one this note previously had at the top before this prepend (the note appears to be shared/stacked across sessions, not one-writer-per-run; overwrite was attempted first and rejected by the tool as an existing-note conflict).
+
+## Self-review
+
+Ruff format + check clean on all touched files. No async/await, no threading, no local imports introduced. py_compile clean. All 5 judgment refinements (R1-R5) implemented and each has dedicated test coverage.
+
+---
 ## UPDATE: adversarial-review response addressed (same session)
 
 `touch_set_score.py` no longer computes any score/rate/ratio (Monte Carlo proof that both the

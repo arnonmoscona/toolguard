@@ -336,14 +336,18 @@ def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) ->
     (:attr:`~toolguard.config_types.RuntimeVerdict.fallback_warning`) -- this
     function does not inspect *reason* itself to decide whether to log. For
     the Bash path, that structured flag is computed per-sub-command inside
-    :func:`toolguard.compound.resolve_compound_permission_detailed` (TOO-19
-    code review M1) -- and only a single narrow spot there still resorts to a
-    marker-substring check, immediately after ``resolve_one`` returns and
-    before any multi-leaf summarisation, rather than downstream on the
-    already-summarised compound reason (see that function and
-    :func:`toolguard.compound._combine_strictest` for why the OLD downstream
-    check silently lost the warning -- and misattributed the allow to a
-    fabricated rule -- for a multi-leaf all-allow compound). Either way the
+    :func:`toolguard.resolve.resolve_bash_permission_detailed`'s own ``_decide``
+    closure (TOO-19 code review M1), STRUCTURALLY -- an 'allow' with
+    ``matched_rule`` left ``None`` can only have fallen through to
+    ``no_match_fallback``, so no marker-substring check on *reason* is
+    involved at all (TOO-45 compound/resolve cycle removal: this used to be
+    computed inside :func:`toolguard.compound.resolve_compound_permission_detailed`
+    via a text-based marker check immediately after ``resolve_one`` returned;
+    that legacy driver still exists for ~40 tests and
+    :func:`toolguard.compound.check_compound_permission`, which have no
+    ``UnitVerdict``-producing resolver of their own and so still go through
+    :func:`toolguard.compound.fallback_kind_for_reason`'s text heuristic --
+    but the production path this function serves does not). Either way the
     hook layer -- the thing this project's own CLAUDE.md most wants kept
     honest -- reads a plain boolean instead of parsing prose itself.
     Critically, this means the new
@@ -492,8 +496,10 @@ def _log_allowed_command(
     ALREADY correct for every case the reason string can hold, including an
     ask-floor leaf's escape-hatch outcome and an
     :class:`~toolguard.parser.multiline.UndecidableSegment` -- see
-    ``compound.py``'s ``resolve_outer``/``record_unit`` plumbing) directly,
-    instead of regex-parsing the ``"All N sub-commands allowed: [...]"``
+    :func:`~toolguard.compound.judge_unit` and
+    :func:`~toolguard.resolve.resolve_bash_permission_detailed`'s own driver
+    loop, which appends ``judge_unit``'s result directly for such a unit)
+    directly, instead of regex-parsing the ``"All N sub-commands allowed: [...]"``
     reason string back apart. That regex-parse (the retired
     ``_parse_compound_match_details``) kept only segments containing
     ``" -> "``, silently DROPPING the audit-log entry for any sub-command

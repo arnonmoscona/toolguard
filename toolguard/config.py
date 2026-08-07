@@ -1368,7 +1368,13 @@ class Configuration:
     def permission_levels_with_provenance(
         self, tool_name: str
     ) -> Tuple[
-        Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[ToolPatternLayer, ...]], ...
+        Tuple[
+            Tuple[str, ...],
+            Tuple[str, ...],
+            Tuple[str, ...],
+            Tuple[ToolPatternLayer, ...],
+        ],
+        ...,
     ]:
         """
         Group per-layer patterns for a tool into per-LEVEL pairs, retaining

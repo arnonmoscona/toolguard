@@ -67,11 +67,17 @@ callers unpack the result as a bare 3-tuple were removed once their only
 callers (8 test call sites) were converted to attribute access.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
-from toolguard.compound import cap_context_words, resolve_compound_permission_detailed
+from toolguard.compound import (
+    _combine_strictest,
+    cap_context_words,
+    decompose,
+    judge_unit,
+)
 from toolguard.config_types import ConflictOverride
 from toolguard.config_types import LevelMatch as LevelMatch
+from toolguard.config_types import ResolveConfig
 from toolguard.config_types import RuntimeVerdict as RuntimeVerdict
 from toolguard.config_types import UnitVerdict as UnitVerdict
 from toolguard.normalization import expand_tilde
@@ -383,7 +389,10 @@ def _check_file_path_hard_deny(
 
 
 def resolve_file_path_permission_detailed(
-    tool_name: str, file_path: str, config, extended_syntax: bool = True
+    tool_name: str,
+    file_path: str,
+    config: ResolveConfig,
+    extended_syntax: bool = True,
 ) -> "RuntimeVerdict":
     """
     Resolve a file-path tool decision using more-specific-wins across levels.
@@ -402,7 +411,10 @@ def resolve_file_path_permission_detailed(
     Args:
         tool_name: ``'Read'``, ``'Write'``, or ``'Edit'``.
         file_path: The file path under evaluation.
-        config: The resolved :class:`~toolguard.config.Configuration`.
+        config: The resolved configuration -- typed as
+            :class:`~toolguard.config_types.ResolveConfig` (TOO-45 D2
+            follow-up), in practice always a real
+            :class:`~toolguard.config.Configuration`.
         extended_syntax: Whether extended prefixes are honoured.
 
     Returns:
@@ -453,7 +465,19 @@ def resolve_file_path_permission_detailed(
             target=file_path,
         )
 
-    def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
+    def _decide_detailed(
+        allow_patterns: Sequence[str],
+        deny_patterns: Sequence[str],
+        ask_patterns: Sequence[str],
+    ) -> Optional[LevelMatch]:
+        """
+        Adapt this level's pattern triple to
+        :func:`_decide_file_path_at_level_detailed`'s own, differently-shaped
+        signature -- this closure's own type (not its body) is what
+        satisfies :class:`~toolguard.config_types.DecideDetailed`, the
+        contract :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+        (below) requires of its callback.
+        """
         return _decide_file_path_at_level_detailed(
             file_path,
             list(allow_patterns),
@@ -520,12 +544,14 @@ def _deciding_sub_match(
     TOO-45 R1e: this now ALWAYS agrees with whichever sub-command
     ``_combine_strictest`` surfaced in the reason, because ``sub_matches`` no
     longer holds a stale, PRE-floor entry for an ASK-floor leaf (foreign
-    inline/heredoc code) -- ``compound.py::_resolve_leaf_detailed`` corrects
-    (or, for an :class:`~toolguard.parser.multiline.UndecidableSegment`,
-    creates) that leaf's recorded :class:`UnitVerdict` to its TRUE final
-    decision/matched_rule/provenance at the point the floor is applied,
-    instead of leaving the truncated outer-command stub's own pre-floor
-    cascade result in place. Example: `ls && python -c "print(1)"` under
+    inline/heredoc code). TOO-45 compound/resolve cycle removal:
+    :func:`~toolguard.compound.judge_unit` BUILDS that leaf's/segment's
+    :class:`UnitVerdict` as its TRUE final decision/matched_rule/provenance
+    in the first place (there is no separate stub-then-correct step any
+    more -- the driver loop above appends ``judge_unit``'s own return value
+    directly for a unit where ``unit.audits_as_one`` is ``True``), instead of
+    ever recording the truncated outer-command stub's own pre-floor cascade
+    result. Example: `ls && python -c "print(1)"` under
     ``undecidable_fallback=deny`` -- ``sub_matches`` now correctly records
     'deny' for the ``python -c`` leaf (not 'allow', the stub's own match),
     so this function finds it and attributes the compound's 'deny' to that
@@ -551,7 +577,7 @@ def _deciding_sub_match(
     ``len(sub_matches) == 1`` is no longer the right proxy for "there is one
     decider", now that :mod:`~toolguard.compound` correctly records a
     :class:`UnitVerdict` for EVERY leaf/segment, including escape-hatch ones
-    that never call ``resolve_one`` at all (an :class:`UndecidableSegment`,
+    that never call ``_decide`` at all (an :class:`UndecidableSegment`,
     or an ASK-floor leaf that allowed via the floor rather than a rule). A
     two-element compound like ``diff <(cat a) <(cat b) && ls -la`` now
     legitimately has TWO ``sub_matches`` entries (the undecidable ``diff``
@@ -607,7 +633,7 @@ def _deciding_sub_match(
 
 def resolve_bash_permission_detailed(
     command: str,
-    config,
+    config: ResolveConfig,
     extended_syntax: bool,
     hard_deny_deny,
     hard_deny_allow,
@@ -619,10 +645,9 @@ def resolve_bash_permission_detailed(
     provenance-aware more-specific-wins cascade
     (:func:`~toolguard.permission_resolution.resolve_permission_detailed`), with
     the unoverridable ``[hard_deny]`` pool checked FIRST per sub-command. The
-    compound decision uses the same strictness as
-    :func:`toolguard.compound.resolve_compound_permission_detailed` (any deny
-    -> deny; else any ask -> ask; else allow). Reasons carry the winning
-    rule's provenance.
+    compound decision uses the same strictness :func:`toolguard.compound._combine_strictest`
+    always has (any deny -> deny; else any ask -> ask; else allow). Reasons
+    carry the winning rule's provenance.
 
     Allow-over-deny overrides discovered on any sub-command (only meaningful when
     the overall decision is allow) are returned so the caller can log them to the
@@ -631,7 +656,15 @@ def resolve_bash_permission_detailed(
     Foreign inline code / heredoc sinks and undecidable segments (control
     structures, process substitution) that cannot be safely decomposed are
     floored per ``config.resolved_undecidable_fallback()`` (TOO-19; ``'ask'``
-    by default) -- see :func:`toolguard.compound.resolve_compound_permission_detailed`.
+    by default) -- see :func:`toolguard.compound.judge_unit`. TOO-45 compound/
+    resolve cycle removal: this function drives
+    :func:`toolguard.compound.decompose`/:func:`toolguard.compound.judge_unit`/
+    :func:`toolguard.compound._combine_strictest` directly (see the ``_decide``
+    closure and the driver loop below) -- it does NOT call
+    :func:`toolguard.compound.resolve_compound_permission_detailed`, which
+    remains a convenience driver over the same three functions for callers
+    with only a plain ``resolve_one`` closure (tests, and
+    :func:`toolguard.compound.check_compound_permission`).
 
     Per-sub-command provenance is recorded in the returned
     :class:`~toolguard.config_types.RuntimeVerdict`\\ 's ``sub_matches`` list
@@ -639,7 +672,10 @@ def resolve_bash_permission_detailed(
 
     Args:
         command: The bash command line (may be compound).
-        config: The resolved :class:`~toolguard.config.Configuration`.
+        config: The resolved configuration -- typed as
+            :class:`~toolguard.config_types.ResolveConfig` (TOO-45 D2
+            follow-up), in practice always a real
+            :class:`~toolguard.config.Configuration`.
         extended_syntax: Whether extended prefixes are honoured.
         hard_deny_deny: Pooled hard-deny deny patterns for Bash.
         hard_deny_allow: Pooled hard-deny allow (carve-out) patterns for Bash.
@@ -656,7 +692,7 @@ def resolve_bash_permission_detailed(
         at least one contributing sub-command whose verdict came from the
         WARNED value of ``no_match_fallback`` or ``undecidable_fallback`` --
         TOO-19 code review M1). Propagated directly from
-        :func:`toolguard.compound.resolve_compound_permission_detailed`'s own
+        :func:`toolguard.compound._combine_strictest`'s own
         structured ``fallback_warning``, computed from a per-sub-command tag
         rather than re-derived by searching the FINAL (possibly multi-leaf
         summarised) reason text for a marker substring -- the latter is what
@@ -675,27 +711,46 @@ def resolve_bash_permission_detailed(
     overrides: List[Tuple[str, ConflictOverride]] = []
     sub_matches: List[UnitVerdict] = []
 
-    def _decide(sub_command: str):
+    def _decide(sub_command: str) -> Tuple[UnitVerdict, Optional[ConflictOverride]]:
         """
-        Pure per-sub-command decision: hard-deny first, then the cascade.
+        Per-sub-command decision: hard-deny first, then the cascade. Records nothing.
 
-        TOO-45 R1e: factored out of ``_resolve_one`` so its result can ALSO
-        drive ``_resolve_outer`` (the ask-floor stub probe), which must NOT
-        record a ``UnitVerdict``/override the way ``_resolve_one`` does --
-        without this split, every ask-floor leaf's stub check would append a
-        pre-floor entry to ``sub_matches``/``overrides`` for the caller
-        (``compound.py``) to then have to discard or correct, rather than
-        simply never being recorded in the first place.
+        Side-effect-free in the sense callers depend on (no logging,
+        sub_matches/overrides mutation, or recursion into this function),
+        but NOT pure in the strict sense -- like every resolver in this
+        module (see this module's own docstring, TOO-45 R6-S2), pattern
+        matching reads live filesystem state via ``normalization.py``'s
+        ``exists()``/``is_symlink()``/``resolve()``. An earlier draft of this
+        docstring, and TOO-45's own compound-cycle plan, called this function
+        "already pure" -- that claim was already retracted once at the module
+        level and is not repeated here.
 
-        Returns ``(decision, reason, additional_context, matched_rule,
-        provenance, fallback_kind, override)`` where ``override`` is
-        ``resolved.overrides[0][1]`` (an allow-over-deny
-        :class:`~toolguard.config_types.ConflictOverride`) or ``None``, and
-        ``fallback_kind`` is ``'warned'``/``'silent'``/``None`` -- computed
-        purely structurally (an 'allow' with ``matched_rule`` left ``None``
-        can ONLY have fallen through to ``no_match_fallback``, see
-        ``permission_resolution.py``'s ``_resolve_unclamped``), never by
-        parsing *reason*.
+        TOO-45 compound/resolve cycle removal (step 4): returns a strict
+        ``(UnitVerdict, Optional[ConflictOverride])`` pair instead of the
+        former 7-tuple -- ``UnitVerdict`` already carries every field the
+        tuple did (``decision``/``reason``/``additional_context``/
+        ``matched_rule``/``provenance``/``fallback_kind``); only ``override``
+        genuinely has nowhere else to live, so it stays a second, explicit
+        return value rather than being smuggled onto ``UnitVerdict`` itself
+        (which is a shared, published record -- audit/log/corpus code reads
+        it -- not a scratch pad for this function's own internal plumbing). A
+        strict pair is fine per this project's convention (see
+        ``tools/architecture_fitness.py``'s ``find_bare_verdict_tuples``,
+        which does not flag one) and needs no adapter: this function is
+        called directly by the driver loop below, never by a test closure
+        with a fixed-shape contract to preserve.
+
+        Args:
+            sub_command: The individual sub-command string to decide.
+
+        Returns:
+            The sub-command's :class:`~toolguard.config_types.UnitVerdict`
+            (``fallback_kind`` computed purely structurally -- an 'allow'
+            with ``matched_rule`` left ``None`` can ONLY have fallen through
+            to ``no_match_fallback``, see ``permission_resolution.py``'s
+            ``_resolve_unclamped`` -- never by parsing *reason*), paired with
+            the allow-over-deny :class:`~toolguard.config_types.ConflictOverride`
+            discovered while resolving it, or ``None`` when there was none.
         """
         hard = check_hard_deny(
             sub_command, list(hard_deny_deny), list(hard_deny_allow), extended_syntax
@@ -710,16 +765,34 @@ def resolve_bash_permission_detailed(
             # hard-deny match is always a genuine attribution, never a
             # fallback escape hatch.
             return (
-                hard.decision,
-                hard.reason,
-                _hard_deny_additional_context(config, "Bash", hard.matched_pattern),
-                hard.matched_pattern,
-                None,  # hard_deny is pooled; no single provenance
-                None,  # fallback_kind
+                UnitVerdict(
+                    sub_command=sub_command,
+                    decision=hard.decision,
+                    matched_rule=hard.matched_pattern,
+                    provenance=None,  # hard_deny is pooled; no single provenance
+                    reason=hard.reason,
+                    additional_context=_hard_deny_additional_context(
+                        config, "Bash", hard.matched_pattern
+                    ),
+                    fallback_kind=None,
+                ),
                 None,  # override
             )
 
-        def _decide_detailed(allow_patterns, deny_patterns, ask_patterns):
+        def _decide_detailed(
+            allow_patterns: Sequence[str],
+            deny_patterns: Sequence[str],
+            ask_patterns: Sequence[str],
+        ) -> Optional[LevelMatch]:
+            """
+            Adapt this level's pattern triple to
+            :func:`~toolguard.permissions.decide_command_at_level_detailed`'s
+            own, differently-shaped signature -- see the file-path resolver's
+            twin closure (above, in
+            :func:`resolve_file_path_permission_detailed`) for why this
+            closure's TYPE is what satisfies
+            :class:`~toolguard.config_types.DecideDetailed`.
+            """
             return decide_command_at_level_detailed(
                 sub_command,
                 list(allow_patterns),
@@ -734,71 +807,78 @@ def resolve_bash_permission_detailed(
             fallback_kind = "warned" if resolved.fallback_warning else "silent"
         override = resolved.overrides[0][1] if resolved.overrides else None
         return (
-            resolved.decision,
-            resolved.reason,
-            resolved.additional_context,
-            resolved.matched_rule,
-            resolved.provenance,
-            fallback_kind,
-            override,
-        )
-
-    def _resolve_one(sub_command: str) -> Tuple[str, str, Optional[str]]:
-        """Resolve *sub_command* AND record its UnitVerdict -- the ``resolve_one`` contract."""
-        (
-            decision,
-            reason,
-            additional_context,
-            matched_rule,
-            provenance,
-            fallback_kind,
-            override,
-        ) = _decide(sub_command)
-        if decision == "allow" and override is not None:
-            # `resolved.overrides` (the internal per-level verdict) pairs its
-            # bare override with identifier None -- see RuntimeVerdict's
-            # docstring ("overrides" reconciliation). Re-pair with the real
-            # sub_command identifier now that it is known.
-            overrides.append((sub_command, override))
-        sub_matches.append(
             UnitVerdict(
                 sub_command=sub_command,
-                decision=decision,
-                matched_rule=matched_rule,
-                provenance=provenance,
-                reason=reason,
-                additional_context=additional_context,
+                decision=resolved.decision,
+                matched_rule=resolved.matched_rule,
+                provenance=resolved.provenance,
+                reason=resolved.reason,
+                additional_context=resolved.additional_context,
                 fallback_kind=fallback_kind,
-            )
+            ),
+            override,
         )
-        return decision, reason, additional_context
 
-    def _resolve_outer(
-        sub_command: str,
-    ) -> Tuple[str, str, Optional[str], Optional[str], Optional[object]]:
-        """Pure probe of *sub_command* -- no ``sub_matches``/``overrides`` side effect.
+    # TOO-45 compound/resolve cycle removal (step 4): drives
+    # compound.decompose/judge_unit/_combine_strictest directly instead of
+    # calling compound.resolve_compound_permission_detailed with injected
+    # resolve_one/resolve_outer/record_unit callbacks -- this IS the cycle
+    # removal: compound.py no longer calls back into this module at all
+    # (verified by profiling one real decision; see the implementation
+    # report). sub_matches/overrides are populated by ordinary
+    # append/extend on the visible lines below, not by a closure's side
+    # effect.
+    units = decompose(command)
+    unit_verdicts: List[UnitVerdict] = []
+    for unit in units:
+        part_verdicts: List[UnitVerdict] = []
+        for part in unit.parts:
+            verdict, override = _decide(part)
+            part_verdicts.append(verdict)
+            if (
+                not unit.audits_as_one
+                and verdict.decision == "allow"
+                and override is not None
+            ):
+                # `resolved.overrides` (the internal per-level verdict) pairs
+                # its bare override with identifier None -- see
+                # RuntimeVerdict's docstring ("overrides" reconciliation).
+                # Re-pair with the real sub_command identifier now that it is
+                # known. Gated on `not unit.audits_as_one` (TOO-45 compound-
+                # cycle judgment R1) so an 'inline_code' unit's outer-stub
+                # probe -- a check for an explicit deny, not a real
+                # per-sub-command decision -- never contributes a conflict-log
+                # entry of its own; only ever true for 'plain' in practice
+                # (the only kind with a genuine allow-over-deny concept), but
+                # reading the SAME field that governs sub_matches recording
+                # keeps the two rules from drifting apart.
+                overrides.append((part, override))
+        judged = judge_unit(unit, part_verdicts, config.resolved_undecidable_fallback())
+        unit_verdicts.append(judged)
+        # A plain unit's audit entries are its own sub-commands. A floored or
+        # undecidable unit is audited as ONE entry, because the floor -- not
+        # any part's rule match -- is what decided it (TOO-45 R1e). Read from
+        # unit.audits_as_one (set by decompose, TOO-45 compound-cycle
+        # judgment R1) rather than re-derived from unit.kind here: a fifth
+        # kind cannot be added to CommandUnit without deciding this field, so
+        # this driver cannot silently under-audit it the way a
+        # `unit.kind == "plain"` check could.
+        if unit.audits_as_one:
+            sub_matches.append(judged)
+        else:
+            sub_matches.extend(part_verdicts)
 
-        Used ONLY by :func:`~toolguard.compound._resolve_leaf_detailed`'s
-        ask-floor branch (TOO-45 R1e) to check the outer-command stub for an
-        explicit deny/ask without polluting ``sub_matches``/``overrides``
-        with a pre-floor entry the caller may go on to discard/correct.
-        """
-        decision, reason, additional_context, matched_rule, provenance, _fk, _ov = (
-            _decide(sub_command)
+    if not units:
+        # Mirrors compound.resolve_compound_permission_detailed's own empty-
+        # command guard exactly (same reason text) -- decompose(command)
+        # returning [] means _combine_strictest would otherwise see an empty
+        # list and report its own, different "No commands to evaluate"
+        # wording.
+        combined = RuntimeVerdict(
+            decision="deny", reason="No valid commands found in command line"
         )
-        return decision, reason, additional_context, matched_rule, provenance
-
-    def _record_unit(unit: UnitVerdict) -> None:
-        """Append a :class:`UnitVerdict` built entirely by the caller (TOO-45 R1e)."""
-        sub_matches.append(unit)
-
-    combined = resolve_compound_permission_detailed(
-        command,
-        _resolve_one,
-        undecidable_fallback=config.resolved_undecidable_fallback(),
-        resolve_outer=_resolve_outer,
-        record_unit=_record_unit,
-    )
+    else:
+        combined = _combine_strictest(unit_verdicts)
     decision, reason, additional_context, fallback_warning = (
         combined.decision,
         combined.reason,
@@ -807,13 +887,13 @@ def resolve_bash_permission_detailed(
     )
 
     # TOO-19 fail-open fix: re-apply the parse-failure ASK floor HERE, at the
-    # compound boundary, in addition to the per-sub-command application inside
-    # _resolve_one (via resolve_permission_detailed). This second
-    # application is not redundant: resolve_compound_permission can produce a
-    # verdict from a grammar-level UndecidableSegment (process substitution,
+    # compound boundary, in addition to the per-sub-command application
+    # inside _decide (via resolve_permission_detailed). This second
+    # application is not redundant: the compound driver above can produce a
+    # verdict from a grammar-level undecidable unit (process substitution,
     # `case`, unparseable control structures -- see
-    # toolguard/parser/multiline.py) which has NO leaves and therefore never
-    # calls _resolve_one at all, so the per-leaf floor never runs for it. Only
+    # toolguard/parser/multiline.py) which has NO parts and therefore never
+    # calls _decide at all, so the per-part floor never runs for it. Only
     # this call site sees the final compound decision regardless of how it was
     # produced, so it is the only place that can cover that gap. Re-applying
     # to a decision that already passed through the per-leaf floor is a

@@ -4,11 +4,13 @@ Replay tests for the TOO-45 verdict-equivalence corpus.
 See ``test/verdict_corpus/README.md`` for what this corpus is for, how it is
 built, and -- critically -- what to do when a test in this module fails. The
 short version, repeated here because it is the single most important fact
-about this file: a failing :meth:`TestVerdictCorpus.test_no_verdict_changed`
-(or, for the end-to-end corpus,
-:meth:`TestVerdictCorpusEndToEnd.test_no_hard_output_changed`) means STOP and
-investigate a real behaviour change. Neither is ever fixed by regenerating a
-goldens file.
+about this file: a failing :meth:`TestVerdictCorpus.test_no_verdict_changed`,
+:meth:`TestVerdictCorpus.test_no_sub_command_breakdown_changed` (TOO-45
+corpus sub-verdict extension -- the compound sub-command breakdown is a
+second, equally HARD invariant), or (for the end-to-end corpus)
+:meth:`TestVerdictCorpusEndToEnd.test_no_hard_output_changed` means STOP and
+investigate a real behaviour change. None of these is ever fixed by
+regenerating a goldens file.
 
 Two test classes, two corpora, run independently
 --------------------------------------------------
@@ -152,6 +154,39 @@ class TestVerdictCorpus(unittest.TestCase):
             f"{len(self.result.verdict_mismatches)} verdict(s) changed -- STOP and "
             "investigate a real behaviour change. Do NOT regenerate goldens.jsonl to "
             "make this pass -- see test/verdict_corpus/README.md.\n" + "\n".join(lines)
+        )
+
+    def test_no_sub_command_breakdown_changed(self):
+        """
+        Given every corpus case, replayed right now through decide()
+        When its sub_matches/overrides breakdown (TOO-45 corpus sub-verdict
+             extension) is compared to the committed golden
+        Then neither differs for any case
+
+        This is a second HARD invariant, same tier as
+        :meth:`test_no_verdict_changed`: the compound sub-command breakdown
+        is exactly the structural data whose silent loss was TOO-45's
+        headline audit-trail defect (813/975 compound-allow cases
+        under-logged, fixed in ``hook.py::_log_allowed_command`` by reading
+        ``verdict.sub_matches`` directly instead of regex-parsing the reason
+        string). A failure here means STOP and investigate a real behaviour
+        change -- it is NEVER fixed by regenerating goldens.jsonl. See
+        test/verdict_corpus/README.md.
+        """
+        if not self.result.breakdown_mismatches:
+            return
+        lines = []
+        for mismatch in self.result.breakdown_mismatches:
+            lines.append(
+                f"  [{mismatch.fixture}] {mismatch.tool}({mismatch.target!r}).{mismatch.field}:"
+            )
+            lines.append(f"    expected: {mismatch.expected!r}")
+            lines.append(f"    actual  : {mismatch.actual!r}")
+        self.fail(
+            f"{len(self.result.breakdown_mismatches)} sub-command breakdown "
+            "mismatch(es) -- STOP and investigate a real behaviour change. Do NOT "
+            "regenerate goldens.jsonl to make this pass -- see "
+            "test/verdict_corpus/README.md.\n" + "\n".join(lines)
         )
 
     def test_tracked_fields_unchanged_or_acknowledged(self):

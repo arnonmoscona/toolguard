@@ -22,6 +22,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
+from typing import Optional, Sequence
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
@@ -31,7 +32,7 @@ from toolguard.config import (
     Provenance,
     RuntimeVerdict,
 )
-from toolguard.config_types import provenance_for_pattern
+from toolguard.config_types import LevelMatch, provenance_for_pattern
 from toolguard.error_log import log_conflict, log_error, log_warning
 from toolguard.log_writer import (
     _DISCOVERY_LOG_FILENAME,
@@ -58,7 +59,11 @@ def _bash_layer(allow, deny, specificity, path):
 def _detailed_decider(command):
     """Return a per-level detailed decider bound to a command (for Bash)."""
 
-    def _decide(allow, deny, ask=()):
+    def _decide(
+        allow: Sequence[str],
+        deny: Sequence[str],
+        ask: Sequence[str] = (),
+    ) -> Optional[LevelMatch]:
         return decide_command_at_level_detailed(
             command, list(allow), list(deny), ask_patterns=list(ask)
         )
