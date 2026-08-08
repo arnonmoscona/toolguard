@@ -355,7 +355,7 @@ def resolve_permission_detailed(
 
     THE single chokepoint every governed tool's decision passes through (see
     :mod:`toolguard.resolve`) -- both the live hook and the read-only
-    ``--eval``/replay path (:mod:`toolguard.tools.decision`) call it in turn.
+    ``--eval``/replay path (:mod:`toolguard.api`) call it in turn.
     That is why the config-level ASK floor (TOO-19, see :func:`_apply_ask_floor`)
     is applied HERE rather than in the Bash-specific compound pipeline
     (:mod:`toolguard.compound`): it then covers every governed tool uniformly.

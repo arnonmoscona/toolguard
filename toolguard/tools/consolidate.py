@@ -43,6 +43,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+from toolguard.api import decide
 from toolguard.config import Configuration, Provenance
 from toolguard.patterns import PatternType, parse_pattern
 from toolguard.tools.config_access import (
@@ -50,7 +51,6 @@ from toolguard.tools.config_access import (
     per_layer_rules,
     with_layer_allow_replaced,
 )
-from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.pattern_overlap import (
     default_prefix_tokens,

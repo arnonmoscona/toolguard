@@ -43,10 +43,7 @@ from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 
 # Tools that operate on file paths (use GLOB matching). Alias of the shared
-# foundation constant. TOO-45 R5a removed the production importer
-# (toolguard.tools.decision now takes FILE_TOOLS from toolguard.constants
-# directly, as its sibling tooling modules already did, which broke the
-# hook <-> tools.decision cycle). Only tests import this name now; prefer
+# foundation constant, kept because tests still import this name; prefer
 # toolguard.constants.FILE_TOOLS in new code.
 FILE_PATH_TOOLS = FILE_TOOLS
 
@@ -630,9 +627,8 @@ def _resolve_event(
     delegates the actual resolution to :func:`toolguard.api.decide`, the single
     side-effect-free primitive that also backs the replay harness and other
     tooling (TOO-45 R6-S2: ``decide`` moved into :mod:`toolguard.api`, the
-    layer both this module and the tooling layer are allowed to import from;
-    :mod:`toolguard.tools.decision` now re-exports the same function object
-    unchanged).  Delegating (rather than re-copying the file-vs-command
+    layer both this module and the tooling layer are allowed to import from).
+    Delegating (rather than re-copying the file-vs-command
     dispatch and the ``[hard_deny]`` handling) makes the ``--eval`` verdict
     identical to the live hook's by construction.  No logging, divergence
     checks, or auto-migration happen here.  ``no_match_fallback`` (including

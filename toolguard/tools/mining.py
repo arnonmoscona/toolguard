@@ -7,7 +7,7 @@ invent permission patterns -- pattern generation/generalisation is agent
 judgement (and, later, the curated-tool advisor).  Instead it:
 
 1. **Aggregates + classifies** every corpus command by comparing the CURRENT
-   config's decision (via :func:`~toolguard.tools.decision.decide`) with the
+   config's decision (via :func:`~toolguard.api.decide`) with the
    OBSERVED outcome from the corpus (logs + transcripts):
 
    - ``allow-candidate`` -- the config would ``ask``/``deny`` it but it was
@@ -36,10 +36,10 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Dict, List, Tuple
 
+from toolguard.api import decide
 from toolguard.config import Configuration, Provenance
 from toolguard.constants import FILE_TOOLS, STATUS_EXECUTED, STATUS_REFUSED
 from toolguard.tools.config_access import with_layer_allow_replaced
-from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import replay
 

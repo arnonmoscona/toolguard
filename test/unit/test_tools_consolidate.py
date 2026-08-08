@@ -16,6 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import List, Optional
 
+from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.config_access import with_layer_allow_replaced
 from toolguard.tools.consolidate import (
@@ -25,7 +26,6 @@ from toolguard.tools.consolidate import (
     propose_broadening_consolidations,
     propose_consolidations,
 )
-from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.redundancy import _config_without_allow
 

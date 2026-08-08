@@ -26,9 +26,9 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import patch
 
+from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools import installer as installer_module
-from toolguard.tools.decision import decide
 from toolguard.tools.installer import main
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions

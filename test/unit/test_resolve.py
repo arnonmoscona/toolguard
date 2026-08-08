@@ -1,12 +1,12 @@
 """
-Anti-drift contract test: decision.decide() must produce the same verdict
+Anti-drift contract test: api.decide() must produce the same verdict
 as calling toolguard.resolve.resolve_*() directly.
 
-These tests document (and guard) the property that toolguard.tools.decision.decide()
+These tests document (and guard) the property that toolguard.api.decide()
 delegates to toolguard.resolve.* -- rather than maintaining a separate copy of the
 orchestration logic. Because both sides share the same code, this test is essentially
 "same code, same results"; if someone were to accidentally reintroduce a divergence
-(e.g. re-copy orchestration into decision.py), these tests would catch it.
+(e.g. re-copy orchestration into api.py), these tests would catch it.
 
 Coverage:
   - Simple Bash allow
@@ -22,13 +22,13 @@ from types import MappingProxyType
 
 from unittest.mock import patch
 
+from toolguard.api import decide
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.hook import (
     _log_allowed_command,
     _log_non_allow_decision,
 )
-from toolguard.tools.decision import decide
 from toolguard.resolve import (
     RuntimeVerdict,
     resolve_bash_permission_detailed,

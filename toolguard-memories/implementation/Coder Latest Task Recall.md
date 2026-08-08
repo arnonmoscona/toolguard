@@ -9,6 +9,73 @@ tags:
 ---
 
 ---
+# CURRENT TASK (supersedes everything below): TOO-45 punch-list item #05 -- delete toolguard/tools/decision.py shim
+
+Repo: /home/arnon/projects/toolguard, branch too-45.
+
+## Goal
+Delete `toolguard/tools/decision.py` (38-line backward-compat re-export of `toolguard.api.decide`).
+Re-point every importer at `toolguard.api`. No alias, no shim. No external callers - all in-repo.
+
+## Steps
+1. Re-point production imports (`from toolguard.tools.decision import decide` ->
+   `from toolguard.api import decide`) in: toolguard/tools/uninstall_readiness.py,
+   toolguard/tools/mining.py, toolguard/tools/self_permission.py, toolguard/tools/consolidate.py,
+   toolguard/tools/replay.py, toolguard/testing/sandbox.py. Keep alphabetical/grouping position
+   for ruff/isort. Grep to confirm no other importers.
+
+2. Re-point test imports, same change in: test/unit/test_resolve.py, test/unit/test_hook_eval.py,
+   test/unit/test_self_integrity.py, test/unit/test_tools_installer.py,
+   test/unit/test_tools_consolidate.py, test/unit/test_symlink_hierarchy.py,
+   test/unit/test_ask_resolution.py, test/verdict_corpus/fixture_loader.py. Grep to confirm
+   complete list.
+
+3. `rm toolguard/tools/decision.py` - plain rm, NOT git rm. No git write ops at all. Read-only
+   git fine.
+
+4. Merge test modules:
+   - `mv test/unit/test_tools_decision.py test/unit/test_api.py` (overwrites; plain mv)
+   - Update module docstring: tests toolguard.api, SHORT, no ticket narrative
+   - Fix import to `from toolguard.api import decide`
+   - From OLD test/unit/test_api.py (read via `git show HEAD:test/unit/test_api.py`), carry over
+     ONLY: `TestDecideBashToolOverride` (needs `_decide_bash` added to import from toolguard.api)
+   - DELETE `TestApiReExportIdentity` (both tests) - shim no longer exists
+   - DELETE `TestApiDecideSmoke` - subsumed by merged suite
+   - Reuse existing `_IsolatedEnvTestCase`/`_make_config` helpers from merged file
+
+5. Fix prose references that become FALSE (delete false statements, prefer deletion over
+   rewriting): toolguard/api.py ~10,~15; toolguard/config_types.py ~681;
+   toolguard/tools/uninstall_readiness.py ~253; toolguard/testing/sandbox.py ~453;
+   toolguard/resolve.py ~25; toolguard/hook.py ~47-50 (FILE_PATH_TOOLS comment) and ~634;
+   toolguard/tools/mining.py ~10; toolguard/tools/self_permission.py ~168;
+   toolguard/tools/__init__.py ~24; toolguard/tools/replay.py ~7,~173;
+   toolguard/permission_resolution.py ~358; tools/corpus_build.py ~10,~21,~41,~527;
+   test/verdict_corpus/fixture_loader.py (several); test/verdict_corpus/README.md ~9;
+   technical-notes.md ~965; docstrings in test modules repointed in step 2.
+
+## DO NOT TOUCH (scope fence)
+tools/architecture_fitness.py, test/unit/test_architecture_fitness.py,
+test/unit/test_architecture.py, .pyscn.toml, toolguard-memories/**. No reformatting/reordering
+beyond what's needed.
+
+## Verification commands
+```
+uv run python -m unittest discover -s test -t .      # expect 2604 OK or report delta
+uv run python tools/architecture_fitness.py --layers  # completeness + direction
+uv run ruff format . && uv run ruff check .
+```
+Grep confirm `tools.decision` / `tools/decision` appears nowhere except: toolguard-memories/,
+tools/architecture_fitness.py, test/unit/test_architecture_fitness.py,
+test/unit/test_architecture.py, .pyscn.toml.
+
+If test/unit/test_verdict_corpus.py reports differences: STOP, report, do not adjust.
+
+## Report requirement
+Final message: exact file list (modified/added/deleted), test count, anything unanticipated.
+
+---
+
+---
 STATUS: implementation complete except one flagged conflict (see final report to
 orchestrator). test_log_directory_must_exist (test/unit/test_log_writer.py) pins the exact
 sys.exit(1) behavior fix #5 intentionally removes. Left untouched per "never modify existing

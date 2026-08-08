@@ -15,7 +15,7 @@ literally call the same :func:`compare_goldens` / :func:`compare_e2e_goldens`
 Two corpora live here, for two different seams:
 
 - The IN-PROCESS corpus (:data:`CASES_PATH` / :data:`GOLDENS_PATH`) calls
-  :func:`toolguard.tools.decision.decide` directly -- fast (~5,000 cases in a
+  :func:`toolguard.api.decide` directly -- fast (~5,000 cases in a
   few seconds), but it stops at the decision itself and cannot see anything
   downstream of it (e.g. how :func:`toolguard.hook.create_hook_output` turns
   a decision into the actual JSON Claude Code receives).
@@ -28,7 +28,7 @@ Two corpora live here, for two different seams:
   ALSO the only place (TOO-45 audit follow-up) that can see
   :class:`~toolguard.config.ConflictOverride`: since TOO-45 R6-S3 unified
   ``Decision`` into :class:`~toolguard.config_types.RuntimeVerdict`,
-  :func:`toolguard.tools.decision.decide` DOES return it on its own
+  :func:`toolguard.api.decide` DOES return it on its own
   ``overrides`` field, but :func:`decision_to_golden` (see that function's
   own docstring) deliberately excludes it from the golden schema, and it
   never appears in the hook's JSON output either -- it exists ONLY as an
@@ -60,11 +60,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from toolguard.api import decide
 from toolguard.config import Configuration, ConflictOverride
 from toolguard.config_types import RuntimeVerdict, UnitVerdict
 from toolguard.hook import FILE_PATH_TOOLS
 from toolguard.testing.sandbox import Sandbox, experiment
-from toolguard.tools.decision import decide
 
 CORPUS_DIR = Path(__file__).resolve().parent
 CONFIGS_DIR = CORPUS_DIR / "configs"
@@ -237,7 +237,7 @@ def _open_fixture_sandbox(fixture_id: str) -> Iterator[Sandbox]:
     :class:`~toolguard.testing.sandbox.Sandbox`.
 
     Shared by :func:`load_fixture_configuration` (in-process replay via
-    :func:`toolguard.tools.decision.decide`) and :func:`load_fixture_sandbox`
+    :func:`toolguard.api.decide`) and :func:`load_fixture_sandbox`
     (end-to-end replay via :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`)
     so both go through the identical write-then-isolate step -- neither
     reimplements it.
@@ -266,7 +266,7 @@ def load_fixture_configuration(
 ) -> Iterator[Tuple[Configuration, Callable[[Optional[str]], Optional[str]]]]:
     """
     Materialise one fixture in an isolated sandbox and load its Configuration
-    ONCE, for IN-PROCESS replay via :func:`toolguard.tools.decision.decide`.
+    ONCE, for IN-PROCESS replay via :func:`toolguard.api.decide`.
 
     This is the ONLY place :class:`~toolguard.config.Configuration` is loaded
     for corpus purposes -- callers must run every case for this fixture
@@ -303,7 +303,7 @@ def load_fixture_sandbox(
     real invocation of the ``toolguard`` binary would. That subprocess
     re-parse is the whole point of the end-to-end corpus: it is what lets this
     corpus see the hook's OUTPUT construction (:func:`toolguard.hook.create_hook_output`),
-    which :func:`toolguard.tools.decision.decide` never touches.
+    which :func:`toolguard.api.decide` never touches.
 
     Args:
         fixture_id: One of :data:`FIXTURE_IDS`.
@@ -475,7 +475,7 @@ def decision_to_golden(
 
     Args:
         fixture_id: The fixture this case was replayed against.
-        decision: The result of :func:`toolguard.tools.decision.decide`.
+        decision: The result of :func:`toolguard.api.decide`.
         sanitize: Ephemeral-path sanitizer from :func:`load_fixture_configuration`.
 
     Returns:
@@ -626,7 +626,7 @@ def _new_stream_log_text(before: Dict[Path, str], after: Dict[Path, str]) -> str
     :meth:`~toolguard.testing.sandbox.Sandbox.run_hook` call -- the only way
     this corpus can observe :class:`~toolguard.config.ConflictOverride`
     (routed to the ``'conflict'`` stream): it never reaches
-    :func:`toolguard.tools.decision.decide`'s return value or the hook's JSON
+    :func:`toolguard.api.decide`'s return value or the hook's JSON
     output (see the end-to-end corpus's module-level rationale above), and
     (TOO-45 D1a review debt item E) neither does the OVERRIDDEN deny's
     provenance specifically -- it is embedded only in this log message's text

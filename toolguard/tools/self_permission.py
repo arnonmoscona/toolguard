@@ -31,8 +31,8 @@ Design guard-rails (see the plan's "Self-permissioning" section):
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+from toolguard.api import decide
 from toolguard.config import Configuration
-from toolguard.tools.decision import decide
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ def evaluate_self_permissions(config: Configuration) -> List[SelfPermissionStatu
     """
     Evaluate every self-permission against *config* using the real decision engine.
 
-    Reuses :func:`~toolguard.tools.decision.decide` (no reimplementation) to learn
+    Reuses :func:`~toolguard.api.decide` (no reimplementation) to learn
     what the hook would actually decide for each tool's probe command, then
     classifies the result.
 

@@ -30,8 +30,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from toolguard import config as config_module
+from toolguard.api import decide
 from toolguard.config import load_configuration
-from toolguard.tools.decision import decide
 
 PROJECT_CONFIG = '[permissions]\nallow = ["Bash(ls *)"]\ndeny = ["Bash(curl *)"]\n'
 

@@ -15,7 +15,7 @@ regenerating a goldens file.
 Two test classes, two corpora, run independently
 --------------------------------------------------
 - :class:`TestVerdictCorpus` replays the fast, ~5,000-case in-process corpus
-  through :func:`toolguard.tools.decision.decide` directly.
+  through :func:`toolguard.api.decide` directly.
 - :class:`TestVerdictCorpusEndToEnd` replays a small (~30-case), deliberately
   chosen end-to-end corpus through the REAL hook binary in a subprocess (via
   :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`). This exists because
@@ -72,7 +72,7 @@ _ACCEPT_PROSE_ENV_VAR = "TOOLGUARD_CORPUS_ACCEPT_PROSE"
 class TestVerdictCorpus(unittest.TestCase):
     """
     Replays every ``(fixture, tool, target)`` case in ``cases.jsonl`` through
-    :func:`toolguard.tools.decision.decide` and compares the result to the
+    :func:`toolguard.api.decide` and compares the result to the
     committed ``goldens.jsonl``, ONCE for the whole test class (replaying is
     the expensive part; every ``test_*`` method below reuses the same
     comparison rather than re-running it).
@@ -88,7 +88,7 @@ class TestVerdictCorpus(unittest.TestCase):
         Load the committed corpus and replay it exactly once.
 
         Given the committed ``cases.jsonl`` and ``goldens.jsonl``
-        When the whole corpus is replayed through :func:`~toolguard.tools.decision.decide`
+        When the whole corpus is replayed through :func:`~toolguard.api.decide`
         Then a single :class:`~test.verdict_corpus.fixture_loader.ComparisonResult`
              is available to every test method in this class.
         """

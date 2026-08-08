@@ -4,7 +4,7 @@ THE KEYSTONE: decision-replay diff for toolguard config safety verification.
 Given a harvested corpus of real commands (from :mod:`toolguard.tools.log_harvest`)
 and two configurations (A = current, B = proposed), this module recomputes each
 entry's permission decision under both configs via
-:func:`~toolguard.tools.decision.decide` and produces a structured
+:func:`~toolguard.api.decide` and produces a structured
 :class:`ReplayDiff` classifying every change.
 
 Classification
@@ -37,10 +37,10 @@ inspections).
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from toolguard.api import decide
 from toolguard.config import Configuration
 from toolguard.config_types import RuntimeVerdict
 from toolguard.constants import STATUS_EXECUTED, STATUS_REFUSED
-from toolguard.tools.decision import decide
 from toolguard.tools.log_harvest import LogEntry
 
 
@@ -170,7 +170,7 @@ def replay(
     """
     Replay a corpus against two configurations and return the decision diff.
 
-    For each entry in ``corpus``, :func:`~toolguard.tools.decision.decide` is
+    For each entry in ``corpus``, :func:`~toolguard.api.decide` is
     called under both ``config_a`` and ``config_b``, the verdicts are compared,
     and the entry is classified as ``unchanged``, ``tightened``, or
     ``broadened``.

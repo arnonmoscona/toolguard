@@ -6,9 +6,7 @@ permission decision: :func:`decide` is what the live hook's ``--eval`` path
 calls (:mod:`toolguard.hook`, the runtime layer) and what every tooling
 consumer -- the replay harness, the corpus builder, ``self_permission``,
 ``uninstall_readiness``, the config-migration mining pass, the takeover-audit
-consolidation step, and :mod:`toolguard.testing.sandbox` -- calls (via
-:mod:`toolguard.tools.decision`'s backward-compatible re-export; see that
-module's docstring).
+consolidation step, and :mod:`toolguard.testing.sandbox` -- calls directly.
 
 Why this module exists (TOO-45 R6-S2)
 --------------------------------------

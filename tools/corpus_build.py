@@ -7,7 +7,7 @@ corpus under ``test/verdict_corpus/``.
 
 The corpus is the safety guard for the upcoming permission-engine refactor: it
 replays a fixed set of ``(config, tool, target)`` cases through
-:func:`toolguard.tools.decision.decide` and pins the result. See
+:func:`toolguard.api.decide` and pins the result. See
 ``test/verdict_corpus/README.md`` for what the corpus is for and how goldens
 are meant to be updated (never by blindly regenerating after a failure).
 
@@ -18,7 +18,7 @@ one either.
 Two corpora, one CLI
 --------------------
 Every mode below drives BOTH the fast in-process corpus (``cases.jsonl`` /
-``goldens.jsonl``, calling :func:`toolguard.tools.decision.decide` directly)
+``goldens.jsonl``, calling :func:`toolguard.api.decide` directly)
 and the small end-to-end corpus (``e2e_cases.jsonl`` / ``e2e_goldens.jsonl``,
 running the real hook binary in a subprocess via
 :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`). The end-to-end corpus
@@ -38,7 +38,7 @@ Modes
     every other fixture in :data:`~test.verdict_corpus.fixture_loader.FIXTURE_IDS`.
     Also rebuilds ``e2e_cases.jsonl`` from :data:`E2E_CASES`.
 ``--generate``
-    Replay every case in ``cases.jsonl`` through :func:`~toolguard.tools.decision.decide`
+    Replay every case in ``cases.jsonl`` through :func:`~toolguard.api.decide`
     and (re)write ``goldens.jsonl``. Also replays every case in
     ``e2e_cases.jsonl`` through the real hook subprocess and (re)writes
     ``e2e_goldens.jsonl``.
@@ -524,7 +524,7 @@ _ASK_PROVENANCE_CASES: List[Tuple[str, str]] = [
 #: corpus too (the allow verdicts themselves are correct and worth pinning),
 #: but `permission_resolution._detect_override`'s actual firing is invisible
 #: to THIS corpus -- since TOO-45 R6-S3 unified `Decision` into
-#: `RuntimeVerdict`, :func:`toolguard.tools.decision.decide` DOES return
+#: `RuntimeVerdict`, :func:`toolguard.api.decide` DOES return
 #: `ConflictOverride` on its own `overrides` field, but
 #: `fixture_loader.decision_to_golden` deliberately excludes it from the
 #: golden schema (see that function's own docstring) and the hook's JSON

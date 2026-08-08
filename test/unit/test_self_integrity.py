@@ -9,7 +9,7 @@ a true clean slate," directly contradicting docs/uninstall.md's repeated,
 explicit "do not delete ~/.toolguard/" policy.
 
 Behavioral coverage (does the pattern actually block/allow the right
-things) lives here via the REAL decision engine (toolguard.tools.decision.decide),
+things) lives here via the REAL decision engine (toolguard.api.decide),
 not just structural assertions on the table -- a hard_deny pattern that looks
 right but does not actually match is worse than no protection at all, since
 it would be trusted.
@@ -19,8 +19,8 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
+from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.tools.decision import decide
 from toolguard.tools.self_integrity import (
     SelfIntegrityProtection,
     required_self_integrity_hard_deny_patterns,

@@ -11,17 +11,13 @@ Modules
 config_access
     Thin facade over :class:`~toolguard.config.Configuration` for skills that
     need to inspect the config hierarchy without interacting with hook internals.
-decision
-    Side-effect-free evaluation primitive: replay a single command/path through
-    the exact same matching logic the hook uses, without any log writes or
-    process exits.
 log_harvest
     Parse daily toolguard log files (``logs/toolguard-YYYY-MM-DD.md``) into a
     structured corpus of :class:`~toolguard.tools.log_harvest.LogEntry` records.
 replay
     THE KEYSTONE: given a harvested corpus and two configurations (A=current,
     B=proposed), recompute each entry's decision under each config via
-    :func:`~toolguard.tools.decision.decide` and produce a structured diff
+    :func:`~toolguard.api.decide` and produce a structured diff
     classifying each change as ``unchanged``, ``tightened``, or ``broadened``.
     The diff is the safety verifier the config-maintenance skill relies on.
 redundancy

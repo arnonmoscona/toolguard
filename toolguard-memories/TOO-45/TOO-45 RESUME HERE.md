@@ -16,7 +16,35 @@ Rewritten at each stop. **Read this first**, then the reports in `toolguard-memo
 
 **Remind Arnon that this session must be put back into auto-mode.** A restart drops it, it is easy to forget, and unattended progress depends on it. Say it before anything else. Re-create an anti-stall cron if the session will run unattended — cron jobs are session-only and do not survive a restart. **Telegram MCP is DOWN**; the terminal is the only channel.
 
-## State: R6 COMPLETE. Everything green. Awaiting Arnon's review of the reports.
+## STATE AS OF 2026-08-08 — READ THIS BLOCK FIRST, the rest of this note is older
+
+**Everything green**: 2,604 tests OK; corpus 6,401 in-process + 61 e2e, no differences; `--layers` complete with no direction violations; R1/R2/R3/R5/R6 all PASS; ruff clean.
+
+**Committed since the R6 work**: `e46900b` observability layer moved below config; `3bb21b7` compound/resolve cycle removed + resolution seam typed with Protocols; `46de79c` misc bug fixes.
+
+**Uncommitted**: `toolguard-memories/TOO-45/proposed-tickets/` (13 files), plus `reports/review-conclusions.md`, `reports/corrections-corpus.md`, `reports/corrections-analysis.md`. Documentation only, no code.
+
+### THE ONE THING ARNON OWES US: the decision batch on 13 proposed tickets
+
+`toolguard-memories/TOO-45/proposed-tickets/01..13`, each a separate file, all opened in his IDE. He is working through them. **Do not start any of them without his decision.** Two he flagged himself: **#11** (does the ASK floor cover non-Bash command tools) is the only one with a plausible security consequence and needs a measurement, not a decision; **#13** (anchor the project root per session) he called potentially catastrophic and wants before RC1.
+
+He also said he will "get back to you on the bug list later" — that is #01 and #02, the two deferred bugs needing design.
+
+### What happened after the R6 block below
+
+- **`compound <-> resolve` runtime cycle REMOVED.** Two independent plans, blind judge picked Plan B, implemented with the judge's refinements. Verified with the same profiler that found it: `compound -> resolve` went 2 calls to 0. Concept count 10 -> 7.
+- **`permission_resolution <-> resolve` cycle typed, NOT removed** — `ResolutionConfig`, `ResolveConfig`, `DecideDetailed` Protocols in `config_types`. Removal is proposed ticket #03.
+- **Golden corpus now guards `sub_matches` and `overrides`** as a HARD tier, proven to detect loss (992 cases). It does NOT guard `hook.py`'s write loop — that gap is ticket #12.
+- **Global guidance gained three rules** (in `~/.claude/CLAUDE.md`, uncommitted — dot_files is his to commit): prose-is-not-a-data-structure; comments short and free of ticket narrative; semantic string literals belong in constants.
+- **A `package.json` marker change was made and REVERTED** — it relocated the project root in a monorepo and re-anchored relative deny patterns. See #13.
+- **Auto-memory added**: prefer Mermaid over PlantUML; reports-and-diagrams treatment triggered by sentiment, not a phrase.
+
+### Two corrections of mine on record, both from acting on inherited claims
+
+1. I ranked `log_writer`'s `sys.exit(1)` as the top security defect on a blind reviewer's say-so. **Two one-minute tests showed both paths unreachable.** Fixed as hardening, not a security fix.
+2. I spec'd the `package.json` change as "making two tuples consistent". The comment I was deleting said the narrowing was deliberate, and it was right.
+
+## State: R6 COMPLETE (older block, superseded above)
 
 ```
 R1 PASS   R2 PASS   R3 PASS   R5 PASS   R6 PASS

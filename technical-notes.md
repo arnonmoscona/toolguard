@@ -962,7 +962,7 @@ Isolation is structural rather than by discipline. `Path.home()` and
 tripwire is what makes this safe by construction instead of safe by inspection: an experiment
 that *would* touch live config fails loudly rather than succeeding quietly.
 
-`.evaluate()` delegates to `toolguard.tools.decision.decide`, the same side-effect-free
+`.evaluate()` delegates to `toolguard.api.decide`, the same side-effect-free
 primitive behind the live hook and `--eval`, so a sandbox verdict matches the hook's by
 construction. `.run_hook()` is the end-to-end form; it runs in a subprocess, so the in-process
 tripwire cannot observe it and isolation there is by environment instead -- a weaker

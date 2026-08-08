@@ -9,7 +9,7 @@ auto-migration).
 Two properties are guarded here:
 
 * Anti-drift: :func:`toolguard.hook._resolve_event` must return the same verdict
-  the decision facade (:func:`toolguard.tools.decision.decide`) produces, so the
+  the decision facade (:func:`toolguard.api.decide`) produces, so the
   probe reflects the real resolver and cannot silently diverge from it.
 * Read-only: driving ``main()`` with ``--eval`` must never call ``log_command``
   or ``run_auto_migration``.
@@ -22,9 +22,9 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
+from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.hook import _resolve_event, main
-from toolguard.tools.decision import decide
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 

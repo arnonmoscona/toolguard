@@ -6,7 +6,7 @@ This is the load-bearing safety guard for the TOO-45 permission-engine architect
 refactor. **There are two corpora, covering two different seams:**
 
 - The **in-process corpus** (`cases.jsonl` / `goldens.jsonl`, ~5,000 cases) replays
-  `(config, tool, target)` cases through `toolguard.tools.decision.decide` -- the
+  `(config, tool, target)` cases through `toolguard.api.decide` -- the
   single side-effect-free entry point that backs both the live hook and `--eval`.
 - The **end-to-end corpus** (`e2e_cases.jsonl` / `e2e_goldens.jsonl`, ~30 cases)
   replays a small, deliberately chosen subset through the REAL `toolguard` hook

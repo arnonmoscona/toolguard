@@ -21,11 +21,9 @@ resolution algorithms.  It contains ONLY functions that are:
   ``hook``).
 
 Both the live hook (``toolguard.hook``) and the ``api``/tooling layer
-(``toolguard.api``, TOO-45 R6-S2's public decision interface; the previous
-name for this, ``toolguard.tools.decision``, is now a backward-compatible
-re-export -- see that module's docstring) import from here, ensuring that
-what the hook decides at runtime is EXACTLY what tooling computes -- there is
-no separate copy of the logic to drift.
+(``toolguard.api``, TOO-45 R6-S2's public decision interface) import from
+here, ensuring that what the hook decides at runtime is EXACTLY what tooling
+computes -- there is no separate copy of the logic to drift.
 
 Functions moved here from ``hook.py`` (previously private helpers):
 - :func:`_anchor_file_pattern`

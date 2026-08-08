@@ -58,7 +58,7 @@ from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 from unittest.mock import patch
 
 from toolguard import config as toolguard_config
-from toolguard.tools.decision import decide
+from toolguard.api import decide
 
 __all__ = [
     "SandboxEscapeError",
@@ -450,7 +450,7 @@ class Sandbox:
         """
         Resolve one permission decision through the REAL decision path.
 
-        Delegates to :func:`toolguard.tools.decision.decide`, the same
+        Delegates to :func:`toolguard.api.decide`, the same
         side-effect-free primitive that backs the live hook and ``--eval``, so a
         verdict here matches the hook's by construction rather than by
         re-implementation.

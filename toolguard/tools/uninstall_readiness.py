@@ -48,8 +48,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from toolguard.api import decide
 from toolguard.config import Configuration
-from toolguard.tools.decision import decide
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +250,7 @@ def evaluate_uninstall_readiness_permissions(
     Evaluate every uninstall-readiness entry against *config* using the real
     decision engine.
 
-    Reuses :func:`~toolguard.tools.decision.decide` (no reimplementation) to
+    Reuses :func:`~toolguard.api.decide` (no reimplementation) to
     learn what the hook would actually decide for each entry's probe, then
     classifies the result.
 

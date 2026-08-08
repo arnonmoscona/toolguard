@@ -11,7 +11,7 @@ resolution).  Before the fix the ``ask`` list was never consulted during matchin
 so a rule in ``[permissions.ask]`` had no effect at all.
 
 These tests drive the real decision engine via
-:func:`toolguard.tools.decision.decide`, which mirrors what the hook would decide.
+:func:`toolguard.api.decide`, which mirrors what the hook would decide.
 
 All tests use stdlib unittest with BDD Given/When/Then docstrings.
 """
@@ -21,8 +21,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import List, Optional
 
+from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.tools.decision import decide
 
 
 def _prov(specificity: int = 0, level: str = "project") -> Provenance:
