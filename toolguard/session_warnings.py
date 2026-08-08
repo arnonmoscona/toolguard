@@ -1,8 +1,9 @@
 """
-Session-based warning system for toolguard takeover mode.
+Per-day warning deduplication for toolguard takeover mode.
 
-Provides warning deduplication using date-stamped marker files to avoid
-repeated warnings to the error log while maintaining visibility on stdout.
+Suppresses repeated warnings using date-stamped marker files (one per
+calendar day, not per Claude Code session -- the module name predates this
+distinction and keeping it avoids a wider rename; TOO-45).
 """
 
 import sys
@@ -112,9 +113,8 @@ def issue_takeover_warning(
 
     This notice is INFORMATIONAL, not actionable, so as of TOO-8 Phase 4 it is
     NO LONGER persisted to any toolguard log stream. It is emitted to stderr for
-    visibility and recorded once per session via a date-stamped marker file so
-    repeated invocations within a day stay quiet. The marker continues to gate
-    the once-per-session behaviour even though nothing is written to a log file.
+    visibility and recorded once per day via a date-stamped marker file so
+    repeated invocations within a day stay quiet.
 
     Notice message:
     [TOOLGUARD WARNING] Takeover mode is active. Claude's native permission prompts are
@@ -142,7 +142,7 @@ def issue_takeover_warning(
     if to_stdout:
         print(warning_message, file=sys.stderr)
 
-    # Maintain the once-per-session marker (no log file is written anymore).
+    # Maintain the once-per-day marker (no log file is written anymore).
     if marker_exists_for_today(logs_dir):
         return
 

@@ -9,6 +9,10 @@ tags:
 
 # TOO-45: layer separation, before and after
 
+> **STALE as of 2026-08-07 — read for method, not for state.** The layer map has changed twice since this was written: an `api` layer (R6-S2), and an `observability` layer below `config` holding `log_writer`, `error_log`, `session_warnings` and `update_check` — the latter prompted by Arnon's reading of the MR-08 canary, which showed four config modules hand-rolling 16 stderr writes because they could not legally reach a logging module. The `compound <-> resolve` runtime cycle discussed here has since been removed outright, and the `permission_resolution <-> resolve` seam is now expressed by Protocols in `config_types`. Current state lives in [[canary-results]] and the architecture document still to be written.
+>
+> **On the gameability section**: Arnon's response is the right frame — every metric and rule is gameable, so the questions are how you *detect* and how you *enforce*. It is easy to hide from static analysis and hard to hide from observed runtime behaviour. Detect by execution and tracing; then fix not only by reorganising code but by making the next violation of that class statically discoverable. Still gameable, better at every step.
+
 Subject: the `[architecture]` block of `.pyscn.toml`, which declares `foundation < config < engine < runtime < tooling < support` — each layer may import only from itself and layers below — and `tools/architecture_fitness.py --layers`, which checks completeness (is every module mapped?) and direction (does any import go up?).
 
 **Trees**: `/tmp/toolguard-master-copy` @ `532de02` ("before") and `/tmp/toolguard-branch-copy` @ `a3e3f27` ("after"). `tools/architecture_fitness.py` exists only on the branch, so **I copied the branch's copy of the tool into `/tmp/toolguard-master-copy/tools/` and ran it there** rather than reimplementing the analysis. Both trees ran the byte-identical instrument. No tree was modified other than that one added file; every layer-map mutation in the gameability section below was made **in memory only**, on parsed dataclasses, and no `.pyscn.toml` was written anywhere.

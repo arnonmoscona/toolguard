@@ -8,6 +8,47 @@ tags:
 - implementation
 ---
 
+---
+STATUS: implementation complete except one flagged conflict (see final report to
+orchestrator). test_log_directory_must_exist (test/unit/test_log_writer.py) pins the exact
+sys.exit(1) behavior fix #5 intentionally removes. Left untouched per "never modify existing
+tests" rule; needs Arnon's decision.
+---
+
+---
+# CURRENT TASK (supersedes everything below): TOO-45 batch defect fixes, branch too-45
+tags: [task-memory, TOO-45]
+
+Source: direct prompt, 2026-08-07.
+
+Constraints: uv run python only; unittest not pytest; stdlib only; no local imports;
+ruff format+check before done; short comments/docstrings, no ticket narrative; string
+literals in conditionals -> named constants.
+
+## Fixes
+1. tools/danger.py lines ~305,~366: `if tool in ("Read","Write","Edit")` x2 -> use
+   toolguard/constants.py FILE_TOOLS. Verify layer rules via architecture_fitness.py --layers.
+2. toolguard/log_writer.py ~449/~465: format normalisation done twice, can disagree.
+   Single normalisation point, use LOG_FORMAT_MARKDOWN/LOG_FORMAT_JSONLINES constants.
+   Add test: unrecognised format -> markdown content in .md file.
+3. toolguard/path_utils.py: add "package.json" to CONFIG_ROOT_INDICATORS (already in
+   DEFAULT_INDICATORS). Intended small behavior change. Add tests. MUST run
+   tools/corpus_build.py --verify after - if golden shifts, STOP, do not regenerate.
+4. toolguard/session_warnings.py: named "session" but is per-day. Do NOT implement session
+   semantics (out of scope). Fix docstring/names to say per-day. Keep module name as-is.
+5. toolguard/log_writer.py ~198 _require_existing_log_dir, ~477 except RuntimeError: both
+   sys.exit(1) -> change to warn stderr + continue (verdict still emitted), like sibling
+   except Exception clause below 477 already does. VERIFIED UNREACHABLE TODAY - defensive
+   hardening only, NOT a security fix, don't call it one. Add test.
+
+Out of scope: once-per-session attempts, pattern-string join key.
+
+Gate: unittest discover (2604 passing baseline), corpus_build --verify, architecture_fitness
+--layers and --predicates (R1 R2 R3 R5 R6 PASS), ruff check.
+
+Report: final message only, short, no separate report file.
+---
+
 ## THIRD COURSE CORRECTION (2026-08-06, ~19:54 EDT) -- READ THIS FIRST IF RESUMING
 
 Adversarial report at `toolguard-memories/TOO-45/reports/touch-set-adversarial-report.md` (READ

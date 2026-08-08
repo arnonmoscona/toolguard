@@ -292,11 +292,11 @@ class TestCleanupOldMarkers(unittest.TestCase):
 
 
 class TestIssueTakeoverWarning(unittest.TestCase):
-    """Test the takeover-active notice (stderr + once-per-session marker only).
+    """Test the takeover-active notice (stderr + once-per-day marker only).
 
     TOO-8 Phase 4: the takeover notice is informational, NOT actionable, so it is
     no longer persisted to any toolguard log stream. These tests pin the new
-    contract: stderr echo every time, a once-per-session marker, and NO log file
+    contract: stderr echo every time, a once-per-day marker, and NO log file
     write whatsoever.
     """
 
@@ -367,7 +367,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         """
         Given no marker exists
         When issue_takeover_warning runs
-        Then today's marker is created (once-per-session guard)
+        Then today's marker is created (once-per-day guard)
         """
         with TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)

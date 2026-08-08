@@ -65,6 +65,7 @@ from enum import IntEnum
 from typing import Callable, List, Optional, Tuple
 
 from toolguard.config import Configuration, Provenance, TakeoverConfig
+from toolguard.constants import FILE_TOOLS
 from toolguard.patterns import PatternType, parse_pattern
 from toolguard.tools.config_access import (
     discover_tools,
@@ -302,7 +303,7 @@ def _is_arbitrary_exec(tool: str, body: str, ptype: PatternType) -> bool:
         True when the pattern is an arbitrary-execution allow.
     """
     # Only flag command tools (Bash and variants); file-path tools can't exec
-    if tool in ("Read", "Write", "Edit"):
+    if tool in FILE_TOOLS:
         return False
 
     body_stripped = body.strip()
@@ -363,7 +364,7 @@ def _is_destructive(tool: str, body: str, ptype: PatternType) -> bool:
     Returns:
         True when the pattern matches a destructive command category.
     """
-    if tool in ("Read", "Write", "Edit"):
+    if tool in FILE_TOOLS:
         return False
     body_lower = body.strip().lower()
 

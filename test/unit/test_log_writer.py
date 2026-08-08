@@ -14,10 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from toolguard.log_writer import (
-    _LOG_CONTEXT_PREVIEW_WORDS,
     LOG_FORMAT_JSONLINES,
     LogRecord,
-    _preview_additional_context,
     log_command,
 )
 
@@ -287,6 +285,30 @@ class TestLogging(unittest.TestCase):
             self.assertEqual(entry["status"], "executed")
             self.assertEqual(entry["command"], "git status")
 
+    def test_unrecognised_format_falls_back_to_markdown(self):
+        """
+        Given an unrecognised log_format value
+        When a command is logged
+        Then a .md file is created containing markdown, not jsonlines, content
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            log_command(
+                LogRecord(command_str="git status", status="executed"),
+                log_dir=log_dir,
+                log_format="csv",
+            )
+
+            expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            log_file = log_dir / expected_filename
+
+            self.assertTrue(log_file.exists(), f"{log_file} was not created")
+            content = log_file.read_text()
+            self.assertIn("**Status**: EXECUTED", content)
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(content)
+
     def test_log_without_violated_rules(self):
         """
         Given a command logged without any violated rules
@@ -313,37 +335,70 @@ class TestLogging(unittest.TestCase):
                 "Violated Rules", content, "Violated rules should not be present"
             )
 
-    def test_log_directory_must_exist(self):
+    def test_missing_log_directory_warns_but_does_not_exit(self):
         """
         Given a log directory path that does not exist
         When a command is logged
-        Then the process exits with code 1 and stderr reports that the logging directory does not exist
+        Then the call returns normally and reports the missing directory on
+             stderr, rather than terminating the process
+
+        Losing an audit record is bad; losing enforcement as well is worse.
+        The hook writes its verdict AFTER logging, so a SystemExit here would
+        suppress the verdict entirely -- and Claude Code treats only exit
+        code 2 as blocking, so the tool call would then proceed unjudged.
+        This asserts the failure direction, not the message.
         """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Use a non-existent subdirectory
             log_dir = Path(tmpdir) / "nonexistent"
 
-            # Capture stderr
             stderr_capture = io.StringIO()
             with contextlib.redirect_stderr(stderr_capture):
-                # Attempt to log - should exit with error
-                with self.assertRaises(SystemExit) as cm:
-                    log_command(
-                        LogRecord(command_str="git status", status="executed"),
-                        log_dir=log_dir,
-                    )
-
-                self.assertEqual(
-                    cm.exception.code,
-                    1,
-                    "Should exit with code 1 when log directory does not exist",
+                log_command(
+                    LogRecord(command_str="git status", status="executed"),
+                    log_dir=log_dir,
                 )
 
-            # Verify error message in stderr
-            stderr_output = stderr_capture.getvalue()
-            self.assertIn("Logging directory does not exist", stderr_output)
+            self.assertIn("Logging directory does not exist", stderr_capture.getvalue())
+
+    def test_missing_log_dir_does_not_block_caller(self):
+        """
+        Given a log directory path that does not exist (TOO-45)
+        When a command is logged
+        Then log_command returns normally instead of exiting, warning to stderr
+
+        Superseding contract for test_log_directory_must_exist above: exiting
+        the process from the audit path means the tool call proceeds with no
+        verdict recorded at all. See _existing_log_dir_or_warn.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir) / "nonexistent"
+
+            stderr_capture = io.StringIO()
+            with contextlib.redirect_stderr(stderr_capture):
+                log_command(
+                    LogRecord(command_str="git status", status="executed"),
+                    log_dir=log_dir,
+                )
+
+            self.assertIn("Logging directory does not exist", stderr_capture.getvalue())
+
+    def test_missing_project_root_does_not_block_caller(self):
+        """
+        Given no explicit log_dir/config and require_project_root raises RuntimeError
+        When a command is logged
+        Then log_command returns normally instead of exiting, warning to stderr
+        """
+        stderr_capture = io.StringIO()
+        with contextlib.redirect_stderr(stderr_capture):
+            with patch(
+                "toolguard.log_writer.require_project_root",
+                side_effect=RuntimeError("no project root"),
+            ):
+                log_command(LogRecord(command_str="git status", status="executed"))
+
+        self.assertIn("Warning: Failed to write log", stderr_capture.getvalue())
 
 
 class TestMatchedRuleLogging(unittest.TestCase):
@@ -841,51 +896,6 @@ class TestPermissionModeLogging(unittest.TestCase):
             self.assertNotIn("permission_mode", entry)
 
 
-class TestPreviewAdditionalContext(unittest.TestCase):
-    """
-    Unit tests for the ``_preview_additional_context`` word-budget helper
-    (TOO-19 Phase 1, increment 7). The accumulated ``additionalContext`` block
-    can be up to 500 words (see ``compound.py::_MAX_CONTEXT_WORDS``); the LOGGED
-    copy is capped to a short preview so a human scanning the log isn't faced
-    with a 500-word block on every matching invocation. The FULL text still
-    reaches Claude via the hook's JSON output -- only the log copy is capped.
-    """
-
-    def test_short_text_passes_through_unchanged(self):
-        """
-        Given text within the word budget
-        When _preview_additional_context runs
-        Then the text is returned unchanged, with no ellipsis or word count
-        """
-        text = "prefer git status --short"
-        self.assertEqual(_preview_additional_context(text), text)
-
-    def test_long_text_is_capped_with_ellipsis_and_word_count(self):
-        """
-        Given text well over the word budget
-        When _preview_additional_context runs
-        Then only the first _LOG_CONTEXT_PREVIEW_WORDS words are kept, followed
-            by an ellipsis marker and the FULL original word count
-        """
-        words = [f"word{i}" for i in range(100)]
-        text = " ".join(words)
-        preview = _preview_additional_context(text)
-        expected_prefix = " ".join(words[:_LOG_CONTEXT_PREVIEW_WORDS])
-        self.assertTrue(preview.startswith(expected_prefix))
-        self.assertIn("...", preview)
-        self.assertIn("100 words total", preview)
-
-    def test_text_exactly_at_budget_passes_through_unchanged(self):
-        """
-        Given text with EXACTLY the word budget's word count
-        When _preview_additional_context runs
-        Then the text is returned unchanged (the cap is inclusive)
-        """
-        words = [f"word{i}" for i in range(_LOG_CONTEXT_PREVIEW_WORDS)]
-        text = " ".join(words)
-        self.assertEqual(_preview_additional_context(text), text)
-
-
 class TestAdditionalContextLogging(unittest.TestCase):
     """
     Test the additional_context parameter in log entries (TOO-19 Phase 1,
@@ -921,12 +931,11 @@ class TestAdditionalContextLogging(unittest.TestCase):
             self.assertIn("**Context**:", content)
             self.assertIn("prefer git status --short", content)
 
-    def test_additional_context_capped_in_markdown_format(self):
+    def test_long_additional_context_is_logged_in_full(self):
         """
-        Given a command logged with an additional_context text OVER the
-            preview word budget
+        Given a command logged with a long additional_context text
         When the markdown log is written
-        Then the Context field shows only the capped preview, not the full text
+        Then the Context field carries the text in full, not a truncated preview
         """
         import tempfile
 
@@ -947,8 +956,8 @@ class TestAdditionalContextLogging(unittest.TestCase):
             content = (log_dir / expected_filename).read_text()
 
             self.assertIn("**Context**:", content)
-            self.assertNotIn(long_text, content)
-            self.assertIn("100 words total", content)
+            self.assertIn(long_text, content)
+            self.assertNotIn("words total", content)
 
     def test_additional_context_in_jsonlines_format(self):
         """

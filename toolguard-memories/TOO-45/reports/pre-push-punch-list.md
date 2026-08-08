@@ -12,7 +12,13 @@ tags:
 
 **Arnon's instruction, 2026-08-07: tackle these BEFORE a push and AFTER the canary experiments.** Nothing here is a canary finding requiring a decision; these are defects and doc drift found along the way. Decisions on the reports themselves wait until his review is done.
 
-This complements [[follow-up-queue]], which holds the earlier accepted bug list. Items 1-4 there (log_writer `sys.exit(1)` fail-open, the pattern-string join key, the three failed once-per-session attempts, the `docs/config-sync.md` marker-path mismatch) are still open and are **not** repeated here.
+This complements [[follow-up-queue]], which holds the earlier accepted bug list. Its items 2-4 (the pattern-string join key, the three failed once-per-session attempts, the `docs/config-sync.md` marker-path mismatch) are still open and are **not** repeated here.
+
+**SEVERITY CORRECTION, 2026-08-07 — [[follow-up-queue]] item 1.** `log_writer`'s two `sys.exit(1)` calls were ranked the highest-severity finding in this ticket, described as a live fail-open where the audit path takes down enforcement. **I could not reach either path.** Tested directly: a project with no `logs/` directory, and a directory with no resolvable project root at all — both emitted a correct verdict and exited 0. The config path supplies a `log_dir` and creates it with `mkdir`, so `_require_existing_log_dir` is a fallback that normal operation does not hit, and a missing project root degrades rather than raising.
+
+It remains worth fixing as **defensive hardening**: exiting from the audit path is the wrong failure mode and is inconsistent with the module's own `except Exception` sibling, which warns and continues. But it is not a live security hole, and the ranking should not be quoted as one.
+
+Worth noting how this happened: the finding came from a blind reviewer whose **other five findings were all real and all confirmed**, so the ranking was inherited on that track record rather than re-derived. A source being reliable five times out of six is not verification.
 
 ## Code defects
 
@@ -54,4 +60,8 @@ This complements [[follow-up-queue]], which holds the earlier accepted bug list.
 
 **12. `test/unit/test_static_analysis_coverage.py` is still untracked** and was never included in the R6 commit. It is the guard that stops pyscn silently dropping a file from its metrics.
 
-**13. The three new evidence tools are untracked**: `tools/change_role_classifier.py`, `tools/touch_set_inventory.py`, `tools/touch_set_score.py`, plus four test files. Decide whether they belong in the repo at all before pushing — they are experiment instrumentation, not product.
+**13. DISCUSS BEFORE PUSH: `git rm` the measurement tools?** `tools/change_role_classifier.py`, `tools/touch_set_inventory.py`, `tools/touch_set_score.py` and their four test files are now **tracked** — they were swept in by a `git add -A` rather than chosen, so this decision was made by accident and is still open (Arnon, 2026-08-07: keep on the list for later discussion).
+
+The case for removing them: they are experiment instrumentation, not product; the classifier and the touch-set scorer were both *proven biased* and contributed to no conclusion in this ticket; and they carry ~90 tests that must be maintained forever for tools nothing calls.
+
+The case for keeping: the classifier's occurrence finding was independently proven exact twice, and the inventory's blindness guarantee was audit-verified — both could serve a future change-canary. Note they would need re-attacking before any reuse; the last adversarial pass ended with residual silent loss in 13 of 24 implementation styles.

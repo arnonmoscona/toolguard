@@ -71,43 +71,6 @@ _DISCOVERY_LEVELS_SEP = "\x1f"
 #: costs exactly one redundant log write, never an incorrect verdict.
 _DISCOVERY_TAIL_READ_BYTES = 65_536  # 64 KiB
 
-#: Word budget for the ``additionalContext`` preview written to a single log
-#: line (TOO-19 Phase 1, increment 7). The accumulated enrichment text can be
-#: up to 500 words (see ``compound.py::_MAX_CONTEXT_WORDS``) and would
-#: otherwise land in the log on EVERY matching invocation -- these logs are
-#: read by a human scanning for anomalies, and a 500-word block per line
-#: destroys that. The FULL text is still injected to Claude via
-#: ``hookSpecificOutput``; only the LOGGED copy is capped.
-_LOG_CONTEXT_PREVIEW_WORDS = 40
-
-
-def _preview_additional_context(
-    text: str, max_words: int = _LOG_CONTEXT_PREVIEW_WORDS
-) -> str:
-    """
-    Bound an ``additionalContext`` block to a short preview for a log line.
-
-    Keeps the first *max_words* words and, when the text was actually cut,
-    appends an ellipsis plus the FULL word count so a human scanning the log
-    can tell there is more without having to open a separate detail store --
-    there is none; the full text lives only in the hook's JSON output for
-    that single invocation.
-
-    Args:
-        text: The full accumulated ``additionalContext`` string.
-        max_words: Maximum number of words to keep before the ellipsis
-            marker. Defaults to :data:`_LOG_CONTEXT_PREVIEW_WORDS`.
-
-    Returns:
-        The text unchanged if it is within budget, otherwise a truncated
-        preview followed by ``" ... (N words total)"``.
-    """
-    words = text.split()
-    if len(words) <= max_words:
-        return text
-    preview = " ".join(words[:max_words])
-    return f"{preview} ... ({len(words)} words total)"
-
 
 @dataclass(frozen=True)
 class LogRecord:
@@ -177,25 +140,30 @@ def _logging_enabled(config: Optional[dict]) -> bool:
     return True
 
 
-def _require_existing_log_dir(log_dir_path: Path) -> None:
+def _existing_log_dir_or_warn(log_dir_path: Path) -> Optional[Path]:
     """
-    Abort the process when a caller-specified log directory does not exist.
+    Return *log_dir_path* if it exists, else warn to stderr and return None.
 
-    This is the historical behaviour for the two paths where the directory is
-    named without a resolved environment config behind it (the explicit
-    ``log_dir`` argument and the no-config default, see
-    :func:`_log_dir_from_environment`): a missing directory is a configuration
-    error, not something to silently create.
+    Used for the two paths where the directory is named without a resolved
+    environment config behind it (the explicit ``log_dir`` argument and the
+    no-config default, see :func:`_log_dir_from_environment`). TOO-45: this
+    used to call ``sys.exit(1)``, which killed the whole hook process over a
+    missing log directory -- the audit trail is not worth losing enforcement
+    for. Matches :func:`_log_dir_from_config`'s non-strict behaviour instead.
 
     Args:
-        log_dir_path: The directory that must already exist.
+        log_dir_path: The directory to check.
+
+    Returns:
+        *log_dir_path* if it exists, else None.
     """
-    if not log_dir_path.exists():
-        print(
-            f"Error: Logging directory does not exist: {log_dir_path}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if log_dir_path.exists():
+        return log_dir_path
+    print(
+        f"Warning: Logging directory does not exist: {log_dir_path}. Logging disabled.",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _log_dir_from_config(config: dict) -> Optional[Path]:
@@ -228,12 +196,12 @@ def _log_dir_from_config(config: dict) -> Optional[Path]:
     return None
 
 
-def _log_dir_from_environment() -> Path:
+def _log_dir_from_environment() -> Optional[Path]:
     """
     Resolve the log directory with neither an explicit path nor a resolved config.
 
-    Falls back to ``<project root>/logs``. The directory must already exist
-    (see :func:`_require_existing_log_dir`).
+    Falls back to ``<project root>/logs``, or None if that directory doesn't
+    exist (see :func:`_existing_log_dir_or_warn`).
 
     TOO-19 m5: the directory name used to be overridable by a legacy
     ``CHECKED_BASH_LOGGING_DIR`` environment variable that defaulted to
@@ -246,18 +214,16 @@ def _log_dir_from_environment() -> Path:
     only by direct/test callers.
 
     Returns:
-        The resolved log directory.
+        The resolved log directory, or None if it doesn't exist.
 
     Raises:
         RuntimeError: Propagated from
             :func:`toolguard.path_utils.require_project_root` when no project
-            root can be found. :func:`log_command` catches this specifically
-            and treats it as fatal (prints and exits 1), so it is not
-            swallowed here.
+            root can be found. :func:`log_command` catches this and warns
+            rather than raising further, so it is not swallowed here.
     """
     log_dir_path = require_project_root() / "logs"
-    _require_existing_log_dir(log_dir_path)
-    return log_dir_path
+    return _existing_log_dir_or_warn(log_dir_path)
 
 
 def _resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optional[Path]:
@@ -275,8 +241,7 @@ def _resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optiona
         The directory to log into, or None when this invocation should not log.
     """
     if log_dir is not None:
-        _require_existing_log_dir(log_dir)
-        return log_dir
+        return _existing_log_dir_or_warn(log_dir)
     if config is not None:
         return _log_dir_from_config(config)
     return _log_dir_from_environment()
@@ -328,9 +293,7 @@ def _build_jsonlines_entry(record: LogRecord) -> dict:
         if value:
             entry[key] = value
     if record.additional_context:
-        entry["additional_context"] = _preview_additional_context(
-            record.additional_context
-        )
+        entry["additional_context"] = record.additional_context
     return entry
 
 
@@ -383,11 +346,7 @@ def _render_markdown_entry(record: LogRecord, timestamp: str) -> str:
         # Rules (TOO-15 review finding #3).
         lines.append(f"- **Note**: {record.note}\n")
     if record.additional_context:
-        # The rule's additionalContext enrichment (TOO-19 Phase 1), capped to
-        # a short preview -- see _preview_additional_context.
-        lines.append(
-            f"- **Context**: {_preview_additional_context(record.additional_context)}\n"
-        )
+        lines.append(f"- **Context**: {record.additional_context}\n")
     if record.extra_info:
         lines.append(f"- **Agent**: {record.extra_info}\n")
     lines.append("\n")
@@ -439,7 +398,9 @@ def log_command(
         return
 
     try:
-        logging_format = log_format.lower()
+        # Single normalisation point (TOO-45): extension and content both
+        # read is_jsonlines, so they can't disagree on an unrecognised value.
+        is_jsonlines = log_format.lower() == LOG_FORMAT_JSONLINES
 
         # Resolve log directory path (None => logging disabled for this call)
         log_dir_path = _resolve_log_dir(log_dir, config)
@@ -447,7 +408,7 @@ def log_command(
             return
 
         # Generate log filename with current date and appropriate extension
-        extension = "md" if logging_format == "markdown" else "jsonlines"
+        extension = LOG_FORMAT_JSONLINES if is_jsonlines else "md"
         log_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.{extension}"
         log_file = log_dir_path / log_filename
 
@@ -463,7 +424,7 @@ def log_command(
         # record in the audit log -- a truncated record would be worse than
         # a missing one for a security tool's audit trail (TOO-19 m5 review
         # finding #19).
-        if logging_format == "jsonlines":
+        if is_jsonlines:
             rendered = json.dumps(_build_jsonlines_entry(record)) + "\n\n"
         else:
             rendered = _render_markdown_entry(record, timestamp)
@@ -471,12 +432,9 @@ def log_command(
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(rendered)
 
-    except RuntimeError as e:
-        # Project root not found - fatal error
-        print(f"Fatal error: {e}", file=sys.stderr)
-        sys.exit(1)
     except Exception as e:
-        # Other logging errors - print warning but don't fail
+        # Includes RuntimeError from a missing project root (TOO-45: no
+        # longer sys.exit(1) -- warn like any other logging failure).
         print(f"Warning: Failed to write log: {e}", file=sys.stderr)
 
 
