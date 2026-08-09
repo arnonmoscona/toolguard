@@ -5,10 +5,10 @@ Provides centralized configuration loading from environment variables and .env f
 """
 
 import os
-import sys
 from pathlib import Path
 from typing import Dict, Optional
 
+from toolguard.error_reporter import report_warning
 from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 
 
@@ -80,7 +80,10 @@ def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:
                     value = value[1:-1]
                 env_vars[key] = value
     except Exception as e:
-        print(f"Warning: Failed to load .env file: {e}", file=sys.stderr)
+        report_warning(
+            f"Failed to load .env file: {e}",
+            "Fix or remove the .env file so toolguard can read it.",
+        )
         return {}
 
     return env_vars
@@ -127,9 +130,9 @@ def get_bool_env(
         return False
     else:
         # Invalid value - warn and use default
-        print(
-            f"Warning: Invalid boolean value for {name}: {value}. Using default: {default}",
-            file=sys.stderr,
+        report_warning(
+            f"Invalid boolean value for {name}: {value}. Using default: {default}",
+            f"Set {name} to one of: true, false, 1, 0, yes, no.",
         )
         return default
 

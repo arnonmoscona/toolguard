@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 import toolguard.config as config_module
 from test.unit._config_isolation import ConfigIsolationMixin
+from toolguard import error_reporter
 from toolguard.config import (
     ConfigLayer,
     Configuration,
@@ -3854,6 +3855,63 @@ class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
 
         allow, _deny = config.allow_deny_for("Bash")
         self.assertIn("git *", allow)
+
+    def test_broken_file_warning_reaches_stderr(self):
+        """
+        Given a broken (unparseable) TOML file in the candidate rules
+            directory
+        When load_configuration() runs
+        Then the failure message, naming the broken file, reaches stderr
+            (TOO-45 punch-list #04: via error_reporter.report_warning, no
+            Reporter registered in this test so it degrades to the bare
+            message -- see toolguard.error_reporter)
+        """
+        home, project = self.isolate_config_environment(
+            xdg_config_home="/nonexistent-xdg"
+        )
+        rules_dir = home / ".toolguard" / "rules"
+        rules_dir.mkdir(parents=True)
+        broken_path = rules_dir / "gh.toml"
+        broken_path.write_text("[permissions]\nallow = [\n")  # unterminated array
+
+        stderr_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf):
+            load_configuration()
+
+        self.assertIn(str(broken_path), stderr_buf.getvalue())
+        self.assertIn("Failed to load", stderr_buf.getvalue())
+
+    def test_broken_file_warning_reaches_the_warning_log_with_an_active_reporter(
+        self,
+    ):
+        """
+        Given a broken (unparseable) TOML file in the candidate rules
+            directory, AND a registered error_reporter.Reporter with a
+            resolvable log directory is active (TOO-45 punch-list #04 fix
+            pass item 8a: a real converted call site, not a synthetic
+            message)
+        When load_configuration() runs
+        Then the failure, naming the broken file, lands in the WARNING log
+             file, not just stderr
+        """
+        home, project = self.isolate_config_environment(
+            xdg_config_home="/nonexistent-xdg"
+        )
+        rules_dir = home / ".toolguard" / "rules"
+        rules_dir.mkdir(parents=True)
+        broken_path = rules_dir / "gh.toml"
+        broken_path.write_text("[permissions]\nallow = [\n")  # unterminated array
+        log_dir = project / "logs"
+        log_dir.mkdir()
+
+        with error_reporter.active(error_reporter.Reporter(log_dir=log_dir)):
+            load_configuration()
+
+        warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+        self.assertEqual(len(warning_files), 1)
+        content = warning_files[0].read_text()
+        self.assertIn(str(broken_path), content)
+        self.assertIn("Failed to load", content)
 
     def test_valid_config_has_no_parse_failures(self):
         """

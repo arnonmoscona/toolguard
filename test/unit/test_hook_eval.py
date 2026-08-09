@@ -296,12 +296,18 @@ class TestEvalModeMain(unittest.TestCase):
         """
         Given --eval mode and non-JSON stdin
         When main() runs
-        Then it emits a deny decision (fail-safe) and never logs or auto-migrates
+        Then it emits a deny decision (fail-safe) on STDOUT, empty stderr,
+             and never logs or auto-migrates -- TOO-45 punch-list #04 fix
+             pass M2: this used to print the deny decision to stderr with an
+             empty stdout, which the security-audit skill's --eval probe
+             (stdout-only, see SKILL.md's "How the floor is checked" section)
+             read as no verdict at all, not a deny -- this test previously
+             pinned exactly that defect
         """
         with (
             patch("sys.argv", ["toolguard", "--eval"]),
             patch("sys.stdin", StringIO("not json at all")),
-            patch("sys.stdout", new_callable=StringIO),
+            patch("sys.stdout", new_callable=StringIO) as mock_stdout,
             patch("sys.stderr", new_callable=StringIO) as mock_stderr,
             patch("toolguard.hook.log_command") as mock_log,
             patch("toolguard.hook.run_auto_migration") as mock_mig,
@@ -310,8 +316,9 @@ class TestEvalModeMain(unittest.TestCase):
                 main()
             except SystemExit:
                 pass
-            result = json.loads(mock_stderr.getvalue())
+            result = json.loads(mock_stdout.getvalue())
         self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(mock_stderr.getvalue(), "")
         mock_log.assert_not_called()
         mock_mig.assert_not_called()
 

@@ -2,6 +2,7 @@
 Unit tests for config_divergence module.
 """
 
+import io
 import json
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from unittest.mock import patch
 
-from toolguard import once_per_store
+from toolguard import error_reporter, once_per_store
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.config_divergence import (
     DIVERGENCE_WARNING,
@@ -115,6 +116,49 @@ class TestGetNativePermissions(unittest.TestCase):
             result = get_native_permissions(settings_path)
 
             self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
+
+    def test_invalid_json_reports_a_warning_to_stderr(self):
+        """
+        Given a settings.local.json containing invalid JSON
+        When get_native_permissions reads it
+        Then the failure, naming the path, reaches stderr (TOO-45 punch-list
+             #04: via error_reporter.report_warning)
+        """
+        with TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.local.json"
+            settings_path.write_text("{ invalid json }")
+
+            buf = io.StringIO()
+            with patch("sys.stderr", buf):
+                get_native_permissions(settings_path)
+
+            self.assertIn(str(settings_path), buf.getvalue())
+            self.assertIn("Failed to load", buf.getvalue())
+
+    def test_invalid_json_reaches_the_warning_log_with_an_active_reporter(self):
+        """
+        Given a settings.local.json containing invalid JSON, AND a
+            registered error_reporter.Reporter with a resolvable log
+            directory is active (TOO-45 punch-list #04 fix pass item 8a: a
+            real converted call site, not a synthetic message)
+        When get_native_permissions reads it
+        Then the failure, naming the path, lands in the WARNING log file,
+             not just stderr
+        """
+        with TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.local.json"
+            settings_path.write_text("{ invalid json }")
+            log_dir = Path(tmpdir) / "logs"
+            log_dir.mkdir()
+
+            with error_reporter.active(error_reporter.Reporter(log_dir=log_dir)):
+                get_native_permissions(settings_path)
+
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+            self.assertEqual(len(warning_files), 1)
+            content = warning_files[0].read_text()
+            self.assertIn(str(settings_path), content)
+            self.assertIn("Failed to load", content)
 
 
 def _config_from_layers(*layers):

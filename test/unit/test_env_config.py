@@ -4,12 +4,15 @@ Unit tests for toolguard environment configuration.
 Tests environment variable loading, .env file parsing, and configuration merging.
 """
 
+import io
 import os
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from toolguard import error_reporter
 from toolguard.env_config import (
     find_project_root,
     get_bool_env,
@@ -274,6 +277,64 @@ class TestLoadEnvFile(unittest.TestCase):
             self.assertEqual(result.get("KEY1"), "value1")
             self.assertEqual(result.get("KEY2"), "value2")
 
+    def test_read_failure_reports_a_warning_to_stderr_and_returns_empty(self):
+        """
+        Given a .env file exists but reading it raises (TOO-45 punch-list #04:
+            this now goes through error_reporter.report_warning, not a bare
+            print)
+        When load_env_file is called
+        Then the failure reaches stderr (no invocation is active in this
+             test, so it degrades to the bare message) and an empty dict is
+             returned
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / ".env").write_text("KEY=value\n")
+
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                with patch("builtins.open", side_effect=OSError("disk error")):
+                    result = load_env_file(project_root)
+
+            self.assertEqual(result, {})
+            self.assertIn("Failed to load .env file", buf.getvalue())
+            self.assertIn("disk error", buf.getvalue())
+
+    def test_read_failure_reaches_the_warning_log_with_an_active_reporter(self):
+        """
+        Given a .env file exists but reading it raises, AND a registered
+            error_reporter.Reporter with a resolvable log directory is
+            active (TOO-45 punch-list #04 fix pass item 8a: a real converted
+            call site, not a synthetic error_reporter message)
+        When load_env_file is called
+        Then the failure lands in the WARNING log file, not just stderr
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir) / "project"
+            project_root.mkdir()
+            env_path = project_root / ".env"
+            env_path.write_text("KEY=value\n")
+            log_dir = Path(tmpdir) / "logs"
+            log_dir.mkdir()
+
+            real_open = open
+
+            def _boom(path, *args, **kwargs):
+                """Fail only the .env read; the log write must go through for real."""
+                if str(path) == str(env_path):
+                    raise OSError("disk error")
+                return real_open(path, *args, **kwargs)
+
+            with error_reporter.active(error_reporter.Reporter(log_dir=log_dir)):
+                with patch("builtins.open", side_effect=_boom):
+                    load_env_file(project_root)
+
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+            self.assertEqual(len(warning_files), 1)
+            content = warning_files[0].read_text()
+            self.assertIn("Failed to load .env file", content)
+            self.assertIn("disk error", content)
+
 
 class TestGetBoolEnv(unittest.TestCase):
     """Test boolean environment variable parsing."""
@@ -351,6 +412,21 @@ class TestGetBoolEnv(unittest.TestCase):
             result = get_bool_env("TEST_VAR", True)
 
         self.assertTrue(result)
+
+    def test_invalid_value_reports_a_warning_to_stderr(self):
+        """
+        Given the env var set to an unrecognized value ('maybe')
+        When get_bool_env is called
+        Then the invalid value and the variable name reach stderr (TOO-45
+             punch-list #04: via error_reporter.report_warning)
+        """
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            with patch.dict(os.environ, {"TEST_VAR": "maybe"}):
+                get_bool_env("TEST_VAR", True)
+
+        self.assertIn("TEST_VAR", buf.getvalue())
+        self.assertIn("maybe", buf.getvalue())
 
 
 class TestGetEnvConfig(unittest.TestCase):

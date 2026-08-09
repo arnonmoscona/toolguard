@@ -14,7 +14,6 @@ returns. See :class:`DivergenceCheckResult`.
 """
 
 import json
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -22,6 +21,7 @@ from typing import Dict, List, Optional, Set
 from toolguard import once_per
 from toolguard.config import is_tool_wrapper, load_configuration
 from toolguard.config_validation import extract_tool_name
+from toolguard.error_reporter import report_warning
 
 #: The single named object for this module's once-per-day throttling. One
 #: name carries both the key and the human description (TOO-45 punch-list
@@ -52,7 +52,10 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
         with open(settings_path, "r") as f:
             config = json.load(f)
     except (json.JSONDecodeError, IOError, Exception) as e:
-        print(f"Warning: Failed to load {settings_path}: {e}", file=sys.stderr)
+        report_warning(
+            f"Failed to load {settings_path}: {e}",
+            f"Fix or remove {settings_path} so toolguard can read it.",
+        )
         return {"allow": [], "deny": [], "ask": []}
 
     permissions = config.get("permissions", {})

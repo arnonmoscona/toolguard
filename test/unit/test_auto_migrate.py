@@ -5,14 +5,16 @@ Tests automatic permission migration functionality including config loading,
 marker file management, and integration with migration script.
 """
 
+import io
 import json
 import unittest
+from contextlib import redirect_stderr
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import once_per_store
+from toolguard import error_reporter, once_per_store
 from toolguard.auto_migrate import (
     AUTO_MIGRATION,
     load_config_sync_settings,
@@ -418,6 +420,256 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
             )
             self.assertTrue(still_claimed)
             mock_migrate.assert_called_once()
+
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.auto_migrate.migrate")
+    @patch("toolguard.config.discover_config_files")
+    def test_run_auto_migration_success_reports_notices_only(
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
+    ):
+        """
+        Given a divergent native pattern and a migrate call that succeeds
+        When run_auto_migration is invoked
+        Then both the "running" and "successfully migrated" progress
+             messages reach stderr, classified as notices (TOO-45 punch-list
+             #04: via error_reporter.report_notice)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_migrate.return_value = 0
+            mock_discover.return_value = []
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
+
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                run_auto_migration(project_root, config_sync, takeover_config)
+
+            stderr_text = buf.getvalue()
+            self.assertIn("Running automatic migration", stderr_text)
+            self.assertIn("Successfully migrated 1 pattern", stderr_text)
+
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.auto_migrate.migrate")
+    @patch("toolguard.config.discover_config_files")
+    def test_run_auto_migration_nonzero_exit_reports_a_warning(
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
+    ):
+        """
+        Given migrate() returns a non-zero exit code
+        When run_auto_migration is invoked
+        Then a "Migration failed" warning reaches stderr (TOO-45 punch-list
+             #04: via error_reporter.report_warning) and False is returned
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_migrate.return_value = 1
+            mock_discover.return_value = []
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
+
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                result = run_auto_migration(project_root, config_sync, takeover_config)
+
+            self.assertFalse(result)
+            self.assertIn("Migration failed", buf.getvalue())
+
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.auto_migrate.migrate")
+    @patch("toolguard.config.discover_config_files")
+    def test_run_auto_migration_exception_reports_a_warning(
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
+    ):
+        """
+        Given migrate() raises
+        When run_auto_migration is invoked
+        Then a "Migration error" warning naming the exception reaches
+             stderr (TOO-45 punch-list #04: via error_reporter.report_warning)
+             and False is returned, without the exception propagating
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_migrate.side_effect = RuntimeError("disk full")
+            mock_discover.return_value = []
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
+
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                result = run_auto_migration(project_root, config_sync, takeover_config)
+
+            self.assertFalse(result)
+            self.assertIn("Migration error", buf.getvalue())
+            self.assertIn("disk full", buf.getvalue())
+
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.auto_migrate.migrate")
+    @patch("toolguard.config.discover_config_files")
+    def test_run_auto_migration_nonzero_exit_reaches_the_warning_log(
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
+    ):
+        """
+        Given migrate() returns a non-zero exit code, AND an error_reporter
+            invocation with a resolvable log directory is active (TOO-45
+            punch-list #04 fix pass item 8a: a real converted call site,
+            not a synthetic message)
+        When run_auto_migration is invoked
+        Then the "Migration failed" warning lands in the WARNING log file,
+             not just stderr
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_migrate.return_value = 1
+            mock_discover.return_value = []
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
+            log_dir = project_root / "logs"
+            log_dir.mkdir()
+
+            with error_reporter.active(error_reporter.Reporter(log_dir=log_dir)):
+                result = run_auto_migration(project_root, config_sync, takeover_config)
+
+            self.assertFalse(result)
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+            self.assertEqual(len(warning_files), 1)
+            self.assertIn("Migration failed", warning_files[0].read_text())
 
     @patch("toolguard.config_divergence.get_native_permissions")
     @patch("toolguard.config_divergence.get_toolguard_permissions")

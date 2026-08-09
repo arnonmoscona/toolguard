@@ -25,7 +25,6 @@ internal is underscore-prefixed.
 import functools
 import json
 import os
-import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +42,7 @@ from toolguard.config_types import (
     UnrecognizedFallbackSetting as UnrecognizedFallbackSetting,
 )
 from toolguard.config_validation import validate_permissions
+from toolguard.error_reporter import report_warning
 from toolguard.issues import Issue
 from toolguard.path_utils import require_project_root
 from toolguard.rule_entry import RuleEntry, entries_for_tool, normalize_entry
@@ -2287,7 +2287,10 @@ def _parse_source_recording_failures(
     """
     content, message = _try_parse_source(path, file_format)
     if message is not None:
-        print(f"Warning: Failed to load {path}: {message}", file=sys.stderr)
+        report_warning(
+            f"Failed to load {path}: {message}",
+            f"Fix or remove {path} so toolguard can read it.",
+        )
         if path.exists():
             parse_failures.append((path, message))
     return content

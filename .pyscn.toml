@@ -183,19 +183,23 @@ name = "observability"
 # side-effect-ness is orthogonal to dependency direction.
 #
 # What the old placement cost, measured: config-layer code could not legally
-# reach a logging or warning module, so four config modules hand-rolled 16
-# direct stderr writes instead (config 3, env_config 2, auto_migrate 6,
-# config_divergence 5). The layering was not being obeyed there, it was being
-# routed around -- and a zero-violation report could never show that, because
-# the map matched the code. Consolidating those onto the real warning path is
-# separate, larger, and deliberately not done here.
+# reach a logging or warning module, so four config modules hand-rolled 8
+# direct stderr writes instead (config 1, env_config 2, auto_migrate 4,
+# config_divergence 1 -- punch-list #01 removed the rest as a side effect
+# when it rewrote auto_migrate/config_divergence onto once_per). The layering
+# was not being obeyed there, it was being routed around -- and a
+# zero-violation report could never show that, because the map matched the
+# code. Consolidated onto `error_reporter` (TOO-45 punch-list #04).
 #
 # error_log and session_warnings import NOTHING from toolguard; update_check
 # imports only foundation; log_writer took exactly one config-layer import
 # (config.find_project_root), a thin wrapper over a foundation primitive, now
 # path_utils.require_project_root. Configuration reaches log_writer by
-# INJECTION already -- a plain dict parameter -- not by import.
-packages = ["log_writer", "error_log", "session_warnings", "update_check", "once_per_store", "once_per"]
+# INJECTION already -- a plain dict parameter -- not by import. error_reporter
+# imports only error_log, same-layer -- log_writer.resolve_log_dir is called
+# by hook.py (runtime layer), which passes the resolved Path in, not by
+# error_reporter itself (TOO-45 punch-list #04 follow-up: Reporter).
+packages = ["log_writer", "error_log", "session_warnings", "update_check", "once_per_store", "once_per", "error_reporter"]
 
 [[architecture.layers]]
 name = "config"

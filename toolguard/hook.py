@@ -11,15 +11,21 @@ Supported tools:
 Input: JSON via stdin with tool information
 Output: JSON via stdout with permission decision
 
-Exit code: Always 0 (errors communicated via JSON output)
+Exit code: 0 in the normal case -- the decision, including for every internal
+error `main()` catches, is always a well-formed JSON object on stdout. Exit 2
+fires only if writing that JSON to stdout itself fails, as a last-resort hard
+block (Claude Code treats exit 2, and only exit 2, as blocking).
 """
 
 import argparse
+import io
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from toolguard import error_reporter
 from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
 from toolguard.compound import (
@@ -31,7 +37,8 @@ from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
-from toolguard.log_writer import LogRecord, log_command, log_discovery
+from toolguard.error_reporter import Reporter
+from toolguard.log_writer import LogRecord, log_command, log_discovery, resolve_log_dir
 from toolguard.resolve import (
     RuntimeVerdict,
     UnitVerdict,
@@ -199,6 +206,81 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
     if verdict.additional_context:
         output["hookSpecificOutput"]["additionalContext"] = verdict.additional_context
     return output
+
+
+def _finalize_output(verdict: RuntimeVerdict, reporter: Reporter) -> Dict[str, Any]:
+    """
+    Build the hook's JSON response for *verdict*, merging in any faults
+    *reporter* accumulated so far this invocation (TOO-45 punch-list #04) --
+    appended to ``additionalContext``, alongside the rule's own enrichment
+    rather than replacing it. Used on both the success path and inside
+    ``main()``'s ``except`` handlers, which drain the same *reporter*.
+    """
+    output = create_hook_output(verdict)
+    fault_context = reporter.drain_claude_context()
+    if fault_context:
+        hook_output = output["hookSpecificOutput"]
+        existing = hook_output.get("additionalContext")
+        hook_output["additionalContext"] = (
+            f"{existing}\n\n{fault_context}" if existing else fault_context
+        )
+    return output
+
+
+def _emit_decision(output: Dict[str, Any]) -> None:
+    """
+    Print the hook's JSON decision to stdout -- the ONE place any code path
+    in ``main()`` delivers a decision, success or error alike (TOO-45
+    punch-list #04 hook.py fix: the three ``except`` handlers used to print
+    here to stderr and exit 0, which Claude Code reads as "no opinion" and
+    silently falls through to native permission handling -- the fail-open).
+
+    Args:
+        output: The JSON-serializable decision dict, from
+            :func:`_finalize_output`.
+
+    If serializing or writing *output* raises, there is no decision left to
+    deliver: falls back to ``sys.exit(2)`` with the failure on stderr -- the
+    one case where the host's own blocking signal (exit 2) is all that's left.
+
+    The flush is inside the ``try`` deliberately (TOO-45 punch-list #04 fix
+    pass M1): Claude Code's stdout is a pipe, which is block-buffered, so a
+    bare ``print()`` can return successfully with the bytes still sitting in
+    the buffer -- a broken reader then only surfaces at interpreter shutdown,
+    past this function, and the process exits non-zero-non-2 (fail-open, the
+    same class of bug this function exists to close). Flushing here is what
+    makes a real write failure raise where it can still be caught.
+
+    Swapping *sys.stdout* for a working stream before ``sys.exit(2)`` is also
+    deliberate, and was found only by re-measuring against a real subprocess:
+    CPython flushes stdout again during interpreter shutdown, and when that
+    second flush ALSO fails on the still-broken pipe, CPython silently
+    overrides ``sys.exit(2)``'s requested code with exit status 120 -- the
+    exact non-2 code this function exists to avoid. Leaving ``sys.exit`` (not
+    ``os._exit``) keeps this path testable and lets normal interpreter
+    cleanup still run.
+    """
+    try:
+        print(json.dumps(output))
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"toolguard: failed to emit decision: {e}", file=sys.stderr)
+        sys.stdout = io.StringIO()
+        sys.exit(2)
+
+
+#: Corrective steps for a crash fault about main()'s own crash handlers --
+#: shared by all three (TOO-45 punch-list #04 hook.py fix).
+_CRASH_CORRECTIVE_STEPS = (
+    "Check the crash report under ~/.toolguard/errors/ for the full traceback."
+)
+
+
+def _report_crash_fault(reporter: Reporter, error_reason: str) -> None:
+    """Report main()'s own crash as a fault, so it reaches Claude via `additionalContext`."""
+    reporter.fault(
+        f"toolguard crashed while deciding: {error_reason}", _CRASH_CORRECTIVE_STEPS
+    )
 
 
 def _build_crash_context(local_vars: Dict[str, Any]) -> Dict[str, Any]:
@@ -674,12 +756,21 @@ def _resolve_event(
 def _run_eval_mode() -> None:
     """
     Handle ``toolguard --eval``: read one hook event on stdin, resolve it
-    READ-ONLY, and print the JSON permissionDecision to stdout.
+    READ-ONLY, and print the JSON permissionDecision to stdout -- on success
+    AND on an internal error alike, via :func:`_emit_decision` (TOO-45
+    punch-list #04 fix pass M2: the three error branches used to print their
+    deny decision to stderr with an empty stdout. The security-audit skill's
+    ``--eval`` probe -- its only production consumer -- reads
+    ``hookSpecificOutput.permissionDecision`` from stdout only (see
+    ``.claude/skills/toolguard-security-audit/SKILL.md``'s "How the floor is
+    checked" section), so that was the same fail-open class as ``main()``'s,
+    just relocated: a config that makes the probe error out yielded no
+    verdict at all instead of the deny it was meant to prove).
 
-    No logging, divergence checks, or auto-migration are performed, so probing a
-    project's configuration (e.g. from the cross-project security-audit skill)
-    never mutates the project or writes to its logs.  Errors are reported as a
-    ``deny`` decision on stderr, matching the live hook's fail-safe contract.
+    No logging, divergence checks, or auto-migration are performed, so probing
+    a project's configuration never mutates the project or writes to its logs
+    -- :func:`create_hook_output` is used directly here rather than
+    :func:`_finalize_output`, so no fault buffer is drained or implied.
     """
     try:
         hook_data = parse_hook_input()
@@ -695,60 +786,60 @@ def _run_eval_mode() -> None:
         env_config = get_env_config(start_dir=cwd)
         extended_syntax = env_config.get("extended_syntax", True)
         verdict = _resolve_event(tool_name, tool_input, config, extended_syntax)
-        print(json.dumps(create_hook_output(verdict)))
+        _emit_decision(create_hook_output(verdict))
     except json.JSONDecodeError as e:
-        output = create_hook_output(
-            RuntimeVerdict(
-                decision="deny", reason=f"Failed to parse hook input: {str(e)}"
+        _emit_decision(
+            create_hook_output(
+                RuntimeVerdict(
+                    decision="deny", reason=f"Failed to parse hook input: {str(e)}"
+                )
             )
         )
-        print(json.dumps(output), file=sys.stderr)
     except ValueError as e:
-        output = create_hook_output(
-            RuntimeVerdict(decision="deny", reason=f"Invalid hook input: {str(e)}")
-        )
-        print(json.dumps(output), file=sys.stderr)
-    except Exception as e:
-        output = create_hook_output(
-            RuntimeVerdict(
-                decision="deny", reason=f"Unexpected error in hook: {str(e)}"
+        _emit_decision(
+            create_hook_output(
+                RuntimeVerdict(decision="deny", reason=f"Invalid hook input: {str(e)}")
             )
         )
-        print(json.dumps(output), file=sys.stderr)
+    except Exception as e:
+        _emit_decision(
+            create_hook_output(
+                RuntimeVerdict(
+                    decision="deny", reason=f"Unexpected error in hook: {str(e)}"
+                )
+            )
+        )
 
 
-def _print_not_a_standalone_command_message() -> None:
-    """Print the friendly explanation for a stray manual/probing invocation."""
-    print(
+def _print_not_a_standalone_command_message(reporter: Reporter) -> None:
+    """Report the friendly explanation for a stray manual/probing invocation."""
+    reporter.notice(
         "toolguard: this is a Claude Code PreToolUse hook, not a standalone command.\n"
         "It reads a JSON hook event on stdin and is invoked automatically by Claude.\n"
         "To smoke-test: "
         'printf \'{"tool_name":"Bash","tool_input":{"command":"ls -la"},'
-        '"hook_event_name":"PreToolUse"}\' | toolguard',
-        file=sys.stderr,
+        '"hook_event_name":"PreToolUse"}\' | toolguard'
     )
 
 
-def _warn_if_settings_path_override() -> None:
+def _warn_if_settings_path_override(reporter: Reporter) -> None:
     """
-    Warn on stderr when ``CLAUDE_SETTINGS_PATH`` puts toolguard in single-file mode.
+    Warn when ``CLAUDE_SETTINGS_PATH`` puts toolguard in single-file mode.
 
     Single-file override footgun (TOO-15): CLAUDE_SETTINGS_PATH makes toolguard
     read ONE settings file for EVERY directory, bypassing the whole hierarchy. As
     a persistently-exported shell variable it silently lets one project's config
     govern the entire machine (and, if that config is fail-closed takeover, can
-    lock it out). Surface it on stderr so the bypass is never invisible.
+    lock it out), so the bypass must never be invisible.
     """
     settings_path_override = os.environ.get("CLAUDE_SETTINGS_PATH")
     if not settings_path_override:
         return
-    print(
-        "[TOOLGUARD WARNING] CLAUDE_SETTINGS_PATH is set "
-        f"({settings_path_override}). Toolguard is in single-file mode: the "
-        "configuration hierarchy is BYPASSED -- only this file and its adjacent "
-        "toolguard_hook.toml govern every directory. If this is unintended, "
-        "unset CLAUDE_SETTINGS_PATH.",
-        file=sys.stderr,
+    reporter.warning(
+        f"CLAUDE_SETTINGS_PATH is set ({settings_path_override}). Toolguard is "
+        "in single-file mode: the configuration hierarchy is BYPASSED -- only "
+        "this file and its adjacent toolguard_hook.toml govern every directory.",
+        "If this is unintended, unset CLAUDE_SETTINGS_PATH.",
     )
 
 
@@ -1139,6 +1230,21 @@ def _handle_command_tool(
     return result
 
 
+def _resolve_reporter_log_dir(env_config: Optional[Dict[str, Any]]) -> Optional[Path]:
+    """
+    Resolve a :class:`Reporter`'s log directory, degrading to None on failure.
+
+    Thin wrapper over :func:`toolguard.log_writer.resolve_log_dir` so a
+    malformed resolution never takes down reporting itself -- see
+    :func:`main`, which calls this twice: once before ``env_config`` is
+    known (coarse fallback) and again once it is (refined).
+    """
+    try:
+        return resolve_log_dir(None, env_config)
+    except Exception:
+        return None
+
+
 def main() -> None:
     """
     Main hook entry point.
@@ -1157,9 +1263,13 @@ def main() -> None:
     11. Output decision as JSON to stdout.
 
     Exit codes:
-    - Always exits with 0 (errors communicated via JSON), EXCEPT when --help
-      is requested (argparse exits 0) or when stdin is a TTY (exits 0 after
-      printing the informational message).
+    - 0 in the normal case: a well-formed JSON decision is always printed to
+      stdout first, including from every internal error this function catches
+      -- --help (argparse exits 0) and a TTY stdin (exits 0 after the
+      informational message) are the only paths with no JSON decision at all.
+    - 2 only if writing that JSON to stdout itself raises (see
+      :func:`_emit_decision`) -- the one case with no decision left to
+      deliver, so the host's own blocking signal is what's left.
     """
     parser = _build_hook_argparser()
     # parse_known_args() is used instead of parse_args() so that the hook still
@@ -1168,6 +1278,14 @@ def main() -> None:
     # unknown args are silently discarded. --help still exits 0 via argparse.
     args, _ = parser.parse_known_args()
 
+    # One Reporter for the whole invocation (TOO-45 punch-list #04 follow-up:
+    # replaces the module-global fault buffer and the two nested
+    # error_reporter "invocation" scopes -- see toolguard/error_reporter.py's
+    # module docstring). log_dir starts unresolved, matching the pre-refactor
+    # "no invocation active" default: the TTY guard below reports through it
+    # exactly like that safe default did.
+    reporter = Reporter()
+
     # Interactive guard: if a human runs 'toolguard' in a terminal without piping
     # a JSON event, do not block on stdin. Print a brief explanation and exit.
     # Claude always pipes JSON (not a TTY), so this guard never fires in real use.
@@ -1175,7 +1293,7 @@ def main() -> None:
     # (no piped stdin) shows the message instead of hanging on stdin.read().
     # Exit code 0: informational, not an error (Arnon: change to non-zero if preferred).
     if sys.stdin.isatty():
-        _print_not_a_standalone_command_message()
+        _print_not_a_standalone_command_message(reporter)
         sys.exit(0)
 
     # Read-only evaluation mode (--eval): resolve one piped event and print the
@@ -1186,113 +1304,147 @@ def main() -> None:
         _run_eval_mode()
         return
 
-    try:
-        # Load environment configuration
-        env_config = get_env_config()
+    # error_reporter.active(reporter) registers *reporter* as the target the
+    # four config-layer modules' report_notice/report_warning calls resolve
+    # (see that module's docstring for why an ambient registry exists at
+    # all). It wraps the whole try/except below -- including the except
+    # handlers -- so a fault reported anywhere in this call still drains
+    # into the same reporter the response is built from.
+    with error_reporter.active(reporter):
+        try:
+            # Coarse log-dir fallback, resolved before env_config is known,
+            # so get_env_config()'s own report_warning call sites (necessarily
+            # before any config-derived resolution exists) have somewhere to
+            # log to, not just stderr.
+            reporter.log_dir = _resolve_reporter_log_dir(None)
 
-        # Parse hook input first to get cwd
-        hook_data = parse_hook_input()
+            # Load environment configuration
+            env_config = get_env_config()
 
-        tool_name = hook_data["tool_name"]
-        tool_input = hook_data["tool_input"]
-        cwd = hook_data.get("cwd", None)
+            # Refine the SAME reporter's log_dir now that env_config is
+            # known -- no new Reporter, no buffer to reconcile.
+            reporter.log_dir = _resolve_reporter_log_dir(env_config)
 
-        # Obtain the resolved configuration once via the public abstraction.
-        # All file discovery, parsing, and format/location decisions live in the
-        # config module; the hook only consumes semantic accessors from here on.
-        config = load_configuration(cwd)
+            # Parse hook input first to get cwd
+            hook_data = parse_hook_input()
 
-        _warn_if_settings_path_override()
-        _log_config_discovery(config, env_config)
+            tool_name = hook_data["tool_name"]
+            tool_input = hook_data["tool_input"]
+            cwd = hook_data.get("cwd", None)
 
-        # Run startup validation, reusing the loaded config.
-        _run_startup_validation(env_config, cwd, config)
+            # Obtain the resolved configuration once via the public abstraction.
+            # All file discovery, parsing, and format/location decisions live in
+            # the config module; the hook only consumes semantic accessors from
+            # here on.
+            config = load_configuration(cwd)
 
-        takeover_dict = _resolve_takeover_mode(config, env_config)
-        _run_divergence_check(config, env_config, takeover_dict)
+            _warn_if_settings_path_override(reporter)
+            _log_config_discovery(config, env_config)
 
-        # Resolve the list of governed tools via the config abstraction
-        governed_tools = list(config.governed_tools())
+            # Run startup validation, reusing the loaded config.
+            _run_startup_validation(env_config, cwd, config)
 
-        # Only handle tools in the governed list
-        if tool_name not in governed_tools:
-            # Not a governed tool - allow (other hooks handle other tools)
-            output = create_hook_output(
-                RuntimeVerdict(
-                    decision="allow",
-                    reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
+            takeover_dict = _resolve_takeover_mode(config, env_config)
+            _run_divergence_check(config, env_config, takeover_dict)
+
+            # Resolve the list of governed tools via the config abstraction
+            governed_tools = list(config.governed_tools())
+
+            # Only handle tools in the governed list
+            if tool_name not in governed_tools:
+                # Not a governed tool - allow (other hooks handle other tools)
+                output = _finalize_output(
+                    RuntimeVerdict(
+                        decision="allow",
+                        reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
+                    ),
+                    reporter,
                 )
-            )
-            print(json.dumps(output))
+                _emit_decision(output)
+                sys.exit(0)
+
+            # Identify current agent context (used for logging)
+            agent_info = _agent_info_for(hook_data)
+
+            # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
+            # mode) is recorded alongside the decision, purely for diagnosis --
+            # it never affects the verdict itself. See log_command's docstring.
+            permission_mode = hook_data.get("permission_mode")
+
+            # Resolve and log the event: file path tools (Read, Write, Edit) and
+            # command tools (Bash, MCP terminals) differ only in how the target
+            # is extracted and resolved; both return the same RuntimeVerdict
+            # shape (TOO-45 R1d).
+            if tool_name in FILE_PATH_TOOLS:
+                verdict = _handle_file_path_tool(
+                    tool_name,
+                    tool_input,
+                    config,
+                    env_config,
+                    agent_info,
+                    permission_mode,
+                )
+            else:
+                verdict = _handle_command_tool(
+                    tool_input, config, env_config, agent_info, permission_mode
+                )
+
+            # Create and output decision
+            output = _finalize_output(verdict, reporter)
+            _emit_decision(output)
             sys.exit(0)
 
-        # Identify current agent context (used for logging)
-        agent_info = _agent_info_for(hook_data)
+        except EmptyStdinError:
+            # A stray manual/probing invocation (e.g. a bare `toolguard --version`
+            # an agent ran to check the installed version), not a real hook call
+            # from Claude Code (which always pipes real JSON) and not an
+            # unexpected internal error -- treat it exactly like the TTY guard:
+            # a friendly explanation, no crash report (TOO-15, recurred twice).
+            _print_not_a_standalone_command_message(reporter)
+            sys.exit(0)
 
-        # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
-        # mode) is recorded alongside the decision, purely for diagnosis -- it
-        # never affects the verdict itself. See log_command's docstring.
-        permission_mode = hook_data.get("permission_mode")
-
-        # Resolve and log the event: file path tools (Read, Write, Edit) and
-        # command tools (Bash, MCP terminals) differ only in how the target is
-        # extracted and resolved; both return the same RuntimeVerdict shape
-        # (TOO-45 R1d).
-        if tool_name in FILE_PATH_TOOLS:
-            verdict = _handle_file_path_tool(
-                tool_name, tool_input, config, env_config, agent_info, permission_mode
+        except json.JSONDecodeError as e:
+            # JSON parsing error - deny, and deliver that decision the SAME
+            # way the success path does: on stdout (TOO-45 punch-list #04
+            # hook.py fix -- this used to go to stderr with exit 0, which
+            # Claude Code reads as "no opinion" and silently falls through to
+            # native permission handling instead of the deny below).
+            error_reason = f"Failed to parse hook input: {str(e)}"
+            crash_context = _build_crash_context(locals())
+            crash_context["raw_stdin"] = e.doc
+            log_crash(e, crash_context, caught_as="json.JSONDecodeError")
+            _report_crash_fault(reporter, error_reason)
+            output = _finalize_output(
+                RuntimeVerdict(decision="deny", reason=error_reason), reporter
             )
-        else:
-            verdict = _handle_command_tool(
-                tool_input, config, env_config, agent_info, permission_mode
+            _emit_decision(output)
+            sys.exit(0)
+
+        except ValueError as e:
+            # Validation error - deny, delivered on stdout (see above).
+            error_reason = f"Invalid hook input: {str(e)}"
+            log_crash(e, _build_crash_context(locals()), caught_as="ValueError")
+            _report_crash_fault(reporter, error_reason)
+            output = _finalize_output(
+                RuntimeVerdict(decision="deny", reason=error_reason), reporter
             )
+            _emit_decision(output)
+            sys.exit(0)
 
-        # Create and output decision
-        output = create_hook_output(verdict)
-        print(json.dumps(output))
-        sys.exit(0)
-
-    except EmptyStdinError:
-        # A stray manual/probing invocation (e.g. a bare `toolguard --version`
-        # an agent ran to check the installed version), not a real hook call
-        # from Claude Code (which always pipes real JSON) and not an
-        # unexpected internal error -- treat it exactly like the TTY guard:
-        # a friendly explanation, no crash report (TOO-15, recurred twice).
-        _print_not_a_standalone_command_message()
-        sys.exit(0)
-
-    except json.JSONDecodeError as e:
-        # JSON parsing error - deny with error message
-        error_reason = f"Failed to parse hook input: {str(e)}"
-        output = create_hook_output(
-            RuntimeVerdict(decision="deny", reason=error_reason)
-        )
-        print(json.dumps(output), file=sys.stderr)
-        crash_context = _build_crash_context(locals())
-        crash_context["raw_stdin"] = e.doc
-        log_crash(e, crash_context, caught_as="json.JSONDecodeError")
-        sys.exit(0)
-
-    except ValueError as e:
-        # Validation error - deny with error message
-        error_reason = f"Invalid hook input: {str(e)}"
-        output = create_hook_output(
-            RuntimeVerdict(decision="deny", reason=error_reason)
-        )
-        print(json.dumps(output), file=sys.stderr)
-        log_crash(e, _build_crash_context(locals()), caught_as="ValueError")
-        sys.exit(0)
-
-    except Exception as e:
-        # Unexpected error - deny and log
-        error_reason = f"Unexpected error in hook: {str(e)}"
-        output = create_hook_output(
-            RuntimeVerdict(decision="deny", reason=error_reason)
-        )
-        print(json.dumps(output), file=sys.stderr)
-        print(f"Error: {error_reason}", file=sys.stderr)
-        log_crash(e, _build_crash_context(locals()), caught_as="unexpected Exception")
-        sys.exit(0)
+        except Exception as e:
+            # Unexpected error - the catch-all exists to fail CLOSED on
+            # anything unforeseen, so its deny must reach Claude the same way
+            # every other decision does: on stdout (see above).
+            error_reason = f"Unexpected error in hook: {str(e)}"
+            log_crash(
+                e, _build_crash_context(locals()), caught_as="unexpected Exception"
+            )
+            _report_crash_fault(reporter, error_reason)
+            output = _finalize_output(
+                RuntimeVerdict(decision="deny", reason=error_reason), reporter
+            )
+            _emit_decision(output)
+            sys.exit(0)
 
 
 if __name__ == "__main__":

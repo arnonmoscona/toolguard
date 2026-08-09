@@ -54,6 +54,12 @@ compaction.
 
 ## Announce intent before code the hook cannot see
 
+**The general rule now lives in `~/.claude/CLAUDE.md` ("Disclose code you wrote before you run
+it") and applies in every project and to every subagent.** This section is toolguard's own
+layer on top: the env-var markers, the measured evidence for the wording, and the enforcement
+status. When the two disagree, the global one states the principle and this one states the
+mechanics -- don't let them drift into two different rules.
+
 **The test is authorship, not length.** Every Bash command you issue is one of two kinds:
 
 - **A tool invocation**: you are running a program that already existed -- `grep`, `ls`,
@@ -79,12 +85,33 @@ including after a `cd`, a `&&`, a pipe, or inside a subshell:
    `ruby -e`, `bash -c`, `sh -c`, `jq -f`.
 3. **A path to a script you or a subagent wrote for this task** -- `uv run python tmp/x.py`,
    `python scratchpad/probe.py`, `bash /tmp/fix.sh`, `node scratch.js`.
+4. **Shell you composed rather than invoked** -- `sed -e`/`-i` substitution programs, `awk`
+   programs, `for`/`while` loops, `xargs` with an authored command, multi-stage `$(...)`
+   pipelines whose logic is the point. The interpreter is `sh` and the program is the command
+   line. **This is the case that gets missed**, because shell does not *look* like a program.
 
-No exceptions for short, for read-only, or for "I just showed the code". The exemption covers
-only what is *not* on that list: `grep`, `ls`, `git diff`, `uv run ruff check .`,
-`uv run python -m unittest ...`, and **committed** project scripts (`tools/coverage_stdlib.py`,
-`toolguard/...`, `~/bin/...`, `~/projects/youtrack_api/...`) -- files that were reviewed once and
-are not being written right now.
+No exceptions for short, for read-only, for "I just showed the code", or for "a rule will
+reject it anyway". The exemption covers only what is *not* on that list: `grep`, `ls`,
+`git diff`, `uv run ruff check .`, `uv run python -m unittest ...`, and **committed** project
+scripts (`tools/coverage_stdlib.py`, `toolguard/...`, `~/bin/...`,
+`~/projects/youtrack_api/...`) -- files that were reviewed once and are not being written
+right now.
+
+**Measured 2026-08-09**: of 17 qualifying commands in one day, 7 were disclosed and 10 were
+not, and every miss on the main agent's side was case 4 or an undisclosed scratch script. The
+misses were not random -- everything that felt like *a program in a file* got a block, and
+everything that felt like *shell* got nothing. That is the file-versus-shell test, which is not
+the test. The test is authorship.
+
+**Disclosure is not only decision support.** It also feeds after-the-fact analysis of what the
+agent actually did, which is why it is required even when the command will be blocked, even
+when it fails, and even when nobody is at the keyboard. A rejected command with a disclosure is
+a usable record; a rejected command without one is a bare path.
+
+**This applies to subagents exactly as it applies to the main agent** -- `feature-coder`,
+`code-reviewer`, and anything else with a Bash tool. A subagent's commands land in the same
+`logs/toolguard-*.md` and, because subagent identification is currently broken, are attributed
+to `main`. An agent that skips disclosure therefore corrupts the main agent's record too.
 
 This wording is not a guess. The previous version said "don't announce ordinary one-liners whose
 full effect is visible in the command text", which a short `python -c` satisfies as well as `grep`
@@ -165,9 +192,17 @@ leaf command and therefore visible:
 TG_ATTEST_READONLY=1 uv run python tmp/count_calls.py
 ```
 
-Undisclosed inline code and ad-hoc scripts are **rejected** by rule, and the rejection will
-eventually explain itself via TOO-19's per-rule `additionalContext`. Attested read-only work can
-run with no prompt at all. See `intent-disclosure-rules.example.toml`.
+**No rule enforces any of this today, and the previous wording here claimed otherwise.** It said
+undisclosed inline code was "rejected by rule" and pointed at
+`intent-disclosure-rules.example.toml`. That file is not in this repo, and nothing in
+`.claude/`, `~/.claude/*.json` or `~/.toolguard/` matches `TG_INTENT` or `TG_ATTEST_READONLY`.
+The markers are written and nothing reads them. The design work is in
+`tmp/intent-disclosure-enforcement.md`, still marked "nothing here is adopted".
+
+So the only thing standing between this rule and a silent miss is compliance -- which is exactly
+the failure mode the "Encoding rules as guidance vs. enforcing them" section of the global
+CLAUDE.md predicts, and it has now been measured happening. Until the rules exist, treat every
+qualifying command as one you will be audited on, because the log is the audit.
 
 Use `TG_ATTEST_READONLY=1` only when *every* leaf is read-only. Do **not** attest a compound
 containing a write, redirect, delete, or install -- not even an incidental one. If part of the

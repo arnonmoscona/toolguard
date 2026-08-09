@@ -5,7 +5,6 @@ Provides automatic consolidation of permissions from settings.local.json
 to toolguard configuration files when divergence is detected.
 """
 
-import sys
 from pathlib import Path
 from typing import Dict, List
 
@@ -16,6 +15,7 @@ from toolguard.config_divergence import (
     get_native_permissions,
     get_toolguard_permissions,
 )
+from toolguard.error_reporter import report_notice, report_warning
 from toolguard.once_per import Repeat
 from toolguard.permission_migration import migrate
 
@@ -97,7 +97,7 @@ def run_auto_migration(
         - Creates backup files
         - Modifies settings.local.json
         - Modifies or creates toolguard config file
-        - Prints status messages to stderr
+        - Reports status via :mod:`toolguard.error_reporter`
     """
     if AUTO_MIGRATION.done(project_root):
         # Already migrated today -- skip the analysis entirely.
@@ -148,10 +148,8 @@ def run_auto_migration(
         return False
 
     def _migrate() -> bool:
-        """Run migrate(), reporting outcome to stderr; the once-per-day slot is already ours."""
-        print(
-            "[TOOLGUARD AUTO-MIGRATION] Running automatic migration...", file=sys.stderr
-        )
+        """Run migrate(), reporting outcome; the once-per-day slot is already ours."""
+        report_notice("[TOOLGUARD AUTO-MIGRATION] Running automatic migration...")
         try:
             exit_code = migrate(
                 project_root=project_root,
@@ -160,14 +158,19 @@ def run_auto_migration(
                 backup_dir=backup_dir,
             )
         except Exception as e:
-            print(f"[TOOLGUARD AUTO-MIGRATION] Migration error: {e}", file=sys.stderr)
+            report_warning(
+                f"[TOOLGUARD AUTO-MIGRATION] Migration error: {e}",
+                "Check the migration's backup and settings.local.json, then retry.",
+            )
             return False
         if exit_code != 0:
-            print("[TOOLGUARD AUTO-MIGRATION] Migration failed", file=sys.stderr)
+            report_warning(
+                "[TOOLGUARD AUTO-MIGRATION] Migration failed",
+                "Check the migration's backup and settings.local.json, then retry.",
+            )
             return False
-        print(
-            f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)",
-            file=sys.stderr,
+        report_notice(
+            f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)"
         )
         return True
 

@@ -208,10 +208,15 @@ def _log_dir_from_environment() -> Optional[Path]:
     ``"logs"`` -- a checked_bash.py-era fallback, undocumented and referenced
     by no config or doc. Removing it is a no-op for anyone who never set it.
     ``TOOLGUARD_LOG_DIR`` (read via
-    :func:`toolguard.env_config.get_env_config`) is the supported override,
-    and production always goes through it because ``hook.py`` passes a
-    resolved config to every ``log_command`` call, so this function is reached
-    only by direct/test callers.
+    :func:`toolguard.env_config.get_env_config`) is the supported override, so
+    this function deliberately honours no environment variable of its own.
+
+    It IS reached in production, by ``hook.py::main``'s coarse Reporter
+    log-dir resolution before ``env_config`` is known -- a warning raised in
+    that window therefore lands in the default directory even when
+    ``TOOLGUARD_LOG_DIR`` points elsewhere. Reading the variable directly here
+    would not fix that: an override supplied through a ``.env`` file would
+    still be missed, giving two divergent resolutions of one setting.
 
     Returns:
         The resolved log directory, or None if it doesn't exist.
@@ -226,12 +231,16 @@ def _log_dir_from_environment() -> Optional[Path]:
     return _existing_log_dir_or_warn(log_dir_path)
 
 
-def _resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optional[Path]:
+def resolve_log_dir(log_dir: Optional[Path], config: Optional[dict]) -> Optional[Path]:
     """
     Pick the directory a log entry is written to, in caller-precedence order.
 
     An explicitly passed *log_dir* wins (used by tests), then the resolved
     environment *config*, then the ``<project root>/logs`` default.
+
+    Public (TOO-45 punch-list #04): ``hook.py::main`` reuses this to resolve
+    its :class:`~toolguard.error_reporter.Reporter`'s log directory, instead
+    of duplicating the resolution rules.
 
     Args:
         log_dir: Directory passed directly by the caller, or None.
@@ -403,7 +412,7 @@ def log_command(
         is_jsonlines = log_format.lower() == LOG_FORMAT_JSONLINES
 
         # Resolve log directory path (None => logging disabled for this call)
-        log_dir_path = _resolve_log_dir(log_dir, config)
+        log_dir_path = resolve_log_dir(log_dir, config)
         if log_dir_path is None:
             return
 

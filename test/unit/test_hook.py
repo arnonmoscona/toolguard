@@ -25,6 +25,7 @@ from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHO
 from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import (
     FILE_PATH_TOOLS,
+    _emit_decision,
     _handle_command_tool,
     _handle_file_path_tool,
     _log_allowed_command,
@@ -2952,9 +2953,13 @@ class TestHookCrashCapture(unittest.TestCase):
         RuntimeError
         When main() runs and the exception falls through to the generic
         `except Exception` clause
-        Then main() still denies and exits 0 as before, AND a crash report file
-        appears under ~/.toolguard/errors/ describing the RuntimeError with a
-        full traceback
+        Then main() still denies and exits 0, the decision lands on STDOUT
+        (TOO-45 punch-list #04 hook.py fix -- this used to go to stderr with
+        exit 0, which Claude Code reads as "no opinion" and falls through to
+        native permission handling instead of denying), stderr is empty, the
+        fault reaches the Claude-facing additionalContext, AND a crash report
+        file appears under ~/.toolguard/errors/ describing the RuntimeError
+        with a full traceback
         """
         hook_input = {
             "tool_name": "Bash",
@@ -2965,10 +2970,11 @@ class TestHookCrashCapture(unittest.TestCase):
 
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            (home / "logs").mkdir()
             with (
                 patch("sys.stdin", StringIO(json.dumps(hook_input))),
                 patch("sys.stdin.isatty", return_value=False),
-                patch("sys.stdout", new_callable=StringIO),
+                patch("sys.stdout", new_callable=StringIO) as mock_stdout,
                 patch("sys.stderr", new_callable=StringIO) as mock_stderr,
                 patch("toolguard.hook.load_configuration", return_value=config),
                 patch(
@@ -2976,17 +2982,35 @@ class TestHookCrashCapture(unittest.TestCase):
                     side_effect=RuntimeError("boom from resolver"),
                 ),
                 patch("pathlib.Path.home", return_value=home),
+                # The outer, config=None error-reporter invocation resolves
+                # its log dir via require_project_root(), independent of
+                # Path.home() -- isolate it too, or this leaks into the real
+                # repo logs/ dir (see .claude/rules/test-config-isolation.md).
+                patch("toolguard.log_writer.require_project_root", return_value=home),
             ):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
 
             self.assertEqual(ctx.exception.code, 0)
-            # The exception path prints its JSON decision to stderr (not
-            # stdout) -- the first JSON line on stderr is create_hook_output's
-            # deny decision.
-            first_stderr_line = mock_stderr.getvalue().splitlines()[0]
-            output = json.loads(first_stderr_line)
+            # error_log.log_crash/log_error echo their own "[CRASH]"/"[ERROR]"
+            # lines to stderr unconditionally as part of writing -- that is
+            # unrelated to this fix. What must NOT be on stderr is the
+            # decision itself.
+            self.assertNotIn('"permissionDecision"', mock_stderr.getvalue())
+            stdout_text = mock_stdout.getvalue()
+            self.assertTrue(
+                stdout_text.strip(), "expected a non-empty decision on stdout"
+            )
+            output = json.loads(stdout_text)
             self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertIn(
+                "toolguard crashed while deciding",
+                output["hookSpecificOutput"]["additionalContext"],
+            )
+            self.assertIn(
+                "boom from resolver",
+                output["hookSpecificOutput"]["additionalContext"],
+            )
 
             errors_dir = home / ".toolguard" / "errors"
             self.assertTrue(errors_dir.is_dir())
@@ -3002,22 +3026,44 @@ class TestHookCrashCapture(unittest.TestCase):
         Given stdin contains text that is not valid JSON
         When main() runs and parse_hook_input's json.JSONDecodeError falls
         through to the `except json.JSONDecodeError` clause
-        Then main() still denies and exits 0 as before, AND a crash report file
-        appears under ~/.toolguard/errors/ describing the parse failure
+        Then main() still denies and exits 0, the decision lands on STDOUT
+        and is non-empty (TOO-45 punch-list #04 hook.py fix -- this used to
+        go to stderr with exit 0, silently falling through to native
+        permission handling instead of denying), the fault reaches
+        additionalContext, AND a crash report file appears under
+        ~/.toolguard/errors/ describing the parse failure
         """
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            (home / "logs").mkdir()
             with (
                 patch("sys.stdin", StringIO("not valid json {")),
                 patch("sys.stdin.isatty", return_value=False),
-                patch("sys.stdout", new_callable=StringIO),
-                patch("sys.stderr", new_callable=StringIO),
+                patch("sys.stdout", new_callable=StringIO) as mock_stdout,
+                patch("sys.stderr", new_callable=StringIO) as mock_stderr,
                 patch("pathlib.Path.home", return_value=home),
+                patch("toolguard.log_writer.require_project_root", return_value=home),
             ):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
 
             self.assertEqual(ctx.exception.code, 0)
+            # error_log.log_crash/log_error echo their own "[CRASH]"/"[ERROR]"
+            # lines to stderr unconditionally as part of writing -- that is
+            # unrelated to this fix. What must NOT be on stderr is the
+            # decision itself.
+            self.assertNotIn('"permissionDecision"', mock_stderr.getvalue())
+            stdout_text = mock_stdout.getvalue()
+            self.assertTrue(
+                stdout_text.strip(), "expected a non-empty decision on stdout"
+            )
+            output = json.loads(stdout_text)
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertIn(
+                "toolguard crashed while deciding",
+                output["hookSpecificOutput"]["additionalContext"],
+            )
+
             errors_dir = home / ".toolguard" / "errors"
             self.assertTrue(errors_dir.is_dir())
             crash_files = list(errors_dir.glob("toolguard-error-*.md"))
@@ -3031,8 +3077,12 @@ class TestHookCrashCapture(unittest.TestCase):
         (hook_event_name)
         When main() runs and parse_hook_input's ValueError falls through to the
         `except ValueError` clause
-        Then main() still denies and exits 0 as before, AND a crash report file
-        appears under ~/.toolguard/errors/ describing the missing field
+        Then main() still denies and exits 0, the decision lands on STDOUT
+        and is non-empty (TOO-45 punch-list #04 hook.py fix -- this used to
+        go to stderr with exit 0, silently falling through to native
+        permission handling instead of denying), the fault reaches
+        additionalContext, AND a crash report file appears under
+        ~/.toolguard/errors/ describing the missing field
         """
         hook_input = {
             "tool_name": "Bash",
@@ -3041,17 +3091,35 @@ class TestHookCrashCapture(unittest.TestCase):
         }
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            (home / "logs").mkdir()
             with (
                 patch("sys.stdin", StringIO(json.dumps(hook_input))),
                 patch("sys.stdin.isatty", return_value=False),
-                patch("sys.stdout", new_callable=StringIO),
-                patch("sys.stderr", new_callable=StringIO),
+                patch("sys.stdout", new_callable=StringIO) as mock_stdout,
+                patch("sys.stderr", new_callable=StringIO) as mock_stderr,
                 patch("pathlib.Path.home", return_value=home),
+                patch("toolguard.log_writer.require_project_root", return_value=home),
             ):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
 
             self.assertEqual(ctx.exception.code, 0)
+            # error_log.log_crash/log_error echo their own "[CRASH]"/"[ERROR]"
+            # lines to stderr unconditionally as part of writing -- that is
+            # unrelated to this fix. What must NOT be on stderr is the
+            # decision itself.
+            self.assertNotIn('"permissionDecision"', mock_stderr.getvalue())
+            stdout_text = mock_stdout.getvalue()
+            self.assertTrue(
+                stdout_text.strip(), "expected a non-empty decision on stdout"
+            )
+            output = json.loads(stdout_text)
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertIn(
+                "toolguard crashed while deciding",
+                output["hookSpecificOutput"]["additionalContext"],
+            )
+
             errors_dir = home / ".toolguard" / "errors"
             self.assertTrue(errors_dir.is_dir())
             crash_files = list(errors_dir.glob("toolguard-error-*.md"))
@@ -3118,6 +3186,7 @@ class TestHookCrashCapture(unittest.TestCase):
 
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            (home / "logs").mkdir()
             with (
                 patch("sys.stdin", StringIO(json.dumps(hook_input))),
                 patch("sys.stdin.isatty", return_value=False),
@@ -3129,6 +3198,7 @@ class TestHookCrashCapture(unittest.TestCase):
                     side_effect=RuntimeError("boom from resolver"),
                 ),
                 patch("pathlib.Path.home", return_value=home),
+                patch("toolguard.log_writer.require_project_root", return_value=home),
                 patch("toolguard.hook.log_crash") as mock_log_crash,
             ):
                 with self.assertRaises(SystemExit) as ctx:
@@ -3140,6 +3210,70 @@ class TestHookCrashCapture(unittest.TestCase):
             self.assertEqual(crash_context["tool_name"], "Bash")
             self.assertEqual(crash_context["tool_input"], {"command": "git status"})
             self.assertEqual(crash_context["cwd"], "/some/project/dir")
+
+
+class TestEmitDecisionStdoutFailureFallsBackToExit2(unittest.TestCase):
+    """
+    TOO-45 punch-list #04 hook.py fix, belt-and-braces: _emit_decision is the
+    ONE place every decision (success or error) is written to stdout. If
+    that write itself fails there is no decision left to deliver, so this is
+    the one case that falls back to sys.exit(2) -- the host's own blocking
+    signal -- with the failure reason on stderr.
+    """
+
+    def test_stdout_write_failure_exits_2_with_reason_on_stderr(self):
+        """
+        Given sys.stdout itself raises when written to (e.g. a broken pipe)
+        When _emit_decision tries to print the JSON decision
+        Then it exits 2 (not 0) and the failure reason lands on stderr
+        """
+
+        class _BrokenStdout:
+            def write(self, _data):
+                raise BrokenPipeError("pipe closed")
+
+            def flush(self):
+                pass
+
+        with (
+            patch("sys.stdout", _BrokenStdout()),
+            patch("sys.stderr", new_callable=StringIO) as mock_stderr,
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                _emit_decision({"hookSpecificOutput": {"permissionDecision": "deny"}})
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("failed to emit decision", mock_stderr.getvalue())
+
+    def test_stdout_flush_failure_exits_2_with_reason_on_stderr(self):
+        """
+        Given sys.stdout accepts the write but raises on flush() -- the shape
+            a real, block-buffered pipe takes when its reader has closed
+            (TOO-45 punch-list #04 fix pass M1: measured on a real subprocess
+            with a closed stdout read-end, `print()` returned successfully
+            and the process exited 120 -- outside the try/except -- because
+            nothing had flushed the buffered write yet)
+        When _emit_decision tries to print the JSON decision
+        Then it exits 2 (not left to fail open at interpreter shutdown) and
+             the failure reason lands on stderr
+        """
+
+        class _BufferedBrokenPipeStdout:
+            def write(self, _data):
+                pass  # Accepted into the (simulated) buffer, not yet flushed.
+
+            def flush(self):
+                raise BrokenPipeError("pipe closed")
+
+        with (
+            patch("sys.stdout", _BufferedBrokenPipeStdout()),
+            patch("sys.stderr", new_callable=StringIO) as mock_stderr,
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                _emit_decision({"hookSpecificOutput": {"permissionDecision": "deny"}})
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("failed to emit decision", mock_stderr.getvalue())
 
 
 if __name__ == "__main__":
