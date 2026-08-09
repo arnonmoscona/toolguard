@@ -82,10 +82,16 @@ def main() -> int:
     Main entry point for the migration script.
 
     Resolves the project root, then delegates all actual migration work to
-    :func:`toolguard.permission_migration.migrate`.
+    :func:`toolguard.permission_migration.migrate`, converting its
+    :class:`~toolguard.permission_migration.MigrationOutcome` to a shell
+    exit code here -- the only place in the call chain that should (TOO-45
+    punch-list #15 final item).
 
     Returns:
-        Exit code (0 for success, 1 for error)
+        1 if the project root itself cannot be resolved. Otherwise
+        :func:`~toolguard.permission_migration.migrate`'s outcome's
+        ``.exit_code``: 0 on success, 1 on error, or 3 if another migration
+        already holds this project's lock.
     """
     args = parse_args()
 
@@ -100,7 +106,7 @@ def main() -> int:
         dry_run=args.dry_run,
         auto_sort=not args.no_sort,
         backup_dir=args.backup_dir,
-    )
+    ).exit_code
 
 
 if __name__ == "__main__":

@@ -4,9 +4,6 @@ Unit tests for config_divergence module.
 
 import io
 import json
-import subprocess
-import sys
-import time
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -26,9 +23,7 @@ from toolguard.config_divergence import (
 from toolguard.once_per_store import ClaimStatus
 
 from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
-
-#: test/unit/test_config_divergence.py -> parents[0]=test/unit, [1]=test, [2]=repo root.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+from test.unit._subprocess_harness import release_barrier_when_ready, run_child
 
 
 class TestGetNativePermissions(unittest.TestCase):
@@ -957,6 +952,7 @@ class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             barrier = Path(tmpdir) / "go"
+            ready_markers = [Path(tmpdir) / f"ready_{i}" for i in range(2)]
             # Each subprocess is a fresh interpreter, outside this suite's
             # own guard machinery -- it MUST isolate the shared store itself,
             # or it would touch the developer's real ~/.toolguard/once_per.db.
@@ -977,6 +973,7 @@ class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
                 "once_per_store._STORE_PATH = Path(sys.argv[3])\n"
                 "project_root = Path(sys.argv[1])\n"
                 "barrier = Path(sys.argv[2])\n"
+                "Path(sys.argv[4]).touch()\n"
                 "deadline = time.monotonic() + 10\n"
                 "while not barrier.exists() and time.monotonic() < deadline:\n"
                 "    pass\n"
@@ -988,26 +985,16 @@ class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
             )
 
             procs = [
-                subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-c",
-                        script,
-                        str(project_root),
-                        str(barrier),
-                        str(store_path),
-                    ],
-                    cwd=str(_REPO_ROOT),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                run_child(
+                    script, str(project_root), str(barrier), str(store_path), str(ready)
                 )
-                for _ in range(2)
+                for ready in ready_markers
             ]
 
-            # Give both children time to reach the busy-wait loop, then release them together.
-            time.sleep(0.3)
-            barrier.touch()
+            self.assertTrue(
+                release_barrier_when_ready(barrier, ready_markers, timeout=10),
+                "children never reached the barrier wait loop",
+            )
 
             outputs = []
             for proc in procs:

@@ -20,14 +20,17 @@ import from without a layering violation.
 (``parse_args`` / ``main``) around :func:`migrate` here.
 """
 
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher, get_close_matches
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from toolguard import file_lock
 from toolguard.config import (
     Configuration,
     discover_config_files,
@@ -41,6 +44,7 @@ from toolguard.config_divergence import (
 )
 from toolguard.config_validation import extract_tool_name
 from toolguard.config_write_guard import verified_write_config
+from toolguard.error_reporter import report_warning
 from toolguard.rule_entry import (
     RuleEntry,
     normalize_entries_preserving,
@@ -55,6 +59,79 @@ from toolguard.rule_sort import (
     render_toml_entry,
     sort_patterns,
 )
+
+
+#: migrate()'s default lock wait -- right for the interactive
+#: toolguard-migrate CLI, where a human chose to wait (TOO-45 punch-list
+#: #15). Callers on a latency-sensitive path pass a shorter
+#: lock_timeout_seconds explicitly; see toolguard.auto_migrate.
+MIGRATE_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class MigrationOutcome(Enum):
+    """
+    :func:`migrate`'s result. Callers branch on the member, never on an
+    exit code -- see :data:`_EXIT_CODES` for the one place an int is
+    derived, at the CLI boundary (TOO-45 punch-list #15 final item). This
+    replaces a bare ``int`` return that let ``!= 0`` branches silently
+    misclassify a new outcome as failure the first time one was added.
+    """
+
+    #: Migration completed (including the "nothing to migrate" no-op).
+    SUCCEEDED = "succeeded"
+    #: Migration raised while loading, computing, or writing.
+    FAILED = "failed"
+    #: Declined without attempting anything: another migration already
+    #: holds this project's lock.
+    DECLINED_LOCKED = "declined_locked"
+
+    @property
+    def exit_code(self) -> int:
+        """This outcome's CLI exit code. See :data:`_EXIT_CODES`."""
+        return _EXIT_CODES[self]
+
+
+#: The one table mapping outcome -> exit code (mirrors
+#: ``error_reporter._ROUTING``'s "one table to read, one place to change"
+#: shape). ``DECLINED_LOCKED``'s value is deliberately not 2: argparse's
+#: own usage-error exit code in the same CLI (migrate_permissions.py),
+#: which would make "declined" indistinguishable from "bad flags" to a
+#: script branching on the exit code.
+_EXIT_CODES: Dict[MigrationOutcome, int] = {
+    MigrationOutcome.SUCCEEDED: 0,
+    MigrationOutcome.FAILED: 1,
+    MigrationOutcome.DECLINED_LOCKED: 3,
+}
+
+#: Subdirectory of ~/.toolguard/ holding per-project migration lockfiles.
+_LOCK_SUBDIR = "locks"
+
+#: Hex digest length for the lock filename -- 16 hex chars (64 bits) is
+#: plenty to avoid collisions among a user's actual projects.
+_LOCK_KEY_HEX_LEN = 16
+
+
+def _migration_lock_path(project_root: Path) -> Path:
+    """
+    Build this project's migrate() lockfile path under ``~/.toolguard/locks/``.
+
+    Keyed on the RESOLVED project root, unlike
+    :func:`toolguard.once_per_store._project_key` (``str(project)``, no
+    ``.resolve()``): mutual exclusion is about the real directory, so two
+    spellings of the same project must map to the same lock. This is a
+    deliberate divergence from that module, not an inconsistency to copy --
+    see this function's caller for the follow-up note.
+
+    ``Path.home()`` is resolved here, at call time, never at module import:
+    this module is on the hook's import path.
+    """
+    digest = hashlib.sha256(str(project_root.resolve()).encode()).hexdigest()
+    return (
+        Path.home()
+        / ".toolguard"
+        / _LOCK_SUBDIR
+        / f"migrate-{digest[:_LOCK_KEY_HEX_LEN]}.lock"
+    )
 
 
 def create_backup(file_path: Path, backup_dir: Path) -> Path:
@@ -1096,22 +1173,37 @@ def _apply_migration(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45 sc
         return 1
 
 
+def _outcome_from_run_migration_result(result: int) -> MigrationOutcome:
+    """
+    Translate :func:`_run_migration`'s internal 0/1 ``int`` into a
+    :class:`MigrationOutcome`. The internal function stays ``int``
+    (unchanged by this refactor) since only :func:`migrate`'s own return
+    type is the public contract this module owns.
+    """
+    return MigrationOutcome.SUCCEEDED if result == 0 else MigrationOutcome.FAILED
+
+
 def migrate(
     project_root: Path,
     dry_run: bool = False,
     auto_sort: bool = True,
     backup_dir: Optional[Path] = None,
-) -> int:
+    lock_timeout_seconds: float = MIGRATE_LOCK_TIMEOUT_SECONDS,
+) -> MigrationOutcome:
     """
     Perform the migration of permissions from settings.local.json to toolguard config.
 
-    Structured as four phases, each delegated to its own helper: load/discover
-    sources (:func:`_load_migration_sources`), compute the divergent/redundant
-    pattern sets and report them, resolve the write target
-    (:func:`_resolve_target_config_path`), and -- unless this is a dry run --
-    apply the migration (:func:`_apply_migration`). This function itself only
-    sequences those phases and handles the early-exit "nothing to do" cases;
-    it performs no file I/O of its own.
+    Delegates the actual load/compute/write work to :func:`_run_migration`.
+    This function's own job is the early-exit "nothing to migrate" case and
+    the cross-process exclusion around the read-modify-write (TOO-45
+    punch-list #15): concurrent migrations of the same project can each read
+    the pre-migration state and each write a result, silently discarding one
+    process's changes. A dry run performs no write and needs no lock -- only
+    the actual (``dry_run=False``) path takes it, spanning BOTH the load
+    (:func:`_load_migration_sources`, inside :func:`_run_migration`) and the
+    write: locking the write alone would still let a second process compute
+    its divergent/redundant sets against a first process's now-stale read
+    and overwrite what the first just added.
 
     This is the library entry point the ``toolguard-migrate`` console script
     (:func:`toolguard.scripts.migrate_permissions.main`) delegates to, and
@@ -1124,9 +1216,14 @@ def migrate(
         dry_run: If True, preview changes without modifying files
         auto_sort: If True, sort patterns after migration
         backup_dir: Directory for backup files (default: project_root/logs/config-backups)
+        lock_timeout_seconds: How long to wait for a contended lock before
+            declining. Defaults to the interactive CLI's wait; a
+            latency-sensitive caller (the synchronous PreToolUse hook, via
+            auto_migrate) should pass something sub-second instead.
 
     Returns:
-        Exit code (0 for success, 1 for error)
+        A :class:`MigrationOutcome`. Use its ``.exit_code`` property to get
+        a shell exit code (the only legitimate reason to want an int).
     """
     if backup_dir is None:
         backup_dir = project_root / "logs" / "config-backups"
@@ -1135,8 +1232,57 @@ def migrate(
     if not settings_path.exists():
         print(f"No settings.local.json found at {settings_path}")
         print("Nothing to migrate.")
-        return 0
+        return MigrationOutcome.SUCCEEDED
 
+    if dry_run:
+        return _outcome_from_run_migration_result(
+            _run_migration(project_root, settings_path, backup_dir, dry_run, auto_sort)
+        )
+
+    lock_path = _migration_lock_path(project_root)
+    try:
+        with file_lock.exclusive(lock_path, timeout_seconds=lock_timeout_seconds):
+            return _outcome_from_run_migration_result(
+                _run_migration(
+                    project_root, settings_path, backup_dir, dry_run, auto_sort
+                )
+            )
+    except file_lock.LockUnavailable as e:
+        if e.reason == file_lock.REASON_TIMEOUT:
+            report_warning(
+                "Migration declined: another migration is already in progress "
+                "for this project.",
+                "Wait for the other migration to finish, then retry.",
+            )
+        else:
+            report_warning(
+                f"Migration declined: exclusive access could not be guaranteed ({e.reason}).",
+                "Resolve the underlying condition, then retry; no files were modified.",
+            )
+        return MigrationOutcome.DECLINED_LOCKED
+
+
+def _run_migration(
+    project_root: Path,
+    settings_path: Path,
+    backup_dir: Path,
+    dry_run: bool,
+    auto_sort: bool,
+) -> int:
+    """
+    Load sources, compute divergent/redundant patterns, report, and -- unless
+    *dry_run* -- write.
+
+    Structured as phases, each delegated to its own helper: load/discover
+    sources (:func:`_load_migration_sources`), compute and report, resolve
+    the write target (:func:`_resolve_target_config_path`), and apply the
+    migration (:func:`_apply_migration`). Called by :func:`migrate` either
+    directly (dry run) or inside its lock (real run) -- see that function's
+    docstring for why the lock spans this whole call.
+
+    Returns:
+        0 on success (including "nothing to migrate"), 1 if migration raised.
+    """
     sources = _load_migration_sources(project_root, settings_path)
 
     # Find divergent patterns (patterns in native but not in toolguard). Restrict to

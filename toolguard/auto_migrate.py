@@ -17,12 +17,19 @@ from toolguard.config_divergence import (
 )
 from toolguard.error_reporter import report_notice, report_warning
 from toolguard.once_per import Repeat
-from toolguard.permission_migration import migrate
+from toolguard.permission_migration import MigrationOutcome, migrate
 
 #: The single named object for this module's once-per-day throttling. One
 #: name carries both the key and the human description (TOO-45 punch-list
 #: #01 item 4) -- no separate _KEY constant to drift from it.
 AUTO_MIGRATION = once_per.day("auto_migration", "automatic permission migration")
+
+#: migrate()'s lock wait on THIS path only (TOO-45 punch-list #15 fix
+#: pass): this runs inside the synchronous PreToolUse hook, with a user
+#: waiting live on the tool call, so a contended lock should decline fast
+#: rather than stall it -- unlike the interactive CLI, which keeps
+#: migrate()'s longer default.
+AUTO_MIGRATE_LOCK_TIMEOUT_SECONDS = 1.0
 
 
 def load_config_sync_settings(config_files: List[tuple]) -> Dict:
@@ -151,11 +158,12 @@ def run_auto_migration(
         """Run migrate(), reporting outcome; the once-per-day slot is already ours."""
         report_notice("[TOOLGUARD AUTO-MIGRATION] Running automatic migration...")
         try:
-            exit_code = migrate(
+            outcome = migrate(
                 project_root=project_root,
                 dry_run=False,
                 auto_sort=auto_sort,
                 backup_dir=backup_dir,
+                lock_timeout_seconds=AUTO_MIGRATE_LOCK_TIMEOUT_SECONDS,
             )
         except Exception as e:
             report_warning(
@@ -163,7 +171,17 @@ def run_auto_migration(
                 "Check the migration's backup and settings.local.json, then retry.",
             )
             return False
-        if exit_code != 0:
+        if outcome is MigrationOutcome.DECLINED_LOCKED:
+            # Nothing was attempted -- the other process holding the lock is
+            # doing the work itself, so there is nothing here to retry. The
+            # day's claim stays consumed (not released): that is deliberate,
+            # not an oversight (TOO-45 punch-list #15 fix pass, item 1).
+            report_notice(
+                "[TOOLGUARD AUTO-MIGRATION] Another migration is already "
+                "running for this project; skipping."
+            )
+            return False
+        if outcome is not MigrationOutcome.SUCCEEDED:
             report_warning(
                 "[TOOLGUARD AUTO-MIGRATION] Migration failed",
                 "Check the migration's backup and settings.local.json, then retry.",

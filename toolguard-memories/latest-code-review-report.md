@@ -7,188 +7,165 @@ tags:
 permalink: latest-code-review-report
 ---
 
-# Code review — 2026-08-09
+# Code review — TOO-45 punch-list #15 (migrate cross-process lock)
 
-**Scope:** `toolguard/hook.py`, `test/unit/test_hook.py`, `test/unit/test_hook_error_reporter.py` (TOO-45 punch-list #04). Reviewed against `HEAD`; `toolguard/error_reporter.py` and `.pyscn.toml` were read as context because the change's correctness depends on them.
-
-**Verification run:** `uv run python -m unittest test.unit.test_hook test.unit.test_hook_error_reporter test.unit.test_error_reporter` — 109 tests, all pass. `ruff check` and `ruff format --check` clean on all four files.
+**Date: 2026-08-09, 14:0x local.** Scope: `toolguard/file_lock.py` (new), `toolguard/permission_migration.py` (modified), `test/unit/test_file_lock.py` (new), `test/unit/test_migration.py` (modified). Reviewer: code-reviewer subagent, isolated context.
 
 ## Summary
 
-This is a good, well-motivated change: it closes a genuine fail-open (the three `except` handlers in `main()` printed their deny JSON to **stderr** and exited 0, which Claude Code reads as "no opinion" and falls through to native permission handling), funnels every decision through one emission point, and the tests assert the stdout/stderr split rather than the message text. Two things stop it from being complete. The exit-2 belt-and-braces path in `_emit_decision` does not work on a real pipe — measured, not inferred — and `_run_eval_mode`, twenty lines above in the same file, still contains three verbatim copies of the exact defect that was just removed from `main()`. There is also a latent structural loss in the nested-invocation design that will silently drop faults as soon as a second `report_fault` call site exists.
+The lock primitive itself is well built and, unusually for concurrency code, actually proven: `flock` is chosen over `lockf` with the reason recorded, release-on-process-death is tested with a real `SIGKILL`, cross-process contention is exercised with real processes rather than asserted, and the Windows branch is reached by patching. The layer registration was done and `tools/architecture_fitness.py --layers` is clean. The problems are all on the *seam*, not the mechanism: `migrate()` now returns a third exit code, and the one library caller that branches on `!= 0` was not updated — which converts a "someone else is busy, try again" into a reported failure that burns the day's auto-migration slot. Two related seam issues (hook-path latency, a decline message that asserts a cause the reason may contradict) share the same root: the new outcome was given a code and a message but not a *place in the callers' vocabulary*.
+
+Suite green (103 tests in the two modules, 4.7 s), `ruff check` and `ruff format --check` clean, architecture fitness clean.
 
 ---
 
 ## Critical
 
-None. No security vulnerability, injection path, or credential handling issue was introduced. The change moves the fail-safe posture in the right direction.
+None.
 
 ---
 
 ## Major
 
-### M1. `_emit_decision` never flushes, so the documented exit-2 guarantee does not hold on a real pipe
+### M1. `auto_migrate` reports a lock decline as a migration failure, and burns the day's slot
 
-**`/home/arnon/projects/toolguard/toolguard/hook.py:249-253`**
+**File**: `/home/arnon/projects/toolguard/toolguard/auto_migrate.py:166-171` (caller not updated by this change)
 
-```python
-try:
-    print(json.dumps(output))
-except Exception as e:
-    print(f"toolguard: failed to emit decision: {e}", file=sys.stderr)
-    sys.exit(2)
-```
+`_migrate()` does `if exit_code != 0: report_warning("[TOOLGUARD AUTO-MIGRATION] Migration failed", "Check the migration's backup and settings.local.json, then retry.")`. With `MIGRATE_DECLINED_LOCKED = 2` this now fires when *nothing was attempted*:
 
-When Claude Code runs the hook, stdout is a **pipe**, so `sys.stdout` is block-buffered. `print()` copies into the buffer and returns; the actual `write(2)` happens at flush or at interpreter shutdown — *after* `_emit_decision` has returned and the `try/except` is long gone.
+- The message is wrong — nothing failed.
+- The corrective step is unactionable — it points at a backup that was never created and a `settings.local.json` that was never touched.
+- Worse, per `auto_migrate`'s own docstring (lines 77-85), **the once-per-day claim is deliberately not released on failure**, and `AUTO_MIGRATION.run(...)` claims the slot immediately before `_migrate()`. So a transient decline — e.g. the user happens to be running `toolguard-migrate` by hand at that moment — suppresses auto-migration for the rest of the day, with a message telling them to inspect a nonexistent backup.
 
-Measured on this machine with a closing reader (scratchpad probe, real pipe):
+This is not an oversight in scope: the coder task recall lists *"`migrate()` returns `int` exit code; callers branch on `!= 0`"* as a **given fact**, and `MIGRATE_DECLINED_LOCKED`'s own docstring says it exists so that *"a caller that wants to say 'someone else is already migrating' can"*. The code path was defined and then left unused by the only caller that could use it.
 
-```
-PRINT_RETURNED_WITHOUT_RAISING
-FLUSH_RAISED: BrokenPipeError: [Errno 32] Broken pipe
-Exception ignored while flushing sys.stdout: BrokenPipeError
-exit=120
-```
-
-So the real behaviour on a stdout write failure is **exit 120 with no JSON on stdout** — and Claude Code treats any exit code other than 0 and 2 as a *non-blocking* error, i.e. the tool call proceeds. That is the same fail-open class this item exists to close, just relocated to the last-resort path.
-
-The module docstring and `main()`'s docstring both assert the stronger guarantee ("Exit 2 fires only if writing that JSON to stdout itself fails"), so the documentation is currently wrong as well.
-
-The unit test passes because `_BrokenStdout.write` raises — which is what a `StringIO`-shaped double does and precisely what a buffered pipe does not.
-
-**Fix:** flush inside the `try`, and cover the buffered case.
+**Fix**: branch explicitly in `_migrate()`:
 
 ```python
-try:
-    print(json.dumps(output))
-    sys.stdout.flush()
-except Exception as e:
-    ...
+if exit_code == MIGRATE_DECLINED_LOCKED:
+    report_notice("[TOOLGUARD AUTO-MIGRATION] Another migration is in progress; skipping.")
+    return False
 ```
 
-Add a test double that raises on `flush()` (not `write()`), asserting exit 2. Keep the existing `write`-raising test; both shapes are worth pinning.
+and, because nothing was attempted, this is the one outcome where the day's claim *should* be released (or never taken) so the next invocation retries. That is a deliberate change to the D4 rule, not an accident — D4's argument was about a *failed* migration having no later same-day caller to retry against, which does not apply to a migration that never ran.
 
-### M2. `_run_eval_mode` still emits its deny JSON on stderr — the same fail-open, in the same file
+### M2. A 10-second lock wait now sits in the synchronous PreToolUse hook path
 
-**`/home/arnon/projects/toolguard/toolguard/hook.py:765-783`**
+**File**: `/home/arnon/projects/toolguard/toolguard/permission_migration.py:62, 1194-1201`
 
-All three `except` clauses do `print(json.dumps(output), file=sys.stderr)` while the success path at line 764 prints to stdout. Consumers parse stdout, so on any internal error they get an **empty stdout and exit 0** — indistinguishable from "produced nothing", not "denied".
+`MIGRATE_LOCK_TIMEOUT_SECONDS = 10.0` is a module constant with no per-caller override. The path `hook._run_divergence_check` → `auto_migrate.run_auto_migration` → `migrate()` is the live permission hook, so under contention a user's tool call can stall for ten seconds before the hook decides anything. Ten seconds of patience is right for an interactive `toolguard-migrate`; it is wrong for an unattended daily migration whose correct response to contention is "not now".
 
-This matters more than an ordinary preview-tool bug: `.claude/skills/toolguard-security-audit/SKILL.md` uses `toolguard --eval` as its ASK-floor probe across projects. A configuration that makes the probe crash yields no verdict rather than a deny, in the tool whose job is to detect exactly that class of hole.
+**Fix**: `def migrate(..., lock_timeout_seconds: float = MIGRATE_LOCK_TIMEOUT_SECONDS)` and have `auto_migrate` pass something sub-second. Note the tests already need this knob and currently get it by `patch.object(permission_migration_module, "MIGRATE_LOCK_TIMEOUT_SECONDS", 0.2)` — patching a module constant to make a test fast is usually the design telling you the value wants to be a parameter.
 
-The docstring now also states a falsehood: *"Errors are reported as a `deny` decision on stderr, matching the live hook's fail-safe contract"* — after this change the live hook's contract is stdout.
+### M3. The decline message asserts a cause that three of four reasons contradict
 
-**Fix:** route these through `_emit_decision` too (the fault buffer is not wanted here, so `create_hook_output` + `_emit_decision`, not `_finalize_output`), and update the docstring. If `--eval` deliberately wants a distinguishable failure exit code, say so explicitly rather than relying on stream choice.
-
-### M3. Nested invocations discard the inner buffer — accumulated faults are lost across the boundary
-
-**`/home/arnon/projects/toolguard/toolguard/hook.py:1266-1271`** (the nesting) and `toolguard/error_reporter.py:137-147` (the drain).
-
-`drain_claude_context()` reads only `_current`, and `invocation()`'s `finally` restores `_current = previous`, throwing the inner `_InvocationState` and its `claude_messages` away. Two losses follow directly from the nesting this change introduces:
-
-* A fault reported **inside** the inner invocation (config loading, startup validation, resolution) followed by an exception is lost: the exception unwinds past the inner `with`, and the handler's `_finalize_output` drains the **outer** buffer, which never received it.
-* A fault reported in the **outer** scope before the inner opens (i.e. during `get_env_config()`) is lost on the **success** path, because the drain there happens inside the inner invocation.
-
-Latent today only because the sole `report_fault` call site is `_report_crash_fault`, which runs in the outer scope. It will start losing data the first time anything between `get_env_config()` and the decision reports a fault — which is the stated purpose of the module. This is the "do not flatten or discard as you go" failure mode from the global conventions, and neither existing test covers the crossing.
-
-**Fix (in `error_reporter.invocation`):** on exit, splice any undrained `claude_messages` into the parent state before restoring, so nesting composes:
+**File**: `/home/arnon/projects/toolguard/toolguard/permission_migration.py:1202-1208`
 
 ```python
-finally:
-    if previous is not None and _current is not None:
-        previous.claude_messages.extend(_current.claude_messages)
-    _current = previous
+except file_lock.LockUnavailable as e:
+    report_warning(
+        "Migration declined: another migration is already in progress "
+        f"for this project ({e.reason}).",
+        "Wait for the other migration to finish, then retry.",
+    )
 ```
 
-Add a test: report a fault inside the inner invocation, raise, assert it appears in the crash response's `additionalContext` alongside the handler's own fault.
+`LockUnavailable` has four reasons. Only `REASON_TIMEOUT` means another migration is in progress. For `REASON_NO_PRIMITIVE` (no `fcntl`, no `msvcrt`), `REASON_DIRECTORY_UNAVAILABLE` (`~/.toolguard/locks/` not creatable — read-only home, quota, a file in the way) and `REASON_FILE_UNAVAILABLE`, the lead sentence is simply false and the corrective step is unactionable: waiting will never help, and on `REASON_NO_PRIMITIVE` migration is *permanently* impossible on that machine while reporting a transient-sounding condition.
+
+The structured `.reason` attribute exists precisely so the caller can branch, and here it is used only as decoration inside a sentence that has already asserted the wrong cause — the shape the project's own "prose is output, not a data structure" rule is aimed at.
+
+**Fix**:
+
+```python
+if e.reason == file_lock.REASON_TIMEOUT:
+    report_warning("Migration declined: another migration is already in progress for this project.",
+                   "Wait for the other migration to finish, then retry.")
+else:
+    report_warning(f"Migration declined: exclusive access could not be guaranteed ({e.reason}).",
+                   "Resolve the underlying condition, then retry; no files were modified.")
+```
+
+Also worth deciding deliberately whether `REASON_NO_PRIMITIVE` should decline at all, or proceed with a warning. Declining (fail closed) is defensible and is probably right — but it means a platform without either primitive can never migrate, and that deserves a sentence in the docs rather than being an emergent consequence.
 
 ---
 
 ## Minor
 
-### m1. Six near-identical `except` blocks
+### N1. Exit code `2` collides with argparse's usage-error code in the same CLI
 
-`main()`'s three handlers (hook.py:1293-1348) differ only in the reason string, the `caught_as` label, and the `JSONDecodeError` case's extra `raw_stdin`. `_run_eval_mode`'s three are the same again. Collapse to one helper:
+`toolguard/scripts/migrate_permissions.py` uses `argparse`, which exits **2** on an unrecognised flag. `MIGRATE_DECLINED_LOCKED = 2` therefore makes `toolguard-migrate --bogus` and "declined, locked" indistinguishable to any script branching on the exit code — which is the exact use case the constant's docstring names. Prefer `3`, or `os.EX_TEMPFAIL` (75), whose meaning is precisely "temporary failure, retry later".
 
-```python
-def _deny_after_crash(exc, reason, caught_as, extra_context=None) -> None:
-    context = _build_crash_context(...)  # caller supplies locals()
-    if extra_context:
-        context.update(extra_context)
-    log_crash(exc, context, caught_as=caught_as)
-    _report_crash_fault(reason)
-    _emit_decision(_finalize_output(RuntimeVerdict(decision="deny", reason=reason)))
-```
+### N2. The real timeout carries no `detail`, and the test pins the shape by hand
 
-Note `_build_crash_context(locals())` has to be evaluated at the catch site, so pass the dict in.
+`file_lock.py:160` raises `LockUnavailable(path, REASON_TIMEOUT)` with no detail, while `test_file_lock.py:183-196` (`test_reason_is_structured_and_message_carries_detail`) constructs the exception itself with `"waited 10.0s"`. That test therefore verifies the constructor, not any behaviour the module produces — a shape test standing in for a behaviour test. Passing `f"waited {timeout_seconds}s"` at the raise site costs nothing, makes the operator-facing message actually useful, and lets the test observe real output.
 
-### m2. `main()` is now ~190 lines at five levels of nesting
+### N3. Windows acquire/release asymmetry
 
-`with` → `try` → `with` → `if` → call args. The whole decision body moved two indent levels right, which is most of the diff's churn and makes the next diff on this function harder to read. Extract the inner block as `_decide_and_emit(env_config) -> None`, leaving `main()` as: parse args → guards → outer invocation → try/except. That also makes m1's helper natural.
+`_release_windows` (`file_lock.py:96-102`) explicitly seeks to 0 before unlocking; `_try_acquire_windows` (87-93) relies on the offset being 0 implicitly. That holds today (fresh `os.open`, and `msvcrt.locking` does not move the pointer), so this is not a live bug — but the asymmetry reads as though one of the two knows something the other doesn't. Seek in both, or in neither with a one-line comment saying why.
 
-### m3. `invocation(config=...)` takes an *env* config, and the call site reads as if it takes the `Configuration`
+### N4. Lock file and directory permissions
 
-`hook.py:1271` reads `error_reporter_invocation(config=env_config)` while a `Configuration` object named `config` is in scope a few lines below. Rename the parameter to `env_config` in `error_reporter.invocation`; the docstring already has to spell out that it means "a `get_env_config()` dict".
+`file_lock.py:144,149` — `mkdir()` and `os.open(..., O_CREAT|O_RDWR)` take default modes, so the lock lands at `0o644` in a `0o755` directory. For state under `~/.toolguard/` a `0o600` file in a `0o700` directory is the conventional choice. This matches `once_per_store`'s existing behaviour, so it is a project-wide nit rather than a regression introduced here — but the new module is the natural place to set the precedent.
 
-### m4. Stale module docstring in `error_reporter.py`
+### N5. `REASON_*` values are English sentences used as machine-stable keys
 
-Lines 10-12 still say *"`report_fault` has no production call site yet ... the Claude-facing buffer is exercised only by tests"*. `hook._report_crash_fault` is now that call site.
+`file_lock.py:43-46`. They are correctly named constants (per the project rule), but the *values* are display prose, which is why M3's message reads awkwardly when interpolated. Short tokens (`"timeout"`, `"no_primitive"`, ...) plus a separate display mapping at the edge would carry the same information, make branching read better, and make M3's fix fall out naturally.
 
-### m5. `_warn_if_settings_path_override` now writes to the warning log on every tool call
+### N6. The concurrency test can silently degrade to a sequential run
 
-Previously stderr-only; via `report_warning` it now also hits `error_log.log_warning` on every invocation where `CLAUDE_SETTINGS_PATH` is set — a persistently-exported variable, so that is one log line per tool call indefinitely. `once_per` exists in this branch; consider whether this belongs on it, or confirm the per-call repetition is deliberate (it is a live-reminder warning, so it may be).
+`test_migration.py:1560` — `time.sleep(0.3)` then `barrier.touch()` assumes both children have started and reached the polling loop within 300 ms. If one child is slow to import (cold cache, loaded machine), the barrier already exists when it arrives and it simply runs alone. The assertions are on the *end state*, which holds either way, so the test passes without ever having exercised contention. Not flaky — worse, quietly vacuous under load.
 
-### m6. The outer invocation resolves a log directory on the hot path, possibly a different one
+Consider having each child print how long its lock acquisition blocked and asserting that at least one waited a non-trivial interval; that turns "both patterns survived" into "both patterns survived *and* the lock actually did something".
 
-`invocation(config=None)` calls `resolve_log_dir(None, None)` → `_log_dir_from_environment()` → `require_project_root()`, on every invocation, before `env_config` exists. Two consequences: a small filesystem walk added to the hot path before any decision work, and the outer and inner invocations can resolve **different** directories, splitting one invocation's log entries across two. Harmless with today's defaults, worth a sentence in the docstring so it is a decision rather than an accident.
+### N7. Test patches the shared module attribute
 
-### m7. `_emit_decision`'s stderr fallback is itself unguarded
-
-If stdout is broken, stderr often is too (same terminal/pipe teardown). `print(..., file=sys.stderr)` raising there propagates out of `_emit_decision`, out of the handler, and the process exits 1 — non-blocking, i.e. fail-open again. Wrap the fallback in a bare `try/except Exception: pass` before `sys.exit(2)`; the exit code is the part that matters.
-
-### m8. `_run_main` swallows `SystemExit` without checking the code
-
-**`test/unit/test_hook_error_reporter.py:67-70`** — every test in the module would still pass if `main()` started exiting 2. Capture the exception and assert `code == 0`. `test_hook.py`'s equivalents already do this.
-
-### m9. `_run_main`'s `patches` list only ever holds zero or one element
-
-**`test/unit/test_hook_error_reporter.py:56-73`** — a list, a loop to start, a `try/finally` loop to stop, for one optional patch. `with contextlib.ExitStack()` or a plain conditional `with` reads better and is harder to get wrong.
-
-### m10. Missing test for the M3 crossing
-
-The module tests "fault in inner, success" and "fault in outer, crash" but not "fault in inner, crash" — the one that currently loses data.
+`test_migration.py:1414` patches `permission_migration_module.file_lock.exclusive` — that is the attribute on the shared `toolguard.file_lock` module object, not a `permission_migration`-local name, so the patch is global for its duration. Harmless in this suite; `patch("toolguard.permission_migration.file_lock.exclusive")` reads the same and has the same effect, so this is really a note that the module-object import style makes the scope ambiguous at a glance.
 
 ---
 
 ## Suggestions
 
-### s1. Fault text now flows into `additionalContext`, which the model reads
+### S1. Fourth copy of the subprocess test harness
 
-`_report_crash_fault` embeds `str(e)` into text delivered to Claude. Today's exception messages are toolguard-authored and safe (`JSONDecodeError` does not echo the document; the `ValueError` names come from a fixed list). But the general `except Exception` will happily forward whatever a deeper component put in its message, and tool input is the most likely source. For a permission hook, that is a small new prompt-injection surface. Consider truncating fault text and prefixing it with a fixed, unmistakable frame (e.g. `[toolguard internal fault] ...`) so injected prose cannot pass as instruction.
+`test_once_per_store.py:307`, `test_config_divergence.py:991`, `test_file_lock.py:244`, `test_migration.py:1551,1641,1649` all hand-roll the same pattern: build a child script as a string, `subprocess.Popen([sys.executable, "-c", script, ...], cwd=repo_root, ...)`, poll a marker/barrier file with a monotonic deadline, `communicate(timeout=...)`, assert `returncode == 0` with `stderr` as the message. `test_file_lock.py` even documents that it is "following `test_once_per_store.py`'s harness" — the duplication is deliberate and acknowledged, which is the right moment to extract it.
 
-### s2. `_CRASH_CORRECTIVE_STEPS` hard-codes a path that `log_crash` also hard-codes
+A small `test/unit/_subprocess_harness.py` with `run_child(script, *args, env=None)` and `wait_for_marker(path, timeout)` would remove the copies and give one place to fix the deadline/timeout constants. The child scripts themselves stay per-test, as they should.
 
-Both name `~/.toolguard/errors/`. If that ever moves, one of them will be missed. `error_log` should expose the directory (or a `crash_reports_hint()`), and hook.py should use it.
+### S2. `~/.toolguard` derivations are now at seven, and one of them is import-time
+
+The spec correctly told the coder not to consolidate, and this review is not reopening that. But the count is now: `error_log.py:169`, `once_per_store.py:199`, `permission_migration.py:98`, `tools/decision_ledger.py:44`, `tools/installer.py:163`, `config.py:444`, `testing/sandbox.py:322,345`.
+
+Worth pulling out for the follow-up ticket: **`tools/decision_ledger.py:44` evaluates `Path.home()` at module import** (`USER_LEDGER_PATH = Path.home() / ".toolguard" / "decisions.json"`). That is exactly the failure `_migration_lock_path`'s docstring warns against ("resolved here, at call time, never at module import"), and it is the one derivation that would silently ignore a `HOME` set for a subprocess or a patched `Path.home()` in a test. The new module documents the rule; the ticket should name the one site that breaks it.
+
+### S3. The lock excludes migrate-vs-migrate only
+
+`tools/rule_apply.py:195-197` and `tools/maintenance.py:844` write the same toolguard config files without participating in this lock. That is faithful to the ticket, which was scoped to `migrate()`'s own read-modify-write, so it is not a defect. But the lock is *named and keyed* `migrate-<sha>`, which makes widening it later a rename-and-migrate rather than a one-line change. If widening is plausible, `config-<sha>` costs nothing today.
+
+### S4. Two notions of "project identity" now coexist, and they are observably different
+
+`_migration_lock_path` keys on `sha256(str(project_root.resolve()))`; `once_per_store._project_key` keys on `str(project)` unresolved. Both choices are individually defensible and the divergence is documented in the docstring and pinned by a test — good. The consequence worth writing into the follow-up ticket is that these two mechanisms **guard the same operation**: reaching `migrate()` through a symlinked project path yields the *same* lock but a *different* daily claim. The combination is the only place the divergence is visible, and it is precisely the auto-migration path.
 
 ---
 
 ## Architectural drift pass
 
-Run because a ticket ID was supplied. These are observations about the trend, not defects in this change.
+A ticket ID was given, so this pass ran; the change set is small, and nothing here is alarming.
 
-**Blast radius vs. conceptual size — healthy.** One concept ("all reports go through one module") landed in six production files plus one new module. That looks wide, but it is a *consolidation*: `.pyscn.toml`'s own comment records the config layer dropping from 16 hand-rolled stderr writes to zero, and I verified that — `grep "file=sys.stderr"` across `config.py`, `env_config.py`, `auto_migrate.py`, `config_divergence.py` now returns nothing. The remaining four in `hook.py` are M2's three plus the one legitimate `_emit_decision` fallback.
+- **Blast radius vs. conceptual size**: one concept ("migrate needs mutual exclusion") landed in 1 new production file + 1 modified production file + 1 config line. Proportionate; no smearing across unrelated modules.
+- **Architectural home for the new file**: `file_lock` is declared in `.pyscn.toml`'s `foundation` layer, and `tools/architecture_fitness.py --layers` reports both completeness ("All modules map to exactly one layer") and direction clean. This is the check that most often degrades silently, and it was done.
+- **Boundary crossings**: none. `config` → `observability` (`error_reporter`) and `config` → `foundation` (`file_lock`) are both downward and legal.
+- **Test cost trend**: this change is ~675 test lines to ~275 production lines (2.45:1) against a repo standing ratio of ~64.7k test to ~34.3k production (1.9:1). Above the norm but justified — the extra weight is real multi-process tests, which is the only way to test this at all, not representation-pinning. Not a flag.
+- **Logical coupling**: not computed; two files is below the threshold where co-change analysis says anything.
 
-**New file has a declared architectural home — good, and worth saying.** `error_reporter` was added to the `observability` layer in `.pyscn.toml` with the rationale updated in the same edit. This is the drift check that most often silently fails (an unlisted module stops being validated and the compliance score stays plausible), and it was done correctly here.
-
-**`hook.py` is the repository's co-change hub, and this change deepens it.** Over the last 200 commits touching `toolguard/`: `hook.py`↔`config.py` co-changed 16 times, and `hook.py` has 8+ distinct co-change partners — more than any other module. It is now 1394 lines, with `main()` at ~190 of them, and this change gives it two further responsibilities: error-reporter invocation lifecycle and decision-emission policy. Each individual addition is reasonable, which is exactly why this accumulates. Worth considering a small `decision_emit` module owning `create_hook_output` / `_finalize_output` / `_emit_decision` and the invocation nesting, leaving `hook.py` to orchestrate. Not urgent; noted so the trend is visible.
-
-**Test cost trend — in line.** ~391 added test lines against ~195 net added production lines (~2:1). The tests assert behaviour (which stream carried the decision, what reached `additionalContext`) rather than pinning message text, so this is not representation-pinning.
-
-**Boundary crossings — none.** The change stays inside `toolguard/` and `test/unit/`.
+The one drift signal worth naming is not structural but *vocabulary*: `migrate()`'s return type is an `int` exit code that three call sites interpret differently (CLI passthrough, `auto_migrate`'s `!= 0`, and now a third value with its own meaning). M1 is the first bug caused by that, and it will not be the last. A small result object or `enum` — `MigrationOutcome.{OK, FAILED, DECLINED_LOCKED}` — rendered to an exit code only at the console-script edge would make the caller's `!= 0` impossible to write by accident. That is the project's own "carry structured data, render at the edge" rule applied to a return value rather than a message.
 
 ---
 
-## Tooling notes
+## What is good here, specifically
 
-* `pyscn` was **not** run: the requested scope is one production file, well below the "substantial part of the codebase" bar, and the skill says to ask first. Worth running before push given `.pyscn.toml` itself changed.
-* `code-review-graph` (`find_large_functions`) returned **stale line numbers** — `main` at 1142-1295 when it is actually at 1205-~1394, i.e. the index predates this uncommitted change. Function names and relative sizes were still usable, and it did surface that `main` is the largest function in the file, which a linear read would have taken longer to establish. Verdict: mildly useful, but `wc -l` plus a `grep` for `^def` gave the same answer with current data. LSP would not have answered "what is the biggest function here" in one call, so this is inside the graph's remaining exclusive ground — just at the low-value end of it. No refresh was run before this call (row-one tool, no refresh required per the reference; staleness here is the incremental-update hook not having seen the working-tree edits).
+Worth saying, because these are the parts that usually get skipped:
+
+- **`flock` over `lockf`, with the reason in the docstring.** The record-lock footgun (any `close()` on the path in the process drops the lock) is real, obscure, and would have been found only in production. Naming it in the module docstring is what stops someone "simplifying" it later.
+- **Release on process death is tested, not asserted.** `test_lock_released_when_holding_process_dies` actually `SIGKILL`s a holder and re-acquires. That is the entire justification for not using an `O_EXCL` lockfile, and it is verified rather than argued.
+- **The dry-run exclusion and the lock's span are both justified in the docstring**, including the specific reason locking only the write would be insufficient (stale read → overwrite). That is the non-obvious part, and it is the part that got written down.
+- **The Windows branch is exercised**, on a Linux-only suite, by a small deliberate fake rather than being left as an untested platform assumption.

@@ -16,11 +16,13 @@ from unittest.mock import patch
 
 from toolguard import error_reporter, once_per_store
 from toolguard.auto_migrate import (
+    AUTO_MIGRATE_LOCK_TIMEOUT_SECONDS,
     AUTO_MIGRATION,
     load_config_sync_settings,
     run_auto_migration,
 )
 from toolguard.once_per_store import ClaimStatus
+from toolguard.permission_migration import MigrationOutcome
 
 from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
 
@@ -392,7 +394,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 0  # Success
+            mock_migrate.return_value = MigrationOutcome.SUCCEEDED  # Success
             mock_discover.return_value = []
 
             config_sync = {
@@ -461,7 +463,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 0
+            mock_migrate.return_value = MigrationOutcome.SUCCEEDED
             mock_discover.return_value = []
 
             config_sync = {
@@ -497,7 +499,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
         mock_get_native,
     ):
         """
-        Given migrate() returns a non-zero exit code
+        Given migrate() returns MigrationOutcome.FAILED
         When run_auto_migration is invoked
         Then a "Migration failed" warning reaches stderr (TOO-45 punch-list
              #04: via error_reporter.report_warning) and False is returned
@@ -522,7 +524,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 1
+            mock_migrate.return_value = MigrationOutcome.FAILED
             mock_discover.return_value = []
 
             config_sync = {
@@ -542,6 +544,84 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
 
             self.assertFalse(result)
             self.assertIn("Migration failed", buf.getvalue())
+
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.auto_migrate.migrate")
+    @patch("toolguard.config.discover_config_files")
+    def test_run_auto_migration_declined_locked_reports_a_notice_not_a_failure(
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
+    ):
+        """
+        Given migrate() returns MigrationOutcome.DECLINED_LOCKED (another
+            migration already holds this project's lock; nothing was
+            attempted)
+        When run_auto_migration is invoked
+        Then a "skipping" NOTICE reaches stderr -- never the "Migration
+             failed" warning, since nothing failed -- False is returned, and
+             the day's claim stays consumed (not released): the other
+             process holding the lock is doing the work, so there is
+             nothing here to retry (TOO-45 punch-list #15 fix pass, item 1)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_migrate.return_value = MigrationOutcome.DECLINED_LOCKED
+            mock_discover.return_value = []
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
+
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                result = run_auto_migration(project_root, config_sync, takeover_config)
+
+            self.assertFalse(result)
+            stderr_text = buf.getvalue()
+            self.assertIn("already running for this project", stderr_text)
+            self.assertNotIn("Migration failed", stderr_text)
+
+            still_claimed = (
+                once_per_store.claim(
+                    project_root,
+                    "auto_migration",
+                    once_per_store.day_scope(),
+                    timedelta(days=7),
+                ).status
+                == ClaimStatus.HELD_BY_SOMEONE_ELSE
+            )
+            self.assertTrue(still_claimed)
 
     @patch("toolguard.config_divergence.get_native_permissions")
     @patch("toolguard.config_divergence.get_toolguard_permissions")
@@ -619,7 +699,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
         mock_get_native,
     ):
         """
-        Given migrate() returns a non-zero exit code, AND an error_reporter
+        Given migrate() returns MigrationOutcome.FAILED, AND an error_reporter
             invocation with a resolvable log directory is active (TOO-45
             punch-list #04 fix pass item 8a: a real converted call site,
             not a synthetic message)
@@ -647,7 +727,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 1
+            mock_migrate.return_value = MigrationOutcome.FAILED
             mock_discover.return_value = []
 
             config_sync = {
@@ -709,7 +789,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 0
+            mock_migrate.return_value = MigrationOutcome.SUCCEEDED
             mock_discover.return_value = []
 
             custom_backup = "/custom/backup/path"
@@ -732,6 +812,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 dry_run=False,
                 auto_sort=False,
                 backup_dir=Path(custom_backup),
+                lock_timeout_seconds=AUTO_MIGRATE_LOCK_TIMEOUT_SECONDS,
             )
 
     @patch("toolguard.config_divergence.get_native_permissions")
@@ -775,7 +856,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 1  # Failure exit code
+            mock_migrate.return_value = MigrationOutcome.FAILED  # Failure outcome
             mock_discover.return_value = []
 
             config_sync = {
@@ -847,7 +928,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = 0
+            mock_migrate.return_value = MigrationOutcome.SUCCEEDED
             mock_discover.return_value = []
 
             config_sync = {

@@ -3,6 +3,7 @@ Unit tests for permission migration script.
 """
 
 import json
+import os
 import tomllib
 import unittest
 from datetime import datetime
@@ -12,11 +13,15 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
+from test.unit._subprocess_harness import release_barrier_when_ready, run_child
+from toolguard import file_lock
+from toolguard import permission_migration as permission_migration_module
 from toolguard.config_write_guard import (
     ConfigWriteVerificationError,
     verified_write_config,
 )
 from toolguard.permission_migration import (
+    MigrationOutcome,
     create_backup,
     detect_similar_patterns,
     extract_pattern_key,
@@ -29,6 +34,7 @@ from toolguard.permission_migration import (
 )
 from toolguard.rule_entry import RuleEntry, normalize_entries_preserving, real_patterns
 from toolguard.rule_sort import get_tool_priority, sort_patterns
+from toolguard.scripts import migrate_permissions as migrate_permissions_module
 
 
 class TestBackupCreation(unittest.TestCase):
@@ -1074,7 +1080,7 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
             json.dump(settings, f)
 
         # Run dry-run migration
-        exit_code = migrate(project_root, dry_run=True)
+        outcome = migrate(project_root, dry_run=True)
 
         # Check no changes were made
         with open(settings_path, "r") as f:
@@ -1082,7 +1088,7 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
 
         self.assertEqual(after_settings, settings)
         self.assertFalse((claude_dir / "toolguard_hook.toml").exists())
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_creates_new_toml_config(self):
         """
@@ -1108,7 +1114,7 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
             json.dump(settings, f)
 
         # Run migration
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         # Check that toolguard_hook.toml was created
         toml_path = claude_dir / "toolguard_hook.toml"
@@ -1124,7 +1130,7 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
             updated_settings = json.load(f)
 
         self.assertEqual(updated_settings["permissions"]["allow"], [])
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_adds_to_existing_toml(self):
         """
@@ -1164,7 +1170,7 @@ deny = []
             json.dump(settings, f)
 
         # Run migration
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         # Check that new patterns were added
         content = toml_path.read_text()
@@ -1180,7 +1186,7 @@ deny = []
         # - Bash(ls:*) is redundant (exact duplicate in toolguard)
         # - Bash(git:*) and Read(/tmp/*) were migrated
         self.assertEqual(updated_settings["permissions"]["allow"], [])
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_structured_entry_round_trips_byte_identical_through_migrate(self):
         """
@@ -1228,8 +1234,8 @@ deny = []
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        exit_code = migrate(project_root)
-        self.assertEqual(exit_code, 0)
+        outcome = migrate(project_root)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
         content = toml_path.read_text()
 
@@ -1291,7 +1297,7 @@ deny = []
             json.dump(settings, f)
 
         # Run migration
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         # Read config and count occurrences
         content = toml_path.read_text()
@@ -1299,7 +1305,7 @@ deny = []
 
         # Should appear only once (not duplicated)
         self.assertEqual(occurrences, 1)
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_no_migration_when_no_new_patterns(self):
         """
@@ -1334,10 +1340,10 @@ deny = []
             json.dump(settings, f)
 
         # Run migration
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         # Should return success with no changes
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_creates_backups(self):
         """
@@ -1364,7 +1370,7 @@ deny = []
         backup_dir = project_root / "logs" / "config-backups"
 
         # Run migration
-        exit_code = migrate(project_root, backup_dir=backup_dir)
+        outcome = migrate(project_root, backup_dir=backup_dir)
 
         # Check backups were created
         self.assertTrue(backup_dir.exists())
@@ -1377,7 +1383,380 @@ deny = []
         self.assertTrue(backup_name.startswith("settings.local."))
         self.assertTrue(backup_name.endswith(".json"))
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+
+class TestMigrationLocking(ConfigIsolationMixin, unittest.TestCase):
+    """
+    migrate()'s cross-process exclusion (TOO-45 punch-list #15). In-process
+    behaviour only -- see TestMigrationLockingAcrossProcesses below for the
+    genuine multi-process cases (a single-process test proves nothing about
+    an OS-level lock).
+    """
+
+    def test_dry_run_never_takes_the_lock(self):
+        """
+        Given a project with divergent patterns to preview
+        When migrate runs with dry_run=True
+        Then file_lock.exclusive is never called -- a dry run performs no
+             write and needs no exclusion
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.local.json"
+        settings_path.write_text(
+            json.dumps(
+                {"permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}}
+            )
+        )
+
+        with patch.object(
+            permission_migration_module.file_lock,
+            "exclusive",
+            side_effect=AssertionError("dry run must not take the lock"),
+        ):
+            outcome = migrate(project_root, dry_run=True)
+
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+    def test_declines_with_named_code_when_lock_already_held(self):
+        """
+        Given this project's migration lock already held (by this test,
+            standing in for another process) and a short lock_timeout_seconds
+            passed explicitly so the test doesn't wait the real default
+        When migrate runs (not a dry run)
+        Then it returns MigrationOutcome.DECLINED_LOCKED (not SUCCEEDED, not
+             FAILED) without touching settings.local.json, and reports the
+             decline via error_reporter.report_warning
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.local.json"
+        original_settings = {
+            "permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
+        }
+        settings_path.write_text(json.dumps(original_settings))
+
+        lock_path = permission_migration_module._migration_lock_path(project_root)
+
+        with patch.object(
+            permission_migration_module, "report_warning"
+        ) as mock_warning:
+            with file_lock.exclusive(lock_path, timeout_seconds=5):
+                outcome = migrate(project_root, dry_run=False, lock_timeout_seconds=0.2)
+
+        self.assertEqual(outcome, MigrationOutcome.DECLINED_LOCKED)
+        mock_warning.assert_called_once()
+        with open(settings_path) as f:
+            self.assertEqual(json.load(f), original_settings)
+
+    def test_declined_message_names_the_real_reason_for_a_non_timeout_decline(self):
+        """
+        Given exclusive() raises LockUnavailable for a reason OTHER than
+            REASON_TIMEOUT (e.g. no OS lock primitive on this platform)
+        When migrate runs (not a dry run)
+        Then the reported message does not assert "another migration is
+             already in progress" -- that claim is only true for
+             REASON_TIMEOUT -- and instead names the real reason
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.local.json"
+        settings_path.write_text(
+            json.dumps(
+                {"permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}}
+            )
+        )
+
+        with patch.object(
+            permission_migration_module.file_lock,
+            "exclusive",
+            side_effect=file_lock.LockUnavailable(
+                Path("/some/lock"), file_lock.REASON_NO_PRIMITIVE
+            ),
+        ):
+            with patch.object(
+                permission_migration_module, "report_warning"
+            ) as mock_warning:
+                outcome = migrate(project_root, dry_run=False)
+
+        self.assertEqual(outcome, MigrationOutcome.DECLINED_LOCKED)
+        message = mock_warning.call_args[0][0]
+        self.assertNotIn("already in progress", message)
+        self.assertIn(file_lock.REASON_NO_PRIMITIVE, message)
+
+    def test_lock_key_is_based_on_the_resolved_project_root(self):
+        """
+        Given two Path spellings of the SAME directory (one via a symlink)
+        When _migration_lock_path is built for each
+        Then both resolve to the SAME lock file -- unlike
+             once_per_store._project_key (str(project), no .resolve()),
+             mutual exclusion here is about the real directory
+        """
+        _home, project_root = self.isolate_config_environment()
+        alias = project_root.parent / "alias"
+        try:
+            alias.symlink_to(project_root)
+        except OSError:
+            self.skipTest("symlinks not supported in this environment")
+
+        direct = permission_migration_module._migration_lock_path(project_root)
+        via_alias = permission_migration_module._migration_lock_path(alias)
+
+        self.assertEqual(direct, via_alias)
+
+
+class TestMigrationLockingAcrossProcesses(unittest.TestCase):
+    """
+    Real concurrent OS processes racing migrate() on the same project (TOO-45
+    punch-list #15). A test that only exercises the lock's happy path in one
+    process proves nothing -- see test_file_lock.py for the lock primitive's
+    own cross-process tests; these exercise migrate()'s USE of it.
+    """
+
+    @staticmethod
+    def _isolated_env(home: Path) -> dict:
+        """A minimal, clean child-process environment isolated to *home*."""
+        return {"HOME": str(home), "PATH": os.environ.get("PATH", "")}
+
+    def test_two_concurrent_migrations_of_different_patterns_lose_neither(self):
+        """
+        Given two processes concurrently migrating the SAME project, each
+            intending to move a DIFFERENT divergent pattern (find_divergent_
+            patterns/find_redundant_patterns are stubbed per-process so each
+            genuinely computes a different result, standing in for two
+            sessions that each added a different new permission -- with
+            identical inputs the two would trivially converge, which is not
+            a real exercise of the lock; see the ticket's own severity note)
+        When both run at nearly the same instant, synchronized via a barrier
+            that is only released once BOTH children have signalled they
+            reached their wait loop -- not a guessed sleep, which can let a
+            slow-to-start child degrade this to a sequential run that still
+            passes
+        Then the target toolguard config ends up with BOTH patterns and
+             settings.local.json ends up with NEITHER -- no lost update,
+             regardless of which process's lock wait wins
+        """
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            project_root = Path(tmpdir) / "project"
+            claude_dir = project_root / ".claude"
+            claude_dir.mkdir(parents=True)
+            settings_path = claude_dir / "settings.local.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "permissions": {
+                            "allow": ["Bash(p1:*)", "Bash(p2:*)"],
+                            "deny": [],
+                            "ask": [],
+                        }
+                    }
+                )
+            )
+            barrier = Path(tmpdir) / "go"
+            patterns = ("Bash(p1:*)", "Bash(p2:*)")
+            ready_markers = [Path(tmpdir) / f"ready_{i}" for i in range(len(patterns))]
+
+            script = (
+                "import sys, time\n"
+                "from pathlib import Path\n"
+                "from unittest.mock import patch\n"
+                "from toolguard import permission_migration as pm\n"
+                "project_root = Path(sys.argv[1])\n"
+                "pattern = sys.argv[2]\n"
+                "barrier = Path(sys.argv[3])\n"
+                "Path(sys.argv[4]).touch()\n"
+                "fake_divergent = {'allow': [pattern], 'deny': [], 'ask': []}\n"
+                "fake_redundant = {'allow': [], 'deny': [], 'ask': []}\n"
+                "deadline = time.monotonic() + 10\n"
+                "while not barrier.exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+                "with patch.object(pm, 'find_divergent_patterns', return_value=fake_divergent):\n"
+                "    with patch.object(pm, 'find_redundant_patterns', return_value=fake_redundant):\n"
+                "        outcome = pm.migrate(project_root, dry_run=False)\n"
+                "print(outcome.exit_code)\n"
+            )
+
+            env = self._isolated_env(home)
+            procs = [
+                run_child(
+                    script,
+                    str(project_root),
+                    pattern,
+                    str(barrier),
+                    str(ready),
+                    env=env,
+                )
+                for pattern, ready in zip(patterns, ready_markers)
+            ]
+
+            self.assertTrue(
+                release_barrier_when_ready(barrier, ready_markers, timeout=10),
+                "children never reached the barrier wait loop",
+            )
+
+            outputs = []
+            for proc in procs:
+                stdout, stderr = proc.communicate(timeout=20)
+                self.assertEqual(proc.returncode, 0, msg=stderr)
+                # migrate() itself prints progress to stdout; the exit code
+                # this script prints is always its last line.
+                outputs.append(stdout.strip().splitlines()[-1])
+
+            self.assertEqual(outputs, ["0", "0"])
+
+            toml_content = (claude_dir / "toolguard_hook.toml").read_text()
+            self.assertIn("Bash(p1:*)", toml_content)
+            self.assertIn("Bash(p2:*)", toml_content)
+
+            with open(settings_path) as f:
+                after_settings = json.load(f)
+            self.assertEqual(after_settings["permissions"]["allow"], [])
+
+    def test_second_process_declines_while_first_holds_the_lock(self):
+        """
+        Given one process holding this project's migration lock directly
+            (standing in for a slow migration already in progress) and a
+            marker file signalling once it holds it
+        When a second process calls the real migrate() against the same
+            project, with a short lock_timeout_seconds passed explicitly so
+            the test doesn't wait the real default
+        Then the second process's migrate() call returns
+             MigrationOutcome.DECLINED_LOCKED -- observed here via its
+             .exit_code, since the call happens in a child process and only
+             the printed exit code crosses the process boundary -- without
+             modifying settings.local.json
+        """
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            project_root = Path(tmpdir) / "project"
+            claude_dir = project_root / ".claude"
+            claude_dir.mkdir(parents=True)
+            settings_path = claude_dir / "settings.local.json"
+            original_settings = {
+                "permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
+            }
+            settings_path.write_text(json.dumps(original_settings))
+            marker = Path(tmpdir) / "holding"
+
+            holder_script = (
+                "import sys, time\n"
+                "from pathlib import Path\n"
+                "from toolguard import file_lock, permission_migration as pm\n"
+                "project_root = Path(sys.argv[1])\n"
+                "marker = Path(sys.argv[2])\n"
+                "lock_path = pm._migration_lock_path(project_root)\n"
+                "with file_lock.exclusive(lock_path, timeout_seconds=5):\n"
+                "    marker.touch()\n"
+                "    time.sleep(1.5)\n"
+                "print('released')\n"
+            )
+            contender_script = (
+                "import sys, time\n"
+                "from pathlib import Path\n"
+                "from toolguard import permission_migration as pm\n"
+                "project_root = Path(sys.argv[1])\n"
+                "marker = Path(sys.argv[2])\n"
+                "deadline = time.monotonic() + 10\n"
+                "while not marker.exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+                "print(pm.migrate(project_root, dry_run=False, lock_timeout_seconds=0.3).exit_code)\n"
+            )
+
+            env = self._isolated_env(home)
+            holder = run_child(holder_script, str(project_root), str(marker), env=env)
+            contender = run_child(
+                contender_script, str(project_root), str(marker), env=env
+            )
+
+            holder_out, holder_err = holder.communicate(timeout=20)
+            contender_out, contender_err = contender.communicate(timeout=20)
+
+            self.assertEqual(holder.returncode, 0, msg=holder_err)
+            self.assertEqual(contender.returncode, 0, msg=contender_err)
+            self.assertEqual(holder_out.strip(), "released")
+            self.assertEqual(
+                contender_out.strip(), str(MigrationOutcome.DECLINED_LOCKED.exit_code)
+            )
+
+            with open(settings_path) as f:
+                self.assertEqual(json.load(f), original_settings)
+
+
+class TestMigrationOutcomeExitCodes(unittest.TestCase):
+    """
+    Pins the one mapping (TOO-45 punch-list #15 final item) standing between
+    MigrationOutcome and the shell -- the value migrate_permissions.main()
+    exposes to the OS. A change here is a deliberate exit-code contract
+    change, not an accident of enum member ordering.
+    """
+
+    def test_exit_code_mapping(self):
+        """
+        Given each MigrationOutcome member
+        When .exit_code is read
+        Then it matches the documented, stable contract: 0 success, 1
+             failure, 3 declined-because-locked (not 2 -- that's argparse's
+             own usage-error code in the same CLI)
+        """
+        self.assertEqual(MigrationOutcome.SUCCEEDED.exit_code, 0)
+        self.assertEqual(MigrationOutcome.FAILED.exit_code, 1)
+        self.assertEqual(MigrationOutcome.DECLINED_LOCKED.exit_code, 3)
+
+
+class TestMigratePermissionsMainExitCodes(unittest.TestCase):
+    """
+    End-to-end check of the CLI boundary (TOO-45 punch-list #15 final item):
+    migrate_permissions.main() must still return a plain int, with the same
+    values as before the MigrationOutcome refactor, even though migrate()
+    itself no longer does.
+    """
+
+    def _main_with_mocked_migrate(self, outcome: MigrationOutcome) -> int:
+        """Run main() with find_project_root and migrate() both mocked."""
+        with (
+            patch.object(
+                migrate_permissions_module,
+                "find_project_root",
+                return_value=Path("/irrelevant"),
+            ),
+            patch.object(migrate_permissions_module, "migrate", return_value=outcome),
+            patch.object(migrate_permissions_module.sys, "argv", ["toolguard-migrate"]),
+        ):
+            return migrate_permissions_module.main()
+
+    def test_success_exits_zero(self):
+        """
+        Given migrate() returns MigrationOutcome.SUCCEEDED
+        When main() runs
+        Then it returns the int 0
+        """
+        self.assertEqual(self._main_with_mocked_migrate(MigrationOutcome.SUCCEEDED), 0)
+
+    def test_failure_exits_one(self):
+        """
+        Given migrate() returns MigrationOutcome.FAILED
+        When main() runs
+        Then it returns the int 1
+        """
+        self.assertEqual(self._main_with_mocked_migrate(MigrationOutcome.FAILED), 1)
+
+    def test_declined_locked_exits_three(self):
+        """
+        Given migrate() returns MigrationOutcome.DECLINED_LOCKED
+        When main() runs
+        Then it returns the int 3 -- distinct from argparse's own usage-error
+             code 2 in the same CLI
+        """
+        self.assertEqual(
+            self._main_with_mocked_migrate(MigrationOutcome.DECLINED_LOCKED), 3
+        )
 
 
 class TestSupersetDetection(unittest.TestCase):
@@ -2219,7 +2598,7 @@ deny = []
             json.dump(settings, f)
 
         # Run migration
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         # Check that redundant patterns were removed
         with open(settings_path, "r") as f:
@@ -2237,7 +2616,7 @@ deny = []
         content = toml_path.read_text()
         self.assertIn("Bash(ls:*)", content)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
 
 class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
@@ -2298,7 +2677,7 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         project_content = project_toml_path.read_text()
         self.assertIn("Bash(ls:*)", project_content)
@@ -2307,7 +2686,7 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         self.assertNotIn("Bash(ls:*)", user_content)
         self.assertEqual(user_content, user_toml_original)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_creates_project_config_instead_of_using_user_level(self):
         """
@@ -2345,7 +2724,7 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         project_toml_path = claude_dir / "toolguard_hook.toml"
         self.assertTrue(
@@ -2360,7 +2739,7 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         self.assertNotIn("Bash(ls:*)", user_content)
         self.assertEqual(user_content, user_toml_original)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_project_root_equal_to_home_targets_the_shared_config(self):
         """
@@ -2398,12 +2777,12 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         self.enterContext(
             patch("toolguard.config.find_project_root", return_value=project_root)
         )
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         content = toml_path.read_text()
         self.assertIn("Bash(ls:*)", content)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_creates_project_config_when_neither_level_has_one(self):
         """
@@ -2427,14 +2806,14 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        exit_code = migrate(project_root)
+        outcome = migrate(project_root)
 
         project_toml_path = claude_dir / "toolguard_hook.toml"
         self.assertTrue(project_toml_path.exists())
         content = project_toml_path.read_text()
         self.assertIn("Bash(ls:*)", content)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
 
 if __name__ == "__main__":

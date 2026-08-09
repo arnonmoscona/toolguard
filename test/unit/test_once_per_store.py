@@ -16,20 +16,15 @@ fails loud rather than silently touching the developer's real file.
 """
 
 import sqlite3
-import subprocess
-import sys
-import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
+from test.unit._subprocess_harness import release_barrier_when_ready, run_child
 from toolguard import once_per_store
 from toolguard.once_per_store import ClaimStatus
-
-#: test/unit/test_once_per_store.py -> parents[0]=test/unit, [1]=test, [2]=repo root.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _IsolatedStoreMixin:
@@ -287,6 +282,7 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
             store_path = Path(tmpdir) / "once_per.db"
             project = Path(tmpdir) / "project"
             barrier = Path(tmpdir) / "go"
+            ready_markers = [Path(tmpdir) / f"ready_{i}" for i in range(2)]
 
             script = (
                 "import sys, time\n"
@@ -296,6 +292,7 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
                 "from toolguard.once_per_store import ClaimStatus\n"
                 "once_per_store._STORE_PATH = Path(sys.argv[1])\n"
                 "barrier = Path(sys.argv[3])\n"
+                "Path(sys.argv[4]).touch()\n"
                 "deadline = time.monotonic() + 10\n"
                 "while not barrier.exists() and time.monotonic() < deadline:\n"
                 "    pass\n"
@@ -304,26 +301,16 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
             )
 
             procs = [
-                subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-c",
-                        script,
-                        str(store_path),
-                        str(project),
-                        str(barrier),
-                    ],
-                    cwd=str(_REPO_ROOT),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                run_child(
+                    script, str(store_path), str(project), str(barrier), str(ready)
                 )
-                for _ in range(2)
+                for ready in ready_markers
             ]
 
-            # Give both children time to reach the busy-wait loop, then release them together.
-            time.sleep(0.3)
-            barrier.touch()
+            self.assertTrue(
+                release_barrier_when_ready(barrier, ready_markers, timeout=10),
+                "children never reached the barrier wait loop",
+            )
 
             outputs = []
             for proc in procs:
