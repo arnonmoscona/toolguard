@@ -13,8 +13,13 @@ rationale.
 """
 
 import unittest
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import patch
 
-from test.unit import _real_log_dir_guard
+from test.unit import _real_log_dir_guard, _real_once_per_home_guard
+from toolguard import once_per_store
+from toolguard.once_per_store import ClaimStatus
 
 
 class TestRealLogDirGuardHasNoRecordedLeaks(unittest.TestCase):
@@ -34,6 +39,27 @@ class TestRealLogDirGuardHasNoRecordedLeaks(unittest.TestCase):
             "One or more tests attempted to write to the real project logs "
             "directory (write suppressed by the guard, but this is a "
             "regression -- see .claude/rules/test-config-isolation.md):\n\n"
+            + "\n".join(events),
+        )
+
+
+class TestRealSuppressionHomeGuardHasNoRecordedLeaks(unittest.TestCase):
+    """Asserts nothing in this run touched the real ~/.toolguard/once_per.db."""
+
+    def test_no_real_once_per_store_access_was_attempted(self):
+        """
+        Given the TOO-45 real-once-per-home guard installed for this whole run
+        When every test that ran before this one is taken into account
+        Then no claim-store call resolved the real ~/.toolguard/once_per.db
+            as its target
+        """
+        events = _real_once_per_home_guard.get_leak_events()
+        self.assertEqual(
+            events,
+            [],
+            "One or more tests attempted to access the real ~/.toolguard/ "
+            "claim store (access suppressed by the guard, but this is "
+            "a regression -- see .claude/rules/test-config-isolation.md):\n\n"
             + "\n".join(events),
         )
 
@@ -152,6 +178,118 @@ class TestRealLogDirGuardActuallyFires(unittest.TestCase):
                 after_mtime,
                 "guard failed to suppress the real-dir write: file mtime changed",
             )
+
+    def test_guard_fires_for_claim_store_reap_via_logs_dir(self):
+        """
+        Given the guard installed, an empty leak registry, and
+            once_per_store._STORE_PATH isolated to a tmp file (so the
+            ~/.toolguard/-facing guard from _real_once_per_home_guard.py
+            passes through and does not mask this one)
+        When toolguard.once_per_store.reap is called with the REAL repo logs/
+            directory as logs_dir (TOO-45 R2: claim/is_claimed/release no
+            longer take a logs_dir argument at all -- the store moved to
+            ~/.toolguard/ -- but reap() still sweeps legacy artefacts under
+            a project's logs_dir, so it remains guarded by THIS module too;
+            the two guards compose, each checking an independent condition)
+        Then the call is recorded as a leak event
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(once_per_store, "_STORE_PATH", Path(tmp) / "once_per.db"):
+                once_per_store.reap(_real_log_dir_guard.REAL_LOGS_DIR)
+
+        events = _real_log_dir_guard.get_leak_events()
+        self.assertEqual(
+            len(events), 1, f"expected exactly one leak event, got {events}"
+        )
+        self.assertIn("reap", events[0])
+        self.assertIn(str(_real_log_dir_guard.REAL_LOGS_DIR), events[0])
+
+
+class TestRealSuppressionHomeGuardActuallyFires(unittest.TestCase):
+    """
+    Self-verification (TOO-45 R2): proves the ~/.toolguard/once_per.db
+    guard mechanism itself works, by DELIBERATELY breaking isolation --
+    setting toolguard.once_per_store._STORE_PATH back to the real developer
+    path (test/unit/__init__.py otherwise redirects it to a session-wide tmp
+    default for every other test, see its module docstring) -- and asserting
+    the guard intercepts every call. Both the leak registry and
+    _STORE_PATH are saved before and restored after each test, so this
+    cannot leak into TestRealSuppressionHomeGuardHasNoRecordedLeaks, the
+    atexit backstop, or any test that runs afterward.
+    """
+
+    def setUp(self):
+        """Start from a clean leak registry and force _STORE_PATH to the real path."""
+        self._pre_existing = _real_once_per_home_guard.get_leak_events()
+        _real_once_per_home_guard.clear_leak_events()
+        self._store_patcher = patch.object(
+            once_per_store,
+            "_STORE_PATH",
+            _real_once_per_home_guard.REAL_ONCE_PER_DB,
+        )
+        self._store_patcher.start()
+
+    def tearDown(self):
+        """Restore _STORE_PATH and whatever was already recorded before this test ran."""
+        self._store_patcher.stop()
+        _real_once_per_home_guard.replace_leak_events(self._pre_existing)
+
+    def test_guard_fires_for_claim_against_the_unpatched_real_store(self):
+        """
+        Given the guard installed and _STORE_PATH forced to the real, unisolated path
+        When toolguard.once_per_store.claim is called with a REAL (non-None) project --
+            claim(None, ...) short-circuits before touching storage regardless of
+            the guard, which would make this test pass even with install() deleted
+        Then the call is recorded as a leak event, reports UNGUARANTEED (the
+            fail-soft outcome), and the real database is NOT created
+        """
+        before_exists = _real_once_per_home_guard.REAL_ONCE_PER_DB.exists()
+
+        result = once_per_store.claim(
+            Path("/synthetic/project"),
+            "synthetic_kind",
+            "synthetic_scope",
+            timedelta(days=1),
+        )
+
+        self.assertEqual(result.status, ClaimStatus.UNGUARANTEED)
+        events = _real_once_per_home_guard.get_leak_events()
+        self.assertEqual(
+            len(events), 1, f"expected exactly one leak event, got {events}"
+        )
+        self.assertIn("claim", events[0])
+        self.assertIn(str(_real_once_per_home_guard.REAL_ONCE_PER_DB), events[0])
+
+        after_exists = _real_once_per_home_guard.REAL_ONCE_PER_DB.exists()
+        self.assertEqual(
+            before_exists,
+            after_exists,
+            "guard failed to suppress the real-store write: db existence changed",
+        )
+
+    def test_guard_fires_for_is_claimed_against_the_unpatched_real_store(self):
+        """
+        Given the guard installed and _STORE_PATH forced to the real, unisolated path
+        When toolguard.once_per_store.is_claimed is called with a REAL (non-None)
+            project -- is_claimed(None, ...) short-circuits before touching
+            storage regardless of the guard, which would make this test pass
+            even with install() deleted
+        Then the call is recorded as a leak event and returns False
+        """
+        result = once_per_store.is_claimed(
+            Path("/synthetic/project"), "synthetic_kind", "synthetic_scope"
+        )
+
+        self.assertFalse(result)
+        events = _real_once_per_home_guard.get_leak_events()
+        self.assertEqual(
+            len(events), 1, f"expected exactly one leak event, got {events}"
+        )
+        self.assertIn("is_claimed", events[0])
 
 
 if __name__ == "__main__":

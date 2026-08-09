@@ -54,11 +54,6 @@ COMMAND_TOOLS = {
     "mcp__local-tools__checked_bash",
 }
 
-# Module-level flags to ensure checks run only once per session
-_validation_done = False
-_divergence_check_done = False
-_takeover_conflict_logged = False
-
 
 def _run_startup_validation(
     env_config: Dict[str, Any], start_dir: str = None, config=None
@@ -81,11 +76,6 @@ def _run_startup_validation(
             ``load_configuration(start_dir)`` so this function remains usable on
             its own.
     """
-    global _validation_done
-    if _validation_done:
-        return
-    _validation_done = True
-
     if config is None:
         config = load_configuration(start_dir)
 
@@ -794,8 +784,8 @@ def _announce_takeover_state(takeover, log_dir) -> None:
 
     On a cross-level ``takeover_mode.enabled`` disagreement (TOO-8 Phase 5)
     ``enabled`` is already fail-safe OFF; the conflict is recorded to the
-    conflict log and a once-per-session warning is surfaced. The downstream
-    path is already the safe one (native prompts active).
+    conflict log and a takeover warning is surfaced. The downstream path is
+    already the safe one (native prompts active).
 
     Args:
         takeover: The resolved :class:`~toolguard.config.TakeoverConfig`.
@@ -804,15 +794,13 @@ def _announce_takeover_state(takeover, log_dir) -> None:
     if not log_dir:
         return
     if takeover.enabled:
-        issue_takeover_warning(log_dir, to_stdout=True)
+        issue_takeover_warning(to_stdout=True)
         return
 
-    global _takeover_conflict_logged
-    if takeover.conflict is None or _takeover_conflict_logged:
+    if takeover.conflict is None:
         return
-    _takeover_conflict_logged = True
     _log_takeover_enabled_conflict(takeover.conflict, log_dir)
-    issue_takeover_warning(log_dir, to_stdout=True)
+    issue_takeover_warning(to_stdout=True)
 
 
 def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -844,7 +832,7 @@ def _run_divergence_check(
     config, env_config: Dict[str, Any], takeover_dict: Dict[str, Any]
 ) -> None:
     """
-    Check for config divergence once per session, auto-migrating when configured.
+    Check for config divergence, auto-migrating when configured.
 
     :func:`check_and_warn_divergence` (``config``-layer) only DETECTS
     divergence and prints an immediate stderr notice -- it deliberately does
@@ -858,11 +846,6 @@ def _run_divergence_check(
         env_config: Environment configuration dict (for ``log_dir``).
         takeover_dict: Takeover settings in the plain-dict form these clients take.
     """
-    global _divergence_check_done
-    if _divergence_check_done:
-        return
-    _divergence_check_done = True
-
     log_dir = env_config.get("log_dir")
     if not log_dir:
         return
@@ -870,7 +853,7 @@ def _run_divergence_check(
     if project_root is None:
         return
 
-    divergence = check_and_warn_divergence(project_root, log_dir, takeover_dict)
+    divergence = check_and_warn_divergence(project_root, takeover_dict)
     if divergence.warning_message is not None:
         log_warning(divergence.warning_message, divergence.corrective_steps, log_dir)
     if not divergence.divergent_patterns:
@@ -878,7 +861,7 @@ def _run_divergence_check(
 
     config_sync = config.config_sync_settings()
     if config_sync["auto_migrate"]:
-        run_auto_migration(project_root, log_dir, dict(config_sync), takeover_dict)
+        run_auto_migration(project_root, dict(config_sync), takeover_dict)
 
 
 def _agent_info_for(hook_data: Dict[str, Any]) -> str:
@@ -1164,7 +1147,7 @@ def main() -> None:
     1. Parse args (provides --help; does NOT consume stdin).
     2. Guard against interactive (TTY) invocation: print an explanation and exit.
     3. Load environment configuration.
-    4. Run startup validation (once per session) - logs warnings for config issues.
+    4. Run startup validation - logs warnings for config issues.
     5. Parse input from stdin.
     6. Check if tool is governed (configurable list).
     7. Determine tool type (file path or command).
@@ -1222,7 +1205,7 @@ def main() -> None:
         _warn_if_settings_path_override()
         _log_config_discovery(config, env_config)
 
-        # Run startup validation (once per session), reusing the loaded config.
+        # Run startup validation, reusing the loaded config.
         _run_startup_validation(env_config, cwd, config)
 
         takeover_dict = _resolve_takeover_mode(config, env_config)

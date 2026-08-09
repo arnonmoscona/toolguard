@@ -24,11 +24,11 @@ Instead this module intercepts the leak at its only possible source: every
 toolguard code path that can write into the real project logs/ directory
 does so by calling one of a small, fixed set of functions
 (``log_writer.log_command``, ``log_writer.log_discovery``,
-``error_log.log_conflict``, ``error_log.log_error``, ``error_log.log_warning``)
-with a ``log_dir`` (directly, or -- for ``log_command`` specifically -- via a
-``config["log_dir"]`` dict, which is the shape ``toolguard.hook.main()``
-actually uses on every call site). ``install()`` wraps each of these, AT
-THEIR DEFINING MODULE, with a guard that:
+``error_log.log_conflict``, ``error_log.log_error``, ``error_log.log_warning``,
+``once_per_store.reap``) with a ``log_dir``/``logs_dir`` (directly, or -- for ``log_command``
+specifically -- via a ``config["log_dir"]`` dict, which is the shape
+``toolguard.hook.main()`` actually uses on every call site). ``install()``
+wraps each of these, AT THEIR DEFINING MODULE, with a guard that:
 
 1. Detects when the resolved ``log_dir`` is the real repo's ``logs/``
    directory (or a path under it).
@@ -41,10 +41,14 @@ THEIR DEFINING MODULE, with a guard that:
    observable difference in behaviour.
 
 Patching happens at the DEFINING module (``toolguard.log_writer`` /
-``toolguard.error_log``) rather than at each importer, so that later
-``from toolguard.log_writer import log_command`` statements (e.g. inside
-``toolguard/hook.py``, imported lazily by individual test modules) bind
-directly to the guarded wrapper. This only works because ``install()`` is
+``toolguard.error_log`` / ``toolguard.once_per_store``) rather than at each
+importer, so that later ``from toolguard.log_writer import log_command``
+statements (e.g. inside ``toolguard/hook.py``, imported lazily by individual
+test modules) bind directly to the guarded wrapper -- and
+``toolguard.once_per`` (the sole caller of ``once_per_store.reap``, via its
+internal housekeeping sweep) sees the guarded wrapper too, since it looks it
+up as a module attribute at call time. This only works because
+``install()`` is
 called from ``test/unit/__init__.py``, which -- as the package ``__init__``
 of every ``test.unit.test_*`` module -- is guaranteed by Python's import
 system to execute before any test module (and therefore before
@@ -75,6 +79,7 @@ from pathlib import Path
 
 import toolguard.error_log as error_log
 import toolguard.log_writer as log_writer
+import toolguard.once_per_store as once_per_store
 
 #: The real repository's logs/ directory -- computed once, from this file's
 #: own location, so it works regardless of the process's cwd or invocation
@@ -146,13 +151,18 @@ def _record_leak(func, log_dir) -> None:
     )
 
 
-def _guard_simple_log_dir_arg(func):
-    """Wrap a log_* function whose ``log_dir`` argument is checked directly."""
+def _guard_simple_log_dir_arg(func, param_name="log_dir"):
+    """
+    Wrap a function whose log-directory argument is checked directly.
+
+    *param_name* accommodates callables that don't use ``log_dir`` as the
+    parameter name (e.g. :mod:`toolguard.once_per_store`'s ``logs_dir``).
+    """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         bound = inspect.signature(func).bind_partial(*args, **kwargs)
-        log_dir = bound.arguments.get("log_dir")
+        log_dir = bound.arguments.get(param_name)
         if _is_real_logs_path(log_dir):
             _record_leak(func, log_dir)
             return None
@@ -202,4 +212,11 @@ def install() -> None:
     log_writer.log_discovery = _guard_simple_log_dir_arg(log_writer.log_discovery)
     for name in ("log_conflict", "log_error", "log_warning"):
         setattr(error_log, name, _guard_simple_log_dir_arg(getattr(error_log, name)))
+    # reap() is the only once_per_store function still keyed by a project
+    # logs_dir (legacy-artefact sweep); claim/is_claimed/release moved to the
+    # shared ~/.toolguard/ store (TOO-45 R2) and are guarded separately, by
+    # _real_once_per_home_guard.py, against the real store path instead.
+    once_per_store.reap = _guard_simple_log_dir_arg(
+        once_per_store.reap, param_name="logs_dir"
+    )
     _installed = True

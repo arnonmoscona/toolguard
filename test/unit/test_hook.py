@@ -38,6 +38,7 @@ from toolguard.resolve import (
     _decide_file_path_at_level_detailed,
     resolve_bash_permission_detailed,
 )
+from toolguard import once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
@@ -296,20 +297,69 @@ class TestHookToolGovernance(unittest.TestCase):
                     )
 
 
+class TestPermissionDecisionSurvivesSqlite3Unavailable(unittest.TestCase):
+    """
+    TOO-45 R2: sqlite3 being unavailable must only disable once-per-day
+    throttling -- it must never reduce permission enforcement. This drives a
+    real permission decision through main() with the module-level
+    toolguard.once_per_store.sqlite3 patched to None.
+
+    TOO-45 punch-list #01 removed issue_takeover_warning's once_per_store
+    interaction entirely (see toolguard.session_warnings), so this fake's
+    project_root=None means no code path in THIS test reaches once_per_store
+    at all -- that degraded-path behaviour is now covered directly, at the
+    module level, by test_config_divergence.py's
+    test_warns_when_sqlite_unavailable and test_auto_migrate.py's
+    test_skips_migration_when_sqlite_unavailable. What remains here is a
+    general smoke test: the whole hook.main() flow must not crash or degrade
+    the permission decision regardless of sqlite3's availability.
+    """
+
+    def test_takeover_enabled_decision_still_resolves_with_sqlite3_unavailable(self):
+        """
+        Given takeover mode enabled, 'git *' allowed, sqlite3 unavailable
+        When main() processes a 'git status' Bash invocation
+        Then the permission decision is still 'allow' -- sqlite3's absence
+             degrades throttling only, never the decision itself
+        """
+        config = _fake_config(
+            governed=["Bash"],
+            bash=(["git *"], []),
+            takeover=TakeoverConfig(True, (), (), "deny"),
+        )
+
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with patch("toolguard.hook.load_configuration", return_value=config):
+                    with patch(
+                        "toolguard.hook.get_env_config",
+                        return_value={"log_dir": Path("/fake/logs")},
+                    ):
+                        with patch("toolguard.hook.log_command"):
+                            with patch.object(once_per_store, "sqlite3", None):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+
+        output = json.loads(mock_stdout.getvalue())
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+
+
 class TestTakeoverEnabledConflictWiring(unittest.TestCase):
     """End-to-end hook wiring for a cross-level takeover_mode.enabled conflict (TOO-8 Phase 5)."""
-
-    def setUp(self):
-        """Reset the once-per-session takeover-conflict flag before each test."""
-        import toolguard.hook as hook_module
-
-        hook_module._takeover_conflict_logged = False
 
     def test_enabled_conflict_logs_and_warns_failsafe_off(self):
         """
         Given a config whose takeover_mode() reports an enabled conflict (fail-safe OFF)
         When main() processes a governed Bash command
-        Then a conflict-log entry is written, a once-per-session takeover warning is issued,
+        Then a conflict-log entry is written, a takeover warning is issued,
              and the command is still evaluated on the safe path (native prompts active)
         """
         conflict = TakeoverEnabledConflict(
@@ -369,76 +419,11 @@ class TestTakeoverEnabledConflictWiring(unittest.TestCase):
         conflict_message = mock_conflict.call_args[0][0]
         self.assertIn("conflicting values", conflict_message)
         self.assertIn("DISABLED", conflict_message)
-        # A once-per-session takeover/config warning was issued.
+        # A takeover warning was issued.
         mock_warn.assert_called_once()
         # Fail-safe path: the command is still evaluated normally (allowed by 'git *').
         output = json.loads(mock_stdout.getvalue())
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
-
-    def test_enabled_conflict_logged_once_per_session(self):
-        """
-        Given the takeover enabled-conflict path has already fired this session
-        When main() processes another governed command in the same session
-        Then no additional conflict-log entry or takeover warning is emitted (once-per-session)
-        """
-        import toolguard.hook as hook_module
-
-        hook_module._takeover_conflict_logged = True
-
-        conflict = TakeoverEnabledConflict(
-            sources=(
-                (
-                    True,
-                    Provenance(
-                        "project",
-                        "toolguard_hook",
-                        "toml",
-                        Path("/p/.claude/toolguard_hook.toml"),
-                        0,
-                    ),
-                ),
-                (
-                    False,
-                    Provenance(
-                        "user",
-                        "toolguard_hook",
-                        "toml",
-                        Path("/u/.claude/toolguard_hook.toml"),
-                        1,
-                    ),
-                ),
-            )
-        )
-        takeover = TakeoverConfig(False, (), (), "deny", conflict=conflict)
-        config = _fake_config(
-            governed=["Bash"], bash=(["git *"], []), takeover=takeover
-        )
-
-        hook_input = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "git status"},
-            "hook_event_name": "PreToolUse",
-        }
-
-        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
-            with patch("sys.stdout", new_callable=StringIO):
-                with patch("toolguard.hook.load_configuration", return_value=config):
-                    with patch(
-                        "toolguard.hook.get_env_config",
-                        return_value={"log_dir": Path("/fake/logs")},
-                    ):
-                        with patch("toolguard.hook.log_command"):
-                            with patch("toolguard.hook.log_conflict") as mock_conflict:
-                                with patch(
-                                    "toolguard.hook.issue_takeover_warning"
-                                ) as mock_warn:
-                                    try:
-                                        main()
-                                    except SystemExit:
-                                        pass
-
-        mock_conflict.assert_not_called()
-        mock_warn.assert_not_called()
 
     def test_log_takeover_conflict_is_noop_without_conflict_or_log_dir(self):
         """
@@ -2199,77 +2184,64 @@ class TestStartupValidation(unittest.TestCase):
         """
         import tempfile
 
-        import toolguard.hook as hook_module
         from toolguard.config import Configuration
 
-        # Reset validation flag for this test
-        original_flag = hook_module._validation_done
-        hook_module._validation_done = False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir()
+            (project_dir / ".git").mkdir()
+            claude_dir = project_dir / ".claude"
+            claude_dir.mkdir()
+            logs_dir = project_dir / "logs"
+            logs_dir.mkdir()
 
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                project_dir = Path(tmpdir) / "project"
-                project_dir.mkdir()
-                (project_dir / ".git").mkdir()
-                claude_dir = project_dir / ".claude"
-                claude_dir.mkdir()
-                logs_dir = project_dir / "logs"
-                logs_dir.mkdir()
-
-                # Native settings.local.json with unsupported tools (should be IGNORED)
-                native_layer = ConfigLayer(
-                    Provenance(
-                        "project", "claude", "json", claude_dir / "settings.local.json"
-                    ),
-                    MappingProxyType(
-                        {
-                            "permissions": {
-                                "allow": ["WebSearch", "WebFetch", "mcp__unknown__tool"]
-                            }
+            # Native settings.local.json with unsupported tools (should be IGNORED)
+            native_layer = ConfigLayer(
+                Provenance(
+                    "project", "claude", "json", claude_dir / "settings.local.json"
+                ),
+                MappingProxyType(
+                    {
+                        "permissions": {
+                            "allow": ["WebSearch", "WebFetch", "mcp__unknown__tool"]
                         }
-                    ),
-                )
-                # toolguard_hook with valid config (should be validated, no issues)
-                hook_layer = ConfigLayer(
-                    Provenance(
-                        "project",
-                        "toolguard_hook",
-                        "toml",
-                        claude_dir / "toolguard_hook.toml",
-                    ),
-                    MappingProxyType(
-                        {
-                            "governed_tools": ["Bash", "Read"],
-                            "permissions": {"allow": ["Bash(ls:*)", "Read(/tmp/**)"]},
-                        }
-                    ),
-                )
-                config = Configuration(layers=(native_layer, hook_layer))
+                    }
+                ),
+            )
+            # toolguard_hook with valid config (should be validated, no issues)
+            hook_layer = ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    claude_dir / "toolguard_hook.toml",
+                ),
+                MappingProxyType(
+                    {
+                        "governed_tools": ["Bash", "Read"],
+                        "permissions": {"allow": ["Bash(ls:*)", "Read(/tmp/**)"]},
+                    }
+                ),
+            )
+            config = Configuration(layers=(native_layer, hook_layer))
 
-                env_config = {"log_dir": logs_dir}
+            env_config = {"log_dir": logs_dir}
 
-                # Reset flag again before calling
-                hook_module._validation_done = False
+            from toolguard.hook import _run_startup_validation
 
-                from toolguard.hook import _run_startup_validation
+            _run_startup_validation(env_config, str(project_dir), config)
 
-                _run_startup_validation(env_config, str(project_dir), config)
+            # Check log file - should NOT have warnings for WebSearch, WebFetch
+            # because those are in settings.local.json which is ignored
+            log_files = list(logs_dir.glob("toolguard-error-*.md"))
 
-                # Check log file - should NOT have warnings for WebSearch, WebFetch
-                # because those are in settings.local.json which is ignored
-                log_files = list(logs_dir.glob("toolguard-error-*.md"))
-
-                if log_files:
-                    content = log_files[0].read_text()
-                    # These tools are in settings.local.json which should be ignored
-                    self.assertNotIn("WebSearch", content)
-                    self.assertNotIn("WebFetch", content)
-                    self.assertNotIn("mcp__unknown__tool", content)
-                # If no log file exists, that's also correct (no warnings generated)
-
-        finally:
-            # Restore original flag
-            hook_module._validation_done = original_flag
+            if log_files:
+                content = log_files[0].read_text()
+                # These tools are in settings.local.json which should be ignored
+                self.assertNotIn("WebSearch", content)
+                self.assertNotIn("WebFetch", content)
+                self.assertNotIn("mcp__unknown__tool", content)
+            # If no log file exists, that's also correct (no warnings generated)
 
     def test_validation_logs_issues_from_config(self):
         """
@@ -2278,27 +2250,21 @@ class TestStartupValidation(unittest.TestCase):
         Then log_warning is called once with that issue's message and corrective steps
         """
         from toolguard.config import Issue
-        import toolguard.hook as hook_module
 
-        original_flag = hook_module._validation_done
-        hook_module._validation_done = False
-        try:
-            issue = Issue("warning", "bad tool WebSearch", "remove it")
+        issue = Issue("warning", "bad tool WebSearch", "remove it")
 
-            class _IssueConfig:
-                def validation_issues(self_inner):
-                    return (issue,)
+        class _IssueConfig:
+            def validation_issues(self_inner):
+                return (issue,)
 
-            env_config = {"log_dir": Path("/fake/logs")}
-            with patch("toolguard.hook.log_warning") as mock_log_warning:
-                from toolguard.hook import _run_startup_validation
+        env_config = {"log_dir": Path("/fake/logs")}
+        with patch("toolguard.hook.log_warning") as mock_log_warning:
+            from toolguard.hook import _run_startup_validation
 
-                _run_startup_validation(env_config, "/some/dir", _IssueConfig())
-                mock_log_warning.assert_called_once_with(
-                    "bad tool WebSearch", "remove it", Path("/fake/logs")
-                )
-        finally:
-            hook_module._validation_done = original_flag
+            _run_startup_validation(env_config, "/some/dir", _IssueConfig())
+            mock_log_warning.assert_called_once_with(
+                "bad tool WebSearch", "remove it", Path("/fake/logs")
+            )
 
     def test_validation_loads_config_when_none(self):
         """
@@ -2306,27 +2272,20 @@ class TestStartupValidation(unittest.TestCase):
         When it runs for a given directory
         Then it calls load_configuration with that directory to obtain one itself
         """
-        import toolguard.hook as hook_module
 
-        original_flag = hook_module._validation_done
-        hook_module._validation_done = False
-        try:
+        class _EmptyConfig:
+            def validation_issues(self_inner):
+                return ()
 
-            class _EmptyConfig:
-                def validation_issues(self_inner):
-                    return ()
+        env_config = {"log_dir": Path("/fake/logs")}
+        with patch(
+            "toolguard.hook.load_configuration", return_value=_EmptyConfig()
+        ) as mock_load:
+            with patch("toolguard.hook.log_warning"):
+                from toolguard.hook import _run_startup_validation
 
-            env_config = {"log_dir": Path("/fake/logs")}
-            with patch(
-                "toolguard.hook.load_configuration", return_value=_EmptyConfig()
-            ) as mock_load:
-                with patch("toolguard.hook.log_warning"):
-                    from toolguard.hook import _run_startup_validation
-
-                    _run_startup_validation(env_config, "/some/dir")
-                    mock_load.assert_called_once_with("/some/dir")
-        finally:
-            hook_module._validation_done = original_flag
+                _run_startup_validation(env_config, "/some/dir")
+                mock_load.assert_called_once_with("/some/dir")
 
 
 class TestLoadFilePathPatternsAdapter(unittest.TestCase):

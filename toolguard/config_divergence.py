@@ -16,99 +16,19 @@ returns. See :class:`DivergenceCheckResult`.
 import json
 import sys
 from dataclasses import dataclass
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from toolguard import once_per
 from toolguard.config import is_tool_wrapper, load_configuration
 from toolguard.config_validation import extract_tool_name
 
-
-def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
-    """
-    Get the path to a divergence marker file for a specific date.
-
-    Marker files use the format: .toolguard-divergence-warned-YYYY-MM-DD
-
-    Args:
-        logs_dir: Directory where marker files are stored
-        marker_date: Date for the marker file
-
-    Returns:
-        Path to the marker file
-    """
-    filename = f".toolguard-divergence-warned-{marker_date.strftime('%Y-%m-%d')}"
-    return logs_dir / filename
-
-
-def marker_exists_for_today(logs_dir: Path) -> bool:
-    """
-    Check if a divergence warning marker file exists for today.
-
-    Args:
-        logs_dir: Directory where marker files are stored
-
-    Returns:
-        True if marker file exists for today, False otherwise
-    """
-    today_marker = get_marker_file_path(logs_dir, date.today())
-    return today_marker.exists()
-
-
-def create_marker_file(logs_dir: Path) -> None:
-    """
-    Create a marker file for today to track that divergence warning was issued.
-
-    Creates the logs directory if it doesn't exist.
-
-    Args:
-        logs_dir: Directory where marker files are stored
-
-    Raises:
-        OSError: If unable to create marker file or directory
-    """
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    today_marker = get_marker_file_path(logs_dir, date.today())
-    try:
-        today_marker.touch()
-    except OSError as e:
-        print(
-            f"Warning: Failed to create divergence marker file {today_marker}: {e}",
-            file=sys.stderr,
-        )
-        raise
-
-
-def cleanup_old_markers(logs_dir: Path, days: int = 7) -> None:
-    """
-    Remove divergence marker files older than the specified number of days.
-
-    This prevents accumulation of old marker files over time.
-
-    Args:
-        logs_dir: Directory where marker files are stored
-        days: Number of days to keep (default: 7)
-    """
-    if not logs_dir.exists():
-        return
-
-    cutoff_date = date.today() - timedelta(days=days)
-
-    try:
-        for marker_file in logs_dir.glob(".toolguard-divergence-warned-*"):
-            try:
-                # Format: .toolguard-divergence-warned-YYYY-MM-DD
-                date_str = marker_file.name.replace(".toolguard-divergence-warned-", "")
-                file_date = date.fromisoformat(date_str)
-
-                if file_date < cutoff_date:
-                    marker_file.unlink()
-            except ValueError, OSError:
-                # Skip files that don't match expected format or can't be deleted
-                continue
-    except OSError:
-        # If we can't list directory, just continue
-        pass
+#: The single named object for this module's once-per-day throttling. One
+#: name carries both the key and the human description (TOO-45 punch-list
+#: #01 item 4) -- no separate _KEY constant to drift from it.
+DIVERGENCE_WARNING = once_per.day(
+    "divergence_warning", "the configuration divergence warning"
+)
 
 
 def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
@@ -249,8 +169,8 @@ class DivergenceCheckResult:
     Outcome of a single :func:`check_and_warn_divergence` call.
 
     ``check_and_warn_divergence`` DETECTS divergence and decides whether a
-    new warning is due (once-per-day, via the marker file); it deliberately
-    does NOT write to toolguard's structured error log itself -- doing so
+    new warning is due (once per day); it deliberately does NOT write to
+    toolguard's structured error log itself -- doing so
     would make this ``config``-layer module depend on
     :mod:`toolguard.error_log`, a ``runtime``-layer module (TOO-45 R5d). The
     caller (:mod:`toolguard.hook`, which already legitimately depends on
@@ -262,8 +182,7 @@ class DivergenceCheckResult:
         divergent_patterns: Patterns found in native config but not in
             toolguard config (flattened across allow/deny/ask), or an empty
             list when there is nothing to report -- either no divergence was
-            found, or a warning was already issued today (marker file
-            present).
+            found, or a warning was already issued today.
         warning_message: The human-readable warning text to log, or ``None``
             when there is nothing new to warn about.
         corrective_steps: Suggested corrective-action text to log alongside
@@ -276,25 +195,26 @@ class DivergenceCheckResult:
 
 
 def check_and_warn_divergence(
-    project_root: Path, logs_dir: Path, takeover_config: Dict
+    project_root: Path, takeover_config: Dict
 ) -> DivergenceCheckResult:
     """
     Check for config divergence and prepare a warning if found.
 
     Scans settings.local.json for patterns not present in toolguard config.
-    A new warning is deduplicated using date-stamped marker files (once per
-    day) -- when a marker already exists for today, this returns an empty
-    result without doing any further work.
+    A new warning is deduplicated once per day. It is only actually printed
+    immediately before returning (the side effect being deduplicated) -- not
+    before the analysis above it -- so an exception raised while
+    loading/comparing config (e.g. a malformed config file) never leaves the
+    day's slot claimed with nothing to show for it. A cheap read-only
+    pre-check skips the analysis entirely on an already-warned day.
 
     This function DETECTS divergence, prints an immediate stderr notice, and
-    marks that a warning has been issued (creates today's marker file). It
-    does NOT write to toolguard's structured error log -- see
-    :class:`DivergenceCheckResult`'s docstring for why; the caller is
-    responsible for that.
+    marks that a warning has been issued. It does NOT write to toolguard's
+    structured error log -- see :class:`DivergenceCheckResult`'s docstring
+    for why; the caller is responsible for that.
 
     Args:
         project_root: Path to project root
-        logs_dir: Directory where logs and marker files are stored
         takeover_config: Takeover mode configuration dict with ignored_allow_patterns
 
     Returns:
@@ -302,8 +222,8 @@ def check_and_warn_divergence(
         and ``warning_message``/``corrective_steps`` are ``None``, when there
         is nothing new to report.
     """
-    # Check if we've already warned today
-    if marker_exists_for_today(logs_dir):
+    if DIVERGENCE_WARNING.done(project_root):
+        # Already warned today -- skip the analysis entirely.
         return DivergenceCheckResult(divergent_patterns=[])
 
     # Load native permissions from settings.local.json
@@ -339,6 +259,8 @@ def check_and_warn_divergence(
         all_divergent.extend(divergent[perm_type])
 
     if not all_divergent:
+        # Nothing to report -- no claim was ever taken, so a later call
+        # today can still catch divergence appearing mid-day.
         return DivergenceCheckResult(divergent_patterns=[])
 
     # Format warning message
@@ -355,16 +277,10 @@ def check_and_warn_divergence(
     corrective_steps = "Consider migrating to toolguard config. Run: toolguard-migrate"
 
     # Immediate, direct stderr notice -- independent of the structured error
-    # log the caller writes via log_warning (see DivergenceCheckResult).
-    print(warning_message, file=sys.stderr)
-
-    # Create marker file
-    try:
-        create_marker_file(logs_dir)
-        cleanup_old_markers(logs_dir, days=7)
-    except OSError:
-        # If we can't create marker, continue (warning was still surfaced)
-        pass
+    # log the caller writes via log_warning (see DivergenceCheckResult). A
+    # loss here means another process just warned -- stay quiet.
+    if not DIVERGENCE_WARNING.warn(project_root, warning_message):
+        return DivergenceCheckResult(divergent_patterns=[])
 
     return DivergenceCheckResult(
         divergent_patterns=all_divergent,

@@ -195,7 +195,7 @@ name = "observability"
 # (config.find_project_root), a thin wrapper over a foundation primitive, now
 # path_utils.require_project_root. Configuration reaches log_writer by
 # INJECTION already -- a plain dict parameter -- not by import.
-packages = ["log_writer", "error_log", "session_warnings", "update_check"]
+packages = ["log_writer", "error_log", "session_warnings", "update_check", "once_per_store", "once_per"]
 
 [[architecture.layers]]
 name = "config"

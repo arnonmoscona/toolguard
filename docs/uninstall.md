@@ -14,9 +14,9 @@ uninstall may be frustrated, and a clean, complete rollback is the point.
   the install flagged as possibly shared (e.g. uv), re-confirm explicitly -- the user may have
   started relying on it.
 - **Keep `~/.toolguard/`.** Its contents are non-executable records (install journal, config
-  backups, decision ledger, a `README.txt`). Uninstall does NOT delete them -- they exist for
-  auditability and problem resolution, and a frustrated user especially should not lose the
-  record of what was done. See Step 3.
+  backups, decision ledger, the once-per-day claim store, a `README.txt`). Uninstall
+  does NOT delete them -- they exist for auditability and problem resolution, and a
+  frustrated user especially should not lose the record of what was done. See Step 3.
 - **Keep the logs by default.** Toolguard's decision logs (`logs/toolguard-*.md` under each
   governed project, plus the conflict/session streams) are the single best artifact for
   debugging a problem after the fact -- exactly what a user would send the author. Do NOT delete
@@ -105,11 +105,12 @@ contains a stale/incorrect entry, and proceed with the rest of the rollback norm
 
 **Do not remove `~/.toolguard/` or anything in it.** It holds only non-executable records --
 the install journal, the config/settings backups the install and uninstall made, the decision
-ledger (`decisions.json`), any captured crash reports in `errors/`, any session-trace dumps in
-`traces/` (see Step 5), and `README.txt`. Toolguard no longer runs anything from here, so
-keeping it costs nothing and preserves a full, auditable history of what was installed and
-removed -- invaluable if the user hit problems (the reason they may be uninstalling) or later
-wants to reinstall or understand what happened.
+ledger (`decisions.json`), the once-per-day claim store (`once_per.db`), any
+captured crash reports in `errors/`, any session-trace dumps in `traces/` (see Step 5), and
+`README.txt`. Toolguard no longer runs anything from here, so keeping it costs nothing and
+preserves a full, auditable history of what was installed and removed -- invaluable if the
+user hit problems (the reason they may be uninstalling) or later wants to reinstall or
+understand what happened.
 
 **Tell the user explicitly, at the end, that you left it:** state that `~/.toolguard/` was kept
 on purpose for auditability and problem resolution, that it contains nothing executable, where

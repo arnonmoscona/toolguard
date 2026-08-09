@@ -4,8 +4,9 @@ by a Bash command, even one the installing agent decides to run on its own
 initiative.
 
 ``~/.toolguard`` holds the install journal, config/settings backups, the
-decision ledger, crash reports, and session-trace dumps -- the entire audit
-trail this project relies on for a reliable, reversible install/uninstall.
+decision ledger, the once-per-day claim store, crash reports, and
+session-trace dumps -- the entire audit trail this project relies on for a
+reliable, reversible install/uninstall.
 docs/uninstall.md has repeatedly and explicitly said "do not delete
 ``~/.toolguard/``" across several real-install rounds (TOO-15), yet a real
 install still deleted it wholesale: the agent decided, unprompted, that

@@ -354,7 +354,12 @@ the same Markdown entry format and echo a concise line to stderr.
 
 The **takeover "active" notice** (`session_warnings.issue_takeover_warning`) is
 informational, NOT actionable, so it is **no longer persisted to any log**: it is
-stderr + a once-per-session marker file only.
+a stderr echo on every invocation, never deduplicated, and (TOO-45 punch-list
+#01, second pass) no longer touches the claim store at all -- periodic
+housekeeping is internal to `toolguard.once_per.OncePer` and runs
+opportunistically as a side effect of any OTHER throttled thing's successful
+claim (e.g. `config_divergence.DIVERGENCE_WARNING`, `auto_migrate
+.AUTO_MIGRATION`), backed by `toolguard.once_per_store`.
 
 ### Conflict logging -- allow-over-deny overrides only
 

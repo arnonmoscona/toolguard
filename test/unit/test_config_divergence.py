@@ -3,109 +3,31 @@ Unit tests for config_divergence module.
 """
 
 import json
+import subprocess
+import sys
+import time
 import unittest
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
+from unittest.mock import patch
 
+from toolguard import once_per_store
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.config_divergence import (
+    DIVERGENCE_WARNING,
     check_and_warn_divergence,
-    cleanup_old_markers,
-    create_marker_file,
     find_divergent_patterns,
-    get_marker_file_path,
     get_native_permissions,
     get_toolguard_permissions,
-    marker_exists_for_today,
 )
+from toolguard.once_per_store import ClaimStatus
 
+from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
 
-class TestMarkerFiles(unittest.TestCase):
-    """Test marker file operations."""
-
-    def test_get_marker_file_path(self):
-        """
-        Given a logs directory and a specific date
-        When get_marker_file_path builds the path
-        Then it is logs_dir/.toolguard-divergence-warned-YYYY-MM-DD for that date
-        """
-        logs_dir = Path("/tmp/logs")
-        test_date = date(2025, 2, 5)
-        marker_path = get_marker_file_path(logs_dir, test_date)
-
-        self.assertEqual(
-            marker_path, Path("/tmp/logs/.toolguard-divergence-warned-2025-02-05")
-        )
-
-    def test_marker_exists_for_today(self):
-        """
-        Given a logs directory with no marker, then today's marker created
-        When marker_exists_for_today is checked before and after
-        Then it returns False initially and True once the marker exists
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            # Should not exist initially
-            self.assertFalse(marker_exists_for_today(logs_dir))
-
-            # Create marker for today
-            today_marker = get_marker_file_path(logs_dir, date.today())
-            today_marker.touch()
-
-            # Should exist now
-            self.assertTrue(marker_exists_for_today(logs_dir))
-
-    def test_create_marker_file(self):
-        """
-        Given a logs directory that does not yet exist
-        When create_marker_file runs
-        Then the directory is created and today's divergence marker exists
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / "logs"
-
-            # Directory doesn't exist yet
-            self.assertFalse(logs_dir.exists())
-
-            # Create marker file
-            create_marker_file(logs_dir)
-
-            # Directory and marker should exist
-            self.assertTrue(logs_dir.exists())
-            self.assertTrue(marker_exists_for_today(logs_dir))
-
-    def test_cleanup_old_markers(self):
-        """
-        Given markers for today, 3 days ago, and 10 days ago
-        When cleanup_old_markers runs with a 7-day threshold
-        Then the 10-day-old marker is deleted while the recent and today markers remain
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            # Create markers for various dates
-            today = date.today()
-            old_date = today - timedelta(days=10)
-            recent_date = today - timedelta(days=3)
-
-            old_marker = get_marker_file_path(logs_dir, old_date)
-            recent_marker = get_marker_file_path(logs_dir, recent_date)
-            today_marker = get_marker_file_path(logs_dir, today)
-
-            old_marker.touch()
-            recent_marker.touch()
-            today_marker.touch()
-
-            # Cleanup markers older than 7 days
-            cleanup_old_markers(logs_dir, days=7)
-
-            # Old marker should be deleted, recent ones should remain
-            self.assertFalse(old_marker.exists())
-            self.assertTrue(recent_marker.exists())
-            self.assertTrue(today_marker.exists())
+#: test/unit/test_config_divergence.py -> parents[0]=test/unit, [1]=test, [2]=repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestGetNativePermissions(unittest.TestCase):
@@ -639,7 +561,21 @@ class TestDivergenceComparisonSemanticsGuard(unittest.TestCase):
         self.assertEqual(result["allow"], ["Bash(git commit:*)"])
 
 
-class TestCheckAndWarnDivergence(unittest.TestCase):
+class TestDivergenceWarningKey(unittest.TestCase):
+    """Locks in the key string other tests here claim directly against the store."""
+
+    def test_key_matches_the_literal_used_by_other_tests(self):
+        """
+        Given the module-level DIVERGENCE_WARNING throttled-thing
+        When its private key is compared to the literal string other tests
+            in this file claim against directly
+        Then they match -- if this ever drifts, those tests would silently
+             stop exercising the real gate
+        """
+        self.assertEqual(DIVERGENCE_WARNING._key, "divergence_warning")
+
+
+class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
     """Test the main divergence check function."""
 
     def test_no_divergence(self):
@@ -651,7 +587,6 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
@@ -671,7 +606,7 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
 
             takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
-            result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
+            result = check_and_warn_divergence(project_root, takeover_config)
 
             # No divergence
             self.assertEqual(result.divergent_patterns, [])
@@ -689,7 +624,6 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
@@ -710,7 +644,7 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
 
             takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
-            result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
+            result = check_and_warn_divergence(project_root, takeover_config)
 
             # Should find divergence
             self.assertIn("Bash(git push:*)", result.divergent_patterns)
@@ -727,7 +661,6 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
@@ -742,11 +675,11 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
             takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
             # First call should find divergence
-            result1 = check_and_warn_divergence(project_root, logs_dir, takeover_config)
+            result1 = check_and_warn_divergence(project_root, takeover_config)
             self.assertIn("Bash(git push:*)", result1.divergent_patterns)
 
             # Second call should be deduplicated
-            result2 = check_and_warn_divergence(project_root, logs_dir, takeover_config)
+            result2 = check_and_warn_divergence(project_root, takeover_config)
             self.assertEqual(result2.divergent_patterns, [])
             self.assertIsNone(result2.warning_message)
 
@@ -758,7 +691,6 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
 
             # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
@@ -778,11 +710,268 @@ class TestCheckAndWarnDivergence(unittest.TestCase):
                 "additional_ignored_patterns": [],
             }
 
-            result = check_and_warn_divergence(project_root, logs_dir, takeover_config)
+            result = check_and_warn_divergence(project_root, takeover_config)
 
             # Should only find git push, not pytest
             self.assertIn("Bash(git push:*)", result.divergent_patterns)
             self.assertNotIn("Bash(uv run pytest:*)", result.divergent_patterns)
+
+    def test_no_divergence_releases_claim_so_later_scan_same_day_still_works(self):
+        """
+        Given a project with no divergence on the first check, then a
+            divergent pattern added to settings.local.json before a second
+            check the same day
+        When check_and_warn_divergence runs twice
+        Then the first call reports nothing, and the second call (same day)
+             DOES report the newly-added divergence -- finding nothing does
+             not consume the day's warning slot, only actually warning does
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / "pyproject.toml").touch()
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status:*)"]}})
+            )
+            hook_path = project_root / ".claude" / "toolguard_hook.json"
+            hook_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status:*)"]}})
+            )
+
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+
+            result1 = check_and_warn_divergence(project_root, takeover_config)
+            self.assertEqual(result1.divergent_patterns, [])
+
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git status:*)", "Bash(git push:*)"]
+                        }
+                    }
+                )
+            )
+
+            result2 = check_and_warn_divergence(project_root, takeover_config)
+            self.assertIn("Bash(git push:*)", result2.divergent_patterns)
+
+    def test_warning_claims_todays_slot(self):
+        """
+        Given a project with a divergent pattern
+        When check_and_warn_divergence runs and reports it
+        Then today's slot for this module's key is held -- proving the
+             dedup goes through the once-per-day claim store, not a marker
+             file
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / "pyproject.toml").touch()
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+            )
+
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+            check_and_warn_divergence(project_root, takeover_config)
+
+            still_claimed = (
+                once_per_store.claim(
+                    project_root,
+                    "divergence_warning",
+                    once_per_store.day_scope(),
+                    timedelta(days=1),
+                ).status
+                == ClaimStatus.HELD_BY_SOMEONE_ELSE
+            )
+            self.assertTrue(still_claimed)
+
+    def test_warns_when_sqlite_unavailable(self):
+        """
+        Given a project with a divergent pattern and sqlite3 unavailable
+        When check_and_warn_divergence runs
+        Then it still reports the divergence and prints the warning (a
+             warning fails OPEN -- see toolguard.session_warnings.OncePer.warn),
+             plus a one-time notice explaining that it can no longer be
+             throttled to once per day
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / "pyproject.toml").touch()
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+            )
+
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+
+            with patch.object(once_per_store, "sqlite3", None):
+                with patch("builtins.print") as mock_print:
+                    result = check_and_warn_divergence(project_root, takeover_config)
+
+            self.assertIn("Bash(git push:*)", result.divergent_patterns)
+            printed = " ".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
+            self.assertIn("sqlite3 is unavailable", printed)
+            self.assertIn("the configuration divergence warning", printed)
+
+
+class TestCheckAndWarnDivergenceExceptionSafety(_IsolatedStoreMixin, unittest.TestCase):
+    """TOO-45 follow-up defect 1 regression: a crash must not leak the claim."""
+
+    def test_exception_during_analysis_leaves_period_unclaimed(self):
+        """
+        Given load_configuration raises during the analysis phase (e.g. a
+            malformed config file), before any warning is ever produced
+        When check_and_warn_divergence is called
+        Then the exception propagates AND a subsequent, successful call the
+             same day can still detect and report divergence -- the crash
+             must not have consumed the day's warning slot
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / "pyproject.toml").touch()
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+            )
+
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+            boom = RuntimeError("malformed config file")
+
+            with patch(
+                "toolguard.config_divergence.load_configuration", side_effect=boom
+            ):
+                with self.assertRaises(RuntimeError):
+                    check_and_warn_divergence(project_root, takeover_config)
+
+            result = check_and_warn_divergence(project_root, takeover_config)
+
+            self.assertIn("Bash(git push:*)", result.divergent_patterns)
+            self.assertIsNotNone(result.warning_message)
+
+
+class TestDivergenceCheckCreatesNoStorageWhenNothingToReport(
+    _IsolatedStoreMixin, unittest.TestCase
+):
+    """TOO-45 follow-up defect 2 regression."""
+
+    def test_no_divergence_creates_no_legacy_logs_dir_or_db(self):
+        """
+        Given a project with matching native and toolguard permissions (no
+            divergence) and a project logs directory that does not yet exist
+        When check_and_warn_divergence runs -- this is what every hook
+            invocation calls, regardless of whether takeover mode is on
+        Then the project's logs directory is never created -- a healthy,
+             non-diverging project must not gain a logs/ directory or claim
+             database it never asked for
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            logs_dir = project_root / "logs"
+            (project_root / "pyproject.toml").touch()
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            config = {"permissions": {"allow": ["Bash(git status:*)"]}}
+            settings_path.write_text(json.dumps(config))
+
+            hook_path = project_root / ".claude" / "toolguard_hook.json"
+            hook_path.write_text(json.dumps(config))
+
+            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+
+            result = check_and_warn_divergence(project_root, takeover_config)
+
+            self.assertEqual(result.divergent_patterns, [])
+            self.assertFalse(logs_dir.exists())
+
+
+class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
+    """Two processes racing the new claim-immediately-before-the-print ordering."""
+
+    def test_two_processes_only_one_warns(self):
+        """
+        Given two separate OS processes, both able to detect the same
+            divergent pattern in a shared project, racing
+            check_and_warn_divergence against the same logs_dir,
+            synchronized via a barrier file
+        When both processes run concurrently
+        Then exactly one reports a warning_message and the other reports
+             none -- claiming only immediately before the stderr notice
+             still closes the race
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            barrier = Path(tmpdir) / "go"
+            # Each subprocess is a fresh interpreter, outside this suite's
+            # own guard machinery -- it MUST isolate the shared store itself,
+            # or it would touch the developer's real ~/.toolguard/once_per.db.
+            store_path = Path(tmpdir) / "once_per.db"
+
+            (project_root / "pyproject.toml").touch()
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+            )
+
+            script = (
+                "import sys, time\n"
+                "from pathlib import Path\n"
+                "from toolguard import once_per_store\n"
+                "from toolguard.config_divergence import check_and_warn_divergence\n"
+                "once_per_store._STORE_PATH = Path(sys.argv[3])\n"
+                "project_root = Path(sys.argv[1])\n"
+                "barrier = Path(sys.argv[2])\n"
+                "deadline = time.monotonic() + 10\n"
+                "while not barrier.exists() and time.monotonic() < deadline:\n"
+                "    pass\n"
+                "result = check_and_warn_divergence(\n"
+                "    project_root,\n"
+                "    {'enabled': False, 'ignored_allow_patterns': []},\n"
+                ")\n"
+                "print(1 if result.warning_message else 0)\n"
+            )
+
+            procs = [
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        str(project_root),
+                        str(barrier),
+                        str(store_path),
+                    ],
+                    cwd=str(_REPO_ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(2)
+            ]
+
+            # Give both children time to reach the busy-wait loop, then release them together.
+            time.sleep(0.3)
+            barrier.touch()
+
+            outputs = []
+            for proc in procs:
+                stdout, stderr = proc.communicate(timeout=15)
+                self.assertEqual(proc.returncode, 0, msg=stderr)
+                outputs.append(stdout.strip())
+
+            self.assertEqual(sorted(outputs), ["0", "1"])
 
 
 if __name__ == "__main__":

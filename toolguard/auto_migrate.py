@@ -6,104 +6,23 @@ to toolguard configuration files when divergence is detected.
 """
 
 import sys
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List
 
+from toolguard import once_per
 from toolguard.config import config_sync_settings_from_sources, load_configuration
 from toolguard.config_divergence import (
     find_divergent_patterns,
     get_native_permissions,
     get_toolguard_permissions,
 )
+from toolguard.once_per import Repeat
 from toolguard.permission_migration import migrate
 
-
-def get_marker_file_path(logs_dir: Path, marker_date: date) -> Path:
-    """
-    Get the path to a migration marker file for a specific date.
-
-    Marker files use the format: .toolguard-migration-YYYY-MM-DD
-
-    Args:
-        logs_dir: Directory where marker files are stored
-        marker_date: Date for the marker file
-
-    Returns:
-        Path to the marker file
-    """
-    filename = f".toolguard-migration-{marker_date.strftime('%Y-%m-%d')}"
-    return logs_dir / filename
-
-
-def marker_exists_for_today(logs_dir: Path) -> bool:
-    """
-    Check if a migration marker file exists for today.
-
-    Args:
-        logs_dir: Directory where marker files are stored
-
-    Returns:
-        True if marker file exists for today, False otherwise
-    """
-    today_marker = get_marker_file_path(logs_dir, date.today())
-    return today_marker.exists()
-
-
-def create_marker_file(logs_dir: Path) -> None:
-    """
-    Create a marker file for today to track that migration was run.
-
-    Creates the logs directory if it doesn't exist.
-
-    Args:
-        logs_dir: Directory where marker files are stored
-
-    Raises:
-        OSError: If unable to create marker file or directory
-    """
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    today_marker = get_marker_file_path(logs_dir, date.today())
-    try:
-        today_marker.touch()
-    except OSError as e:
-        print(
-            f"Warning: Failed to create migration marker file {today_marker}: {e}",
-            file=sys.stderr,
-        )
-        raise
-
-
-def cleanup_old_markers(logs_dir: Path, days: int = 7) -> None:
-    """
-    Remove migration marker files older than the specified number of days.
-
-    This prevents accumulation of old marker files over time.
-
-    Args:
-        logs_dir: Directory where marker files are stored
-        days: Number of days to keep (default: 7)
-    """
-    if not logs_dir.exists():
-        return
-
-    cutoff_date = date.today() - timedelta(days=days)
-
-    try:
-        for marker_file in logs_dir.glob(".toolguard-migration-*"):
-            try:
-                # Format: .toolguard-migration-YYYY-MM-DD
-                date_str = marker_file.name.replace(".toolguard-migration-", "")
-                file_date = date.fromisoformat(date_str)
-
-                if file_date < cutoff_date:
-                    marker_file.unlink()
-            except ValueError, OSError:
-                # Skip files that don't match expected format or can't be deleted
-                continue
-    except OSError:
-        # If we can't list directory, just continue
-        pass
+#: The single named object for this module's once-per-day throttling. One
+#: name carries both the key and the human description (TOO-45 punch-list
+#: #01 item 4) -- no separate _KEY constant to drift from it.
+AUTO_MIGRATION = once_per.day("auto_migration", "automatic permission migration")
 
 
 def load_config_sync_settings(config_files: List[tuple]) -> Dict:
@@ -131,47 +50,57 @@ def load_config_sync_settings(config_files: List[tuple]) -> Dict:
     return config_sync_settings_from_sources(config_files)
 
 
-def should_run_migration(logs_dir: Path) -> bool:
-    """
-    Check if migration should run based on marker file.
-
-    Returns False if migration already ran today (marker file exists).
-
-    Args:
-        logs_dir: Directory where marker files are stored
-
-    Returns:
-        True if migration should run, False if already ran today
-    """
-    return not marker_exists_for_today(logs_dir)
-
-
 def run_auto_migration(
-    project_root: Path, logs_dir: Path, config_sync: Dict, takeover_config: Dict
+    project_root: Path, config_sync: Dict, takeover_config: Dict
 ) -> bool:
     """
     Run automatic migration of permissions from settings.local.json to toolguard config.
 
-    Creates backups, migrates divergent patterns, and creates marker file.
+    Creates backups and migrates divergent patterns, at most once per day.
+    The day's slot is claimed only immediately before ``migrate()`` itself --
+    the side effect being deduplicated -- never before the analysis that
+    decides whether there's anything to migrate, so an exception raised
+    during that analysis never leaves the day's slot claimed with nothing
+    done. That closes the real race this replaces: two concurrent processes
+    could previously both pass a stale "already ran today?" check and both
+    run ``migrate()`` (which writes settings.local.json and the toolguard
+    config) at once. A cheap read-only pre-check skips the analysis entirely
+    on an already-migrated day.
+
+    ``migrate()`` must NOT run when the once-per-day guarantee itself is
+    unavailable: two concurrent processes could then both migrate at once
+    with no mutual exclusion, and last-writer-wins can silently discard one
+    process's changes (TOO-45 punch-list #15). ``AUTO_MIGRATION.run(...,
+    repeating=Repeat.UNSAFE)`` makes that choice explicit; see
+    :class:`toolguard.once_per.Repeat`.
+
+    The claim is NOT released when ``migrate()`` fails. This function's only
+    production caller (:func:`toolguard.hook._run_divergence_check`) is only
+    reached when :func:`toolguard.config_divergence.check_and_warn_divergence`
+    itself claims the day's ``divergence_warning`` slot, which happens at
+    most once a day -- so there is never a later same-day call to retry
+    against. A failed migration is retried the next day (TOO-45 D4: an
+    earlier version released this claim on failure, but the release was
+    unreachable through the only real caller and existed only as a promise
+    two direct-call tests pinned).
 
     Args:
         project_root: Path to project root directory
-        logs_dir: Directory for logs and marker files
         config_sync: Config sync settings (auto_sort_on_migrate, backup_dir)
         takeover_config: Takeover mode configuration (for ignored patterns)
 
     Returns:
-        True if migration succeeded, False if failed or nothing to migrate
+        True if migration succeeded, False if failed, skipped, already
+        attempted today, or nothing needs migrating.
 
     Side effects:
         - Creates backup files
         - Modifies settings.local.json
         - Modifies or creates toolguard config file
-        - Creates marker file
         - Prints status messages to stderr
     """
-    # Check if we've already migrated today
-    if not should_run_migration(logs_dir):
+    if AUTO_MIGRATION.done(project_root):
+        # Already migrated today -- skip the analysis entirely.
         return False
 
     # ignore_env_override=True: migration is project-scoped end-to-end (it writes
@@ -191,6 +120,7 @@ def run_auto_migration(
     # Check if there's anything to migrate
     settings_path = project_root / ".claude" / "settings.local.json"
     if not settings_path.exists():
+        # No claim was ever taken, so there's nothing to release.
         return False
 
     native_perms = get_native_permissions(settings_path)
@@ -214,37 +144,32 @@ def run_auto_migration(
     total_divergent = sum(len(patterns) for patterns in divergent.values())
 
     if total_divergent == 0:
+        # No claim was ever taken, so there's nothing to release.
         return False
 
-    # Run migration
-    print("[TOOLGUARD AUTO-MIGRATION] Running automatic migration...", file=sys.stderr)
-    try:
-        exit_code = migrate(
-            project_root=project_root,
-            dry_run=False,
-            auto_sort=auto_sort,
-            backup_dir=backup_dir,
+    def _migrate() -> bool:
+        """Run migrate(), reporting outcome to stderr; the once-per-day slot is already ours."""
+        print(
+            "[TOOLGUARD AUTO-MIGRATION] Running automatic migration...", file=sys.stderr
         )
-
-        if exit_code == 0:
-            print(
-                f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)",
-                file=sys.stderr,
+        try:
+            exit_code = migrate(
+                project_root=project_root,
+                dry_run=False,
+                auto_sort=auto_sort,
+                backup_dir=backup_dir,
             )
-
-            # Create marker file
-            try:
-                create_marker_file(logs_dir)
-                cleanup_old_markers(logs_dir, days=7)
-            except OSError:
-                # If we can't create marker, continue (migration was still successful)
-                pass
-
-            return True
-        else:
+        except Exception as e:
+            print(f"[TOOLGUARD AUTO-MIGRATION] Migration error: {e}", file=sys.stderr)
+            return False
+        if exit_code != 0:
             print("[TOOLGUARD AUTO-MIGRATION] Migration failed", file=sys.stderr)
             return False
+        print(
+            f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)",
+            file=sys.stderr,
+        )
+        return True
 
-    except Exception as e:
-        print(f"[TOOLGUARD AUTO-MIGRATION] Migration error: {e}", file=sys.stderr)
-        return False
+    migrated = AUTO_MIGRATION.run(project_root, _migrate, repeating=Repeat.UNSAFE)
+    return bool(migrated)

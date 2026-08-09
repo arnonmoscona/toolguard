@@ -32,6 +32,7 @@ from toolguard.config import (
     Provenance,
     RuntimeVerdict,
 )
+from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.config_types import LevelMatch, provenance_for_pattern
 from toolguard.error_log import log_conflict, log_error, log_warning
 from toolguard.log_writer import (
@@ -122,25 +123,27 @@ class TestLogStreamSeparation(unittest.TestCase):
 
 
 class TestTakeoverNoticeNotPersisted(unittest.TestCase):
-    """The takeover notice is stderr + marker only, never a persisted log."""
+    """The takeover notice is a stderr echo only, never a persisted log."""
 
     def test_takeover_notice_writes_no_log_file(self):
         """
         Given a fresh log directory
         When issue_takeover_warning runs
-        Then no toolguard log stream file is created (only a marker), and the
-             notice is echoed to stderr
+        Then no toolguard log stream file is created, and the notice is
+             echoed to stderr -- issue_takeover_warning no longer touches
+             the claim store at all (TOO-45 punch-list #01)
         """
         from toolguard.session_warnings import issue_takeover_warning
 
         with TemporaryDirectory() as tmp:
-            log_dir = Path(tmp)
-            with patch("sys.stderr", new_callable=StringIO) as err:
-                issue_takeover_warning(log_dir, to_stdout=True)
+            log_dir = Path(tmp) / "logs"
 
-            self.assertEqual(list(log_dir.glob("toolguard-*.md")), [])
-            # Marker present (once-per-session guard) and stderr echoed.
-            self.assertTrue(list(log_dir.glob(".toolguard-warned-*")))
+            with patch("sys.stderr", new_callable=StringIO) as err:
+                issue_takeover_warning(to_stdout=True)
+
+            self.assertEqual(
+                list(log_dir.glob("toolguard-*.md")) if log_dir.exists() else [], []
+            )
             self.assertIn("Takeover mode is active", err.getvalue())
 
 
@@ -621,9 +624,6 @@ class TestHookConflictLogging(unittest.TestCase):
                 "create_log_dir": True,
                 "extended_syntax": True,
             }
-            hook_mod._discovery_diagnostic_done = True
-            hook_mod._validation_done = True
-            hook_mod._divergence_check_done = True
             with patch("sys.stdin", StringIO(json.dumps(hook_input))):
                 with patch("sys.stdout", new_callable=StringIO) as out:
                     with patch(
@@ -632,14 +632,17 @@ class TestHookConflictLogging(unittest.TestCase):
                         with patch(
                             "toolguard.hook.get_env_config", return_value=env_config
                         ):
-                            with patch(
-                                "toolguard.hook.check_and_warn_divergence",
-                                return_value=[],
-                            ):
-                                try:
-                                    hook_mod.main()
-                                except SystemExit:
-                                    pass
+                            with patch("toolguard.hook._run_startup_validation"):
+                                with patch(
+                                    "toolguard.hook.check_and_warn_divergence",
+                                    return_value=DivergenceCheckResult(
+                                        divergent_patterns=[]
+                                    ),
+                                ):
+                                    try:
+                                        hook_mod.main()
+                                    except SystemExit:
+                                        pass
             output = json.loads(out.getvalue())
             self.assertEqual(
                 output["hookSpecificOutput"]["permissionDecision"], "allow"
@@ -675,9 +678,6 @@ class TestHookConflictLogging(unittest.TestCase):
                 "create_log_dir": True,
                 "extended_syntax": True,
             }
-            hook_mod._discovery_diagnostic_done = True
-            hook_mod._validation_done = True
-            hook_mod._divergence_check_done = True
             with patch("sys.stdin", StringIO(json.dumps(hook_input))):
                 with patch("sys.stdout", new_callable=StringIO) as out:
                     with patch(
@@ -686,14 +686,17 @@ class TestHookConflictLogging(unittest.TestCase):
                         with patch(
                             "toolguard.hook.get_env_config", return_value=env_config
                         ):
-                            with patch(
-                                "toolguard.hook.check_and_warn_divergence",
-                                return_value=[],
-                            ):
-                                try:
-                                    hook_mod.main()
-                                except SystemExit:
-                                    pass
+                            with patch("toolguard.hook._run_startup_validation"):
+                                with patch(
+                                    "toolguard.hook.check_and_warn_divergence",
+                                    return_value=DivergenceCheckResult(
+                                        divergent_patterns=[]
+                                    ),
+                                ):
+                                    try:
+                                        hook_mod.main()
+                                    except SystemExit:
+                                        pass
             output = json.loads(out.getvalue())
             self.assertEqual(
                 output["hookSpecificOutput"]["permissionDecision"], "allow"
@@ -736,9 +739,6 @@ class TestHookConflictLogging(unittest.TestCase):
                 "create_log_dir": True,
                 "extended_syntax": True,
             }
-            hook_mod._discovery_diagnostic_done = True
-            hook_mod._validation_done = True
-            hook_mod._divergence_check_done = True
             with patch("sys.stdin", StringIO(json.dumps(hook_input))):
                 with patch("sys.stdout", new_callable=StringIO) as out:
                     with patch(
@@ -747,14 +747,17 @@ class TestHookConflictLogging(unittest.TestCase):
                         with patch(
                             "toolguard.hook.get_env_config", return_value=env_config
                         ):
-                            with patch(
-                                "toolguard.hook.check_and_warn_divergence",
-                                return_value=[],
-                            ):
-                                try:
-                                    hook_mod.main()
-                                except SystemExit:
-                                    pass
+                            with patch("toolguard.hook._run_startup_validation"):
+                                with patch(
+                                    "toolguard.hook.check_and_warn_divergence",
+                                    return_value=DivergenceCheckResult(
+                                        divergent_patterns=[]
+                                    ),
+                                ):
+                                    try:
+                                        hook_mod.main()
+                                    except SystemExit:
+                                        pass
             output = json.loads(out.getvalue())
             self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
             self.assertIn(
@@ -797,8 +800,6 @@ class TestM1SingleSourceWarning(ConfigIsolationMixin, unittest.TestCase):
         env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
 
-        # Reset the once-per-session guard so validation runs here.
-        hook_mod._validation_done = False
         hook_mod._run_startup_validation(env_config, str(proj_root), config)
 
         warning_files = list(log_dir.glob("toolguard-warning-*.md"))
@@ -832,9 +833,15 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
              the structured log write
         """
         from toolguard import hook as hook_mod
+        from toolguard import once_per_store
         from toolguard.config import load_configuration
 
         _home, proj_root = self.isolate_config_environment()
+        store_patcher = patch.object(
+            once_per_store, "_STORE_PATH", _home / ".toolguard" / "once_per.db"
+        )
+        store_patcher.start()
+        self.addCleanup(store_patcher.stop)
         claude = proj_root / ".claude"
         claude.mkdir()
         (claude / "settings.local.json").write_text(
@@ -849,13 +856,61 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         config = load_configuration(proj_root, ignore_env_override=True)
         takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
 
-        # Reset the once-per-session guard so the check runs here.
-        hook_mod._divergence_check_done = False
         hook_mod._run_divergence_check(config, env_config, takeover_dict)
 
         warning_files = list(log_dir.glob("toolguard-warning-*.md"))
         self.assertEqual(len(warning_files), 1)
         self.assertIn("Bash(git push:*)", warning_files[0].read_text())
+
+    def test_failed_migration_is_not_retried_same_day(self):
+        """
+        Given a project with a divergent Bash pattern, auto_migrate enabled,
+            and migrate() rigged to always fail
+        When toolguard.hook._run_divergence_check runs TWICE for that
+            project (simulating two separate tool-call invocations the same
+            day)
+        Then migrate() is attempted exactly ONCE -- the divergence_warning
+             claim the first call takes gates every later same-day call
+             before it ever reaches run_auto_migration, so a failed
+             migration is retried the next day, not the same day (TOO-45
+             D4). A test that called run_auto_migration directly instead of
+             going through the hook would not exercise that gate at all --
+             which is exactly what hid this defect the first time.
+        """
+        from toolguard import hook as hook_mod
+        from toolguard import once_per_store
+        from toolguard.config import load_configuration
+
+        _home, proj_root = self.isolate_config_environment()
+        store_patcher = patch.object(
+            once_per_store, "_STORE_PATH", _home / ".toolguard" / "once_per.db"
+        )
+        store_patcher.start()
+        self.addCleanup(store_patcher.stop)
+        claude = proj_root / ".claude"
+        claude.mkdir()
+        (claude / "settings.local.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+        )
+        (claude / "toolguard_hook.json").write_text(
+            json.dumps(
+                {
+                    "permissions": {"allow": []},
+                    "config_sync": {"auto_migrate": True},
+                }
+            )
+        )
+
+        log_dir = proj_root / "logs"
+        env_config = {"log_dir": log_dir}
+        config = load_configuration(proj_root, ignore_env_override=True)
+        takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
+
+        with patch("toolguard.auto_migrate.migrate", return_value=1) as mock_migrate:
+            hook_mod._run_divergence_check(config, env_config, takeover_dict)
+            hook_mod._run_divergence_check(config, env_config, takeover_dict)
+
+        self.assertEqual(mock_migrate.call_count, 1)
 
 
 class TestValidationIssueRoutingByLevel(unittest.TestCase):
@@ -889,7 +944,6 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
             )
             config = self._FakeConfig([issue])
 
-            hook_mod._validation_done = False
             hook_mod._run_startup_validation(env_config, proj, config)
 
             error_files = list(log_dir.glob("toolguard-error-*.md"))
@@ -915,7 +969,6 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
             )
             config = self._FakeConfig([issue])
 
-            hook_mod._validation_done = False
             hook_mod._run_startup_validation(env_config, proj, config)
 
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))

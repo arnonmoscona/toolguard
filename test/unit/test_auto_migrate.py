@@ -7,143 +7,20 @@ marker file management, and integration with migration script.
 
 import json
 import unittest
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from toolguard import once_per_store
 from toolguard.auto_migrate import (
-    cleanup_old_markers,
-    create_marker_file,
-    get_marker_file_path,
+    AUTO_MIGRATION,
     load_config_sync_settings,
-    marker_exists_for_today,
     run_auto_migration,
-    should_run_migration,
 )
+from toolguard.once_per_store import ClaimStatus
 
-
-class TestMarkerFiles(unittest.TestCase):
-    """Test marker file operations for once-per-day execution."""
-
-    def test_get_marker_file_path(self):
-        """
-        Given a logs directory and a specific date
-        When get_marker_file_path builds the path
-        Then it is logs_dir/.toolguard-migration-YYYY-MM-DD for that date
-        """
-        logs_dir = Path("/tmp/logs")
-        test_date = date(2026, 2, 5)
-
-        marker_path = get_marker_file_path(logs_dir, test_date)
-
-        self.assertEqual(marker_path, logs_dir / ".toolguard-migration-2026-02-05")
-
-    def test_marker_exists_for_today_false(self):
-        """
-        Given an empty logs directory
-        When marker_exists_for_today is checked
-        Then it returns False
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            result = marker_exists_for_today(logs_dir)
-
-            self.assertFalse(result)
-
-    def test_marker_exists_for_today_true(self):
-        """
-        Given today's migration marker exists in the logs directory
-        When marker_exists_for_today is checked
-        Then it returns True
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-            today_marker = get_marker_file_path(logs_dir, date.today())
-            today_marker.touch()
-
-            result = marker_exists_for_today(logs_dir)
-
-            self.assertTrue(result)
-
-    def test_create_marker_file(self):
-        """
-        Given a logs directory that does not yet exist
-        When create_marker_file runs
-        Then the directory is created and today's migration marker exists
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / "logs"
-
-            create_marker_file(logs_dir)
-
-            today_marker = get_marker_file_path(logs_dir, date.today())
-            self.assertTrue(today_marker.exists())
-            self.assertTrue(logs_dir.exists())
-
-    def test_cleanup_old_markers(self):
-        """
-        Given migration markers for today, 5 days ago, and 10 days ago
-        When cleanup_old_markers runs with 7-day retention
-        Then the 10-day-old marker is deleted while today's and the recent one remain
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            # Create markers for today, 5 days ago, and 10 days ago
-            today = date.today()
-            today_marker = get_marker_file_path(logs_dir, today)
-            recent_marker = get_marker_file_path(logs_dir, today - timedelta(days=5))
-            old_marker = get_marker_file_path(logs_dir, today - timedelta(days=10))
-
-            today_marker.touch()
-            recent_marker.touch()
-            old_marker.touch()
-
-            # Cleanup with 7-day retention
-            cleanup_old_markers(logs_dir, days=7)
-
-            # Today and recent should remain, old should be deleted
-            self.assertTrue(today_marker.exists())
-            self.assertTrue(recent_marker.exists())
-            self.assertFalse(old_marker.exists())
-
-    def test_cleanup_old_markers_no_logs_dir(self):
-        """
-        Given a logs directory that does not exist
-        When cleanup_old_markers runs
-        Then it completes without raising an error
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / "nonexistent"
-
-            # Should not raise error
-            cleanup_old_markers(logs_dir, days=7)
-
-    def test_cleanup_old_markers_invalid_filename(self):
-        """
-        Given an old valid marker and a marker with an unparseable date
-        When cleanup_old_markers runs with 7-day retention
-        Then the old valid marker is removed and the invalid-format one is preserved
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            # Create valid and invalid marker files
-            valid_marker = get_marker_file_path(
-                logs_dir, date.today() - timedelta(days=10)
-            )
-            invalid_marker = logs_dir / ".toolguard-migration-invalid"
-
-            valid_marker.touch()
-            invalid_marker.touch()
-
-            # Cleanup should remove valid old marker but skip invalid
-            cleanup_old_markers(logs_dir, days=7)
-
-            self.assertFalse(valid_marker.exists())
-            self.assertTrue(invalid_marker.exists())  # Invalid format preserved
+from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
 
 
 class TestConfigSyncSettings(unittest.TestCase):
@@ -303,53 +180,47 @@ auto_migrate = true
             self.assertEqual(result["auto_migrate"], True)
 
 
-class TestShouldRunMigration(unittest.TestCase):
-    """Test should_run_migration logic."""
+class TestAutoMigrationKey(unittest.TestCase):
+    """Locks in the key string other tests here claim directly against the store."""
 
-    def test_should_run_migration_no_marker(self):
+    def test_key_matches_the_literal_used_by_other_tests(self):
         """
-        Given no migration marker exists for today
-        When should_run_migration is checked
-        Then it returns True
+        Given the module-level AUTO_MIGRATION throttled-thing
+        When its private key is compared to the literal string other tests
+            in this file claim against directly
+        Then they match -- if this ever drifts, those tests would silently
+             stop exercising the real gate
         """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-
-            result = should_run_migration(logs_dir)
-
-            self.assertTrue(result)
-
-    def test_should_run_migration_marker_exists(self):
-        """
-        Given today's migration marker already exists
-        When should_run_migration is checked
-        Then it returns False
-        """
-        with TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-            create_marker_file(logs_dir)
-
-            result = should_run_migration(logs_dir)
-
-            self.assertFalse(result)
+        self.assertEqual(AUTO_MIGRATION._key, "auto_migration")
 
 
-class TestRunAutoMigration(unittest.TestCase):
+class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
     """Test run_auto_migration function."""
 
-    def test_run_auto_migration_already_ran_today(self):
+    def test_run_auto_migration_already_claimed_today(self):
         """
-        Given today's migration marker already exists
+        Given today's slot is already claimed for this module's key
+            (as if a prior call, in this process or another, already attempted
+            migration today), and a genuinely divergent settings.local.json
         When run_auto_migration is invoked
-        Then it skips and returns False
+        Then it skips (never calling migrate) and returns False -- proving the
+             gate is the claim itself, not merely "no settings file"
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
-            # Create marker file for today
-            create_marker_file(logs_dir)
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            once_per_store.claim(
+                project_root,
+                "auto_migration",
+                once_per_store.day_scope(),
+                timedelta(days=7),
+            )
 
             config_sync = {
                 "auto_migrate": True,
@@ -358,11 +229,11 @@ class TestRunAutoMigration(unittest.TestCase):
             }
             takeover_config = {"enabled": False}
 
-            result = run_auto_migration(
-                project_root, logs_dir, config_sync, takeover_config
-            )
+            with patch("toolguard.auto_migrate.migrate") as mock_migrate:
+                result = run_auto_migration(project_root, config_sync, takeover_config)
 
             self.assertFalse(result)
+            mock_migrate.assert_not_called()
 
     def test_run_auto_migration_no_settings_file(self):
         """
@@ -372,8 +243,6 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
             config_sync = {
                 "auto_migrate": True,
@@ -382,9 +251,7 @@ class TestRunAutoMigration(unittest.TestCase):
             }
             takeover_config = {"enabled": False}
 
-            result = run_auto_migration(
-                project_root, logs_dir, config_sync, takeover_config
-            )
+            result = run_auto_migration(project_root, config_sync, takeover_config)
 
             self.assertFalse(result)
 
@@ -398,12 +265,11 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         Given a settings file exists but native and toolguard permissions show no divergence
         When run_auto_migration is invoked
-        Then it returns False because there is nothing to migrate
+        Then it returns False, and releases today's claim so a later call
+             the same day (e.g. after new divergence appears) can retry
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
             settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
@@ -425,11 +291,18 @@ class TestRunAutoMigration(unittest.TestCase):
                 "additional_ignored_patterns": [],
             }
 
-            result = run_auto_migration(
-                project_root, logs_dir, config_sync, takeover_config
-            )
+            result = run_auto_migration(project_root, config_sync, takeover_config)
 
             self.assertFalse(result)
+            self.assertEqual(
+                once_per_store.claim(
+                    project_root,
+                    "auto_migration",
+                    once_per_store.day_scope(),
+                    timedelta(days=7),
+                ).status,
+                ClaimStatus.CLAIMED,
+            )
 
     @patch("toolguard.config_divergence.get_native_permissions")
     @patch("toolguard.config_divergence.get_toolguard_permissions")
@@ -445,8 +318,6 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
             settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
@@ -475,9 +346,7 @@ class TestRunAutoMigration(unittest.TestCase):
                 "additional_ignored_patterns": [],
             }
 
-            result = run_auto_migration(
-                project_root, logs_dir, config_sync, takeover_config
-            )
+            result = run_auto_migration(project_root, config_sync, takeover_config)
 
             # No divergence after filtering, so no migration
             self.assertFalse(result)
@@ -498,12 +367,10 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         Given a divergent native pattern and a migrate call that succeeds
         When run_auto_migration is invoked
-        Then it returns True, creates today's marker, and calls migrate once
+        Then it returns True, claims today's slot, and calls migrate once
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
             # Setup mocks
             settings_path = project_root / ".claude" / "settings.local.json"
@@ -537,12 +404,19 @@ class TestRunAutoMigration(unittest.TestCase):
                 "additional_ignored_patterns": [],
             }
 
-            result = run_auto_migration(
-                project_root, logs_dir, config_sync, takeover_config
-            )
+            result = run_auto_migration(project_root, config_sync, takeover_config)
 
             self.assertTrue(result)
-            self.assertTrue(marker_exists_for_today(logs_dir))
+            still_claimed = (
+                once_per_store.claim(
+                    project_root,
+                    "auto_migration",
+                    once_per_store.day_scope(),
+                    timedelta(days=7),
+                ).status
+                == ClaimStatus.HELD_BY_SOMEONE_ELSE
+            )
+            self.assertTrue(still_claimed)
             mock_migrate.assert_called_once()
 
     @patch("toolguard.config_divergence.get_native_permissions")
@@ -565,8 +439,6 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
             settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
@@ -600,7 +472,7 @@ class TestRunAutoMigration(unittest.TestCase):
                 "additional_ignored_patterns": [],
             }
 
-            run_auto_migration(project_root, logs_dir, config_sync, takeover_config)
+            run_auto_migration(project_root, config_sync, takeover_config)
 
             # Verify migrate was called with custom backup dir and no sorting
             mock_migrate.assert_called_once_with(
@@ -626,12 +498,13 @@ class TestRunAutoMigration(unittest.TestCase):
         """
         Given a divergent pattern but migrate returns a non-zero failure code
         When run_auto_migration is invoked
-        Then it returns False and does not create today's marker
+        Then it returns False and the day's claim stays held -- the only
+             production caller only ever reaches this function once a day
+             (gated by check_and_warn_divergence's own daily claim), so
+             there is no same-day retry to release for (TOO-45 D4)
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            logs_dir.mkdir()
 
             settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
@@ -664,13 +537,137 @@ class TestRunAutoMigration(unittest.TestCase):
                 "additional_ignored_patterns": [],
             }
 
-            result = run_auto_migration(
-                project_root, logs_dir, config_sync, takeover_config
-            )
+            result = run_auto_migration(project_root, config_sync, takeover_config)
 
             self.assertFalse(result)
-            # Marker should NOT be created on failure
-            self.assertFalse(marker_exists_for_today(logs_dir))
+            # Claim was NOT released on failure -- a fresh claim attempt reports HELD.
+            self.assertEqual(
+                once_per_store.claim(
+                    project_root,
+                    "auto_migration",
+                    once_per_store.day_scope(),
+                    timedelta(days=7),
+                ).status,
+                ClaimStatus.HELD_BY_SOMEONE_ELSE,
+            )
+
+    @patch("toolguard.config_divergence.get_native_permissions")
+    @patch("toolguard.config_divergence.get_toolguard_permissions")
+    @patch("toolguard.config_divergence.find_divergent_patterns")
+    @patch("toolguard.auto_migrate.migrate")
+    @patch("toolguard.config.discover_config_files")
+    def test_skips_migration_when_sqlite_unavailable(
+        self,
+        mock_discover,
+        mock_migrate,
+        mock_find_divergent,
+        mock_get_toolguard,
+        mock_get_native,
+    ):
+        """
+        Given a divergent pattern and sqlite3 unavailable
+        When run_auto_migration is invoked
+        Then migrate() is NOT called and the function returns False -- unlike
+             a warning, migrate() writes permission config, so concurrent,
+             uncoordinated processes could otherwise both run it at once with
+             no mutual exclusion and last-writer-wins could silently discard
+             one process's changes (TOO-45 punch-list #15: once-per-day
+             throttling being unavailable now fails CLOSED for this action,
+             not open)
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            mock_get_native.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
+            mock_find_divergent.return_value = {
+                "allow": ["Bash(git status)"],
+                "deny": [],
+                "ask": [],
+            }
+            mock_migrate.return_value = 0
+            mock_discover.return_value = []
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {
+                "enabled": False,
+                "ignored_allow_patterns": [],
+                "additional_ignored_patterns": [],
+            }
+
+            with patch.object(once_per_store, "sqlite3", None):
+                with patch("builtins.print") as mock_print:
+                    result = run_auto_migration(
+                        project_root, config_sync, takeover_config
+                    )
+
+            self.assertFalse(result)
+            mock_migrate.assert_not_called()
+            printed = " ".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
+            self.assertIn("sqlite3 is unavailable", printed)
+            self.assertIn("skipped", printed)
+
+
+class TestRunAutoMigrationExceptionSafety(_IsolatedStoreMixin, unittest.TestCase):
+    """TOO-45 follow-up defect 1 regression: a crash must not leak the claim."""
+
+    def test_exception_during_analysis_leaves_period_unclaimed(self):
+        """
+        Given load_configuration raises during the analysis phase (e.g. a
+            malformed config file), before migrate() is ever reached
+        When run_auto_migration is called
+        Then the exception propagates AND a subsequent call the same day
+             can still take the claim -- the crash must not have consumed
+             the day's slot
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            settings_path = project_root / ".claude" / "settings.local.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}})
+            )
+
+            config_sync = {
+                "auto_migrate": True,
+                "backup_dir": "logs/backups",
+                "auto_sort_on_migrate": True,
+            }
+            takeover_config = {"enabled": False}
+            boom = RuntimeError("malformed config file")
+
+            with patch("toolguard.auto_migrate.load_configuration", side_effect=boom):
+                with self.assertRaises(RuntimeError):
+                    run_auto_migration(project_root, config_sync, takeover_config)
+
+            # A subsequent claim attempt the same day still succeeds -- the
+            # crash left nothing claimed.
+            self.assertEqual(
+                once_per_store.claim(
+                    project_root,
+                    "auto_migration",
+                    once_per_store.day_scope(),
+                    timedelta(days=7),
+                ).status,
+                ClaimStatus.CLAIMED,
+            )
 
 
 if __name__ == "__main__":

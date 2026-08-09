@@ -138,6 +138,8 @@ _README_TEMPLATE = (
     "  guided install (see docs/install.md in the toolguard repository).\n"
     "- errors/ -- detailed crash reports if the hook ever hit an unexpected\n"
     "  exception (created on demand, not by init-state).\n"
+    "- once_per.db -- once-per-day claim store for periodic notices\n"
+    "  (created on demand, not by init-state).\n"
     "- traces/ -- session-trace dumps written by the guided install/uninstall\n"
     "  runbooks (see docs/install.md Phase T.1), created on demand, not by\n"
     "  init-state.\n"
