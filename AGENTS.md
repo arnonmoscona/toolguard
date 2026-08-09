@@ -45,9 +45,12 @@ Key facts an agent should not get wrong:
 
 - A tool is enforced only if it appears in **both** the Claude Code hook matchers
   (`.claude/settings.local.json`) **and** `governed_tools` (`.claude/toolguard_hook.toml`).
-- Govern all the tools the user actually uses -- command tools (`Bash`,
-  `mcp__jetbrains__execute_terminal_command`, custom MCP shell tools) and file-path tools
-  (`Read`, `Write`, `Edit`) -- not just `Bash`.
+  `governed_tools` defaults to `Bash`, `Read`, `Write`, `Edit` when unset -- no config entry is
+  needed for that set.
+- Govern any OTHER tool the user actually uses too -- an MCP command tool (e.g.
+  `mcp__jetbrains__execute_terminal_command`, a custom MCP shell tool) is never governed by
+  default, so it needs an explicit `governed_tools` entry (which then must list the built-in
+  four alongside it -- setting `governed_tools` replaces the default, it doesn't extend it).
 - Custom MCP command tools must also be listed in `additional_supported_tools`.
 - Standard patterns live in `settings.local.json`; extended patterns (`[regex]`/`[glob]`/
   `[native]`, prefix inside the tool wrapper) live in `toolguard_hook.toml`.

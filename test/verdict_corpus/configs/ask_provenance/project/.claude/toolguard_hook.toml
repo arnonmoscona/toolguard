@@ -1,0 +1,34 @@
+# TOO-45 verdict-corpus fixture (project level -- MOST specific). Together
+# with home/.claude/toolguard_hook.toml and home/.toolguard/rules/*.rules.toml
+# this fixture exists SPECIFICALLY to strengthen coverage of
+# Configuration.provenance_for_pattern / entry_for_pattern taking their
+# 'ask' branch (kind == "ask"), across THREE distinct contributing sources at
+# TWO hierarchy levels: this project-level file (specificity 0), the user
+# level's own toolguard_hook.toml (specificity 1, layer index 0 within that
+# level), and a rules-dir file merged into the SAME user level but as a
+# SEPARATE contributing layer (specificity 1, layer index 1) -- so a pattern
+# defined ONLY in the rules-dir file exercises the search loop actually
+# walking past the first layer of a level, not just matching at index 0.
+#
+# Every command name is unique across all three files (proj-/user-/rules-
+# prefixed) so no pattern here is ever shadowed by a more-specific one.
+#
+# The Read/Write patterns use `[regex]` deliberately -- see
+# configs/override_breadth/project/.claude/toolguard_hook.toml's comment for
+# why a bare/glob relative file-path pattern never matches this corpus's
+# relative case targets.
+[permissions]
+ask = [
+    "Bash(rm proj-file-a.txt)",
+    "Bash(rm proj-file-b.txt)",
+    { match = "Bash(mv proj-file-c.txt *)", additionalContext = "Confirm the destination before moving (project-level rule)." },
+    "Bash(chmod 777 proj-perm.txt)",
+    "Bash(kill -9 1111)",
+    { match = "Bash(kill -9 2222)", additionalContext = "Killing a process by PID is irreversible." },
+    "Bash(mkfs.ext4 /dev/proj-disk)",
+    "Bash(dd if=/dev/zero of=proj-out.img)",
+    "Read([regex]^\\./secrets/proj-secret\\.txt$)",
+    { match = "Write([regex]^\\./deploy/proj-manifest\\.yaml$)", additionalContext = "Review the manifest diff before writing." },
+    "Bash(shutdown -h now)",
+    "Bash(iptables -F)",
+]

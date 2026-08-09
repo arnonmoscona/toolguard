@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration, Provenance
 from toolguard.config_write_guard import verified_write_config
-from toolguard.constants import GOVERNED_TOOLS
+from toolguard.constants import BUILTIN_TOOLS
 from toolguard.rule_sort import (
     find_section_boundaries,
     is_synthetic_pattern,
@@ -172,8 +172,9 @@ def run_maintenance(
 
     Args:
         config: The resolved configuration to inspect.
-        tools: Tool names to inspect.  Defaults to the governed tools, in sorted
-            order for deterministic output.
+        tools: Tool names to inspect.  Defaults to every builtin tool
+            (:data:`toolguard.constants.BUILTIN_TOOLS`), in sorted order for
+            deterministic output.
         corpus: Optional harvested command corpus.  When supplied it enables
             corpus-backed redundancy, broadening evidence, and mining; when
             ``None`` those fall back to static-only / empty results.
@@ -181,7 +182,7 @@ def run_maintenance(
     Returns:
         A :class:`MaintenanceReport` aggregating all findings.  Nothing is applied.
     """
-    target_tools = list(tools) if tools is not None else sorted(GOVERNED_TOOLS)
+    target_tools = list(tools) if tools is not None else sorted(BUILTIN_TOOLS)
 
     tool_reports: List[ToolMaintenance] = []
     for tool in target_tools:
@@ -706,13 +707,13 @@ def _collect_annotations(
 
     Args:
         config: The resolved configuration to analyze.
-        tools: Tools to annotate, or ``None`` for all governed tools.
+        tools: Tools to annotate, or ``None`` for every builtin tool.
 
     Returns:
         ``{ path -> { full_pattern -> [note, ...] } }`` with notes merged and
         sorted across tools (patterns are tool-qualified, so they never collide).
     """
-    target_tools = list(tools) if tools is not None else sorted(GOVERNED_TOOLS)
+    target_tools = list(tools) if tools is not None else sorted(BUILTIN_TOOLS)
     merged: Dict[Path, Dict[str, List[str]]] = {}
     for tool in target_tools:
         for path, patterns in clarity_annotations(config, tool).items():

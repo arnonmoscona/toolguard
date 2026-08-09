@@ -4,15 +4,13 @@ from typing import List, Tuple
 
 from toolguard.issues import Issue
 from toolguard.rule_entry import normalize_entry
+from toolguard.tool_spec import KNOWN_TOOL_NAMES
 
-# Known supported tools that toolguard can govern
-KNOWN_SUPPORTED_TOOLS = {
-    "Bash",
-    "Read",
-    "Write",
-    "Edit",
-    "mcp__jetbrains__execute_terminal_command",
-}
+# Known supported tools that toolguard can govern. Derived from the
+# :mod:`toolguard.tool_spec` registry (TOO-45 punch-list #10); a user-specific
+# tool such as an MCP server's own bash wrapper is added via
+# ``additional_supported_tools`` in config, not hardcoded here.
+KNOWN_SUPPORTED_TOOLS = KNOWN_TOOL_NAMES
 
 
 def extract_tool_name(permission: str) -> str:

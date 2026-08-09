@@ -1,0 +1,13 @@
+# TOO-45 verdict-corpus fixture (project level, VALID). Paired with a
+# deliberately malformed user-level file so the corpus exercises
+# Configuration.apply_parse_failure_floor clamping a would-be allow down to
+# ask, while a hard_deny stays deny (the floor never weakens a deny).
+[permissions]
+allow = [
+    "Bash(ls *)",
+]
+
+[hard_deny]
+deny = [
+    "Bash([regex]^rm\\s+-rf\\s+/$)",
+]

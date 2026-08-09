@@ -96,8 +96,18 @@ for both styles and the [README installation notes](../README.md#installation).
 
 ## Step 2: Configure governed tools
 
-Create `.claude/toolguard_hook.toml` (preferred) or `.claude/toolguard_hook.json` with the
-list of tools to govern.
+**Default: `Bash`, `Read`, `Write`, `Edit` are governed automatically.** If that is the set
+you want, you can skip straight to [Step 3](#step-3-configure-permission-patterns) -- no
+`governed_tools` key is required. You only need to set `governed_tools` explicitly to
+**narrow** that default (e.g. Bash only) or to **add** a custom command tool such as
+`mcp__jetbrains__execute_terminal_command`, which is never governed by default.
+
+Remember that governance also requires the tool to be registered as a hook matcher in your
+Claude Code settings (see [Step 1](#step-1-register-hook-matchers)) -- `governed_tools` and
+the hook matchers are two independent switches, and both must be on for a given tool.
+
+To set `governed_tools` explicitly, create `.claude/toolguard_hook.toml` (preferred) or
+`.claude/toolguard_hook.json`:
 
 **TOML format** (recommended):
 
@@ -142,9 +152,12 @@ additional_supported_tools = [
     "mcp__your_terminal_server__run_command"
 ]
 
-# Minimal, for illustration -- in a real config list every tool you govern.
+# governed_tools defaults to Bash/Read/Write/Edit -- a custom tool is never
+# governed by default, so list it explicitly alongside the built-ins you
+# still want governed (this REPLACES the default, it doesn't extend it).
 governed_tools = [
-    "Bash"
+    "Bash", "Read", "Write", "Edit",
+    "mcp__your_terminal_server__run_command"
 ]
 ```
 
@@ -170,14 +183,45 @@ tool that appears in your permission patterns but is not recognized. Listing a c
 tool in `additional_supported_tools` silences that warning; the built-in tools are recognized
 automatically and never need it.
 
+#### Known limitation: only command tools and file-path tools can be governed
+
+**Governing a tool whose subject is neither a shell command nor a file path does not work
+today, and it fails closed rather than loudly.**
+
+Toolguard reads the governed subject out of exactly two places: `file_path` for `Read`,
+`Write` and `Edit`, and `command` for everything else. A tool whose payload uses any other
+key -- `WebFetch` (`url`), a documentation-fetching MCP tool (`doc_id`), an API client
+(`endpoint`) -- has no subject to find, so **every call is denied** with
+`No command provided in tool input`, and the permission patterns you wrote for it are never
+evaluated.
+
+So a custom tool is safe to govern only when it takes its command under a `command` key.
+Anything else should be left out of `governed_tools` and, if you need it restricted, denied
+in your native Claude Code settings instead.
+
+There is a second, subtler case worth knowing about even for command tools.
+`mcp__jetbrains__execute_terminal_command` accepts an `executeInShell` flag which defaults to
+**false**, meaning the string is run as a single process rather than through a shell. Toolguard
+always parses that string as a shell command -- splitting on `&&`, `;` and `|`, and discarding
+anything after a `#`. When the tool is running in process mode those characters are ordinary
+arguments, so toolguard's view of the command and what actually runs can differ. Governing
+that tool is still worthwhile; just do not rely on comment or compound handling being faithful
+for it.
+
+Both limitations are tracked and will be addressed together, since the fix is the same: letting
+a tool describe where its subject lives and how that subject should be matched.
+
 ### Recommended tools to govern
+
+`Bash`, `Read`, `Write`, and `Edit` are all governed by default -- the tables below explain
+*why* each is worth governing, not a setting you need to make.
 
 **Command tools** (execute shell commands):
 
 | Tool | Description | When to include |
 |------|-------------|-----------------|
-| `Bash` | Native Claude Code bash tool | Always -- this is the primary tool |
-| `mcp__jetbrains__execute_terminal_command` | JetBrains IDE terminal | If using JetBrains MCP integration |
+| `Bash` | Native Claude Code bash tool | Always -- this is the primary tool (governed by default) |
+| `mcp__jetbrains__execute_terminal_command` | JetBrains IDE terminal | If using JetBrains MCP integration (NOT governed by default -- see [Declaring additional supported tools](#declaring-additional-supported-tools)) |
 
 Also check your MCP tool list. **Any tool that can execute bash commands should be
 included.**
@@ -186,9 +230,9 @@ included.**
 
 | Tool | Description | When to include |
 |------|-------------|-----------------|
-| `Read` | Claude Code file read tool | For GLOB pattern control over file reading |
-| `Write` | Claude Code file write tool | For GLOB pattern control over file writing |
-| `Edit` | Claude Code file edit tool | For GLOB pattern control over file editing |
+| `Read` | Claude Code file read tool | For GLOB pattern control over file reading (governed by default) |
+| `Write` | Claude Code file write tool | For GLOB pattern control over file writing (governed by default) |
+| `Edit` | Claude Code file edit tool | For GLOB pattern control over file editing (governed by default) |
 
 **Why govern file path tools?** Claude Code has a
 [known bug](https://github.com/anthropics/claude-code/issues/16170) where `**` globstar
@@ -917,6 +961,15 @@ allow = [
   only a carve-out exception to its own `deny`, not a forced allow. `[hard_deny]` is a
   toolguard extension (read from `toolguard_hook` files only) and is pooled across all levels
   of the configuration hierarchy.
+
+> **Upgrade note: the default `governed_tools` set grew.** Before this release, an unconfigured
+> `governed_tools` defaulted to `Bash` only; it now defaults to `Bash`, `Read`, `Write`, `Edit`
+> (see [Step 2: Configure governed tools](#step-2-configure-governed-tools)). If you never set
+> `governed_tools` explicitly, upgrading toolguard means `Read`/`Write`/`Edit` are evaluated
+> against your rules for the first time. If you never wrote file-path (`Read`/`Write`/`Edit`)
+> permission patterns either, every such call now falls through to
+> [`no_match_fallback`](#no-match-fallback) -- silent, a warning, or a deny, depending on that
+> setting. If you want the old Bash-only behaviour, set `governed_tools = ["Bash"]` explicitly.
 
 ## Keeping toolguard up to date
 

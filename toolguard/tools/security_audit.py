@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from toolguard.config import Configuration, TakeoverConfig
-from toolguard.constants import GOVERNED_TOOLS
+from toolguard.constants import BUILTIN_TOOLS
 from toolguard.tools.clarity import find_confusing_interactions
 from toolguard.tools.config_access import (
     audit_context,
@@ -350,7 +350,7 @@ def security_audit(
     # A confusing within-file interaction is a latent security risk: you cannot
     # reason about what is actually permitted.  Reported at LOW severity and
     # clearly labelled so it never dilutes a genuine vulnerability.
-    for tool in sorted(GOVERNED_TOOLS):
+    for tool in sorted(BUILTIN_TOOLS):
         for cf in find_confusing_interactions(config, tool):
             ranked.append(
                 RankedFinding(

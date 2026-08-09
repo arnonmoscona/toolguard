@@ -48,18 +48,12 @@ from toolguard.resolve import (
 from toolguard.constants import FILE_TOOLS
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
+from toolguard.tool_spec import payload_key as _tool_payload_key
 
 # Tools that operate on file paths (use GLOB matching). Alias of the shared
 # foundation constant, kept because tests still import this name; prefer
 # toolguard.constants.FILE_TOOLS in new code.
 FILE_PATH_TOOLS = FILE_TOOLS
-
-# Tools that execute commands (use compound command parsing)
-COMMAND_TOOLS = {
-    "Bash",
-    "mcp__jetbrains__execute_terminal_command",
-    "mcp__local-tools__checked_bash",
-}
 
 
 def _run_startup_validation(
@@ -734,10 +728,11 @@ def _resolve_event(
         )
 
     if tool_name in FILE_PATH_TOOLS:
-        target = tool_input.get("file_path", "")
+        key = _tool_payload_key(tool_name)
+        target = tool_input.get(key, "")
         if not target:
             return RuntimeVerdict(
-                decision="deny", reason="No file_path provided in tool input"
+                decision="deny", reason=f"No {key} provided in tool input"
             )
     else:
         target = tool_input.get("command", "")
@@ -1097,7 +1092,8 @@ def _handle_file_path_tool(
         tuple that discarded ``provenance``/``matched_rule``/``overrides``/
         ``fallback_warning``/``sub_matches``/``tool``/``target``).
     """
-    file_path = tool_input.get("file_path", "")
+    key = _tool_payload_key(tool_name)
+    file_path = tool_input.get(key, "")
     if not file_path:
         log_command(
             LogRecord(
@@ -1110,7 +1106,7 @@ def _handle_file_path_tool(
             config=env_config,
         )
         return RuntimeVerdict(
-            decision="deny", reason="No file_path provided in tool input"
+            decision="deny", reason=f"No {key} provided in tool input"
         )
 
     extended_syntax = env_config.get("extended_syntax", True)

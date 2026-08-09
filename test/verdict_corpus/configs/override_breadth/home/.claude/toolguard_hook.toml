@@ -1,0 +1,33 @@
+# TOO-45 verdict-corpus fixture (user level, LESS specific than project). See
+# project/.claude/toolguard_hook.toml's comment for the overall rationale.
+# Every deny pattern here is BROADER than its paired project-level allow, so
+# the project allow wins (more-specific-wins) and _detect_override reports
+# the override. `echo hello` and `ls -R` (project-only, negative controls)
+# deliberately have NO counterpart here. `sudo reboot` is the mirror negative
+# control: denied here with NO project-level rule at all, so the deny wins
+# outright and there is nothing to override. Read/Write/Edit patterns use
+# `[regex]` for the same anchoring reason explained in
+# project/.claude/toolguard_hook.toml's comment.
+[permissions]
+deny = [
+    "Bash(git push *)",
+    "Bash(npm install *)",
+    "Bash(npm uninstall *)",
+    "Bash(docker rm *)",
+    "Bash(docker stop *)",
+    "Bash(kubectl delete *)",
+    "Bash(terraform apply *)",
+    "Bash(terraform destroy *)",
+    "Bash(rm *)",
+    "Bash(chmod *)",
+    "Bash(chown *)",
+    "Bash(systemctl restart *)",
+    "Bash(systemctl stop *)",
+    "Read([regex]^\\./docs/.*)",
+    "Read([regex]^\\./data/.*)",
+    "Write([regex]^\\./scratch/.*)",
+    "Write([regex]^\\./out/.*)",
+    "Edit([regex]^\\./config/.*)",
+    "Edit([regex]^\\./src/.*)",
+    "Bash(sudo *)",
+]

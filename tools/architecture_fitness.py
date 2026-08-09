@@ -3671,10 +3671,11 @@ def _project_dependencies(pyproject_text: str) -> List[str]:
 # here. Verified correct against the live hook on this machine, 2026-08-04.
 
 #: File-path tools use "file_path" in tool_input; everything else uses
-#: "command". Kept as a small local constant (deliberately NOT imported from
-#: toolguard.hook.FILE_PATH_TOOLS) -- this check treats the installed hook as
-#: an external black box invoked via subprocess, the same way a real Claude
-#: Code PreToolUse event would, rather than reaching into its internals.
+#: "command". Kept as a small local constant -- deliberately NOT imported from
+#: toolguard.tool_spec -- because this canary's whole purpose is to detect
+#: drift between the installed hook and this repo, and a check that derives
+#: the fact it verifies from the thing it verifies can only ever agree with
+#: itself.
 _CANARY_FILE_TOOLS = frozenset({"Read", "Write", "Edit"})
 
 

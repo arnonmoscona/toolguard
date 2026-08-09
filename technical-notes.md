@@ -501,10 +501,12 @@ and the old behaviour coincide.
 
 `Configuration.governed_tools()` is a UNION across all toolguard_hook layers in
 the hierarchy (de-duplicated, first-occurrence/most-specific-first order),
-defaulting to `('Bash',)` when nothing is configured. It now resolves over the
-hierarchical `self.layers` (not the legacy 2-level `_load_governed_tools`), so it
-is consistent with permission and takeover resolution and applies under
-`CLAUDE_SETTINGS_PATH` mode (the explicit source is the only layer).
+defaulting to `('Bash', 'Read', 'Write', 'Edit')`
+(`toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS`) when nothing is configured. It now
+resolves over the hierarchical `self.layers` (not the legacy 2-level
+`_load_governed_tools`), so it is consistent with permission and takeover
+resolution and applies under `CLAUDE_SETTINGS_PATH` mode (the explicit source is
+the only layer).
 
 The takeover pattern lists (`ignored_allow_patterns`,
 `additional_ignored_patterns`) remain a UNION across all levels.

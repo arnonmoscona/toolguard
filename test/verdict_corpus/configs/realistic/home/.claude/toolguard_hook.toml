@@ -1,0 +1,60 @@
+# toolguard_hook.toml -- written by toolguard-install
+# See docs/configuration.md in the toolguard repository for the full schema.
+
+additional_supported_tools = [
+    "mcp__jetbrains__execute_terminal_command",
+]
+
+governed_tools = [
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "mcp__jetbrains__execute_terminal_command",
+]
+
+[permissions]
+allow = [
+  "Bash([regex]^export PATH=.?\\$HOME/\\.local/bin:\\$PATH.?$)",
+  "Bash([regex]^rm (/home/tguser/\\.claude/toolguard_hook\\.local\\.toml|/home/tguser/\\.claude/toolguard_hook\\.toml))",
+  "Bash([regex]^rm \\-rf (/home/tguser/\\.claude/skills/toolguard\\-maintenance|/home/tguser/\\.claude/skills/toolguard\\-security\\-audit))",
+  "Bash(cd:*)",
+  "Bash(toolguard-audit:*)",
+  "Bash(uv tool uninstall toolguard:*)",
+  "Read(~/.toolguard/**)",
+  "Write(/home/tguser/.claude/settings.json)",
+  "Write(~/.toolguard/**)",
+  "Edit(/home/tguser/.claude/settings.json)",
+  "Edit(~/.toolguard/**)",
+]
+
+ask = [
+  "Bash(toolguard-maintain:*)",
+]
+
+[hard_deny]
+deny = [
+    "Bash([regex]^rm\\b.*\\.toolguard)",
+    "Bash([regex]^find\\b.*\\.toolguard.*-delete)",
+    "Read(**/.env)",
+    "Read(**/.env.*)",
+    "Read(**/.aws/**)",
+    "Read(**/.ssh/**)",
+    "Write(**/.env)",
+    "Write(**/.aws/**)",
+    "Write(**/.ssh/**)",
+    "Edit(**/.env)",
+    "Read(~/.env)",
+    "Read(~/.env.*)",
+    "Read(~/.aws/**)",
+    "Read(~/.ssh/**)",
+    "Write(~/.env)",
+    "Write(~/.aws/**)",
+    "Write(~/.ssh/**)",
+    "Edit(~/.env)",
+]
+
+
+[takeover_mode]
+enabled = true
+no_match_fallback = "ask"

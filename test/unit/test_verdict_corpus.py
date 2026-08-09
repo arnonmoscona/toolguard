@@ -49,6 +49,7 @@ covers the same ground ``ConfigIsolationMixin`` does (``Path.home()``,
 
 import os
 import unittest
+from unittest.mock import patch
 
 from test.verdict_corpus.fixture_loader import (
     CASES_PATH,
@@ -57,12 +58,14 @@ from test.verdict_corpus.fixture_loader import (
     GOLDENS_PATH,
     ComparisonResult,
     E2EComparisonResult,
+    build_hook_payload,
     compare_e2e_goldens,
     compare_goldens,
     generate_e2e_goldens_in_memory,
     generate_goldens_in_memory,
     read_jsonl,
 )
+from toolguard.tool_spec import ToolKind, ToolSpec
 
 #: Set to "1" to acknowledge reviewed reason/additional_context/provenance/
 #: matched_rule differences without regenerating goldens.jsonl. See README.md.
@@ -347,6 +350,49 @@ class TestVerdictCorpusEndToEnd(unittest.TestCase):
             "then either regenerate e2e_goldens.jsonl (once the change is confirmed "
             f"legitimate) or set {_ACCEPT_PROSE_ENV_VAR}=1 to acknowledge without "
             "regenerating.\n" + "\n".join(lines)
+        )
+
+
+class TestBuildHookPayloadPayloadKeySeam(unittest.TestCase):
+    """
+    ``build_hook_payload`` must dispatch through the tool_spec registry, not a
+    hardcoded 'command' literal (TOO-45 punch-list #10 fix pass, m3).
+    """
+
+    @patch.dict(
+        "toolguard.tool_spec.TOOLS_BY_NAME",
+        {
+            "Read": ToolSpec(
+                name="Read",
+                kind=ToolKind.FILE,
+                payload_key="target_path",
+                is_builtin=True,
+            )
+        },
+    )
+    def test_payload_key_comes_from_the_registry(self):
+        """
+        Given a Read registry entry whose payload key is 'target_path'
+        When build_hook_payload builds a Read event
+        Then the target is placed under 'target_path', not 'file_path'
+        """
+        self.assertEqual(
+            build_hook_payload("Read", "/proj/readme.md"),
+            {"tool_name": "Read", "tool_input": {"target_path": "/proj/readme.md"}},
+        )
+
+    def test_unregistered_tool_falls_back_to_command(self):
+        """
+        Given a tool with no registered ToolSpec
+        When build_hook_payload builds an event
+        Then the target is placed under 'command'
+        """
+        self.assertEqual(
+            build_hook_payload("mcp__local-tools__checked_bash", "ls"),
+            {
+                "tool_name": "mcp__local-tools__checked_bash",
+                "tool_input": {"command": "ls"},
+            },
         )
 
 

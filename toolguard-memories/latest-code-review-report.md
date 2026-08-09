@@ -7,15 +7,30 @@ tags:
 permalink: latest-code-review-report
 ---
 
-# Code review — TOO-45 punch-list #15 (migrate cross-process lock)
+# Code review report -- 2026-08-09
 
-**Date: 2026-08-09, 14:0x local.** Scope: `toolguard/file_lock.py` (new), `toolguard/permission_migration.py` (modified), `test/unit/test_file_lock.py` (new), `test/unit/test_migration.py` (modified). Reviewer: code-reviewer subagent, isolated context.
+**Ticket**: TOO-45 (punch-list #10 -- ToolSpec registry)
+**Scope reviewed** (9 files, as requested):
+
+- `/home/arnon/projects/toolguard/toolguard/tool_spec.py` (new, 96 lines)
+- `/home/arnon/projects/toolguard/toolguard/constants.py`
+- `/home/arnon/projects/toolguard/toolguard/config_validation.py`
+- `/home/arnon/projects/toolguard/toolguard/hook.py`
+- `/home/arnon/projects/toolguard/toolguard/tools/installer.py`
+- `/home/arnon/projects/toolguard/toolguard/tools/transcript_harvest.py`
+- `/home/arnon/projects/toolguard/test/verdict_corpus/fixture_loader.py`
+- `/home/arnon/projects/toolguard/tools/architecture_fitness.py`
+- `/home/arnon/projects/toolguard/test/unit/test_tool_spec.py` (new, 101 lines)
+
+Also inspected as part of the change set: `/home/arnon/projects/toolguard/.pyscn.toml`.
 
 ## Summary
 
-The lock primitive itself is well built and, unusually for concurrency code, actually proven: `flock` is chosen over `lockf` with the reason recorded, release-on-process-death is tested with a real `SIGKILL`, cross-process contention is exercised with real processes rather than asserted, and the Windows branch is reached by patching. The layer registration was done and `tools/architecture_fitness.py --layers` is clean. The problems are all on the *seam*, not the mechanism: `migrate()` now returns a third exit code, and the one library caller that branches on `!= 0` was not updated — which converts a "someone else is busy, try again" into a reported failure that burns the day's auto-migration slot. Two related seam issues (hook-path latency, a decline message that asserts a cause the reason may contradict) share the same root: the new outcome was given a code and a message but not a *place in the callers' vocabulary*.
+This is a well-executed consolidation: four hand-written tool-name sets and every production `"file_path"` literal now derive from one registry, the dead `hook.COMMAND_TOOLS` was correctly identified as dead (zero readers at HEAD) and deleted, the new module has a declared architectural home in `.pyscn.toml`, and `--layers` passes clean on both completeness and direction. The full suite passes (2721 tests, OK) and ruff is clean on all nine files.
 
-Suite green (103 tests in the two modules, 4.7 s), `ruff check` and `ruff format --check` clean, architecture fitness clean.
+The problems are not in the mechanics but in what the registry *claims*. `governed_by_default` names a set that contradicts the runtime's actual default in two other places, and the derived views are functions in one module and frozen snapshots in another -- so the registry's headline promise ("adding a tool is one entry here") is true for some consumers and false for others, with no test that could tell. Nothing is broken today; both are traps set for the next change.
+
+**Verdict**: no critical or security issues. Two Major findings (both naming/contract, both cheap to fix while the ticket is open), six Minor, four Suggestions.
 
 ---
 
@@ -23,149 +38,130 @@ Suite green (103 tests in the two modules, 4.7 s), `ruff check` and `ruff format
 
 None.
 
----
-
 ## Major
 
-### M1. `auto_migrate` reports a lock decline as a migration failure, and burns the day's slot
+### M1. `governed_by_default()` asserts a default that contradicts the runtime default -- inside the module declared the single source of truth
 
-**File**: `/home/arnon/projects/toolguard/toolguard/auto_migrate.py:166-171` (caller not updated by this change)
+- `toolguard/tool_spec.py:79-81` -- `governed_by_default()` docstring: *"Tool names governed unless a config's `governed_tools` overrides it"*, returning `{Bash, Read, Write, Edit}`.
+- `toolguard/config.py:974-976` -- the runtime default is `("Bash",)` when no layer configures `governed_tools`.
+- `toolguard/config_validation.py:80,82` -- independently defaults to `["Bash"]`.
+- `test/verdict_corpus/configs/hard_deny.toml:6` and `pattern_forms.toml:5` both document the `("Bash",)` default explicitly, and set the four tools by hand *because* it is not the default.
 
-`_migrate()` does `if exit_code != 0: report_warning("[TOOLGUARD AUTO-MIGRATION] Migration failed", "Check the migration's backup and settings.local.json, then retry.")`. With `MIGRATE_DECLINED_LOCKED = 2` this now fires when *nothing was attempted*:
+So "which tools are governed by default" now has three definitions, and the newest one -- in the module whose whole purpose is to be authoritative -- disagrees with the two that actually drive behaviour. This is inert today only because no runtime path reads it. The risk is the obvious next step: a future author wiring `Configuration.governed_tools()`'s fallback to `governed_by_default()`, which the name actively invites, would silently begin governing `Read`/`Write`/`Edit` on every project with no toolguard config.
 
-- The message is wrong — nothing failed.
-- The corrective step is unactionable — it points at a backup that was never created and a `settings.local.json` that was never touched.
-- Worse, per `auto_migrate`'s own docstring (lines 77-85), **the once-per-day claim is deliberately not released on failure**, and `AUTO_MIGRATION.run(...)` claims the slot immediately before `_migrate()`. So a transient decline — e.g. the user happens to be running `toolguard-migrate` by hand at that moment — suppresses auto-migration for the rest of the day, with a message telling them to inspect a nonexistent backup.
+Look at what the flag's real consumers do with it -- `security_audit.py:353`, `maintenance.py:184,715` (`sorted(GOVERNED_TOOLS)` as the target list) and `transcript_harvest.py:281` (`if tool not in GOVERNED_TOOLS: continue`). None of them mean "default"; all of them mean "the built-in Claude tools we know how to work with", as opposed to the user-specific MCP name.
 
-This is not an oversight in scope: the coder task recall lists *"`migrate()` returns `int` exit code; callers branch on `!= 0`"* as a **given fact**, and `MIGRATE_DECLINED_LOCKED`'s own docstring says it exists so that *"a caller that wants to say 'someone else is already migrating' can"*. The code path was defined and then left unused by the only caller that could use it.
+**Fix**: rename the `ToolSpec` field and the derived view to what the set is -- `is_builtin` / `builtin_tools()` (or `core_tools()`) -- and correct the docstring. Keep `constants.GOVERNED_TOOLS` as the exported name if importers depend on it, but say in its comment that it is the built-in set, not a default. Separately worth folding the two `["Bash"]` fallbacks (`config.py:975`, `config_validation.py:80`) into one named constant, since that *is* the default and it is currently duplicated.
 
-**Fix**: branch explicitly in `_migrate()`:
+### M2. Derived views are live functions in the registry but frozen snapshots in `constants.py` -- one registry, two view semantics, no test that can see the difference
 
-```python
-if exit_code == MIGRATE_DECLINED_LOCKED:
-    report_notice("[TOOLGUARD AUTO-MIGRATION] Another migration is in progress; skipping.")
-    return False
-```
+- `toolguard/constants.py:27,31` -- `GOVERNED_TOOLS = governed_by_default()` and `FILE_TOOLS = file_kind_tools()` bind **at import time**.
+- `toolguard/tools/installer.py:901`, `toolguard/tools/transcript_harvest.py:227`, `toolguard/hook.py:731,1094` call the registry functions **at call time**.
 
-and, because nothing was attempted, this is the one outcome where the day's claim *should* be released (or never taken) so the next invocation retries. That is a deliberate change to the D4 rule, not an accident — D4's argument was about a *failed* migration having no later same-day caller to retry against, which does not apply to a migration that never ran.
+`tool_spec.py:36` promises *"Adding a tool is one entry here; every derived view below picks it up automatically"*. That holds for the calling consumers and not for the snapshotting ones. Today the registry is a static module-level tuple so the two can't diverge -- but the function form advertises dynamism the constant form does not have, and `_REGISTRY` is private with no injection seam, so there is no way to write a test that would catch a divergence if one were ever introduced.
 
-### M2. A 10-second lock wait now sits in the synchronous PreToolUse hook path
-
-**File**: `/home/arnon/projects/toolguard/toolguard/permission_migration.py:62, 1194-1201`
-
-`MIGRATE_LOCK_TIMEOUT_SECONDS = 10.0` is a module constant with no per-caller override. The path `hook._run_divergence_check` → `auto_migrate.run_auto_migration` → `migrate()` is the live permission hook, so under contention a user's tool call can stall for ten seconds before the hook decides anything. Ten seconds of patience is right for an interactive `toolguard-migrate`; it is wrong for an unattended daily migration whose correct response to contention is "not now".
-
-**Fix**: `def migrate(..., lock_timeout_seconds: float = MIGRATE_LOCK_TIMEOUT_SECONDS)` and have `auto_migrate` pass something sub-second. Note the tests already need this knob and currently get it by `patch.object(permission_migration_module, "MIGRATE_LOCK_TIMEOUT_SECONDS", 0.2)` — patching a module constant to make a test fast is usually the design telling you the value wants to be a parameter.
-
-### M3. The decline message asserts a cause that three of four reasons contradict
-
-**File**: `/home/arnon/projects/toolguard/toolguard/permission_migration.py:1202-1208`
-
-```python
-except file_lock.LockUnavailable as e:
-    report_warning(
-        "Migration declined: another migration is already in progress "
-        f"for this project ({e.reason}).",
-        "Wait for the other migration to finish, then retry.",
-    )
-```
-
-`LockUnavailable` has four reasons. Only `REASON_TIMEOUT` means another migration is in progress. For `REASON_NO_PRIMITIVE` (no `fcntl`, no `msvcrt`), `REASON_DIRECTORY_UNAVAILABLE` (`~/.toolguard/locks/` not creatable — read-only home, quota, a file in the way) and `REASON_FILE_UNAVAILABLE`, the lead sentence is simply false and the corrective step is unactionable: waiting will never help, and on `REASON_NO_PRIMITIVE` migration is *permanently* impossible on that machine while reporting a transient-sounding condition.
-
-The structured `.reason` attribute exists precisely so the caller can branch, and here it is used only as decoration inside a sentence that has already asserted the wrong cause — the shape the project's own "prose is output, not a data structure" rule is aimed at.
-
-**Fix**:
-
-```python
-if e.reason == file_lock.REASON_TIMEOUT:
-    report_warning("Migration declined: another migration is already in progress for this project.",
-                   "Wait for the other migration to finish, then retry.")
-else:
-    report_warning(f"Migration declined: exclusive access could not be guaranteed ({e.reason}).",
-                   "Resolve the underlying condition, then retry; no files were modified.")
-```
-
-Also worth deciding deliberately whether `REASON_NO_PRIMITIVE` should decline at all, or proceed with a warning. Declining (fail closed) is defensible and is probably right — but it means a platform without either primitive can never migrate, and that deserves a sentence in the docs rather than being an emergent consequence.
-
----
+**Fix**: make the three derived views module-level frozensets rather than zero-arg functions (`KNOWN_TOOL_NAMES`, `BUILTIN_TOOLS`, `FILE_KIND_TOOLS`), leaving `payload_key()` as the only function. That makes the snapshot semantics uniform and honest, removes three per-call frozenset constructions, and is simpler code than what is there now. If instead the intent really is a live registry, the fix is the opposite -- `constants.py` must call, not snapshot -- but that seems like more machinery than a five-entry static table warrants.
 
 ## Minor
 
-### N1. Exit code `2` collides with argparse's usage-error code in the same CLI
+### m1. `constants.py` module docstring is now false
 
-`toolguard/scripts/migrate_permissions.py` uses `argparse`, which exits **2** on an unrecognised flag. `MIGRATE_DECLINED_LOCKED = 2` therefore makes `toolguard-migrate --bogus` and "declined, locked" indistinguishable to any script branching on the exit code — which is the exact use case the constant's docstring names. Prefer `3`, or `os.EX_TEMPFAIL` (75), whose meaning is precisely "temporary failure, retry later".
+`toolguard/constants.py:6-7` -- *"Keeping them here -- in a leaf module that imports nothing from toolguard"*. Line 21 now imports `toolguard.tool_spec`. One-line correction: say it imports only other foundation modules, matching the `.pyscn.toml` foundation definition.
 
-### N2. The real timeout carries no `detail`, and the test pins the shape by hand
+### m2. `tool_spec.py` docstring is self-contradictory and wrong about `Configuration.governed_tools()`
 
-`file_lock.py:160` raises `LockUnavailable(path, REASON_TIMEOUT)` with no detail, while `test_file_lock.py:183-196` (`test_reason_is_structured_and_message_carries_detail`) constructs the exception itself with `"waited 10.0s"`. That test therefore verifies the constructor, not any behaviour the module produces — a shape test standing in for a behaviour test. Passing `f"waited {timeout_seconds}s"` at the raise site costs nothing, makes the operator-facing message actually useful, and lets the test observe real output.
+`toolguard/tool_spec.py:7-10` -- *"The CONFIGURABLE governed/supported-tool sets stay exactly as they are -- `Configuration.governed_tools()` and `additional_supported_tools` consume this registry rather than duplicating it"*. The first half and second half contradict each other, and the second half is factually wrong: `Configuration.governed_tools()` (`config.py:949-976`) reads config layers and never touches the registry. Only `config_validation.KNOWN_SUPPORTED_TOOLS` consumes it. Drop the claim about `governed_tools()`.
 
-### N3. Windows acquire/release asymmetry
+### m3. Half-converted payload-key dispatch -- the `"command"` literal survives next to the registry
 
-`_release_windows` (`file_lock.py:96-102`) explicitly seeks to 0 before unlocking; `_try_acquire_windows` (87-93) relies on the offset being 0 implicitly. That holds today (fresh `os.open`, and `msvcrt.locking` does not move the pointer), so this is not a live bug — but the asymmetry reads as though one of the two knows something the other doesn't. Seek in both, or in neither with a one-line comment saying why.
+- `test/verdict_corpus/fixture_loader.py:680` -- `key = payload_key(tool) if tool in FILE_PATH_TOOLS else "command"`
+- `toolguard/tools/transcript_harvest.py:226-229` -- same shape
 
-### N4. Lock file and directory permissions
+The registry knows the payload key for *every* tool, including command-kind ones, so the `FILE_TOOLS` branch plus the hardcoded `"command"` is exactly the duplication the ticket set out to remove -- half-removed. A command-kind tool registered with a non-`command` key would be resolved correctly by the registry and wrongly by these two sites.
 
-`file_lock.py:144,149` — `mkdir()` and `os.open(..., O_CREAT|O_RDWR)` take default modes, so the lock lands at `0o644` in a `0o755` directory. For state under `~/.toolguard/` a `0o600` file in a `0o700` directory is the conventional choice. This matches `once_per_store`'s existing behaviour, so it is a project-wide nit rather than a regression introduced here — but the new module is the natural place to set the precedent.
+**Fix** (both sites):
 
-### N5. `REASON_*` values are English sentences used as machine-stable keys
+```python
+spec = TOOLS_BY_NAME.get(tool)
+key = spec.payload_key if spec else "command"
+```
 
-`file_lock.py:43-46`. They are correctly named constants (per the project rule), but the *values* are display prose, which is why M3's message reads awkwardly when interpolated. Short tokens (`"timeout"`, `"no_primitive"`, ...) plus a separate display mapping at the edge would carry the same information, make branching read better, and make M3's fix fall out naturally.
+The `else` fallback is still needed for unregistered tools (e.g. `mcp__local-tools__checked_bash`, deliberately not in the registry), but it becomes an unknown-tool fallback rather than a second definition of the command key.
 
-### N6. The concurrency test can silently degrade to a sequential run
+### m4. Deny reason hardcodes `file_path` after the key became dynamic
 
-`test_migration.py:1560` — `time.sleep(0.3)` then `barrier.touch()` assumes both children have started and reached the polling loop within 300 ms. If one child is slow to import (cold cache, loaded machine), the barrier already exists when it arrives and it simply runs alone. The assertions are on the *end state*, which holds either way, so the test passes without ever having exercised contention. Not flaky — worse, quietly vacuous under load.
+`toolguard/hook.py:734` and `toolguard/hook.py:1107` both return `reason="No file_path provided in tool input"`, and `hook.py:1094` names the local `file_path`, while the key itself now comes from `_tool_payload_key(tool_name)`. If a file-kind tool ever registers a different key, the message names a key the caller never sent -- and this reason string reaches the user. Interpolate the resolved key. `test/unit/test_hook_eval.py:166` asserts on the substring and must be updated in the same edit.
 
-Consider having each child print how long its lock acquisition blocked and asserting that at least one waited a non-trivial interval; that turns "both patterns survived" into "both patterns survived *and* the lock actually did something".
+### m5. Test gaps in `test/unit/test_tool_spec.py`
 
-### N7. Test patches the shared module attribute
+- **No registry-integrity test.** `TOOLS_BY_NAME` (`tool_spec.py:71`) is a dict comprehension, so a duplicated `name` in `_REGISTRY` collapses silently. Add `assertEqual(len(TOOLS_BY_NAME), len(_REGISTRY))`, plus an assertion that every `payload_key` is non-empty.
+- **`test_tool_spec_is_frozen` (line 92)** uses `assertRaises(Exception)`, which would pass on any unrelated error. Use `dataclasses.FrozenInstanceError`.
+- **Nothing tests the behaviour that actually changed.** The existing hook, harvest and fixture tests pass `{"file_path": ...}` literals and would pass identically against the pre-refactor code, so the registry seam itself is unpinned. A single test that swaps in a file-kind tool with a different payload key and drives `hook._resolve_event`, `transcript_harvest._command_for_tool` and `fixture_loader.build_hook_payload` would pin it -- and would immediately surface M2 and m3.
+- **`test_constants_module_constants_equal_derived_views` (lines 47-50)** is near-tautological: both sides are the same call. It catches only re-hardcoding, which the literal-pinning tests above already cover.
 
-`test_migration.py:1414` patches `permission_migration_module.file_lock.exclusive` — that is the attribute on the shared `toolguard.file_lock` module object, not a `permission_migration`-local name, so the patch is global for its duration. Harmless in this suite; `patch("toolguard.permission_migration.file_lock.exclusive")` reads the same and has the same effect, so this is really a note that the module-object import style makes the scope ambiguous at a glance.
+### m6. Public function imported under a private alias
 
----
+`toolguard/hook.py:51` -- `from toolguard.tool_spec import payload_key as _tool_payload_key`. There is no name collision in `hook.py` to avoid, and the leading underscore makes call sites read as if the function were module-private. Import it plainly, or alias without the underscore.
 
 ## Suggestions
 
-### S1. Fourth copy of the subprocess test harness
+### s1. Three names still denote one value -- collapse the alias chain while the ticket is open
 
-`test_once_per_store.py:307`, `test_config_divergence.py:991`, `test_file_lock.py:244`, `test_migration.py:1551,1641,1649` all hand-roll the same pattern: build a child script as a string, `subprocess.Popen([sys.executable, "-c", script, ...], cwd=repo_root, ...)`, poll a marker/barrier file with a monotonic deadline, `communicate(timeout=...)`, assert `returncode == 0` with `stderr` as the message. `test_file_lock.py` even documents that it is "following `test_once_per_store.py`'s harness" — the duplication is deliberate and acknowledged, which is the right moment to extract it.
+`tool_spec.file_kind_tools()` -> `constants.FILE_TOOLS` -> `hook.FILE_PATH_TOOLS`. The last is already carrying a comment saying it exists only because tests import it. The refactor cut *literal* duplication from four sites to one but left the *name* duplication at three. `FILE_PATH_TOOLS` has exactly three readers -- `toolguard/hook.py`, `test/unit/test_hook.py`, `test/verdict_corpus/fixture_loader.py` -- so deleting it is cheap now and gets more expensive later. Per project convention, "it breaks N tests" is not an objection.
 
-A small `test/unit/_subprocess_harness.py` with `run_child(script, *args, env=None)` and `wait_for_marker(path, timeout)` would remove the copies and give one place to fix the deadline/timeout constants. The child scripts themselves stay per-test, as they should.
+### s2. `.pyscn.toml` layer assignment was done correctly -- worth noting because this is the step that usually gets skipped
 
-### S2. `~/.toolguard` derivations are now at seven, and one of them is import-time
+`tool_spec` was added to the `foundation` packages list, and `uv run python tools/architecture_fitness.py --layers` reports "All modules map to exactly one layer" and "No cross-layer direction violations". An unassigned new file is drift by default and layer checkers commonly fail silently on it; this one did not.
 
-The spec correctly told the coder not to consolidate, and this review is not reopening that. But the count is now: `error_log.py:169`, `once_per_store.py:199`, `permission_migration.py:98`, `tools/decision_ledger.py:44`, `tools/installer.py:163`, `config.py:444`, `testing/sandbox.py:322,345`.
+### s3. Keep the `_CANARY_FILE_TOOLS` comment framing
 
-Worth pulling out for the follow-up ticket: **`tools/decision_ledger.py:44` evaluates `Path.home()` at module import** (`USER_LEDGER_PATH = Path.home() / ".toolguard" / "decisions.json"`). That is exactly the failure `_migration_lock_path`'s docstring warns against ("resolved here, at call time, never at module import"), and it is the one derivation that would silently ignore a `HOME` set for a subprocess or a patched `Path.home()` in a test. The new module documents the rule; the ticket should name the one site that breaks it.
+`tools/architecture_fitness.py:3673-3679` replaces a rationale about subprocess-vs-import with the actual reason: *"a check that derives the fact it verifies from the thing it verifies can only ever agree with itself"*. That is the correct and more durable justification for not importing `tool_spec` here, and it generalises to every other canary in that file.
 
-### S3. The lock excludes migrate-vs-migrate only
+### s4. Typing style in `tool_spec.py`
 
-`tools/rule_apply.py:195-197` and `tools/maintenance.py:844` write the same toolguard config files without participating in this lock. That is faithful to the ticket, which was scoped to `migrate()`'s own read-modify-write, so it is not a defect. But the lock is *named and keyed* `migrate-<sha>`, which makes widening it later a rename-and-migrate rather than a one-line change. If widening is plausible, `config-<sha>` costs nothing today.
-
-### S4. Two notions of "project identity" now coexist, and they are observably different
-
-`_migration_lock_path` keys on `sha256(str(project_root.resolve()))`; `once_per_store._project_key` keys on `str(project)` unresolved. Both choices are individually defensible and the divergence is documented in the docstring and pinned by a test — good. The consequence worth writing into the follow-up ticket is that these two mechanisms **guard the same operation**: reaching `migrate()` through a symlinked project path yields the *same* lock but a *different* daily claim. The combination is the only place the divergence is visible, and it is precisely the auto-migration path.
+The module mixes `typing.FrozenSet` / `typing.Mapping` (lines 15, 71, 74, 79, 84) with the builtin generic `tuple[ToolSpec, ...]` (line 37). Use builtin generics and `collections.abc` throughout: `frozenset[str]`, `Mapping` from `collections.abc`.
 
 ---
 
 ## Architectural drift pass
 
-A ticket ID was given, so this pass ran; the change set is small, and nothing here is alarming.
+Run because the change touches six production files and carries a ticket ID. These are observations for judgement, not thresholds.
 
-- **Blast radius vs. conceptual size**: one concept ("migrate needs mutual exclusion") landed in 1 new production file + 1 modified production file + 1 config line. Proportionate; no smearing across unrelated modules.
-- **Architectural home for the new file**: `file_lock` is declared in `.pyscn.toml`'s `foundation` layer, and `tools/architecture_fitness.py --layers` reports both completeness ("All modules map to exactly one layer") and direction clean. This is the check that most often degrades silently, and it was done.
-- **Boundary crossings**: none. `config` → `observability` (`error_reporter`) and `config` → `foundation` (`file_lock`) are both downward and legal.
-- **Test cost trend**: this change is ~675 test lines to ~275 production lines (2.45:1) against a repo standing ratio of ~64.7k test to ~34.3k production (1.9:1). Above the norm but justified — the extra weight is real multi-process tests, which is the only way to test this at all, not representation-pinning. Not a flag.
-- **Logical coupling**: not computed; two files is below the threshold where co-change analysis says anything.
+**Blast radius vs. conceptual size.** One concept (a tool registry) landed in 6 production files + 1 new test + 1 dev-tool comment + 1 corpus fixture + 1 config file. The ratio looks bad in isolation and is not: this is a *consolidation*, and it reduces definition sites (four hand-written tool-name sets and every production `"file_path"` literal collapse to one table). High file count here is the cost of paying down duplication, not evidence of a concept smeared across the tree.
 
-The one drift signal worth naming is not structural but *vocabulary*: `migrate()`'s return type is an `int` exit code that three call sites interpret differently (CLI passthrough, `auto_migrate`'s `!= 0`, and now a third value with its own meaning). M1 is the first bug caused by that, and it will not be the last. A small result object or `enum` — `MigrationOutcome.{OK, FAILED, DECLINED_LOCKED}` — rendered to an exit code only at the console-script edge would make the caller's `!= 0` impossible to write by accident. That is the project's own "carry structured data, render at the edge" rule applied to a return value rather than a message.
+**Logical coupling (co-change).** Over the last 400 commits, 54 touched `toolguard/` (excluding merges and the two >40-file architecture-overhaul commits, which would swamp the signal):
+
+| file | commits | distinct co-change partners |
+|---|---|---|
+| `toolguard/hook.py` | 29 / 54 (54%) | 60 |
+| `toolguard/config.py` | 25 | 68 |
+| `toolguard/tools/installer.py` | 12 | 55 |
+| `toolguard/config_validation.py` | 3 | 51 |
+| `toolguard/tools/transcript_harvest.py` | 2 | 38 |
+| `toolguard/constants.py` | 2 | 21 |
+
+`hook.py` changes in over half of all commits touching the package and co-changes with 60 distinct files, at 1445 lines. That is the package's clearest hub, and it is a standing condition rather than something this change created -- the change adds two lines to it. `config.py` is second. Neither is a finding against this change set; both are the reason to keep doing punch-list consolidations like this one.
+
+**100%-coupled pairs** (rarer file never changed without the other, min 4 commits): `config.py <-> config_types.py` (8/8), `resolve.py <-> rule_entry.py` (4/4), `config_types.py <-> rule_entry.py` (4/4), `config.py <-> rule_entry.py` (4/4). Those four files behave as one module. They are untouched here, but that is structurally the *same shape* punch-list #10 just fixed for tool names, and they are the obvious next candidates. (`resolve.py`/`hook.py <-> tools/decision.py` at 5/5 is historical -- `decision.py` was deleted in item 05.)
+
+**New file has an architectural home.** Yes -- see s2. Clean.
+
+**Boundary crossings.** The change spans source (`toolguard/`), dev tooling (`tools/`) and test fixtures (`test/verdict_corpus/`). Not a real crossing: the `tools/architecture_fitness.py` edit is comment-only and its explicit point is that it must *not* import the new module. No boundary was weakened.
+
+**Test cost trend.** 101 new test lines against roughly 126 production lines added/changed, about 0.8:1, versus a standing repo ratio of ~1.9:1 (65,030 test lines / 34,481 production lines, excluding the generated parser). Below the project's norm. Normally that is a good sign for a refactor with existing behavioural coverage -- but here the shortfall lands exactly where it matters (m5): the new tests pin the registry's *contents* while the *seam* the refactor introduced is unpinned, and the pre-existing tests cannot distinguish the new code from the old.
 
 ---
 
-## What is good here, specifically
+## Verification performed
 
-Worth saying, because these are the parts that usually get skipped:
+- `uv run python -m unittest discover -s test -t .` -- **Ran 2721 tests, OK**.
+- `uv run ruff check` on all nine scoped files -- **All checks passed**.
+- `uv run python tools/architecture_fitness.py --layers` -- completeness and direction both clean.
+- Confirmed `hook.COMMAND_TOOLS` had zero readers at HEAD (`git grep -n COMMAND_TOOLS HEAD -- '*.py'` returns only its own definition), so the deletion is dead-code removal, not a behaviour change. `mcp__local-tools__checked_bash` dropping out with it is consistent with `KNOWN_SUPPORTED_TOOLS`, which deliberately excluded it as user-specific.
+- Confirmed no remaining production `"file_path"` literals outside the registry and the deliberate canary.
+- Confirmed the `KNOWN_SUPPORTED_TOOLS` `set` -> `frozenset` change is safe: its only use is `KNOWN_SUPPORTED_TOOLS | set(additional_supported_tools)` (`config_validation.py:90`), and no caller mutates it.
+- Confirmed the `installer.py:901` ordering change (`("Read","Write","Edit")` -> `sorted(file_kind_tools())`, i.e. Edit/Read/Write) is cosmetic: `test/unit/test_tools_installer.py:1274` asserts membership, not order.
 
-- **`flock` over `lockf`, with the reason in the docstring.** The record-lock footgun (any `close()` on the path in the process drops the lock) is real, obscure, and would have been found only in production. Naming it in the module docstring is what stops someone "simplifying" it later.
-- **Release on process death is tested, not asserted.** `test_lock_released_when_holding_process_dies` actually `SIGKILL`s a holder and re-acquires. That is the entire justification for not using an `O_EXCL` lockfile, and it is verified rather than argued.
-- **The dry-run exclusion and the lock's span are both justified in the docstring**, including the specific reason locking only the write would be insufficient (stale read → overwrite). That is the non-obvious part, and it is the part that got written down.
-- **The Windows branch is exercised**, on a Linux-only suite, by a small deliberate fake rather than being left as an untested platform assumption.
+**pyscn not run** -- the effective diff is ~65 lines across a small set; the layer fitness check above is the relevant structural check for this change. Say the word if you want a full `uvx pyscn analyze` pass before the push.
+
+**code-review-graph note (trial)**: one non-trivial use, `get_impact_radius` on the three foundation files -- 500 nodes / 81 files at depth 2, "risk: high", with `ConfigIsolationMixin` and `isolate_config_environment` as top "key entities". That is what you get asking for blast radius on a foundation constants module: technically true, not actionable, and the named entities were unrelated test scaffolding. Targeted greps for the specific symbol names (`COMMAND_TOOLS`, `GOVERNED_TOOLS`, `FILE_PATH_TOOLS`, `"file_path"`) answered the real question -- who reads this -- faster and exactly. **The graph did not earn this invocation.** Phase: refactoring/consolidation. No staleness refresh was needed (impact radius is an auto-updating layer).

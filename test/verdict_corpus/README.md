@@ -178,17 +178,21 @@ a golden record.
 | `pattern_forms` | Native syntax, the explicit `[native]` spelling, `[regex]`, and `[glob]` prefixes, for both Bash and file-path tools. |
 | `enrichment` | `additionalContext` on allow, ask, deny, and hard_deny entries (the `{ match = "...", additionalContext = "..." }` structured form), including the multi-part accumulation case for a compound command whose allowed sub-commands each carry their own context. |
 
-Two fixtures (`hard_deny`, `pattern_forms`) declare `governed_tools` explicitly
-(the default, when unset, is `('Bash',)`) so their `Read`/`Write` cases are
-actually governed at the end-to-end layer -- `decide()` (the in-process corpus's
-entry point) never consults `governed_tools` at all, so this only matters for
-`e2e_cases.jsonl`. Their `[hard_deny]`/`[permissions]` `Read`/`Write` patterns
-also use the absolute `[glob]/**/...` form rather than a bare relative one: a
-relative pattern is anchored to the (ephemeral, per-run) sandbox project root,
-which none of this corpus's portable, absolute-looking case targets would ever
-fall under -- discovered by generating goldens with the relative form first and
-finding every such case fell through to the `no_match_fallback` default instead
-of ever reaching the pattern it was meant to exercise.
+Three fixtures (`hard_deny`, `pattern_forms`, `override_breadth`) declare
+`governed_tools` explicitly, independent of whatever the default happens to be
+(`Configuration.governed_tools()` defaults to
+`('Bash', 'Read', 'Write', 'Edit')` when no level configures it -- see
+`toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS`), so their `Read`/`Write`/`Edit`
+cases stay actually governed at the end-to-end layer even if the default ever
+changes -- `decide()` (the in-process corpus's entry point) never consults
+`governed_tools` at all, so this only matters for `e2e_cases.jsonl`. Their
+`[hard_deny]`/`[permissions]` `Read`/`Write` patterns also use the absolute
+`[glob]/**/...` form rather than a bare relative one: a relative pattern is
+anchored to the (ephemeral, per-run) sandbox project root, which none of this
+corpus's portable, absolute-looking case targets would ever fall under --
+discovered by generating goldens with the relative form first and finding
+every such case fell through to the `no_match_fallback` default instead of
+ever reaching the pattern it was meant to exercise.
 
 ## End-to-end case selection
 

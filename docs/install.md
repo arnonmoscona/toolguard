@@ -249,10 +249,13 @@ project-level rules later on top of a user-level base.)
 Present the few settings that shape behavior. Recommend the safe default, explain the "why"
 briefly, and use their answer.
 
-- **`governed_tools` -- govern what they use.** Recommend `Bash`, `Read`, `Write`, `Edit`,
-  plus any command-running MCP tool they use (e.g. `mcp__jetbrains__execute_terminal_command`;
-  a custom MCP shell tool also goes in `additional_supported_tools`). Ask which they use;
-  default to the built-in four if unsure.
+- **`governed_tools` -- govern what they use.** `Bash`, `Read`, `Write`, `Edit` are toolguard's
+  own default when `governed_tools` is left unset, so no config entry is needed for that set.
+  Ask whether they use any command-running MCP tool (e.g.
+  `mcp__jetbrains__execute_terminal_command`; a custom MCP shell tool also goes in
+  `additional_supported_tools`) -- only then does `governed_tools` need writing explicitly, and
+  it must list the built-in four alongside the MCP tool (setting it replaces the default, it
+  doesn't extend it). If unsure, leave it unset.
 - **Takeover mode -- RECOMMENDED ON, but ENABLED LATE.** Take their decision now, but explain
   that if they choose it, you will switch it on near the *end* of the install, not now. With
   takeover on, toolguard becomes the real gatekeeper: it neutralizes broad "allow everything"

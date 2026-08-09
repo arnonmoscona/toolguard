@@ -1,0 +1,9 @@
+# TOO-45 verdict-corpus fixture (user level). Opposite verdicts from the
+# project level for the same two patterns -- see project/.claude/toolguard_hook.toml.
+[permissions]
+deny = [
+    "Bash(rm important-file *)",
+]
+allow = [
+    "Bash(ls *)",
+]

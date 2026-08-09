@@ -48,6 +48,7 @@ from toolguard.path_utils import require_project_root
 from toolguard.rule_entry import RuleEntry, entries_for_tool, normalize_entry
 from toolguard.rule_entry import is_tool_wrapper as is_tool_wrapper
 from toolguard.rule_entry import normalize_entries_preserving
+from toolguard.tool_spec import DEFAULT_GOVERNED_TOOLS
 from toolguard.toml_scan import find_multiline_structured_entry_line
 
 # ``Issue`` moved to ``toolguard.issues`` (TOO-19 Phase 0a, increment 1) so
@@ -954,7 +955,9 @@ class Configuration:
         every level's ``governed_tools`` list is pooled, de-duplicated, and kept
         in first-occurrence (most-specific-first) order. Native Claude settings
         layers are ignored (``governed_tools`` is a toolguard extension).
-        Defaults to ``('Bash',)`` when no level configures any governed tool.
+        Defaults to :data:`~toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS`
+        (``('Bash', 'Read', 'Write', 'Edit')``) when no level configures any
+        governed tool.
 
         Resolving over ``self.layers`` keeps governed-tools consistent with the
         hierarchical, more-specific-aware resolution used for permissions and
@@ -972,7 +975,7 @@ class Configuration:
                 if isinstance(tool, str):
                     seen.setdefault(tool, None)
         if not seen:
-            return ("Bash",)
+            return DEFAULT_GOVERNED_TOOLS
         return tuple(seen.keys())
 
     # -- takeover mode -----------------------------------------------------

@@ -2,9 +2,9 @@
 Shared immutable constants for toolguard.
 
 A single home for small vocabularies that were previously re-declared at multiple
-call sites (the governed/file tool-name sets and the harvested-corpus status
-strings).  Keeping them here -- in a leaf module that imports nothing from
-toolguard -- lets both the core (``hook``) and the tooling layer
+call sites (the built-in/file tool-name sets and the harvested-corpus status
+strings).  Keeping them here -- in a leaf module that imports only other
+foundation modules -- lets both the core (``hook``) and the tooling layer
 (``log_harvest``, ``transcript_harvest``, ``mining``, ``replay``) share one
 definition without coupling to a heavyweight module.
 
@@ -18,12 +18,24 @@ into :func:`toolguard._git.run_git` instead, kept separate from this module
 because it is procedural, not a constant.
 """
 
-# Tools toolguard governs (intercepts permission decisions for).
-GOVERNED_TOOLS = frozenset({"Bash", "Read", "Write", "Edit"})
+from toolguard.tool_spec import BUILTIN_TOOLS as _BUILTIN_TOOLS
+from toolguard.tool_spec import FILE_KIND_TOOLS as _FILE_KIND_TOOLS
 
-# Governed tools whose target is a file PATH rather than a shell command line.
+# Tools toolguard ships built-in knowledge of (kind, payload key). Re-exported
+# from the :mod:`toolguard.tool_spec` registry (TOO-45 punch-list #10) -- kept
+# here, under this name, because existing importers (``tools/maintenance``,
+# ``tools/security_audit``, ``tools/transcript_harvest``) expect it. Renamed
+# from GOVERNED_TOOLS in the same punch-list's fix pass: every real importer
+# means "every tool toolguard knows how to analyze/harvest", not the config's
+# EFFECTIVE governed set -- that is ``Configuration.governed_tools()``, whose
+# no-configuration fallback is this same registry's
+# ``DEFAULT_GOVERNED_TOOLS`` (``('Bash', 'Read', 'Write', 'Edit')``), but
+# which a level in the hierarchy can narrow or extend at any time.
+BUILTIN_TOOLS = _BUILTIN_TOOLS
+
+# Tools whose target is a file PATH rather than a shell command line.
 # (Bash is the complement: its "command" is a shell command line.)
-FILE_TOOLS = frozenset({"Read", "Write", "Edit"})
+FILE_TOOLS = _FILE_KIND_TOOLS
 
 # Observed-status vocabulary for a harvested corpus entry (``LogEntry.status``).
 STATUS_EXECUTED = "EXECUTED"  # the tool ran without error

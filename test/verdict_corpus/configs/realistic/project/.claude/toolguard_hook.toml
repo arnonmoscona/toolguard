@@ -1,0 +1,107 @@
+# Auto-mode evidence-collection experiment (temporary, 2026-07-23): loosened from the
+# user-level default of "ask" so unmatched commands don't block auto-mode sessions.
+# Revert (remove this line) once evidence collection is done.
+no_match_fallback = "allow_with_no_warnings"      # TEMPORARY until TOO-28 is done
+undecidable_fallback = "allow_with_no_warnings"   # TEMPORARY until TOO-28 is done
+
+[permissions]
+allow = [
+  "Bash(/home/tguser/.local/bin/basic-memory --help)",
+  "Bash(\\\\obsidian --help)",
+  "Bash(\\\\obsidian append *)",
+  "Bash(\\\\obsidian create *)",
+  "Bash(\\\\obsidian delete *)",
+  "Bash(\\\\obsidian read *)",
+  "Bash(\\\\obsidian search *)",
+  "Bash(\\\\obsidian search:context *)",
+  "Bash(\\\\obsidian vaults *)",
+  "Bash(ag \"_load_governed_tools\\\\b\" toolguard)",
+  "Bash(ag \"_load_permissions\\\\b\" toolguard)",
+  "Bash(ag \"bash_permissions\" toolguard)",
+  "Bash(ag def bash_permissions|def _load_governed_tools|def _load_permissions|_CONFIG_SYNC_DEFAULTS *)",
+  "Bash(awk '{print $2\"\\\\t\"$1\" lines\\\\t\"$3}')",
+  "Bash(basic-memory doctor *)",
+  "Bash(basic-memory status *)",
+  "Bash(git -C /home/tguser/projects/toolguard show 3d4d480:.claude/CLAUDE.md)",
+  "Bash(git check-ignore *)",
+  "Bash(grep *)",
+  "Bash(grep -v \"^--$\")",
+  "Bash(obsidian --version)",
+  "Bash(obsidian version *)",
+  "Bash(pbcopy)",
+  "Bash(pyright *)",
+  "Bash([regex]^timeout [0-9]* pyright .*)",
+  "Bash(rtk grep *)",
+  "Bash(rtk ls *)",
+  "Bash(search)",
+  "Bash(sed -n '14,20p' /home/tguser/projects/toolguard/claude.code.review.md)",
+  "Bash(sed -n '60,67p' /home/tguser/projects/toolguard/tmp/drafts/dot-claude/CLAUDE.md)",
+  "Bash(sort -n -k1)",
+  "Bash(sort -t. -k1)",
+
+  "Bash(uvx basic-memory *)",
+  "Bash(~/projects/youtrack_api/get-issue.sh \"TOO-14\")",
+  "Bash(~/projects/youtrack_api/get-issue.sh *)",
+  "Bash(~/projects/youtrack_api/get-issue.sh TOO-8 *)",
+  "Read(//home/tguser/.basic-memory/**)",
+  "Read(//home/tguser/.claude/**)",
+  "Read(//home/tguser/.config/**)",
+  "Read(//home/tguser/.config/basic-memory/**)",
+  "Read(//home/tguser/projects/dot_files/wsl/.claude/**)",
+  "Read(//home/tguser/projects/dot_files/wsl/.claude/skills/**)",
+  "Read(//home/tguser/projects/flowers/featherhill/**)",
+  "Read(//home/tguser/projects/flowers/featherhill/.claude/**)",
+  "Read(./**)",
+  "Write(./**)",
+  "Edit(./**)",
+
+
+  "Bash(canopy *)",
+  "Bash(pyscn analyze *)",
+  # ---------------------------------------------------------------------------
+]
+
+ask = [
+  # The following were commented out as part of the auto-mode data collection process.
+  # When TOO-28 is implemented (specifically per-rule overrides) then these will be coinfigured for
+  # auto-mode-specific behavior. So we will also need to modify some user level rules (like HEREDOC rules)
+  #"Bash(python3 -m json.tool)",
+  #"Bash(uv run *)",
+
+  # TOO-19 note (2026-07-25), for whoever reads this next -- do NOT try to fix
+  # the heredoc/`python -c` prompting by adding an allow rule here or anywhere
+  # else in the hierarchy. It cannot work, by design:
+  #
+  #   command_extractor.py  flags foreign inline code / foreign heredoc sinks
+  #                         with LeafCommand(ask_floor=True)
+  #   compound.py:65-71     clamps the verdict -- an explicit `deny` is honoured,
+  #                         but `allow` is UNCONDITIONALLY downgraded to `ask`
+  #
+  # There is no config knob gating that clamp (making it configurable is the
+  # deferred ticket). The working alternative is to never inline Python into
+  # bash at all: Write the script to a file, then run `uv run python <file>` --
+  # a plain leaf command, allowed. That also matches the project's own
+  # "no Bash for file operations" rule.
+  #
+  # TESTED 2026-07-25 -- adding an allow that matches the sentinel form
+  # (`__HEREDOC_TO_python__`) does NOT help, and neither does `Bash(*)`.
+  # Measured two ways in a throwaway dir:
+  #   (a) end-to-end with an allow list containing every spelling of the
+  #       sentinel form PLUS `Bash(*)`  -> still `ask`;
+  #   (b) _resolve_leaf() called with a resolve_one stub that allows
+  #       EVERYTHING (stronger than any writable rule) -> still `ask`.
+  # Because compound.py resolves the outer command and then THROWS THE ALLOW
+  # AWAY: only a `deny` returns early, every other verdict falls through to
+  # the unconditional `return "ask", ...`. The rule does match; the match is
+  # discarded. So this is not fixable from config at any pattern.
+  #
+  # Scope note: only FOREIGN executors get the floor (python/node/perl/ruby/
+  # php/Rscript/awk/... -- see FOREIGN_EXECUTORS). A heredoc into bash/sh is
+  # NOT ask-floored -- verified allowed. So there is no __HEREDOC_TO_bash__
+  # problem to solve.
+]
+
+deny = [
+  "Bash(python3 *)",  # You should always run python through uv in the current venv
+  "Bash(python *)"  # You should always run python through uv in the current venv
+]

@@ -1,0 +1,11 @@
+# TOO-45 verdict-corpus fixture (project level). Deliberately conflicts with
+# both the user level and a rules-dir file for the SAME two patterns, in
+# opposite directions, so the corpus exercises more-specific-wins across all
+# three sources.
+[permissions]
+allow = [
+    "Bash(rm important-file *)",
+]
+deny = [
+    "Bash(ls *)",
+]

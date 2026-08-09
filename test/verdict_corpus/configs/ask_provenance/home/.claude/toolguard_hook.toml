@@ -1,0 +1,20 @@
+# TOO-45 verdict-corpus fixture (user level, LESS specific than project). See
+# project/.claude/toolguard_hook.toml's comment for the overall rationale.
+# These patterns are only reachable when the project level does not match at
+# all, exercising the level-2 (user) branch of the more-specific-wins loop in
+# permission_resolution._resolve_unclamped, and -- because this
+# is a SECOND contributing layer alongside home/.toolguard/rules/extra.rules.toml
+# at the SAME specificity -- the FIRST layer index 0 (this file) within that
+# level for provenance_for_pattern/entry_for_pattern's search loop.
+[permissions]
+ask = [
+    "Bash(rm user-file-a.txt)",
+    "Bash(rm user-file-b.txt)",
+    { match = "Bash(mv user-file-c.txt *)", additionalContext = "Confirm the destination before moving (user-level rule)." },
+    "Bash(chmod 777 user-perm.txt)",
+    "Bash(kill -9 3333)",
+    { match = "Bash(kill -9 4444)", additionalContext = "Killing a process by PID is irreversible (user-level rule)." },
+    "Bash(mkfs.ext4 /dev/user-disk)",
+    "Read([regex]^\\./secrets/user-secret\\.txt$)",
+    { match = "Write([regex]^\\./deploy/user-manifest\\.yaml$)", additionalContext = "Review the manifest diff before writing (user-level rule)." },
+]

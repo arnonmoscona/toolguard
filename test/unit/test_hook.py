@@ -39,6 +39,7 @@ from toolguard.resolve import (
     _decide_file_path_at_level_detailed,
     resolve_bash_permission_detailed,
 )
+from toolguard.tool_spec import ToolKind, ToolSpec
 from toolguard import once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
@@ -2865,6 +2866,67 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
         record = mock_log.call_args.args[0]
         self.assertEqual(record.violated_rules, ["/secrets/**"])
         self.assertEqual(record.provenance, "project: /p/toolguard_hook.toml")
+
+    @patch("toolguard.hook.log_command")
+    @patch.dict(
+        "toolguard.tool_spec.TOOLS_BY_NAME",
+        {
+            "Read": ToolSpec(
+                name="Read",
+                kind=ToolKind.FILE,
+                payload_key="target_path",
+                is_builtin=True,
+            )
+        },
+    )
+    def test_target_is_read_from_the_registered_key(self, mock_log):
+        """
+        TOO-45 punch-list #10 fix pass (M2/m4): _handle_file_path_tool must
+        read the payload key from the tool_spec registry, not a hardcoded
+        'file_path' literal.
+
+        Given a Read registry entry whose payload key is 'target_path'
+        When a tool_input carrying only 'target_path' is resolved
+        Then the target is found and resolved (not the fail-closed deny)
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Read"],
+                "permissions": {"allow": ["Read(/tmp/x/**)"], "deny": []},
+            }
+        )
+        verdict = _handle_file_path_tool(
+            "Read", {"target_path": "/tmp/x/foo.txt"}, config, {}, "main", None
+        )
+        self.assertEqual(verdict.decision, "allow")
+
+    @patch("toolguard.hook.log_command")
+    @patch.dict(
+        "toolguard.tool_spec.TOOLS_BY_NAME",
+        {
+            "Read": ToolSpec(
+                name="Read",
+                kind=ToolKind.FILE,
+                payload_key="target_path",
+                is_builtin=True,
+            )
+        },
+    )
+    def test_empty_target_deny_reason_names_the_registered_key(self, mock_log):
+        """
+        Given a Read registry entry whose payload key is 'target_path'
+        When the tool_input lacks 'target_path'
+        Then the fail-closed deny reason names 'target_path', not 'file_path'
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Read"],
+                "permissions": {"allow": ["Read(/tmp/x/**)"], "deny": []},
+            }
+        )
+        verdict = _handle_file_path_tool("Read", {}, config, {}, "main", None)
+        self.assertEqual(verdict.decision, "deny")
+        self.assertIn("No target_path provided", verdict.reason)
 
 
 class TestHookArgparseAndIsatty(unittest.TestCase):

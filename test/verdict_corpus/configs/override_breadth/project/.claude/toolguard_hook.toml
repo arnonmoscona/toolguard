@@ -1,0 +1,60 @@
+# TOO-45 verdict-corpus fixture (project level -- MOST specific). Exists to
+# strengthen coverage of permission_resolution._detect_override (currently 6
+# cases out of 3308 invocations per the TOO-45 audit) -- a more-specific ALLOW here
+# overriding a less-specific DENY in home/.claude/toolguard_hook.toml, for
+# the SAME command/path, at every tool this corpus governs.
+#
+# governed_tools is set explicitly, independent of whatever the default
+# happens to be -- see hard_deny.toml's identical comment for why this
+# matters for the end-to-end corpus.
+#
+# Each allow pattern below is paired 1:1 with a BROADER deny pattern in the
+# user-level file for the same command/path family, so the specific case
+# matches project's allow exactly while also matching home's (less specific)
+# deny -- the exact shape _detect_override exists to catch. Two patterns
+# (`echo hello`, `ls -R`) are deliberate NEGATIVE CONTROLS with no home-level
+# counterpart at all, so a plain allow with nothing to override is also
+# represented in this fixture.
+#
+# The Read/Write/Edit patterns use `[regex]` deliberately, not a bare/glob
+# relative pattern: a relative file-path pattern is anchored to the SANDBOX'S
+# OWN (ephemeral, absolute) project root before matching
+# (Configuration._anchor_file_pattern / resolve.py), while the corpus's
+# case targets are relative strings (e.g. `./docs/allowed.md`) chosen for
+# portability across regenerations -- so a bare/glob pattern here would never
+# match them (confirmed empirically; every such case silently fell through to
+# no_match_fallback). `[regex]` patterns are matched against the raw relative
+# target text directly, UNaffected by that anchoring -- see
+# pattern_forms.toml's identical precedent (its own `[glob]`/bare Read/Write
+# patterns don't match its relative case targets either; only its `[regex]`
+# one does) and hard_deny.toml's comment for the mirror-image fix on that
+# fixture (absolute targets + absolute `[glob]/**/...` patterns instead).
+governed_tools = ["Bash", "Read", "Write", "Edit"]
+
+[permissions]
+allow = [
+    "Bash(git push origin main)",
+    "Bash(git push --force origin main)",
+    "Bash(npm install lodash)",
+    "Bash(npm uninstall left-pad)",
+    "Bash(docker rm my-container)",
+    "Bash(docker stop my-container)",
+    "Bash(kubectl delete pod test-pod)",
+    "Bash(kubectl delete deployment web)",
+    "Bash(terraform apply -auto-approve)",
+    "Bash(terraform destroy -auto-approve)",
+    "Bash(rm keep.txt)",
+    "Bash(rm -f build.log)",
+    "Bash(chmod 644 file.txt)",
+    "Bash(chown alice file.txt)",
+    "Bash(systemctl restart myapp)",
+    "Bash(systemctl stop myapp)",
+    "Read([regex]^\\./docs/allowed\\.md$)",
+    "Read([regex]^\\./data/allowed\\.csv$)",
+    "Write([regex]^\\./scratch/allowed\\.txt$)",
+    "Write([regex]^\\./out/allowed\\.log$)",
+    "Edit([regex]^\\./config/allowed\\.yaml$)",
+    "Edit([regex]^\\./src/allowed\\.py$)",
+    "Bash(echo hello)",
+    "Bash(ls -R)",
+]

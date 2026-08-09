@@ -35,14 +35,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from toolguard.constants import (
-    FILE_TOOLS,
-    GOVERNED_TOOLS,
+    BUILTIN_TOOLS,
     STATUS_ERROR,
     STATUS_EXECUTED,
     STATUS_REFUSED,
     STATUS_UNKNOWN,
 )
 from toolguard.subagent import parse_jsonl_lines
+from toolguard.tool_spec import TOOLS_BY_NAME
 from toolguard.tools.log_harvest import LogEntry
 
 
@@ -216,16 +216,15 @@ def _command_for_tool(tool: str, tool_input: Dict[str, Any]) -> Optional[str]:
     Extract the command (Bash) or file path (Read/Write/Edit) from a tool input.
 
     Args:
-        tool: Governed tool name.
+        tool: Known (builtin) tool name.
         tool_input: The ``input`` dict of the tool_use item.
 
     Returns:
         The command string or file path, or ``None`` when it is missing/empty.
     """
-    if tool in FILE_TOOLS:
-        value = tool_input.get("file_path")
-    else:
-        value = tool_input.get("command")
+    spec = TOOLS_BY_NAME.get(tool)
+    key = spec.payload_key if spec else "command"
+    value = tool_input.get(key)
     if isinstance(value, str) and value.strip():
         return value
     return None
@@ -240,9 +239,9 @@ def harvest_transcript_file(path: Path) -> List[LogEntry]:
     """
     Parse a single transcript JSONL file into :class:`LogEntry` records.
 
-    Walks the assistant ``tool_use`` items for governed tools, joins each to its
-    ``tool_result`` (for status), and emits one entry per governed tool use that
-    has a parseable timestamp and a non-empty command/path.
+    Walks the assistant ``tool_use`` items for known (builtin) tools, joins each
+    to its ``tool_result`` (for status), and emits one entry per known tool use
+    that has a parseable timestamp and a non-empty command/path.
 
     Args:
         path: Path to a ``*.jsonl`` transcript file.
@@ -277,7 +276,7 @@ def harvest_transcript_file(path: Path) -> List[LogEntry]:
             if not isinstance(item, dict) or item.get("type") != "tool_use":
                 continue
             tool = item.get("name")
-            if tool not in GOVERNED_TOOLS:
+            if tool not in BUILTIN_TOOLS:
                 continue
             tool_input = item.get("input")
             if not isinstance(tool_input, dict):

@@ -4,7 +4,12 @@
 # re-include anything under it. The earlier attempt to track
 # .claude/commands/documentation-review.md that way is therefore impossible
 # here, and that file is now tracked in dot_files only (TOO-19, 2026-07-28).
-.claude
+#
+# ANCHORED to the repo root (leading slash). An unanchored ".claude" matches at
+# every depth, which silently excluded the ten multi-file verdict-corpus
+# fixtures under test/verdict_corpus/configs/*/{home,project}/.claude/ -- real
+# directories, not symlinks. A fresh clone got 14 of the 24 corpus configs.
+/.claude
 logs
 .mcp.json
 .DS_Store

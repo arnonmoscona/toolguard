@@ -1061,10 +1061,10 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         """
         Given a Configuration with no layers
         When Configuration.governed_tools() resolves
-        Then it returns the default ('Bash',)
+        Then it returns the default ('Bash', 'Read', 'Write', 'Edit')
         """
         config = Configuration(layers=())
-        self.assertEqual(config.governed_tools(), ("Bash",))
+        self.assertEqual(config.governed_tools(), ("Bash", "Read", "Write", "Edit"))
 
     def test_governed_tools_union_across_three_levels(self):
         """
@@ -1084,17 +1084,19 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
         """
         Given a hook layer whose governed_tools value is a string rather than a list
         When Configuration.governed_tools() resolves
-        Then the malformed entry is skipped and the default ('Bash',) is returned
+        Then the malformed entry is skipped and the default ('Bash', 'Read', 'Write', 'Edit')
+        is returned
         """
         layers = (self._hook_layer("project", {"governed_tools": "not-a-list"}, 0),)
         config = Configuration(layers=layers)
-        self.assertEqual(config.governed_tools(), ("Bash",))
+        self.assertEqual(config.governed_tools(), ("Bash", "Read", "Write", "Edit"))
 
     def test_governed_tools_ignores_native_layers(self):
         """
         Given a native ('claude') layer declaring governed_tools and no hook layer doing so
         When Configuration.governed_tools() resolves
-        Then the native list is ignored and the default ('Bash',) is returned
+        Then the native list is ignored and the default ('Bash', 'Read', 'Write', 'Edit')
+        is returned
         """
         layers = (
             ConfigLayer(
@@ -1103,7 +1105,7 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
             ),
         )
         config = Configuration(layers=layers)
-        self.assertEqual(config.governed_tools(), ("Bash",))
+        self.assertEqual(config.governed_tools(), ("Bash", "Read", "Write", "Edit"))
 
     def test_takeover_mode_shape(self):
         """
@@ -3015,13 +3017,19 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         block still loaded and resolves normally (a positive control: without
         it, this test would pass vacuously whenever the file simply failed to
         load at all, which would prove nothing about filtering)
+
+        The sneaky ``governed_tools`` value is deliberately a tool NOT in the
+        default governed set (``Bash``/``Read``/``Write``/``Edit``, see
+        ``toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS``) -- otherwise a leaked
+        value would be indistinguishable from the default and this assertion
+        would prove nothing.
         """
         with tempfile.TemporaryDirectory() as tmp:
             xdg = Path(tmp) / "xdg"
             rules_dir = xdg / "toolguard" / "rules"
             rules_dir.mkdir(parents=True)
             (rules_dir / "sneaky.toml").write_text(
-                'governed_tools = ["Write"]\n'
+                'governed_tools = ["mcp__jetbrains__execute_terminal_command"]\n'
                 'no_match_fallback = "deny"\n'
                 "[takeover_mode]\n"
                 "enabled = true\n"
@@ -3036,7 +3044,7 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         # having simply failed to load at all.
         allow, _deny = config.allow_deny_for("Bash")
         self.assertIn("gh *", allow)
-        self.assertEqual(config.governed_tools(), ("Bash",))
+        self.assertEqual(config.governed_tools(), ("Bash", "Read", "Write", "Edit"))
         self.assertEqual(config.resolved_no_match_fallback(), "ask")
         self.assertFalse(config.takeover_mode().enabled)
 

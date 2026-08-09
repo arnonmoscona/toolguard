@@ -170,7 +170,7 @@ strict_mode = true
 [[architecture.layers]]
 name = "foundation"
 # Leaves: no toolguard imports at all, or only other foundation modules.
-packages = ["constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance", "install_update", "file_lock"]
+packages = ["constants", "issues", "path_utils", "normalization", "patterns", "toml_scan", "_git", "install_provenance", "install_update", "file_lock", "tool_spec"]
 
 [[architecture.layers]]
 name = "observability"

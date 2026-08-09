@@ -75,6 +75,7 @@ from toolguard.install_update import (
     local_remote_head,
     remote_head,
 )
+from toolguard.tool_spec import FILE_KIND_TOOLS
 
 
 def _entry_pattern(entry: RuleEntryOrStr) -> str:
@@ -897,7 +898,7 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
         (f"Bash({p.pattern})", p.list_type) for p in required_self_permissions()
     ]
     candidates += [
-        (f"{tool}(~/.toolguard/**)", "allow") for tool in ("Read", "Write", "Edit")
+        (f"{tool}(~/.toolguard/**)", "allow") for tool in sorted(FILE_KIND_TOOLS)
     ]
     candidates.append((_UV_BIN_PATH_PREPEND_ALLOW, "allow"))
 

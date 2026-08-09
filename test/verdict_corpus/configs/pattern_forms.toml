@@ -2,9 +2,9 @@
 # (no prefix, and the explicit [native] spelling), [regex], and [glob] -- for
 # both Bash and file-path tools.
 #
-# governed_tools is set explicitly (default is ('Bash',) when unset) so Read
-# and Write are actually governed -- see hard_deny.toml's identical comment
-# for why this matters for the end-to-end corpus specifically.
+# governed_tools is set explicitly, independent of whatever the default
+# happens to be -- see hard_deny.toml's identical comment for why this
+# matters for the end-to-end corpus specifically.
 governed_tools = ["Bash", "Read", "Write", "Edit"]
 
 [permissions]

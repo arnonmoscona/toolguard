@@ -63,8 +63,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from toolguard.api import decide
 from toolguard.config import Configuration, ConflictOverride
 from toolguard.config_types import RuntimeVerdict, UnitVerdict
-from toolguard.hook import FILE_PATH_TOOLS
 from toolguard.testing.sandbox import Sandbox, experiment
+from toolguard.tool_spec import TOOLS_BY_NAME
 
 CORPUS_DIR = Path(__file__).resolve().parent
 CONFIGS_DIR = CORPUS_DIR / "configs"
@@ -671,12 +671,14 @@ def build_hook_payload(tool: str, target: str) -> Dict[str, Any]:
 
     Returns:
         ``{"tool_name": tool, "tool_input": {...}}`` -- ``run_hook`` fills in
-        ``cwd``/``hook_event_name``/``session_id`` defaults. Dispatches on
-        :data:`toolguard.hook.FILE_PATH_TOOLS` the SAME way ``decision.py``
-        does, so a file-tool target reaches the hook as ``file_path`` and
-        everything else as ``command`` -- matching real Claude Code events.
+        ``cwd``/``hook_event_name``/``session_id`` defaults. The payload key
+        comes from the :mod:`toolguard.tool_spec` registry, so a registered
+        tool's target reaches the hook under its own key (``file_path`` for
+        Read/Write/Edit today) and an unregistered tool falls back to
+        ``command`` -- matching real Claude Code events.
     """
-    key = "file_path" if tool in FILE_PATH_TOOLS else "command"
+    spec = TOOLS_BY_NAME.get(tool)
+    key = spec.payload_key if spec else "command"
     return {"tool_name": tool, "tool_input": {key: target}}
 
 

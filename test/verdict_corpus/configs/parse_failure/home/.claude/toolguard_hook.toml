@@ -1,0 +1,5 @@
+# TOO-45 verdict-corpus fixture (user level, DELIBERATELY MALFORMED TOML).
+# This file must never parse -- it exists to populate
+# Configuration.parse_failures and trigger the ASK floor. Do not "fix" it.
+[permissions
+allow = ["Bash(cat *)"

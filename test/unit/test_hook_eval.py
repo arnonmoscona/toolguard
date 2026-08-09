@@ -25,6 +25,7 @@ from unittest.mock import patch
 from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.hook import _resolve_event, main
+from toolguard.tool_spec import ToolKind, ToolSpec
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
@@ -165,6 +166,57 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         self.assertEqual(verdict.decision, "deny")
         self.assertIn("No file_path provided", verdict.reason)
         self.assertIsNone(verdict.additional_context)
+
+
+class TestResolveEventPayloadKeySeam(unittest.TestCase):
+    """
+    _resolve_event must read the payload key from the tool_spec registry, not
+    a hardcoded 'file_path' literal (TOO-45 punch-list #10 fix pass, M2/m4):
+    pins the seam by swapping in a fake registry entry for 'Read'.
+    """
+
+    @patch.dict(
+        "toolguard.tool_spec.TOOLS_BY_NAME",
+        {
+            "Read": ToolSpec(
+                name="Read",
+                kind=ToolKind.FILE,
+                payload_key="target_path",
+                is_builtin=True,
+            )
+        },
+    )
+    def test_target_is_read_from_the_registered_key(self):
+        """
+        Given a Read registry entry whose payload key is 'target_path'
+        When a tool_input carrying only 'target_path' is resolved
+        Then the target is found (not treated as empty/fail-closed)
+        """
+        cfg = _config(tool="Read", allow=["/proj/**"])
+        verdict = _resolve_event("Read", {"target_path": "/proj/readme.md"}, cfg, True)
+        self.assertEqual(verdict.decision, "allow")
+
+    @patch.dict(
+        "toolguard.tool_spec.TOOLS_BY_NAME",
+        {
+            "Read": ToolSpec(
+                name="Read",
+                kind=ToolKind.FILE,
+                payload_key="target_path",
+                is_builtin=True,
+            )
+        },
+    )
+    def test_empty_target_deny_reason_names_the_registered_key(self):
+        """
+        Given a Read registry entry whose payload key is 'target_path'
+        When the tool_input lacks 'target_path'
+        Then the fail-closed deny reason names 'target_path', not 'file_path'
+        """
+        cfg = _config(tool="Read", allow=["/proj/**"])
+        verdict = _resolve_event("Read", {}, cfg, True)
+        self.assertEqual(verdict.decision, "deny")
+        self.assertIn("No target_path provided", verdict.reason)
 
 
 class TestEvalModeMain(unittest.TestCase):

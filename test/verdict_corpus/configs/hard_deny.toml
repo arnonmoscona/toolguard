@@ -3,11 +3,12 @@
 # hard_deny.deny pattern, not a normal/forced allow -- see
 # Configuration.hard_deny's docstring).
 #
-# governed_tools is set explicitly (default is ('Bash',) when unset) so Read
-# is actually governed -- otherwise the end-to-end corpus's Read(**/.env)
-# hard-deny case would short-circuit to "allow" at the "Not a governed tool"
-# check in hook.py::main BEFORE ever reaching hard_deny, which is a real and
-# correct behaviour but not what this fixture is for. decide() (the in-process
+# governed_tools is set explicitly, independent of whatever the default
+# happens to be, so this fixture keeps governing Read even if the default
+# ever changes -- otherwise the end-to-end corpus's Read(**/.env) hard-deny
+# case would short-circuit to "allow" at the "Not a governed tool" check in
+# hook.py::main BEFORE ever reaching hard_deny, which is a real and correct
+# behaviour but not what this fixture is for. decide() (the in-process
 # corpus's entry point) never consults governed_tools at all, so this key has
 # no effect there -- it only matters for the end-to-end (real hook) corpus.
 governed_tools = ["Bash", "Read", "Write", "Edit"]

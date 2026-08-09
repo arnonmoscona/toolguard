@@ -18,9 +18,12 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+from toolguard.tool_spec import ToolKind, ToolSpec
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.transcript_harvest import (
+    _command_for_tool,
     _extract_text,
     harvest_transcript_file,
     harvest_transcripts,
@@ -248,6 +251,32 @@ class TestToolExtraction(_TempDirMixin, unittest.TestCase):
             ],
         )
         self.assertEqual(harvest_transcript_file(path), [])
+
+    @patch.dict(
+        "toolguard.tools.transcript_harvest.TOOLS_BY_NAME",
+        {
+            "Read": ToolSpec(
+                name="Read",
+                kind=ToolKind.FILE,
+                payload_key="target_path",
+                is_builtin=True,
+            )
+        },
+    )
+    def test_command_for_tool_reads_the_registered_key(self):
+        """
+        TOO-45 punch-list #10 fix pass (m3): _command_for_tool must dispatch
+        through the tool_spec registry, not a hardcoded 'command'/'file_path'
+        literal.
+
+        Given a Read registry entry whose payload key is 'target_path'
+        When a tool_input carrying only 'target_path' is extracted
+        Then the target is returned (not None)
+        """
+        self.assertEqual(
+            _command_for_tool("Read", {"target_path": "/abs/foo.py"}),
+            "/abs/foo.py",
+        )
 
 
 # ---------------------------------------------------------------------------
