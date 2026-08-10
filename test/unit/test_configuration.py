@@ -34,8 +34,33 @@ from toolguard.config import (
     load_configuration,
 )
 from toolguard.config_types import LevelMatch, entry_for_pattern
-from toolguard.permission_resolution import resolve_permission_detailed
+from toolguard.permission_resolution import resolve_permission_cascade
 from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry, _strip_tool_wrapper
+
+
+def _resolve_via_cascade(config, tool_name, decide, subject="Command"):
+    """
+    Resolve *tool_name* against *config*, computing each level's match with
+    *decide* (a test-local stand-in, never a real matcher) BEFORE folding.
+
+    TOO-45 punch-list #03: the cascade (more-specific-wins, override
+    detection, the ASK floor) is a pure fold over already-computed
+    :class:`~toolguard.config_types.LevelMatch` values -- there is no
+    callback crossing into :mod:`toolguard.permission_resolution` any more,
+    only data built locally here.
+    """
+    levels = config.permission_levels_with_provenance(tool_name)
+    matched_levels = [
+        (decide(allow, deny, ask), layers) for allow, deny, ask, layers in levels
+    ]
+    return resolve_permission_cascade(
+        matched_levels,
+        tool_name,
+        config.parse_failures,
+        config.has_any_rules(tool_name),
+        config.resolved_no_match_fallback(),
+        subject=subject,
+    )
 
 
 class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
@@ -2820,7 +2845,7 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
 class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
     """
     Existing generic Configuration surfaces (permission_levels_with_provenance,
-    the engine's resolve_permission_detailed, hard_deny, toolguard_permissions,
+    the engine's resolve_permission_cascade, hard_deny, toolguard_permissions,
     allow_deny_for) correctly treat rules-dir-sourced layers as ordinary
     user-level layers once such layers exist -- no new code is needed for
     that (TOO-30 item 9).
@@ -2888,7 +2913,7 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         """
         Given a project-level deny on 'gh *' and a (less-specific) rules-dir
         allow on the same pattern
-        When resolve_permission_detailed('Bash', ...) resolves the cascade
+        When resolve_permission_cascade('Bash', ...) resolves the cascade
         Then the project-level deny wins (more-specific-wins across levels,
         unaffected by the new source)
         """
@@ -2933,14 +2958,14 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(config, "Bash", _decide)
+            resolved = _resolve_via_cascade(config, "Bash", _decide)
         self.assertEqual(resolved.decision, "deny")
 
     def test_rules_dir_deny_beats_claude_allow_within_user_level(self):
         """
         Given a ~/.claude allow and a rules-dir deny for the SAME pattern at the
         SAME (user) specificity
-        When resolve_permission_detailed('Bash', ...) resolves that level
+        When resolve_permission_cascade('Bash', ...) resolves that level
         Then deny wins within the level (deny-wins-within-a-level, now spanning
         both the ~/.claude source and the rules-dir source)
         """
@@ -2976,7 +3001,7 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(config, "Bash", _decide)
+            resolved = _resolve_via_cascade(config, "Bash", _decide)
         self.assertEqual(resolved.decision, "deny")
 
     def test_rules_dir_hard_deny_pooled_with_claude_hard_deny(self):
@@ -3280,11 +3305,11 @@ class TestRulesDirectoryValidationAndProvenance(
             allow, _deny = config.allow_deny_for("Bash")
         self.assertIn("gh *", allow)
 
-    def test_resolve_permission_detailed_reason_cites_rules_dir_file_path(self):
+    def test_resolve_permission_cascade_reason_cites_rules_dir_file_path(self):
         """
         Given a single rules-dir-sourced layer (level 'user') whose allow
         pattern wins a resolution
-        When resolve_permission_detailed('Bash', ...) resolves the decision
+        When resolve_permission_cascade('Bash', ...) resolves the decision
         Then the returned reason string cites the specific rules-dir file path
         via the existing provenance-suffix mechanism
         """
@@ -3312,7 +3337,7 @@ class TestRulesDirectoryValidationAndProvenance(
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(config, "Bash", _decide)
+            resolved = _resolve_via_cascade(config, "Bash", _decide)
         self.assertIn(str(rules_path), resolved.reason)
         self.assertIn("user:", resolved.reason)
 
@@ -3350,13 +3375,13 @@ class TestRulesDirectoryExplicitModeBypass(ConfigIsolationMixin, unittest.TestCa
 
 class TestParseFailureAskFloor(unittest.TestCase):
     """
-    TOO-19 fail-open fix: permission_resolution.resolve_permission_detailed()
+    TOO-19 fail-open fix: permission_resolution.resolve_permission_cascade()
     clamps every decision to 'ask' when Configuration.parse_failures is
     non-empty (a governed config file failed to parse), mirroring the ASK
     floor already implemented for foreign inline code in
     toolguard/compound.py:65-71 -- an explicit 'deny' (including hard_deny,
     which never reaches this function -- see resolve.py, checked before
-    resolve_permission_detailed is called) is
+    the cascade is called) is
     preserved unchanged; 'allow' and 'ask' are clamped to 'ask' with a reason
     naming the broken file(s). Closes the hole where a single TOML syntax
     error silently dropped every rule (including deny/hard_deny) in that
@@ -3420,7 +3445,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
         """
         Given a config whose Bash allow pattern matches the command AND a
             recorded parse_failures entry for a broken file
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_permission_cascade('Bash', ...) resolves the command
         Then the decision is 'ask' (not 'allow') and the reason names the
             broken file and its parse error, not the original allow reason
         """
@@ -3434,9 +3459,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._decide_allow_git
-            )
+            resolved = _resolve_via_cascade(config, "Bash", self._decide_allow_git)
 
         self.assertEqual(resolved.decision, "ask")
         self.assertIn(str(broken), resolved.reason)
@@ -3447,7 +3470,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
         """
         Given a config with NO matching rule (falls through to the default
             'ask' no-match-fallback) AND a recorded parse failure
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_permission_cascade('Bash', ...) resolves the command
         Then the decision is 'ask' and the reason is the ASK-floor message
             naming the broken file -- not the generic no-match reason --
             mirroring compound.py's floor, which always rewrites the reason
@@ -3461,9 +3484,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._decide_allow_git
-            )
+            resolved = _resolve_via_cascade(config, "Bash", self._decide_allow_git)
 
         self.assertEqual(resolved.decision, "ask")
         self.assertIn(str(broken), resolved.reason)
@@ -3473,7 +3494,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
         """
         Given a config whose Bash deny pattern matches the command AND a
             recorded parse failure for a DIFFERENT file
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_permission_cascade('Bash', ...) resolves the command
         Then the decision is still 'deny' -- a deny is never weakened by the
             ASK floor -- and the reason is the ORIGINAL deny reason, not the
             broken-file ASK-floor message
@@ -3486,7 +3507,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(config, "Bash", self._decide_deny_rm)
+            resolved = _resolve_via_cascade(config, "Bash", self._decide_deny_rm)
 
         self.assertEqual(resolved.decision, "deny")
         self.assertIn("Command matches deny pattern: rm -rf /", resolved.reason)
@@ -3496,7 +3517,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
         """
         Given a config with NO recorded parse failures (the default/normal
             case -- Configuration.parse_failures defaults to ())
-        When resolve_permission_detailed('Bash', ...) resolves an allow match
+        When resolve_permission_cascade('Bash', ...) resolves an allow match
         Then the decision is 'allow', unchanged -- this is the most important
             regression guard: the overwhelming majority of the 1691-test
             baseline builds Configuration this way and must see zero change
@@ -3508,9 +3529,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._decide_allow_git
-            )
+            resolved = _resolve_via_cascade(config, "Bash", self._decide_allow_git)
 
         self.assertEqual(resolved.decision, "allow")
         self.assertIn("Command matches allow pattern: git *", resolved.reason)
@@ -3519,7 +3538,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
         """
         Given a structured allow entry carrying additionalContext AND a
             recorded parse failure for a broken file
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_permission_cascade('Bash', ...) resolves the command
         Then the decision is clamped to 'ask' by the floor and
             additional_context is None -- the winning rule match no longer
             determines the verdict, same reasoning as provenance/override
@@ -3549,9 +3568,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._decide_allow_git
-            )
+            resolved = _resolve_via_cascade(config, "Bash", self._decide_allow_git)
 
         self.assertEqual(resolved.decision, "ask")
         self.assertIsNone(resolved.additional_context)
@@ -3567,7 +3584,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             most permissive possible setting -- the deliberate "no floor"
             escape hatch) AND a recorded parse failure for a broken file, and
             an allow rule that matches the command
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_permission_cascade('Bash', ...) resolves the command
         Then the decision is STILL clamped to 'ask' -- a broken config is not
             a policy question undecidable_fallback (or any setting) can
             answer, so it is completely unaffected by this test's
@@ -3602,9 +3619,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._decide_allow_git
-            )
+            resolved = _resolve_via_cascade(config, "Bash", self._decide_allow_git)
 
         self.assertEqual(resolved.decision, "ask")
         self.assertIn(str(broken), resolved.reason)
@@ -3688,12 +3703,12 @@ class TestAdditionalContextResolution(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            return resolve_permission_detailed(config, "Bash", self._decide)
+            return _resolve_via_cascade(config, "Bash", self._decide)
 
     def test_structured_allow_entry_surfaces_additional_context(self):
         """
         Given a structured allow entry with additionalContext = 'why'
-        When resolve_permission_detailed('Bash', ...) resolves a match
+        When resolve_permission_cascade('Bash', ...) resolves a match
         Then the decision is 'allow' and additional_context is 'why'
         """
         config = self._config(allow=[{"match": "git *", "additionalContext": "why"}])
@@ -3704,7 +3719,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
     def test_structured_deny_entry_surfaces_additional_context(self):
         """
         Given a structured deny entry with additionalContext = 'why not'
-        When resolve_permission_detailed('Bash', ...) resolves a match
+        When resolve_permission_cascade('Bash', ...) resolves a match
         Then the decision is 'deny' and additional_context is 'why not'
         """
         config = self._config(deny=[{"match": "git *", "additionalContext": "why not"}])
@@ -3715,7 +3730,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
     def test_structured_ask_entry_surfaces_additional_context(self):
         """
         Given a structured ask entry with additionalContext = 'careful'
-        When resolve_permission_detailed('Bash', ...) resolves a match
+        When resolve_permission_cascade('Bash', ...) resolves a match
         Then the decision is 'ask' and additional_context is 'careful'
         """
         config = self._config(ask=[{"match": "git *", "additionalContext": "careful"}])
@@ -3726,7 +3741,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
     def test_plain_string_rule_yields_none(self):
         """
         Given a plain-string (unstructured) allow rule
-        When resolve_permission_detailed('Bash', ...) resolves a match
+        When resolve_permission_cascade('Bash', ...) resolves a match
         Then additional_context is None -- there is no metadata to surface
         """
         config = self._config(allow=["git *"])
@@ -3737,7 +3752,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
     def test_structured_entry_without_key_yields_none(self):
         """
         Given a structured allow entry with no additionalContext key at all
-        When resolve_permission_detailed('Bash', ...) resolves a match
+        When resolve_permission_cascade('Bash', ...) resolves a match
         Then additional_context is None
         """
         config = self._config(allow=[{"match": "git *", "autoMode": True}])
@@ -3748,7 +3763,7 @@ class TestAdditionalContextResolution(unittest.TestCase):
     def test_no_match_fallback_yields_none(self):
         """
         Given a config with rules configured but none matching the command
-        When resolve_permission_detailed('Bash', ...) falls through to the
+        When resolve_permission_cascade('Bash', ...) falls through to the
             no_match_fallback branch
         Then additional_context is None (no rule matched, nothing to surface)
         """

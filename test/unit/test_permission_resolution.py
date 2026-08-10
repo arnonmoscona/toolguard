@@ -17,35 +17,10 @@ Run with:
 import unittest
 from pathlib import Path
 from types import MappingProxyType
-from typing import Optional, Sequence
 from unittest.mock import patch
 
 from toolguard.config import Configuration, ConfigLayer, Provenance, TakeoverConfig
-from toolguard.config_types import LevelMatch
-from toolguard.permission_resolution import resolve_permission_detailed
-from toolguard.permissions import decide_command_at_level_detailed
-
-
-def _detailed_decider(command):
-    """
-    Return a per-level detailed decider bound to *command*.
-
-    Mirrors ``test_logging_streams.py``'s helper of the same name: drives the
-    REAL per-level Bash decider (:func:`decide_command_at_level_detailed`)
-    rather than a hand-rolled stand-in, so pattern matching (e.g. the
-    trailing-wildcard ``rm -rf *`` form) is exercised for real.
-    """
-
-    def _decide(
-        allow: Sequence[str],
-        deny: Sequence[str],
-        ask: Sequence[str] = (),
-    ) -> Optional[LevelMatch]:
-        return decide_command_at_level_detailed(
-            command, list(allow), list(deny), ask_patterns=list(ask)
-        )
-
-    return _decide
+from toolguard.permission_resolution import resolve_command_permission
 
 
 def _project_bash_config(*, deny=(), parse_failures=()):
@@ -94,7 +69,7 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
         Given a Configuration with BOTH a recorded parse_failures entry for a
             broken file AND a deny rule (carrying additionalContext) that
             matches the command
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_command_permission('Bash', ...) resolves the command
         Then the decision is 'deny', and its provenance, additional_context,
             AND matched_rule are all preserved unchanged -- the parse-failure
             ASK floor never weakens a deny, so the explanation for why it was
@@ -113,9 +88,7 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "deny"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", _detailed_decider("rm -rf /tmp/x")
-            )
+            resolved = resolve_command_permission(config, "Bash", "rm -rf /tmp/x")
 
         self.assertEqual(resolved.decision, "deny")
         self.assertIsNotNone(resolved.provenance)
@@ -129,7 +102,7 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
         """
         Given the SAME broken-config parse_failures entry, but a command that
             matches nothing (no deny rule fires)
-        When resolve_permission_detailed('Bash', ...) resolves the command
+        When resolve_command_permission('Bash', ...) resolves the command
         Then the decision is 'ask' -- the floor's normal clamping behaviour
             for a non-deny decision is unaffected by this test module's new
             deny-preservation coverage; a regression that clamped everything
@@ -156,9 +129,7 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
             "takeover_mode",
             return_value=TakeoverConfig(False, (), (), "ask"),
         ):
-            resolved = resolve_permission_detailed(
-                config, "Bash", _detailed_decider("ls -la")
-            )
+            resolved = resolve_command_permission(config, "Bash", "ls -la")
 
         self.assertEqual(resolved.decision, "ask")
         self.assertIn(str(broken), resolved.reason)

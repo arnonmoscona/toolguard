@@ -35,10 +35,8 @@ from toolguard.hook import (
     parse_hook_input,
 )
 from toolguard.log_writer import LogRecord
-from toolguard.resolve import (
-    _decide_file_path_at_level_detailed,
-    resolve_bash_permission_detailed,
-)
+from toolguard.file_matching import decide_file_path_at_level_detailed
+from toolguard.resolve import resolve_bash_permission_detailed
 from toolguard.tool_spec import ToolKind, ToolSpec
 from toolguard import once_per_store
 
@@ -79,7 +77,7 @@ def check_file_path_permission(
     Evaluate a file path against flat allow/deny pattern lists, returning (decision, reason).
 
     Thin test adapter over the live single-level resolver
-    :func:`toolguard.resolve._decide_file_path_at_level_detailed`. It preserves the
+    :func:`toolguard.file_matching.decide_file_path_at_level_detailed`. It preserves the
     decision semantics the removed ``check_file_path_permission`` had (deny-first,
     glob/regex/native prefixes, tilde expansion, default-deny when nothing matches)
     so the existing file-path test intents carry over unchanged. An empty
@@ -87,7 +85,7 @@ def check_file_path_permission(
     or ``~``-anchored, so project-root anchoring is a no-op.
     """
     config = Configuration(layers=())
-    result = _decide_file_path_at_level_detailed(
+    result = decide_file_path_at_level_detailed(
         file_path, allow_patterns, deny_patterns, config, extended_syntax
     )
     if result is None:
@@ -152,7 +150,7 @@ def _fake_config(
             # API-sync with the real Configuration's engine query surface
             # (TOO-45 D1a): the engine (toolguard.permission_resolution) now
             # drives the cascade itself and calls this instead of a
-            # fake-owned resolve_permission_detailed. The fake models a
+            # fake-owned equivalent. The fake models a
             # single hierarchy level per tool with no provenance layers, so
             # config_types.provenance_for_pattern/entry_for_pattern (called
             # by the engine directly, TOO-45 R2d -- no longer reached

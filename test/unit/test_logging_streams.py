@@ -22,7 +22,6 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
-from typing import Optional, Sequence
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
@@ -33,7 +32,7 @@ from toolguard.config import (
     RuntimeVerdict,
 )
 from toolguard.config_divergence import DivergenceCheckResult
-from toolguard.config_types import LevelMatch, provenance_for_pattern
+from toolguard.config_types import provenance_for_pattern
 from toolguard.error_log import log_conflict, log_error, log_warning
 from toolguard.log_writer import (
     _DISCOVERY_LOG_FILENAME,
@@ -41,8 +40,7 @@ from toolguard.log_writer import (
     _parse_discovery_line,
     log_discovery,
 )
-from toolguard.permission_resolution import resolve_permission_detailed
-from toolguard.permissions import decide_command_at_level_detailed
+from toolguard.permission_resolution import resolve_command_permission
 
 
 def _bash_layer(allow, deny, specificity, path):
@@ -55,21 +53,6 @@ def _bash_layer(allow, deny, specificity, path):
     }
     prov = Provenance("project", "toolguard_hook", "toml", Path(path), specificity)
     return ConfigLayer(provenance=prov, content=MappingProxyType(content))
-
-
-def _detailed_decider(command):
-    """Return a per-level detailed decider bound to a command (for Bash)."""
-
-    def _decide(
-        allow: Sequence[str],
-        deny: Sequence[str],
-        ask: Sequence[str] = (),
-    ) -> Optional[LevelMatch]:
-        return decide_command_at_level_detailed(
-            command, list(allow), list(deny), ask_patterns=list(ask)
-        )
-
-    return _decide
 
 
 class TestLogStreamSeparation(unittest.TestCase):
@@ -148,7 +131,7 @@ class TestTakeoverNoticeNotPersisted(unittest.TestCase):
 
 
 class TestProvenanceInReasons(unittest.TestCase):
-    """The engine's resolve_permission_detailed appends matched-rule provenance to the reason."""
+    """The engine's resolve_command_permission appends matched-rule provenance to the reason."""
 
     def test_allow_reason_carries_provenance_and_stays_compatible(self):
         """
@@ -161,9 +144,7 @@ class TestProvenanceInReasons(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = resolve_permission_detailed(
-            config, "Bash", _detailed_decider("git status")
-        )
+        resolved = resolve_command_permission(config, "Bash", "git status")
         self.assertIsInstance(resolved, RuntimeVerdict)
         self.assertEqual(resolved.decision, "allow")
         # Backward-compatible substring still present.
@@ -185,9 +166,7 @@ class TestProvenanceInReasons(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = resolve_permission_detailed(
-            config, "Bash", _detailed_decider("rm -rf /")
-        )
+        resolved = resolve_command_permission(config, "Bash", "rm -rf /")
         self.assertEqual(resolved.decision, "ask")
         self.assertIsNone(resolved.provenance)
         self.assertEqual(
@@ -198,7 +177,7 @@ class TestProvenanceInReasons(unittest.TestCase):
 
 
 class TestConflictDetection(unittest.TestCase):
-    """Allow-over-deny override detection in the engine's resolve_permission_detailed."""
+    """Allow-over-deny override detection in the engine's resolve_command_permission."""
 
     def test_allow_over_deny_records_override_with_both_provenances(self):
         """
@@ -214,9 +193,7 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer([], ["git *"], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_permission_detailed(
-            config, "Bash", _detailed_decider("git push")
-        )
+        resolved = resolve_command_permission(config, "Bash", "git push")
         self.assertEqual(resolved.decision, "allow")
         # RuntimeVerdict.overrides (TOO-45 R1c) is a list of (identifier,
         # ConflictOverride) pairs -- at this internal per-level layer the
@@ -239,9 +216,7 @@ class TestConflictDetection(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = resolve_permission_detailed(
-            config, "Bash", _detailed_decider("git push")
-        )
+        resolved = resolve_command_permission(config, "Bash", "git push")
         self.assertEqual(resolved.decision, "allow")
         self.assertEqual(resolved.overrides, [])
 
@@ -257,9 +232,7 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer(["rm *"], [], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_permission_detailed(
-            config, "Bash", _detailed_decider("rm -rf /")
-        )
+        resolved = resolve_command_permission(config, "Bash", "rm -rf /")
         self.assertEqual(resolved.decision, "deny")
         self.assertEqual(resolved.overrides, [])
 
@@ -305,9 +278,7 @@ class TestProvenanceHelpers(unittest.TestCase):
                 _bash_layer([], ["git *"], 2, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_permission_detailed(
-            config, "Bash", _detailed_decider("git push")
-        )
+        resolved = resolve_command_permission(config, "Bash", "git push")
         self.assertEqual(resolved.decision, "allow")
         self.assertEqual(len(resolved.overrides), 1)
         self.assertEqual(resolved.overrides[0][1].overridden_provenance.specificity, 2)

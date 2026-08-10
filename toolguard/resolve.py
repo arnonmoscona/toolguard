@@ -26,15 +26,31 @@ here, ensuring that what the hook decides at runtime is EXACTLY what tooling
 computes -- there is no separate copy of the logic to drift.
 
 Functions moved here from ``hook.py`` (previously private helpers):
-- :func:`_anchor_file_pattern`
-- :func:`_match_file_path_pattern`
-- :func:`_decide_file_path_at_level_detailed`
-- :func:`_check_file_path_hard_deny`
 - :func:`resolve_file_path_permission_detailed`
 - :func:`resolve_bash_permission_detailed`
 
 ``hook.py`` re-exports every name that was previously importable from it so
 that all existing callers (including tests) remain unbroken.
+
+TOO-45 punch-list #03 moved the file-path pattern-matching cluster
+(``_anchor_file_pattern``, ``_collapse_slashes``, ``_match_file_path_pattern``,
+``_first_matching_file_pattern``, ``decide_file_path_at_level_detailed``, and
+``check_file_path_hard_deny``) out to :mod:`toolguard.file_matching`, and
+removed the runtime cycle that module previously formed with
+:mod:`toolguard.permission_resolution`: this module used to build a
+per-level decision closure and hand it down as a callable
+(``permission_resolution`` calling back UP into ``resolve.py``); now
+``permission_resolution`` imports its matchers directly from
+:mod:`toolguard.permissions` and :mod:`toolguard.file_matching`, and this
+module calls :func:`~toolguard.permission_resolution.resolve_command_permission`/
+:func:`~toolguard.permission_resolution.resolve_file_path_permission`
+straight through, passing the command/file path as plain data. Only
+:func:`check_file_path_hard_deny` is still called directly from here (it
+runs BEFORE the cascade, not as part of it).
+:func:`resolve_file_path_permission_detailed` itself stays here: it shares
+:func:`_hard_deny_additional_context` with the Bash resolver below, and
+moving it into ``file_matching.py`` would require that module to import back
+from this one -- the exact kind of cycle this punch-list removes.
 
 Result dataclasses
 ------------------
@@ -47,12 +63,13 @@ one sub-command's outcome inside a compound Bash resolution, carried on
 ``RuntimeVerdict.sub_matches``. :class:`~toolguard.config_types.LevelMatch`
 (TOO-45 R1f) is a third, lower altitude still: the raw
 ``(decision, reason, matched_pattern)`` result of ONE hierarchy level or
-hard-deny pool check, returned by :func:`_decide_file_path_at_level_detailed`
-and :func:`_check_file_path_hard_deny` below (and by
+hard-deny pool check, returned by
+:func:`~toolguard.file_matching.decide_file_path_at_level_detailed`
+and :func:`~toolguard.file_matching.check_file_path_hard_deny` (and by
 :func:`toolguard.permissions.check_hard_deny`/
 :func:`toolguard.permissions.decide_command_at_level_detailed`) -- it is the
-``decide_detailed`` callback contract
-:func:`~toolguard.permission_resolution.resolve_permission_detailed` consumes.
+per-level result :func:`~toolguard.permission_resolution.resolve_permission_cascade`
+folds over.
 All three are actually DEFINED in :mod:`toolguard.config_types`, not here --
 see that module's docstring and each class's own docstring for why
 (:mod:`toolguard.permission_resolution` constructs/consumes them directly and
@@ -65,7 +82,7 @@ callers unpack the result as a bare 3-tuple were removed once their only
 callers (8 test call sites) were converted to attribute access.
 """
 
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 from toolguard.compound import (
     _combine_strictest,
@@ -78,194 +95,24 @@ from toolguard.config_types import LevelMatch as LevelMatch
 from toolguard.config_types import ResolveConfig
 from toolguard.config_types import RuntimeVerdict as RuntimeVerdict
 from toolguard.config_types import UnitVerdict as UnitVerdict
-from toolguard.normalization import expand_tilde
-from toolguard.patterns import PatternType, match_pattern, parse_pattern
+from toolguard.file_matching import check_file_path_hard_deny
 from toolguard.permission_resolution import (
     apply_parse_failure_floor,
-    resolve_permission_detailed,
+    resolve_command_permission,
+    resolve_file_path_permission,
 )
-from toolguard.permissions import (
-    check_hard_deny,
-    decide_command_at_level_detailed,
-    is_universal_pattern,
-    resolve_allow_ask,
-)
+from toolguard.permissions import check_hard_deny
 
 
 # ---------------------------------------------------------------------------
-# File-path helpers (pure)
+# File-path helpers
+#
+# The pattern-matching cluster itself lives in `toolguard.file_matching`
+# (TOO-45 punch-list #03). Only `check_file_path_hard_deny` is imported here,
+# because only it runs before the cascade; everything else is called from
+# `permission_resolution`. Importers wanting the rest import that module
+# directly -- this one deliberately does not re-export them.
 # ---------------------------------------------------------------------------
-
-
-def _anchor_file_pattern(pattern: str, config, extended_syntax: bool) -> str:
-    """
-    Anchor a relative file-path permission pattern to the PROJECT ROOT.
-
-    Per the project-root-relative-path rule, a relative file-path pattern (one not
-    starting with ``/`` or ``~`` after any extended-syntax prefix) resolves against
-    the project root regardless of which config level declared it. Absolute and
-    ``~`` patterns are returned unchanged.
-
-    Any extended-syntax prefix (``[glob]``/``[regex]``/``[native]``) is preserved:
-    only the path body after the prefix is anchored. ``[regex]`` patterns are left
-    untouched (a regex is not a path and must not be path-joined).
-
-    Args:
-        pattern: A file-path permission pattern (wrapper already stripped).
-        config: The resolved :class:`~toolguard.config.Configuration`.
-        extended_syntax: Whether extended prefixes are honoured.
-
-    Returns:
-        The pattern with its path body anchored to the project root when relative.
-    """
-    prefix = ""
-    body = pattern
-    if extended_syntax:
-        for known in ("[glob]", "[regex]", "[native]"):
-            if pattern.startswith(known):
-                prefix = known
-                body = pattern[len(known) :]
-                break
-    # A regex pattern is not a filesystem path; never path-join it.
-    if prefix == "[regex]":
-        return pattern
-    return prefix + config.resolve_config_path(body)
-
-
-def _collapse_slashes(path_or_pattern: str) -> str:
-    """
-    Collapse runs of consecutive ``/`` into a single ``/``.
-
-    Fixes patterns or paths that carry a redundant doubled slash (e.g.
-    ``//Users/x`` -- common in rules copied from Claude's ``settings.local.json``)
-    so they match the equivalent single-slash form. Only slash characters are
-    affected; ``**`` globstar segments and other glob metacharacters are untouched.
-
-    Args:
-        path_or_pattern: A file path or a GLOB path pattern.
-
-    Returns:
-        The input with every run of consecutive slashes reduced to one.
-    """
-    while "//" in path_or_pattern:
-        path_or_pattern = path_or_pattern.replace("//", "/")
-    return path_or_pattern
-
-
-def _match_file_path_pattern(
-    pattern: str, expanded_path: str, extended_syntax: bool
-) -> bool:
-    """
-    Match a file path against a single pattern, respecting extended syntax prefixes.
-
-    DEFAULT patterns are treated as GLOB (backwards compatible with existing
-    behaviour).  Extended prefixes (``[regex]``, ``[glob]``, ``[native]``) are
-    honoured when ``extended_syntax`` is ``True``.
-
-    Args:
-        pattern: The (already anchored) permission pattern.
-        expanded_path: The file path after tilde-expansion.
-        extended_syntax: Whether to honour extended prefixes.
-
-    Returns:
-        ``True`` when the pattern matches ``expanded_path``.
-    """
-    pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
-
-    # For file paths, DEFAULT patterns use the same semantics as GLOB
-    if pattern_type == PatternType.DEFAULT:
-        pattern_type = PatternType.GLOB
-
-    # Collapse redundant slashes for GLOB matching so a pattern carrying a doubled
-    # slash (e.g. '//Users/...') still matches the real single-slash path. Applied
-    # to BOTH the pattern and the path so allow and deny stay consistent. Left
-    # untouched for regex/native, where the exact characters are significant.
-    if pattern_type == PatternType.GLOB:
-        actual_pattern = _collapse_slashes(actual_pattern)
-        expanded_path = _collapse_slashes(expanded_path)
-
-    try:
-        return match_pattern(pattern_type, actual_pattern, expanded_path)
-    except ValueError, TypeError:
-        return False
-
-
-def _first_matching_file_pattern(
-    patterns: List[str], expanded_path: str, config, extended_syntax: bool
-) -> Tuple[bool, Optional[str]]:
-    """Return ``(True, pattern)`` for the first file pattern that matches, else ``(False, None)``."""
-    for pattern in patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return True, pattern
-    return False, None
-
-
-def _decide_file_path_at_level_detailed(
-    file_path: str,
-    allow_patterns: List[str],
-    deny_patterns: List[str],
-    config,
-    extended_syntax: bool,
-    ask_patterns: Optional[List[str]] = None,
-) -> Optional[LevelMatch]:
-    """
-    Decide a file path's outcome at ONE config level, reporting the matched pattern.
-
-    Mirrors :func:`toolguard.permissions.decide_command_at_level_detailed` for
-    file-path tools so a matched file-path pattern can be mapped back to its
-    source provenance by the provenance-aware resolver. Deny-first within the
-    level; the allow and ask lists then combine by more-specific-wins (blanket
-    ``*``-class ask patterns ignored) so an ask pattern yields an ``ask`` prompt.
-    Relative patterns are anchored to the project root before matching.
-
-    Args:
-        file_path: The file path under evaluation.
-        allow_patterns: This level's allow patterns (wrapper-free).
-        deny_patterns: This level's deny patterns (wrapper-free).
-        config: The resolved :class:`~toolguard.config.Configuration` (provides
-            project-root anchoring).
-        extended_syntax: Whether extended prefixes are honoured.
-        ask_patterns: This level's ask patterns (wrapper-free).  Optional/defaulting
-            to none so legacy callers keep their exact allow/deny behavior.
-
-    Returns:
-        A :class:`~toolguard.config_types.LevelMatch` when this level
-        matches (TOO-45 R1f converted the bare ``(decision, reason,
-        matched_pattern)`` tuple this used to return into this dataclass),
-        else ``None``.
-    """
-    expanded_path = expand_tilde(file_path)
-
-    for pattern in deny_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return LevelMatch(
-                decision="deny",
-                reason=f"Path matches deny pattern: {pattern}",
-                matched_pattern=pattern,
-            )
-
-    allow_hit = _first_matching_file_pattern(
-        allow_patterns, expanded_path, config, extended_syntax
-    )
-
-    ask_hit: Tuple[bool, Optional[str]] = (False, None)
-    if ask_patterns:
-        non_blanket_ask = [p for p in ask_patterns if not is_universal_pattern(p)]
-        ask_hit = _first_matching_file_pattern(
-            non_blanket_ask, expanded_path, config, extended_syntax
-        )
-
-    combined = resolve_allow_ask(allow_hit, ask_hit)
-    if combined is None:
-        return None
-    decision, matched_pattern = combined
-    return LevelMatch(
-        decision=decision,
-        reason=f"Path matches {decision} pattern: {matched_pattern}",
-        matched_pattern=matched_pattern,
-    )
 
 
 def _hard_deny_additional_context(
@@ -277,7 +124,7 @@ def _hard_deny_additional_context(
     A hard deny IS the deciding match, and "why is this forbidden, and what
     should I do instead" is exactly where an explanation earns its keep, so
     both governed paths surface it: the file-path pool
-    (:func:`_check_file_path_hard_deny`) and the per-sub-command Bash pool
+    (:func:`~toolguard.file_matching.check_file_path_hard_deny`) and the per-sub-command Bash pool
     (:func:`resolve_bash_permission_detailed`). This is the single lookup they
     share, so the two cannot drift apart -- an asymmetry here would make any
     documentation of the feature wrong for one tool family or the other.
@@ -315,77 +162,6 @@ def _hard_deny_additional_context(
     return None
 
 
-def _check_file_path_hard_deny(
-    tool_name: str, file_path: str, config, extended_syntax: bool
-) -> Optional[LevelMatch]:
-    """
-    Apply the unoverridable hard-deny rule to a file path, checked FIRST.
-
-    The pooled ``[hard_deny]`` (deny, allow) patterns for ``tool_name`` are
-    collected across ALL levels (see
-    :meth:`~toolguard.config.Configuration.hard_deny`). The path is hard-denied
-    when it matches any hard-deny ``deny`` pattern AND does NOT match a hard-deny
-    ``allow`` carve-out. Relative patterns are anchored to the project root, the
-    same as normal file-path patterns.
-
-    TOO-45 R1f: the matched pattern is now reported as its own
-    ``LevelMatch.matched_pattern`` field, mirroring
-    :func:`toolguard.permissions.check_hard_deny`'s Bash-side convention,
-    instead of this function looking up the ``additionalContext`` enrichment
-    (TOO-19 Phase 1) itself and returning that. The caller
-    (:func:`resolve_file_path_permission_detailed`) now does that lookup via
-    :func:`_hard_deny_additional_context`, exactly mirroring how
-    :func:`resolve_bash_permission_detailed`'s ``_decide`` closure already
-    does it for the Bash side -- one fewer asymmetry between the two
-    hard-deny paths. Before R1f the matched pattern itself was discarded
-    here (a TOO-45 R3 comment at the call site explained why closing that
-    gap was out of R3's scope); this does NOT change the caller's final
-    ``RuntimeVerdict.matched_rule``, which deliberately still stays
-    ``None`` for a file-path hard-deny -- see that call site's own comment.
-
-    Args:
-        tool_name: ``'Read'``, ``'Write'``, or ``'Edit'``.
-        file_path: The file path under evaluation.
-        config: The resolved :class:`~toolguard.config.Configuration` (provides
-            hard_deny pool + anchoring).
-        extended_syntax: Whether extended prefixes are honoured.
-
-    Returns:
-        A :class:`~toolguard.config_types.LevelMatch` with
-        ``decision='deny'`` and ``matched_pattern`` set to the matched
-        hard-deny pattern when the path is hard-denied, otherwise ``None``
-        so the caller falls through to the normal more-specific-wins
-        cascade.
-    """
-    deny_patterns, allow_patterns = config.hard_deny(tool_name)
-    if not deny_patterns:
-        return None
-
-    expanded_path = expand_tilde(file_path)
-
-    matched_deny = None
-    for pattern in deny_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            matched_deny = pattern
-            break
-
-    if matched_deny is None:
-        return None
-
-    # A hard-deny matched. An allow carve-out exempts the path from the hard deny.
-    for pattern in allow_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
-            return None
-
-    return LevelMatch(
-        decision="deny",
-        reason=f"Path matches hard_deny pattern: {matched_deny} (cannot be overridden)",
-        matched_pattern=matched_deny,
-    )
-
-
 def resolve_file_path_permission_detailed(
     tool_name: str,
     file_path: str,
@@ -396,10 +172,10 @@ def resolve_file_path_permission_detailed(
     Resolve a file-path tool decision using more-specific-wins across levels.
 
     The unoverridable ``[hard_deny]`` pool is checked FIRST (see
-    :func:`_check_file_path_hard_deny`); a hard-deny match denies immediately and
+    :func:`~toolguard.file_matching.check_file_path_hard_deny`); a hard-deny match denies immediately and
     cannot be overridden by any level's normal allow. Otherwise this drives the
     hard-deny-first, more-specific-wins cascade via
-    :func:`~toolguard.permission_resolution.resolve_permission_detailed`, applying
+    :func:`~toolguard.permission_resolution.resolve_file_path_permission`, applying
     deny-first within each level and project-root anchoring to relative patterns.
     The first level that matches anything decides; no match at any level =>
     fail-closed deny. Returns the allow-over-deny override (if any) so the caller
@@ -430,13 +206,13 @@ def resolve_file_path_permission_detailed(
         ``tool``/``target`` set to *tool_name*/*file_path* (TOO-45 R1c;
         unconsumed until R1d).
     """
-    hard = _check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
+    hard = check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
     if hard is not None:
         return RuntimeVerdict(
             decision=hard.decision,
             reason=hard.reason,
             provenance=None,
-            # TOO-45 R1f: `_check_file_path_hard_deny` now reports its
+            # TOO-45 R1f: `check_file_path_hard_deny` now reports its
             # matched pattern in `hard.matched_pattern` instead of computing
             # this lookup internally (mirroring how
             # `resolve_bash_permission_detailed`'s `_decide` closure already
@@ -463,35 +239,17 @@ def resolve_file_path_permission_detailed(
             target=file_path,
         )
 
-    def _decide_detailed(
-        allow_patterns: Sequence[str],
-        deny_patterns: Sequence[str],
-        ask_patterns: Sequence[str],
-    ) -> Optional[LevelMatch]:
-        """
-        Adapt this level's pattern triple to
-        :func:`_decide_file_path_at_level_detailed`'s own, differently-shaped
-        signature -- this closure's own type (not its body) is what
-        satisfies :class:`~toolguard.config_types.DecideDetailed`, the
-        contract :func:`~toolguard.permission_resolution.resolve_permission_detailed`
-        (below) requires of its callback.
-        """
-        return _decide_file_path_at_level_detailed(
-            file_path,
-            list(allow_patterns),
-            list(deny_patterns),
-            config,
-            extended_syntax,
-            ask_patterns=list(ask_patterns),
-        )
-
-    # TOO-45 R3: `subject="Path"` gets the no-match-fallback reason phrased
-    # correctly AT THE SOURCE (see `_resolve_unclamped`'s `subject` param)
-    # instead of resolving with the Bash-phrased ("Command...") default and
-    # rewriting the prefix here by parsing it back out of `resolved.reason`
-    # -- the R3 violation this replaced (`reason.startswith(_no_match_prefix)`).
-    resolved = resolve_permission_detailed(
-        config, tool_name, _decide_detailed, subject="Path"
+    # TOO-45 punch-list #03: `resolve_file_path_permission` builds the
+    # eager per-level match list itself (importing
+    # `file_matching.decide_file_path_at_level_detailed` directly) and folds
+    # it with `resolve_permission_cascade` -- there is no callback for this
+    # call site to adapt any more. `subject="Path"` (baked into that entry
+    # point) gets the no-match-fallback reason phrased correctly AT THE
+    # SOURCE (TOO-45 R3) instead of resolving with the Bash-phrased
+    # ("Command...") default and rewriting the prefix here by parsing it
+    # back out of `resolved.reason` -- the R3 violation this replaced.
+    resolved = resolve_file_path_permission(
+        config, tool_name, file_path, extended_syntax
     )
     # `resolved.overrides` (the internal per-level verdict) pairs its bare
     # override with identifier None -- see RuntimeVerdict's docstring
@@ -641,7 +399,7 @@ def resolve_bash_permission_detailed(
 
     Each extracted sub-command is resolved independently through the
     provenance-aware more-specific-wins cascade
-    (:func:`~toolguard.permission_resolution.resolve_permission_detailed`), with
+    (:func:`~toolguard.permission_resolution.resolve_command_permission`), with
     the unoverridable ``[hard_deny]`` pool checked FIRST per sub-command. The
     compound decision uses the same strictness :func:`toolguard.compound._combine_strictest`
     always has (any deny -> deny; else any ask -> ask; else allow). Reasons
@@ -777,29 +535,15 @@ def resolve_bash_permission_detailed(
                 None,  # override
             )
 
-        def _decide_detailed(
-            allow_patterns: Sequence[str],
-            deny_patterns: Sequence[str],
-            ask_patterns: Sequence[str],
-        ) -> Optional[LevelMatch]:
-            """
-            Adapt this level's pattern triple to
-            :func:`~toolguard.permissions.decide_command_at_level_detailed`'s
-            own, differently-shaped signature -- see the file-path resolver's
-            twin closure (above, in
-            :func:`resolve_file_path_permission_detailed`) for why this
-            closure's TYPE is what satisfies
-            :class:`~toolguard.config_types.DecideDetailed`.
-            """
-            return decide_command_at_level_detailed(
-                sub_command,
-                list(allow_patterns),
-                list(deny_patterns),
-                extended_syntax,
-                ask_patterns=list(ask_patterns),
-            )
-
-        resolved = resolve_permission_detailed(config, "Bash", _decide_detailed)
+        # TOO-45 punch-list #03: `resolve_command_permission` builds the
+        # eager per-level match list itself (importing
+        # `permissions.decide_command_at_level_detailed` directly, with
+        # `extended_syntax` threaded through exactly as this closure used
+        # to) and folds it with `resolve_permission_cascade` -- there is no
+        # callback for this call site to adapt any more.
+        resolved = resolve_command_permission(
+            config, "Bash", sub_command, extended_syntax
+        )
         fallback_kind = None
         if resolved.decision == "allow" and resolved.matched_rule is None:
             fallback_kind = "warned" if resolved.fallback_warning else "silent"
@@ -886,7 +630,7 @@ def resolve_bash_permission_detailed(
 
     # TOO-19 fail-open fix: re-apply the parse-failure ASK floor HERE, at the
     # compound boundary, in addition to the per-sub-command application
-    # inside _decide (via resolve_permission_detailed). This second
+    # inside _decide (via resolve_command_permission). This second
     # application is not redundant: the compound driver above can produce a
     # verdict from a grammar-level undecidable unit (process substitution,
     # `case`, unparseable control structures -- see

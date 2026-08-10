@@ -209,7 +209,7 @@ packages = ["rule_entry", "config_types", "config", "config_validation", "config
 [[architecture.layers]]
 name = "engine"
 # Pure decision logic: pattern matching, command decomposition, resolution.
-packages = ["permissions", "compound", "resolve", "parser", "permission_resolution"]
+packages = ["permissions", "compound", "resolve", "parser", "permission_resolution", "file_matching"]
 
 [[architecture.layers]]
 name = "api"

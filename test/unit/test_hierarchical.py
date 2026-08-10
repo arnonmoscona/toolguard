@@ -6,7 +6,7 @@ These tests exercise the new behavior introduced in Phase 2:
 
 - ``_discover_levels`` walks from the project root up to (and including) ``~``,
   assigning a specificity index per level (0 = most specific).
-- ``permission_resolution.resolve_permission_detailed`` evaluates levels
+- ``permission_resolution.resolve_command_permission`` evaluates levels
   most-specific first; the first level that matches anything decides
   (deny-first within a level); no match anywhere => fail-closed deny.
 - Relative config paths always resolve against the project root.
@@ -24,8 +24,7 @@ from unittest.mock import patch
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.compound import resolve_compound_permission
 from toolguard.config import _discover_levels, load_configuration
-from toolguard.permission_resolution import resolve_permission_detailed
-from toolguard.permissions import decide_command_at_level_detailed
+from toolguard.permission_resolution import resolve_command_permission
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -222,26 +221,6 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
             )
         return Configuration(layers=tuple(layers))
 
-    @staticmethod
-    def _detailed_decider(command):
-        """
-        Build a per-level ``decide_detailed`` closure bound to one command.
-
-        Mirrors the inline closure the production hook builds over
-        ``decide_command_at_level_detailed`` so the test exercises the same
-        per-level decision logic the cascade consumes.
-        """
-
-        def _decide(allow_patterns, deny_patterns, ask_patterns=()):
-            return decide_command_at_level_detailed(
-                command,
-                list(allow_patterns),
-                list(deny_patterns),
-                ask_patterns=list(ask_patterns),
-            )
-
-        return _decide
-
     def _resolve(self, config, command):
         """
         Resolve a single command through the Bash level cascade.
@@ -249,9 +228,7 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         Returns ``(decision, reason)`` extracted from the ``RuntimeVerdict``
         so existing Given/When/Then assertions remain unchanged.
         """
-        resolved = resolve_permission_detailed(
-            config, "Bash", self._detailed_decider(command)
-        )
+        resolved = resolve_command_permission(config, "Bash", command)
         return resolved.decision, resolved.reason
 
     def test_child_allow_overrides_parent_deny(self):
@@ -337,9 +314,7 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         config = self._config((["git *"], []), ([], ["rm *"]))
 
         def _resolve_one(sub):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._detailed_decider(sub)
-            )
+            resolved = resolve_command_permission(config, "Bash", sub)
             return resolved.decision, resolved.reason, resolved.additional_context
 
         _verdict = resolve_compound_permission("git status && rm -rf /", _resolve_one)
@@ -361,9 +336,7 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         )
 
         def _resolve_one(sub):
-            resolved = resolve_permission_detailed(
-                config, "Bash", self._detailed_decider(sub)
-            )
+            resolved = resolve_command_permission(config, "Bash", sub)
             return resolved.decision, resolved.reason, resolved.additional_context
 
         _verdict = resolve_compound_permission("git status && ls -l", _resolve_one)
@@ -519,7 +492,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         Then the [glob] prefix is preserved and the relative body is anchored to
             the project root
         """
-        from toolguard.resolve import _anchor_file_pattern
+        from toolguard.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -532,7 +505,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         When _anchor_file_pattern runs
         Then the pattern is returned unchanged (never path-joined)
         """
-        from toolguard.resolve import _anchor_file_pattern
+        from toolguard.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -545,7 +518,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         When _anchor_file_pattern runs
         Then the pattern is returned unchanged
         """
-        from toolguard.resolve import _anchor_file_pattern
+        from toolguard.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)
@@ -559,7 +532,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         Then the pattern is returned unchanged (tilde expansion happens downstream,
             it is NOT anchored to the project root)
         """
-        from toolguard.resolve import _anchor_file_pattern
+        from toolguard.file_matching import _anchor_file_pattern
 
         _home, project = self.isolate_config_environment()
         config = load_configuration(project)

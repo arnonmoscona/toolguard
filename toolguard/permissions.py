@@ -424,9 +424,9 @@ def decide_command_at_level_detailed(
         A :class:`~toolguard.config_types.LevelMatch` when this level
         matches (TOO-45 R1f converted the bare ``(decision, reason,
         matched_pattern)`` tuple this used to return into this dataclass --
-        this is also the ``decide_detailed`` callback contract
-        :func:`~toolguard.permission_resolution.resolve_permission_detailed`
-        consumes), else ``None`` so the cascade falls through to the next
+        this is also the per-level result
+        :func:`~toolguard.permission_resolution.resolve_command_permission`
+        folds over), else ``None`` so the cascade falls through to the next
         level.
     """
     if deny_patterns:

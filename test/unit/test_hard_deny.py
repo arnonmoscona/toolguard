@@ -29,8 +29,8 @@ from toolguard.compound import resolve_compound_permission
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
 from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.hook import resolve_file_path_permission_detailed
-from toolguard.permission_resolution import resolve_permission_detailed
-from toolguard.permissions import check_hard_deny, decide_command_at_level_detailed
+from toolguard.permission_resolution import resolve_command_permission
+from toolguard.permissions import check_hard_deny
 from toolguard.rule_entry import _strip_tool_wrapper
 
 
@@ -383,15 +383,7 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
                 # None.
                 return hard.decision, hard.reason, None
 
-            def _decide(allow_patterns, deny_patterns, ask_patterns=()):
-                return decide_command_at_level_detailed(
-                    sub,
-                    list(allow_patterns),
-                    list(deny_patterns),
-                    ask_patterns=list(ask_patterns),
-                )
-
-            resolved = resolve_permission_detailed(config, "Bash", _decide)
+            resolved = resolve_command_permission(config, "Bash", sub)
             return resolved.decision, resolved.reason, resolved.additional_context
 
         _verdict = resolve_compound_permission(command, _resolve_one)
@@ -517,7 +509,7 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
             resolve_bash_permission_detailed does in production)
         Then the decision is still 'deny' -- the fail-open ASK floor never
             reaches hard_deny (it is checked and returned BEFORE
-            resolve_permission_detailed is ever called), so hard_deny
+            resolve_command_permission is ever called), so hard_deny
             protection is never weakened to 'ask' even while the config is
             broken
         """

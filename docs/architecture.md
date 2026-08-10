@@ -52,6 +52,8 @@ toolguard/                      # Project root
 |   |                           # more-specific-wins cascade and the TOO-19 parse-
 |   |                           # failure ASK floor, decoupled from config.py
 |   |-- resolve.py              # Bash and file-path resolution with provenance
+|   |-- file_matching.py        # File-path glob/regex pattern matching (extracted
+|   |                           # from resolve.py; TOO-45 punch-list #03)
 |   |-- patterns.py             # Pattern type parsing and matching
 |   |-- normalization.py        # Path normalization functions
 |   |-- path_utils.py           # Project-root resolution primitive

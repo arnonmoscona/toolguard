@@ -8,91 +8,79 @@ tags:
 - coder-latest
 ---
 
-# Task: TOO-45 punch-list #10 fix pass (branch too-45)
+## TOO-45 punch-list #03, stage 1 of 3
 
-Full code review at `toolguard-memories/latest-code-review-report.md`. Original spec:
-`toolguard-memories/TOO-45/TOO-45 punch-list 10 ToolSpec - coder task spec.md`.
+Branch: `too-45`. Working dir: `/home/arnon/projects/toolguard`.
 
-Corpus stayed byte-identical in the original consolidation; this pass fixes contract
-problems the review found, no behaviour change intended.
+### Context
 
-## Fix list (from Arnon's fix-pass prompt)
+`resolve.py` (928 lines) and `permission_resolution.py` form a bidirectional runtime cycle. Chosen plan: three staged commits. This is **stage 1 only**: extract the file-path matching cluster out of `resolve.py` into `toolguard/file_matching.py`. Rename-only, no behaviour change, no rewiring. Stage 2 (invert the seam) and stage 3 (point cascade tests at pure fold) are explicitly NOT part of this task.
 
-1. **M1**: `governed_by_default()` names a set that isn't the runtime default
-   (`config.py:975` default is `("Bash",)`). Rename `ToolSpec.governed_by_default` field
-   -> `ToolSpec.is_builtin`; rename `tool_spec.governed_by_default()` -> `builtin_tools()`
-   (later folded into M2's frozenset conversion, so final name is `BUILTIN_TOOLS`). Fix
-   docstrings to say what it is (builtin knowledge set) and explicitly NOT a default.
-   Check whether `constants.GOVERNED_TOOLS` should follow the rename -- verify each
-   importer's actual intended semantics (builtin vs effective-governed); report a live
-   bug if found, don't quietly fix behaviour.
+### What to do
 
-2. **M2**: one registry, two view semantics -- `constants.py` snapshots at import time,
-   but `installer.py`/`hook.py`/`transcript_harvest.py` call the tool_spec functions live.
-   Fix: make the three derived views module-level frozensets in tool_spec.py
-   (`KNOWN_TOOL_NAMES`, `BUILTIN_TOOLS`, `FILE_KIND_TOOLS`), keep `payload_key()` as the
-   only function. Correct tool_spec.py's docstring (drops dynamism claim).
+- Identify the file-path matching cluster in `toolguard/resolve.py`: matching a filesystem path against glob-style permission patterns, plus path anchoring/normalisation helpers used only by that path.
+- Move to new `toolguard/file_matching.py`.
+- Rename-only: no restructuring, no renamed functions, no "improvements". If something looks wrong in the moved code, leave it and report it.
+- Layer: `engine`, alongside `resolve`/`permission_resolution`. Add to `.pyscn.toml` engine packages list (line ~212) or completeness check fails.
+- Decide per-helper whether it's genuinely file-path-only vs shared with Bash path (stays put). Report uncertain calls.
+- Keep `resolve.py`'s public surface unchanged -- importers of `resolve` must not need editing.
 
-3. **Minors** (explicitly listed, do all):
-   - constants.py docstring falsely claims "imports nothing from toolguard" (it imports
-     tool_spec).
-   - tool_spec.py:7-10 docstring wrongly describes `Configuration.governed_tools()` as
-     consuming the registry -- it doesn't; only `config_validation.KNOWN_SUPPORTED_TOOLS`
-     does.
-   - Half-converted payload-key dispatch: `fixture_loader.py:680` and
-     `transcript_harvest.py:226-229` still hardcode `"command"` next to a registry lookup.
-     Fix both to `spec = TOOLS_BY_NAME.get(tool); key = spec.payload_key if spec else "command"`.
-   - `hook.py:734` and `:1107` hardcode "No file_path provided" after the key became
-     dynamic -- interpolate the resolved key. (Text is unchanged for current registry
-     contents since Read/Write/Edit resolve to "file_path", so `test_hook_eval.py:166`'s
-     `assertIn("No file_path provided", ...)` still passes -- confirmed, no test edit
-     needed for that specific assertion.)
-   - `assertRaises(Exception)` in test_tool_spec.py's frozen-dataclass test -> assert
-     `dataclasses.FrozenInstanceError` specifically.
-   - `TOOLS_BY_NAME` needs a duplicate-name guard -- must fail loudly at import if
-     `_REGISTRY` has a repeated name.
+### Do NOT
 
-4. **Close the test gap**: test:production ratio was 0.8:1 vs repo norm 1.9:1, gap sits on
-   the unpinned seam (snapshot vs live). Once item 2 done, pin the resulting contract.
-   Plan: add registry-integrity test (`len(TOOLS_BY_NAME) == len(_REGISTRY)`, all
-   payload_keys non-empty), a duplicate-name-guard test, an identity pin
-   (`constants.BUILTIN_TOOLS is tool_spec.BUILTIN_TOOLS`), and seam-pin tests in each
-   consumer's existing test file (test_hook.py for `_handle_file_path_tool`,
-   test_hook_eval.py for `_resolve_event`, test_tools_transcript_harvest.py for
-   `_command_for_tool`, test_verdict_corpus.py for `fixture_loader.build_hook_payload`)
-   that inject a fake `ToolSpec` via `patch.dict(tool_spec.TOOLS_BY_NAME, ...)` and prove
-   dispatch genuinely reads through the registry rather than a hardcoded literal.
+- Touch `permission_resolution.py`, `DecideDetailed` Protocol, any `decide_detailed` closure (stage 2).
+- Touch the cascade's unit tests (stage 3).
+- Add a fitness predicate for the cycle (Arnon's decision: code-review checks by measurement instead).
 
-## Explicit DO NOT
+### Verification required
 
-- Do not change `governed_tools()`'s resolution or any default.
-- Do not touch `config.py`'s `_DEFAULT_IGNORED_ALLOW_PATTERNS`.
-- No behaviour change at all -- golden verdict corpus must stay byte-identical.
-
-## Verification bar
-
-- Golden verdict corpus byte-identical (the check that matters most).
-- Full suite green (was 2721).
+- Golden verdict corpus byte-identical (part of main suite, `test_verdict_corpus.py`, ~in the 2733 count).
+- Full suite green (2733 at last count baseline confirmed before starting).
 - `uv run python tools/architecture_fitness.py --layers` clean.
 - `uv run ruff format .` and `uv run ruff check .`.
+- Report line counts before/after for `resolve.py` and size of new module.
 
-## Process
+### Process
 
-Intent disclosure before any authored Bash logic (heredocs, `python -c`, scratch scripts,
-authored shell). `# INTENT:` / `# TOUCHES:` / `# INLINE BECAUSE:` plus `TG_INTENT=1` or
-`TG_ATTEST_READONLY=1`.
+- No git commits -- Arnon does all git write ops.
+- Intent disclosure before any authored Bash logic (heredocs, python -c, scratch scripts, authored shell loops): `# INTENT:` / `# TOUCHES:` / `# INLINE BECAUSE:` plus `TG_INTENT=1` or `TG_ATTEST_READONLY=1`.
+- Write implementation report to basic-memory.
 
-## Decisions made during planning (to record in report)
+## Analysis performed before implementing
 
-- **constants.GOVERNED_TOOLS renamed to BUILTIN_TOOLS.** Checked all 4 real importers
-  (`security_audit.py:353`, `maintenance.py:184,715`, `transcript_harvest.py:281`) --
-  every one iterates "every tool we know how to analyze/harvest", never "the config's
-  effective governed set". No live bug found. Since the name carries the exact same
-  false-default-implication risk M1 flagged at the tool_spec layer, renaming it there too
-  is the consistent fix, not scope creep. Not part of the documented public API/docs
-  surface (grepped README.md, docs/, api.py -- no hits), so safe to rename with no
-  external-compat concern.
-- Explicitly NOT doing: m6 (private alias `_tool_payload_key` import), s1 (collapse
-  `FILE_PATH_TOOLS` alias chain), s4 (typing style FrozenSet/Mapping -> builtin
-  generics) -- none of these are in the fix-pass prompt's itemized list; keeping scope to
-  what was asked.
+Read `toolguard/resolve.py` fully (928 lines). Candidate cluster:
+
+- `_anchor_file_pattern` -- file-path only
+- `_collapse_slashes` -- only called from `_match_file_path_pattern`; docstring itself says "file path or GLOB path pattern" -- file-path only (verified via repo-wide grep, no other callers)
+- `_match_file_path_pattern` -- file-path only
+- `_first_matching_file_pattern` -- file-path only
+- `_decide_file_path_at_level_detailed` -- file-path only
+- `_check_file_path_hard_deny` -- file-path only
+
+**Stays in resolve.py (shared with Bash path):**
+- `_hard_deny_additional_context` -- called by BOTH `resolve_file_path_permission_detailed` (file path) and `resolve_bash_permission_detailed`'s `_decide` closure (Bash). Confirmed shared -- explicit task guidance says shared helpers stay put.
+- `resolve_file_path_permission_detailed` -- the public top-level file-path resolver. Decided to KEEP this in resolve.py rather than move it, because it calls `_hard_deny_additional_context` (shared, stays in resolve.py). Moving it to file_matching.py would require file_matching to import back from resolve.py, while resolve.py needs to import from file_matching.py (to re-export the moved helpers for backward-compat imports) -- that's a new import cycle between resolve and file_matching, which would be exactly the kind of thing this whole punch-list is trying to eliminate. Keeping the public entry point in resolve.py avoids that; file_matching.py has zero dependency back on resolve.py.
+- `_deciding_sub_match`, `resolve_bash_permission_detailed` -- Bash-only, untouched.
+
+### External references needing preservation
+
+Tests import several of these "private" helpers directly from `toolguard.resolve` (not `toolguard.hook`):
+- `test_hierarchical.py`: `from toolguard.resolve import _anchor_file_pattern` (4 call sites)
+- `test_hook.py`: `from toolguard.resolve import (_decide_file_path_at_level_detailed, resolve_bash_permission_detailed)`
+- `test_hard_deny.py`, `test_resolve.py`, `hook.py`, `api.py`: import `resolve_file_path_permission_detailed` from `toolguard.hook` or `toolguard.resolve`.
+
+Since `resolve.py`'s public surface must stay unchanged, resolve.py will import the moved names from `file_matching` and re-export them (mirroring the existing `LevelMatch as LevelMatch` re-export idiom already in the file), so no test file needs editing.
+
+### Docstring/doc-drift updates anticipated
+
+- `resolve.py` module docstring lists functions moved from hook.py; needs updating to reflect new home for the ones that move again.
+- `config_types.py` docstrings reference `toolguard.resolve._decide_file_path_at_level_detailed`, `toolguard.resolve._check_file_path_hard_deny`, `toolguard.resolve._anchor_file_pattern` -- update to `toolguard.file_matching.*`. `_hard_deny_additional_context` references stay pointed at resolve.py (unchanged).
+- `tools/architecture_fitness.py` references `toolguard.resolve._check_file_path_hard_deny` in a comment -- update.
+- Test file comments (test_hierarchical, test_recommended_protections, test_resolve, test_hook) reference `resolve.py`'s `_anchor_file_pattern` etc in prose/docstrings -- these are NOT the cascade's unit tests being restricted (that's about permission_resolution/resolve fold tests specifically), but since instructions say don't touch cascade tests and to keep tests working via re-export, I will leave test files untouched entirely (imports keep working via re-export) unless a test file's own prose docstring is factually wrong about location -- decided to leave test file prose alone since the import continues to work correctly and the task's explicit restriction is "do not touch the cascade's unit tests"; broadly avoiding touching any test file is the safer/smaller diff.
+
+### .pyscn.toml layer map
+
+Engine layer packages line ~212: `packages = ["permissions", "compound", "resolve", "parser", "permission_resolution"]` -- need to add `"file_matching"`.
+
+### Baseline test run (before any changes)
+
+`uv run python -m unittest discover -s test -t .` => Ran 2733 tests in 48.787s, OK. Confirms baseline matches ticket's expected count before starting.

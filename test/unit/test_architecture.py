@@ -51,9 +51,20 @@ LAYERS = (
         # it never imports toolguard.config -- that claim is the entire
         # justification for extracting it out of config.py, and nothing
         # enforced it until this entry was added (a reviewer added the
-        # forbidden import and the suite stayed green).
+        # forbidden import and the suite stayed green). Punch-list #03 added
+        # toolguard.permissions/toolguard.file_matching to the allowed set:
+        # this module now imports its per-level matchers directly instead of
+        # receiving one back as an injected callable from resolve.py, which
+        # is what removed the permission_resolution <-> resolve runtime
+        # cycle no import-graph check could see.
         "toolguard.permission_resolution",
-        frozenset({"toolguard.config_types"}),
+        frozenset(
+            {
+                "toolguard.config_types",
+                "toolguard.permissions",
+                "toolguard.file_matching",
+            }
+        ),
     ),
 )
 

@@ -241,7 +241,8 @@ This applies uniformly to:
 - File-path tools (Read/Write/Edit).
 
 The level cascade is orchestrated by
-`permission_resolution.resolve_permission_detailed` (TOO-45 D1a; fed by
+`permission_resolution.resolve_command_permission`/`resolve_file_path_permission`
+(TOO-45 D1a; fed by
 `Configuration.permission_levels_with_provenance(tool)` through a narrow,
 duck-typed query surface -- the engine module never imports `toolguard.config`
 itself). Pattern
@@ -325,7 +326,7 @@ Applies uniformly to: Bash commands, EACH sub-command of a compound command
 (the compound is hard-denied if any sub-command is), and file-path tools
 (Read/Write/Edit, tool-scoped). Command matching uses
 `permissions.check_hard_deny`; the file-path equivalent is
-`hook._check_file_path_hard_deny`. There is no behaviour change when no
+`file_matching.check_file_path_hard_deny`. There is no behaviour change when no
 `[hard_deny]` is configured. Single resolution path (no dual/legacy code).
 
 > Note (flagged for review): these exact `[hard_deny]` semantics -- the
@@ -370,7 +371,7 @@ log citing BOTH sides' provenance (winning allow's file/level + the overridden
 deny's file/level) and the command. `hard_deny` denials are **not** conflicts --
 they are recorded in the resolution log (with provenance), never the conflict log.
 
-Detection lives in `permission_resolution.resolve_permission_detailed` /
+Detection lives in `permission_resolution.resolve_permission_cascade` /
 `permission_resolution._detect_override`: when the winning decision is an `allow` at level
 *k*, the LESS-specific levels are scanned for a `deny` match on the same command;
 the first match becomes a `ConflictOverride`. The hook
@@ -382,13 +383,13 @@ stream.
 `Configuration.permission_levels_with_provenance` is the provenance-carrying level
 view (per level: `(allow, deny, ToolPatternLayer[])`). The detailed deciders
 (`permissions.decide_command_at_level_detailed`,
-`hook._decide_file_path_at_level_detailed`) report the matched pattern, which
+`file_matching.decide_file_path_at_level_detailed`) report the matched pattern, which
 `config_types.provenance_for_pattern` maps back to the owning
 `ToolPatternLayer.provenance` for exact file/level precision. (TOO-45 R2d moved
 this off `Configuration` -- it held no configuration state -- to live beside
 `ToolPatternLayer` in `toolguard.config_types`; `permission_resolution.py`
 imports and calls it directly.)
-`resolve_permission_detailed` returns a `RuntimeVerdict`
+`resolve_permission_cascade` returns a `RuntimeVerdict`
 (decision, reason, provenance, overrides, ...) -- TOO-45 R1c collapsed the former
 `ResolvedDecision`/`BashResolution`/`FileResolution` into this one type, the single
 runtime verdict every governed-tool resolution returns; see
@@ -401,7 +402,7 @@ consumers still work. Applied to Bash, each compound sub-command independently,
 and Read/Write/Edit.
 
 There is a single cascade implementation: the hook drives
-`resolve_permission_detailed` / `resolve_file_path_permission_detailed` /
+`resolve_command_permission` / `resolve_file_path_permission_detailed` /
 `hook.resolve_bash_permission_detailed`. (The earlier 2-tuple variants
 `resolve_permission` / `resolve_file_path_permission` and their per-level helpers
 `decide_command_at_level` / `make_command_level_decider` were removed once the

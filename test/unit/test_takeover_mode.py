@@ -26,8 +26,7 @@ from toolguard.config import (
     load_configuration,
 )
 from toolguard.hook import load_file_path_patterns
-from toolguard.permission_resolution import resolve_permission_detailed
-from toolguard.permissions import decide_command_at_level_detailed
+from toolguard.permission_resolution import resolve_command_permission
 
 
 class TestTakeoverModeConfig(ConfigIsolationMixin, unittest.TestCase):
@@ -227,10 +226,10 @@ enabled = true
 class TestBashTakeoverFiltering(unittest.TestCase):
     """
     Test that takeover mode suppresses native Bash(*) allows in the live
-    resolve_permission_detailed path.
+    resolve_command_permission path.
 
     These tests exercise the full stack from Configuration.permission_layers
-    through resolve_permission_detailed, confirming that a native blanket
+    through resolve_command_permission, confirming that a native blanket
     Bash(*) allow cannot bypass a toolguard deny when takeover is enabled,
     while a toolguard_hook Bash(*) allow is never suppressed.
     """
@@ -282,28 +281,19 @@ class TestBashTakeoverFiltering(unittest.TestCase):
 
     def _resolve(self, config, command):
         """
-        Drive a single Bash command through resolve_permission_detailed.
+        Drive a single Bash command through resolve_command_permission.
 
         Returns:
             Tuple of (decision, reason).
         """
-
-        def _decide(allow_patterns, deny_patterns, ask_patterns=()):
-            return decide_command_at_level_detailed(
-                command,
-                list(allow_patterns),
-                list(deny_patterns),
-                ask_patterns=list(ask_patterns),
-            )
-
-        resolved = resolve_permission_detailed(config, "Bash", _decide)
+        resolved = resolve_command_permission(config, "Bash", command)
         return resolved.decision, resolved.reason
 
     def test_native_blanket_bash_allow_suppressed_when_takeover_enabled(self):
         """
         Given takeover mode enabled, native settings allowing Bash(*), and a
             toolguard_hook deny for 'rm *' with no hook allow
-        When 'rm -rf /' is resolved through resolve_permission_detailed
+        When 'rm -rf /' is resolved through resolve_command_permission
         Then the native Bash(*) allow is suppressed by takeover filtering so the
             command reaches no allow at any level and is denied
         """
@@ -321,7 +311,7 @@ class TestBashTakeoverFiltering(unittest.TestCase):
         """
         Given takeover mode disabled, native settings allowing Bash(*), and a
             toolguard_hook deny for 'rm *'
-        When 'rm -rf /' is resolved through resolve_permission_detailed
+        When 'rm -rf /' is resolved through resolve_command_permission
         Then the native Bash(*) allow is NOT filtered, so the allow at the
             native level wins (unless the hook-level deny matches first at its
             level) -- specifically the deny fires here because hook level is
@@ -346,7 +336,7 @@ class TestBashTakeoverFiltering(unittest.TestCase):
         """
         Given takeover mode enabled and a toolguard_hook layer allowing Bash(*)
             (not a native Claude settings layer), with no deny rules
-        When 'git status' is resolved through resolve_permission_detailed
+        When 'git status' is resolved through resolve_command_permission
         Then the hook's Bash(*) allow is never filtered and the command is allowed
         """
         # Only a hook layer with Bash(*) allow -- no native layer.

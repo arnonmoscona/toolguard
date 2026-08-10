@@ -990,7 +990,7 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         """
         HARD INVARIANT (TOO-19) end to end: an ask_floor leaf (foreign inline
         code) whose OUTER command resolution goes through
-        permission_resolution.resolve_permission_detailed -- and therefore
+        permission_resolution.resolve_command_permission -- and therefore
         through the parse-failure ASK floor -- cannot be downgraded below
         'ask' by
         undecidable_fallback, even when set to the most permissive
@@ -2066,7 +2066,7 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
     """
     TOO-19 fail-open fix: a grammar-level UndecidableSegment (process
     substitution, an unparseable control structure) has NO leaves and so
-    never calls permission_resolution.resolve_permission_detailed -- unlike
+    never calls permission_resolution.resolve_command_permission -- unlike
     an ask_floor LEAF (foreign inline code / heredoc), which does. Before this
     fix, that meant the parse-failure ASK floor never ran for it, and a
     broken config combined with undecidable_fallback='allow_with_warning'

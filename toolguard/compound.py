@@ -175,7 +175,7 @@ FALLBACK_DENY_PLACEHOLDER = "[fallback deny -- no rule matched]"
 #: shorter marker must never shadow the longer one; the ``deny`` marker has no
 #: such prefix collision, so its position relative to the ``allow`` ones does
 #: not matter. The ``allow``-side settings: the ``no_match_fallback`` wording
-#: is built by :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+#: is built by :func:`~toolguard.permission_resolution.resolve_permission_cascade`
 #: and reaches this module through ``resolve_one``; the ``undecidable_fallback``
 #: wording is built by this module itself and reaches ``hook.py`` as the FINAL
 #: reason of a single-leaf command (TOO-19 m5). The ``deny``-side marker
@@ -209,7 +209,7 @@ def fallback_kind_for_reason(decision: str, reason: str) -> Optional[str]:
       callable's return type is a plain 3-tuple relied on by ~18 test-authored
       closures (see the TOO-19 implementation report), so the richer
       ``RuntimeVerdict.fallback_warning`` bit computed inside
-      :func:`~toolguard.permission_resolution.resolve_permission_detailed` never
+      :func:`~toolguard.permission_resolution.resolve_permission_cascade` never
       reaches this module -- only its already-tested, verbatim reason wording
       does. Only ``no_match_fallback`` markers can appear on that path.
     - ``hook.py``'s audit-log branch for a SINGLE-leaf command (TOO-19 m5 for
@@ -1218,7 +1218,7 @@ def resolve_compound_permission_detailed(
 
     Each extracted sub-command is resolved through ``resolve_one`` -- typically
     a closure over
-    :func:`toolguard.permission_resolution.resolve_permission_detailed`, so
+    :func:`toolguard.permission_resolution.resolve_command_permission`, so
     every sub-command independently runs the full more-specific-wins level
     cascade.
     The compound is allowed iff ALL sub-commands resolve to allow; otherwise the

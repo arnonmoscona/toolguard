@@ -7,32 +7,46 @@ tags:
 permalink: latest-code-review-report
 ---
 
-# Code review report -- 2026-08-09
+# Code review report -- 2026-08-09 (20:36-20:52)
 
-**Ticket**: TOO-45 (punch-list #10 -- ToolSpec registry)
-**Scope reviewed** (9 files, as requested):
+**Ticket**: TOO-45 (punch-list #03 -- extract `file_matching`, remove the `permission_resolution <-> resolve` runtime cycle)
+**Scope reviewed** (8 files, as requested):
 
-- `/home/arnon/projects/toolguard/toolguard/tool_spec.py` (new, 96 lines)
-- `/home/arnon/projects/toolguard/toolguard/constants.py`
-- `/home/arnon/projects/toolguard/toolguard/config_validation.py`
-- `/home/arnon/projects/toolguard/toolguard/hook.py`
-- `/home/arnon/projects/toolguard/toolguard/tools/installer.py`
-- `/home/arnon/projects/toolguard/toolguard/tools/transcript_harvest.py`
-- `/home/arnon/projects/toolguard/test/verdict_corpus/fixture_loader.py`
-- `/home/arnon/projects/toolguard/tools/architecture_fitness.py`
-- `/home/arnon/projects/toolguard/test/unit/test_tool_spec.py` (new, 101 lines)
-
-Also inspected as part of the change set: `/home/arnon/projects/toolguard/.pyscn.toml`.
+- `/home/arnon/projects/toolguard/toolguard/permission_resolution.py` (heavily rewritten, +299/-…)
+- `/home/arnon/projects/toolguard/toolguard/resolve.py` (928 -> 714 lines, two closures deleted)
+- `/home/arnon/projects/toolguard/toolguard/file_matching.py` (new, 280 lines, untracked)
+- `/home/arnon/projects/toolguard/toolguard/config_types.py` (`DecideDetailed` deleted; `PathAnchoring` + `FilePathResolutionConfig` added)
+- `/home/arnon/projects/toolguard/toolguard/permissions.py` (1 docstring line)
+- `/home/arnon/projects/toolguard/test/unit/test_configuration.py`
+- `/home/arnon/projects/toolguard/test/unit/test_hierarchical.py`
+- `/home/arnon/projects/toolguard/test/unit/test_permission_resolution.py`
 
 ## Summary
 
-This is a well-executed consolidation: four hand-written tool-name sets and every production `"file_path"` literal now derive from one registry, the dead `hook.COMMAND_TOOLS` was correctly identified as dead (zero readers at HEAD) and deleted, the new module has a declared architectural home in `.pyscn.toml`, and `--layers` passes clean on both completeness and direction. The full suite passes (2721 tests, OK) and ruff is clean on all nine files.
+This is a good refactor, and the central claim holds under independent measurement: the injected `decide_detailed` callable is genuinely gone, not relocated, and the runtime call graph across the decision path is acyclic. Behaviour is preserved (2733 tests OK, golden verdict corpus unchanged), the new module has a declared architectural home, and the change is a net deletion of 184 production lines with no compensating test bloat. Everything I found is documentation drift, naming/visibility inconsistency, or duplication that the change introduced without marking as deliberate -- no correctness, security, or performance defects.
 
-The problems are not in the mechanics but in what the registry *claims*. `governed_by_default` names a set that contradicts the runtime's actual default in two other places, and the derived views are functions in one module and frozen snapshots in another -- so the registry's headline promise ("adding a tool is one entry here") is true for some consumers and false for others, with no test that could tell. Nothing is broken today; both are traps set for the next change.
+## What I measured (including the clean results)
 
-**Verdict**: no critical or security issues. Two Major findings (both naming/contract, both cheap to fix while the ticket is open), six Minor, four Suggestions.
+**Runtime call topology.** The change adds/removes injected callables, so I measured rather than inferred. A `sys.setprofile` probe recorded caller-module -> callee-module edges across five real decisions driven through `toolguard.api.decide()` (compound Bash, file path, file-path hard-deny, ask match, deny match), then ran DFS cycle detection:
 
----
+- 14 toolguard modules, 25 module-pair edges on the decision path
+- **No runtime cycle.**
+- `permission_resolution -> resolve`: **absent** (this is the whole point of the change, and it is real)
+- `file_matching -> resolve`, `permissions -> resolve`, `file_matching -> permission_resolution`: all absent
+- Observed shape matches the intent: `resolve -> permission_resolution -> {permissions, file_matching}`, plus `resolve -> file_matching` for the pre-cascade hard-deny check.
+
+**Residual invisible edge, acyclic.** `permission_resolution -> config` and `file_matching -> config` DO exist at runtime -- they call `Configuration`'s methods through the Protocol-typed `config` parameter. There is no import edge, so no static tool sees them; this is the same invisibility class as the callable that was removed. It is currently harmless (the graph is acyclic and `config` never calls back into the engine), but the seam was **narrowed, not eliminated**, and a future method added to `Configuration` that reaches back into the engine would recreate an invisible cycle with nothing positioned to notice. Worth knowing when reading `permission_resolution.py`'s docstring claim of decoupling from `config` -- true for imports, not for runtime.
+
+**Eager-matching cost.** The implementation report carries a `+0.58%` figure inherited from the design docs and explicitly says it was not re-measured. I re-measured it: replayed the committed 6401-case verdict corpus with both per-level matchers wrapped, comparing the new eager cascade against a reconstruction of the old lazy one (visit until first match; then, only for an `allow` winner, scan the tail skipping levels with no deny patterns).
+
+- matcher invocations, new eager: **17,799**; old lazy: **17,680** -> **+0.67%**
+- 119 of 9,070 cascades did extra work; largest single-decision delta was **1** extra matcher call
+
+The claim holds. One caveat the number hides: the worst case scales with hierarchy depth when a **deny** wins at the most-specific level (old cost 1 matcher call, new cost L). Corpus fixtures top out at ~2 levels, so a deep real-world hierarchy would show a larger -- still trivial -- delta. No action needed.
+
+**Suite / lint.** `uv run python -m unittest discover -s test -t .` -> Ran 2733 tests, OK (matches the stated baseline exactly). `uv run ruff check .` -> All checks passed. `uv run ruff format --check .` -> 173 files already formatted.
+
+**pyscn** (`uvx pyscn analyze --json --skip-deps .`, report `analyze_20260809_204301.json`): 11 in-scope functions, all cyclomatic complexity <= 8 except the pre-existing `permissions.match_command` (cx=18, cognitive=67), which this change did not touch. `resolve.resolve_bash_permission_detailed` has cognitive complexity 25 but the change **reduced** it (one closure deleted). Direction of travel is good. Clone findings are folded into the Suggestions below.
 
 ## Critical
 
@@ -40,128 +54,104 @@ None.
 
 ## Major
 
-### M1. `governed_by_default()` asserts a default that contradicts the runtime default -- inside the module declared the single source of truth
+**MAJ-1. `technical-notes.md` names a function that no longer exists, in 4 places.**
+`/home/arnon/projects/toolguard/technical-notes.md` lines 244, 373, 391, 404 reference `permission_resolution.resolve_permission_detailed`, deleted by this change. Lines 328 and 385 reference `hook._check_file_path_hard_deny` / `hook._decide_file_path_at_level_detailed`, which were already stale (wrong module) and are now doubly stale (wrong module *and* wrong name -- they are `file_matching.check_file_path_hard_deny` / `decide_file_path_at_level_detailed`).
 
-- `toolguard/tool_spec.py:79-81` -- `governed_by_default()` docstring: *"Tool names governed unless a config's `governed_tools` overrides it"*, returning `{Bash, Read, Write, Edit}`.
-- `toolguard/config.py:974-976` -- the runtime default is `("Bash",)` when no layer configures `governed_tools`.
-- `toolguard/config_validation.py:80,82` -- independently defaults to `["Bash"]`.
-- `test/verdict_corpus/configs/hard_deny.toml:6` and `pattern_forms.toml:5` both document the `("Bash",)` default explicitly, and set the four tools by hand *because* it is not the default.
+The implementation report deliberately deferred this to punch-list #07 and I can see the reasoning, but it is worth raising to Major because CLAUDE.md instructs agents to read `technical-notes.md` on demand for design rationale, and 73KB of design prose naming non-existent API actively misleads. The pre-push checklist's `/documentation-review` gate should not be allowed to be the only thing that catches it.
+*Fix*: update the 6 references, or add a dated "names below are pre-punch-list-#03" banner to the affected sections until #07 lands.
 
-So "which tools are governed by default" now has three definitions, and the newest one -- in the module whose whole purpose is to be authoritative -- disagrees with the two that actually drive behaviour. This is inert today only because no runtime path reads it. The risk is the obvious next step: a future author wiring `Configuration.governed_tools()`'s fallback to `governed_by_default()`, which the name actively invites, would silently begin governing `Read`/`Write`/`Edit` on every project with no toolguard config.
+**MAJ-2. 16 test docstrings in `test_configuration.py` name a function the test does not call.**
+`/home/arnon/projects/toolguard/test/unit/test_configuration.py`, lines 2848, 2916, 2968, 3308, 3312, 3448, 3473, 3497, 3520, 3541, 3587, 3711, 3722, 3733, 3744, 3755, 3766. Each says `When resolve_command_permission('Bash', ...) ...`, but every one of those tests calls the new test-local `_resolve_via_cascade` (line ~41), which calls `resolve_permission_cascade` -- the pure fold -- and never touches `resolve_command_permission`, whose entire job (building the level list with the **real** matcher) these tests deliberately avoid.
 
-Look at what the flag's real consumers do with it -- `security_audit.py:353`, `maintenance.py:184,715` (`sorted(GOVERNED_TOOLS)` as the target list) and `transcript_harvest.py:281` (`if tool not in GOVERNED_TOOLS: continue`). None of them mean "default"; all of them mean "the built-in Claude tools we know how to work with", as opposed to the user-specific MCP name.
-
-**Fix**: rename the `ToolSpec` field and the derived view to what the set is -- `is_builtin` / `builtin_tools()` (or `core_tools()`) -- and correct the docstring. Keep `constants.GOVERNED_TOOLS` as the exported name if importers depend on it, but say in its comment that it is the built-in set, not a default. Separately worth folding the two `["Bash"]` fallbacks (`config.py:975`, `config_validation.py:80`) into one named constant, since that *is* the default and it is currently duplicated.
-
-### M2. Derived views are live functions in the registry but frozen snapshots in `constants.py` -- one registry, two view semantics, no test that can see the difference
-
-- `toolguard/constants.py:27,31` -- `GOVERNED_TOOLS = governed_by_default()` and `FILE_TOOLS = file_kind_tools()` bind **at import time**.
-- `toolguard/tools/installer.py:901`, `toolguard/tools/transcript_harvest.py:227`, `toolguard/hook.py:731,1094` call the registry functions **at call time**.
-
-`tool_spec.py:36` promises *"Adding a tool is one entry here; every derived view below picks it up automatically"*. That holds for the calling consumers and not for the snapshotting ones. Today the registry is a static module-level tuple so the two can't diverge -- but the function form advertises dynamism the constant form does not have, and `_REGISTRY` is private with no injection seam, so there is no way to write a test that would catch a divergence if one were ever introduced.
-
-**Fix**: make the three derived views module-level frozensets rather than zero-arg functions (`KNOWN_TOOL_NAMES`, `BUILTIN_TOOLS`, `FILE_KIND_TOOLS`), leaving `payload_key()` as the only function. That makes the snapshot semantics uniform and honest, removes three per-call frozenset constructions, and is simpler code than what is there now. If instead the intent really is a live registry, the fix is the opposite -- `constants.py` must call, not snapshot -- but that seems like more machinery than a five-entry static table warrants.
+This is a mechanical-rename error introduced by this change: the old name `resolve_permission_detailed` was accurate, and it was replaced with the wrong successor. In a project that uses Given/When/Then docstrings as the specification, a "When" clause naming the wrong unit under test is worse than no clause. It also obscures MIN-3 below.
+*Fix*: `resolve_permission_cascade` in all 16, and correspondingly rename `test_resolve_command_permission_reason_cites_rules_dir_file_path` (line 3308) to `..._resolve_permission_cascade_...`.
 
 ## Minor
 
-### m1. `constants.py` module docstring is now false
+**MIN-1. Two module docstrings directly contradict each other about re-exporting.**
+`/home/arnon/projects/toolguard/toolguard/file_matching.py:24` says: *"``resolve.py`` re-exports every name below for its own existing importers."*
+`/home/arnon/projects/toolguard/toolguard/resolve.py:107-112` says: *"Only `check_file_path_hard_deny` is imported here ... this one deliberately does not re-export them."*
+`resolve.py` is correct; the `file_matching.py` sentence is stage-1 text that stage 2 invalidated when it renamed the helpers public and repointed the test imports.
+*Fix*: delete the sentence at `file_matching.py:24`.
 
-`toolguard/constants.py:6-7` -- *"Keeping them here -- in a leaf module that imports nothing from toolguard"*. Line 21 now imports `toolguard.tool_spec`. One-line correction: say it imports only other foundation modules, matching the `.pyscn.toml` foundation definition.
+**MIN-2. Two functions were made public on a rationale that measurement contradicts.**
+`/home/arnon/projects/toolguard/toolguard/file_matching.py:9-18` justifies the public names thus: *"`anchor_file_pattern`, `match_file_path_pattern`, `decide_file_path_at_level_detailed`, and `check_file_path_hard_deny` are public ... both cross a module boundary, so neither can stay private."* Measured across `toolguard/`, `test/`, `tools/`:
 
-### m2. `tool_spec.py` docstring is self-contradictory and wrong about `Configuration.governed_tools()`
+- `decide_file_path_at_level_detailed` -- crosses (imported by `permission_resolution`). Correct.
+- `check_file_path_hard_deny` -- crosses (imported by `resolve`). Correct.
+- `match_file_path_pattern` -- **zero** callers outside `file_matching.py`, production or test.
+- `anchor_file_pattern` -- **zero production** callers outside `file_matching.py`; 4 test imports in `test_hierarchical.py`.
 
-`toolguard/tool_spec.py:7-10` -- *"The CONFIGURABLE governed/supported-tool sets stay exactly as they are -- `Configuration.governed_tools()` and `additional_supported_tools` consume this registry rather than duplicating it"*. The first half and second half contradict each other, and the second half is factually wrong: `Configuration.governed_tools()` (`config.py:949-976`) reads config layers and never touches the registry. Only `config_validation.KNOWN_SUPPORTED_TOOLS` consumes it. Drop the claim about `governed_tools()`.
+Per this project's own API-visibility criterion (privatize by "should non-test code call it?"; tests importing privates is fine), both should stay `_`-prefixed.
+*Fix*: either re-privatize the two (updating the 4 test imports), or -- if the intent is that `file_matching` presents a coherent public matching API -- keep them public and rewrite the rationale, which is currently a false statement of fact.
 
-### m3. Half-converted payload-key dispatch -- the `"command"` literal survives next to the registry
+**MIN-3. 26 cascade tests no longer exercise production's level-list construction.**
+`_resolve_via_cascade` (`test_configuration.py:~41`) reimplements the comprehension that pairs `config.permission_levels_with_provenance(tool)` output into `LevelOutcome` values. Previously those tests called the production function `resolve_permission_detailed(config, tool, decide)` with only the *matcher* faked, so production's own level iteration and match/layers pairing were under test. Now that step is a test-local copy.
 
-- `test/verdict_corpus/fixture_loader.py:680` -- `key = payload_key(tool) if tool in FILE_PATH_TOOLS else "command"`
-- `toolguard/tools/transcript_harvest.py:226-229` -- same shape
+Risk is low -- the pairing is still covered by the real-matcher tests in `test_hierarchical.py`, `test_permission_resolution.py`, `test_logging_streams.py`, `test_hard_deny.py`, `test_takeover_mode.py` -- so this is an observation, not a demand. But it is a genuine coverage relocation that the implementation report does not mention, and it is the kind of thing that is invisible later.
+*Fix (optional)*: none required; if you want the old property back, have `_resolve_via_cascade` call `resolve_command_permission` with a monkeypatched matcher instead of rebuilding the list.
 
-The registry knows the payload key for *every* tool, including command-kind ones, so the `FILE_TOOLS` branch plus the hardcoded `"command"` is exactly the duplication the ticket set out to remove -- half-removed. A command-kind tool registered with a non-`command` key would be resolved correctly by the registry and wrongly by these two sites.
-
-**Fix** (both sites):
-
-```python
-spec = TOOLS_BY_NAME.get(tool)
-key = spec.payload_key if spec else "command"
-```
-
-The `else` fallback is still needed for unregistered tools (e.g. `mcp__local-tools__checked_bash`, deliberately not in the registry), but it becomes an unknown-tool fallback rather than a second definition of the command key.
-
-### m4. Deny reason hardcodes `file_path` after the key became dynamic
-
-`toolguard/hook.py:734` and `toolguard/hook.py:1107` both return `reason="No file_path provided in tool input"`, and `hook.py:1094` names the local `file_path`, while the key itself now comes from `_tool_payload_key(tool_name)`. If a file-kind tool ever registers a different key, the message names a key the caller never sent -- and this reason string reaches the user. Interpolate the resolved key. `test/unit/test_hook_eval.py:166` asserts on the substring and must be updated in the same edit.
-
-### m5. Test gaps in `test/unit/test_tool_spec.py`
-
-- **No registry-integrity test.** `TOOLS_BY_NAME` (`tool_spec.py:71`) is a dict comprehension, so a duplicated `name` in `_REGISTRY` collapses silently. Add `assertEqual(len(TOOLS_BY_NAME), len(_REGISTRY))`, plus an assertion that every `payload_key` is non-empty.
-- **`test_tool_spec_is_frozen` (line 92)** uses `assertRaises(Exception)`, which would pass on any unrelated error. Use `dataclasses.FrozenInstanceError`.
-- **Nothing tests the behaviour that actually changed.** The existing hook, harvest and fixture tests pass `{"file_path": ...}` literals and would pass identically against the pre-refactor code, so the registry seam itself is unpinned. A single test that swaps in a file-kind tool with a different payload key and drives `hook._resolve_event`, `transcript_harvest._command_for_tool` and `fixture_loader.build_hook_payload` would pin it -- and would immediately surface M2 and m3.
-- **`test_constants_module_constants_equal_derived_views` (lines 47-50)** is near-tautological: both sides are the same call. It catches only re-hardcoding, which the literal-pinning tests above already cover.
-
-### m6. Public function imported under a private alias
-
-`toolguard/hook.py:51` -- `from toolguard.tool_spec import payload_key as _tool_payload_key`. There is no name collision in `hook.py` to avoid, and the leading underscore makes call sites read as if the function were module-private. Import it plainly, or alias without the underscore.
+**MIN-4. `check_file_path_hard_deny` is typed far wider than it uses, two functions below the change that fixed exactly that.**
+`/home/arnon/projects/toolguard/toolguard/file_matching.py:210-212` types `config` as `ResolveConfig` (8 members) while touching only `hard_deny` and `resolve_config_path`. The change introduces `PathAnchoring` precisely to state "the narrowest statement of what those functions actually touch" for its neighbours, then does not apply the principle here. `file_matching.py`'s own docstring rationale for this ("it needs both anchoring and `hard_deny`") describes a 2-member surface, not `ResolveConfig`.
+*Fix*: `class HardDenyPool(PathAnchoring, Protocol)` adding only `hard_deny`, in `config_types.py` beside the others.
 
 ## Suggestions
 
-### s1. Three names still denote one value -- collapse the alias chain while the ticket is open
+**SUG-1. Make `resolve_permission_cascade`'s parameters keyword-only, or bundle them.**
+`/home/arnon/projects/toolguard/toolguard/permission_resolution.py:349-356` takes five positionals after `levels`, of which **three are plain strings** (`tool_name`, `no_match_fallback`, `subject`). Transposing any two is a silent behaviour change that no type checker catches. Both production call sites pass 5 positionally.
+Either make everything after `levels` keyword-only (`*,`), or -- closer to this project's stated preference for an invocation-scoped facts object over repeated threading -- pass one frozen dataclass carrying the four config-derived facts (`tool_name`, `parse_failures`, `has_any_rules`, `no_match_fallback`), which both entry points read from `config` and re-thread today.
 
-`tool_spec.file_kind_tools()` -> `constants.FILE_TOOLS` -> `hook.FILE_PATH_TOOLS`. The last is already carrying a comment saying it exists only because tests import it. The refactor cut *literal* duplication from four sites to one but left the *name* duplication at three. `FILE_PATH_TOOLS` has exactly three readers -- `toolguard/hook.py`, `test/unit/test_hook.py`, `test/verdict_corpus/fixture_loader.py` -- so deleting it is cheap now and gets more expensive later. Per project convention, "it breaks N tests" is not an objection.
+**SUG-2. The two new entry points are 0.85-similar and nothing marks that as deliberate.**
+pyscn flags `permission_resolution.py:400-436 <-> 439-479` as a type-2 clone at 0.850 similarity -- `resolve_command_permission` vs `resolve_file_path_permission`. They differ only in which matcher is called (and its extra `config` argument) and `subject="Path"`. This duplication was **introduced by this change**. Either extract a shared `_resolve(levels, matcher, subject)` taking a bound matcher, or add a one-line comment saying the duplication is preferred over a higher-order parameter (which would be defensible here, given the whole point was removing an injected callable -- but say so, otherwise the next reader will "fix" it by reintroducing one).
 
-### s2. `.pyscn.toml` layer assignment was done correctly -- worth noting because this is the step that usually gets skipped
+**SUG-3. Replace `_resolve_unclamped`'s four-branch fallback chain with a lookup.**
+`permission_resolution.py:311-346` is four `if fallback == "...":` branches each constructing a near-identical `RuntimeVerdict` (pyscn flags 312-322 <-> 323-332 at 0.79). A dict keyed on the fallback value -> `(decision, reason_template, fallback_warning)` collapses it and makes adding a fifth policy a data change rather than a code change.
 
-`tool_spec` was added to the `foundation` packages list, and `uv run python tools/architecture_fitness.py --layers` reports "All modules map to exactly one layer" and "No cross-layer direction violations". An unassigned new file is drift by default and layer checkers commonly fail silently on it; this one did not.
+**SUG-4. Decision strings are branched on with no named constants.**
+`permission_resolution.py` has 15 sites constructing or branching on bare `"deny"` / `"allow"` / `"ask"` / `"allow_with_warning"`; `constants.py` defines no decision constants. The global CLAUDE.md names `"deny"`/`"ask"` decisions as the highest-value case for this rule. This is pre-existing and project-wide, and this change merely perpetuated it -- so it belongs in its own ticket, not here. Flagging it because the change moved and rewrote several of those sites, which was the natural moment.
 
-### s3. Keep the `_CANARY_FILE_TOOLS` comment framing
+**SUG-5. The two per-level matchers are the same algorithm twice.**
+`permissions.decide_command_at_level_detailed` and `file_matching.decide_file_path_at_level_detailed` share the identical skeleton (deny-first loop, non-blanket ask filter, `resolve_allow_ask`, build `LevelMatch`), differing in the match primitive, path anchoring, and the noun in the reason string. Pre-existing, but the change makes it more visible: they are now siblings consumed by one fold. Low priority -- the anchoring difference is real and a shared skeleton would need a `match_one(pattern, subject)` callable, which cuts against this ticket's direction.
 
-`tools/architecture_fitness.py:3673-3679` replaces a rationale about subprocess-vs-import with the actual reason: *"a check that derives the fact it verifies from the thing it verifies can only ever agree with itself"*. That is the correct and more durable justification for not importing `tool_spec` here, and it generalises to every other canary in that file.
-
-### s4. Typing style in `tool_spec.py`
-
-The module mixes `typing.FrozenSet` / `typing.Mapping` (lines 15, 71, 74, 79, 84) with the builtin generic `tuple[ToolSpec, ...]` (line 37). Use builtin generics and `collections.abc` throughout: `frozenset[str]`, `Mapping` from `collections.abc`.
-
----
+**SUG-6. Cross-reference density has a measurable rename tax.**
+This change edited 6 production files for **docstrings only**, because those modules name other modules' functions in `:func:` cross-references. That same mechanism produced MAJ-1 (the references in `technical-notes.md` that were not updated because nothing links them to the rename). Consider referencing the *module* rather than the function in cross-module prose, where the function name is not itself the point.
 
 ## Architectural drift pass
 
-Run because the change touches six production files and carries a ticket ID. These are observations for judgement, not thresholds.
+Run because the change touches 9 production files and carries a ticket ID. These are indicators for judgement, not thresholds.
 
-**Blast radius vs. conceptual size.** One concept (a tool registry) landed in 6 production files + 1 new test + 1 dev-tool comment + 1 corpus fixture + 1 config file. The ratio looks bad in isolation and is not: this is a *consolidation*, and it reduces definition sites (four hand-written tool-name sets and every production `"file_path"` literal collapse to one table). High file count here is the cost of paying down duplication, not evidence of a concept smeared across the tree.
+1. **Blast radius vs conceptual size -- healthy.** One concept landed in 9 production files, but only **4 carry code** (`permission_resolution`, `resolve`, `file_matching`, `config_types`); the other 5 are docstring-only. The code footprint matches the idea's size. The doc-only tail is SUG-6.
 
-**Logical coupling (co-change).** Over the last 400 commits, 54 touched `toolguard/` (excluding merges and the two >40-file architecture-overhaul commits, which would swamp the signal):
+2. **Logical coupling -- one real signal.** Over the last 400 commits touching `toolguard/`: `config_types.py` changed in **8** commits, and **all 8** also touched an engine module (`resolve` / `permission_resolution` / `permissions` / `compound` / `file_matching`). A 100%-coupled pair is two files behaving as one module. This change adds to it: `PathAnchoring` and `FilePathResolutionConfig` landed in `config_types.py` purely because `file_matching` and `permission_resolution` needed them.
 
-| file | commits | distinct co-change partners |
-|---|---|---|
-| `toolguard/hook.py` | 29 / 54 (54%) | 60 |
-| `toolguard/config.py` | 25 | 68 |
-| `toolguard/tools/installer.py` | 12 | 55 |
-| `toolguard/config_validation.py` | 3 | 51 |
-| `toolguard/tools/transcript_harvest.py` | 2 | 38 |
-| `toolguard/constants.py` | 2 | 21 |
+   This is not a defect -- it is the deliberate price of "put the contract in a shared leaf so no import edge is needed", and the alternative (importing `config`) is worse. But it is worth naming, because the *concepts* have drifted across a layer boundary: `PathAnchoring` describes what an **engine** module needs, and it now lives in the **config** layer. `engine -> config` is a legal downward edge, so no checker complains, and the compliance score stays clean while the coupling grows. If this keeps accreting, an engine-layer contracts module (`toolguard/engine_contracts.py`, registered under `engine` in `.pyscn.toml`) would hold these Protocols with no cycle and no cross-layer concept leak. Not urgent; worth a ticket before the next batch of Protocols.
 
-`hook.py` changes in over half of all commits touching the package and co-changes with 60 distinct files, at 1445 lines. That is the package's clearest hub, and it is a standing condition rather than something this change created -- the change adds two lines to it. `config.py` is second. Neither is a finding against this change set; both are the reason to keep doing punch-list consolidations like this one.
+3. **New file has a declared home -- clean.** `file_matching` is registered in `.pyscn.toml` under the `engine` layer (line 212). No unassigned file, which is the failure mode that usually goes unnoticed.
 
-**100%-coupled pairs** (rarer file never changed without the other, min 4 commits): `config.py <-> config_types.py` (8/8), `resolve.py <-> rule_entry.py` (4/4), `config_types.py <-> rule_entry.py` (4/4), `config.py <-> rule_entry.py` (4/4). Those four files behave as one module. They are untouched here, but that is structurally the *same shape* punch-list #10 just fixed for tool names, and they are the obvious next candidates. (`resolve.py`/`hook.py <-> tools/decision.py` at 5/5 is historical -- `decision.py` was deleted in item 05.)
+4. **Boundary crossings -- benign.** The change spans `toolguard/` and `tools/` (`architecture_fitness.py`, one docstring line). One crossing, doc-only.
 
-**New file has an architectural home.** Yes -- see s2. Clean.
+5. **Test cost trend -- good.** This change: **+120/-199** test lines against **+376/-560** production lines (ratio 0.32). The project's standing ratio over the last 40 commits is roughly **3.25** test insertions per production insertion. Coming in ten times below the norm is the right answer for a behaviour-preserving refactor: no representation-pinning tests were added, and the golden corpus carried the verification instead. Positive signal.
 
-**Boundary crossings.** The change spans source (`toolguard/`), dev tooling (`tools/`) and test fixtures (`test/verdict_corpus/`). Not a real crossing: the `tools/architecture_fitness.py` edit is comment-only and its explicit point is that it must *not* import the new module. No boundary was weakened.
+## Tool observation (code-review-graph trial)
 
-**Test cost trend.** 101 new test lines against roughly 126 production lines added/changed, about 0.8:1, versus a standing repo ratio of ~1.9:1 (65,030 test lines / 34,481 production lines, excluding the generated parser). Below the project's norm. Normally that is a good sign for a refactor with existing behavioural coverage -- but here the shortfall lands exactly where it matters (m5): the new tests pin the registry's *contents* while the *seam* the refactor introduced is unpinned, and the pre-existing tests cannot distinguish the new code from the old.
+Phase: **refactoring**. `semantic_search_nodes` returned `/home/arnon/projects/toolguard/toolguard/resolve.py::_decide_detailed` at lines 780-800 -- a function **deleted in the working tree**. Verified absent by grep. Had I taken it at face value it would have been a false "dead closure left behind" finding.
 
----
+Two honest caveats. First, **I did not run `embed` + `postprocess` before the search**, so per the trial protocol this entry should be read as inconclusive rather than negative. Second, the stale node came from the *nodes* table, which the reference documents as auto-updating on every Edit/Write/Bash -- so refreshing embeddings might not have helped anyway. The search did usefully surface the test-local `_decide` stubs across five test files in one call. But the specific question I was asking ("is `_decide_detailed` gone?") is a one-call `LSP` question that pyright would have answered correctly, which is the standard the trial now applies.
 
-## Verification performed
+## Verification commands used
 
-- `uv run python -m unittest discover -s test -t .` -- **Ran 2721 tests, OK**.
-- `uv run ruff check` on all nine scoped files -- **All checks passed**.
-- `uv run python tools/architecture_fitness.py --layers` -- completeness and direction both clean.
-- Confirmed `hook.COMMAND_TOOLS` had zero readers at HEAD (`git grep -n COMMAND_TOOLS HEAD -- '*.py'` returns only its own definition), so the deletion is dead-code removal, not a behaviour change. `mcp__local-tools__checked_bash` dropping out with it is consistent with `KNOWN_SUPPORTED_TOOLS`, which deliberately excluded it as user-specific.
-- Confirmed no remaining production `"file_path"` literals outside the registry and the deliberate canary.
-- Confirmed the `KNOWN_SUPPORTED_TOOLS` `set` -> `frozenset` change is safe: its only use is `KNOWN_SUPPORTED_TOOLS | set(additional_supported_tools)` (`config_validation.py:90`), and no caller mutates it.
-- Confirmed the `installer.py:901` ordering change (`("Read","Write","Edit")` -> `sorted(file_kind_tools())`, i.e. Edit/Read/Write) is cosmetic: `test/unit/test_tools_installer.py:1274` asserts membership, not order.
+```
+uv run python -m unittest discover -s test -t .        # Ran 2733 tests, OK
+uv run ruff check .                                     # All checks passed
+uv run ruff format --check .                            # 173 files already formatted
+uvx pyscn analyze --json --skip-deps .                  # grade B; in-scope cx all <= 8 bar pre-existing match_command
+```
 
-**pyscn not run** -- the effective diff is ~65 lines across a small set; the layer fitness check above is the relevant structural check for this change. Say the word if you want a full `uvx pyscn analyze` pass before the push.
+Plus two throwaway measurement scripts (deleted with the scratchpad): a `sys.setprofile` runtime-call-graph probe with DFS cycle detection, and a corpus replay counting eager vs lazy matcher invocations.
 
-**code-review-graph note (trial)**: one non-trivial use, `get_impact_radius` on the three foundation files -- 500 nodes / 81 files at depth 2, "risk: high", with `ConfigIsolationMixin` and `isolate_config_environment` as top "key entities". That is what you get asking for blast radius on a foundation constants module: technically true, not actionable, and the named entities were unrelated test scaffolding. Targeted greps for the specific symbol names (`COMMAND_TOOLS`, `GOVERNED_TOOLS`, `FILE_PATH_TOOLS`, `"file_path"`) answered the real question -- who reads this -- faster and exactly. **The graph did not earn this invocation.** Phase: refactoring/consolidation. No staleness refresh was needed (impact radius is an auto-updating layer).
+## Review metrics
+
+- **Elapsed**: 16 minutes (20:36 -> 20:52)
+- **Estimated cost**: ~$3.10 (Opus 5; heavy file reads, one 6401-case corpus replay, one full test-suite run)
+- **Files reviewed**: 8 in scope; ~12 more read for context (`api.py`, `patterns.py`, `constants.py`, `.pyscn.toml`, `technical-notes.md`, corpus harness, sandbox harness)
+- **Issues by severity**: Critical 0, Major 2, Minor 4, Suggestions 6, plus 5 architectural-drift observations (4 healthy, 1 worth a ticket)

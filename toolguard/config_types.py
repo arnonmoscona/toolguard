@@ -35,7 +35,7 @@ rationale.
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import List, Mapping, Optional, Protocol, Tuple
 
 from toolguard.rule_entry import RuleEntry, _strip_tool_wrapper
 
@@ -445,17 +445,17 @@ class LevelMatch:
     TOO-45 R1f: replaces the bare ``(decision, reason, matched_pattern)``
     tuple that :func:`~toolguard.permissions.check_hard_deny`,
     :func:`~toolguard.permissions.decide_command_at_level_detailed`,
-    :func:`~toolguard.resolve._decide_file_path_at_level_detailed`, and
-    :func:`~toolguard.resolve._check_file_path_hard_deny` used to return
+    :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`, and
+    :func:`~toolguard.file_matching.check_file_path_hard_deny` used to return
     (or ``None`` when nothing at this level/pool matched -- every real
     caller wraps this type in ``Optional``, never constructs a
     ``LevelMatch`` for "no match").
 
-    This is the ``decide_detailed`` callback contract
-    :func:`~toolguard.permission_resolution.resolve_permission_detailed`
-    consumes: ``decide_detailed(allow, deny, ask)`` must return a
-    ``LevelMatch`` (or ``None``) so the matched pattern can be mapped back
-    to its owning :class:`~toolguard.config.ToolPatternLayer`/provenance.
+    This is the per-level result :func:`~toolguard.permission_resolution.resolve_permission_cascade`
+    (TOO-45 punch-list #03: the pure fold over already-computed per-level
+    matches) folds over, paired one-to-one with the level's
+    :class:`~toolguard.config.ToolPatternLayer` tuple, so the winning
+    pattern can be mapped back to its owning layer/provenance.
 
     A THIRD, lower altitude than :class:`UnitVerdict` (one sub-command's
     outcome) and :class:`RuntimeVerdict` (the whole runtime verdict): this
@@ -484,16 +484,16 @@ class LevelMatch:
     winning-pattern field at all, and a test renames it to ``matched_rule``
     to prove the classification does not move.
 
-    ``_check_file_path_hard_deny``'s use (TOO-45 R1f reconciliation)
+    ``check_file_path_hard_deny``'s use (TOO-45 R1f reconciliation)
     -------------------------------------------------------------------
-    Before R1f, ``_check_file_path_hard_deny`` computed its own
+    Before R1f, ``check_file_path_hard_deny`` computed its own
     ``additionalContext`` lookup internally and returned
     ``(decision, reason, additional_context)`` -- a DIFFERENT shape from
     the other three functions' ``(decision, reason, matched_pattern)``,
     and the matched hard-deny pattern itself was discarded (a TOO-45 R3
     comment at the call site explained why closing that gap was out of
     R3's scope). R1f reconciles this onto ONE shared type instead of
-    inventing a second: ``_check_file_path_hard_deny`` now returns its
+    inventing a second: ``check_file_path_hard_deny`` now returns its
     matched pattern in ``matched_pattern`` (mirroring
     :func:`~toolguard.permissions.check_hard_deny`'s Bash-side
     convention), and its caller
@@ -507,21 +507,21 @@ class LevelMatch:
     structural conversion only, not the R3 fix; see that call site's own
     comment for why the asymmetry is preserved rather than closed here.
 
-    Lives in :mod:`toolguard.config_types`, not :mod:`toolguard.resolve` or
-    :mod:`toolguard.permissions`, for the same reason
-    :class:`RuntimeVerdict`/:class:`UnitVerdict` do:
-    :mod:`toolguard.permission_resolution` consumes this type directly (via
-    the ``decide_detailed`` callback's return value) and is architecturally
-    forbidden from importing either module (see
-    :mod:`toolguard.permission_resolution`'s own module docstring).
-    :mod:`toolguard.permissions` and :mod:`toolguard.resolve` both
-    re-export it for their own callers.
+    Lives in :mod:`toolguard.config_types`, not :mod:`toolguard.resolve`,
+    :mod:`toolguard.permissions`, or :mod:`toolguard.file_matching`, for the
+    same reason :class:`RuntimeVerdict`/:class:`UnitVerdict` do: it is the
+    shared leaf every one of those modules imports, so defining it here adds
+    no import edge in any direction. :mod:`toolguard.permission_resolution`
+    consumes it directly, as the per-level fold input (TOO-45 punch-list
+    #03) and as :func:`~toolguard.permission_resolution._detect_override`'s
+    scan target; :mod:`toolguard.permissions`, :mod:`toolguard.resolve`, and
+    :mod:`toolguard.file_matching` all re-export it for their own callers.
 
     Attributes:
         decision: ``'allow'``, ``'ask'``, or ``'deny'`` -- this level's/
             pool's own decision, before any cascade-wide clamp (e.g. the
             TOO-19 parse-failure ASK floor, applied later by
-            :func:`~toolguard.permission_resolution.resolve_permission_detailed`)
+            :func:`~toolguard.permission_resolution.resolve_permission_cascade`)
             is applied.
         reason: Human-readable reason for THIS level's/pool's own match,
             before provenance is appended as a bracketed suffix (that
@@ -713,9 +713,11 @@ class RuntimeVerdict:
     :func:`~toolguard.resolve.resolve_file_path_permission_detailed`)
     populate them, since only they have the actual command/file_path string
     in scope; the internal per-level verdict built by
-    :func:`~toolguard.permission_resolution.resolve_permission_detailed`
-    leaves both ``None`` (it is never handed a target string at all -- its
-    ``decide_detailed`` callback closes over it privately). ``tool`` for a
+    :func:`~toolguard.permission_resolution.resolve_command_permission`/
+    :func:`~toolguard.permission_resolution.resolve_file_path_permission`
+    leaves both ``None`` (neither is handed a target string at this layer --
+    only the tool-specific matcher below it closes over one privately).
+    ``tool`` for a
     Bash/MCP-terminal resolution is always the literal string ``'Bash'``,
     matching :func:`~toolguard.resolve.resolve_bash_permission_detailed`'s
     existing convention of always evaluating against the Bash rule set
@@ -738,7 +740,8 @@ class RuntimeVerdict:
     - File path (:func:`~toolguard.resolve.resolve_file_path_permission_detailed`):
       *identifier* is the file path itself (== ``target``); 0 or 1 entries.
     - The internal per-level verdict
-      (:func:`~toolguard.permission_resolution.resolve_permission_detailed`):
+      (:func:`~toolguard.permission_resolution.resolve_command_permission`/
+      :func:`~toolguard.permission_resolution.resolve_file_path_permission`):
       *identifier* is ``None`` -- that layer has no sub_command/target string
       in scope (see the ``tool``/``target`` note above); the two public
       ``resolve.py`` entry points re-pair the bare override with the real
@@ -826,35 +829,25 @@ class RuntimeVerdict:
 
 
 # ---------------------------------------------------------------------------
-# Shape contracts across the permission_resolution <-> resolve runtime seam
-# (TOO-45 D2)
+# Configuration-surface Protocols for the permission_resolution / resolve /
+# file_matching seam (TOO-45 D2, narrowed by punch-list #03)
 # ---------------------------------------------------------------------------
 #
-# :mod:`toolguard.permission_resolution` and :mod:`toolguard.resolve` form a
-# runtime cycle static analysis cannot see: ``resolve.py`` imports FROM
-# ``permission_resolution`` (a real import edge), while
-# ``permission_resolution`` receives ``resolve``'s per-tool decision
-# function back as an INJECTED CALLABLE (``decide_detailed``), never as an
-# import. The dependency going the other way is therefore on SHAPE, not on
-# an import -- normal in a duck-typed language, but until now that shape was
-# asserted almost nowhere: ``config`` arrived at every call site as a bare,
-# entirely untyped parameter, and ``decide_detailed`` as
-# ``Callable[[object, object, object], Optional[LevelMatch]]``, with the
-# real contract stated only in prose (this module's callers' docstrings) --
-# text that drifts silently whenever the real implementations change
-# underneath it, with no tool positioned to notice.
+# ``permission_resolution.py`` is architecturally forbidden from importing
+# :mod:`toolguard.config`, so ``config`` cannot be typed as
+# :class:`~toolguard.config.Configuration` at its entry points. These
+# Protocols close that gap by stating, structurally, the exact subset of
+# ``Configuration`` each caller's ``config`` parameter needs -- checked by
+# pyright without adding an import edge to :mod:`toolguard.config`.
 #
-# The two Protocols below turn that prose into a structural contract pyright
-# actually checks, without adding a single import edge: both
-# ``permission_resolution.py`` and ``resolve.py`` already import
-# :mod:`toolguard.config_types` (see ``RuntimeVerdict``/``LevelMatch``'s own
-# "why this lives here" notes above), so defining the contract in THIS
-# shared leaf lets both sides of the seam see it without either importing
-# the other, or importing :mod:`toolguard.config`. Neither
-# :class:`~toolguard.config.Configuration` nor ``resolve.py``'s closures are
-# ever declared to implement these Protocols explicitly -- structural typing
-# is the entire point: the shape is checked without either module knowing
-# the other, or this one, defines it.
+# Punch-list #03 removed the runtime cycle a static import graph could not
+# see (``resolve.py`` importing FROM ``permission_resolution`` while
+# ``permission_resolution`` called back into a closure ``resolve.py`` handed
+# it): ``permission_resolution`` now imports its per-level matchers directly
+# from :mod:`toolguard.permissions` and :mod:`toolguard.file_matching`
+# instead of receiving one back as an injected callable, so there is no
+# longer a callback-shaped contract to type here -- only the ``config``
+# surface each entry point reads.
 
 
 class ResolutionConfig(Protocol):
@@ -863,9 +856,10 @@ class ResolutionConfig(Protocol):
     reads from ``config`` to run its decision cascade.
 
     :mod:`toolguard.permission_resolution` is architecturally forbidden from
-    importing :mod:`toolguard.config` (that module's own docstring: "It is
-    deliberately decoupled from :mod:`toolguard.config`: it imports only
-    :mod:`toolguard.config_types` and the stdlib"), so ``config`` cannot be
+    importing :mod:`toolguard.config` (that module's own docstring: it stays
+    decoupled from :mod:`toolguard.config`, importing only
+    :mod:`toolguard.config_types`, :mod:`toolguard.permissions`,
+    :mod:`toolguard.file_matching`, and the stdlib), so ``config`` cannot be
     typed as :class:`~toolguard.config.Configuration` there. This Protocol
     is what closes that gap: any object handed in as ``config`` --
     in practice always a real ``Configuration``, but a test double needs
@@ -922,12 +916,16 @@ class ResolutionConfig(Protocol):
         Return ``tool_name``'s ``(allow, deny, ask, layers)`` pattern tuples,
         one per hierarchy level, most-specific first.
 
-        Drives the more-specific-wins cascade in
-        :func:`~toolguard.permission_resolution._resolve_unclamped`: each
-        level's ``(allow, deny, ask)`` triple is handed to the caller's
-        :class:`DecideDetailed` callback, and ``layers`` is kept around so a
-        winning pattern can be mapped back to its source :class:`Provenance`
-        via :func:`provenance_for_pattern`/:func:`entry_for_pattern`.
+        Drives the more-specific-wins cascade: each level's ``(allow, deny,
+        ask)`` triple is matched by :func:`~toolguard.permissions.decide_command_at_level_detailed`
+        or :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`
+        (TOO-45 punch-list #03: called directly by
+        :func:`~toolguard.permission_resolution.resolve_command_permission`/
+        :func:`~toolguard.permission_resolution.resolve_file_path_permission`,
+        one per level, eagerly), and ``layers`` is kept around so a winning
+        pattern can be mapped back to its source :class:`Provenance` via
+        :func:`provenance_for_pattern`/:func:`entry_for_pattern` inside the
+        pure fold, :func:`~toolguard.permission_resolution.resolve_permission_cascade`.
         """
         ...
 
@@ -973,7 +971,8 @@ class ResolveConfig(ResolutionConfig, Protocol):
     those four is deliberate: structural subtyping then makes a
     ``ResolveConfig`` valid wherever a ``ResolutionConfig`` is expected, so
     passing ``config`` from a ``resolve.py`` entry point down into
-    :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+    :func:`~toolguard.permission_resolution.resolve_command_permission`/
+    :func:`~toolguard.permission_resolution.resolve_file_path_permission`
     stays sound without a cast.
 
     This is what closes the gap the first pass of this work (TOO-45 D2)
@@ -982,7 +981,7 @@ class ResolveConfig(ResolutionConfig, Protocol):
     had nowhere correct to be typed (too narrow for what they actually use),
     so they stayed bare/untyped, and pyright performed NO check at the one
     boundary that matters at runtime -- the real call from ``resolve.py``
-    into ``resolve_permission_detailed``. Typing ``resolve.py``'s entry
+    into the resolver entry points. Typing ``resolve.py``'s entry
     points (:func:`~toolguard.resolve.resolve_file_path_permission_detailed`,
     :func:`~toolguard.resolve.resolve_bash_permission_detailed`) against
     THIS Protocol instead makes that call site checked for real -- see the
@@ -998,10 +997,11 @@ class ResolveConfig(ResolutionConfig, Protocol):
         """
         Anchor a relative file-path pattern's body to the project root.
 
-        Used by ``resolve.py``'s own ``_anchor_file_pattern`` for every
+        Used by ``file_matching.py``'s own ``_anchor_file_pattern`` for every
         file-path pattern match (allow, deny, ask, and hard-deny carve-outs
-        alike) -- ``permission_resolution.py`` never calls this; it is
-        purely a ``resolve.py``-side concern.
+        alike) -- ``permission_resolution.py`` reaches this only through
+        :class:`PathAnchoring` (below), for the file-path cascade; it is
+        purely a file-path-side concern.
         """
         ...
 
@@ -1010,14 +1010,14 @@ class ResolveConfig(ResolutionConfig, Protocol):
         Return the pooled ``(deny_patterns, allow_patterns)`` hard-deny pair
         for ``tool_name``, wrapper-stripped, unioned across every level.
 
-        Used by ``resolve.py``'s ``_check_file_path_hard_deny`` to check the
+        Used by ``file_matching.py``'s ``check_file_path_hard_deny`` to check the
         unoverridable hard-deny pool FIRST, before the normal cascade --
         entirely outside ``permission_resolution.py``'s own scope (the
         Bash-side equivalent pool is fetched by ``resolve.py``'s OWN caller
         and handed to :func:`~toolguard.resolve.resolve_bash_permission_detailed`
-        as plain arguments, not read from ``config`` inside ``resolve.py``
-        itself, which is why this Protocol declares the method anyway --
-        the file-path path uses it directly).
+        as plain arguments, not read from ``config`` inside the file-path
+        resolver itself, which is why this Protocol declares the method
+        anyway -- the file-path path uses it directly).
         """
         ...
 
@@ -1044,79 +1044,36 @@ class ResolveConfig(ResolutionConfig, Protocol):
         Used directly by :func:`~toolguard.resolve.resolve_bash_permission_detailed`
         to floor a compound Bash verdict built from a grammar-level
         undecidable segment (one with no leaves, so it never reaches
-        :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+        :func:`~toolguard.permission_resolution.resolve_command_permission`
         at all) -- a concern specific to the Bash compound pipeline that
         ``permission_resolution.py`` has no reason to know about.
         """
         ...
 
 
-class DecideDetailed(Protocol):
+class PathAnchoring(Protocol):
     """
-    The per-level decision callback :func:`resolve_permission_detailed`
-    drives its more-specific-wins cascade through.
+    The one member :mod:`toolguard.file_matching` needs from ``config`` to
+    anchor a relative file-path pattern to the project root.
 
-    TOO-45 D2: corrects a conflation in this contract's earlier
-    documentation (formerly a module-level comment in
-    ``permission_resolution.py``). FOUR functions across the codebase
-    return :class:`LevelMatch` --
-    :func:`toolguard.permissions.decide_command_at_level_detailed`,
-    :func:`toolguard.permissions.check_hard_deny`,
-    :func:`toolguard.resolve._decide_file_path_at_level_detailed`, and
-    :func:`toolguard.resolve._check_file_path_hard_deny` -- but "returns
-    ``LevelMatch``" and "implements THIS callback" are not the same claim,
-    and only TWO of those four are ever wired in as this callback: the
-    identically-shaped ``_decide_detailed`` closures declared inside
-    :func:`toolguard.resolve.resolve_file_path_permission_detailed` and
-    :func:`toolguard.resolve.resolve_bash_permission_detailed`, each
-    adapting its own tool's per-level decision function
-    (``_decide_file_path_at_level_detailed`` /
-    ``decide_command_at_level_detailed`` respectively) to this exact
-    ``(allow, deny, ask) -> Optional[LevelMatch]`` shape. The two
-    ``check_hard_deny``-family functions are NOT ``decide_detailed``
-    implementations -- they are called directly, BEFORE the cascade this
-    callback drives, against a POOLED hard-deny pattern set, with a
-    different parameter shape entirely (a command/path plus a bare
-    deny/allow pair, no ``ask``, no per-level scoping).
-
-    Modelled as a callback Protocol (``__call__``) rather than a bare
-    ``Callable[[...], ...]`` alias so each parameter can be named for what
-    it means -- a positional ``Callable`` alias cannot express that, and the
-    three parameters (allow/deny/ask) are exactly the kind of same-typed,
-    order-dependent triple where a name is worth having.
+    Deliberately narrower than :class:`ResolveConfig`: ``file_matching.py``'s
+    matching functions (:func:`~toolguard.file_matching._anchor_file_pattern`,
+    :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`)
+    touch nothing else on ``config``, so typing them against this one-member
+    Protocol documents that tight coupling instead of the wider surface
+    :class:`ResolveConfig` grants ``resolve.py`` itself.
     """
 
-    def __call__(
-        self,
-        allow_patterns: Sequence[str],
-        deny_patterns: Sequence[str],
-        ask_patterns: Sequence[str],
-        /,
-    ) -> Optional["LevelMatch"]:
-        """
-        Decide one hierarchy level's (or hard-deny pool's) outcome.
-
-        Args:
-            allow_patterns: This level's allow patterns (wrapper-free).
-            deny_patterns: This level's deny patterns (wrapper-free).
-            ask_patterns: This level's ask patterns (wrapper-free).
-
-        Returns:
-            A :class:`LevelMatch` when this level matches anything, else
-            ``None`` so the more-specific-wins cascade falls through to the
-            next (less-specific) level.
-
-        Marked positional-only (``/``) deliberately: every real caller
-        (:func:`~toolguard.permission_resolution._resolve_unclamped`,
-        :func:`~toolguard.permission_resolution._detect_override`) invokes
-        this purely positionally (``decide_detailed(allow, deny, ask)``),
-        and both real implementations use their OWN, differently-named
-        local parameter names (``allow``/``deny``/``ask``, not
-        ``allow_patterns``/``deny_patterns``/``ask_patterns``) -- without
-        ``/``, pyright's callback-Protocol conformance check requires
-        parameter NAMES to match too (since an unmarked parameter is also
-        callable by keyword), which would wrongly reject every real
-        implementer over a cosmetic naming difference that no caller here
-        relies on.
-        """
+    def resolve_config_path(self, raw_path: str) -> str:
+        """Anchor a relative file-path pattern's body to the project root."""
         ...
+
+
+class FilePathResolutionConfig(ResolutionConfig, PathAnchoring, Protocol):
+    """
+    The configuration surface :func:`~toolguard.permission_resolution.resolve_file_path_permission`
+    needs: the cascade surface (:class:`ResolutionConfig`) plus anchoring
+    (:class:`PathAnchoring`) -- the file-path cascade forwards ``config`` one
+    layer down into :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`
+    for project-root anchoring, which the Bash cascade never needs.
+    """

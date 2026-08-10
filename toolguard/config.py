@@ -881,7 +881,7 @@ class Configuration:
             object/table (same silent-information-loss failure mode) both
             count. Non-empty is a severe safety-floor condition: EVERY
             governed decision is clamped to ``'ask'`` by
-            :func:`~toolguard.permission_resolution.resolve_permission_detailed`
+            :func:`~toolguard.permission_resolution.resolve_permission_cascade`
             (see :func:`~toolguard.permission_resolution._apply_ask_floor`)
             until the file(s) are fixed, because a broken file may have
             silently dropped a deny/hard_deny rule with no other visible
@@ -1922,7 +1922,7 @@ class Configuration:
                     corrective_steps=(
                         "Fix the file's syntax. Until it parses, EVERY toolguard "
                         "permission decision is clamped to 'ask' (see "
-                        "toolguard.permission_resolution.resolve_permission_detailed) "
+                        "toolguard.permission_resolution.resolve_permission_cascade) "
                         "so no rule -- including deny/hard_deny -- in this file is "
                         "silently lost."
                     ),
@@ -2268,7 +2268,7 @@ def _parse_source_recording_failures(
 
     Used only by :func:`load_configuration`'s call sites, i.e. the sources
     that actually feed the returned :class:`Configuration` (and therefore
-    :func:`~toolguard.permission_resolution.resolve_permission_detailed`'s
+    :func:`~toolguard.permission_resolution.resolve_permission_cascade`'s
     ASK-floor clamp): the main hierarchy-discovery loop and the
     ``CLAUDE_SETTINGS_PATH`` explicit-override branch. A file that simply
     does not exist on disk is NOT recorded -- it is not "broken"

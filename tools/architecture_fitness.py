@@ -1385,7 +1385,7 @@ def _is_literal_decision_tuple(value: ast.expr) -> bool:
     case: a function that writes ``return "deny", reason, pattern`` in its
     own body IS constructing a bare verdict tuple, regardless of whatever
     return annotation it does or doesn't carry -- several real hits on this
-    tree had none at all (e.g. ``toolguard.resolve._check_file_path_hard_deny``,
+    tree had none at all (e.g. ``toolguard.file_matching.check_file_path_hard_deny``,
     before TOO-45 R1f converted it to a
     :class:`~toolguard.config_types.LevelMatch` return).
     """

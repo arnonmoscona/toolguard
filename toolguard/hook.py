@@ -1075,7 +1075,7 @@ def _handle_file_path_tool(
     unconfigured tool resolves to 'ask' and a configured-but-non-matching tool
     resolves per ``no_match_fallback`` -- both are decided centrally inside
     ``resolve_file_path_permission_detailed`` /
-    ``permission_resolution.resolve_permission_detailed``, so the hook and
+    ``permission_resolution.resolve_file_path_permission``, so the hook and
     ``toolguard.api.decide()`` cannot drift apart.
 
     Args:
@@ -1165,7 +1165,7 @@ def _handle_command_tool(
     'allow_with_warning' -- or its deprecated 'warn_deny' alias -- auto-allows
     with a warning; 'allow' -- or its 'allow_with_no_warnings' alias, TOO-19 --
     auto-allows with NO warning) -- all decided centrally inside
-    ``resolve_bash_permission_detailed`` / ``permission_resolution.resolve_permission_detailed``
+    ``resolve_bash_permission_detailed`` / ``permission_resolution.resolve_command_permission``
     so the hook and ``toolguard.api.decide()`` cannot drift apart.
 
     Resolution is more-specific-wins: each sub-command of a compound command

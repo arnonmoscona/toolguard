@@ -381,7 +381,7 @@ class TestEvalModeMain(unittest.TestCase):
             parse), and --eval mode
         When main() probes that command
         Then --eval prints 'ask', not 'allow' -- the ASK floor applies inside
-            permission_resolution.resolve_permission_detailed, the single
+            permission_resolution.resolve_permission_cascade, the single
             chokepoint both the live hook and --eval delegate to, so the
             cross-project
             security-audit skill never reports a safety floor the live hook
