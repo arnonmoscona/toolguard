@@ -1,9 +1,8 @@
 """
-Unit tests for the repo-grain migration project-root resolver.
+Unit tests for :func:`toolguard.tools.project_root.resolve_project_root`, which
+classifies the project boundary for the migration safety gate.
 
-These exercise :func:`toolguard.tools.project_root.resolve_project_root`, the pure
-primitive that classifies the project boundary for the migration safety gate.
-Each test uses a temporary directory tree so the walk-up is fully controlled.
+Each test builds a temporary directory tree so the walk-up is fully controlled.
 """
 
 import tempfile
@@ -67,9 +66,9 @@ class TestResolveProjectRoot(unittest.TestCase):
         Given a directory tree whose top holds only a .claude directory (no VCS
             marker) and a nested start dir
         When resolve_project_root is called from the nested dir
-        Then the status is RESOLVED_ANCHOR (TOO-15: .claude is a first-class
-            anchor, the same trust tier as a VCS root, not a weaker ask-first
-            candidate) and it is safe to migrate.
+        Then the status is RESOLVED_ANCHOR -- .claude sits in the same trust
+            tier as a VCS root, not a weaker ask-first candidate -- and it is
+            safe to migrate.
         """
         (self.root / ".claude").mkdir()
         nested = self.root / "pkg" / "sub"
@@ -123,13 +122,9 @@ class TestResolveProjectRoot(unittest.TestCase):
         When resolve_project_root is called from inside the sub-package once with
             strict=True and once with the tiered default (strict=False)
         Then strict=True returns the NEARER pyproject.toml directory (flat,
-            nearest-marker-of-any-kind-wins -- the config.py/env_config.py
-            semantics), while the tiered default returns the FARTHER .git anchor
-            root instead (anchor tier climbed fully before falling back to the
-            weaker tier -- the migration-gate semantics). This is the actual
-            behavioral differentiator between the two modes: an implementation
-            that just unwraps the tiered algorithm's .root for strict=True would
-            pass every other test in this file but fail this one.
+            nearest-marker-of-any-kind-wins), while the tiered default returns
+            the FARTHER .git anchor root instead (the anchor tier is climbed
+            fully before any weaker marker is considered).
         """
         (self.root / ".git").mkdir()
         pkg = self.root / "pkg"
@@ -150,9 +145,7 @@ class TestResolveProjectRoot(unittest.TestCase):
         Then the status resolves directly to the pyproject.toml directory as
             RESOLVED_ANCHOR rather than AMBIGUOUS -- strict mode never asks the
             caller to disambiguate; it always picks the nearest marker of any
-            kind. (Contrast with test_build_marker_without_vcs_is_ambiguous,
-            which exercises the same fixture shape under the tiered default and
-            gets AMBIGUOUS instead.)
+            kind.
         """
         (self.root / "pyproject.toml").write_text("[project]\n")
 
@@ -215,8 +208,8 @@ class TestResolveProjectRoot(unittest.TestCase):
         """
         Given any resolution call
         When it returns
-        Then the result is a ProjectRootResolution carrying a calibrated, non-empty
-            reason string (the render-ready explanation for the skill layer).
+        Then the result is a ProjectRootResolution carrying a non-empty reason
+            string.
         """
         (self.root / ".git").mkdir()
 

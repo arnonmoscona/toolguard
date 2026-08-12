@@ -1,16 +1,4 @@
-"""
-Unit tests for toolguard.install_provenance (TOO-19).
-
-Covers the two detection primitives (source-checkout classification,
-installed-distribution location and staleness comparison) and the
-PYTHONPATH-shadow predicate. All git/importlib.metadata side effects are
-mocked -- no real subprocess or package-metadata lookups, following the
-established pattern in test_update_check.py. Every "never nag on
-uncertainty" branch (dirty tree, undetermined cleanliness, no installed
-distribution, missing content) gets its own test, per TOO-19's explicit
-requirement that silence-on-uncertainty is load-bearing behavior, not an
-incidental default.
-"""
+"""Unit tests for toolguard.install_provenance."""
 
 import importlib.metadata
 import os
@@ -24,12 +12,7 @@ from toolguard import install_provenance
 
 
 def _write_fake_package(root: Path, project_name="toolguard"):
-    """
-    Build ``<root>/pyproject.toml`` (naming *project_name*) plus
-    ``<root>/toolguard/__init__.py`` -- the minimal shape
-    :func:`~toolguard.install_provenance.source_checkout_root` recognises as
-    a source checkout.
-    """
+    """Build the minimal source-checkout shape: pyproject.toml plus toolguard/__init__.py."""
     (root / "pyproject.toml").write_text(f'[project]\nname = "{project_name}"\n')
     pkg = root / "toolguard"
     pkg.mkdir()

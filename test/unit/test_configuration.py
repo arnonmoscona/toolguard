@@ -1,7 +1,5 @@
 """
-Unit tests for the TOO-8 Phase 1 public config abstraction.
-
-These tests exercise :func:`toolguard.config.load_configuration` and the
+Unit tests for :func:`toolguard.config.load_configuration` and the
 :class:`Configuration` public API, plus the internal delegating helper
 ``config_sync_settings_from_sources`` that ``auto_migrate`` uses.
 
@@ -39,16 +37,9 @@ from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry, _strip_tool_
 
 
 def _resolve_via_cascade(config, tool_name, decide, subject="Command"):
-    """
-    Resolve *tool_name* against *config*, computing each level's match with
-    *decide* (a test-local stand-in, never a real matcher) BEFORE folding.
-
-    TOO-45 punch-list #03: the cascade (more-specific-wins, override
-    detection, the ASK floor) is a pure fold over already-computed
-    :class:`~toolguard.config_types.LevelMatch` values -- there is no
-    callback crossing into :mod:`toolguard.permission_resolution` any more,
-    only data built locally here.
-    """
+    """Resolve *tool_name* against *config*, matching each level with *decide* (a
+    test-local stand-in, never a real matcher) before folding via
+    :func:`~toolguard.permission_resolution.resolve_permission_cascade`."""
     levels = config.permission_levels_with_provenance(tool_name)
     matched_levels = [
         (decide(allow, deny, ask), layers) for allow, deny, ask, layers in levels
@@ -85,7 +76,6 @@ class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
 
         self.assertIsInstance(config, Configuration)
         self.assertGreaterEqual(len(config.layers), 2)
-        # Every layer carries provenance and a read-only mapping.
         for layer in config.layers:
             self.assertIsInstance(layer, ConfigLayer)
             self.assertIsInstance(layer.provenance, Provenance)
@@ -112,7 +102,6 @@ class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
             json.dumps({"permissions": {"allow": ["Bash(git *)"]}})
         )
         config = load_configuration()
-        # The valid settings layer is still present.
         allow, _ = config.allow_deny_for("Bash")
         self.assertIn("git *", allow)
 
@@ -166,7 +155,7 @@ class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
 
         allow, _ = config.allow_deny_for("Bash")
         self.assertIn("git *", allow)
-        self.assertNotIn("git status", allow)  # the skipped file's own rule
+        self.assertNotIn("git status", allow)
 
         stderr_output = captured_stderr.getvalue()
         self.assertIn(str(hook_path), stderr_output)
@@ -310,9 +299,7 @@ class TestPermissionLayers(unittest.TestCase):
         takeover = TakeoverConfig(True, ("Read(*)",), (), "deny")
         with patch.object(Configuration, "takeover_mode", return_value=takeover):
             per_layer = config.permission_layers("Read")
-        # Native layer: blanket '*' filtered out, '/tmp/**' kept.
         self.assertEqual(per_layer[0].allow, ("/tmp/**",))
-        # Hook layer: '*' kept (never filtered).
         self.assertEqual(per_layer[1].allow, ("*",))
 
     def test_per_layer_provenance_preserved(self):
@@ -607,12 +594,7 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         """
         Given project and user hook layers each defining config_sync.backup_dir
         When scalar('config_sync.backup_dir') resolves the value
-        Then the project (more-specific) value wins (TOO-8 Phase 5 more-specific-wins)
-
-        Phase 5 flips the Phase-1 user-wins (last-occurrence) resolution to
-        more-specific-wins: layers are ordered most-specific first, so the first
-        layer that defines the key wins. See
-        test_config_sync_conflict_is_project_wins for the explicit pin.
+        Then the project (more-specific) value wins
         """
         layers = (
             self._hook_layer(
@@ -628,12 +610,8 @@ class TestScalarsAndConfigSync(unittest.TestCase):
     def test_config_sync_conflict_is_project_wins(self):
         """
         Given project and user hook layers with conflicting config_sync values
-        When scalar() and config_sync_settings() resolve them under Phase 5
+        When scalar() and config_sync_settings() resolve them
         Then the PROJECT (more-specific) value wins on every conflict
-
-        This pins the conflict DIRECTION after the TOO-8 Phase 5 flip from
-        user-wins to more-specific-wins (decision #4). Layers are most-specific
-        first, so the first defining layer (project) wins.
         """
         layers = (
             self._hook_layer(
@@ -647,14 +625,11 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         )
         config = Configuration(layers=layers)
 
-        # scalar() resolves project-wins (more-specific-wins) on conflict.
         self.assertEqual(
             config.scalar("config_sync.backup_dir", "default"), "proj/backups"
         )
         self.assertIs(config.scalar("config_sync.auto_migrate", None), True)
 
-        # config_sync_settings() (the public accessor used by the hook) reflects
-        # the same more-specific-wins resolution.
         cs = config.config_sync_settings()
         self.assertEqual(cs["backup_dir"], "proj/backups")
         self.assertIs(cs["auto_migrate"], True)
@@ -708,7 +683,7 @@ class TestScalarsAndConfigSync(unittest.TestCase):
         self.assertEqual(cs["backup_dir"], "logs/config-backups")
         self.assertEqual(cs["auto_sort_on_migrate"], True)
         with self.assertRaises(TypeError):
-            cs["auto_migrate"] = True  # read-only
+            cs["auto_migrate"] = True
 
 
 class TestToolguardPermissions(unittest.TestCase):
@@ -720,10 +695,6 @@ class TestToolguardPermissions(unittest.TestCase):
         When toolguard_permissions() aggregates them
         Then the hook patterns are returned as RuleEntry with tool wrappers intact
              and the native pattern is skipped
-
-        TOO-19 Phase 0a increment 8: toolguard_permissions()'s return type widened
-        from plain pattern strings to RuleEntry (see the method's docstring for
-        why), so this test compares `.pattern` rather than the tuple directly.
         """
         layers = (
             ConfigLayer(
@@ -757,8 +728,8 @@ class TestToolguardPermissions(unittest.TestCase):
         Given a hook layer whose allow list holds a structured (dict) entry
         When toolguard_permissions() aggregates it
         Then the entry is preserved as a RuleEntry with its metadata intact
-             (regression guard for the W1 defect: the old isinstance(perm, str)
-             filter silently dropped every structured entry here)
+             (regression guard: a plain isinstance(perm, str) filter would
+             silently drop it)
         """
         layers = (
             ConfigLayer(
@@ -853,8 +824,8 @@ class TestValidationIssues(unittest.TestCase):
         )
         config = Configuration(layers=layers)
         messages = " ".join(i.message for i in config.validation_issues())
-        self.assertIn("WebSearch", messages)  # unsupported
-        self.assertIn("Read", messages)  # supported but ungoverned
+        self.assertIn("WebSearch", messages)
+        self.assertIn("Read", messages)
 
     def test_structured_entry_unsupported_tool_reaches_validation_issues(self):
         """
@@ -862,9 +833,8 @@ class TestValidationIssues(unittest.TestCase):
         unsupported tool
         When validation_issues() runs
         Then the structured entry's tool is flagged, end-to-end, exactly as a
-        plain-string entry would be (TOO-19 Phase 0a, increment 4 bug fix:
-        structured entries used to be silently skipped by
-        validate_permissions, not just at the lower layers)
+        plain-string entry would be (regression guard: structured entries
+        used to be silently skipped by validation)
         """
         layers = (
             ConfigLayer(
@@ -1025,8 +995,8 @@ class TestInternalHelpers(unittest.TestCase):
             ]
             result = config_sync_settings_from_sources(config_files)
             self.assertEqual(result["auto_migrate"], True)
-            self.assertEqual(result["backup_dir"], "b")  # last wins
-            self.assertEqual(result["auto_sort_on_migrate"], True)  # default
+            self.assertEqual(result["backup_dir"], "b")
+            self.assertEqual(result["auto_sort_on_migrate"], True)
 
     def test_config_sync_settings_from_sources_defaults(self):
         """
@@ -1060,7 +1030,6 @@ class TestInternalHelpers(unittest.TestCase):
                 (empty, "toolguard_hook", "json"),
             ]
             result = config_sync_settings_from_sources(config_files)
-            # Falls back to defaults since nothing usable was found.
             self.assertEqual(result["auto_migrate"], False)
             self.assertEqual(result["backup_dir"], "logs/config-backups")
 
@@ -1161,7 +1130,7 @@ class TestGovernedAndTakeoverDelegation(unittest.TestCase):
 
 
 class TestTakeoverEnabledResolution(unittest.TestCase):
-    """takeover_mode.enabled single-owner + fail-safe-on-conflict (TOO-8 Phase 5)."""
+    """takeover_mode.enabled single-owner resolution, fail-safe on conflict."""
 
     @staticmethod
     def _hook_layer(level, content, specificity):
@@ -1234,7 +1203,6 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
         tc = Configuration(layers=layers).takeover_mode()
         self.assertFalse(tc.enabled)
         self.assertIsInstance(tc.conflict, TakeoverEnabledConflict)
-        # Both disagreeing sources are recorded, most-specific first.
         values = [v for v, _prov in tc.conflict.sources]
         self.assertEqual(values, [True, False])
         levels = [prov.level for _v, prov in tc.conflict.sources]
@@ -1285,10 +1253,9 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
             ),
         )
         tc = Configuration(layers=layers).takeover_mode()
-        # Default blanket allows plus the project's extra are all present.
+        # Bash(*) is a seeded default, not set by any layer here.
         self.assertIn("Bash(*)", tc.ignored_allow_patterns)
         self.assertIn("Foo(*)", tc.ignored_allow_patterns)
-        # additional_ignored_patterns unions across all three levels.
         self.assertEqual(
             tc.additional_ignored_patterns,
             ("Read(/a/**)", "Read(/b/**)", "Read(/c/**)"),
@@ -1313,13 +1280,8 @@ class TestTakeoverEnabledResolution(unittest.TestCase):
 
 
 class TestHasAnyRules(unittest.TestCase):
-    """
-    Configuration.has_any_rules() (TOO-15): distinguishes a tool with NO
-    permission rules configured anywhere (allow/deny/ask/hard_deny all empty at
-    every level) from a tool that has rules which simply do not match a given
-    command/path. The former must resolve to 'ask'; the latter is governed by
-    no_match_fallback.
-    """
+    """Configuration.has_any_rules(): a tool with no configured rules anywhere
+    versus one whose rules simply don't match the given command/path."""
 
     @staticmethod
     def _hook_layer(level, content, specificity=0):
@@ -1418,18 +1380,9 @@ class TestHasAnyRules(unittest.TestCase):
 
 
 class TestResolvedNoMatchFallback(unittest.TestCase):
-    """
-    Configuration.resolved_no_match_fallback() (TOO-15): the top-level
-    ``no_match_fallback`` key, with the legacy ``[takeover_mode].no_match_fallback``
-    honoured as a backwards-compatible alias when no layer sets the top-level
-    key. The top-level key wins when both are set. Applies regardless of
-    takeover_mode.enabled. Defaults to 'ask'. The recognized values are 'ask',
-    'deny', 'allow_with_warning', and 'allow' (TOO-19). Two spellings are
-    accepted but normalized before reaching the recognized set: the
-    deprecated legacy value 'warn_deny' normalizes to 'allow_with_warning',
-    and the deliberate (non-deprecated) long-form synonym
-    'allow_with_no_warnings' normalizes to 'allow'.
-    """
+    """Configuration.resolved_no_match_fallback(): the top-level
+    no_match_fallback key, with the legacy [takeover_mode] alias and the
+    deprecated/synonym spelling normalization."""
 
     @staticmethod
     def _hook_layer(level, content, specificity=0):
@@ -1449,9 +1402,8 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
         """
         Given no layer sets either the top-level key or the legacy alias
         When Configuration.resolved_no_match_fallback() resolves
-        Then it returns 'ask' (TOO-15: the new default, so a fresh install with
-            rules configured but an unmatched command is never silently
-            bricked -- it prompts instead)
+        Then it returns 'ask' -- a fresh install with rules configured but an
+            unmatched command is never silently bricked, it prompts instead
         """
         config = Configuration(layers=(self._hook_layer("project", {}),))
         self.assertEqual(config.resolved_no_match_fallback(), "ask")
@@ -1612,7 +1564,7 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
     def test_value_allow_is_returned_as_is(self):
         """
         Given a hook layer setting the top-level 'no_match_fallback' key to
-            'allow' (TOO-19, the canonical no-warning spelling)
+            'allow' (the canonical no-warning spelling)
         When Configuration.resolved_no_match_fallback() resolves
         Then it returns 'allow' unchanged
         """
@@ -1623,7 +1575,7 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
     def test_allow_with_no_warnings_normalizes_to_allow_via_top_level_key(self):
         """
         Given a hook layer setting the top-level 'no_match_fallback' key to
-            'allow_with_no_warnings' (TOO-19's deliberate long-form synonym)
+            'allow_with_no_warnings' (the deliberate long-form synonym)
         When Configuration.resolved_no_match_fallback() resolves
         Then it is normalized to the canonical 'allow' -- identical to setting
             'allow' directly
@@ -1643,7 +1595,7 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
         When Configuration.resolved_no_match_fallback() resolves
         Then the legacy-alias value is still normalized to 'allow' -- the
             alias normalization applies regardless of which mechanism
-            supplied the raw value (TOO-19)
+            supplied the raw value
         """
         layers = (
             self._hook_layer(
@@ -1656,18 +1608,9 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
 
 
 class TestResolvedUndecidableFallback(unittest.TestCase):
-    """
-    Configuration.resolved_undecidable_fallback() (TOO-19): the top-level
-    ``undecidable_fallback`` key ONLY, most-specific-wins across non-native
-    layers. Unlike ``no_match_fallback`` there is deliberately NO legacy
-    ``[takeover_mode]`` alias and NO deprecated ``'warn_deny'`` spelling --
-    this is a brand-new setting with no history to be backwards-compatible
-    with. Defaults to 'ask'. The recognized values are 'ask', 'deny',
-    'allow_with_warning', and 'allow'. The deliberate (non-deprecated)
-    long-form synonym 'allow_with_no_warnings' IS honoured here (normalizes
-    to 'allow') -- that alias was introduced for both settings at once
-    (TOO-19), unlike 'warn_deny', which remains no_match_fallback-only.
-    """
+    """Configuration.resolved_undecidable_fallback(): the top-level key only --
+    unlike no_match_fallback it has no legacy [takeover_mode] alias and no
+    'warn_deny' spelling, though it does honour 'allow_with_no_warnings'."""
 
     @staticmethod
     def _hook_layer(level, content, specificity=0):
@@ -1775,8 +1718,7 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
             NOT have
         When Configuration.resolved_undecidable_fallback() resolves
         Then the [takeover_mode] value is NOT honored and the default 'ask'
-            is returned -- undecidable_fallback has no legacy alias, by
-            design (TOO-19), and must not gain one
+            is returned -- undecidable_fallback has no legacy alias by design
         """
         layers = (
             self._hook_layer(
@@ -1789,7 +1731,7 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
     def test_value_allow_is_returned_as_is(self):
         """
         Given a hook layer setting the top-level 'undecidable_fallback' key
-            to 'allow' (TOO-19, the canonical no-warning spelling)
+            to 'allow' (the canonical no-warning spelling)
         When Configuration.resolved_undecidable_fallback() resolves
         Then it returns 'allow' unchanged
         """
@@ -1800,11 +1742,10 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
     def test_allow_with_no_warnings_normalizes_to_allow(self):
         """
         Given a hook layer setting the top-level 'undecidable_fallback' key
-            to 'allow_with_no_warnings' (TOO-19's deliberate long-form synonym)
+            to 'allow_with_no_warnings' (the deliberate long-form synonym)
         When Configuration.resolved_undecidable_fallback() resolves
         Then it is normalized to the canonical 'allow' -- identical to
-            setting 'allow' directly, and identical in meaning between the
-            two settings
+            setting 'allow' directly
         """
         layers = (
             self._hook_layer(
@@ -1821,9 +1762,7 @@ class TestResolvedUndecidableFallback(unittest.TestCase):
         When Configuration.resolved_undecidable_fallback() resolves
         Then 'warn_deny' is NOT normalized (unlike for no_match_fallback) --
             it is simply an unrecognized value here and falls back to the
-            default 'ask'. This is the deliberate no_match_fallback/
-            undecidable_fallback asymmetry the TOO-19 allow/allow_with_no_warnings
-            work must preserve.
+            default 'ask'
         """
         layers = (self._hook_layer("project", {"undecidable_fallback": "warn_deny"}),)
         config = Configuration(layers=layers)
@@ -1911,16 +1850,9 @@ class TestToolguardPermissionsEdgeCases(unittest.TestCase):
 
 
 class TestUnrecognizedFallbackSettings(unittest.TestCase):
-    """
-    Configuration.unrecognized_fallback_settings() (TOO-19 m5).
-
-    Arnon set ``no_match_fallback = "allow_with_no_warning"`` (singular). It
-    was unrecognized, so it resolved to 'ask' -- maximum friction -- with no
-    diagnostic anywhere, and the conclusion drawn was "the feature is broken"
-    rather than "there is a typo". Resolution semantics are unchanged ('ask'
-    IS the safe direction); what changed is that the typo is now named, with
-    the offending value, the setting, the file, and the accepted spellings.
-    """
+    """Configuration.unrecognized_fallback_settings(): names a typo'd or
+    otherwise unrecognized no_match_fallback/undecidable_fallback value
+    instead of silently falling back to 'ask' with no diagnostic."""
 
     @staticmethod
     def _hook_layer(level, content, specificity=0):
@@ -2143,7 +2075,6 @@ class TestExplicitModeAdjacentToml(unittest.TestCase):
             settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
             hook_toml = Path(tmp) / "toolguard_hook.toml"
             hook_toml.write_text('[permissions]\nallow = ["Bash(ls *)"]\n')
-            # A JSON also present, but TOML must win.
             (Path(tmp) / "toolguard_hook.json").write_text(
                 json.dumps({"permissions": {"allow": ["Bash(skip)"]}})
             )
@@ -2158,60 +2089,8 @@ class TestExplicitModeAdjacentToml(unittest.TestCase):
             self.assertNotIn("json", formats)
 
 
-# ---------------------------------------------------------------------------
-# TOO-30: ~/.config/toolguard/rules/ split-file discovery (RED phase)
-# ---------------------------------------------------------------------------
-#
-# These tests exercise the NOT-YET-IMPLEMENTED contract described in the TOO-30
-# task recall (basic-memory, project='toolguard',
-# implementation/coder-latest-task-recall-too-30-red-phase-tests):
-#
-#   - toolguard.config._rules_dir()               (new, private)
-#   - toolguard.config._discover_rules_files()     (new, private)
-#   - toolguard.config._discover_levels()          (existing, gains rules-dir entries)
-#   - toolguard.config._level_for_path()           (existing, gains rules-dir 'user' case)
-#   - toolguard.config.ConfigLayer.unexpected_keys (new field, default ())
-#   - toolguard.config.load_configuration()        (existing, filters rules-dir content)
-#   - toolguard.config.Configuration.validation_issues() (existing, new unexpected_keys check)
-#
-# TOO-19 follow-up (also RED-phase for this increment): a second, pre-existing
-# candidate rules directory, ~/.toolguard/rules, was never scanned -- a real
-# ruleset placed there was silently unenforced. Added on top of the above:
-#
-#   - toolguard.config._rules_dirs()                  (replaces _rules_dir();
-#     returns BOTH candidate directories, XDG first)
-#   - toolguard.config._merged_rules_by_stem()         (new, private;
-#     first-directory-wins per stem across candidate dirs)
-#   - toolguard.config._discover_rules_files_multi()   (new, private; multi-dir
-#     discovery wrapper used by _discover_levels())
-#   - toolguard.config._shadowed_rules_stems()         (new, private; detects a
-#     stem present in more than one candidate directory)
-#   - toolguard.config.ConfigLayer.shadowed_path       (new field, default None)
-#   - toolguard.config.Configuration.validation_issues() (new shadowing-warning
-#     check, alongside the existing "both formats" check)
-#
-# Per this file's test-hygiene convention (see module docstring/CLAUDE.md), the
-# not-yet-existing private names are referenced ONLY inside test method bodies via
-# ``config_module.<name>`` (imported once, at the top of this file, alongside the
-# other imports -- importing the MODULE itself always succeeds since it exists
-# today; only the not-yet-existing ATTRIBUTES on it, referenced inside method
-# bodies below, are what fail in isolation) -- never imported into the
-# top-of-file ``from toolguard.config import (...)`` block -- so a missing
-# attribute fails only the one test method, never collection of this whole file.
-
-
 def _toml_permissions_block(allow=(), deny=(), ask=()):
-    """
-    Build a minimal ``[permissions]`` TOML block for a rules-dir test file.
-
-    Args:
-        allow: Allow patterns (already tool-wrapped, e.g. ``'Bash(git *)'``).
-        deny: Deny patterns, same shape as ``allow``.
-        ask: Ask patterns, same shape as ``allow``.
-
-    Returns:
-        A TOML source string with a single ``[permissions]`` table.
-    """
+    """Build a minimal ``[permissions]`` TOML block for a rules-dir test file."""
     lines = ["[permissions]"]
     lines.append("allow = " + json.dumps(list(allow)))
     lines.append("deny = " + json.dumps(list(deny)))
@@ -2222,23 +2101,11 @@ def _toml_permissions_block(allow=(), deny=(), ask=()):
 
 class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
     """_rules_dirs(), _discover_rules_files(), and end-to-end discovery via
-    load_configuration() into the user level (TOO-30, extended by TOO-19 for
-    the second ~/.toolguard/rules candidate directory)."""
+    load_configuration() into the user level."""
 
-    # -- _rules_dirs() (white-box, no I/O) ------------------------------------
-    #
-    # TOO-19: _rules_dir() (single directory) was replaced by _rules_dirs(),
-    # returning BOTH candidate directories in precedence order (XDG first,
-    # then the legacy ~/.toolguard/rules). These do no filesystem I/O, so they
-    # need no ConfigIsolationMixin setup -- but the expected value MUST be
-    # computed with Path.home() called INSIDE the same patched environment as
-    # the code under test. Path.home() is not pure: it reads $HOME and falls
-    # back to the pwd database when unset, so a Path.home() evaluated outside
-    # a clear=True patch can differ from one evaluated inside it. That made
-    # these three tests pass only because $HOME happened to match the pwd entry
-    # on the developer's machine; they failed under any other $HOME (found
-    # 2026-07-28 while replacing test/unit/CLAUDE.md's live-config sanity check
-    # with an empty-$HOME run).
+    # Path.home() is impure (reads $HOME, falls back to the pwd database when
+    # unset), so the expected value below must call it inside the same patched
+    # environment as the code under test -- see .claude/rules/test-config-isolation.md.
 
     def test_rules_dirs_uses_xdg_config_home_when_set(self):
         """
@@ -2294,8 +2161,6 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
                 expected_home / ".toolguard" / "rules",
             ),
         )
-
-    # -- _discover_rules_files() (white-box, flat scan of a real tmp dir) ---
 
     def test_discover_rules_files_missing_directory_returns_empty(self):
         """
@@ -2371,8 +2236,6 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             result = config_module._discover_rules_files(rules_dir)
         self.assertEqual([path.name for path, _fmt in result], ["gh.toml"])
 
-    # -- _shadowed_rules_stems() (white-box, direct temp dirs, no Path.home()) -
-
     def test_shadowed_rules_stems_reports_distinct_real_files(self):
         """
         Given the same stem 'gh.toml' present in both candidate directories as
@@ -2395,9 +2258,8 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
         """
         Given the same stem 'gh.toml' present in both candidate directories,
         where the XDG directory's entry is a SYMLINK pointing at the legacy
-        directory's real file (one rules directory symlinked into the other --
-        the actual TOO-19 stopgap workaround, and a natural migration move any
-        user might make)
+        directory's real file (one rules directory symlinked into the other,
+        a natural migration move a user might make)
         When _shadowed_rules_stems() compares them via Path.resolve()
         Then the stem is NOT reported as shadowed, since both entries are the
         same real file and nothing is actually being ignored
@@ -2429,8 +2291,6 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             (legacy_dir / "gh.toml").write_text("[permissions]\nallow = []\n")
             result = config_module._shadowed_rules_stems((xdg_dir, legacy_dir))
         self.assertEqual(result, {})
-
-    # -- end-to-end via load_configuration() --------------------------------
 
     def test_missing_rules_dir_produces_no_extra_layers_end_to_end(self):
         """
@@ -2547,10 +2407,8 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
                 _toml_permissions_block(allow=["Bash(primary *)"])
             )
             config = load_configuration()
-        # NOTE: filtered by provenance.level, not by path prefix -- the rules
-        # directory (xdg/toolguard/rules) is a SIBLING of fake_home, not nested
-        # under it, so a path-prefix filter against fake_home would never match
-        # the rules-dir layers even with a correct implementation.
+        # Filtered by provenance.level, not path prefix: the rules directory
+        # is a sibling of fake_home here, not nested under it.
         user_level_layers = [
             layer for layer in config.layers if layer.provenance.level == "user"
         ]
@@ -2588,13 +2446,10 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
         messages = " ".join(issue.message for issue in config.validation_issues())
         self.assertIn("Both gh.toml and gh.json", messages)
 
-    # -- TOO-19: second candidate rules directory (~/.toolguard/rules) ------
-
     def test_legacy_toolguard_dir_file_discovered_end_to_end(self):
         """
         Given a rules file that exists ONLY under the legacy ~/.toolguard/rules
-        directory (not under the XDG directory) -- the originally reported
-        TOO-19 bug, where such a file was silently never enforced
+        directory (not under the XDG directory)
         When load_configuration() runs
         Then it becomes a 'toolguard_hook_rules' layer at the 'user' level and
         its permissions resolve normally
@@ -2711,9 +2566,8 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
         """
         Given a 'gh.toml' rules file that physically exists ONLY under the
         legacy ~/.toolguard/rules directory, with the XDG rules directory's
-        entry for the same stem being a SYMLINK to that same real file (the
-        actual stopgap workaround that motivated TOO-19: one rules directory
-        symlinked into the other is a natural migration/compatibility move,
+        entry for the same stem being a SYMLINK to that same real file (one
+        rules directory symlinked into the other is a natural migration move,
         not an accident)
         When load_configuration() runs
         Then exactly one 'toolguard_hook_rules' layer is produced for that
@@ -2801,7 +2655,6 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
                 _toml_permissions_block(allow=["Bash(alpha *)"])
             )
             self.isolate_config_environment(xdg_config_home=xdg)
-            # NOTE: ~/.toolguard/rules is deliberately left absent (not created).
             config = load_configuration()
         rules_layers = [
             layer
@@ -2843,17 +2696,12 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
 
 
 class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
-    """
-    Existing generic Configuration surfaces (permission_levels_with_provenance,
-    the engine's resolve_permission_cascade, hard_deny, toolguard_permissions,
-    allow_deny_for) correctly treat rules-dir-sourced layers as ordinary
-    user-level layers once such layers exist -- no new code is needed for
-    that (TOO-30 item 9).
-
-    Most tests here construct Configuration directly from hand-built layers
-    (zero filesystem I/O, no isolation needed); ConfigIsolationMixin is only
-    used by the one end-to-end test that actually calls load_configuration().
-    """
+    """Generic Configuration surfaces (permission_levels_with_provenance,
+    resolve_permission_cascade, hard_deny, toolguard_permissions,
+    allow_deny_for) treat rules-dir-sourced layers as ordinary user-level
+    layers. Most tests here build Configuration from hand-built layers with
+    no file I/O; only the one end-to-end test calling load_configuration()
+    needs ConfigIsolationMixin."""
 
     @staticmethod
     def _claude_user_hook_layer(content, specificity):
@@ -3042,12 +2890,6 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         block still loaded and resolves normally (a positive control: without
         it, this test would pass vacuously whenever the file simply failed to
         load at all, which would prove nothing about filtering)
-
-        The sneaky ``governed_tools`` value is deliberately a tool NOT in the
-        default governed set (``Bash``/``Read``/``Write``/``Edit``, see
-        ``toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS``) -- otherwise a leaked
-        value would be indistinguishable from the default and this assertion
-        would prove nothing.
         """
         with tempfile.TemporaryDirectory() as tmp:
             xdg = Path(tmp) / "xdg"
@@ -3064,9 +2906,6 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
             )
             self.isolate_config_environment(xdg_config_home=xdg)
             config = load_configuration()
-        # Positive control: the file's own valid permissions DID load -- so a
-        # false pass on the assertions below cannot be explained by the file
-        # having simply failed to load at all.
         allow, _deny = config.allow_deny_for("Bash")
         self.assertIn("gh *", allow)
         self.assertEqual(config.governed_tools(), ("Bash", "Read", "Write", "Edit"))
@@ -3078,9 +2917,6 @@ class TestRulesDirectoryMergeSemantics(ConfigIsolationMixin, unittest.TestCase):
         Given a rules-dir layer with a Bash allow pattern
         When toolguard_permissions() aggregates raw permissions
         Then the rules-dir pattern (tool wrapper intact) is included
-
-        TOO-19 Phase 0a increment 8: compares `.pattern` since
-        toolguard_permissions() now returns RuleEntry, not plain strings.
         """
         layers = (
             self._rules_layer(
@@ -3163,7 +2999,7 @@ class TestRulesDirectoryValidationAndProvenance(
         Given a ConfigLayer constructed without a shadowed_path argument
         When its shadowed_path attribute is read
         Then it defaults to None (backward compatible with existing
-        direct-construction call sites; TOO-19)
+        direct-construction call sites)
         """
         prov = Provenance(
             "user",
@@ -3175,24 +3011,8 @@ class TestRulesDirectoryValidationAndProvenance(
         layer = ConfigLayer(prov, MappingProxyType({"permissions": {"allow": []}}))
         self.assertIsNone(layer.shadowed_path)
 
-    # TOO-19 (2026-07-28): these four asserted against the private
-    # _level_for_path(), which re-derived a source's level from its path shape
-    # and has been REMOVED -- _discover_levels() now emits the level directly,
-    # since it is the pass that actually found the file. The behaviours are
-    # unchanged and still asserted, now through discovery itself, which also
-    # makes them end-to-end rather than white-box.
-
     def _discovered_level(self, project, filename):
-        """
-        Return the level(s) discovery assigns to a file, by name.
-
-        Args:
-            project: Project root to discover from.
-            filename: The file's base name.
-
-        Returns:
-            A list of level labels for every discovered source with that name.
-        """
+        """Return the level(s) discovery assigns to files named *filename* under *project*."""
         return [
             level
             for path, _stype, _fmt, _spec, level in config_module._discover_levels(
@@ -3233,8 +3053,7 @@ class TestRulesDirectoryValidationAndProvenance(
         """
         Given a rules file in the legacy ~/.toolguard/rules directory
         When the hierarchy levels are discovered
-        Then it is assigned the 'user' level (TOO-19: the second candidate
-        rules directory is a user-level source)
+        Then it is assigned the 'user' level
         """
         fake_home, project = self.isolate_config_environment()
         legacy_rules_dir = fake_home / ".toolguard" / "rules"
@@ -3246,13 +3065,10 @@ class TestRulesDirectoryValidationAndProvenance(
     def test_symlinked_rules_file_is_discovered_at_the_user_level(self):
         """
         Given a rules file physically under ~/.toolguard/rules, symlinked INTO
-        the XDG rules directory (the real stopgap workaround shape from TOO-19)
+        the XDG rules directory
         When the hierarchy levels are discovered
-        Then it is still assigned the 'user' level
-
-        Under the removed path-shape derivation this depended on resolve()
-        landing on a recognised anchor. Discovery now assigns the level from
-        WHERE THE FILE WAS FOUND, so the symlink target is irrelevant.
+        Then it is still assigned the 'user' level -- the level comes from
+        where the file was found, not from resolving the symlink target
         """
         fake_home, project = self.isolate_config_environment()
         legacy_rules_dir = fake_home / ".toolguard" / "rules"
@@ -3374,31 +3190,17 @@ class TestRulesDirectoryExplicitModeBypass(ConfigIsolationMixin, unittest.TestCa
 
 
 class TestParseFailureAskFloor(unittest.TestCase):
-    """
-    TOO-19 fail-open fix: permission_resolution.resolve_permission_cascade()
-    clamps every decision to 'ask' when Configuration.parse_failures is
-    non-empty (a governed config file failed to parse), mirroring the ASK
-    floor already implemented for foreign inline code in
-    toolguard/compound.py:65-71 -- an explicit 'deny' (including hard_deny,
-    which never reaches this function -- see resolve.py, checked before
-    the cascade is called) is
-    preserved unchanged; 'allow' and 'ask' are clamped to 'ask' with a reason
-    naming the broken file(s). Closes the hole where a single TOML syntax
-    error silently dropped every rule (including deny/hard_deny) in that
-    file, with only an easy-to-miss stderr warning as evidence.
-
-    These tests build Configuration directly from hand-constructed
-    ConfigLayer/Provenance objects with zero file I/O, so no ConfigIsolationMixin
-    is needed (per test/unit/CLAUDE.md's checklist).
-    """
+    """resolve_permission_cascade()'s ASK floor: when
+    Configuration.parse_failures is non-empty, every decision except an
+    already-'deny' one clamps to 'ask' with a reason naming the broken
+    file(s). Built from hand-constructed ConfigLayer/Provenance objects with
+    no file I/O, so ConfigIsolationMixin isn't needed (see
+    .claude/rules/test-config-isolation.md)."""
 
     @staticmethod
     def _config(*, allow=(), deny=(), parse_failures=()):
-        """Build a single-layer project-level Bash Configuration.
-
-        allow/deny are given as bare patterns; wrapped in Bash(...) here
-        since permission_layers() strips that wrapper during extraction.
-        """
+        """Build a single-layer project-level Bash Configuration from bare
+        (unwrapped) allow/deny patterns."""
         prov = Provenance(
             "project", "toolguard_hook", "toml", Path("/p/.claude/toolguard_hook.toml")
         )
@@ -3577,9 +3379,6 @@ class TestParseFailureAskFloor(unittest.TestCase):
         self,
     ):
         """
-        HARD INVARIANT (TOO-19): the parse-failure ASK floor is permanently
-        exempt from undecidable_fallback -- no config value may ever relax it.
-
         Given a config with undecidable_fallback='allow_with_warning' (the
             most permissive possible setting -- the deliberate "no floor"
             escape hatch) AND a recorded parse failure for a broken file, and
@@ -3609,9 +3408,7 @@ class TestParseFailureAskFloor(unittest.TestCase):
         config = Configuration(
             layers=(layer,), parse_failures=((broken, "unexpected character"),)
         )
-        # Confirm the fixture actually set the permissive value under test --
-        # a self-check that this test would notice if resolved_undecidable_fallback()
-        # itself regressed.
+        # Self-check: confirms the fixture set the permissive value under test.
         self.assertEqual(config.resolved_undecidable_fallback(), "allow_with_warning")
 
         with patch.object(
@@ -3626,26 +3423,17 @@ class TestParseFailureAskFloor(unittest.TestCase):
 
 
 class TestAdditionalContextResolution(unittest.TestCase):
-    """
-    TOO-19 Phase 1, increment 2: permission_resolution._resolve_unclamped
-    surfaces the winning RuleEntry's additional_context property onto
-    RuntimeVerdict.additional_context.
-
-    These tests build Configuration directly from hand-constructed
-    ConfigLayer/Provenance objects with zero file I/O, so no ConfigIsolationMixin
-    is needed (per test/unit/CLAUDE.md's checklist).
-    """
+    """permission_resolution._resolve_unclamped surfaces the winning
+    RuleEntry's additional_context onto RuntimeVerdict.additional_context.
+    Built from hand-constructed ConfigLayer/Provenance objects with no file
+    I/O, so ConfigIsolationMixin isn't needed (see
+    .claude/rules/test-config-isolation.md)."""
 
     @staticmethod
     def _config(*, allow=(), deny=(), ask=()):
-        """
-        Build a single-layer project-level Bash Configuration.
-
-        Each of allow/deny/ask is a list of raw permission-list elements
-        (plain strings or structured {match=..., additionalContext=...}
-        dicts) -- NOT yet Bash(...)-wrapped, since this helper wraps the
-        'match'/plain-string pattern itself.
-        """
+        """Build a single-layer project-level Bash Configuration from raw
+        (plain-string or structured) permission-list elements, not yet
+        Bash(...)-wrapped."""
 
         def _wrap(entry):
             if isinstance(entry, dict):
@@ -3773,29 +3561,10 @@ class TestAdditionalContextResolution(unittest.TestCase):
 
 
 class TestEntryForPatternLookup(unittest.TestCase):
-    """
-    ``config_types.entry_for_pattern`` (TOO-45 R2d: moved off ``Configuration``,
-    beside :class:`ToolPatternLayer`, which it searches).
-
-    Built directly from hand-constructed ToolPatternLayer objects with zero
-    file I/O (no ConfigIsolationMixin needed, per test/unit/CLAUDE.md's
-    checklist).
-
-    TOO-45 R2 note: the pre-R2 version of this class (``TestEntryForPatternDrift``)
-    also covered a DRIFTED-parallel-lists corner case (TOO-19 code review m4):
-    ``ToolPatternLayer`` used to store ``allow``/``allow_entries`` as two
-    independent, positionally-correlated fields, so a caller could construct
-    one with mismatched lengths and the lookup had to defensively guard
-    against that. R2 made ``allow``/``deny``/``ask`` derived properties over
-    ``allow_entries``/``deny_entries``/``ask_entries`` -- the only stored
-    fields -- so that drifted state is no longer constructible at all (see
-    ``test_layer_rejects_a_separately_supplied_pattern_tuple`` below). The two
-    tests that existed only to fire that now-deleted defensive guard
-    (``test_misaligned_layer_returns_none_instead_of_falling_through``,
-    ``test_drift_does_not_change_the_resolved_verdict``) were deleted along
-    with it; the remaining (never-drifted) lookup test is kept, adapted to
-    the new call target.
-    """
+    """:func:`~toolguard.config_types.entry_for_pattern`, built from
+    hand-constructed ToolPatternLayer objects with no file I/O, so
+    ConfigIsolationMixin isn't needed (see
+    .claude/rules/test-config-isolation.md)."""
 
     @staticmethod
     def _entry(pattern, context=None):
@@ -3824,9 +3593,8 @@ class TestEntryForPatternLookup(unittest.TestCase):
             separately-supplied `allow` pattern tuple alongside `allow_entries`
         When the constructor call is made
         Then it raises TypeError -- `allow` is a derived property, not a
-            constructor field, so a hand-drifted pair of parallel lists (the
-            defect the deleted TestEntryForPatternDrift tests existed to
-            guard against) can no longer be built at all
+            constructor field, so a hand-drifted pair of parallel lists can
+            no longer be built at all
         """
         with self.assertRaises(TypeError):
             ToolPatternLayer(
@@ -3839,13 +3607,9 @@ class TestEntryForPatternLookup(unittest.TestCase):
 
 
 class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
-    """
-    load_configuration() records genuinely broken (exists-but-unparseable)
+    """load_configuration() records genuinely broken (exists-but-unparseable)
     config files into Configuration.parse_failures, but never for files that
-    are merely absent or a valid-but-differently-shaped sibling (TOO-19 scope
-    note: "broken" means the file existed and failed to parse/was not a
-    table -- not "absent").
-    """
+    are merely absent."""
 
     def test_broken_rules_dir_file_recorded_alongside_valid_layer(self):
         """
@@ -3866,7 +3630,7 @@ class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
         rules_dir = home / ".toolguard" / "rules"
         rules_dir.mkdir(parents=True)
         broken_path = rules_dir / "gh.toml"
-        broken_path.write_text("[permissions]\nallow = [\n")  # unterminated array
+        broken_path.write_text("[permissions]\nallow = [\n")
 
         with patch("sys.stderr", new_callable=io.StringIO):
             config = load_configuration()
@@ -3884,10 +3648,9 @@ class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
         Given a broken (unparseable) TOML file in the candidate rules
             directory
         When load_configuration() runs
-        Then the failure message, naming the broken file, reaches stderr
-            (TOO-45 punch-list #04: via error_reporter.report_warning, no
-            Reporter registered in this test so it degrades to the bare
-            message -- see toolguard.error_reporter)
+        Then the failure message, naming the broken file, reaches stderr via
+            error_reporter.report_warning, degrading to the bare message
+            since no Reporter is registered in this test
         """
         home, project = self.isolate_config_environment(
             xdg_config_home="/nonexistent-xdg"
@@ -3895,7 +3658,7 @@ class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
         rules_dir = home / ".toolguard" / "rules"
         rules_dir.mkdir(parents=True)
         broken_path = rules_dir / "gh.toml"
-        broken_path.write_text("[permissions]\nallow = [\n")  # unterminated array
+        broken_path.write_text("[permissions]\nallow = [\n")
 
         stderr_buf = io.StringIO()
         with patch("sys.stderr", stderr_buf):
@@ -3910,9 +3673,7 @@ class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
         """
         Given a broken (unparseable) TOML file in the candidate rules
             directory, AND a registered error_reporter.Reporter with a
-            resolvable log directory is active (TOO-45 punch-list #04 fix
-            pass item 8a: a real converted call site, not a synthetic
-            message)
+            resolvable log directory is active
         When load_configuration() runs
         Then the failure, naming the broken file, lands in the WARNING log
              file, not just stderr
@@ -3923,7 +3684,7 @@ class TestParseFailuresPropagation(ConfigIsolationMixin, unittest.TestCase):
         rules_dir = home / ".toolguard" / "rules"
         rules_dir.mkdir(parents=True)
         broken_path = rules_dir / "gh.toml"
-        broken_path.write_text("[permissions]\nallow = [\n")  # unterminated array
+        broken_path.write_text("[permissions]\nallow = [\n")
         log_dir = project / "logs"
         log_dir.mkdir()
 

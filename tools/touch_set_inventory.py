@@ -1,55 +1,38 @@
 #!/usr/bin/env python
 """
-Dev-only instrument (repo-root ``tools/``, NOT shipped -- see ``pyproject.toml``'s
-``[tool.hatch.build.targets.wheel] packages`` list, which does not include this
-directory) built for the TOO-45 architecture experiment. This is the input given
-to the BLIND PREDICTOR in the M2 "expected touch set" measure -- see
-``toolguard-memories/TOO-45/reports/micro-canary-protocol.md`` and
-:mod:`tools.touch_set_score`, which compares the predictor's guesses (written as
-a predictions file) against one or two actuals files supplied separately by
-blinded human judge(s) looking at the real diff, producing evidence lists --
-never a score.
+Dev-only instrument: the structural inventory of ONE tree, and the input given to the
+BLIND PREDICTOR in TOO-45's M2 "expected touch set" measure (see
+``toolguard-memories/TOO-45/reports/micro-canary-protocol.md``).
 
 A predictor must be able to form sensible expectations about where things live
 WITHOUT seeing the change. So for every module in the tree this tool emits: the
 module's own path, the first line of its module docstring (its self-described
-purpose), its line count, and its PUBLIC top-level symbols (functions and
-classes not prefixed with ``_``), each with the first line of its own
-docstring.
+purpose), its line count, and its PUBLIC top-level symbols, each with the first line
+of its own docstring.
 
 Hard rule, non-negotiable
 --------------------------
 This tool NEVER reads or emits anything derived from a diff, a second tree, or
-version control history. It describes exactly one tree, as it stands, and
-nothing else. There is deliberately no ``--old``/``--new``/``--repo`` mode here
--- if this tool could see the answer, the prediction it is meant to seed would
-be worthless. (:mod:`tools.touch_set_score` does not read a tree/diff either,
-for an unrelated reason: it is now a pure comparator between files -- see that
-module's docstring.)
-
-**This guarantee was verified, not just claimed**, by an adversarial audit
-running ``run_inventory`` under a ``sys.addaudithook``: 170 files opened, zero
-outside the tree, zero under ``.git``, zero subprocess/socket/exec events. The
-gitignore support added below (see D12) reads a single local file with
-``Path.read_text`` -- it does NOT invoke ``git`` as a subprocess, specifically
-so this guarantee is not weakened while closing the leak it was added for.
+version control history, and there is deliberately no ``--old``/``--new``/``--repo``
+mode -- if it could see the answer, the prediction it is meant to seed would be
+worthless. The gitignore support below reads one local file with ``Path.read_text``
+and never invokes ``git`` as a subprocess.
 
 What counts as "public"
 -------------------------
 A top-level (module-body-level) ``def``/``async def``/``class`` whose name does
 not start with ``_``. Methods, nested functions, and module-level variables/
-constants are NOT included -- the spec asks for top-level functions and
-classes only. A symbol's own docstring is truncated to its first line, same as
-the module docstring, for the same "one-liner" summary treatment.
+constants are NOT included. A symbol's own docstring is truncated to its first line,
+same as the module docstring.
 
-Never silently skip anything
-------------------------------
-A file that fails to parse, or fails to even be READ (a broken symlink, a
-directory matching ``*.py``, a permission-denied file, an encoding failure --
-see :func:`_safe_read_text`), is named in ``parse_failures`` and excluded from
-``modules`` (stated explicitly, not folded into an empty inventory). A module
-or symbol with no docstring at all gets an explicit ``null``/``None``, never an
-empty string standing in for "absent".
+Failures are named, not folded away
+-------------------------------------
+A file that fails to parse, or fails to even be READ (see :func:`_safe_read_text`),
+is named in ``parse_failures`` and excluded from ``modules``. A module or symbol with
+no docstring at all gets an explicit ``null``/``None``, never an empty string standing
+in for "absent". Files dropped during DISCOVERY are a different case -- an
+:data:`EXCLUDED_DIR_NAMES` directory, or a ``.gitignore`` match -- and appear nowhere in
+the report at all.
 
 Usage::
 
@@ -58,37 +41,25 @@ Usage::
 
 Validating predictions at authoring time (``--validate-predictions``)
 --------------------------------------------------------------------------
-A predictor's biggest unforced error is naming a function that does not
-exist. :mod:`tools.touch_set_score` cannot catch this itself -- it reads no
-tree at all, so a guessed name is indistinguishable there from an ordinary
-miss on a real, untouched location. The fix belongs upstream, at authoring
-time, not in the tree-agnostic scorer:
+A predictor's biggest unforced error is naming a function that does not exist.
+:mod:`tools.touch_set_score` cannot catch this itself -- it reads no tree at all, so
+a guessed name is indistinguishable there from an ordinary miss on a real, untouched
+location. The check therefore belongs here, at authoring time:
 
     uv run python tools/touch_set_inventory.py --tree /path/to/tree \\
         --validate-predictions predictions.json
 
-This checks every ``location`` in *predictions.json* against the FULL set of
-locations that exist in the tree -- every function/class at ANY nesting
-depth and ANY visibility, PLUS class-level and module-level assignment
-targets (dataclass-style fields, module constants -- widened per the D5
-finding below), which is deliberately BROADER than the public-top-level-only
-symbols shown in the plain inventory above. A prediction naming a real
-private helper, method, or field is not a guess just because the blind
-predictor was never shown it by name; only a location absent from this
-fuller set is reported invalid.
+This checks every ``location`` in *predictions.json* against the FULL set of locations
+that exist in the tree (see :func:`all_locations_for_validation`), BROADER than the
+public-top-level-only symbols the plain inventory shows: a prediction naming a real
+private helper, method, or field is not a guess just because the blind predictor was
+never shown it by name.
 
-**Invalid is advisory, not a hard gate**: this mode always exits 0 for a
-well-formed predictions file, regardless of how many locations are invalid
-(a malformed FILE -- bad JSON, missing required fields -- still exits 2, same
-as always). An earlier version exited 1 on any invalid location; that was
-found to reject real locations no static walk can ever see (a
-lambda-assigned name, a name built at runtime), including this very
-docstring's own worked example (``RuleEntry.allow_in_auto_mode``, a
-dataclass property, in an earlier tree layout) -- gating a predictor out of
-naming the single most predictable location for several of this ticket's
-requirement shapes. The false-negative cost is now demonstrably higher than
-the false-positive cost, so invalid locations are reported with nearest-
-real-location suggestions for a human to read, not enforced.
+**Invalid is advisory, not a hard gate**: this mode always exits 0 for a well-formed
+predictions file, however many locations are invalid (a malformed FILE -- bad JSON,
+missing required fields -- still exits 2). No static walk can see a name that exists
+only at runtime, so invalid locations are reported with nearest-real-location
+suggestions for a human to read, not enforced.
 """
 
 from __future__ import annotations
@@ -103,12 +74,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-# This ONE import from tools.touch_set_score is a deliberately different case from the
-# change_role_classifier avoidance below: it is a pure, side-effect-free string function (no
-# tree/diff/AST logic, no coupling to anything under adversarial review), the dependency is
-# one-way (touch_set_score has and needs zero awareness of this module), and reusing it keeps
-# the two tools' notion of "the same location string" from silently drifting apart -- exactly
-# the "check for existing code before writing it again" discipline this suite is held to.
+# Shared rather than reimplemented so the two tools' notion of "the same location string"
+# cannot drift apart.
 from tools.touch_set_score import normalize_location
 
 KNOWN_LIMITATIONS = [
@@ -132,16 +99,11 @@ KNOWN_LIMITATIONS = [
 ]
 
 # --------------------------------------------------------------------------
-# File discovery / test-vs-production / gitignore (D12) / symlink dedup (D11)
+# File discovery, test-vs-production, gitignore, symlink dedup
 # --------------------------------------------------------------------------
 #
-# Deliberately NOT imported from tools.change_role_classifier, even though that module already
-# has equivalent helpers -- this tool must carry zero dependency on the role-classification
-# engine (see tools/touch_set_score.py's module docstring for why: an adversarial review found
-# that engine's role labels anti-correlated with code quality, and after that finding the
-# TOO-45 M2 instrument suite was redesigned to depend on it nowhere at all, not just where it
-# drove a "kind"). File discovery and the test/production path rule below are simple enough
-# that duplicating them here is cheaper than a coupling to a module now under adversarial fire.
+# Discovery and the test/production rule are duplicated here rather than imported from
+# tools.change_role_classifier, deliberately: this tool depends on that module nowhere.
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -160,13 +122,11 @@ EXCLUDED_DIR_NAMES = {
 
 
 def _load_gitignore_patterns(tree_root: Path) -> list[str]:
-    """Best-effort reader of *tree_root*'s OWN top-level ``.gitignore`` -- read as ordinary file
-    content via ``Path.read_text``, NEVER via a ``git`` subprocess call (see the module
-    docstring's blindness guarantee). Returns the raw non-comment, non-blank, non-negation
-    pattern lines, unprocessed; see :data:`KNOWN_LIMITATIONS` for exactly what subset of
-    gitignore syntax :func:`_is_gitignored` supports. Returns an empty list if there is no
-    ``.gitignore`` or it cannot be read -- a missing or unreadable gitignore is not an error,
-    just "nothing extra to exclude"."""
+    """Read *tree_root*'s OWN top-level ``.gitignore`` as ordinary file content, NEVER via a
+    ``git`` subprocess call (see the module docstring's hard rule). Returns the non-blank,
+    non-comment, non-negation pattern lines unprocessed; :func:`_is_gitignored` decides what
+    they mean. A missing or unreadable ``.gitignore`` returns an empty list rather than
+    raising -- there is simply nothing extra to exclude."""
     gitignore_path = tree_root / ".gitignore"
     if not gitignore_path.is_file():
         return []
@@ -178,16 +138,26 @@ def _load_gitignore_patterns(tree_root: Path) -> list[str]:
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith("!"):
-            continue  # blank/comment/negation -- negation is not supported, see KNOWN_LIMITATIONS
+            # Negation is unsupported: drop the line rather than let it act as an ordinary
+            # exclude, which would invert its meaning.
+            continue
         patterns.append(stripped)
     return patterns
 
 
 def _is_gitignored(relpath: Path, patterns: list[str]) -> bool:
-    """Best-effort match of *relpath* (relative to the tree root) against *patterns*. A pattern
-    with an internal ``/`` is treated as anchored to the tree root (matched against the full
-    relative POSIX path); a bare pattern with no ``/`` is matched against any single path
-    component at any depth (so ``tmp/`` correctly excludes ``tmp/anything/deep/file.py``)."""
+    """Best-effort match of *relpath* (relative to the tree root) against *patterns*. A
+    trailing ``/`` is stripped before either rule below is applied.
+
+    A pattern that then still contains a ``/`` is treated as anchored to the tree root and
+    compared LITERALLY against the relative POSIX path -- equality, or that path as a
+    directory prefix. ``fnmatch`` is not reached on this branch, so a wildcard in an anchored
+    pattern is compared as an ordinary character: ``docs/*.py`` does not exclude
+    ``docs/a.py``.
+
+    A pattern with no ``/`` left is ``fnmatch``ed against each path component separately, at
+    any depth, so ``tmp/`` does exclude ``tmp/anything/deep/file.py``.
+    """
     posix = relpath.as_posix()
     parts = relpath.parts
     for pattern in patterns:
@@ -207,11 +177,11 @@ def _is_gitignored(relpath: Path, patterns: list[str]) -> bool:
 def discover_python_files(
     root: Path, gitignore_patterns: list[str] | None = None
 ) -> list[Path]:
-    """Every ``*.py`` file under *root*, as paths relative to *root*, skipping build/VCS/cache
-    noise directories and (when *gitignore_patterns* is given) anything matching them -- see
-    :func:`_is_gitignored`. Also de-duplicates a module reachable through more than one path via
-    a FILE symlink (D11): only the first path (in sorted order) to each distinct underlying file
-    is kept, so an aliased module is never inventoried twice. Sorted for deterministic output."""
+    """Every ``*.py`` file under *root*, as paths relative to *root*, skipping any
+    :data:`EXCLUDED_DIR_NAMES` directory and, when *gitignore_patterns* is given, anything
+    :func:`_is_gitignored` matches. A module reachable through more than one path via a FILE
+    symlink is kept once, under the first path in sorted order. Sorted for deterministic
+    output."""
     candidates: list[Path] = []
     for path in root.rglob("*.py"):
         relpath = path.relative_to(root)
@@ -228,10 +198,9 @@ def discover_python_files(
         try:
             real = (root / relpath).resolve()
         except OSError:
-            # A resolve() failure (e.g. a broken symlink) is not this function's problem to
-            # report -- it surfaces again, named, when _safe_read_text tries to actually read
-            # the file. Treat it as its own unique identity here so it is never silently
-            # dropped from discovery.
+            # An unresolvable path is not this function's problem to report -- it surfaces
+            # again, named, when _safe_read_text tries to actually read the file. Give it its
+            # own identity here so discovery never silently drops it.
             real = root / relpath
         if real in seen_real:
             continue
@@ -250,12 +219,10 @@ def is_test_path(relpath: Path) -> bool:
 
 
 def _safe_read_text(path: Path) -> tuple[str | None, str | None]:
-    """Reads *path* as UTF-8-with-surrogateescape text, catching every filesystem/encoding
-    failure a real tree can produce (D11: a broken symlink -> FileNotFoundError, a directory
-    matching ``*.py`` -> IsADirectoryError, a permission-denied file -> PermissionError, an
-    encoding that round-trips through surrogateescape but still raises downstream ->
-    UnicodeError) so ONE bad file in a large tree reports as a named failure instead of crashing
-    the whole run. Returns ``(content, error)`` -- exactly one is ``None``."""
+    """Reads *path* as UTF-8-with-surrogateescape text, turning ``OSError`` (a broken symlink,
+    a directory matching ``*.py``, a permission-denied file) and ``UnicodeError`` into a named
+    failure, so ONE bad file in a large tree does not crash the whole run. Returns
+    ``(content, error)`` -- exactly one is ``None``."""
     try:
         return path.read_text(encoding="utf-8", errors="surrogateescape"), None
     except (OSError, UnicodeError) as exc:
@@ -301,10 +268,9 @@ class InventoryResult:
 
 
 def _first_line(docstring: str | None) -> str | None:
-    """The first physical line of *docstring* after ``ast.get_docstring``'s own dedent/clean,
-    with surrounding whitespace stripped. Returns ``None`` -- never ``""`` -- when there is no
-    docstring at all or it is entirely blank, so "absent" and "blank" are never conflated with
-    the empty string a caller might otherwise print as if it were real content."""
+    """The first non-blank line of *docstring*, whitespace-stripped. Returns ``None`` -- never
+    ``""`` -- when there is no docstring at all or it is entirely blank, so "absent" is never
+    printed as if it were real content."""
     if docstring is None:
         return None
     stripped = docstring.strip()
@@ -334,7 +300,7 @@ def build_module_entry(
     """Parses *source* and returns ``(entry, None)`` on success or ``(None, error_message)``
     on a syntax error -- callers must name the failure explicitly rather than silently omitting
     the file from the inventory. Only TOP-LEVEL (module-body) ``def``/``class`` statements are
-    considered -- methods and nested functions are deliberately excluded, per the spec."""
+    considered; methods and nested functions are deliberately excluded."""
     try:
         tree = ast.parse(source, filename=relpath)
     except SyntaxError as exc:
@@ -370,11 +336,10 @@ def build_module_entry(
 
 
 def run_inventory(tree_root: Path) -> InventoryResult:
-    """Builds the inventory for exactly one tree. Reads ONLY files under *tree_root* -- no
-    other path, no VCS metadata, no second tree. See the module docstring's "Hard rule". Skips
-    anything matched by *tree_root*'s own top-level ``.gitignore`` (D12) and any file that
-    cannot even be read (D11, via :func:`_safe_read_text`), both named explicitly in
-    ``parse_failures`` rather than silently absent."""
+    """Builds the inventory for exactly one tree. Opens only paths under *tree_root* -- no
+    other path, no VCS metadata, no second tree; see the module docstring's "Hard rule". A
+    file that cannot be read or parsed is named in ``parse_failures`` rather than silently
+    omitted."""
     modules: list[ModuleEntry] = []
     parse_failures: list[str] = []
     gitignore_patterns = _load_gitignore_patterns(tree_root)
@@ -403,8 +368,7 @@ def run_inventory(tree_root: Path) -> InventoryResult:
 
 
 def build_report(result: InventoryResult) -> dict:
-    """Builds the full structured report (used for both text and --json output) so the two
-    presentations can never drift apart."""
+    """The full structured report, shared by the text and ``--json`` presentations."""
     return {
         "tree_root": result.tree_root,
         "modules_found": len(result.modules),
@@ -476,24 +440,24 @@ def print_text_report(report: dict) -> None:
 # Prediction-existence validation (--validate-predictions)
 # --------------------------------------------------------------------------
 #
-# Everything below is deliberately SEPARATE from the ModuleEntry/SymbolEntry machinery above:
-# the plain inventory shows a blind predictor only PUBLIC TOP-LEVEL symbols (by design -- see
-# the module docstring), but existence-validation must not reject a real prediction just
-# because it names a private helper, a method, or a data-carrying field the predictor was never
-# shown by name. So this section collects a much BROADER location set (every function/class at
-# any nesting depth/visibility, PLUS class/module-level assignment targets -- D5) purely for the
-# "does this string correspond to something real" check, and never feeds it into the
-# printed/JSON inventory a predictor sees.
+# Deliberately SEPARATE from the ModuleEntry/SymbolEntry machinery above: the plain inventory
+# shows a blind predictor only PUBLIC TOP-LEVEL symbols, but existence-validation must not
+# reject a real prediction just because it names a private helper, a method, or a
+# data-carrying field the predictor was never shown by name. The broader location set
+# collected here serves only the "does this string correspond to something real" check, and
+# never feeds the printed/JSON inventory a predictor sees.
 
 
 def _collect_qualnames(tree: ast.Module) -> list[str]:
     """Every FunctionDef/AsyncFunctionDef/ClassDef qualname, at ANY nesting depth and ANY
-    visibility, PLUS every class-level or module-level simple assignment target (``AnnAssign``/
-    ``Assign`` with a plain ``Name`` target -- D5: a dataclass field, a class attribute, or a
-    module constant is a location a diff judge would legitimately cite, and the earlier version
-    of this walk rejected all of them, including this tool's own worked example). Assignment
-    targets are deliberately scanned ONLY at module and class scope, never inside a function
-    body -- an arbitrary local variable is not the kind of location this check is for."""
+    visibility, PLUS simple assignment targets (``AnnAssign``/``Assign`` with a plain ``Name``
+    target) -- a dataclass field, a class attribute, or a module constant is a location a diff
+    judge would legitimately cite.
+
+    Assignment targets are taken from the module body and from class bodies only -- not from a
+    function's locals, which are not the kind of location this check is for, and not from a
+    module-level assignment nested inside a block such as ``if TYPE_CHECKING:``, since only the
+    module body's own statements are scanned."""
     qualnames: list[str] = []
 
     def scan_body_for_assigns(body: list[ast.stmt], prefix: tuple[str, ...]) -> None:
@@ -525,9 +489,9 @@ def _collect_qualnames(tree: ast.Module) -> list[str]:
 def all_locations_for_validation(tree_root: Path) -> tuple[set[str], list[str]]:
     """Every location string (bare module path, AND ``path::Qual.Name`` for every function/
     class/field found by :func:`_collect_qualnames`) that exists anywhere in *tree_root*.
-    Respects the tree's own gitignore (D12) and never crashes on an unreadable file (D11).
-    Returns ``(locations, parse_failures)`` -- a file that fails to read or parse contributes no
-    locations and is named explicitly, never silently absent from the failures list."""
+    Honours the tree's own gitignore and never crashes on an unreadable file. Returns
+    ``(locations, parse_failures)`` -- a file that fails to read or parse contributes no
+    locations and is named in the failures."""
     locations: set[str] = set()
     parse_failures: list[str] = []
     gitignore_patterns = _load_gitignore_patterns(tree_root)
@@ -551,10 +515,9 @@ def all_locations_for_validation(tree_root: Path) -> tuple[set[str], list[str]]:
 def load_prediction_locations(path: Path) -> tuple[list[str], list[str]]:
     """Minimal loader for ``--validate-predictions``: extracts every ``location`` string from a
     predictions-shaped JSON file. Deliberately does NOT validate ``kind`` or any other field --
-    that is tools/touch_set_score.py's job when actually scoring; this only checks whether a
-    predicted LOCATION exists in a given tree. Returns ``(locations, errors)``; any error is
-    fatal for the caller, same discipline as the rest of this suite: never validate a subset of
-    a broken file and pretend the rest is fine."""
+    this mode only asks whether a predicted LOCATION exists in a given tree. Returns
+    ``(locations, errors)``; :func:`validate_predictions` treats any error as fatal rather than
+    checking part of a broken file and reporting as if the rest were fine."""
     errors: list[str] = []
     try:
         raw_text = path.read_text(encoding="utf-8")
@@ -605,10 +568,8 @@ class ValidationResult:
 def _nearest_locations(
     location: str, all_locations: set[str], limit: int = 3
 ) -> list[str]:
-    """Nearest real-location suggestions for an invalid prediction, via stdlib ``difflib`` --
-    cheap, no dependency, good enough for "did you mean" without claiming semantic understanding.
-    Empty when nothing is close enough (cutoff chosen empirically to avoid noise on short
-    names)."""
+    """Up to *limit* nearest real locations for an invalid prediction, via stdlib ``difflib``
+    -- a "did you mean", not a semantic match. Empty when nothing clears the cutoff."""
     return difflib.get_close_matches(location, all_locations, n=limit, cutoff=0.6)
 
 
@@ -618,11 +579,10 @@ def validate_predictions(
     """Checks every location named in *predictions_path* against the FULL location set of
     *tree_root* (see :func:`all_locations_for_validation`). Meant to run BEFORE scoring, at
     authoring time, so a guessed nonexistent location is caught and fixed by the predictor
-    instead of silently becoming an indistinguishable miss in tools/touch_set_score.py, which
-    has no tree access to make this check itself. Returns ``(result, fatal_errors)``; *result*
-    is ``None`` only when the predictions file itself failed to load (a tree-side parse/read
-    failure is NOT fatal here -- it is named in ``result.parse_failures`` instead, since other
-    files in the tree may still be checkable)."""
+    instead of silently becoming an indistinguishable miss. Returns ``(result, fatal_errors)``;
+    *result* is ``None`` only when the predictions file itself failed to load -- a tree-side
+    parse/read failure is named in ``result.parse_failures`` instead, since other files in the
+    tree may still be checkable."""
     raw_locations, load_errors = load_prediction_locations(predictions_path)
     if load_errors:
         return None, load_errors
@@ -664,7 +624,7 @@ def validate_predictions(
 
 
 def build_validation_report(result: ValidationResult) -> dict:
-    """Builds the full structured validation report (used for both text and --json output)."""
+    """The full structured validation report, shared by the text and ``--json`` presentations."""
     return {
         "tree_root": result.tree_root,
         "predictions_file": result.predictions_path,

@@ -1,13 +1,5 @@
-"""Tests for ``tools/change_role_classifier.py`` (TOO-45).
-
-Exercises the classification core (:func:`tools.change_role_classifier.analyze_source`)
-directly against synthetic source snippets, so tests run fast and don't touch the
-filesystem. See the module docstring in ``tools/change_role_classifier.py`` for the
-role definitions and the design rationale.
-
-Assertions are anchored to source LINE CONTENT (via :func:`_at`), not hardcoded line
-numbers, so reformatting a snippet never silently breaks a test's meaning.
-"""
+"""Tests for ``tools/change_role_classifier.py``; see that module's docstring for role
+definitions."""
 
 import ast
 import contextlib
@@ -30,8 +22,8 @@ def _analyze(
 
 
 def _at(analysis: crc.FileAnalysis, source: str, needle: str) -> list[crc.Occurrence]:
-    """Occurrences whose source line contains *needle* (a small, readable anchor instead of a
-    brittle hardcoded line number)."""
+    """Occurrences whose source line contains *needle* (a readable anchor instead of a
+    hardcoded line number)."""
     target_lines = {
         i + 1 for i, line in enumerate(source.splitlines()) if needle in line
     }
@@ -39,7 +31,7 @@ def _at(analysis: crc.FileAnalysis, source: str, needle: str) -> list[crc.Occurr
 
 
 class TestExactIdentifierMatching(unittest.TestCase):
-    """Requirement 1: resolve by AST node identity, never by name substring."""
+    """Resolves by AST node identity, never by name substring."""
 
     def test_substring_near_miss_produces_no_occurrences(self):
         """
@@ -75,8 +67,7 @@ class TestExactIdentifierMatching(unittest.TestCase):
 
 
 class TestShadowedLocal(unittest.TestCase):
-    """Hazard: a same-named local in an unrelated scope must be classified independently,
-    never conflated with a different scope's occurrence of the same spelling."""
+    """Hazard: a same-named local in an unrelated scope must be classified independently."""
 
     def test_two_unrelated_scopes_classified_independently(self):
         """
@@ -101,7 +92,6 @@ class TestShadowedLocal(unittest.TestCase):
         self.assertTrue(any(crc.ROLE_WRITE in o.roles for o in write_hits))
         conduit_hits = _at(analysis, source, "mode.upper()")
         self.assertTrue(any(crc.ROLE_CONDUIT in o.roles for o in conduit_hits))
-        # The unrelated scope's WRITE/CONDUIT must NOT also carry DECISION, and vice versa.
         self.assertNotIn(crc.ROLE_DECISION, write_hits[0].roles)
 
     def test_alias_hop_does_not_leak_across_scopes(self):
@@ -132,11 +122,8 @@ class TestShadowedLocal(unittest.TestCase):
 
 
 class TestSetLiteralIsTransparent(unittest.TestCase):
-    """Regression test for a real bug found live during TOO-45 validation: unlike List/Tuple,
-    `ast.Set` has no `.ctx` field at all (Python has no set-destructuring assignment), so the
-    original ctx-guarded case never matched a Set parent and every set-literal element fell
-    through to UNCLASSIFIED. Found on `toolguard/rule_entry.py`'s real
-    `KNOWN_ENRICHMENT_KEYS = frozenset({ADDITIONAL_CONTEXT_KEY, ALLOW_IN_AUTO_MODE_KEY})`."""
+    """Regression: `ast.Set` has no `.ctx` field, so a set-literal element used to fall through
+    to UNCLASSIFIED (found on `rule_entry.py`'s `KNOWN_ENRICHMENT_KEYS` frozenset)."""
 
     def test_subject_inside_set_literal_walks_up_past_it(self):
         """
@@ -324,11 +311,8 @@ class TestSignatureCeremony(unittest.TestCase):
 
 
 class TestDefNameBindsAsWrite(unittest.TestCase):
-    """A property/method whose own NAME equals the subject is a real, discovered case (found
-    live on the TOO-45 validation trees, not invented): the `def` statement binds a new name
-    in its enclosing scope, same as an assignment target -- see KNOWN LIMITATIONS for what
-    this still cannot see (the body's own logic, if it reads the value via a differently
-    named constant)."""
+    """A `def`/property whose own name equals the subject is WRITE, since it binds a new name
+    in its enclosing scope; see KNOWN_LIMITATIONS for what this still cannot see."""
 
     def test_property_def_matching_subject_is_write(self):
         """
@@ -347,8 +331,6 @@ class TestDefNameBindsAsWrite(unittest.TestCase):
         def_hits = [o for o in analysis.occurrences if o.kind == "def-name"]
         self.assertEqual(len(def_hits), 1)
         self.assertIn(crc.ROLE_WRITE, def_hits[0].roles)
-        # The property BODY's real logic (`value is True`) never spells the subject's name,
-        # so it produces NO additional occurrence -- documented, not silently absent.
         self.assertEqual(len(analysis.occurrences), 1)
 
 
@@ -402,11 +384,6 @@ class TestImportsAndBindings(unittest.TestCase):
 
     def test_subject_as_keyword_argument_value_in_branch_test_reaches_decision(self):
         """
-        Regression for the coordinator's N5 finding (second review): `keyword.value`'s own
-        hop correctly continued the walk, but its parent `Call` node (field "keywords") had
-        no rule, so `if f(key=subject):` terminated at bare CONDUIT instead of reaching the
-        enclosing `If`.
-
         Given the subject passed as a keyword-argument VALUE (not the argument name) inside
         a call that is itself the test of an `if`
         When analyzed
@@ -437,8 +414,8 @@ class TestWalrusDualRole(unittest.TestCase):
 
 
 class TestHonestyRequirements(unittest.TestCase):
-    """Requirement 2: never silently skip -- parse failures and unhandled constructs must be
-    named explicitly, never folded into a zero."""
+    """Never silently skip: parse failures and unhandled constructs are named explicitly, not
+    folded into a zero."""
 
     def test_parse_failure_is_reported_not_silently_dropped(self):
         """
@@ -481,11 +458,6 @@ class TestHonestyRequirements(unittest.TestCase):
         self,
     ):
         """
-        Regression for the coordinator's N5 finding (second review): the text report used to
-        print notes ONLY for UNCLASSIFIED occurrences, so a location that DID get a real role
-        (via an accumulated `_CONTINUE` hop) but then hit an unhandled parent had its
-        explanatory note visible only in --json, never in the text report a human reads.
-
         Given a bare expression statement where the subject flows through two CONTINUE hops
         (a Call, then an Attribute) before reaching a genuinely unhandled parent (a bare
         `Expr` statement)
@@ -523,14 +495,7 @@ class TestHonestyRequirements(unittest.TestCase):
 
 
 class TestPrimaryRolePrecedence(unittest.TestCase):
-    """`_ratio_text` and the CONDUIT-to-DECISION ratio it built were REMOVED from
-    tools/change_role_classifier.py after an independent adversarial review showed the
-    ratio was the wrong measure for the question (see the module docstring's "No comparative
-    ratio is published" section). The test that pinned `_ratio_text` was removed with it, per
-    project convention (deleting production code permits deleting the test that pinned exactly
-    that code) -- `test_ratio_is_reported_as_undefined_not_as_zero_when_no_decisions` is gone,
-    not modified. `primary_role`'s precedence rule is unrelated production code that still
-    exists (role labels remain descriptive per-location annotation) and keeps its test here."""
+    """`primary_role` reduces a set of roles to one label by fixed precedence."""
 
     def test_primary_role_precedence(self):
         """
@@ -544,7 +509,7 @@ class TestPrimaryRolePrecedence(unittest.TestCase):
 
 
 class TestPathBasedTestVsProduction(unittest.TestCase):
-    """Requirement 6: test-vs-production distinguished by path, rule stated in output."""
+    """Test-vs-production is distinguished by path; the rule used is stated in report output."""
 
     def test_paths_under_test_directory_are_test(self):
         self.assertTrue(crc.is_test_path(Path("test/unit/test_foo.py")))
@@ -594,15 +559,13 @@ class TestChangedLineRestriction(unittest.TestCase):
             new_text, "f.py", ["mode"], allowed_lines=changed, is_test=False
         )
         lines_seen = {o.line for o in analysis.occurrences}
-        self.assertNotIn(
-            3, lines_seen
-        )  # `mode = False` is unchanged from the old version
-        self.assertIn(4, lines_seen)  # the new `if mode:` line must be included
+        self.assertNotIn(3, lines_seen)
+        self.assertIn(4, lines_seen)
 
 
 class TestRarerBindingKinds(unittest.TestCase):
-    """Node kinds beyond the required hazard list, exercised for completeness: each has its
-    own plain-string AST field (not a Name node), so each is a distinct code path."""
+    """Binding kinds with their own plain-string AST field (not a Name node), each a distinct
+    code path."""
 
     def test_except_handler_name_is_write(self):
         """
@@ -659,8 +622,7 @@ class TestRarerBindingKinds(unittest.TestCase):
 
 
 class TestTwoTreeDiffMode(unittest.TestCase):
-    """Regression coverage for run_two_tree_diff -- exercised manually during development but
-    (correctly) belongs in the committed suite, not left as a one-off scratch check."""
+    """Regression coverage for `run_two_tree_diff`."""
 
     def test_restricts_to_changed_lines_and_reports_added_and_removed_files(self):
         """
@@ -689,21 +651,12 @@ class TestTwoTreeDiffMode(unittest.TestCase):
             occ_by_file = {}
             for fa in result.files_analyzed:
                 occ_by_file[fa.file] = {o.line for o in fa.occurrences}
-            self.assertNotIn(
-                3, occ_by_file["m.py"]
-            )  # unchanged `mode = False` excluded
-            self.assertIn(4, occ_by_file["m.py"])  # new `if mode:` included
-            self.assertEqual(
-                occ_by_file["added.py"], {1, 2}
-            )  # new file: every line counts
+            self.assertNotIn(3, occ_by_file["m.py"])
+            self.assertIn(4, occ_by_file["m.py"])
+            self.assertEqual(occ_by_file["added.py"], {1, 2})
 
     def test_byte_identical_move_reports_no_occurrences(self):
         """
-        Regression for the coordinator's N3 finding (second review): the git-mode `-M`
-        rename fix never landed in `--old`/`--new` mode, so a byte-identical file moved to a
-        new relative path reported the WHOLE file as changed, including phantom DECISION/
-        WRITE occurrences.
-
         Given a file moved from `pkg/a.py` to `pkg2/a.py` with byte-identical content
         When run_two_tree_diff analyzes old vs. new
         Then it reports ZERO occurrences for the moved file, and the old path is NOT listed
@@ -755,9 +708,8 @@ class TestTwoTreeDiffMode(unittest.TestCase):
 
 
 class TestGitDiffMode(unittest.TestCase):
-    """Regression coverage for run_git_diff, against a throwaway git repo created for the
-    test (never the real toolguard repo -- see .claude/rules for why live repo state is never
-    a test fixture)."""
+    """Regression coverage for `run_git_diff`, using a throwaway git repo (never the real
+    toolguard repo)."""
 
     def test_reports_changed_lines_from_two_commits(self):
         """
@@ -812,16 +764,13 @@ class TestGitDiffMode(unittest.TestCase):
 
 
 def _trees(files: dict[str, str]) -> dict:
-    """Parses a {file_label: source} mapping into {file_label: ast.Module}, for tests that
-    call compute_symbol_closure directly without touching the filesystem."""
+    """Parses a {file_label: source} mapping into {file_label: ast.Module}."""
     return {label: ast.parse(source, filename=label) for label, source in files.items()}
 
 
 class TestSymbolClosure(unittest.TestCase):
-    """The subject is a NAME, not a value: these are the required closure hazards from the
-    coordinator's review. Every rule here is definition-site based (exact string equality,
-    exact identifier reference) -- never name similarity, which is the exact defect that broke
-    two earlier instruments in this ticket."""
+    """Closure growth is definition-site based (exact string/identifier equality), never name
+    similarity."""
 
     def test_constant_bound_to_subject_string_read_via_dot_get_is_found(self):
         """
@@ -905,19 +854,10 @@ class TestSymbolClosure(unittest.TestCase):
         self,
     ):
         """
-        Second-round (N1) update: the growth rule was widened from "the return value must
-        BE a bare Name/Attribute" to "any return expression REFERENCES a tracked symbol
-        anywhere within it" -- deliberately, per the coordinator's evidence-gathering
-        framing ("an under-inclusive closure means missing evidence"). A function whose
-        return expression involves the tracked key (via a subscript/isinstance/ternary, not
-        a bare forward) now correctly counts as carrying the value outward.
-
         Given a function whose return expression contains the tracked constant nested
         inside a ternary/isinstance/subscript, not as a bare top-level Name
         When the closure is computed
-        Then the function DOES join the closure -- this is exactly the "stylistic rewrite"
-        gap the second adversarial review found (`return A and B` vs an equivalent
-        multi-statement early-return form must be treated identically)
+        Then the function DOES join the closure
         """
         source = (
             "MODE_KEY = 'mode'\n"
@@ -938,12 +878,6 @@ class TestSymbolClosure(unittest.TestCase):
         self,
     ):
         """
-        The genuine remaining boundary: a function that references a tracked symbol
-        somewhere in its BODY (an earlier statement) but whose return VALUE EXPRESSIONS
-        never mention it at all is still a usage site, not an accessor -- this is what
-        stopped the original F3 explosion (`command` growing to 19 names via `main`,
-        `run_maintenance`, none of which return the subject itself).
-
         Given a function that checks a tracked constant in an earlier statement, then
         returns a value built by a helper call that does not itself reference the constant
         When the closure is computed
@@ -966,14 +900,6 @@ class TestSymbolClosure(unittest.TestCase):
         self,
     ):
         """
-        Regression reproducing the second adversarial report's decisive experiment verbatim:
-        the SAME predicate, written two idiomatically-equivalent ways, must be treated
-        identically -- `return A and B and C` (a single boolean expression) versus
-        `if not A: return False` / `return C` (early-return form). Under the FIRST (bare
-        Name/Attribute) version of this rule, only the second form joined the closure; a
-        purely stylistic three-line rewrite with no architectural change moved a real tree's
-        reported occurrences from 5 to 11.
-
         Given the identical predicate logic written both ways
         When the closure is computed for each
         Then BOTH forms admit the predicate function -- the rewrite changes nothing
@@ -1077,15 +1003,12 @@ class TestSymbolClosure(unittest.TestCase):
 
 
 class TestOpaqueHops(unittest.TestCase):
-    """The coordinator's second request: closure cannot follow a tracked symbol's value
-    through a function-local variable, so that gap must be MEASURED, not merely declared.
-    These count places where a tracked symbol contributes to a local's value and the local
-    is used again -- never classifying what happens after, per the request."""
+    """Opaque hops count places where a tracked symbol feeds a local that is used again,
+    without classifying what happens after."""
 
     def test_real_property_shape_is_counted(self):
         """
-        Given the exact real pattern found on both TOO-45 validation trees --
-        `value = self.metadata.get(THE_KEY); return value is True`
+        Given `value = self.metadata.get(THE_KEY); return value is True`
         When analyzed with THE_KEY tracked
         Then one opaque hop is reported, naming the local and the tracked symbol involved
         """
@@ -1160,10 +1083,8 @@ class TestOpaqueHops(unittest.TestCase):
 
 
 class TestBoolOpCaveatPrintedNotOnlyInLimitations(unittest.TestCase):
-    """Regression for the coordinator's N9 note (second review): the BoolOp-is-unconditional-
-    DECISION caveat previously existed only in KNOWN_LIMITATIONS, not where the DECISION
-    counts themselves are printed. `print_text_report` must show it directly next to the role
-    breakdown."""
+    """Regression: the BoolOp-is-unconditional-DECISION caveat used to exist only in
+    KNOWN_LIMITATIONS; `print_text_report` must show it next to the role breakdown too."""
 
     def test_caveat_appears_near_role_breakdown_in_text_output(self):
         result = crc.AnalysisResult(
@@ -1189,12 +1110,9 @@ class TestBoolOpCaveatPrintedNotOnlyInLimitations(unittest.TestCase):
 
 
 class TestOpaqueHopsReturnScanning(unittest.TestCase):
-    """Second-round (N2) regression: `_find_opaque_hops_in_scope` used to inspect only
-    assignments, never `Return`/`Yield` values, so a one-line accessor whose enclosing
-    function did NOT (for whatever reason) join the closure produced zero opaque hops with
-    nothing else recording the loss -- and KNOWN_LIMITATIONS falsely claimed this shape was
-    covered. Fixed with a Return/Yield-scanning safety net, gated so it never contradicts a
-    function N1's growth rule DID successfully promote."""
+    """Regression: opaque-hop scanning used to check only assignments, missing `Return`/`Yield`
+    values; a Return/Yield-scanning safety net now covers that without double-counting an
+    already-promoted accessor."""
 
     def test_hop_limited_accessor_return_is_flagged(self):
         """
@@ -1248,8 +1166,7 @@ class TestOpaqueHopsReturnScanning(unittest.TestCase):
         symbol, analyzed directly (bypassing closure/growth entirely, so "gen" is never a
         tracked symbol itself)
         When analyzed
-        Then the yield is flagged as an opaque hop, the same way a `return` would be --
-        implicit returns are covered where reasonably possible, per the coordinator's request
+        Then the yield is flagged as an opaque hop, the same way a `return` would be
         """
         source = "def gen(items):\n    for x in items:\n        yield x.flag_x\n"
         analysis = _analyze(source, ["flag_x"])
@@ -1260,11 +1177,8 @@ class TestOpaqueHopsReturnScanning(unittest.TestCase):
 
 
 class TestClosureParseFailuresSurfaced(unittest.TestCase):
-    """Regression test for a real defect the coordinator caught by reading the code: in
-    git-diff mode, a file fetched ONLY for whole-tree closure discovery (not part of the
-    diff) that failed to parse was silently excluded from closure growth with no trace
-    anywhere in the output -- the exact silent-exclusion failure mode this tool exists to
-    prevent."""
+    """Regression: in git-diff mode, a file fetched only for closure discovery that failed to
+    parse used to be silently excluded from closure growth with no trace in the output."""
 
     def test_non_diff_file_parse_failure_is_reported_not_dropped(self):
         """
@@ -1313,20 +1227,15 @@ class TestClosureParseFailuresSurfaced(unittest.TestCase):
 
             result = crc.run_git_diff(repo, base, head, ["mode"])
 
-            self.assertEqual(
-                result.parse_failures, []
-            )  # broken.py was never in the diff
+            self.assertEqual(result.parse_failures, [])
             self.assertEqual(len(result.closure_parse_failures), 1)
             self.assertTrue(result.closure_parse_failures[0].startswith("broken.py:"))
 
 
 class TestDualRoleThroughCallsAndAttributes(unittest.TestCase):
-    """Regression for the coordinator's F1 finding, the single most consequential defect in
-    the adversarial review: `_governing_role` used to return a TERMINAL CONDUIT for
-    `Call.args`/`Call.func` and `Attribute.value`, so a decision expressed through one layer
-    of indirection was scored as pure transport -- the tool preferred copy-pasted inline
-    checks over factored predicates. Every case below is verbatim from the adversarial
-    report's own measurement table."""
+    """Regression: `_governing_role` used to return a terminal CONDUIT for `Call.args`/
+    `Call.func` and `Attribute.value`, scoring a decision expressed through one layer of
+    indirection as pure transport."""
 
     def _decision_present(self, source: str, subject: str = "x") -> tuple:
         analysis = _analyze(source, [subject])
@@ -1391,9 +1300,9 @@ class TestDualRoleThroughCallsAndAttributes(unittest.TestCase):
 
     def test_predicate_function_call_sites_now_register_decision(self):
         """
-        Given the requirement copy-pasted inline at one call site vs. factored into a
-        predicate function called from another -- the adversarial report's own worked
-        example, where the factored version used to score as pure CONDUIT with zero DECISION
+        Given the same requirement copy-pasted inline at one call site vs. factored into a
+        predicate function called from another, where the factored version used to score as
+        pure CONDUIT with zero DECISION
         When analyzed
         Then BOTH forms register DECISION: the inline form directly, the factored form via
         the walk now reaching through the `Call` to the enclosing `if`
@@ -1420,11 +1329,9 @@ class TestDualRoleThroughCallsAndAttributes(unittest.TestCase):
 
 
 class TestStatementSpanLineFiltering(unittest.TestCase):
-    """Regression for the coordinator's F4 finding: line-restriction used to check the
-    occurrence NODE's own line, so a subject moved from a call argument into a branch test
-    (or a DECISION's comparand edited) inside a multi-line statement could report zero
-    occurrences with zero honesty-bucket signal, because difflib marked a DIFFERENT line of
-    the SAME statement as changed. Both cases are verbatim from the adversarial report."""
+    """Regression: line-restriction used to check only the occurrence node's own line, so a
+    change elsewhere in the same multi-line statement (moved into a branch test, or a
+    comparand edit) could report zero occurrences."""
 
     def test_subject_moved_from_call_arg_into_branch_test(self):
         """
@@ -1483,9 +1390,8 @@ def _git_head(repo: Path) -> str:
 
 
 class TestGitRenameDetection(unittest.TestCase):
-    """Regression for the coordinator's F5 finding: without `-M` rename detection, a renamed
-    file's new path has no pre-image at base, so `allowed_lines` became None and the ENTIRE
-    file counted as changed even for a byte-identical `git mv`."""
+    """Regression: without `-M` rename detection, a renamed file's new path has no pre-image at
+    base, so the whole file counted as changed even for a byte-identical `git mv`."""
 
     def test_pure_rename_reports_no_occurrences(self):
         """
@@ -1541,8 +1447,8 @@ class TestGitRenameDetection(unittest.TestCase):
 
 
 class TestTestVsProductionAdversarialCases(unittest.TestCase):
-    """Regression for the coordinator's F6 finding, the cases the adversarial report measured
-    directly, plus the root-context fix."""
+    """Edge cases for test-vs-production path classification, including root-context
+    forcing."""
 
     def test_spec_directory_is_test(self):
         self.assertTrue(crc.is_test_path(Path("spec/spec_thing.py")))
@@ -1570,12 +1476,6 @@ class TestTestVsProductionAdversarialCases(unittest.TestCase):
 
     def test_distant_unrelated_ancestor_named_test_does_not_force_test(self):
         """
-        Regression for the coordinator's N7 finding (second review): the unbounded version
-        inspected root.resolve().parts in full -- every ancestor directory all the way to the
-        filesystem root -- so a throwaway tree's ARBITRARY parent (e.g. sitting somewhere
-        under a path that happens to contain "test" far upstream, unrelated to the tree's own
-        content) could silently zero out its entire production bucket.
-
         Given a root whose analysis-relevant path is deeply nested, with "test" appearing only
         as a DISTANT ancestor well outside the bounded trailing window
         When the root-context check runs
@@ -1592,7 +1492,7 @@ class TestTestVsProductionAdversarialCases(unittest.TestCase):
         Given a report built from files with a mix of test/production classification
         When printed
         Then both TEST and PRODUCTION file lists appear (not just counts) -- a misfiled tree
-        must be visible at a glance, per the adversarial finding
+        must be visible at a glance
         """
         prod_fa = crc.FileAnalysis(
             file="pkg/a.py",
@@ -1624,10 +1524,9 @@ class TestTestVsProductionAdversarialCases(unittest.TestCase):
 
 
 class TestFileReadRobustness(unittest.TestCase):
-    """Regression for the coordinator's F8 finding: a broken symlink, a permission-denied
-    file, a directory whose name matches `*.py`, or a non-UTF-8 file with a valid PEP 263
-    encoding cookie all used to raise an UNCAUGHT exception, aborting the entire run over one
-    bad file. Each must now degrade to a named parse_failures entry."""
+    """Regression: a broken symlink, permission-denied file, `*.py`-named directory, or
+    non-UTF-8 file with a PEP 263 cookie used to raise an uncaught exception aborting the whole
+    run; each must now degrade to a named `parse_failures` entry."""
 
     def test_broken_symlink_is_reported_not_crashed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1646,7 +1545,7 @@ class TestFileReadRobustness(unittest.TestCase):
             try:
                 result = crc.run_single_tree(root, ["mode"])
             finally:
-                target.chmod(0o644)  # restore so tempdir cleanup can remove it
+                target.chmod(0o644)
             self.assertEqual(len(result.parse_failures), 1)
             self.assertIn("secret.py", result.parse_failures[0])
 
@@ -1691,11 +1590,9 @@ class TestFileReadRobustness(unittest.TestCase):
 
 
 class TestSymlinkedDirectoryTraversal(unittest.TestCase):
-    """Regression for the coordinator's N4 finding (second review): `Path.rglob` defaults
-    `recurse_symlinks=False` on Python 3.13+, so a `*.py` file reachable only through a
-    symlinked package directory was silently absent from `files_analyzed`,
-    `production_files`/`test_files`, AND `parse_failures` all at once -- discovery itself
-    never yielded the path, so no honesty bucket could name what was skipped."""
+    """Regression: `Path.rglob` defaults `recurse_symlinks=False` on Python 3.13+, so a `*.py`
+    file reachable only through a symlinked directory used to be silently absent from every
+    bucket, including `parse_failures`."""
 
     def test_file_behind_symlinked_directory_is_discovered(self):
         """
@@ -1725,7 +1622,7 @@ class TestSymlinkedDirectoryTraversal(unittest.TestCase):
             root = Path(d)
             (root / "a.py").write_text("mode = True\n")
             (root / "self_link").symlink_to(root, target_is_directory=True)
-            found = crc.discover_python_files(root)  # must return, not hang
+            found = crc.discover_python_files(root)
             self.assertIn(Path("a.py"), found)
 
 

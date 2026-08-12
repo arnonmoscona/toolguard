@@ -1,10 +1,6 @@
 """
-Unit tests for :mod:`toolguard.tools.decision_ledger`.
-
-The prior-decision ledger (TOO-15 Phase C) stores the maintenance skill's settled
-meta-decisions so periodic runs do not re-litigate them. These tests cover the data
-model, level-scoped locations, idempotent recording, the "is this settled?" query,
-and the fail-loud behaviour on a corrupt ledger.
+Unit tests for :mod:`toolguard.tools.decision_ledger`, the store for the maintenance
+skill's settled meta-decisions.
 """
 
 import json

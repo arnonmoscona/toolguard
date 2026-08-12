@@ -1,33 +1,4 @@
-"""
-Unit tests for toolguard.session_warnings: the takeover-mode-active notice.
-
-The once-per-day facade (``OncePer`` / ``day`` / ``Repeat``) moved to
-:mod:`toolguard.once_per` and is tested in test_once_per.py (TOO-45
-punch-list #01, conceptual overhaul, second pass). issue_takeover_warning no
-longer touches the claim store at all -- see its docstring -- so the tests
-below cover only its own, much smaller contract: an unconditional stderr
-print, gated by a single boolean.
-
-TOO-45 punch-list #01 deleted issue_takeover_warning's project/logs_dir
-parameters and its once-per-day housekeeping trigger (`cleanup_days`, the
-`_SWEEP_KEY` claim, and the sqlite3-unavailable degraded notice that
-housekeeping used to produce). The tests that pinned exactly that deleted
-behaviour were removed rather than adapted -- there is no store interaction
-left to test at this layer:
-  - test_stdout_always_written_even_with_marker (pinned: a pre-existing
-    sweep-key claim not affecting the stderr echo)
-  - test_claims_once_per_day_for_housekeeping (pinned: the sweep-key claim
-    being held after a call)
-  - test_cleanup_skipped_when_none (pinned: the cleanup_days=None no-op)
-  - test_cleanup_days_controls_claim_ttl (pinned: cleanup_days setting the
-    housekeeping claim's ttl)
-  - test_handles_claim_failure_gracefully (pinned: fail-soft behaviour when
-    the claim store's parent could not be created)
-  - test_none_project_still_writes_notice_and_stores_nothing (pinned: a
-    project parameter that no longer exists)
-  - test_warns_when_sqlite_unavailable / test_no_sqlite_warning_when_
-    cleanup_disabled (pinned: the housekeeping-triggered degraded notice)
-"""
+"""Unit tests for toolguard.session_warnings: the takeover-mode-active notice."""
 
 import unittest
 from io import StringIO
@@ -63,9 +34,10 @@ class TestIssueTakeoverWarning(unittest.TestCase):
 
     def test_does_not_call_log_warning(self):
         """
-        Given issue_takeover_warning runs
-        Then log_warning is never called -- the notice is stderr-only,
-             never persisted to a toolguard log stream (TOO-8 Phase 4)
+        Given issue_takeover_warning emits the notice
+        When toolguard.error_log.log_warning is patched
+        Then it is never called -- the notice is stderr-only, never
+             persisted to a toolguard log stream
         """
         with patch("toolguard.error_log.log_warning") as mock_log:
             issue_takeover_warning(to_stdout=True)
@@ -74,8 +46,9 @@ class TestIssueTakeoverWarning(unittest.TestCase):
 
     def test_notice_message_content(self):
         """
-        Given issue_takeover_warning emits the notice to stderr
-        Then the message contains the expected takeover-mode phrases
+        Given issue_takeover_warning runs with to_stdout=True
+        When the printed text is collected
+        Then it contains the expected takeover-mode phrases
         """
         with patch("builtins.print") as mock_print:
             issue_takeover_warning(to_stdout=True)

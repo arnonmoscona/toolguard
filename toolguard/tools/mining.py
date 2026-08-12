@@ -1,34 +1,27 @@
 """
 Rule mining: turn a harvested command corpus into actionable rule candidates.
 
-This is the deterministic core behind the "what should become a rule?" maintenance
-task (the successor to the ad-hoc ``denied-summary`` prototype).  It does NOT
-invent permission patterns -- pattern generation/generalisation is agent
-judgement (and, later, the curated-tool advisor).  Instead it:
+The deterministic core behind the "what should become a rule?" maintenance
+task.  It never invents or generalises a permission pattern.  It does two
+things:
 
-1. **Aggregates + classifies** every corpus command by comparing the CURRENT
-   config's decision (via :func:`~toolguard.api.decide`) with the
-   OBSERVED outcome from the corpus (logs + transcripts):
+1. **Classify and group** (:func:`mine_rule_candidates`).  Each corpus entry's
+   verdict under the CURRENT config is compared with the status the corpus
+   recorded for it:
 
-   - ``allow-candidate`` -- the config would ``ask``/``deny`` it but it was
-     actually EXECUTED (approval fatigue, or blocked-but-needed): a candidate to
-     ADD to allow.
-   - ``declined``        -- the user REFUSED the permission prompt (transcript
-     signal): they said no; surface it, do not suggest allowing it.
-   - ``denied``/``asked`` -- the config blocks/prompts it and there is no
-     positive observation: shown for review.
+   - ``allow-candidate`` -- config says ``ask``/``deny``, corpus recorded
+     ``EXECUTED`` (approval fatigue, or blocked-but-needed): a candidate to ADD
+     to allow.
+   - ``declined``        -- corpus recorded ``REFUSED``, whatever the config
+     says.
+   - ``denied``/``asked`` -- config says ``deny``/``ask`` and the corpus
+     recorded neither ``EXECUTED`` nor ``REFUSED``.
+   - ``consistent``      -- everything else: the config already allows it and
+     the corpus recorded no refusal.  Dropped, never reported.
 
-   Commands the config already allows and that ran fine are ``consistent`` and
-   omitted from the report.
-
-2. **Verifies** a proposed allow rule with decision-replay
-   (:func:`evaluate_added_allow_rule`): it quantifies EXACTLY which corpus
-   commands the rule would newly admit -- the perfect input for a risk note and
-   the guard against an over-broad suggestion.
-
-The allow/deny asymmetry applies: allow candidates are conservative (the user
-must approve adding them, and replay quantifies the blast radius); declined/deny
-signals bias toward fail-safe.
+2. **Measure a proposal** (:func:`evaluate_added_allow_rule`).  Decision-replay
+   against the config with the proposed allow rule added, naming the commands
+   the rule newly admits -- of those the corpus happens to contain.
 """
 
 from collections import Counter
@@ -43,14 +36,16 @@ from toolguard.tools.config_access import with_layer_allow_replaced
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.replay import replay
 
-# Signal classifications (most actionable first).
 SIGNAL_ALLOW_CANDIDATE = "allow-candidate"
 SIGNAL_DECLINED = "declined"
 SIGNAL_DENIED = "denied"
 SIGNAL_ASKED = "asked"
-SIGNAL_CONSISTENT = "consistent"  # omitted from the report
+#: Dropped by :func:`mine_rule_candidates`, so it never reaches a
+#: :class:`CommandGroup` or the rendered report.
+SIGNAL_CONSISTENT = "consistent"
 
-# Signal display priority (lower sorts first when occurrences tie).
+#: Group display priority, applied only after the occurrence count -- lower
+#: sorts first.
 _SIGNAL_ORDER = {
     SIGNAL_ALLOW_CANDIDATE: 0,
     SIGNAL_DECLINED: 1,
@@ -71,8 +66,7 @@ class CommandGroup:
 
     Attributes:
         tool: Tool name (``'Bash'``, ``'Read'``, ...).
-        command_key: Coarse grouping key (Bash: the executable token, e.g.
-            ``'git'``; file tools: the parent directory).
+        command_key: Coarse grouping key -- see :func:`_command_key`.
         signal: One of ``allow-candidate`` / ``declined`` / ``denied`` / ``asked``.
         distinct_commands: The distinct command strings in this cluster (sorted).
         occurrences: Total number of corpus entries in this cluster.
@@ -95,8 +89,8 @@ class MiningReport:
     The result of mining a corpus against the current config.
 
     Attributes:
-        groups: Command clusters, sorted by occurrences (desc) then signal
-            priority then command_key.  Excludes ``consistent`` commands.
+        groups: Command clusters, in the order :func:`mine_rule_candidates`
+            sorted them.  ``consistent`` entries are not represented.
     """
 
     groups: Tuple[CommandGroup, ...]
@@ -107,12 +101,12 @@ class MiningReport:
 
     @property
     def allow_candidates(self) -> List[CommandGroup]:
-        """Clusters the config blocks/prompts but were actually executed."""
+        """Clusters the config would ``ask``/``deny`` that the corpus recorded as executed."""
         return self.by_signal(SIGNAL_ALLOW_CANDIDATE)
 
     @property
     def declined(self) -> List[CommandGroup]:
-        """Clusters the user refused at the permission prompt."""
+        """Clusters whose corpus entries recorded ``REFUSED``."""
         return self.by_signal(SIGNAL_DECLINED)
 
 
@@ -125,12 +119,10 @@ class AddRuleEffect:
         tool: Tool the rule applies to.
         pattern: The wrapper-free allow pattern body that was evaluated.
         target_locus: Human-readable description of the layer it was added to.
-        newly_allowed: Distinct corpus commands that move toward ``allow`` (were
-            ``ask``/``deny`` before, ``allow`` after) -- exactly what the rule
-            admits.
+        newly_allowed: Distinct corpus commands that were ``ask``/``deny``
+            before and ``allow`` after (sorted).
         broadened_count: Number of corpus entries that became looser.
-        tightened_count: Number that became stricter (should be 0 for a pure
-            allow addition; non-zero signals an interaction worth inspecting).
+        tightened_count: Number of corpus entries that became stricter.
     """
 
     tool: str
@@ -148,14 +140,15 @@ class AddRuleEffect:
 
 def _command_key(tool: str, command: str) -> str:
     """
-    Compute the coarse grouping key for a command.
+    Compute the coarse grouping key for a corpus entry.
 
-    Bash commands group by their leading executable token (e.g. ``git``); file
-    tools group by their target's parent directory.
+    A file tool groups by its target's parent directory; every other tool --
+    ``Bash`` and any MCP terminal tool alike -- groups by the command's leading
+    token, e.g. ``git``.
 
     Args:
         tool: Tool name.
-        command: The command string (Bash) or file path (file tools).
+        command: The command string, or the file path for a file tool.
 
     Returns:
         A grouping key string.
@@ -171,12 +164,13 @@ def _command_key(tool: str, command: str) -> str:
 
 def _classify(current_verdict: str, observed_status: str) -> str:
     """
-    Classify one corpus entry's mining signal.
+    Classify one corpus entry's mining signal (see the module docstring).
 
     Args:
         current_verdict: The verdict the CURRENT config gives (``allow``/``ask``/``deny``).
-        observed_status: The observed status from the corpus (``EXECUTED``/
-            ``REFUSED``/``ERROR``/``UNKNOWN``/...).
+        observed_status: The status the corpus recorded.  Only ``EXECUTED``
+            and ``REFUSED`` are distinguished; every other value behaves the
+            same way.
 
     Returns:
         One of the ``SIGNAL_*`` constants.
@@ -206,21 +200,20 @@ def mine_rule_candidates(
     """
     Mine a corpus for rule candidates against the current config.
 
-    Each entry's current-config decision is compared with its observed outcome and
-    classified (see module docstring).  Entries are grouped by
-    ``(tool, command_key, signal)`` and summarised.  ``consistent`` commands
-    (already allowed and executed) are omitted.
+    Each entry is classified (see the module docstring), then grouped by
+    ``(tool, command_key, signal)`` and summarised.  ``consistent`` entries are
+    dropped before grouping.
 
     Args:
         config: The current resolved configuration.
-        corpus: Harvested command corpus (logs and/or transcripts).
-        min_occurrences: Minimum cluster size to include (default 1).
+        corpus: Harvested command corpus.
+        min_occurrences: Drop clusters holding fewer than this many corpus
+            entries.  Counts entries, not distinct commands.
 
     Returns:
         A :class:`MiningReport` whose groups are sorted by occurrences (desc),
-        then signal priority, then command key.
+        then signal priority, then tool, then command key.
     """
-    # Accumulate per (tool, key, signal).
     buckets: Dict[Tuple[str, str, str], Dict] = {}
 
     for entry in corpus:
@@ -273,7 +266,7 @@ def mine_rule_candidates(
 
 
 # ---------------------------------------------------------------------------
-# Candidate verification (replay-backed)
+# Candidate measurement (replay-backed)
 # ---------------------------------------------------------------------------
 
 
@@ -289,8 +282,8 @@ def evaluate_added_allow_rule(
 
     Builds a synthetic config with ``pattern`` appended to ``tool``'s allow list
     at ``target_provenance`` and replays the corpus against (current vs proposed).
-    The result reports EXACTLY which corpus commands the rule newly admits -- the
-    blast radius a user needs to approve the suggestion responsibly.
+    Only commands the corpus contains are measured, so the result is a lower
+    bound on what the rule admits, not its full reach.
 
     Args:
         config: The current configuration.
@@ -328,15 +321,17 @@ def evaluate_added_allow_rule(
 
 def render_mining_report(report: MiningReport, fmt: str = "text") -> str:
     """
-    Render a :class:`MiningReport` as a human-readable ASCII summary.
+    Render a :class:`MiningReport` as human-readable text.
 
     Args:
         report: The report to render.
         fmt: ``'text'`` (default) or ``'markdown'``.
 
     Returns:
-        An ASCII-only sorted summary, allow-candidates and declined commands
-        first.
+        A title, one line carrying all four signal counts, then one block per
+        group in :attr:`MiningReport.groups` order -- which is by frequency
+        first, so a common ``asked`` group can precede a rare
+        ``allow-candidate`` one.
 
     Raises:
         ValueError: When ``fmt`` is not ``'text'`` or ``'markdown'``.

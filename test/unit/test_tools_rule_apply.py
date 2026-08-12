@@ -1,16 +1,6 @@
 """
-Unit tests for toolguard.tools.rule_apply -- applying consolidation proposals to
-config files and producing a structured change report.
-
-Tests cover:
-- TOML apply: originals removed, consolidated rule added, file written.
-- Dry run: diff produced but nothing written.
-- Comment / single-quoted-literal / other-rule preservation through a rewrite.
-- JSON apply.
-- Config drift: a proposal whose patterns are absent is skipped, not applied.
-- Multiple proposals targeting one file.
-- Missing file path is reported as a skip.
-- render_change_report formatting and invalid-format handling.
+Unit tests for toolguard.tools.rule_apply: applying consolidation proposals
+to config files and producing a structured change report.
 """
 
 import json
@@ -27,11 +17,6 @@ from toolguard.tools.rule_apply import (
     apply_proposals,
     render_change_report,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _prov(path, file_format: str = "toml") -> Provenance:
@@ -88,11 +73,6 @@ class _TempConfigMixin:
         path = self.tmpdir / name
         path.write_text(json.dumps({"permissions": permissions}, indent=2) + "\n")
         return path
-
-
-# ---------------------------------------------------------------------------
-# TOML apply
-# ---------------------------------------------------------------------------
 
 
 class TestApplyToml(_TempConfigMixin, unittest.TestCase):
@@ -156,9 +136,9 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
         When apply_proposals runs
         Then toolguard.tools.rule_apply.verified_write_config is called with the
              real target path, file_format="toml", and expected_patterns covering
-             every pattern in the newly-consolidated allow list (TOO-19
-             corrective change: the final real-file write must go through the
-             same self-protection gate as the writer functions it reuses)
+             every pattern in the newly-consolidated allow list (the final
+             real-file write must go through the same self-protection gate
+             as the writer functions it reuses)
         """
         cfg = self._write("toolguard_hook.toml", _TOML_WITH_FIND)
         with patch("toolguard.tools.rule_apply.verified_write_config") as mock_write:
@@ -196,10 +176,9 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
              missing its "match" key, elsewhere in the same file
         When a git-family consolidation targeting the OTHER rules is applied
         Then the write succeeds (no ConfigWriteVerificationError) and the
-             malformed entry survives verbatim -- TOO-19 review-round-2 fix:
-             _apply_to_file's expected_patterns previously included that
-             entry's synthesized repr()-based pattern, which could never
-             appear in the written text and wrongly refused the write
+             malformed entry survives verbatim -- expected_patterns must not
+             include a synthesized pattern for an entry that can never
+             appear in the written text
         """
         text = (
             "[permissions]\n"
@@ -221,12 +200,7 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
 
 
 class TestStructuredEntrySurvivesUnrelatedEdit(_TempConfigMixin, unittest.TestCase):
-    """
-    A structured entry elsewhere in the same allow list must round-trip
-    byte-identical through a rule_apply edit targeting a DIFFERENT rule
-    (TOO-19 Phase 0a increment 8's write-path widening covers rule_apply.py
-    the same way it covers migration).
-    """
+    """A structured entry elsewhere in the allow list must round-trip byte-identical through an edit targeting a different rule."""
 
     def test_structured_entry_untouched_by_unrelated_consolidation(self):
         """
@@ -237,13 +211,11 @@ class TestStructuredEntrySurvivesUnrelatedEdit(_TempConfigMixin, unittest.TestCa
         Then the structured entry's original line and its leading comment
              survive byte-identical, while the git rules are still replaced
         """
-        # "Bash(ls:*)" is listed FIRST so the structured entry's own leading
-        # comment is a per-RULE comment_block (attaches to "Bash(rm -rf:*)"
-        # via rule_comments), not the section's top-of-list comment -- a
-        # comment preceding the very first rule in a subsection is anchored
-        # to the section top rather than that rule (pre-existing, unrelated
-        # to this increment), which would make this test's "travels with the
-        # rule when re-sorted" assertion vacuous.
+        # "Bash(ls:*)" is listed FIRST: a comment_block preceding the very
+        # first rule in a subsection anchors to the section top rather than
+        # to that rule, so without a rule ahead of it the structured entry's
+        # own comment would attach to the wrong place and this test's
+        # "travels with the rule when re-sorted" assertion would be vacuous.
         toml_content = (
             "[permissions]\n"
             "allow = [\n"
@@ -259,36 +231,19 @@ class TestStructuredEntrySurvivesUnrelatedEdit(_TempConfigMixin, unittest.TestCa
         report = apply_proposals([_git_family_proposal(_prov(cfg))])
         text = cfg.read_text()
 
-        # The unrelated structured entry (and its comment) is byte-identical.
         self.assertIn(
             "  # keep an eye on this one\n"
             '  { match = "Bash(rm -rf:*)", additionalContext = "dangerous" },\n',
             text,
         )
-        # The targeted rules were still consolidated.
         self.assertNotIn("Bash(git diff:*)", text)
         self.assertNotIn("Bash(git status:*)", text)
         self.assertIn("Bash([regex]^git (diff|status))", text)
         self.assertEqual(report.total_applied, 1)
 
 
-# ---------------------------------------------------------------------------
-# Enrichment guard (TOO-19 Phase 0a increment 9)
-# ---------------------------------------------------------------------------
-
-
 def _rule_entry_metadata(path: Path, file_format: str, list_type: str, pattern: str):
-    """
-    Read back one entry's metadata dict from a config file on disk, by pattern.
-
-    Reuses the module's own :func:`_read_raw_permissions` (rather than
-    re-parsing TOML/JSON independently) so this assertion helper exercises
-    exactly the same read path production code uses.
-
-    Returns:
-        The entry's ``metadata`` as a plain ``dict``, or ``None`` if no entry
-        with ``pattern`` exists in ``list_type``.
-    """
+    """Read back one entry's metadata dict from a config file on disk, by pattern."""
     raw = _read_raw_permissions(path, file_format)
     for entry in raw[list_type]:
         if entry.pattern == pattern:
@@ -297,13 +252,7 @@ def _rule_entry_metadata(path: Path, file_format: str, list_type: str, pattern: 
 
 
 class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
-    """
-    A proposal is refused, whole, rather than silently dropping enrichment --
-    but ONLY when merge_entries reports a genuine case-3 CONTRADICTION for the
-    proposal's added pattern. Case 1 (bare vs. structured, same pattern) and
-    case 2 (compatible/disjoint-key union) apply normally, using
-    merge_entries' own consolidated result.
-    """
+    """A proposal is refused, whole, rather than silently dropping rule enrichment."""
 
     _CONSOLIDATED = "Bash([regex]^git (diff|status))"
 
@@ -366,8 +315,6 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
         text = cfg.read_text()
         self.assertNotIn("Bash(git diff:*)", text)
         self.assertNotIn("Bash(git status:*)", text)
-        # Exactly one occurrence of the consolidated pattern's `match =` line
-        # (duplicates collapsed into the merged entry).
         self.assertEqual(text.count(f'match = "{self._CONSOLIDATED}"'), 1)
 
         metadata = _rule_entry_metadata(cfg, "toml", "allow", self._CONSOLIDATED)
@@ -459,11 +406,6 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
         self.assertIn("would lose rule enrichment", out)
 
 
-# ---------------------------------------------------------------------------
-# JSON apply
-# ---------------------------------------------------------------------------
-
-
 class TestApplyJson(_TempConfigMixin, unittest.TestCase):
     """Applying an allow-list consolidation to a JSON config."""
 
@@ -486,11 +428,6 @@ class TestApplyJson(_TempConfigMixin, unittest.TestCase):
         self.assertNotIn("Bash(git status:*)", allow)
         self.assertIn("Bash([regex]^git (diff|status))", allow)
         self.assertIn("Bash(ls:*)", allow)
-
-
-# ---------------------------------------------------------------------------
-# Config drift / skips
-# ---------------------------------------------------------------------------
 
 
 class TestDriftAndSkips(_TempConfigMixin, unittest.TestCase):
@@ -529,11 +466,6 @@ class TestDriftAndSkips(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(report.total_skipped, 1)
         self.assertIn("no file path", report.files[0].skipped[0][1])
         self.assertEqual(len(report.files_written), 0)
-
-
-# ---------------------------------------------------------------------------
-# Multiple proposals on one file
-# ---------------------------------------------------------------------------
 
 
 class TestMultipleProposalsSameFile(_TempConfigMixin, unittest.TestCase):
@@ -580,11 +512,6 @@ class TestMultipleProposalsSameFile(_TempConfigMixin, unittest.TestCase):
         self.assertIn("Bash(mkdir -p /tmp/:*)", text)
         self.assertEqual(report.total_applied, 2)
         self.assertEqual(len(report.files_written), 1)
-
-
-# ---------------------------------------------------------------------------
-# Report rendering
-# ---------------------------------------------------------------------------
 
 
 class TestRenderChangeReport(_TempConfigMixin, unittest.TestCase):

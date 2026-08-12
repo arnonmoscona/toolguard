@@ -1,14 +1,6 @@
 """
 Unit tests for toolguard.tools.mining -- classifying a corpus into rule
 candidates and verifying a proposed allow rule by decision-replay.
-
-Tests cover:
-- Signal classification: allow-candidate (ask-approved and deny-but-ran),
-  declined, denied, asked, and consistent (omitted).
-- Grouping by command key (Bash executable token; file-tool parent dir).
-- Sorting and min_occurrences filtering.
-- evaluate_added_allow_rule: replay-measured newly-allowed commands.
-- render_mining_report formatting and invalid-format handling.
 """
 
 import unittest
@@ -29,11 +21,6 @@ from toolguard.tools.mining import (
     mine_rule_candidates,
     render_mining_report,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _prov(path: str = "/fake/.claude/toolguard_hook.toml") -> Provenance:
@@ -76,11 +63,6 @@ def _entry(tool: str, command: str, status: str) -> LogEntry:
     )
 
 
-# ---------------------------------------------------------------------------
-# Classification
-# ---------------------------------------------------------------------------
-
-
 class TestSignalClassification(unittest.TestCase):
     """Each corpus entry is classified by current-verdict vs observed-outcome."""
 
@@ -101,14 +83,11 @@ class TestSignalClassification(unittest.TestCase):
 
     def test_deny_then_executed_is_allow_candidate(self):
         """
-        Given an ask-by-default config (TOO-15) and a corpus entry that
-            EXECUTED anyway
+        Given an ask-by-default config and a corpus entry that EXECUTED anyway
         When mined
-        Then it is an allow-candidate with current_verdict 'ask' (_classify
-            treats 'ask' and 'deny' identically for the EXECUTED-anyway
-            allow-candidate signal -- see test_classify_signal_mappings).
+        Then it is an allow-candidate whose current_verdict is 'ask'
         """
-        config = _config(_layer(allow=["ls:*"]))  # everything else asks
+        config = _config(_layer(allow=["ls:*"]))
         report = mine_rule_candidates(config, [_entry("Bash", "whoami", "EXECUTED")])
         self.assertEqual(len(report.allow_candidates), 1)
         self.assertEqual(report.allow_candidates[0].current_verdict, "ask")
@@ -128,12 +107,8 @@ class TestSignalClassification(unittest.TestCase):
 
     def test_denied_without_execution_is_denied(self):
         """
-        Given a config with no_match_fallback EXPLICITLY set to 'deny' (this
-            test specifically exercises the SIGNAL_DENIED classification
-            bucket, which requires an actual 'deny' verdict -- TOO-15's new
-            'ask' default would instead classify as SIGNAL_ASKED, already
-            covered by test_classify_signal_mappings) and a command observed
-            only as UNKNOWN
+        Given a config with no_match_fallback EXPLICITLY set to 'deny' and a
+            command observed only as UNKNOWN
         When mined
         Then it is classified 'denied' (not an allow-candidate).
         """
@@ -165,17 +140,13 @@ class TestSignalClassification(unittest.TestCase):
         self.assertEqual(report.groups, ())
 
 
-# ---------------------------------------------------------------------------
-# Grouping, sorting, filtering
-# ---------------------------------------------------------------------------
-
-
 class TestGroupingAndSorting(unittest.TestCase):
     """Commands cluster by key; report is sorted and can be size-filtered."""
 
     def test_bash_commands_group_by_executable_token(self):
         """
-        Given several distinct 'git ...' commands all EXECUTED under a deny config
+        Given several distinct 'git ...' commands all EXECUTED under an
+            ask-by-default config
         When mined
         Then they form ONE group keyed 'git' listing all distinct commands.
         """
@@ -195,7 +166,8 @@ class TestGroupingAndSorting(unittest.TestCase):
 
     def test_file_tool_groups_by_parent_directory(self):
         """
-        Given two Read entries on files in the same directory, executed under deny
+        Given two Read entries on files in the same directory, EXECUTED under
+            an ask-by-default config
         When mined
         Then they group under that parent directory as the command_key.
         """
@@ -234,17 +206,12 @@ class TestGroupingAndSorting(unittest.TestCase):
         self.assertEqual(report.groups, ())
 
 
-# ---------------------------------------------------------------------------
-# Candidate verification
-# ---------------------------------------------------------------------------
-
-
 class TestEvaluateAddedAllowRule(unittest.TestCase):
     """A proposed allow rule is measured by decision-replay."""
 
     def test_newly_allowed_commands_reported(self):
         """
-        Given a deny-by-default config and a corpus of 'git push' commands
+        Given an ask-by-default config and a corpus of 'git push' commands
         When evaluate_added_allow_rule adds 'git push:*' at the project layer
         Then the replay reports those commands as newly allowed and 0 tightened.
         """
@@ -253,7 +220,7 @@ class TestEvaluateAddedAllowRule(unittest.TestCase):
         corpus = [
             _entry("Bash", "git push origin main", "EXECUTED"),
             _entry("Bash", "git push", "EXECUTED"),
-            _entry("Bash", "ls -la", "EXECUTED"),  # already allowed -> unchanged
+            _entry("Bash", "ls -la", "EXECUTED"),
         ]
         effect = evaluate_added_allow_rule(config, "Bash", "git push:*", prov, corpus)
         self.assertEqual(effect.tightened_count, 0)
@@ -261,11 +228,6 @@ class TestEvaluateAddedAllowRule(unittest.TestCase):
         self.assertIn("git push", effect.newly_allowed)
         self.assertNotIn("ls -la", effect.newly_allowed)
         self.assertEqual(effect.broadened_count, 2)
-
-
-# ---------------------------------------------------------------------------
-# Rendering
-# ---------------------------------------------------------------------------
 
 
 class TestRenderMiningReport(unittest.TestCase):

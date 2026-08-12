@@ -1,28 +1,12 @@
 """
-Environment shadowing audit for toolguard (TOO-19).
+Environment shadowing audit: report a ``PYTHONPATH`` that would shadow the
+installed toolguard distribution for a freshly-launched process.
 
-Detects an environment condition that WOULD cause the installed toolguard
-distribution to be shadowed for a fresh process -- e.g. ``PYTHONPATH``
-containing an entry (such as ``.``) under which a ``toolguard/`` package
-exists. See :func:`toolguard.install_provenance.pythonpath_shadow_entries`
-for the underlying predicate, and :mod:`toolguard.session_start` for the
-SEPARATE, session-level detection of THIS process actually being shadowed
-right now (a different, stronger check -- this module only asks what the
-environment permits, not what happened).
-
-This finding is deliberately about the *hook's* resolution, not the auditing
-process's own: ``toolguard-audit``/``toolguard-maintain`` may themselves be
-invoked with ``--dev`` (running from this source tree on purpose, per
-``CLAUDE.md``), which says nothing about whether an ordinary ``toolguard``
-PreToolUse hook invocation -- launched separately by Claude Code, sharing the
-same environment -- would be shadowed. So this check reads ``PYTHONPATH``
-from the environment directly rather than inspecting how THIS process itself
-was launched or imported.
-
-Silent in the normal case (no ``PYTHONPATH``, or a ``PYTHONPATH`` with no
-shadowing entry) -- like :mod:`toolguard.tools.takeover_audit`'s
-``loose-undecidable-fallback`` finding, a finding that always fires trains
-people to ignore findings.
+The question is deliberately asked of the ENVIRONMENT, not of how THIS process
+was launched or imported: the auditor may legitimately be running from a source
+tree via ``--dev``, which says nothing about whether an ordinary hook invocation
+sharing the same environment would be shadowed.  See technical-notes.md, "The
+audit predicate: ``PYTHONPATH`` content, not process provenance".
 """
 
 from dataclasses import dataclass
@@ -39,8 +23,7 @@ class EnvironmentFinding:
 
     Attributes:
         finding_id: Stable string identifier (e.g. ``'pythonpath-shadows-hook'``).
-        severity: Ranked :class:`~toolguard.tools.danger.Severity` (the same
-            shared IntEnum other analysers use, for consistent ranking).
+        severity: Ranked severity of the condition.
         description: Human-readable description of the condition found.
         impact: Explanation of the security impact.
         remediation: Suggested fix.
@@ -60,13 +43,12 @@ def audit_environment(
     Audit the process environment for a toolguard-hook-shadowing condition.
 
     Args:
-        env: Environment mapping to inspect (defaults to ``os.environ`` via
-            :func:`~toolguard.install_provenance.pythonpath_shadow_entries`;
-            exposed here for testing without mutating the real environment).
+        env: Environment mapping to inspect (defaults to ``os.environ``).
+            Exposed for testing without mutating the real environment.
 
     Returns:
-        A list with one HIGH finding when ``PYTHONPATH`` would shadow the
-        installed toolguard package; empty (the normal case) otherwise.
+        A list with one HIGH finding when ``PYTHONPATH`` holds a shadowing
+        entry; empty -- the normal case -- otherwise.
     """
     entries = pythonpath_shadow_entries(env)
     if not entries:

@@ -1,75 +1,50 @@
 """
-Structural regression guard (TOO-19): the developer's real logs/ directory
-must never receive a write from the test suite.
+Structural regression guard: the developer's real logs/ directory must
+never receive a write from the test suite.
 
-Design and why this shape was chosen
--------------------------------------
-A checklist in a rules file (``.claude/rules/test-config-isolation.md``) did
-not prevent this leak the first time -- three tests missed it independently,
-including one (``TestHardDenyThroughMain``) that DID use the sanctioned
-``ConfigIsolationMixin`` and still leaked, because the mixin's original scope
-covered ``toolguard.config``'s three discovery anchors and not
+A checklist alone (``.claude/rules/test-config-isolation.md``) did not
+prevent this leak the first time -- three tests missed it independently, one
+of them despite already using the sanctioned isolation mixin, because that
+mixin's scope covered ``toolguard.config``'s three discovery anchors and not
 ``toolguard.env_config``'s separate, fourth one. Prose guidance is not
 self-enforcing; this module is the enforcement.
 
-The obvious design -- a single test that snapshots the real ``logs/``
-directory's listing/mtimes before the suite and diffs it after -- was
-considered and rejected: a same-process ``unittest`` test can only observe
-state as of when IT runs, and ``unittest discover``'s test ordering means a
-"snapshot at start, diff at end" test cannot bracket every other test unless
-it is guaranteed to run strictly first and strictly last, which nothing
-enforces.
+A single test that snapshots the real ``logs/`` directory before the suite
+and diffs it after was considered and rejected: a same-process test can only
+observe state as of when it runs, and nothing guarantees such a test runs
+strictly first and strictly last under ``unittest discover``'s ordering.
 
 Instead this module intercepts the leak at its only possible source: every
 toolguard code path that can write into the real project logs/ directory
 does so by calling one of a small, fixed set of functions
 (``log_writer.log_command``, ``log_writer.log_discovery``,
 ``error_log.log_conflict``, ``error_log.log_error``, ``error_log.log_warning``,
-``once_per_store.reap``) with a ``log_dir``/``logs_dir`` (directly, or -- for ``log_command``
-specifically -- via a ``config["log_dir"]`` dict, which is the shape
-``toolguard.hook.main()`` actually uses on every call site). ``install()``
-wraps each of these, AT THEIR DEFINING MODULE, with a guard that:
+``once_per_store.reap``) with a ``log_dir``/``logs_dir`` (directly, or -- for
+``log_command`` specifically -- via a ``config["log_dir"]`` dict, the shape
+``toolguard.hook.main()`` uses). ``install()`` wraps each of these, at their
+DEFINING module, with a guard that:
 
 1. Detects when the resolved ``log_dir`` is the real repo's ``logs/``
    directory (or a path under it).
-2. When detected, does NOT call the real function at all -- so a regression
-   can never actually land a write on disk, this guard IS the backstop, not
-   merely a detector -- and instead records the offending call (function,
-   resolved path, and a short call-stack excerpt naming the test) in a
+2. When detected, does NOT call the real function at all -- this guard IS
+   the backstop, not merely a detector -- and instead records the offending
+   call (function, resolved path, a short call-stack excerpt) in a
    module-level registry.
-3. Otherwise (the normal, isolated case) calls straight through with no
-   observable difference in behaviour.
+3. Otherwise calls straight through with no observable difference.
 
-Patching happens at the DEFINING module (``toolguard.log_writer`` /
-``toolguard.error_log`` / ``toolguard.once_per_store``) rather than at each
-importer, so that later ``from toolguard.log_writer import log_command``
-statements (e.g. inside ``toolguard/hook.py``, imported lazily by individual
-test modules) bind directly to the guarded wrapper -- and
-``toolguard.once_per`` (the sole caller of ``once_per_store.reap``, via its
-internal housekeeping sweep) sees the guarded wrapper too, since it looks it
-up as a module attribute at call time. This only works because
-``install()`` is
-called from ``test/unit/__init__.py``, which -- as the package ``__init__``
-of every ``test.unit.test_*`` module -- is guaranteed by Python's import
-system to execute before any test module (and therefore before
-``toolguard.hook``, which is never imported anywhere earlier in the process)
-is ever imported. A test-level ``patch("toolguard.hook.log_command")``
-(used throughout test_hook.py etc.) simply replaces the guarded wrapper with
-a ``Mock`` for the duration of that ``with`` block, which is harmless -- a
-``Mock`` never touches the filesystem at all.
+Patching happens at the DEFINING module rather than at each importer, so
+that a later ``from toolguard.log_writer import log_command`` (e.g. inside
+``toolguard/hook.py``) binds directly to the guarded wrapper -- which is why
+``install()`` must run, from ``test/unit/__init__.py``, before any test
+module (and therefore before ``toolguard.hook``) is ever imported. A
+test-level ``patch("toolguard.hook.log_command")`` simply replaces the
+guarded wrapper with a ``Mock``, which is harmless.
 
-The registry is surfaced two ways, both order-independent:
-
-* ``test_zz_real_log_dir_guard.py`` asserts the registry is empty, producing
-  an ordinary, readable ``unittest`` FAILURE naming every offending call.
-  Named to sort last among ``test_*.py`` files (a convenience, not a
-  correctness requirement, since:)
-* ``test/unit/__init__.py`` also registers an ``atexit`` hook that re-checks
-  the registry once after the ENTIRE process's test run completes, and forces
-  a nonzero process exit with a stderr banner if anything leaked -- this is
-  what actually delivers "reliable regardless of discovery/test order": it
-  does not depend on any particular test running first or last, or even on
-  the dedicated guard test being discovered at all.
+The registry is surfaced two ways, both order-independent: a dedicated test
+in ``test_zz_real_log_dir_guard.py`` asserts it is empty, and
+``test/unit/__init__.py`` also registers an ``atexit`` hook that re-checks it
+once after the ENTIRE process's test run and force-exits nonzero if anything
+leaked -- the guarantee that does not depend on test discovery order.
 """
 
 import functools
@@ -213,9 +188,8 @@ def install() -> None:
     for name in ("log_conflict", "log_error", "log_warning"):
         setattr(error_log, name, _guard_simple_log_dir_arg(getattr(error_log, name)))
     # reap() is the only once_per_store function still keyed by a project
-    # logs_dir (legacy-artefact sweep); claim/is_claimed/release moved to the
-    # shared ~/.toolguard/ store (TOO-45 R2) and are guarded separately, by
-    # _real_once_per_home_guard.py, against the real store path instead.
+    # logs_dir; claim/is_claimed/release use the shared ~/.toolguard/ store
+    # and are guarded separately, by _real_once_per_home_guard.py.
     once_per_store.reap = _guard_simple_log_dir_arg(
         once_per_store.reap, param_name="logs_dir"
     )

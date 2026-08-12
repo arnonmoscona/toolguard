@@ -1,52 +1,33 @@
 """
 Cross-project ``(project, kind, scope)`` claim store backing "once per
-period" behaviour.
+period" throttling.
 
-This is a private implementation detail (TOO-45 punch-list #01, conceptual
-overhaul): the only caller is :mod:`toolguard.once_per`, which presents
-``claim``/``scope``/``sqlite`` mechanics to nobody -- its named per-thing
-objects (e.g. ``once_per.day("key", "description")``) take a project and a
-message/action, nothing more. Production code outside this module and
-:mod:`toolguard.once_per` must never import this module directly.
+This module is a private implementation layer: application code must not
+import this module directly; throttle through :mod:`toolguard.once_per`.
 
-Storage is toolguard's OWN state, at ``~/.toolguard/once_per.db`` -- never
-inside a project directory, matching :data:`toolguard.error_log`'s
-``~/.toolguard/errors/`` and :data:`toolguard.tools.decision_ledger
-.USER_LEDGER_PATH`'s ``~/.toolguard/decisions.json``. Because the store is
-shared across every project, isolation lives in the KEY instead of the file
-location: every claim is keyed on ``(project, kind, scope)``, where
-``project`` is the resolved project-root path (as ``str``, so the row stays
-readable when someone inspects the database by hand). ``project`` is
-``None`` when no project root could be resolved.
+Storage lives at ``~/.toolguard/once_per.db``, never inside a project
+directory. Because the store is shared across every project, isolation is
+by KEY rather than by file: every claim is keyed on ``(project, kind,
+scope)``, where ``project`` is the project-root path as ``str`` (so a row
+stays readable if someone inspects the database by hand).
 
 Schema: one table ``claims(project, kind, scope, created_at, expires_at)``,
 primary keyed on ``(project, kind, scope)``, with real timestamp columns --
-expiry is a comparison, never a filename parse.
-
-``scope`` is an OPAQUE, namespaced string, owned by :mod:`toolguard.once_per`.
-Today only ``"day:YYYY-MM-DD"`` (see :func:`day_scope`); a future
-session-scoped period adds a new scope prefix (e.g. ``"session:<id>"``),
-never a new mechanism. ``kind`` distinguishes what is being throttled; also
-owned by :mod:`toolguard.once_per` -- this module has no opinion on the
-domain vocabulary.
+expiry is a comparison, never a filename parse. ``scope`` and ``kind`` are
+opaque strings this module does not validate or constrain; :func:`day_scope`
+is only a convenience for building one particular ``scope`` shape
+(``"day:YYYY-MM-DD"``), not a requirement.
 
 Every write is fail-soft: a broken or unwritable store must never break a
-permission decision, and :func:`claim` never raises. But "fail soft" is NOT
-"always report success": :func:`claim` reports its outcome PER CALL via
-:class:`ClaimResult` -- ``CLAIMED``, ``HELD_BY_SOMEONE_ELSE``, or
-``UNGUARANTEED`` (with a ``reason``) -- so a caller whose action is unsafe to
-repeat can tell "I hold the claim" apart from "the guarantee could not be
-verified this time" instead of both collapsing into one ambiguous ``True``.
-Only :func:`claim` may create ``~/.toolguard/`` or the database -- every
-other function here is read-only or best-effort cleanup and must never
-create storage that a caller with nothing to report would otherwise never
-have touched.
-
-The store path is resolved LAZILY (:func:`_resolve_store_path`), never at
-import time: this module is on the hook's import path (via
-:mod:`toolguard.once_per`), and a module-level ``Path.home()`` call would
-make the whole hook fail to import -- silently, with no exit code 2 -- on a
-container/CI shape with no ``HOME`` and no passwd entry.
+permission decision. But "fail soft" is not "always report success":
+:func:`claim` reports its outcome per call via :class:`ClaimResult` --
+``CLAIMED``, ``HELD_BY_SOMEONE_ELSE``, or ``UNGUARANTEED`` (with a
+``reason``) -- so a caller whose action is unsafe to repeat can tell "I
+hold the claim" apart from "the guarantee could not be verified this time"
+instead of both collapsing into one ambiguous ``True``. Only :func:`claim`
+may create ``~/.toolguard/`` or the database -- every other function here
+only reads or deletes, and must never create storage that a caller with
+nothing to report would otherwise never have touched.
 """
 
 from __future__ import annotations
@@ -63,23 +44,18 @@ try:
 except ImportError:
     sqlite3 = None  # type: ignore[assignment]
 
-#: Fail-soft storage errors every store-touching function catches. Named,
-#: rather than an inline unparenthesized except-tuple: pyscn's parser
-#: doesn't yet support Python 3.14's unparenthesized multi-exception except
-#: clauses, and ruff's formatter strips the parens off one whenever it's
-#: written inline, so a literal tuple here always ends up unparenthesized
-#: again (see test_pyscn_reports_no_parse_failures).
+#: Named so the except clauses read ``except <name>:`` -- an inline tuple
+#: has its parens stripped by ruff, and the unparenthesized form fails
+#: pyscn's parser (``test_pyscn_reports_no_parse_failures``).
 _STORAGE_ERRORS = (OSError, sqlite3.Error) if sqlite3 is not None else (OSError,)
 
-#: is_claimed additionally treats a malformed or non-string stored
-#: timestamp as expired rather than raising -- see its docstring (TOO-45 D2).
+#: ``_STORAGE_ERRORS`` plus ``ValueError``/``TypeError`` -- see
+#: :func:`is_claimed`'s except block for why.
 _READ_ERRORS = _STORAGE_ERRORS + (ValueError, TypeError)
 
-#: Test-patchable override for the store path (``patch.object(once_per_store,
-#: "_STORE_PATH", ...)``). ``None`` means "use the default", resolved by
-#: :func:`_resolve_store_path`. Never read directly outside this module;
-#: :mod:`toolguard.testing.sandbox` and every store-touching function here
-#: go through that resolver instead.
+#: Test-patchable override for the store path
+#: (``patch.object(once_per_store, "_STORE_PATH", ...)``). ``None`` means
+#: "use the default" -- see :func:`_resolve_store_path`.
 _STORE_PATH: Optional[Path] = None
 
 #: Schema version, checked via ``PRAGMA user_version`` by :func:`_ensure_schema`.
@@ -97,21 +73,19 @@ _CLAIMS_TABLE_COLUMNS = (
     "PRIMARY KEY (project, kind, scope)"
 )
 
-#: Legacy per-project claim db this module wrote directly under a project's
-#: logs_dir before storage moved to ~/.toolguard/ (TOO-45 R2). Nothing writes
-#: this anymore; reap() removes it on sight, like the marker-file prefixes
-#: below.
+#: Swept on sight by :func:`reap`, under a project's logs_dir; nothing in
+#: this repository writes it.
 _LEGACY_PROJECT_DB_FILENAME = ".toolguard-suppression.db"
 
-#: This store's OWN previous filename, before the "suppression" language was
-#: retired (TOO-45 punch-list #01). A sibling of the current store path;
-#: reap() removes it on sight, disposable state like everything else here.
+#: In the same directory as the current store path. Swept on sight by
+#: reap(); nothing in this repository writes it, disposable state like
+#: everything else here.
 _LEGACY_STORE_FILENAME = "suppression.db"
 
-#: Legacy per-kind marker-file prefixes this module's claim store replaces.
-#: Nothing writes these anymore; reap() sweeps any that linger from before
-#: the upgrade. This is the one place a filename glob is still correct --
-#: these are someone else's (the old code's) format, not this module's.
+#: Legacy per-kind marker-file prefixes the claim store replaced. Nothing
+#: writes these anymore; reap() sweeps any that linger. The one place a
+#: filename glob is correct here -- these are the old marker-file format,
+#: not this module's.
 _LEGACY_MARKER_PREFIXES = (
     ".toolguard-warned-",
     ".toolguard-migration-",
@@ -154,9 +128,7 @@ class ClaimResult:
 
     ``reason`` is populated only when ``status`` is
     :attr:`ClaimStatus.UNGUARANTEED` -- a short, caller-facing phrase for
-    composing a degraded-mode notice. This module never asserts WHY on the
-    caller's behalf beyond that phrase, and never repeats a specific storage
-    technology's name outside this reason -- see the reason constants below.
+    composing a degraded-mode notice.
     """
 
     status: ClaimStatus
@@ -180,18 +152,17 @@ def _resolve_store_path() -> Optional[Path]:
     Resolve the claim database path, lazily.
 
     Returns the test-patched :data:`_STORE_PATH` override when one is set,
-    otherwise computes ``~/.toolguard/once_per.db`` FRESH on every call
-    (never cached at module scope, and never memoised here either): this is
-    what lets a store-touching call correctly pick up whatever ``$HOME`` is
-    live for the current process, which is how :mod:`toolguard.testing
-    .sandbox`'s child-process isolation (setting ``HOME`` in the subprocess
-    environment) and every test's ``patch.object(once_per_store,
-    "_STORE_PATH", ...)`` both keep working with the same mechanism.
+    otherwise computes ``~/.toolguard/once_per.db`` fresh on every call --
+    never cached at module scope -- so a store-touching call always picks
+    up whatever ``$HOME`` is live for the current process. Also never
+    resolved at import time: a module-level ``Path.home()`` call would make
+    this module -- and anything that imports it -- fail to import on a
+    container/CI shape with no ``HOME`` and no passwd entry.
 
-    Returns ``None`` -- "store unavailable" -- if ``Path.home()`` cannot be
+    Returns ``None`` ("store unavailable") if ``Path.home()`` cannot be
     resolved (e.g. no ``HOME`` and no passwd entry for the uid, an ordinary
-    container/CI shape). Every caller in this module must treat ``None`` the
-    same as any other storage error: fail soft, never raise.
+    container/CI shape). Every caller here must treat ``None`` like any
+    other storage error: fail soft, never raise.
     """
     if _STORE_PATH is not None:
         return _STORE_PATH
@@ -206,40 +177,36 @@ def _ensure_schema(conn: Any) -> None:
     Ensure *conn*'s ``claims`` table matches :data:`_SCHEMA_VERSION`.
 
     Checked via ``PRAGMA user_version`` rather than ``CREATE TABLE IF NOT
-    EXISTS`` alone: against a differently-shaped existing table (or a brand
-    new file, whose version defaults to 0) that statement is a silent no-op,
-    and every later statement raises into the fail-soft handlers --
-    disabling throttling permanently and silently.
+    EXISTS`` alone: against a differently-shaped existing table, that
+    statement is a silent no-op, and every later statement raises into the
+    fail-soft handlers -- disabling throttling permanently and silently.
 
     Three cases, by comparing the stored version to ours:
 
     - Equal: heal only -- ``CREATE TABLE IF NOT EXISTS``, in case the table
       itself went missing while the version header survived (e.g. an
       external ``DROP TABLE``), then return.
-    - Lower (a genuinely older store): drop and recreate. This is disposable
-      claim state, never user data, so recreating on a shape change is
-      correct and deliberately not a migration.
-    - Higher (a NEWER build's store): raise rather than touch it. This
-      process is not the one that owns that shape, so it stands down --
-      degrading to unavailable for this claim -- instead of destroying data
-      a newer, possibly still-running build depends on.
+    - Lower: drop and recreate. By far the more common way here is a brand
+      new file, whose version defaults to 0; more rarely, a genuinely older
+      store. This is disposable claim state, never user data, so recreating
+      on a shape change, or creating for the first time, is correct and
+      deliberately not a migration.
+    - Higher (a newer build's store): raise rather than touch it, standing
+      down instead of destroying data a newer, possibly still-running build
+      depends on.
 
-    Deliberately does NOT commit -- :func:`claim`, the only caller, runs
-    this inside an explicit ``BEGIN IMMEDIATE`` transaction it manages
-    itself, atomically with the insert it guards, and commits once both
-    have run. A plain ``with conn:`` is NOT enough for this: PRAGMA and DDL
-    statements (verified empirically against this project's Python/sqlite3)
-    execute in sqlite3's own autocommit mode regardless of Python's `with
-    conn:` wrapper, which only opens an implicit transaction before a DML
-    statement -- so without the explicit BEGIN, this function's DROP+CREATE
-    commits on its own, separately from the insert that follows it. That
-    left a window where a second, concurrently-racing first-ever claim()
-    could see the just-fixed schema, "fix" it again (a no-op DROP+CREATE,
-    but still a fresh empty table), and wipe the first claim's row before
-    its own insert landed -- reproduced via two real OS processes racing a
-    brand-new store file
-    (test_concurrent_claim_from_two_processes_only_one_wins) during
-    development of this fix.
+    Deliberately does NOT commit -- :func:`claim` runs this inside an
+    explicit ``BEGIN IMMEDIATE`` transaction it manages itself, atomically
+    with the insert it guards, and commits once both have run. A plain
+    ``with conn:`` is not enough: PRAGMA and DDL statements run in
+    sqlite3's own autocommit mode regardless of that wrapper, which only
+    opens an implicit transaction before a DML statement -- so without the
+    explicit BEGIN, this function's DROP+CREATE
+    would commit on its own, ahead of the insert, leaving a window where a
+    second, concurrently-racing first-ever claim() could see the
+    just-repaired schema, repeat the no-op DROP+CREATE -- but still a fresh
+    empty table -- and wipe the first claim's row before its own insert
+    landed.
     """
     current_version = conn.execute("PRAGMA user_version").fetchone()[0]
     if current_version > _SCHEMA_VERSION:
@@ -260,19 +227,13 @@ def _connect() -> Any:
     Open the shared claim database, creating ``~/.toolguard/`` on demand.
 
     Return type is ``Any``: with ``sqlite3`` possibly ``None`` at import
-    time, there is no valid ``Connection`` type to annotate. Only
-    :func:`claim` calls this -- it is the sole function allowed to create
-    ``~/.toolguard/`` or the database file.
+    time, there is no valid ``Connection`` type to annotate.
 
-    Does NOT touch the schema -- :func:`claim` runs :func:`_ensure_schema`
-    itself, inside its own transaction (see that function's docstring for
-    why). Assigning the returned connection to the CALLER's own variable
-    before anything schema- or write-related can raise is what keeps a
-    later failure from leaking the connection: nothing here can raise after
-    a connection is created, so there is nothing for this function itself
-    to clean up.
+    Does not touch the schema -- :func:`claim` runs :func:`_ensure_schema`
+    itself, inside its own transaction. Nothing here can raise after the
+    connection is created, so this function itself needs no ``try``/``finally``.
 
-    Raises ``OSError`` if the store path cannot be resolved at all (see
+    Raises ``OSError`` if the store path cannot be resolved (see
     :func:`_resolve_store_path`) -- callers already catch ``OSError`` as
     part of their fail-soft handling.
     """
@@ -285,24 +246,23 @@ def _connect() -> Any:
 
 def _connect_existing() -> Any:
     """
-    Open the shared claim database read/write WITHOUT creating anything.
+    Open the shared claim database read/write without creating anything.
 
     Returns ``None`` when the store path can't be resolved, or the database
     file doesn't exist yet -- nothing has ever been claimed, so there is
     nothing to read or clean up. Opens with sqlite3's ``mode=rw`` URI option
-    so a concurrent delete between the existence check and the connect can
-    never create a fresh, table-less file in its place -- it raises
-    ``sqlite3.Error`` instead, which every caller already catches.
+    so a concurrent delete between the existence check and the connect
+    raises ``sqlite3.Error`` (which every caller already catches) instead
+    of creating a fresh, table-less file in its place.
 
     Built via ``Path.as_uri()`` rather than plain string interpolation:
     SQLite treats the first raw ``?`` in a URI path as the query delimiter,
-    so a literal ``?`` in the path would silently truncate the filename
-    there (and drop ``mode=rw``, reopening the exact hole it exists to
-    close) and a literal ``%`` would be misread as a percent-escape --
-    ``as_uri()`` percent-encodes both.
+    so a literal ``?`` would silently truncate the filename there (dropping
+    ``mode=rw``, reopening the exact hole it exists to close), and a
+    literal ``%`` would be misread as a percent-escape -- ``as_uri()``
+    percent-encodes both.
 
-    Used by every function except :func:`claim`. See :func:`_connect` for
-    why the return type is ``Any``.
+    See :func:`_connect` for why the return type is ``Any``.
     """
     path = _resolve_store_path()
     if path is None or not path.exists():
@@ -315,13 +275,13 @@ def is_claimed(project: Optional[Path], kind: str, scope: str) -> bool:
     Read-only check: is ``(project, kind, scope)`` currently claimed and still live?
 
     Never creates the database -- a missing one just means "not claimed".
-    This is an optimisation only, letting a caller skip its analysis work on
-    an already-warned day; the atomic :func:`claim` remains the correctness
-    mechanism for the actual race. Fails soft to ``False`` (proceed) on any
-    storage error, a ``None`` project, or a missing ``sqlite3``.
+    This is an optimisation only: it is not atomic, so :func:`claim` remains
+    the correctness mechanism for the actual race. Fails soft to ``False``
+    (proceed) on any storage error, a ``None`` project, or a missing
+    ``sqlite3``.
 
     Args:
-        project: Resolved project-root path this claim is about, or None if
+        project: The project-root path this claim is about, or None if
             unresolved (then always False -- nothing is ever stored for it).
         kind: Caller-owned category being throttled.
         scope: Opaque throttling window, e.g. :func:`day_scope`.
@@ -342,11 +302,9 @@ def is_claimed(project: Optional[Path], kind: str, scope: str) -> bool:
             return False
         return datetime.fromisoformat(row[0]) >= datetime.now()
     except _READ_ERRORS:
-        # ValueError/TypeError: a malformed or non-string expires_at (hand
-        # edit, or another toolguard build sharing this file with a
-        # different schema) is treated as an expired claim, never raised --
-        # this runs on every tool call via check_and_warn_divergence, and
-        # nothing upstream catches it (TOO-45 D2).
+        # ValueError/TypeError: a malformed or non-string expires_at (a
+        # hand edit, or a different schema sharing this file) is treated
+        # as an expired claim rather than raised.
         return False
     finally:
         if conn is not None:
@@ -368,39 +326,33 @@ def claim(
     stay quiet.
 
     Returns :attr:`ClaimStatus.UNGUARANTEED`, with a ``reason``, when the
-    once-per-period guarantee could not itself be verified for THIS call:
-    ``sqlite3`` is missing, *project* is ``None`` (no project root could be
-    resolved), or a storage error occurred. This is deliberately NOT folded
-    into "proceed" or "held" -- a caller whose action is unsafe to repeat
-    (see :class:`toolguard.once_per.Repeat`) needs to be able to tell
-    "I hold the claim" apart from "the guarantee could not be verified this
-    time", which collapsing both into one boolean cannot express (TOO-45
-    punch-list #01: this replaced an earlier design where ``project=None``
-    silently returned the same value as a genuine claim, defeating a
-    caller's fail-closed policy every single call).
+    once-per-period guarantee could not itself be verified for this call:
+    ``sqlite3`` is missing, *project* is ``None``, or a storage error
+    occurred. Deliberately not folded into "proceed" or "held" -- a caller
+    whose action is unsafe to repeat needs to tell "I hold the claim" apart
+    from "the guarantee could not be verified this time", which one boolean
+    cannot express.
 
-    A single ``INSERT ... ON CONFLICT DO UPDATE ... WHERE`` closes the
-    check-then-create race the old marker-file pattern had, as long as the
-    store itself is healthy: two racing processes can't both win. Under
-    contention that surfaces as a ``sqlite3.Error`` (e.g. a locked
-    database), the fail-soft path below returns UNGUARANTEED regardless, so
-    a caller with a safe-to-repeat policy may still proceed -- the guarantee
-    holds only while the store is healthy.
+    A single ``INSERT ... ON CONFLICT DO UPDATE ... WHERE`` avoids a
+    separate check-then-create race: two racing processes can't both win,
+    as long as the store itself is healthy. Ordinary contention just waits
+    (``timeout=5.0`` on connect); only if that busy timeout is exceeded does
+    it surface as a ``sqlite3.Error``, and the fail-soft path below returns
+    UNGUARANTEED regardless -- the guarantee holds only while the store is
+    healthy.
 
     The caller decides WHEN to call this: to actually gate a race, it must
     be the last thing before the side effect being deduplicated, not called
     up front "just in case" -- see :func:`is_claimed` for a cheap read-only
     pre-check that doesn't hold anything.
 
-    Never raises: every failure mode reports as UNGUARANTEED rather than
-    propagating -- a broken or unavailable claim store must never block a
-    permission decision.
+    Never raises: storage failures report as UNGUARANTEED rather than
+    propagating.
 
     Args:
-        project: Resolved project-root path this claim is about, or None if
+        project: The project-root path this claim is about, or None if
             unresolved.
-        kind: Caller-owned category being throttled (e.g. a module's own
-            "takeover_warning" constant).
+        kind: Caller-owned category being throttled.
         scope: Opaque throttling window, e.g. ``day_scope()``.
         ttl: How long this claim remains valid before it may be reclaimed.
     """
@@ -413,13 +365,9 @@ def claim(
     conn = None
     try:
         conn = _connect()
-        # BEGIN IMMEDIATE, not `with conn:` -- PRAGMA and DDL statements
-        # (inside _ensure_schema) run in sqlite3's own autocommit mode
-        # regardless of Python's `with conn:` wrapper, which only opens an
-        # implicit transaction before a DML statement. An explicit BEGIN
-        # keeps schema repair and the insert in ONE real transaction, which
-        # is what actually closes the race (verified empirically -- `with
-        # conn:` alone did not, see _ensure_schema's docstring).
+        # BEGIN IMMEDIATE, not `with conn:` -- keeps _ensure_schema's repair
+        # and this insert in one real transaction; see that function's
+        # docstring for why `with conn:` alone is not enough.
         conn.execute("BEGIN IMMEDIATE")
         _ensure_schema(conn)
         cur = conn.execute(
@@ -452,11 +400,9 @@ def release(project: Optional[Path], kind: str, scope: str) -> None:
     """
     Give up a claim early so a later attempt this period can retry.
 
-    For a caller whose claimed side effect itself failed (e.g. a migration
-    that raised or returned a failure code), so "once per period" applies
-    to successes only. Never creates storage; a claim that was never taken
-    has nothing to release. Fails soft: storage errors, a ``None`` project,
-    or a missing ``sqlite3`` are all swallowed.
+    Never creates storage; a claim that was never taken has nothing to
+    release. Fails soft: storage errors, a ``None`` project, or a missing
+    ``sqlite3`` are all swallowed.
     """
     if sqlite3 is None or project is None:
         return
@@ -482,21 +428,15 @@ def reap(logs_dir: Path) -> None:
     Delete expired claims, and sweep legacy per-project/per-kind artefacts.
 
     Expiry is a timestamp comparison against the stored ``expires_at`` --
-    never a filename parse. The expiry sweep is GLOBAL, across every
-    project: pure housekeeping on rows already past their TTL never
-    reintroduces cross-project bleed, since it only ever removes claims no
-    project could still be relying on.
+    never a filename parse. The sweep is global, across every project: it
+    only ever removes claims already past their TTL.
 
-    Also sweeps, unconditionally on sight: this store's own previous
-    filename (``~/.toolguard/suppression.db``, a sibling of the current
-    store path, from before TOO-45 punch-list #01 retired the "suppression"
-    language), and, under *logs_dir*, the legacy per-kind marker files
-    (``.toolguard-warned-*`` / ``.toolguard-migration-*`` /
-    ``.toolguard-divergence-warned-*``) the original marker-file mechanism
-    left behind, plus a stale ``.toolguard-suppression.db`` from this
-    module's earlier, since-reversed per-project storage format. Nothing
-    creates any of these anymore, so no date parsing or format detection is
-    needed to decide whether one is old enough to remove.
+    Also sweeps, unconditionally on sight: :data:`_LEGACY_STORE_FILENAME`,
+    and, under *logs_dir*, the legacy per-kind marker files
+    (:data:`_LEGACY_MARKER_PREFIXES`) plus a stale
+    :data:`_LEGACY_PROJECT_DB_FILENAME`. Nothing creates any of these
+    anymore, so no date parsing or format detection is needed to decide
+    whether one is old enough to remove.
 
     Never creates storage. Fails soft throughout.
     """

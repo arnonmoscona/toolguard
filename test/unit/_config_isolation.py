@@ -1,35 +1,29 @@
 """
 Shared test isolation for toolguard's config-discovery hierarchy.
 
-toolguard/config.py reads real filesystem state from exactly three controllable
-anchors: Path.home(), toolguard.config.find_project_root(), and the
-XDG_CONFIG_HOME/CLAUDE_SETTINGS_PATH environment variables. This repo dogfoods
-toolguard on itself, so a real ~/.claude/toolguard_hook.toml (and potentially a
-real ~/.config/toolguard/rules/ and/or ~/.toolguard/rules/ -- TOO-30/TOO-19's
-two candidate rules directories, both derived from Path.home()) genuinely
-exists on the machine running this suite -- tests that don't redirect these
-three anchors can silently depend on, or be broken by, that real state.
-ConfigIsolationMixin redirects all three into a fresh temporary directory.
+``toolguard.config`` reads real filesystem state from exactly three
+controllable anchors: ``Path.home()``, ``toolguard.config.find_project_root()``,
+and the ``XDG_CONFIG_HOME``/``CLAUDE_SETTINGS_PATH`` environment variables.
+This repo dogfoods toolguard on itself, so real config genuinely exists on
+the machine running this suite (``~/.claude/toolguard_hook.toml`` and
+possibly ``~/.config/toolguard/rules/`` and/or ``~/.toolguard/rules/``, both
+derived from ``Path.home()``) -- a test that doesn't redirect all three
+anchors can silently depend on, or be broken by, that real state.
+``ConfigIsolationMixin`` redirects all three into a fresh temporary directory.
 
-TOO-19 (test log-dir isolation leak): toolguard.env_config has its OWN,
-separate ``find_project_root()`` -- distinct from ``toolguard.config``'s, and
-NOT patched by the three anchors above -- that resolves the log directory
+A fourth, separate anchor: ``toolguard.env_config`` has its OWN
+``find_project_root()`` -- distinct from ``toolguard.config``'s, and not
+patched by the three anchors above -- that resolves the log directory
 (``TOOLGUARD_LOG_DIR``, or ``<project_root>/logs`` by default) from the
 process's real ``Path.cwd()``. A test that calls ``toolguard.hook.main()`` (or
-anything else that reaches ``get_env_config()``) without an explicit
+anything else reaching ``get_env_config()``) without an explicit
 ``TOOLGUARD_LOG_DIR`` therefore silently resolves the REAL repo's ``logs/``
-directory, since the test process's cwd genuinely is the repo root. This bit
-three tests for real (TOO-19, 2026-07-31): ``TestHardDenyThroughMain`` (in
-test_hard_deny.py, which already used this mixin but still leaked, because the
-mixin did not isolate this fourth anchor) plus test_hook.py and
-test_hook_eval.py (which did not use the mixin at all, since they mock
-``load_configuration()`` directly and never reach ``toolguard.config``'s
-discovery -- but DO reach ``get_env_config()``, an entirely separate path the
-mixin's original scope did not cover). ``isolate_config_environment()`` below
-now ALSO sets ``TOOLGUARD_LOG_DIR`` inside the isolated environment, and
-``isolate_log_dir_for_module()`` gives module-level (not per-TestCase) callers
-the same protection for tests that never call ``isolate_config_environment()``
-at all.
+directory, since the test process's cwd genuinely is the repo root -- this
+bit tests that already used this mixin, because its original scope covered
+only the first three anchors. ``isolate_config_environment()`` below also
+sets ``TOOLGUARD_LOG_DIR``; ``isolate_log_dir_for_module()`` gives
+module-level (not per-``TestCase``) callers the same protection for tests
+that never call ``isolate_config_environment()`` at all.
 
 This module deliberately does NOT start with "test" so that
 ``unittest discover``'s ``test*.py`` pattern never picks it up as a test module

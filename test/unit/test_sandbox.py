@@ -1,12 +1,6 @@
 """
 Unit tests for :mod:`toolguard.testing.sandbox`.
 
-These tests are the proof that the sandbox's isolation is structural rather than
-incidental. Several of them deliberately name the REAL filesystem paths that a
-broken sandbox would reach (``~/.toolguard/rules`` and
-``~/.config/toolguard/rules``) and assert that the tripwire stops the write, so
-the coverage is demonstrated rather than inferred.
-
 This module intentionally does NOT use ConfigIsolationMixin: the object under
 test is itself an isolation mechanism, and layering another one over it would
 hide exactly the failures these tests exist to catch.
@@ -28,8 +22,6 @@ from toolguard.testing.sandbox import (
 
 ALLOW_LS = '[permissions]\nallow = ["Bash(ls *)"]\n'
 
-#: Same rule as ALLOW_LS but as a structured entry carrying an
-#: ``additionalContext`` enrichment (TOO-19 Phase 1).
 ALLOW_LS_ENRICHED = (
     "[permissions]\n"
     'allow = [{ match = "Bash(ls *)", additionalContext = "prefer the Read tool" }]\n'
@@ -140,9 +132,6 @@ class TestSandboxTripwire(unittest.TestCase):
         Given a sandbox experiment
         When code attempts to write into the REAL ~/.toolguard/rules directory
         Then SandboxEscapeError is raised and nothing is written there
-
-        Named explicitly rather than relying on Path.home() patching, so this
-        directory's coverage is proven rather than inferred (TOO-19).
         """
         victim = Path.home() / ".toolguard" / "rules" / "__tripwire_probe__.toml"
         self.addCleanup(self._fail_if_created, victim)
@@ -157,9 +146,6 @@ class TestSandboxTripwire(unittest.TestCase):
         Given a sandbox experiment
         When code attempts to write into the REAL ~/.config/toolguard/rules directory
         Then SandboxEscapeError is raised and nothing is written there
-
-        The XDG directory is the one an exported XDG_CONFIG_HOME could redirect
-        back out of the sandbox, so it gets its own explicit test (TOO-19).
         """
         victim = (
             Path.home() / ".config" / "toolguard" / "rules" / "__tripwire_probe__.toml"
@@ -198,9 +184,6 @@ class TestSandboxTripwire(unittest.TestCase):
         Given a sandbox experiment
         When code atomically replaces a file OUTSIDE the sandbox
         Then SandboxEscapeError is raised
-
-        os.replace is the final step of toolguard's own atomic config write, so
-        an uncovered os.replace would leave the real write path unguarded.
         """
         victim = Path.home() / "__toolguard_sandbox_replace_probe__.txt"
         self.addCleanup(self._fail_if_created, victim)
@@ -215,8 +198,6 @@ class TestSandboxTripwire(unittest.TestCase):
         Given a sandbox experiment
         When code attempts to delete a tree outside the sandbox
         Then SandboxEscapeError is raised
-
-        This is the ~/.toolguard wipe class of failure (TOO-15, four occurrences).
         """
         import shutil
 
@@ -244,10 +225,6 @@ class TestSandboxTripwire(unittest.TestCase):
         Given the tripwire guard for a sandbox root
         When it is asked about paths in the two REAL rules directories
         Then it raises for both, proving the decision itself rather than a side effect
-
-        Deliberately I/O-free: this test can be mutation-tested (by neutralising
-        the guard) without any risk of actually writing to real configuration,
-        which the write-based tests above could not offer.
         """
         import tempfile
 
@@ -280,12 +257,7 @@ class TestSandboxTripwire(unittest.TestCase):
             guard._check(Path(tmp) / "nested" / "file.toml", "probe")
 
     def _fail_if_created(self, victim: Path) -> None:
-        """
-        Fail loudly (and clean up) if a tripwire probe file actually got created.
-
-        Args:
-            victim: The path the test attempted to write outside the sandbox.
-        """
+        """Fail loudly (and clean up) if a tripwire probe file actually got created."""
         if victim.exists():
             victim.unlink()
             self.fail(
@@ -334,9 +306,6 @@ class TestSandboxEvaluation(unittest.TestCase):
         Given a sandbox that allows everything, including the inline-python form
         When a `python -c` command is evaluated
         Then the verdict is still ask, because the ASK floor is unsuppressible
-
-        This is the question that was originally answered by editing live config
-        (TOO-19, 2026-07-25). It is now one safe call.
         """
         config = '[permissions]\nallow = ["Bash(*)", "Bash(python -c *)"]\n'
         with experiment(project_config=config) as sandbox:
@@ -373,9 +342,6 @@ class TestSandboxEvaluation(unittest.TestCase):
         Given a sandbox that has already evaluated a command once
         When the config is rewritten to deny that command and it is re-evaluated
         Then the new verdict reflects the NEW config, not a cached parse
-
-        toolguard caches parsed config files in an unbounded lru_cache; without
-        an explicit invalidation this would silently return the stale verdict.
         """
         with experiment(project_config=ALLOW_LS) as sandbox:
             self.assertEqual(sandbox.evaluate("Bash", "ls -la").decision, "allow")
@@ -479,9 +445,7 @@ class TestSandboxCli(unittest.TestCase):
         """
         Given a structured allow entry carrying additionalContext
         When the CLI evaluates a matching command with --json
-        Then the payload carries 'additionalContext' with that text -- the
-             sandbox is the sanctioned way to preview what the hook would do,
-             so omitting a real hook output field would make the preview lie
+        Then the payload carries 'additionalContext' with that text
         """
         import io
         import tempfile
@@ -500,8 +464,7 @@ class TestSandboxCli(unittest.TestCase):
         """
         Given a plain-string allow rule carrying no enrichment
         When the CLI evaluates a matching command with --json
-        Then the 'additionalContext' key is ABSENT from the payload, not
-             present as null -- mirroring the hook's own absent-key behaviour
+        Then the 'additionalContext' key is ABSENT from the payload, not present as null
         """
         import io
         import tempfile

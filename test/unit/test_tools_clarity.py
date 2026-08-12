@@ -1,9 +1,7 @@
 """
-Unit tests for the rule-interaction clarity analyzer (toolguard.tools.clarity).
-
-These verify the first detector: a DEFAULT allow rule whose command-space
-overlaps a deny or ask rule in the same config layer is flagged with a calibrated
-explanation, while non-overlapping or non-DEFAULT rules are not.
+Unit tests for the rule-interaction clarity analyzer (toolguard.tools.clarity):
+the same-layer pairwise and multi-section detectors and the cross-layer one,
+each checked for the finding it produces and for the cases it must not flag.
 """
 
 import unittest
@@ -117,9 +115,9 @@ class TestFindConfusingInteractions(unittest.TestCase):
 
     def test_non_default_guard_is_skipped(self):
         """
-        Given an allow and a deny expressed as a non-DEFAULT [regex] pattern
+        Given a DEFAULT allow and a deny expressed as a [regex] pattern
         When find_confusing_interactions runs
-        Then the non-DEFAULT guard is not prefix-comparable and no finding is made.
+        Then no finding is made.
         """
         config = _make_config(
             _make_layer(
@@ -244,7 +242,7 @@ class TestCrossLayerInteraction(unittest.TestCase):
 
     def test_same_specificity_layers_are_not_cross_layer(self):
         """
-        Given an allow and an overlapping deny in two DIFFERENT files at the SAME
+        Given an allow and an overlapping deny in two layers of the SAME
             specificity
         When find_confusing_interactions runs
         Then no 'cross-layer-dependent' finding is produced (they resolve as one

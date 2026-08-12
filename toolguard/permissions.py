@@ -1,12 +1,15 @@
 """
-Permission checking logic for toolguard.
+Command string matching and permission decisions for the command-kind tools. The two
+tie-break primitives -- :func:`is_universal_pattern` and :func:`resolve_allow_ask` -- are
+also used by the file-path side; nothing else here is.
 
-Replicates the exact matching logic from checked_bash.py including:
-- fnmatch pattern matching
-- Path normalization
-- Special handling for path component patterns
-- Command:args pattern separation
-- Extended pattern support (REGEX and GLOB)
+Matches a command against allow/deny/ask pattern lists -- DEFAULT fnmatch-style matching
+plus the extended ``[regex]``/``[glob]``/``[native]`` syntax handled by
+:mod:`toolguard.patterns`. Includes a bare allow/deny check (:func:`check_permission`),
+the unoverridable hard-deny pool (:func:`check_hard_deny`), one hierarchy level of the
+more-specific-wins cascade (:func:`decide_command_at_level_detailed`), and the
+allow/ask tie-break primitives (:func:`resolve_allow_ask`, :func:`is_universal_pattern`)
+that combine matches into a level's outcome.
 """
 
 import fnmatch
@@ -19,41 +22,24 @@ from .normalization import normalize_command, normalize_path
 
 def normalize_path_in_command(command_str: str) -> str:
     """
-    Normalize paths in a command to canonical form.
+    Normalize a command's path arguments to canonical form.
 
-    This uses the comprehensive normalization from normalization.py which:
-    - Converts /Users/<username>/... to ~/...
-    - Resolves symlinks (max 3 iterations)
-    - Normalizes multiple leading slashes to single /
-    - Expands relative paths to ./
-
-    Additionally handles the case where arguments don't clearly look like paths
-    but should be treated as such (e.g., 'ls mydir' -> 'ls ./mydir').
+    Delegates to :func:`~toolguard.normalization.normalize_command`, then also adds a
+    ``./`` prefix to a command's argument string when it doesn't already look like a path
+    (doesn't start with ``.``, ``/``, ``-``, or ``~``) -- e.g. ``'ls mydir'`` ->
+    ``'ls ./mydir'`` -- covering a case that function does not normalize on its own.
 
     Args:
-        command_str: The command string to normalize
+        command_str: The command string to normalize.
 
     Returns:
-        Normalized command string with canonical paths
-
-    Examples:
-        >>> normalize_path_in_command('cat /Users/arnon/file.txt')
-        'cat ~/file.txt'
-        >>> normalize_path_in_command('cat file.txt')
-        'cat ./file.txt'
-        >>> normalize_path_in_command('ls mydir')
-        'ls ./mydir'
+        The normalized command string.
     """
-    # First apply comprehensive normalization from normalization.py
     result = normalize_command(command_str)
 
-    # Additionally, for backwards compatibility, add ./ prefix to args
-    # that don't start with ., /, -, or ~
-    # This handles cases like 'ls mydir' -> 'ls ./mydir'
-    parts = result.split(None, 1)  # Split into command and args
+    parts = result.split(None, 1)
     if len(parts) == 2:
         cmd, args = parts
-        # If args don't start with . or / or - or ~, add ./ prefix
         if args and not args.startswith((".", "/", "-", "~")):
             result = f"{cmd} ./{args}"
 
@@ -62,33 +48,25 @@ def normalize_path_in_command(command_str: str) -> str:
 
 def contains_path_component(command_str: str, component: str) -> bool:
     """
-    Check if a command contains a specific path component.
+    Check whether *component* appears as a whole ``/``- or ``\\``-separated segment of any
+    argument.
 
-    For example, '.env' as a component in 'cat .env', 'cat dir/.env', 'cat .env/file', etc.
+    E.g. ``component='.env'`` matches ``'cat .env'``, ``'cat dir/.env'``, and
+    ``'cat .env/file'`` -- segments are compared whole, so this is not a substring search.
 
     Args:
-        command_str: The command string to check
-        component: The path component to search for
+        command_str: The command string to check.
+        component: The path component to search for.
 
     Returns:
-        True if the component is found in any path argument, False otherwise
+        True if *component* is found in any argument, False otherwise.
     """
-    # Remove the command part, focus on arguments
     parts = command_str.split(None, 1)
     if len(parts) < 2:
         return False
 
     args = parts[1]
-
-    # Check if the component appears as:
-    # - Exact match: "cat .env"
-    # - After a slash: "cat dir/.env" or "cat /path/.env"
-    # - Before a slash: "cat .env/file"
-    # - In the middle: "cat dir/.env/file"
-
-    # Split args by spaces to handle multiple arguments
     for arg in args.split():
-        # Split by path separators
         path_parts = arg.replace("\\", "/").split("/")
         if component in path_parts:
             return True
@@ -100,95 +78,74 @@ def match_command(
     command_str: str, patterns: List[str], extended_syntax: bool = True
 ) -> Tuple[bool, Optional[str]]:
     """
-    Check if the command matches any of the patterns.
+    Check whether *command_str* matches any pattern in *patterns*; return the first hit.
 
-    Patterns can be:
-    - Simple wildcards: "git *" matches any git command
-    - Prefix with args: "git log:*" matches "git log" with any arguments
-    - Complex patterns: "cat ./**:*" matches cat with any file in current dir tree
-    - Path patterns: "**/.env/**" matches any command containing /.env/ in the path
-    - Extended REGEX: "[regex]^git (log|diff|status).*" for regex matching
-    - Extended GLOB: "[glob]/Users/*/projects/**/*.py" for true glob matching
+    A DEFAULT pattern (no ``[regex]``/``[glob]``/``[native]`` prefix) is checked first
+    for a ``**/<component>/**`` shape -- before ``**`` is normalized down to ``*`` --
+    matching when the raw *command_str* contains that literal path component anywhere
+    (via :func:`contains_path_component`). Otherwise it is matched via ``fnmatch``
+    against both the raw command and its :func:`normalize_path_in_command`-normalized
+    form -- as a ``cmd:args`` prefix-and-args split when the pattern contains a ``:``,
+    or as a whole-string match otherwise. ``[regex]``/``[glob]``/``[native]`` patterns
+    bypass all DEFAULT handling and match directly against the raw command via
+    :func:`~toolguard.patterns.match_pattern`.
 
-    Wildcards:
-    - * matches any characters within a path component
-    - ** matches any characters including path separators (treated as * for fnmatch)
-
-    TOO-17 defence-in-depth: DEFAULT and GLOB patterns must not span newlines.
-    A leaf command that still contains a newline (should not normally happen
-    after the multi-line pre-pass) is rejected from DEFAULT/GLOB matching so
-    that a prefix allow can never silently match a multi-statement blob.
-    REGEX patterns are exempt (their authors control DOTALL explicitly).
+    A leaf command that still contains a newline (should not normally happen after the
+    multi-line pre-pass upstream) is excluded from DEFAULT matching, so a DEFAULT prefix
+    allow cannot match a multi-statement blob this way. REGEX/GLOB/NATIVE patterns
+    bypass this guard.
 
     Args:
-        command_str: The command string to match
-        patterns: List of patterns to match against
-        extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes
+        command_str: The command string to match.
+        patterns: Patterns to match against, tried in order.
+        extended_syntax: If False, skip parsing ``[regex]``/``[glob]``/``[native]`` prefixes.
 
     Returns:
-        Tuple of (matched: bool, matched_pattern: str or None).
-
-        COUPLING: ``matched_pattern`` is the RAW, un-normalized list element from
-        ``patterns`` (prefixes such as ``[regex]``/``[glob]`` included), not the
-        parsed/stripped form. Provenance lookup
-        (:func:`toolguard.config_types.provenance_for_pattern`) relies on
-        this identity -- it searches for a layer entry whose
-        ``stripped_pattern`` equals this value. If this is ever changed to
-        return a normalized/wrapper-stripped pattern, provenance lookup will
-        silently return None.
+        ``(matched, matched_pattern)``. ``matched_pattern`` is the RAW list element from
+        *patterns*, extended-syntax prefix included -- not what
+        :func:`~toolguard.patterns.parse_pattern` would extract.
+        :func:`~toolguard.config_types.provenance_for_pattern` relies on this identity: it
+        searches for a layer entry whose ``stripped_pattern`` equals this value, so
+        returning a normalized/wrapper-stripped pattern here would silently break it.
     """
-    # TOO-17: If the command contains a newline, skip DEFAULT/GLOB matching
-    # (defense-in-depth: after the pre-pass leaves should be newline-free, but
-    # guard here so a future regression cannot re-open the fail-open path).
     command_has_newline = "\n" in command_str or "\r" in command_str
-
-    # Try matching with both original and normalized command
     command_variants = [command_str, normalize_path_in_command(command_str)]
 
     for pattern in patterns:
-        # Parse pattern to determine type
         pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
 
-        # REGEX, GLOB, and NATIVE patterns bypass all DEFAULT logic
         if pattern_type in (PatternType.REGEX, PatternType.GLOB, PatternType.NATIVE):
-            # Match directly against command (no normalization, no colon syntax)
             if match_pattern(pattern_type, actual_pattern, command_str):
                 return True, pattern
             continue
 
-        # TOO-17 defence-in-depth: DEFAULT patterns must not span newlines.
-        # If the command contains a newline, skip DEFAULT matching to prevent
-        # a prefix allow from matching a multi-statement blob.
         if command_has_newline:
+            # Defense-in-depth against a fail-open bypass: a leaf that still
+            # contains a newline here must not be matched by DEFAULT rules.
             continue
 
-        # DEFAULT pattern type - use existing logic
-        # Special handling for path component patterns like "**/.env/**"
-        # These are patterns that want to match a specific path component anywhere
         if actual_pattern.startswith("**/") and actual_pattern.endswith("/**"):
-            # Extract the component between **/ and /**
             component = actual_pattern[3:-3]
             if contains_path_component(command_str, component):
                 return True, pattern
             continue
 
-        # Normalize ** to * for fnmatch (fnmatch doesn't distinguish them)
         pattern_normalized = actual_pattern.replace("**", "*")
 
         if ":" in pattern_normalized:
-            # Pattern like "git log:*" or "cat ./*:*"
-            # Split into command pattern and args pattern
+            # Any ':' triggers this branch, not only an intentional cmd:args
+            # separator -- e.g. 'curl http://ex.com/*' splits at the '//'-preceding
+            # colon and will not match as a whole-string pattern.
             cmd_pattern, args_pattern = pattern_normalized.split(":", 1)
             cmd_pattern = cmd_pattern.strip()
             args_pattern = args_pattern.strip()
 
-            # Extract the base command from the pattern (e.g., "cat" from "cat ./*")
             pattern_parts = cmd_pattern.split(None, 1)
             base_cmd = pattern_parts[0]
 
-            # Normalize the pattern's base_cmd the same way we normalize commands,
-            # so e.g. `bin/x:*` and `./bin/x:*` both canonicalize to `./bin/x` —
-            # matching a command `bin/x` whose own first token normalizes the same way.
+            # A pattern's base command is normalized the same way a real
+            # command is, so e.g. 'bin/x:*' and './bin/x:*' both canonicalize
+            # to './bin/x' and match a command starting with either spelling.
             base_cmd_variants = [base_cmd]
             if "/" in base_cmd:
                 normalized_base = normalize_path(base_cmd)
@@ -196,27 +153,21 @@ def match_command(
                     base_cmd_variants.append(normalized_base)
 
             for cmd_var in command_variants:
-                # If args pattern is * or empty, just match the command prefix
                 if args_pattern in ("*", "**", ""):
-                    # Match command prefix more flexibly
                     matched_base = any(
                         cmd_var.startswith(bc + " ") or cmd_var == bc
                         for bc in base_cmd_variants
                     )
                     if matched_base:
-                        # Now check if the full command matches the pattern
-                        # Try each base_cmd variant as the pattern prefix
                         for bc in base_cmd_variants:
                             full_cmd_pattern = bc + cmd_pattern[len(base_cmd) :] + "*"
                             if fnmatch.fnmatch(cmd_var, full_cmd_pattern):
                                 return True, pattern
                 else:
-                    # More specific args pattern - match the full command
                     full_pattern = cmd_pattern + " " + args_pattern
                     if fnmatch.fnmatch(cmd_var, full_pattern):
                         return True, pattern
         else:
-            # No colon - match the entire command string
             for cmd_var in command_variants:
                 if fnmatch.fnmatch(cmd_var, pattern_normalized):
                     return True, pattern
@@ -247,15 +198,12 @@ def check_hard_deny(
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
 
     Returns:
-        A :class:`~toolguard.config_types.LevelMatch` with
-        ``decision='deny'`` when the command is hard-denied, otherwise
-        ``None`` (no hard-deny match, so the caller falls through to the
-        normal cascade). ``matched_pattern`` is carried as its own field
-        (TOO-19 code review m3; TOO-45 R1f converted the bare
-        ``(decision, reason, matched_pattern)`` tuple this used to return
-        into this dataclass) rather than requiring a caller to recover it
-        by stripping a fixed prefix/suffix off ``reason`` -- that
-        round-trip is fragile against any future wording change here.
+        A :class:`~toolguard.config_types.LevelMatch` with ``decision='deny'``
+        when the command is hard-denied, otherwise ``None`` so the caller
+        falls through to the normal cascade. ``matched_pattern`` is carried
+        as its own field rather than recovered by parsing ``reason`` --
+        keeping the two independent so a future wording change to ``reason``
+        cannot silently break pattern recovery.
     """
     if not deny_patterns:
         return None
@@ -264,7 +212,6 @@ def check_hard_deny(
     if not matched:
         return None
 
-    # A deny matched. An allow carve-out exempts the command from the hard deny.
     if allow_patterns:
         exempt, exempt_pattern = match_command(command, allow_patterns, extended_syntax)
         if exempt:
@@ -284,46 +231,40 @@ def check_permission(
     extended_syntax: bool = True,
 ) -> Tuple[str, str]:
     """
-    Check if a command is permitted based on allow and deny patterns.
-
-    Algorithm:
-    1. Check deny patterns first - if match, command is denied
-    2. Check allow patterns - if match, command is allowed
-    3. If no match in either, command is denied (fail closed)
+    Check a command against a flat, unprovenanced allow/deny pattern pair. Deny-first;
+    fails closed when nothing matches either list.
 
     Args:
-        command: The bash command to check
-        allow_patterns: List of patterns that allow commands
-        deny_patterns: List of patterns that deny commands
-        extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes
+        command: The bash command to check.
+        allow_patterns: Patterns that allow the command.
+        deny_patterns: Patterns that deny the command.
+        extended_syntax: If False, skip parsing ``[regex]``/``[glob]``/``[native]`` prefixes.
 
     Returns:
-        Tuple of (decision, reason) where decision is 'allow' or 'deny'
-        and reason is a human-readable explanation
+        ``(decision, reason)`` where decision is ``'allow'`` or ``'deny'``.
     """
-    # Check deny list first - if it matches, reject immediately
     if deny_patterns:
         matched, pattern = match_command(command, deny_patterns, extended_syntax)
         if matched:
             return "deny", f"Command matches deny pattern: {pattern}"
 
-    # Check if command is allowed
     matched, pattern = match_command(command, allow_patterns, extended_syntax)
     if matched:
         return "allow", f"Command matches allow pattern: {pattern}"
 
-    # Default: deny (not explicitly allowed)
     return "deny", "Command does not match any allow patterns"
 
 
 def is_universal_pattern(pattern: str) -> bool:
     """
-    Return True when a pattern matches EVERY input (a blanket ``*``-class rule).
+    Return True for a blanket ``*``-class rule: the bare ``*`` and its
+    ``[glob]``/``[native]``-prefixed forms, recognised by shape rather than by matching.
+    (Only ``[native]*`` actually matches every input -- ``[glob]*`` does not cross ``/``,
+    and the bare ``*`` is blocked by the DEFAULT newline guard.)
 
-    Handles the wrapper-free ``*`` and the ``[glob]``/``[native]`` variants.  Used
-    by the resolver's "a broad ask with no matching allow is excluded from
-    level-matching" rule: a blanket ask does not, by itself, grant a prompt --
-    it falls through to the shared no_match_fallback resolution instead.
+    A pattern this returns True for should not, by itself, be treated as granting an ask
+    prompt: its level declines to decide, so the rest of the cascade runs, and
+    ``no_match_fallback`` applies only if no other level matches either.
     """
     body = pattern.strip()
     for marker in ("[glob]", "[native]"):
@@ -334,13 +275,12 @@ def is_universal_pattern(pattern: str) -> bool:
 
 def _literal_prefix_specificity(pattern: str) -> int:
     """
-    Heuristic specificity: the length of the literal prefix before the first
-    wildcard.  Longer = more specific; a blanket ``*`` scores 0.
+    Heuristic specificity: the length of the literal prefix before the first wildcard.
 
-    Used only to break the more-specific-wins comparison between an allow and an
-    ask pattern that BOTH match the same command at one level (e.g. broad allow
-    ``*`` vs specific ask ``git diff:*``).  An extended-syntax marker is stripped
-    first so ``[regex]``/``[glob]``/``[native]`` bodies score by their literal
+    Longer is more specific; a blanket ``*`` scores 0. Used by :func:`resolve_allow_ask`
+    to break a tie between an allow and an ask pattern that both match the same command
+    (e.g. broad allow ``*`` vs. specific ask ``git diff:*``). An extended-syntax marker is
+    stripped first so ``[regex]``/``[glob]``/``[native]`` bodies score by their literal
     lead too.
     """
     body = pattern.strip()
@@ -359,13 +299,12 @@ def resolve_allow_ask(
     ask_hit: Tuple[bool, Optional[str]],
 ) -> Optional[Tuple[str, str]]:
     """
-    Combine an allow-match and a (non-blanket) ask-match into ``(decision, pattern)``.
+    Combine one level's allow-match and non-blanket ask-match into a single outcome.
 
-    Implements toolguard's documented within-level more-specific-wins model between
-    allow and ask: a more-specific allow bypasses the ask (``allow``); a
-    more-specific -- or exactly-tied -- ask gates it (``ask``, i.e. a prompt is the
-    safe resolution of a tie).  The caller MUST already have excluded blanket ask
-    patterns (a broad ask does not grant a prompt).
+    More-specific-wins between the two: a more-specific allow bypasses the ask
+    (``'allow'``); a more-specific -- or exactly tied -- ask gates it into ``'ask'``,
+    since a tie resolves to the safer prompt. The caller must already have excluded
+    blanket ask patterns before calling this (see :func:`is_universal_pattern`).
 
     Args:
         allow_hit: ``(matched, pattern)`` from matching the allow list.
@@ -373,7 +312,7 @@ def resolve_allow_ask(
 
     Returns:
         ``(decision, matched_pattern)`` where decision is ``'allow'`` or ``'ask'``,
-        or ``None`` when neither the allow nor the ask matched (fall through).
+        or ``None`` when neither matched.
     """
     allow_match, allow_pat = allow_hit
     ask_match, ask_pat = ask_hit
@@ -401,33 +340,24 @@ def decide_command_at_level_detailed(
     Decide a command's outcome against ONE hierarchy level's patterns.
 
     Deny-first within the level: a deny match yields a ``decision='deny'``
-    :class:`~toolguard.config_types.LevelMatch`. Otherwise the allow and ask
-    lists are combined by more-specific-wins (a more-specific allow bypasses
-    a matching ask; a more-specific or tied ask gates the allow into an
-    ``ask`` prompt), with blanket ``*``-class ask patterns ignored (a broad
-    ask does not, alone, grant a prompt).  When the level matches NOTHING,
-    returns ``None`` so the more-specific-wins cascade can fall through to
-    the next (less-specific) level.  The matched pattern is reported so the
-    provenance-aware resolver can map it back to the
-    :class:`~toolguard.config.ToolPatternLayer` (and thus the source file/level).
+    :class:`~toolguard.config_types.LevelMatch`. Otherwise the allow and ask lists are
+    combined by more-specific-wins (:func:`resolve_allow_ask`), with blanket ``*``-class
+    ask patterns ignored first (:func:`is_universal_pattern`). When the level matches
+    nothing, returns ``None`` so the more-specific-wins cascade can fall through to the
+    next (less-specific) level. The matched pattern is reported (not just the decision)
+    so a caller can map it back to whichever config layer contributed it.
 
     Args:
         command: The bash command (sub-command) to evaluate.
         allow_patterns: This level's allow patterns (wrapper-free).
         deny_patterns: This level's deny patterns (wrapper-free).
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
-        ask_patterns: This level's ask patterns (wrapper-free).  Optional and
-            defaulting to none so legacy callers that predate ask resolution keep
-            their exact allow/deny behavior.
+        ask_patterns: This level's ask patterns (wrapper-free); omitted or empty
+            means no ask pattern gates this level.
 
     Returns:
-        A :class:`~toolguard.config_types.LevelMatch` when this level
-        matches (TOO-45 R1f converted the bare ``(decision, reason,
-        matched_pattern)`` tuple this used to return into this dataclass --
-        this is also the per-level result
-        :func:`~toolguard.permission_resolution.resolve_command_permission`
-        folds over), else ``None`` so the cascade falls through to the next
-        level.
+        A :class:`~toolguard.config_types.LevelMatch` when this level matches,
+        else ``None`` so the cascade falls through to the next level.
     """
     if deny_patterns:
         matched, pattern = match_command(command, deny_patterns, extended_syntax)

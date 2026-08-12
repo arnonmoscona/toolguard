@@ -1,51 +1,46 @@
 """
-Shared fixture-loading, decision-replay, and comparison code for the TOO-45
+Shared fixture-loading, decision-replay, and comparison code for the
 verdict-equivalence corpus.
 
-Used by BOTH ``tools/corpus_build.py`` (the dev-only tool that regenerates
+Shared between ``tools/corpus_build.py`` (regenerates
 ``cases.jsonl``/``goldens.jsonl``/``e2e_cases.jsonl``/``e2e_goldens.jsonl``)
-and ``test/unit/test_verdict_corpus.py`` (the replay tests that guard the
-refactor), so the two can never drift on how a fixture's committed config
-files become a :class:`~toolguard.config.Configuration`, or on how a
+and ``test/unit/test_verdict_corpus.py`` (the replay tests), so the two can
+never drift on how a fixture's committed config files become a
+:class:`~toolguard.config.Configuration`, or on how a
 :class:`~toolguard.config_types.RuntimeVerdict` (or a raw hook JSON response)
-becomes a golden record. ``corpus_build.py --verify`` and the unit tests
-literally call the same :func:`compare_goldens` / :func:`compare_e2e_goldens`
--- one prints a CLI diff and exits non-zero, the other asserts.
+becomes a golden record -- ``corpus_build.py --verify`` and the unit tests
+call the same :func:`compare_goldens`/:func:`compare_e2e_goldens`.
 
 Two corpora live here, for two different seams:
 
-- The IN-PROCESS corpus (:data:`CASES_PATH` / :data:`GOLDENS_PATH`) calls
-  :func:`toolguard.api.decide` directly -- fast (~5,000 cases in a
-  few seconds), but it stops at the decision itself and cannot see anything
-  downstream of it (e.g. how :func:`toolguard.hook.create_hook_output` turns
-  a decision into the actual JSON Claude Code receives).
-- The END-TO-END corpus (:data:`E2E_CASES_PATH` / :data:`E2E_GOLDENS_PATH`)
+- The IN-PROCESS corpus (:data:`CASES_PATH`/:data:`GOLDENS_PATH`) calls
+  :func:`toolguard.api.decide` directly -- fast, but it stops at the
+  decision itself and cannot see anything downstream of it (e.g. how
+  :func:`toolguard.hook.create_hook_output` turns a decision into the
+  actual JSON Claude Code receives).
+- The END-TO-END corpus (:data:`E2E_CASES_PATH`/:data:`E2E_GOLDENS_PATH`)
   runs the real ``toolguard`` hook binary in a subprocess via
   :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`, for exactly that
-  reason -- deliberately small (a few dozen cases; subprocess startup
-  dominates), chosen to span the output-JSON surface rather than to
-  re-exercise decision coverage the in-process corpus already has. It is
-  ALSO the only place (TOO-45 audit follow-up) that can see
-  :class:`~toolguard.config.ConflictOverride`: since TOO-45 R6-S3 unified
-  ``Decision`` into :class:`~toolguard.config_types.RuntimeVerdict`,
-  :func:`toolguard.api.decide` DOES return it on its own
-  ``overrides`` field, but :func:`decision_to_golden` (see that function's
-  own docstring) deliberately excludes it from the golden schema, and it
-  never appears in the hook's JSON output either -- it exists ONLY as an
-  entry in ``logs/toolguard-conflict-*.md``, a THIRD seam neither corpus's
-  primary comparison touches. See
-  :func:`_new_stream_log_text` and the ``conflict_logged``/``conflict_message``
-  golden keys below -- the latter (TOO-45 D1a review debt item E) is also the
-  only place the OVERRIDDEN deny's provenance is observable at all, since it
-  is embedded only in that log message's text.
-  (The ``allow_with_warning`` fallback's own WARNING-stream routing
-  was investigated the same way and deliberately NOT instrumented here:
-  ``toolguard-warning-*.md`` also receives an unrelated, pre-existing "tool
-  not in governed_tools" advisory on every hook run for any fixture that
-  does not set ``governed_tools`` explicitly, which would make a
-  presence-only signal on that stream noisy rather than diagnostic. The
-  in-process corpus's ``reason`` text already pins that fallback firing
-  precisely -- see ``fallback_allow_warning``'s cases in ``cases.jsonl``.)
+  reason -- deliberately small (subprocess startup dominates), chosen to
+  span the output-JSON surface rather than re-exercise decision coverage
+  the in-process corpus already has. It is also the only place that can
+  see a :class:`~toolguard.config.ConflictOverride`: ``decide()`` returns
+  one on its own ``overrides`` field, but :func:`decision_to_golden`
+  deliberately excludes it from the golden schema, and it never appears in
+  the hook's JSON output either -- it exists only as an entry in
+  ``logs/toolguard-conflict-*.md``, a third seam neither corpus's primary
+  comparison touches. See :func:`_new_stream_log_text` and the
+  ``conflict_logged``/``conflict_message`` golden keys below -- the latter
+  is also the only place the OVERRIDDEN deny's provenance is observable at
+  all, since it is embedded only in that log message's text.
+  (The ``allow_with_warning`` fallback's own WARNING-stream routing is
+  deliberately NOT instrumented here: ``toolguard-warning-*.md`` also
+  receives an unrelated, pre-existing "tool not in governed_tools" advisory
+  on every hook run for a fixture that doesn't set ``governed_tools``
+  explicitly, which would make a presence-only signal on that stream noisy
+  rather than diagnostic. The in-process corpus's ``reason`` text already
+  pins that fallback firing precisely -- see ``fallback_allow_warning``'s
+  cases in ``cases.jsonl``.)
 
 See ``README.md`` (this directory) for what the corpus is for and how to
 update it. This module deliberately does NOT start with ``test`` so
@@ -93,9 +88,8 @@ FIXTURE_IDS = (
     "hierarchy_conflict",
     "pattern_forms",
     "enrichment",
-    # TOO-45 audit follow-up (config.py's no-match-fallback tail and its
-    # thinnest-covered neighbours): 'ask'-rule provenance across multiple
-    # hierarchy levels/layers, and allow-over-deny override breadth.
+    # 'ask'-rule provenance across multiple hierarchy levels/layers, and
+    # allow-over-deny override breadth.
     "ask_provenance",
     "override_breadth",
 )
@@ -350,18 +344,16 @@ def unit_verdict_to_dict(
     """
     Convert one :class:`~toolguard.config_types.UnitVerdict` (one entry of
     ``RuntimeVerdict.sub_matches``) to a JSON-safe, sandbox-path-sanitized
-    dict, for the golden schema's ``sub_matches`` list (TOO-45 corpus
-    sub-verdict extension -- see :func:`decision_to_golden`'s docstring).
+    dict for the golden schema's ``sub_matches`` list (see
+    :func:`decision_to_golden` for why this list exists).
 
     Deliberately narrower than the full :class:`~toolguard.config_types.UnitVerdict`:
-    only the four fields the extension's spec calls for --
-    ``sub_command``/``decision``/``matched_rule``/``provenance``. ``reason``
-    and ``additional_context`` are per-unit PROSE, not the structural
-    identity this extension exists to pin (the compound-command's own
-    ``reason``/``additional_context`` are already TRACKED at the top level),
-    and ``fallback_kind`` is a rendering aid for ``hook.py``'s log
-    substitution, not part of the audit-loss surface (a dropped/garbled
-    ``UnitVerdict`` is detectable here regardless of ``fallback_kind``).
+    only ``sub_command``/``decision``/``matched_rule``/``provenance``.
+    ``reason``/``additional_context`` are per-unit prose, not the structural
+    identity this pins (the compound's own ``reason``/``additional_context``
+    are already tracked at the top level), and ``fallback_kind`` is a
+    rendering aid for ``hook.py``'s log substitution, not part of the
+    audit-loss surface this guards.
 
     Args:
         unit: One entry from ``RuntimeVerdict.sub_matches``.
@@ -385,18 +377,16 @@ def override_to_dict(
 ) -> Dict[str, Any]:
     """
     Convert one ``(identifier, ConflictOverride)`` pair (one entry of
-    ``RuntimeVerdict.overrides``) to a JSON-safe, sandbox-path-sanitized dict,
-    for the golden schema's ``overrides`` list (TOO-45 corpus sub-verdict
-    extension -- see :func:`decision_to_golden`'s docstring).
+    ``RuntimeVerdict.overrides``) to a JSON-safe, sandbox-path-sanitized dict
+    for the golden schema's ``overrides`` list (see :func:`decision_to_golden`).
 
     Args:
         identifier: The deciding sub-command string (Bash) or the target
             path (file-path); see :class:`~toolguard.config_types.RuntimeVerdict`'s
             ``overrides`` docstring for the identifier convention. Never
             ``None`` in practice for a golden produced from ``decide()``'s
-            return value (only the internal, never-returned per-level
-            verdict pairs a bare override with ``None``), but sanitized
-            defensively the same way every other optional string here is.
+            return value, but sanitized defensively the same way every
+            other optional string here is.
         override: The :class:`~toolguard.config.ConflictOverride`.
         sanitize: Ephemeral-path sanitizer from :func:`load_fixture_configuration`.
 
@@ -424,54 +414,23 @@ def decision_to_golden(
     Build one golden record (the schema stored in ``goldens.jsonl``) from a
     replayed :class:`~toolguard.config_types.RuntimeVerdict`.
 
-    ``sub_matches``/``overrides`` (TOO-45 corpus sub-verdict extension)
-    -----------------------------------------------------------------------
-    Originally excluded on purpose (see git history for this docstring's
-    prior text) -- this corpus is exactly the safety net this project relies
-    on, and it did not capture the compound sub-command breakdown, which is
-    precisely the structural data whose loss was TOO-45's headline defect:
-    ``hook.py``'s audit-log writer used to reconstruct which sub-commands of
-    an allowed compound ran by regex-parsing the combined ``reason`` string,
-    silently dropping 813 of 975 compound-allow corpus cases' audit entries
-    (1,943 sub-commands with no log record at all). ``_log_allowed_command``
-    now reads ``verdict.sub_matches`` structurally instead (TOO-45 R1e), but
-    nothing pinned that fix against a future regression reintroducing the
-    loss -- this extension is that pin, at the ``decide()``-return-value
-    altitude (whether ``sub_matches``/``overrides`` themselves are computed
-    correctly; NOT whether ``_log_allowed_command``'s own write loop over
-    them is correct -- see ``README.md``'s "Sub-command breakdown" section
-    for that residual gap and why the end-to-end corpus does not close it
-    either).
+    ``sub_matches``/``overrides`` guard the compound sub-command breakdown
+    against being silently dropped or reordered -- the failure mode this
+    corpus exists to catch, since a golden that omitted them could not have
+    noticed it. Included via :func:`unit_verdict_to_dict`/:func:`override_to_dict`.
+    Both keys are ALWAYS present as a list, even empty, so a regression that
+    drops a genuinely non-empty breakdown to ``[]`` is a visible diff rather
+    than a key that silently stops appearing. Both compare as a HARD tier
+    (see :class:`CompoundBreakdownMismatch`), not the TRACKED tier
+    ``reason``/``additional_context`` use: they are structural facts a
+    legitimate refactor has no reason to reword.
 
-    Included fields, via :func:`unit_verdict_to_dict`/:func:`override_to_dict`:
-    exactly the four fields the extension's spec calls for per
-    :class:`~toolguard.config_types.UnitVerdict` (``sub_command``,
-    ``decision``, ``matched_rule``, ``provenance``), and the full
-    :class:`~toolguard.config.ConflictOverride` shape per override entry.
-    Both keys are ALWAYS present as a list -- empty (never omitted) when a
-    verdict genuinely has none (every file-path verdict for ``sub_matches``;
-    the common case for ``overrides``) -- so a regression that drops a
-    genuinely non-empty compound's breakdown down to ``[]`` is a visible
-    ``[...N entries...]`` -> ``[]`` diff, not a key that silently stops
-    appearing. Both are treated as a NEW HARD comparison tier (see
-    :class:`CompoundBreakdownMismatch`/:data:`ComparisonResult.breakdown_mismatches`),
-    not the existing TRACKED tier: unlike ``reason``/``additional_context``,
-    these are structural facts a legitimate refactor has no reason to reword,
-    and the entire point of this extension is to catch STRUCTURAL loss
-    (dropped/reordered/malformed entries), the exact failure mode of the
-    defect being guarded against.
-
-    ``matched_rule`` (top-level, unrelated to the above) was widened in
-    separately (TOO-45 D1a review debt item E): two independent mutations --
-    nulling ``matched_rule`` at its source in
-    ``permission_resolution._resolve_unclamped`` and nulling an overridden
-    deny's provenance in ``permission_resolution._detect_override`` -- each
-    failed unit tests but left this corpus reporting no differences, because
-    it did not observe either field at all. ``matched_rule`` is tracked here;
-    the overridden-deny-provenance half is tracked on the END-TO-END corpus
-    instead (see :func:`e2e_decision_to_golden`), since it is observable only
-    via the conflict-log message's text, not via ``decide()``'s return value
-    at all.
+    ``matched_rule`` is tracked here for the same reason -- a mutation that
+    nulls it at its source previously left this corpus reporting no
+    difference, because it did not observe the field at all. The
+    overridden-deny's provenance is tracked on the END-TO-END corpus instead
+    (see :func:`e2e_decision_to_golden`), since it is observable only via
+    the conflict-log message's text, not via ``decide()``'s return value.
 
     Args:
         fixture_id: The fixture this case was replayed against.
@@ -626,13 +585,12 @@ def _new_stream_log_text(before: Dict[Path, str], after: Dict[Path, str]) -> str
     :meth:`~toolguard.testing.sandbox.Sandbox.run_hook` call -- the only way
     this corpus can observe :class:`~toolguard.config.ConflictOverride`
     (routed to the ``'conflict'`` stream): it never reaches
-    :func:`toolguard.api.decide`'s return value or the hook's JSON
-    output (see the end-to-end corpus's module-level rationale above), and
-    (TOO-45 D1a review debt item E) neither does the OVERRIDDEN deny's
-    provenance specifically -- it is embedded only in this log message's text
-    (see ``hook._format_conflict_message``), so capturing the text (not just
-    "did a new entry appear", the previous behaviour) is what lets this
-    corpus notice a mutation that nulls it.
+    :func:`toolguard.api.decide`'s return value or the hook's JSON output
+    (see the end-to-end corpus's module-level rationale above), and neither
+    does the OVERRIDDEN deny's provenance specifically -- it is embedded
+    only in this log message's text (see ``hook._format_conflict_message``),
+    so capturing the text (not just "did a new entry appear") is what lets
+    this corpus notice a mutation that nulls it.
 
     Log entries are always appended, never rewritten, so for each file the
     new content is the after-text with the before-text's prefix removed
@@ -712,9 +670,8 @@ def e2e_decision_to_golden(
             stream by THIS case (see :func:`_new_stream_log_text`), already
             sanitized, or ``None`` when no conflict was logged. This is the
             only observable trace of a :class:`~toolguard.config.ConflictOverride`
-            -- and (TOO-45 D1a review debt item E) the only place the
-            OVERRIDDEN deny's provenance is observable at all, since it is
-            embedded in this message's text (see
+            -- and the only place the OVERRIDDEN deny's provenance is
+            observable at all, since it is embedded in this message's text (see
             ``hook._format_conflict_message``) and nowhere else this corpus
             can see. Included in the golden ONLY when not ``None`` (see
             below).
@@ -844,15 +801,13 @@ def _index_by_key(
 
 #: The golden fields tracked (not frozen) for equivalence -- a legitimate
 #: reword/refactor may change these; a hard invariant (verdict) never should.
-#: ``matched_rule`` added by TOO-45 D1a review debt item E (see
-#: :func:`decision_to_golden`'s docstring for why it was missing).
+#: See :func:`decision_to_golden`'s docstring for why ``matched_rule`` is here.
 TRACKED_FIELDS = ("reason", "additional_context", "provenance", "matched_rule")
 
 #: The golden fields compared as a HARD invariant, same tier as ``verdict``
-#: (TOO-45 corpus sub-verdict extension) -- see :func:`decision_to_golden`'s
-#: docstring for why ``sub_matches``/``overrides`` are HARD rather than
-#: TRACKED, unlike the structurally-similar ``provenance``/``matched_rule``
-#: above.
+#: -- see :func:`decision_to_golden`'s docstring for why
+#: ``sub_matches``/``overrides`` are HARD rather than TRACKED, unlike the
+#: structurally-similar ``provenance``/``matched_rule`` above.
 BREAKDOWN_FIELDS = ("sub_matches", "overrides")
 
 
@@ -882,10 +837,10 @@ class VerdictMismatch:
 @dataclass(frozen=True)
 class CompoundBreakdownMismatch:
     """
-    One HARD difference in the compound sub-command breakdown (TOO-45 corpus
-    sub-verdict extension) -- always a test failure, same tier as
-    :class:`VerdictMismatch`. See :func:`decision_to_golden`'s docstring for
-    why ``sub_matches``/``overrides`` are HARD rather than TRACKED.
+    One HARD difference in the compound sub-command breakdown -- always a
+    test failure, same tier as :class:`VerdictMismatch`. See
+    :func:`decision_to_golden`'s docstring for why ``sub_matches``/``overrides``
+    are HARD rather than TRACKED.
 
     Attributes:
         field: ``"sub_matches"`` or ``"overrides"`` -- which golden list
@@ -912,9 +867,9 @@ class ComparisonResult:
         verdict_mismatches: HARD failures -- any change here means STOP and
             investigate (see README.md); never regenerate to "fix" these.
         breakdown_mismatches: HARD failures in the compound sub-command
-            breakdown (``sub_matches``/``overrides``, TOO-45 corpus
-            sub-verdict extension) -- same "STOP and investigate" rule as
-            ``verdict_mismatches``; see :class:`CompoundBreakdownMismatch`.
+            breakdown (``sub_matches``/``overrides``) -- same "STOP and
+            investigate" rule as ``verdict_mismatches``; see
+            :class:`CompoundBreakdownMismatch`.
         prose_diffs: TRACKED, not frozen -- reason/additional_context/provenance
             differences. Reported for human review; acknowledgeable via
             ``TOOLGUARD_CORPUS_ACCEPT_PROSE=1``.
@@ -987,9 +942,10 @@ def compare_goldens(
                 )
             )
         for breakdown_field in BREAKDOWN_FIELDS:
-            # .get(..., []) tolerates a golden written before this extension
-            # (none should remain committed, but this keeps an old golden a
-            # clean breakdown_mismatch rather than a KeyError).
+            # .get(..., []) tolerates a golden written before sub_matches/
+            # overrides existed (none should remain committed, but this
+            # keeps an old golden a clean breakdown_mismatch rather than a
+            # KeyError).
             expected_breakdown = expected.get(breakdown_field, [])
             actual_breakdown = actual.get(breakdown_field, [])
             if expected_breakdown != actual_breakdown:
@@ -1036,7 +992,7 @@ class E2EHardMismatch:
             ``"additionalContext_presence"`` (the KEY appeared or disappeared
             from ``hookSpecificOutput`` -- independent of what its text
             says), or ``"conflict_logged"`` (a ``ConflictOverride`` was/was
-            not written to the conflict log -- TOO-45 audit follow-up).
+            not written to the conflict log).
         expected: The committed golden's value for *kind*.
         actual: The freshly replayed value for *kind*.
 
@@ -1061,15 +1017,15 @@ class E2EComparisonResult:
     the nested ``hookSpecificOutput`` shape:
 
     - HARD (:attr:`hard_mismatches`): ``permissionDecision``, the
-      PRESENCE/ABSENCE of the ``additionalContext`` key, and (TOO-45 audit
-      follow-up) the presence/absence of a new ``'conflict'``-stream entry
-      (see :func:`_new_stream_log_text`) -- presence-only, same rationale as
+      PRESENCE/ABSENCE of the ``additionalContext`` key, and the
+      presence/absence of a new ``'conflict'``-stream entry (see
+      :func:`_new_stream_log_text`) -- presence-only, same rationale as
       ``additionalContext``'s key.
     - TRACKED (:attr:`prose_diffs`, reusing :class:`ProseDiff`):
       ``permissionDecisionReason``'s text, ``additionalContext``'s text when
-      present on both sides, and (TOO-45 D1a review debt item E)
-      ``conflict_message``'s text when both sides logged a conflict -- the
-      only place the overridden deny's provenance is observable at all.
+      present on both sides, and ``conflict_message``'s text when both sides
+      logged a conflict -- the only place the overridden deny's provenance
+      is observable at all.
     """
 
     hard_mismatches: List[E2EHardMismatch] = field(default_factory=list)
@@ -1187,11 +1143,11 @@ def compare_e2e_goldens(
                     )
                 )
 
-        # TOO-45 D1a review debt item E: conflict_message's TEXT (not just
-        # whether a conflict was logged at all, already checked above as a
-        # hard mismatch) is where the overridden deny's provenance is
-        # observable -- track it the same way additionalContext's text is
-        # tracked, only when both sides actually logged a conflict.
+        # conflict_message's TEXT (not just whether a conflict was logged at
+        # all, already checked above as a hard mismatch) is where the
+        # overridden deny's provenance is observable -- track it the same
+        # way additionalContext's text is tracked, only when both sides
+        # actually logged a conflict.
         if expected_conflict_logged and actual_conflict_logged:
             expected_message = expected_index[key].get("conflict_message")
             actual_message = actual_index[key].get("conflict_message")

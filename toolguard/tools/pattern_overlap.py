@@ -1,12 +1,9 @@
 """
-DEFAULT-pattern command-prefix overlap helpers.
+Command-prefix overlap tests for DEFAULT ``cmd:*``/``cmd:**`` patterns.
 
-These are shared between the consolidation engine (which uses them for broadening
-guard-overlap evidence) and the clarity analyzer (which uses them for same-file
-rule-interaction detection), so the overlap semantics live in exactly one place.
-Only DEFAULT ``cmd:*``/``cmd:**`` prefix patterns are analysed; ``[regex]``/
-``[glob]``/``[native]`` patterns are out of scope here (their command-space is
-not prefix-comparable).
+``[regex]``/``[glob]``/``[native]`` patterns are out of scope -- their
+command-space is not prefix-comparable -- and :func:`default_prefix_tokens`
+returns ``None`` for them.
 """
 
 from typing import List, Optional, Tuple
@@ -18,17 +15,19 @@ def split_default_body(body: str) -> Tuple[List[str], str]:
     """
     Split a DEFAULT pattern body into ``(cmd_tokens, args_part)``.
 
-    Splits on the FIRST ``:`` in ``body``.  The left side is stripped and
-    tokenised on whitespace; the right side is stripped and returned as-is.
-    If no ``:`` is present, ``args_part`` is the empty string.
+    The split is on the FIRST ``:``, which is not always the ``cmd:args``
+    separator: ``'curl http://ex.com/*'`` splits at the colon inside the URL,
+    giving ``(['curl', 'http'], '//ex.com/*')``.
+    :func:`toolguard.permissions.match_command` splits a DEFAULT pattern on the
+    first ``:`` too, so making this one smarter alone would put the two out of
+    step.
 
     Args:
         body: Wrapper-free DEFAULT pattern body (e.g. ``'git diff:*'``).
 
     Returns:
-        Tuple of ``(cmd_tokens, args_part)`` where ``cmd_tokens`` is a list of
-        whitespace-split tokens from the command portion and ``args_part`` is
-        the args portion (e.g. ``'*'``).
+        ``(cmd_tokens, args_part)`` -- the command part split on whitespace, and
+        the stripped args part, empty when ``body`` holds no ``:``.
     """
     if ":" in body:
         colon_idx = body.index(":")
@@ -48,9 +47,9 @@ def default_prefix_tokens(body: str) -> Optional[List[str]]:
         body: A wrapper-free pattern body.
 
     Returns:
-        The command tokens (e.g. ``['uv', 'run', 'alembic']``) when ``body`` is a
-        DEFAULT prefix pattern with a ``*``/``**`` argument tail, else ``None``
-        (non-DEFAULT patterns are not analysed for overlap here).
+        The command tokens (e.g. ``['uv', 'run', 'alembic']``), or ``None`` when
+        *body* is not DEFAULT or its args part is anything other than ``*`` or
+        ``**`` -- so ``'git commit:-m *'`` and a bare ``'ls'`` both give ``None``.
     """
     ptype, inner = parse_pattern(body, extended_syntax=True)
     if ptype != PatternType.DEFAULT:
@@ -63,18 +62,23 @@ def default_prefix_tokens(body: str) -> Optional[List[str]]:
 
 def prefixes_overlap(a: List[str], b: List[str]) -> bool:
     """
-    Return whether two DEFAULT command prefixes share a command.
+    Return whether one command-prefix token sequence is a prefix of the other.
 
-    Two prefix patterns match a common command exactly when one token sequence is
-    a prefix of the other (e.g. ``['uv','run']`` and ``['uv','run','alembic']``
-    both match ``uv run alembic ...``).
+    Prefix containment is SUFFICIENT for the patterns those tokens came from to
+    match a command in common, but not necessary -- so ``False`` here is not
+    evidence that they are disjoint.
+    :func:`toolguard.permissions.match_command` glues the trailing ``*`` onto
+    the last token with no separator, so ``git commit:*`` and
+    ``git commit-tree:*`` both match ``git commit-tree abc`` while their token
+    lists diverge at the second token.
 
     Args:
         a: First command-prefix token list.
         b: Second command-prefix token list.
 
     Returns:
-        ``True`` when their command-spaces intersect.
+        ``True`` when one list is a prefix of the other; an empty list is a
+        prefix of anything.
     """
     n = min(len(a), len(b))
     return a[:n] == b[:n]

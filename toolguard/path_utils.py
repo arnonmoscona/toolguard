@@ -1,38 +1,8 @@
 """
-Low-level filesystem path helpers shared across toolguard.
+Low-level filesystem path helpers: the bounded walk up the parent directories,
+the project-root marker sets, and project-root resolution.
 
-Leaf module: it imports only the standard library, so any module (including
-low-level ones like :mod:`toolguard.config` and :mod:`toolguard.env_config`) can
-use it without risking an import cycle. Notably, :mod:`toolguard.hook` (the live
-runtime hook) imports :mod:`toolguard.config`/:mod:`toolguard.env_config`
-directly, and :mod:`toolguard.tools` is documented as deliberately segregated
-from that runtime path -- so anything shared with the hook's config/env loaders
-must live in a leaf module like this one, never in :mod:`toolguard.tools`.
-
-It hosts:
-
-* :func:`iter_dirs_upward` / :func:`find_nearest_marker` -- the single bounded
-  "climb toward home" walk-up that several root-finders previously duplicated.
-* :data:`STRONG_PROJECT_ANCHORS` / :data:`CONFIG_ROOT_INDICATORS` /
-  :data:`DEFAULT_INDICATORS` -- the canonical, shared marker sets (TOO-15).
-* :func:`resolve_project_root` (with :class:`RootStatus` /
-  :class:`RootCandidate` / :class:`ProjectRootResolution`) -- the single
-  primitive (TOO-15) that implements BOTH walk-up shapes previously duplicated
-  across :mod:`toolguard.config`, :mod:`toolguard.env_config`, and
-  :mod:`toolguard.tools.project_root`:
-
-  * ``strict=True`` ("nearest marker of any kind wins", a single flat walk-up
-    over the given ``indicators``): used by the runtime config/env loaders,
-    which only ever need one unambiguous directory and never distinguish
-    marker "trust tiers".
-  * ``strict=False`` (the default; "climb fully for the anchor tier first, and
-    only fall back to the weaker build-manifest tier -- as an ask-first
-    ``AMBIGUOUS`` proposal -- when no anchor exists anywhere"): used by the
-    migration safety gate, which must never silently pick the wrong repo
-    grain (a build manifest can sit in a sub-package below the real root).
-
-  :mod:`toolguard.tools.project_root` re-exports this primitive unchanged for
-  its existing callers (``migration_gate.py``, ``corpus.py``) and their tests.
+Stdlib only, importing nothing from toolguard: it is a foundation-layer leaf.
 """
 
 from dataclasses import dataclass
@@ -43,17 +13,17 @@ from typing import Iterable, Iterator, List, Optional, Tuple
 
 def iter_dirs_upward(start: Path) -> Iterator[Path]:
     """
-    Yield ``start`` and each parent directory up to (and including) the home dir.
+    Yield ``start``, then each parent, stopping at ``Path.home()`` or at the top
+    of the path -- ``/`` for an absolute path, ``.`` for a relative one.
 
-    The walk stops at the user's home directory or the filesystem root, so it
-    never escapes above the user's home.  Both the stopping directory and
-    ``start`` itself are yielded.
+    Home is recognised by exact equality with ``Path.home()``, so a walk that
+    starts outside home never meets it and runs all the way to the top.
 
     Args:
         start: Directory to begin climbing from.
 
     Yields:
-        Each directory from ``start`` upward, inclusive of the stopping point.
+        Each directory from ``start`` upward, including the stopping point.
     """
     home = Path.home()
     current = start
@@ -66,11 +36,9 @@ def iter_dirs_upward(start: Path) -> Iterator[Path]:
 
 def find_nearest_marker(start: Path, markers: Iterable[str]) -> Optional[Path]:
     """
-    Return the nearest ancestor (including ``start``) that holds any marker.
+    Return the nearest directory at or above ``start`` holding any of ``markers``.
 
-    Climbs from ``start`` toward the home directory and returns the first
-    directory containing any of ``markers``, or ``None`` when none is found within
-    the bounded walk-up.
+    Stops at the home directory or the top, whichever comes first.
 
     Args:
         start: Directory to begin the search from.
@@ -78,7 +46,8 @@ def find_nearest_marker(start: Path, markers: Iterable[str]) -> Optional[Path]:
             'pyproject.toml')``).
 
     Returns:
-        The nearest directory containing a marker, or ``None``.
+        The nearest directory containing a marker, or ``None`` when the walk
+        finds none.
     """
     marker_tuple = tuple(markers)
     for directory in iter_dirs_upward(start):
@@ -88,28 +57,21 @@ def find_nearest_marker(start: Path, markers: Iterable[str]) -> Optional[Path]:
     return None
 
 
-# Strong project anchors, in precedence order: a version-control root (``.git``,
-# ``.hg``, ``.jj``) or an explicit Claude Code project marker (``.claude``
-# directory, ``CLAUDE.md`` file) is unambiguous evidence of a project root --
-# the SAME trust tier as version control, not a weaker "ask first" candidate
-# (TOO-15). This is the single canonical marker tuple; nothing else in the
-# codebase should hardcode its own copy.
+#: Markers that identify a project root on their own: a version-control root
+#: (``.git``, ``.hg``, ``.jj``) or an explicit Claude Code project marker
+#: (``.claude`` directory, ``CLAUDE.md`` file). The tiered resolution below
+#: trusts these over build manifests, which can sit in a sub-package well below
+#: the real root.
 STRONG_PROJECT_ANCHORS: Tuple[str, ...] = (".git", ".hg", ".jj", ".claude", "CLAUDE.md")
 
-# The marker set for the "nearest marker of any kind wins" (strict) resolution
-# used by toolguard.config.find_project_root and
-# toolguard.env_config.find_project_root -- the runtime config/env loaders. It
-# is deliberately narrower than DEFAULT_INDICATORS below (no package.json/
-# go.mod/Cargo.toml/... ) because those two loaders have never searched for
-# non-Python build manifests; only pyproject.toml plus the strong anchors.
+#: Marker set for config-root discovery: the strong anchors plus
+#: ``pyproject.toml``, and nothing else -- narrower than
+#: :data:`DEFAULT_INDICATORS`, which also lists non-Python build manifests.
 CONFIG_ROOT_INDICATORS: Tuple[str, ...] = STRONG_PROJECT_ANCHORS + ("pyproject.toml",)
 
-# Default, DEFAULTED-and-NON-AUTHORITATIVE indicator list for the tiered
-# (strict=False) migration-gate resolution.  It exists only to PROPOSE
-# candidate roots and reduce prompting; it never has to be complete, and the
-# caller may extend it.  STRONG_PROJECT_ANCHORS come first (the safety
-# anchor tier); the rest are build manifests used only to suggest a candidate
-# when no anchor exists.
+#: Default ``indicators`` for :func:`resolve_project_root`: the strong anchors
+#: followed by build manifests. Deliberately neither authoritative nor
+#: complete -- a caller may pass its own list.
 DEFAULT_INDICATORS: Tuple[str, ...] = STRONG_PROJECT_ANCHORS + (
     "pyproject.toml",
     "package.json",
@@ -126,17 +88,13 @@ class RootStatus(str, Enum):
     Classification of a project-root resolution.
 
     Attributes:
-        RESOLVED_OVERRIDE: An explicit, persisted user override is in effect.
-        RESOLVED_ANCHOR: A project anchor was found -- either a strong anchor
-            (version control, or a Claude Code ``.claude``/``CLAUDE.md``
-            marker) in the tiered (``strict=False``) resolution, or the
-            nearest marker of any kind in the flat (``strict=True``)
-            resolution. In both cases this is the safe migration boundary /
-            unambiguous root.
+        RESOLVED_OVERRIDE: An explicit ``override`` was supplied and honoured.
+        RESOLVED_ANCHOR: A root was found by climbing -- a strong anchor in the
+            tiered (``strict=False``) resolution, or the nearest marker of any
+            kind in the flat (``strict=True``) one.
         AMBIGUOUS: Tiered resolution only: no anchor, but weaker build-manifest
-            markers offer candidate roots; a caller must disambiguate (ask the
-            user) before migrating. Never produced in ``strict=True`` mode.
-        NONE: No marker at all -- not safe to migrate; refuse.
+            markers offer candidate roots for the caller to choose between.
+        NONE: Nothing found.
     """
 
     RESOLVED_OVERRIDE = "resolved_override"
@@ -153,9 +111,8 @@ class RootCandidate:
     Attributes:
         path: Directory containing the marker.
         marker: The marker file/dir name that was found (e.g. ``'pyproject.toml'``).
-        is_anchor: Whether the marker is a strong project anchor (version
-            control, or a Claude Code project marker) as opposed to a weaker,
-            ask-first build-manifest marker.
+        is_anchor: Whether *marker* is one of :data:`STRONG_PROJECT_ANCHORS`
+            rather than a weaker build manifest.
     """
 
     path: Path
@@ -172,11 +129,10 @@ class ProjectRootResolution:
         status: The :class:`RootStatus` classification.
         root: The resolved root directory when ``status`` is a ``RESOLVED_*``
             value, else ``None``.
-        candidates: Candidate roots to propose when ``status`` is ``AMBIGUOUS``
-            (in nearest-first order); empty otherwise.
-        reason: A calibrated, render-ready explanation.  It deliberately never
-            claims a migration is "safe" -- only that a boundary was or was not
-            unambiguously found.
+        candidates: Candidate roots when ``status`` is ``AMBIGUOUS``, nearest
+            first; empty otherwise. One entry per matching directory-and-marker
+            pair, so a directory holding two build manifests appears twice.
+        reason: Render-ready explanation of what was found.
     """
 
     status: RootStatus
@@ -191,28 +147,12 @@ class ProjectRootResolution:
 
     @property
     def safe_to_migrate(self) -> bool:
-        """
-        Whether the gate may migrate without further user input.
-
-        Only an anchor-resolved root or an explicit override is sufficient; an
-        ``AMBIGUOUS`` or ``NONE`` result must be escalated (ask) or refused.
-        """
+        """Whether a caller may migrate without asking the user."""
         return self.is_resolved
 
 
 def _nearest_anchor(start: Path, markers: Tuple[str, ...]) -> Optional[RootCandidate]:
-    """
-    Return the nearest strong-anchor root climbing up from ``start``, or ``None``.
-
-    Args:
-        start: Directory to start from.
-        markers: Anchor marker names to look for (subset of
-            :data:`STRONG_PROJECT_ANCHORS`).
-
-    Returns:
-        The nearest :class:`RootCandidate` whose directory holds an anchor
-        marker, or ``None`` when none is found within the bounded walk-up.
-    """
+    """Nearest directory at or above ``start`` holding an anchor marker, or ``None``."""
     for directory in iter_dirs_upward(start):
         for marker in markers:
             if (directory / marker).exists():
@@ -223,16 +163,7 @@ def _nearest_anchor(start: Path, markers: Tuple[str, ...]) -> Optional[RootCandi
 def _all_non_anchor_candidates(
     start: Path, markers: Tuple[str, ...]
 ) -> List[RootCandidate]:
-    """
-    Collect every non-anchor marker directory climbing up from ``start``.
-
-    Args:
-        start: Directory to start from.
-        markers: Non-anchor (weaker, ask-first) indicator names to look for.
-
-    Returns:
-        Candidates in nearest-first order (one per directory+marker that matches).
-    """
+    """Every directory-and-marker match at or above ``start``, nearest first."""
     candidates: List[RootCandidate] = []
     for directory in iter_dirs_upward(start):
         for marker in markers:
@@ -251,41 +182,32 @@ def resolve_project_root(
     indicators: Tuple[str, ...] = DEFAULT_INDICATORS,
 ) -> ProjectRootResolution:
     """
-    Resolve a project root as a structured, decision-free result.
+    Resolve a project root, and classify the result rather than acting on it.
 
-    Two resolution shapes, selected by ``strict``:
+    Two shapes, selected by ``strict``:
 
-    * ``strict=False`` (the default -- the migration-gate shape): an explicit
-      ``override`` wins; else the nearest strong-anchor root (the canonical,
-      repo-grain boundary, climbed for FIRST across the whole walk-up); else
-      the weaker build-marker candidates are returned as ``AMBIGUOUS``
-      proposals for a caller to disambiguate; else ``NONE`` (refuse to
-      migrate).
-    * ``strict=True`` (the config/env-loader shape): an explicit ``override``
-      still wins; else a SINGLE flat walk-up treating every marker in
-      ``indicators`` as equally trusted, returning the directory holding the
-      NEAREST marker of any kind (status ``RESOLVED_ANCHOR``); else ``NONE``.
-      This mode NEVER returns ``AMBIGUOUS`` -- callers that only need one
-      unambiguous directory (not a disambiguation prompt) get a direct answer.
+    * ``strict=False`` (the default, tiered): an ``override`` wins; else the
+      nearest strong anchor, searched for across the whole walk-up before any
+      weaker marker is considered; else every build-manifest match is returned
+      as ``AMBIGUOUS`` candidates; else ``NONE``.
+    * ``strict=True`` (flat): an ``override`` still wins; else the nearest
+      marker of any kind in ``indicators``, all equally trusted, as
+      ``RESOLVED_ANCHOR``; else ``NONE``. Never returns ``AMBIGUOUS``.
 
-    This function is pure and never prompts -- the ask/refuse decision belongs
-    to the caller.
+    Decides nothing and never prompts, but is not pure: it reads the
+    filesystem, and the current directory when ``start_dir`` is omitted.
 
     Args:
-        start_dir: Directory to resolve from (defaults to the current directory).
-        strict: Selects the flat "nearest marker wins" shape instead of the
-            tiered anchor-first shape. Defaults to ``False`` (unchanged
-            behaviour for existing callers).
-        override: An explicit, previously-persisted project root.  When given
-            it is honoured unconditionally (status ``RESOLVED_OVERRIDE``),
-            regardless of ``strict``.
-        indicators: The detection markers to consider.  Defaults to
-            :data:`DEFAULT_INDICATORS`; the list is a non-authoritative
-            convenience and may be customised by the caller.  In the
-            ``strict=False`` shape, any entry in :data:`STRONG_PROJECT_ANCHORS`
-            is treated as a strong anchor and the rest are weaker
-            proposal-only markers; in the ``strict=True`` shape all entries
-            are equally trusted.
+        start_dir: Directory to resolve from; defaults to the current
+            directory. Passed through ``Path.resolve`` before the walk.
+        strict: Select the flat shape instead of the tiered one.
+        override: An explicit project root, honoured unconditionally and
+            regardless of ``strict``. Resolved but NOT checked for existence --
+            a path that is not there is returned as the root.
+        indicators: The markers to consider, defaulting to
+            :data:`DEFAULT_INDICATORS`. In the tiered shape, entries that are
+            in :data:`STRONG_PROJECT_ANCHORS` form the anchor tier and the rest
+            are proposal-only; ``strict=True`` treats them all alike.
 
     Returns:
         A :class:`ProjectRootResolution` describing what was found.
@@ -365,21 +287,10 @@ def resolve_project_root(
 
 def require_project_root(start_dir: Optional[Path] = None) -> Path:
     """
-    Resolve a project root in the config/runtime shape, or raise.
+    Resolve a project root in the flat (``strict=True``) shape, or raise.
 
-    Climbs from *start_dir* (or the current directory) to the nearest marker --
-    a strong project anchor (``.git``/``.hg``/``.jj``/``.claude``/``CLAUDE.md``)
-    or ``pyproject.toml`` -- stopping at the home directory or filesystem root.
-    A thin wrapper around :func:`resolve_project_root` in its ``strict=True``
-    ("nearest marker of any kind wins") shape (TOO-15).
-
-    This lives in the foundation layer deliberately (TOO-45). Callers that need
-    a project root are spread across layers -- configuration discovery and the
-    logging path both need one -- and routing them through a config-layer
-    helper is what pinned :mod:`toolguard.log_writer` above ``config`` and made
-    a cross-cutting concern unreachable from below it. Wrapping a foundation
-    primitive is not a reason for a caller to inherit a config-layer
-    dependency.
+    Climbs from *start_dir* (or the current directory) to the nearest
+    :data:`CONFIG_ROOT_INDICATORS` marker.
 
     Args:
         start_dir: Directory to start searching from. Defaults to the current
@@ -389,7 +300,7 @@ def require_project_root(start_dir: Optional[Path] = None) -> Path:
         Path to the project root.
 
     Raises:
-        RuntimeError: If no project root can be established.
+        RuntimeError: If the walk-up finds no marker.
     """
     start = Path(start_dir) if start_dir else Path.cwd()
     resolution = resolve_project_root(

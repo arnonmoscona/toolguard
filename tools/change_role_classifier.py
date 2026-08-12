@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """
-Dev-only instrument (repo-root ``tools/``, NOT shipped -- see ``pyproject.toml``'s
-``[tool.hatch.build.targets.wheel] packages`` list, which does not include this
-directory) built for the TOO-45 architecture experiment: implement the same small
-requirement in two candidate codebases and measure which one absorbed it better.
+Dev-only measurement instrument, not shipped (the wheel's ``packages`` list is
+``["toolguard"]``). Built for the TOO-45 architecture experiment: implement the
+same small requirement in two candidate codebases and ask which one absorbed it
+better.
 
-Counting changed FILES measures the size of the requirement, not the quality of the
-code that received it. This tool measures something sharper: for every place a
-"subject" identifier (a field/config-key/flag introduced or changed by the
+Counting changed FILES measures the size of the requirement, not the quality of
+the code that received it. This tool measures something sharper: for every place
+a "subject" identifier (a field/config-key/flag introduced or changed by the
 requirement) is touched, what ROLE does it play there?
 
 - DECISION -- the subject participates in a branch, comparison, boolean operation,
@@ -22,39 +22,32 @@ requirement) is touched, what ROLE does it play there?
   itself, not later uses of it), type annotations, and scope declarations
   (``global``/``nonlocal``).
 
-A single occurrence can carry more than one role (see the walrus-in-an-if hazard
-below); every role found is reported. Where a single label is needed the
-precedence is DECISION > WRITE > CONDUIT > CEREMONY.
+One occurrence can carry more than one role, and every role found is reported.
+Where a single label is needed the precedence is
+DECISION > WRITE > CONDUIT > CEREMONY.
 
-No comparative ratio is published (retired after adversarial review)
------------------------------------------------------------------------
-This tool used to publish a CONDUIT-to-DECISION ratio as a headline comparative
-number. An independent adversarial review showed that is the wrong measure for
-the question, not merely a buggy one: a purely mechanical, architecture-neutral
-edit (``sed 's/entry\\.subject)/entry.subject or None)/g'``) moved a tree from
-the worst possible reading to the best, and even with every role-classification
-defect fixed, a trivial short-circuit default and a real policy branch can still
-score identically. Role labels below remain DESCRIPTIVE per-location annotation
--- what is this occurrence doing, here -- and are never recombined into a single
-number. The two outputs this tool stands behind are OCCURRENCE FINDING (verified
-exact against an independent AST oracle over 394 real occurrences across five
-subjects) and the SYMBOL CLOSURE listing (see below), which surfaced a real
-structural fact TOO-45 needed: two trees can route the identical value through
-the identical two-function chain at two different module addresses.
+Role labels are per-location annotation, never a score
+--------------------------------------------------------
+Do not recombine them into a comparative number, and in particular do not restore
+the CONDUIT-to-DECISION ratio this tool used to publish. An adversarial review
+retired that ratio as the wrong measure rather than a buggy one: a mechanical,
+architecture-neutral edit (``sed 's/entry\\.subject)/entry.subject or None)/g'``)
+moved a tree from the worst possible reading to the best, and even with every
+role-classification defect fixed, a trivial short-circuit default and a real
+policy branch can score identically. What this tool stands behind is the
+occurrence list -- matching verified exact against an independent AST oracle over
+394 occurrences -- and the symbol closure listing.
 
 Symbol closure: the subject is a NAME, not a value
 ------------------------------------------------------
 A well-factored codebase routes a value through a module-level constant and a
-small accessor, which means matching the subject's literal spelling alone goes
-blindest exactly where the code is cleanest. :func:`compute_symbol_closure` grows
-a bounded, fully-audited set of additional tracked symbol names via
-DEFINITION-SITE analysis only, never name similarity: a name bound to the subject
-string, a ``def``/``class`` whose own name equals the subject, or a function that
-directly RETURNS an already-tracked symbol (a bare ``return NAME`` -- an
-accessor, not a mere consumer: see :data:`CLOSURE_RULE_RETURNS_TRACKED`'s
-docstring for why "any reference anywhere in the body" was tried and rejected).
-``--closure-hops`` (default 2) bounds the growth; every member and every
-excluded-by-hop-limit candidate is printed with its hop, its rule, and why.
+small accessor, so matching the subject's literal spelling alone goes blindest
+exactly where the code is cleanest. :func:`compute_symbol_closure` grows a bounded
+set of additional tracked names by DEFINITION-SITE analysis only, never name
+similarity: a name assigned the subject string, a name assigned from an
+already-tracked name, or a function whose return/yield expression mentions an
+already-tracked name. ``--closure-hops`` (default 2) bounds the growth; both the
+members and the candidates cut off by the limit are listed.
 
 Opaque hops: measuring what closure cannot follow
 ------------------------------------------------------
@@ -62,88 +55,68 @@ Closure cannot trace a tracked symbol's value through an ordinary function-local
 variable (``value = self.metadata.get(THE_KEY); return value is True`` -- the
 final comparison is invisible). Rather than solving intra-procedural dataflow,
 the tool COUNTS these crossings (:func:`_find_opaque_hops_in_scope`), split
-production/test, printed next to the role breakdown -- an asymmetry between two
+production/test, printed next to the role breakdown: an asymmetry between two
 trees' opaque-hop counts means their DECISION counts are not a fair comparison
 even when the role counts read identically.
 
-Stdlib only -- this project's runtime carries no third-party dependency, and this
-tool follows the same discipline so it never needs one either.
+Stdlib only, like toolguard's own runtime.
 
 Never match on name substrings
 -------------------------------
-Resolution is entirely via ``ast`` node identity: exact identifier equality on
-``ast.Name.id`` / ``ast.Attribute.attr`` / ``ast.arg.arg`` / ``ast.alias.name`` /
-``ast.alias.asname`` / ``ast.keyword.arg`` / the plain-string fields on
-``ExceptHandler``, ``MatchAs``, ``MatchStar``, ``MatchMapping``, ``Global`` and
-``Nonlocal``. A subject named ``mode`` never matches ``auto_mode`` or
-``mode_string`` -- Python identifiers are exact tokens, never substrings, in every
-one of those AST fields. This is a hard requirement here: an earlier instrument in
-this same ticket over- and under-counted by doing exactly the substring match this
-tool refuses to do.
+Resolution is exact identifier equality on ``ast`` node fields, so a subject named
+``mode`` never matches ``auto_mode`` or ``mode_string``. This is a hard
+requirement rather than an implementation detail: an earlier instrument on this
+same ticket substring-matched, and both over- and under-counted as a result.
 
 Scope-aware alias tracking (single hop, per scope, branch-insensitive)
 ------------------------------------------------------------------------
 A subject that flows through an intermediate local variable before reaching a
 branch is still attributed to the subject: ``tmp = subject`` is classified at the
 assignment (CONDUIT -- the hop), and every later ``tmp`` use within the *same*
-scope is classified by ITS OWN context and tagged ``via_alias`` (e.g. ``if tmp:``
-becomes DECISION). This is a fixed-point closure over direct ``name = name``
+scope is classified by ITS OWN context and tagged ``via_alias``, so ``if tmp:``
+becomes DECISION. This is a fixed-point closure over direct ``name = name``
 assignments, computed per lexical scope (module / function / class body,
 including nested control-flow blocks but NOT nested function/class/lambda
 bodies), and is deliberately NOT flow- or branch-sensitive -- see
 :data:`KNOWN_LIMITATIONS`.
 
-Never silently skip anything
-------------------------------
+Parse failures and unrecognised constructs
+--------------------------------------------
 A file that fails to parse is named in ``parse_failures`` and excluded from the
-counts (stated explicitly, not folded into a zero). Any AST construct this tool
-does not have a rule for produces an explicit UNCLASSIFIED occurrence, counted and
-printed separately -- never dropped and never counted as zero. See
-:data:`KNOWN_LIMITATIONS` for what this tool structurally cannot see at all
+counts rather than folded into a zero. An AST construct this tool has no rule for
+produces an explicit UNCLASSIFIED occurrence, counted and printed separately.
+:data:`KNOWN_LIMITATIONS` lists what the tool structurally cannot see at all
 (``getattr``/``**kwargs`` reach, runtime dispatch, a decision expressed by
 choosing between call sites, a subject renamed between two trees).
 
 Test vs. production, by path
 -------------------------------
-A file is TEST code if any path component is ``test``/``tests``/``spec``/``specs``,
-the filename is ``conftest.py``, or the filename matches ``test_*.py`` /
-``*_test.py``. Everything else is production. If the analysis root itself sits
-inside a test-like directory, every file under it is treated as test regardless
-of its relative path (pointing ``--tree`` directly at a ``test/`` subtree used to
-silently classify everything as production). This is a path heuristic, not
-semantic analysis, and has one known, undecidable-by-filename-alone blind spot
-documented in :data:`KNOWN_LIMITATIONS`. The full file lists behind this split
-are always printed, not just counts, so a misfiled tree is visible at a glance.
+Decided by :func:`is_test_path`. The two tree modes additionally apply
+:func:`_root_forces_test_context`, for a root that is itself inside a test-like
+directory; git-diff mode has no such root and does not. The full file lists behind
+the split are always printed, not just counts, so a misfiled tree is visible at a
+glance.
 
 Three input modes
 --------------------
 ``--tree DIR``
     Single source tree. EVERY occurrence of the subject anywhere in the tree
     counts as a "changed location" -- correct for a freshly-introduced identifier,
-    where there is no prior state to diff against (this is the mode used to
-    compare the two TOO-45 architecture candidates, which are alternate
-    universes implementing the same requirement, not before/after of one tree).
+    where there is no prior state to diff against.
 
 ``--old DIR --new DIR``
     Two source trees of the SAME codebase. Restricts analysis to lines that
     differ (added or replaced) in the NEW tree, computed per-file via
-    :mod:`difflib` against the CHANGED STATEMENT's full line span, not just the
-    occurrence's own line (a subject moved from a call argument into a branch
-    test, or a DECISION's comparand edited, used to report zero occurrences
-    with zero honesty-bucket signal -- see :func:`_enclosing_statement_span`).
-    Files present only in OLD are reported as removed (their content cannot be
-    classified against the NEW tree and is named, not silently dropped).
+    :mod:`difflib` against the CHANGED STATEMENT's full line span rather than the
+    occurrence's own line (see :func:`_enclosing_statement_span`). An OLD path with
+    no NEW counterpart is reported as removed unless its content matches a new path,
+    in which case it is treated as a move and diffed against it.
 
 ``--repo DIR --base REV --head REV``
-    Git-diff mode. Uses ``git diff --name-status -M`` (rename detection) to find
-    changed ``*.py`` files and resolve a renamed file's pre-image from its OLD
-    path -- without ``-M``, a pure ``git mv`` with byte-identical content has no
-    pre-image at the new path, so the ENTIRE file counted as changed, importing
-    phantom counts on exactly the rename-heavy diffs an architecture-overhaul
-    comparison produces. Uses ``git show`` to read content, decoded via
-    :func:`_decode_python_bytes` (PEP 263 cookie / BOM aware, never crashes on
-    undecodable bytes), then applies the same statement-span changed-line
-    restriction as ``--old``/``--new``.
+    Git-diff mode. ``git diff --name-status -M`` finds the changed ``*.py`` files
+    and resolves a renamed file's pre-image from its OLD path; ``git show`` reads
+    the content, decoded via :func:`_decode_python_bytes`. The same
+    statement-span changed-line restriction as ``--old``/``--new`` then applies.
 
 Usage::
 
@@ -421,14 +394,11 @@ def discover_python_files(root: Path) -> list[Path]:
     """Every ``*.py`` file under *root*, as paths relative to *root*, skipping build/VCS/cache
     noise directories. Sorted for deterministic output.
 
-    ``recurse_symlinks=True`` -- adversarially found (N4, second review): ``Path.rglob``
-    defaults ``recurse_symlinks=False`` as of Python 3.13, so a ``*.py`` file reachable only
-    through a symlinked package directory was silently absent from ``files_analyzed``,
-    ``production_files``/``test_files``, AND ``parse_failures`` -- not merely uncounted, but
-    invisible to every honesty bucket at once, since discovery itself never yielded the path.
-    ``rglob`` with ``recurse_symlinks=True`` guards against symlink cycles internally
-    (CPython's own glob implementation tracks visited directories), so no separate cycle guard
-    is added here."""
+    ``recurse_symlinks=True`` because ``Path.rglob`` defaults it to False: a ``*.py`` file
+    reachable only through a symlinked package directory is otherwise absent from
+    ``files_analyzed``, ``production_files``/``test_files`` and ``parse_failures`` alike,
+    because discovery never yields the path at all. Nothing here deduplicates, so a directory
+    symlink that loops back into the tree makes one file discoverable under many paths."""
     found: list[Path] = []
     for path in root.rglob("*.py", recurse_symlinks=True):
         if any(
@@ -444,20 +414,14 @@ TEST_INFRA_FILENAMES = frozenset({"conftest.py"})
 
 
 def is_test_path(relpath: Path) -> bool:
-    """Test-vs-production rule for this tool, applied uniformly and stated in the output: a
-    path is TEST code if any directory component is exactly one of :data:`TEST_DIR_NAMES`
-    (`test`/`tests`/`spec`/`specs`), the filename is a known test-infrastructure filename
-    (:data:`TEST_INFRA_FILENAMES` -- `conftest.py`), or the filename matches
-    `test_*.py`/`*_test.py`. Everything else is production.
+    """True if *relpath* is TEST code: any directory component is exactly one of
+    :data:`TEST_DIR_NAMES`, the filename is in :data:`TEST_INFRA_FILENAMES`, or the filename
+    matches `test_*.py`/`*_test.py`. Everything else is production.
 
-    This is a path heuristic, not semantic analysis, and it has a known, irreducible blind
-    spot in one direction: a file genuinely named `test_helpers.py` that is itself shared
-    PRODUCTION support code (not a test module) cannot be told apart from a genuine test
-    module by filename alone -- adversarially found (F6) and not fixed here, because doing so
-    would require guessing intent. What IS fixed: `spec`/`specs` directories and `conftest.py`
-    (both previously silently misclassified as production), and the per-file classification is
-    now printed in full (see ``print_text_report``'s TEST/PRODUCTION FILE LISTS section) so a
-    misfiled tree is visible at a glance rather than only affecting silent counts."""
+    A path heuristic, not semantic analysis, with an irreducible blind spot in one direction:
+    a file genuinely named `test_helpers.py` that is itself shared PRODUCTION support code
+    cannot be told apart from a real test module by filename alone. Resolving that would mean
+    guessing intent, so the per-file classification is printed in full instead."""
     if any(part in TEST_DIR_NAMES for part in relpath.parts[:-1]):
         return True
     name = relpath.name
@@ -466,30 +430,22 @@ def is_test_path(relpath: Path) -> bool:
     return name.startswith("test_") or name.endswith("_test.py")
 
 
+#: How many of *root*'s own TRAILING path components :func:`_root_forces_test_context`
+#: inspects. Bounded deliberately: checking the whole absolute ancestor chain lets any
+#: unrelated ancestor named "test"/"spec" -- a home directory, a scratch-space convention,
+#: anything upstream that has nothing to do with the tree's content -- classify the entire
+#: tree as test code and empty its production bucket. A small trailing window still catches
+#: the intended case, ``--tree path/to/test/unit``.
 _ROOT_TEST_CONTEXT_WINDOW = 4
-# How many of *root*'s own TRAILING path components _root_forces_test_context inspects.
-# Bounded deliberately (second adversarial review, N7): the first version checked
-# root.resolve().parts in full, i.e. every ancestor directory all the way to the filesystem
-# root -- so a throwaway tree checked out under any unrelated ancestor directory named
-# "test"/"spec" (a machine's home directory, a scratch-space convention, anything upstream of
-# the tree that has nothing to do with its own content) silently zeroed out its ENTIRE
-# production bucket. Measured: a tree at ".../spec/candidateA/" containing only
-# "pkg/prod.py" reported production files: 0, production occurrences: 0. A small trailing
-# window still catches the intended case (`--tree path/to/test/unit`, `--tree path/to/spec`)
-# while bounding the blast radius of an unrelated distant ancestor.
 
 
 def _root_forces_test_context(root: Path) -> bool:
-    """True if *root* itself -- the tree or subtree the tool was pointed AT -- already sits
-    inside a test-like directory within the last :data:`_ROOT_TEST_CONTEXT_WINDOW` path
-    components (e.g. ``--tree path/to/test/unit``). Relative-path classification alone cannot
-    see this, because the 'test' path component was stripped off by being the analysis ROOT
-    rather than appearing in any reported relative path -- adversarially found (F6, first
-    review): pointing `--tree` at a test subdirectory silently classified everything as
-    production unless the filename itself also matched. When true, every file under *root* is
-    treated as test code regardless of its relative path. Bounded to a trailing window, not the
-    full absolute ancestor chain -- see :data:`_ROOT_TEST_CONTEXT_WINDOW`'s comment for why
-    (N7, second review)."""
+    """True if *root* itself -- the tree or subtree the tool was pointed AT -- sits inside a
+    test-like directory within its last :data:`_ROOT_TEST_CONTEXT_WINDOW` path components
+    (e.g. ``--tree path/to/test/unit``). Relative-path classification cannot see this, because
+    that 'test' component was consumed by being the analysis ROOT rather than appearing in any
+    reported relative path. When true, every file under *root* is treated as test code
+    regardless of its relative path."""
     parts = root.resolve().parts
     window = parts[-_ROOT_TEST_CONTEXT_WINDOW:] if parts else parts
     return any(part in TEST_DIR_NAMES for part in window)
@@ -516,8 +472,8 @@ class Occurrence:
     line: int
     col: int
     subject: str
-    kind: str  # name | attribute | arg | import-alias | keyword-name | except-name |
-    # match-as | match-star | match-mapping-rest | global | nonlocal
+    kind: str  # name | attribute | arg | def-name | import-alias | keyword-name |
+    # except-name | match-as | match-star | match-mapping-rest | global | nonlocal
     roles: tuple[str, ...]
     via_alias: bool
     alias_chain: tuple[str, ...]
@@ -531,8 +487,8 @@ class Occurrence:
 
 @dataclasses.dataclass(frozen=True)
 class StringMention:
-    """A string-literal constant whose value exactly equals a subject -- surfaced for honesty
-    (requirement 2/3: don't silently skip), never classified into a role."""
+    """A string-literal constant whose value exactly equals a subject. Surfaced so a
+    string-keyed use of the subject is at least visible; never classified into a role."""
 
     file: str
     line: int
@@ -544,13 +500,10 @@ class StringMention:
 @dataclasses.dataclass(frozen=True)
 class OpaqueHop:
     """A tracked symbol's value crosses into a fresh, untracked LOCAL name that is then used
-    again -- e.g. ``value = self.metadata.get(THE_KEY); return value is True``. This tool
-    cannot see what happens to *local_name* past this point (that would be intra-procedural
-    dataflow, out of scope by design -- see KNOWN LIMITATIONS), so every one of these is a
-    place a DECISION could be hiding, uncounted. Measured, not classified: see
-    :func:`_find_opaque_hops_in_scope`'s docstring for the exact rule, and the printed
-    OPAQUE HOPS section for why a large difference between two trees means their DECISION
-    counts are not a fair comparison."""
+    again -- e.g. ``value = self.metadata.get(THE_KEY); return value is True``. What happens
+    to *local_name* past this point is intra-procedural dataflow, out of scope by design, so
+    each of these is a place a DECISION could be hiding, uncounted. Measured, not classified;
+    :func:`_find_opaque_hops_in_scope` has the exact rule."""
 
     file: str
     line: int
@@ -567,10 +520,9 @@ class FileAnalysis:
     occurrences: list[Occurrence]
     string_mentions: list[StringMention]
     opaque_hops: list[OpaqueHop] = dataclasses.field(default_factory=list)
+    #: Set whether or not anything matched, so the per-bucket file lists can name files with
+    #: zero occurrences too.
     is_test: bool = False
-    # File-level test/production classification, independent of whether anything was found in
-    # it -- needed so the full file-list-per-bucket report (F6) can include files with zero
-    # occurrences too, not only ones that happened to match the subject.
 
 
 # --------------------------------------------------------------------------
@@ -670,20 +622,15 @@ def _build_index(tree: ast.Module) -> _TreeIndex:
 # Role classification
 # --------------------------------------------------------------------------
 
-_TRANSPARENT = (
-    object()
-)  # sentinel: keep walking up, this construct doesn't decide the role
-_CONTINUE = (
-    object()
-)  # sentinel: like _TRANSPARENT, but the caller must also record a role
-# (see _governing_role's docstring for why this exists -- a real, adversarially-found defect)
+_TRANSPARENT = object()  # keep walking up; this construct doesn't decide the role
+_CONTINUE = object()  # like _TRANSPARENT, but the caller must also record a role
 
 
 def _direct_role_for_ctx(node: ast.AST) -> frozenset[str] | None:
-    """Python's own compiler already tells us, via ``.ctx``, whether a Name/Attribute/Subscript
-    is a binding target (Store) or a deletion (Del) -- both are WRITE, decisively, with no
-    hand-rolled target detection needed. Returns None for Load context (or no ctx at all),
-    meaning the caller must walk up to find the governing construct."""
+    """WRITE for a Store or Del context -- Python's own ``.ctx`` already says whether an
+    occurrence is a binding target or a deletion, so no target detection is hand-rolled here.
+    None for a Load context (or no ctx at all), meaning the caller must walk up to find the
+    governing construct."""
     ctx = getattr(node, "ctx", None)
     if isinstance(ctx, (ast.Store, ast.Del)):
         return frozenset({ROLE_WRITE})
@@ -691,11 +638,10 @@ def _direct_role_for_ctx(node: ast.AST) -> frozenset[str] | None:
 
 
 def _write_or_conduit_for_targets(targets: list[ast.expr]) -> frozenset[str]:
-    """Governs the RHS ``value`` of an Assign/AnnAssign/AugAssign: if any target persists into
-    an object or mapping (Attribute/Subscript), the value being assigned is WRITE ('serialised
-    / persisted out'). If every target is a plain local Name, the value merely flows into a
-    local variable -- CONDUIT (the alias-hop registration for that local happens separately,
-    in :func:`_compute_aliases`). Tuple/List destructuring targets are treated as CONDUIT with
+    """Role for the RHS ``value`` of an Assign/AnnAssign/AugAssign: WRITE if any target
+    persists into an object or mapping (Attribute/Subscript), CONDUIT if every target is a
+    plain local Name -- the value merely flows into a local, whose own alias hop is registered
+    separately in :func:`_compute_aliases`. Tuple/List destructuring counts as CONDUIT, with
     the alias-hop limitation documented in :data:`KNOWN_LIMITATIONS`."""
     if any(isinstance(t, (ast.Attribute, ast.Subscript)) for t in targets):
         return frozenset({ROLE_WRITE})
@@ -709,18 +655,16 @@ def _governing_role(parent: ast.AST, field: str) -> frozenset[str] | object | No
     ``(_CONTINUE, frozenset[str])`` pair (this construct DOES tag a real role -- e.g. CONDUIT
     for a call argument -- but is not itself the last word: keep walking to see whether a MORE
     governing construct exists further up, and report BOTH roles if so), or ``None`` (no rule
-    recognises this parent/field combination -- caller reports UNCLASSIFIED, never silently
-    drops it).
+    recognises this parent/field combination -- the caller reports UNCLASSIFIED rather than
+    dropping it).
 
-    ``_CONTINUE`` exists because a terminal CONDUIT here was a real, adversarially-found
-    defect: `if bool(x):`, `if x.enabled:`, `if x.is_ready():`, `if isinstance(x, str):`,
-    `if items.get(x):` and `if (found := x) is not None:` all terminated at `Call.args`/
-    `Call.func`/`Attribute.value`/`NamedExpr.value` before ever reaching the enclosing
-    `If.test`, so a decision expressed through one layer of indirection was scored as pure
-    transport -- the tool preferred copy-pasted inline checks over factored predicates. The
-    fix is a dual role, not a swap: the value genuinely DID move through the call/attribute
-    (CONDUIT is still true), AND it genuinely IS the branch's own test (DECISION is also
-    true) -- see :func:`_walk_up`."""
+    ``_CONTINUE`` earns its complexity. With a terminal CONDUIT here, `if bool(x):`,
+    `if x.enabled:`, `if x.is_ready():` and `if (found := x) is not None:` all stop at the
+    call/attribute/walrus before ever reaching the enclosing `If.test`, so a decision
+    expressed through one layer of indirection scores as pure transport -- which makes the
+    tool prefer copy-pasted inline checks over factored predicates. The fix is a dual role,
+    not a swap: the value genuinely DID move through the call (CONDUIT is still true) AND it
+    genuinely IS the branch's own test (DECISION is also true)."""
     match parent:
         case ast.Compare() if field in ("left", "comparators"):
             return frozenset({ROLE_DECISION})
@@ -769,12 +713,10 @@ def _governing_role(parent: ast.AST, field: str) -> frozenset[str] | object | No
         case ast.Yield() | ast.YieldFrom() if field == "value":
             return frozenset({ROLE_CONDUIT})
         case ast.Call() if field in ("args", "func", "keywords"):
-            # "keywords" is the gap the second adversarial review found (N5): a `keyword.value`
-            # hop's own parent is the enclosing `Call` at field "keywords" (a separate field
-            # from "args"), which had no rule -- so `if f(key=subject):` walked
-            # keyword.value -> _CONTINUE -> Call(field="keywords") -> unhandled, and the
-            # accumulated CONDUIT was returned with a note nobody saw in the text report (see
-            # print_text_report's OCCURRENCES WITH NOTES section, added in the same fix).
+            # "keywords" belongs here alongside "args": a `keyword.value` hop's own parent is
+            # the enclosing `Call` at field "keywords", a separate field, so without it
+            # `if f(key=subject):` walks keyword.value -> _CONTINUE -> unhandled construct and
+            # terminates at bare CONDUIT.
             return (_CONTINUE, frozenset({ROLE_CONDUIT}))
         case ast.keyword() if field == "value":
             return (_CONTINUE, frozenset({ROLE_CONDUIT}))
@@ -796,11 +738,9 @@ def _governing_role(parent: ast.AST, field: str) -> frozenset[str] | object | No
             return _TRANSPARENT
         case ast.Set():
             # Unlike List/Tuple, a Set literal has NO `.ctx` field at all -- Python has no
-            # set-destructuring assignment, so a set literal can only ever be a value being
-            # built (Load-equivalent). Checking `.ctx` here would always be None and always
-            # fail the isinstance check below, silently sending every set-literal element to
-            # UNCLASSIFIED -- found live via validation on real data (rule_entry.py's
-            # `KNOWN_ENRICHMENT_KEYS = frozenset({...})`), not invented.
+            # set-destructuring assignment, so a set literal is only ever a value being built.
+            # Folding it into the List/Tuple case below would test `.ctx` for None and send
+            # every set-literal element to UNCLASSIFIED.
             return _TRANSPARENT
         case ast.List() | ast.Tuple() if isinstance(
             getattr(parent, "ctx", None), ast.Load
@@ -818,14 +758,13 @@ def _governing_role(parent: ast.AST, field: str) -> frozenset[str] | object | No
 
 def _walk_up(node: ast.AST, idx: _TreeIndex) -> tuple[frozenset[str], tuple[str, ...]]:
     """Walks from a Load-context occurrence toward the root, through transparent wrappers and
-    role-tagging-but-continuing hops (``_CONTINUE`` -- see :func:`_governing_role`), until a
-    genuinely terminal governing construct is found. Roles recorded at ``_CONTINUE`` hops
-    accumulate rather than being discarded, so a subject can end up with BOTH CONDUIT (it moved
-    through a call/attribute) and DECISION (that call/attribute's result is what a branch
-    tests) -- see the F1 defect this replaced. Never returns an empty role set: a construct
+    role-tagging-but-continuing hops (``_CONTINUE``), until a terminal governing construct is
+    found. Roles recorded at ``_CONTINUE`` hops accumulate rather than being discarded, so an
+    occurrence can end up with BOTH CONDUIT (it moved through a call/attribute) and DECISION
+    (that call's result is what a branch tests). Never returns an empty role set: a construct
     with no rule, or a chain with no recorded parent, becomes UNCLASSIFIED with an explanatory
-    note UNLESS at least one real hop role was already accumulated, in which case that role is
-    returned rather than being discarded just because nothing further governs it."""
+    note -- unless a real hop role was already accumulated, which is returned rather than
+    discarded just because nothing further governs it."""
     current = node
     accumulated: set[str] = set()
     for _ in range(MAX_WALK_DEPTH):
@@ -884,10 +823,6 @@ def _classify_ctx_node(
                 extra_roles, extra_notes = _walk_up(info[0], idx)
                 if ROLE_UNCLASSIFIED not in extra_roles:
                     roles = roles | extra_roles
-                    # extra_notes is normally empty here (a successful _walk_up match carries
-                    # no notes today), but it is real data the walk gathered -- surfacing it
-                    # rather than discarding it means a future _walk_up rule that DOES attach
-                    # a note to a successful match is never silently dropped on the floor.
                     notes = (
                         notes
                         + extra_notes
@@ -969,9 +904,9 @@ def _scope_body_statements(scope_node: ast.AST) -> list[ast.stmt]:
 
 
 def _tracked_refs_in_expr(expr: ast.expr, tracked_names: set[str]) -> tuple[str, ...]:
-    """Every tracked name (Name.id or Attribute.attr) referenced ANYWHERE within *expr*, via a
-    full `ast.walk` -- not required to be the top-level node. Shared notion of "references"
-    between closure growth's return/yield scan and opaque-hop detection."""
+    """Every tracked name (Name.id or Attribute.attr) referenced anywhere within *expr* -- a
+    full ``ast.walk``, not just the top-level node. This is the shared notion of "references"
+    used by both closure growth's return/yield scan and opaque-hop detection."""
     return tuple(
         sorted(
             {
@@ -991,34 +926,25 @@ def _tracked_refs_in_expr(expr: ast.expr, tracked_names: set[str]) -> tuple[str,
 def _find_opaque_hops_in_scope(
     flat_stmts: list[ast.stmt], tracked_names: set[str], scope_is_tracked: bool = False
 ) -> list[tuple[ast.stmt, str, tuple[str, ...]]]:
-    """Two independent sources of "opaque hop", both measuring the same thing: a place this
-    tool cannot confidently attribute to a tracked symbol, even though a tracked symbol is
-    genuinely involved.
+    """Two independent sources of :class:`OpaqueHop`, both marking the same thing: a place a
+    tracked symbol is genuinely involved but cannot be confidently attributed.
 
-    1. Assignments to a plain local Name whose RHS is NOT itself a bare tracked-symbol
-       reference (that exact case is the EXISTING, followable alias-hop feature -- counting it
-       again here would double-count the same event) but DOES contain a tracked symbol
-       somewhere in a more complex expression, AND the local is referenced again (Load)
-       somewhere in this same flat scope -- e.g. `value = self.metadata.get(THE_KEY); return
-       value is True`: `THE_KEY` never appears in the RETURN's own expression (only `value`
-       does), so closure growth cannot see it, and this is the only place it becomes visible.
+    1. An assignment to a plain local Name whose RHS mentions a tracked symbol inside a larger
+       expression, where the local is then read again somewhere in this same flat scope --
+       e.g. `value = self.metadata.get(THE_KEY); return value is True`. `THE_KEY` never appears
+       in the return's own expression, so closure growth cannot see it. An RHS that IS a bare
+       tracked reference is skipped: that is the followable alias-hop feature, and counting it
+       here would double-count one event.
 
-    2. A `return`/`yield`/`yield from` VALUE EXPRESSION that references a tracked symbol, but
-       whose enclosing function did NOT end up tracked by CLOSURE_RULE_RETURNS_TRACKED (hop
-       limit exceeded, locally-bound-name shadowing, or -- defensively -- any future rule this
-       function is not aware of): a return-based safety net so an accessor-shaped function that
-       closure growth could not (for whatever reason) promote is still surfaced somewhere,
-       rather than silently disappearing. Skipped entirely when *scope_is_tracked* is True,
-       since that function's own name is already a tracked occurrence -- flagging its return
-       again here would contradict "tracked" with "opaque" for the identical location. Second
-       adversarially-found defect (N2, second review): `_find_opaque_hops_in_scope` previously
-       inspected only assignments, so `return self.metadata.get(THE_KEY)` (before closure
-       growth was widened to catch this exact one-line shape) produced zero opaque hops with
-       nothing else recording the loss -- and the tool's own KNOWN_LIMITATIONS text falsely
-       claimed this shape WAS covered by the opaque-hop count.
+    2. A `return`/`yield`/`yield from` value expression referencing a tracked symbol in a
+       function that did NOT itself end up tracked -- hop limit, locally-bound-name shadowing,
+       or any rule this function does not know about. A safety net, so an accessor-shaped
+       function closure growth could not promote is surfaced somewhere. Skipped when
+       *scope_is_tracked*, since that function's own name is already a tracked occurrence and
+       flagging its return would call one location both tracked and opaque.
 
-    Each one is measured, never classified: this tool does not try to say what the value is
-    used for past this point. See :class:`OpaqueHop`."""
+    Both are measured, never classified: nothing here says what the value is used for past
+    this point."""
     hops: list[tuple[ast.stmt, str, tuple[str, ...]]] = []
     for stmt in flat_stmts:
         target: ast.Name | None = None
@@ -1074,49 +1000,33 @@ def _find_opaque_hops_in_scope(
 # --------------------------------------------------------------------------
 # Symbol closure (definition-site alias tracking across the whole tree)
 # --------------------------------------------------------------------------
-#
-# The subject is a NAME, not a value. A well-factored codebase routes the value it names
-# through a module-level constant and a small accessor/validator function -- normal, GOOD
-# practice, and MORE likely the better a codebase is factored. Matching the subject's literal
-# spelling alone therefore goes blindest exactly where the code is cleanest. This section grows
-# a bounded, fully-audited set of additional tracked symbol names via definition-site analysis
-# (never name-similarity) so that constant bindings, reader functions, and their call sites are
-# found too.
 
 CLOSURE_RULE_SEED = "seed"
 CLOSURE_RULE_STRING_LITERAL = "string-literal-binding"
 CLOSURE_RULE_NAME_ALIAS = "name-alias"
 CLOSURE_RULE_OWN_NAME = "own-name"
+#: A function joins the closure when a tracked symbol is referenced anywhere within a
+#: return/yield VALUE EXPRESSION -- data flowing out of the function, scoped to what is
+#: returned rather than to the function's body in general.
+#:
+#: Intentionally hard to move in either direction, because both edges have been over-run:
+#: widen it to any reference in the BODY and a function that merely consults a tracked symbol
+#: while computing something else joins as though it carried the value, so closure size scales
+#: with how finely a tree is factored (subject `command` grew to a 19-name closure including
+#: `main`, 58% false-positive occurrences). Narrow it to "the return value must BE a bare
+#: Name/Attribute" and it tests the author's punctuation instead: `return A and B and
+#: entry.subject and C` is rejected where an equivalent `if not A: return False` /
+#: `return entry.subject` is accepted, so a stylistic three-line rewrite of one predicate body
+#: moved a real tree's reported occurrences from 5 to 11 with no architectural change.
 CLOSURE_RULE_RETURNS_TRACKED = "returns-tracked"
-# NOTE: two prior versions of this rule were tried and replaced, in opposite directions.
-#
-# V1 was "reads-tracked" -- ANY reference anywhere in a function's BODY. A real,
-# adversarially-found defect (F3, first review): a function that merely CONSULTS a tracked
-# symbol while computing something else entirely (a validator, a resolver several calls deep)
-# is a USAGE SITE, not a new value-carrying symbol, and admitting it as one let closure size
-# scale with how finely a tree happened to be factored -- on the real package, subject
-# `command` grew a 19-name closure including `main` and `run_maintenance`, 58% false positives.
-#
-# V2 (the immediate predecessor of this rule) narrowed to "the return value must literally BE a
-# bare Name/Attribute". That over-corrected: it tests the author's punctuation, not whether the
-# function carries the value (N1, second review) -- `return A and B and entry.subject and C`
-# was rejected while a semantically-identical `if not A: return False` / `return entry.subject`
-# was accepted, so a purely stylistic three-line rewrite of one predicate body, with NO
-# architectural change, moved a real tree's reported occurrences from 5 to 11.
-#
-# This version: a function joins if a tracked symbol is referenced ANYWHERE WITHIN a
-# return/yield VALUE EXPRESSION (walked via `ast.walk`, not required to be the top-level node)
-# -- "data flowing out of the function", scoped to what is actually returned/yielded, not to
-# the shape of the statement that returns/yields it, and not to the function's body in general.
 
 
 @dataclasses.dataclass(frozen=True)
 class _WholeTreeAssignment:
     """A module-level or class-level `NAME = <expr>` / `NAME: T = <expr>` statement, found
-    anywhere in the tree. Deliberately restricted to that scope (not function-local
-    assignments, which the per-occurrence alias-hop feature above already covers) because a
-    constant worth closure-tracking is, in every real example seen so far, defined at module or
-    class scope."""
+    anywhere in the tree. Function-local assignments are deliberately out of scope here; the
+    per-occurrence alias-hop feature covers those for a single occurrence's own
+    classification."""
 
     file: str
     line: int
@@ -1127,30 +1037,17 @@ class _WholeTreeAssignment:
 
 @dataclasses.dataclass(frozen=True)
 class _WholeTreeDef:
-    """A function/method/class definition found anywhere in the tree, with the set of names
-    REFERENCED anywhere within a `return`/`yield`/`yield from` VALUE EXPRESSION -- collected by
-    walking each such expression (via `ast.walk`, so `return bool(NAME)`, `return NAME or
-    default`, `return NAME if NAME else other`, `return f(NAME)` and delegating wrappers all
-    count, not only a bare `return NAME`) -- from every such statement reachable in the def's
-    OWN scope (via :func:`_flatten_scope_statements`, so if/for/while/with/try/match bodies are
-    included but nested function/class/lambda bodies are not), minus any name that is locally
-    bound (parameter or local variable) anywhere within it, so a same-spelled local parameter is
-    never mistaken for a return of an outer tracked symbol.
+    """A function/method/class definition found anywhere in the tree, with the names it
+    references anywhere within a `return`/`yield`/`yield from` VALUE EXPRESSION. A class is
+    recorded with an empty *returned_names*; only its name is collected.
 
-    This is the SECOND version of this rule (see :data:`CLOSURE_RULE_RETURNS_TRACKED`'s
-    docstring for the first version and why it was replaced): the first required the return's
-    value to literally BE a bare Name/Attribute, which tests the AUTHOR'S PUNCTUATION rather
-    than whether the function carries the value -- adversarially found (N1, second review):
-    `return A and B and entry.subject and C` (a real four-clause boolean predicate) was
-    rejected, while a byte-for-byte-equivalent `if not A: return False` / `return
-    entry.subject` was accepted, so a purely stylistic three-line rewrite with NO architectural
-    change moved a real tree's reported occurrences from 5 to 11. The fix: the test is now
-    "does *any* return/yield expression in this function reference a tracked symbol ANYWHERE
-    within it", not "is the expression syntactically a single bare token". Still deliberately
-    scoped to what the function itself RETURNS/YIELDS -- a function that merely references a
-    tracked symbol on the way to computing an UNRELATED return value (a validator returning a
-    list of issues, a resolver returning a Verdict) still does not qualify, because the tracked
-    symbol never appears in the RETURNED expression itself."""
+    *returned_names* is collected by walking each such expression, so `return bool(NAME)`,
+    `return NAME or default` and `return f(NAME)` all count, not only a bare `return NAME`;
+    from every such statement in the def's OWN scope (via :func:`_flatten_scope_statements`,
+    so if/for/while/with/try/match bodies are included but nested function/class/lambda bodies
+    are not); minus every name locally bound anywhere within it, so a same-spelled parameter
+    is not mistaken for a return of an outer tracked symbol. The scoping to what is RETURNED
+    is the rule's whole point -- see :data:`CLOSURE_RULE_RETURNS_TRACKED`."""
 
     file: str
     line: int
@@ -1160,9 +1057,9 @@ class _WholeTreeDef:
 
 def _locally_bound_names(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """Parameter names plus every name a Store/Del-context Name binds anywhere inside
-    *func_node* (including nested scopes -- a deliberately conservative over-approximation: see
-    the class docstring on :class:`_WholeTreeDef`). Used to stop a same-spelled local shadow
-    from being credited as "this function reads the tracked symbol"."""
+    *func_node*, nested scopes included -- a deliberately conservative over-approximation.
+    Stops a same-spelled local shadow being credited as "this function returns the tracked
+    symbol"."""
     names: set[str] = set()
     args = func_node.args
     for arg_list in (args.posonlyargs, args.args, args.kwonlyargs):
@@ -1231,12 +1128,8 @@ def _collect_whole_tree_facts(
                 )
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 locally_bound = _locally_bound_names(node)
-                # Collected UNFILTERED here (every Name.id / Attribute.attr referenced
-                # anywhere within a return/yield value expression) -- the actual match
-                # against whatever is tracked at a given hop happens later, per hop, in
-                # _closure_growth_candidates. Implicit-return generators (`yield`/`yield
-                # from`) are included alongside `return`, per the second adversarial
-                # review's request to cover them where reasonably possible.
+                # Collected unfiltered -- the match against whatever is tracked at a given
+                # hop happens later, per hop, in _closure_growth_candidates.
                 referenced: set[str] = set()
                 for stmt in _flatten_scope_statements(node.body):
                     value_exprs: list[ast.expr] = []
@@ -1278,10 +1171,9 @@ class ClosureMember:
 
 @dataclasses.dataclass(frozen=True)
 class ClosureCandidate:
-    """A symbol that WOULD join the closure exactly one hop past the limit -- reported so a
-    truncated chain is never silently invisible, never merged into the tracked set. Only probed
-    ONE hop beyond the limit (see KNOWN LIMITATIONS): a chain needing hop_limit + 2 would not
-    appear here either."""
+    """A symbol that would join the closure exactly one hop past the limit -- reported so a
+    truncated chain is visible, never merged into the tracked set. Only one hop beyond the
+    limit is probed, so a chain needing hop_limit + 2 does not appear here either."""
 
     name: str
     would_be_hop: int
@@ -1376,11 +1268,11 @@ def _closure_growth_candidates(
 def compute_symbol_closure(
     trees: dict[str, ast.Module], subjects: Sequence[str], hop_limit: int
 ) -> ClosureResult:
-    """Grows the tracked symbol set from *subjects* via definition-site analysis only -- never
-    name similarity (see :func:`_closure_growth_candidates`'s three rules). Runs exactly
-    *hop_limit* growth rounds, then one extra, unmerged probe round purely to populate
-    :attr:`ClosureResult.excluded` so a chain cut off by the limit is reported, not silently
-    dropped."""
+    """Grows the tracked symbol set from *subjects* by definition-site analysis only, never
+    name similarity (:func:`_closure_growth_candidates` holds the rules). Runs at most
+    *hop_limit* growth rounds, stopping early once a round adds nothing, then one extra
+    unmerged probe round purely to populate :attr:`ClosureResult.excluded`, so a chain cut off
+    by the limit is reported rather than dropped."""
     subject_set = set(subjects)
     assignments, defs = _collect_whole_tree_facts(trees)
 
@@ -1427,14 +1319,12 @@ def compute_symbol_closure(
 
 
 def _enclosing_statement_span(node: ast.AST, idx: _TreeIndex) -> tuple[int, int]:
-    """Walks up *node*'s parents until it finds the smallest enclosing ``ast.stmt``, and
-    returns that statement's full ``(lineno, end_lineno)`` span. Used to decide whether a
-    changed-line-restricted analysis should count an occurrence: a multi-line statement can
-    change meaning entirely (a subject moved from a call argument into a branch test; a
-    DECISION's comparand edited) while difflib marks only ANOTHER line of the SAME statement
-    as changed -- checking only the occurrence's own line silently reported zero occurrences
-    for both cases. If no enclosing statement is found (should not normally happen), falls
-    back to the node's own line as a single-line span."""
+    """The smallest enclosing ``ast.stmt``'s full ``(lineno, end_lineno)`` span, found by
+    walking up *node*'s parents. This, not the occurrence's own line, is what a
+    changed-line-restricted analysis must test: a multi-line statement can change meaning
+    entirely -- a subject moved from a call argument into a branch test, a DECISION's comparand
+    edited -- while difflib marks only ANOTHER line of that same statement as changed. Falls
+    back to the node's own line as a single-line span if no enclosing statement is found."""
     current = node
     for _ in range(MAX_WALK_DEPTH):
         if isinstance(current, ast.stmt):
@@ -1457,15 +1347,9 @@ def analyze_source(
     is_test: bool,
 ) -> FileAnalysis:
     """Parses *source* and returns every subject occurrence (restricted to *allowed_lines* if
-    given, else every line) with its role(s). Never raises on a syntax error -- reports it in
-    ``FileAnalysis.parse_error`` instead so the caller can name the excluded file explicitly.
-
-    Thin wrapper around :func:`_analyze_tree` that also does the parsing -- kept as the public,
-    single-file entry point (and what the unit tests call directly to exercise role
-    classification in isolation from closure discovery). The tree-orchestration functions
-    (``run_single_tree`` etc.) call :func:`_analyze_tree` directly instead, reusing a tree
-    they already parsed once for whole-tree closure discovery, so no file is ever parsed
-    twice."""
+    given, else every line) with its role(s). The public single-file entry point: it does the
+    parsing and delegates to :func:`_analyze_tree`. Never raises on a syntax error -- reports
+    it in ``FileAnalysis.parse_error`` instead, so the caller can name the excluded file."""
     try:
         tree = ast.parse(source, filename=file_label)
     except SyntaxError as exc:
@@ -1504,12 +1388,9 @@ def _analyze_tree(
         return alias_cache[key]
 
     def line_ok(node: ast.AST) -> bool:
-        """Whether *node*'s ENCLOSING STATEMENT (not the node's own line) overlaps
-        *allowed_lines* -- a real, adversarially-found defect (F4): using the occurrence's own
-        `.lineno` meant a subject moved from a call argument into a branch test, or a
-        DECISION's comparand edited, could report zero occurrences with zero honesty-bucket
-        signal, because difflib marked a DIFFERENT line of the same multi-line statement as
-        changed. See :func:`_enclosing_statement_span`."""
+        """Whether *node*'s ENCLOSING STATEMENT -- not the node's own line -- overlaps
+        *allowed_lines*. See :func:`_enclosing_statement_span` for why the distinction
+        matters."""
         if allowed_lines is None:
             return True
         start, end = _enclosing_statement_span(node, idx)
@@ -1730,12 +1611,9 @@ def _analyze_tree(
     opaque_hops: list[OpaqueHop] = []
     for scope_node in idx.scope_nodes:
         flat = _flatten_scope_statements(_scope_body_statements(scope_node))
-        # If this scope IS a function and its own name already joined the closure (via
-        # CLOSURE_RULE_RETURNS_TRACKED), its returns are already visible through its own
-        # def-name occurrence -- flagging them AGAIN as opaque would contradict "tracked" with
-        # "opaque" for the exact same location. Only scopes that did NOT get promoted (hop
-        # limit, shadowing, or any other reason) need the opaque-hop safety net for their
-        # returns.
+        # A function whose own name already joined the closure has its returns visible through
+        # its def-name occurrence; flagging them as opaque too would call one location both
+        # tracked and opaque. Only unpromoted scopes need the return-based safety net.
         scope_is_tracked = (
             isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and scope_node.name in subject_set
@@ -1797,12 +1675,11 @@ class AnalysisResult:
     parse_failures: list[str]  # human-readable "path: message"
     removed_files: list[str]  # present only in the OLD side (two-tree/git-diff modes)
     closure: ClosureResult
+    #: Files gathered ONLY for whole-tree closure discovery, and so never in ``files_analyzed``
+    #: or ``parse_failures``, that failed to parse. A file here means closure growth is
+    #: incomplete, which has to stay visible even though the file was not part of the diff
+    #: being reported.
     closure_parse_failures: list[str] = dataclasses.field(default_factory=list)
-    # Files gathered ONLY for whole-tree closure discovery (never in files_analyzed/
-    # parse_failures) that failed to parse -- currently only possible in git-diff mode, whose
-    # closure pass fetches files beyond the diff. A file here means closure growth is
-    # incomplete for a reason this tool cannot see past, and that must be visible, not folded
-    # into silence just because the file was never part of the diff being reported.
 
 
 def _try_parse(source: str, label: str) -> tuple[ast.Module | None, str | None]:
@@ -1813,13 +1690,11 @@ def _try_parse(source: str, label: str) -> tuple[ast.Module | None, str | None]:
 
 
 def _read_python_source(path: Path) -> tuple[str | None, str | None]:
-    """Reads *path* respecting a PEP 263 encoding cookie (or a UTF-8 BOM) exactly the way
-    Python's own tokenizer does, via the stdlib `tokenize.detect_encoding`. Returns
-    ``(source, None)`` on success or ``(None, message)`` on ANY failure -- a broken symlink, a
-    permission-denied file, a directory whose name happens to match `*.py`, or a non-UTF-8 file
-    with a valid encoding cookie all used to raise an uncaught exception and abort the ENTIRE
-    run over one bad file in a large tree; adversarially found (F8). A file this cannot read is
-    reported exactly like a parse failure -- named, excluded, never a crash, never silent."""
+    """Reads *path* respecting a PEP 263 encoding cookie or a UTF-8 BOM, via the stdlib
+    `tokenize.detect_encoding`. Returns ``(source, None)`` on success or ``(None, message)`` on
+    ANY failure -- a broken symlink, a permission-denied file, a directory whose name happens
+    to match `*.py`, an undecodable file. Callers report the message like a parse failure, so
+    one bad file in a large tree is named and excluded rather than aborting the run."""
     try:
         with path.open("rb") as fh:
             encoding, _ = tokenize.detect_encoding(fh.readline)
@@ -1849,15 +1724,15 @@ def _run_pipeline(
     removed_files: list[str],
     closure_parse_failures: list[str] | None = None,
 ) -> AnalysisResult:
-    """Shared second half of every input mode: *closure_trees* (the WHOLE tree being examined,
-    used only to grow the tracked symbol set -- a constant and the function that reads it are
-    routinely in a file that never itself changed) feeds :func:`compute_symbol_closure`;
-    *analyzed_files* (the subset the caller actually wants reported -- every file for
-    ``--tree``, only the changed/added ones for the diff modes) is then classified against the
-    closure-expanded tracked-name set, never against the bare original subjects alone.
-    *closure_parse_failures* names files that were fetched ONLY for closure discovery (not
-    already covered by *analyzed_files*' own parse failures) and failed to parse -- see
-    :attr:`AnalysisResult.closure_parse_failures`."""
+    """Shared second half of every input mode.
+
+    *closure_trees* is the WHOLE tree being examined and is used only to grow the tracked
+    symbol set, because a constant and the function that reads it are routinely in a file that
+    never itself changed. *analyzed_files* is the subset the caller wants reported -- every
+    file for ``--tree``, only the changed and added ones for the diff modes -- and is
+    classified against the closure-expanded tracked names, never against the bare subjects
+    alone. *closure_parse_failures* names files fetched only for closure discovery that failed
+    to parse; see :attr:`AnalysisResult.closure_parse_failures`."""
     closure = compute_symbol_closure(closure_trees, subjects, closure_hop_limit)
     tracked_names = closure.tracked_names
 
@@ -1936,14 +1811,12 @@ def run_two_tree_diff(
     old_relpath_set = set(old_relpaths)
     new_relpath_set = set(new_relpaths)
 
-    # Read every OLD-side file up front (bounded cost: each old file is read at most once)
-    # so a file that MOVED -- identical content, different relative path -- can be matched by
-    # content instead of falling through to "brand new". Without this, a byte-identical
-    # `pkg/a.py` -> `pkg2/a.py` move reported the WHOLE file as changed, including phantom
-    # DECISION/WRITE occurrences -- adversarially found (N3, second review): the `-M` rename
-    # fix landed only in git-diff mode; two-tree mode had no move detection at all, and for an
-    # architecture-overhaul comparison, where moving files IS the change, this inflated the
-    # tree that did the moving by exactly the amount of code that moved.
+    # Read every OLD-side file up front (each is read at most once) so a file that MOVED --
+    # identical content, different relative path -- can be matched by content instead of
+    # falling through to "brand new". Without it, a byte-identical `pkg/a.py` -> `pkg2/a.py`
+    # move reports the WHOLE file as changed, with phantom DECISION/WRITE occurrences. That
+    # inflates whichever tree did the moving by exactly the amount of code that moved, and in
+    # an architecture-overhaul comparison moving files IS the change.
     old_contents: dict[Path, str | None] = {}
     for relpath in old_relpaths:
         content, _read_error = _read_python_source(old_root / relpath)
@@ -1969,9 +1842,8 @@ def run_two_tree_diff(
             parsed_files.append(_ParsedFile(label, is_test, None, read_error, None))
             continue
         if relpath in old_relpath_set:
-            # A read failure on the OLD side (rare -- e.g. it became unreadable between the
-            # two snapshots) falls back to "no usable pre-image", the same as a genuinely new
-            # file: not a crash, just the existing not-comparable case.
+            # A read failure on the OLD side falls back to "no usable pre-image", the same as
+            # a genuinely new file, so every line counts as changed.
             old_source = old_contents.get(relpath)
             allowed_lines: set[int] | None = (
                 None
@@ -1998,9 +1870,8 @@ def run_two_tree_diff(
     removed = sorted(
         str(p) for p in (old_relpath_set - new_relpath_set - claimed_move_sources)
     )
-    # The whole NEW tree is already parsed above (every file, changed or not), so it doubles
-    # as the closure-discovery input with no extra work -- unlike git-diff mode below, which
-    # has to fetch the rest of the tree separately.
+    # The whole NEW tree is already parsed above, changed files or not, so it doubles as the
+    # closure-discovery input with no extra work.
     closure_trees = {pf.label: pf.tree for pf in parsed_files if pf.tree is not None}
     return _run_pipeline(
         f"two-tree diff (old={old_root}, new={new_root})",
@@ -2013,12 +1884,10 @@ def run_two_tree_diff(
 
 
 def _git_show(repo: Path, rev: str, path: str) -> str | None:
-    """Returns file content at *rev*, or None if the file does not exist there. Fetches raw
-    bytes and decodes via `tokenize.detect_encoding` (same as :func:`_read_python_source`) so
-    a file with a PEP 263 encoding cookie or a UTF-8 BOM decodes correctly, and a genuinely
-    undecodable blob degrades to None (treated as "not found" by callers) instead of crashing
-    the whole run with an uncaught `UnicodeDecodeError` -- `subprocess.run(text=True)`'s
-    default strict decoding had exactly that crash risk."""
+    """File content at *rev*, or None if the file does not exist there. Fetches raw bytes and
+    decodes via :func:`_decode_python_bytes` rather than letting `subprocess.run(text=True)`
+    decode strictly, so a PEP 263 cookie or a UTF-8 BOM is honoured. An undecodable blob also
+    returns None, which callers cannot tell apart from "not found"."""
     result = subprocess.run(
         ["git", "-C", str(repo), "show", f"{rev}:{path}"],
         capture_output=True,
@@ -2031,8 +1900,8 @@ def _git_show(repo: Path, rev: str, path: str) -> str | None:
 
 
 def _decode_python_bytes(data: bytes) -> str | None:
-    """Decodes *data* respecting a PEP 263 encoding cookie or UTF-8 BOM, the same way
-    :func:`_read_python_source` reads from disk. Returns None (never raises) if the bytes
+    """Decodes *data* respecting a PEP 263 encoding cookie or a UTF-8 BOM, the same way
+    :func:`_read_python_source` reads from disk. Returns None, never raises, if the bytes
     cannot be decoded at all."""
     try:
         encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
@@ -2059,19 +1928,19 @@ class _GitDiffEntry:
     """One line of `git diff --name-status -M` output. *old_path* equals *new_path* unless
     *status* is ``"R"`` (renamed, possibly with content changes too)."""
 
-    status: str  # "A" | "M" | "D" | "R" | (rarely) something else, treated like "M"
+    #: "A" | "M" | "D" | "R". Any other single-path status is treated like "M";
+    #: :func:`_git_diff_entries` drops a two-path status that is not "R".
+    status: str
     old_path: str
     new_path: str
 
 
 def _git_diff_entries(repo: Path, base: str, head: str) -> list[_GitDiffEntry]:
     """Parses `git diff --name-status -M` so a renamed file's PRE-IMAGE is fetched from its
-    OLD path, never its new one. Without `-M` (the tool's previous behaviour), a pure
-    `git mv` with byte-identical content has no pre-image AT THE NEW PATH, so
-    `allowed_lines` became None and the ENTIRE file counted as changed -- a real,
-    adversarially-found defect (F5): rename-heavy refactors, which is close to the definition
-    of what an architecture-overhaul comparison looks like, imported phantom counts for every
-    moved-but-unchanged file."""
+    OLD path, never its new one. Without `-M`, a pure `git mv` with byte-identical content has
+    no pre-image AT THE NEW PATH, `allowed_lines` becomes None and the ENTIRE file counts as
+    changed -- phantom counts for every moved-but-unchanged file, on exactly the rename-heavy
+    diffs an architecture-overhaul comparison produces."""
     result = subprocess.run(
         [
             "git",
@@ -2125,8 +1994,8 @@ def run_git_diff(
         if entry.status == "A":
             allowed_lines = None  # newly added path: every line counts as changed
         else:
-            # "M", "R" (rename, using the OLD path for the pre-image -- the fix), or any
-            # rarer status git-diff might emit: fetch the pre-image and diff normally.
+            # "M", "R" (rename: the pre-image comes from the OLD path), or any rarer status
+            # git-diff emits -- fetch the pre-image and diff normally.
             old_source = _git_show(repo, base, entry.old_path)
             allowed_lines = (
                 None
@@ -2144,10 +2013,10 @@ def run_git_diff(
             )
         )
 
-    # Reported files_analyzed stays scoped to the diff (as before); closure_trees is built
-    # separately from the WHOLE tree at *head* so closure discovery is never blind to a
-    # constant/reader function that lives in a file the diff didn't touch. Files already
-    # attempted above (success OR failure) are never re-fetched.
+    # files_analyzed stays scoped to the diff; closure_trees is built separately from the WHOLE
+    # tree at *head*, so closure discovery is not blind to a constant or reader function
+    # living in a file the diff never touched. Files already attempted above, successfully or
+    # not, are never re-fetched.
     closure_trees: dict[str, ast.Module] = {
         pf.label: pf.tree for pf in analyzed_files if pf.tree is not None
     }
@@ -2158,15 +2027,17 @@ def run_git_diff(
             continue
         source = _git_show(repo, head, path)
         if source is None:
+            # Undecodable at *head*: the closure shrinks and no bucket names the file.
+            # Measured -- a tracked-at-head `*.py` blob with an unusable PEP 263 cookie
+            # appears in none of parse_failures, closure_parse_failures, removed_files or
+            # the TEST/PRODUCTION lists.
             continue
         tree, error = _try_parse(source, path)
         if tree is not None:
             closure_trees[path] = tree
         else:
-            # This file is NOT part of the diff and so never reaches `parse_failures` above --
-            # without recording it here, a parse error in a file outside the diff would
-            # silently shrink the closure with no trace anywhere in the output. See
-            # AnalysisResult.closure_parse_failures.
+            # Outside the diff, so this never reaches `parse_failures`; recorded here instead
+            # because a parse error out here shrinks the closure just as silently.
             closure_parse_failures.append(f"{path}: {error}")
 
     return _run_pipeline(
@@ -2198,20 +2069,10 @@ def _all_opaque_hops(result: AnalysisResult) -> list[OpaqueHop]:
 
 
 def build_report(result: AnalysisResult) -> dict:
-    """Builds the full structured report (used for both text and --json output) so the two
-    presentations can never drift apart.
-
-    RETIRED, deliberately: a published CONDUIT-to-DECISION ratio. An independent adversarial
-    review showed it is not merely buggy but the wrong measure for the question -- a trivial
-    `sed 's/entry\\.subject)/entry.subject or None)/g'` moved a tree from the worst possible
-    reading to the best with no architectural change, and even with every role-classification
-    bug fixed, a short-circuit default and a real policy branch can still score identically.
-    Role labels remain here as DESCRIPTIVE per-location annotation (`primary_role_counts`/
-    `all_roles_counts` below) -- they are not recombined into any single comparative number.
-    The trustworthy outputs of this tool are its occurrence finding (verified exact against an
-    independent AST oracle over 394 real occurrences) and its symbol closure listing (which
-    showed something real: two trees routing the same value through the same two-function
-    chain at different module addresses) -- see KNOWN LIMITATIONS for the full account."""
+    """The full structured report, feeding both the text and the ``--json`` output so the two
+    presentations cannot drift apart. `primary_role_counts` and `all_roles_counts` are
+    per-location annotation and are deliberately not combined into a comparative number -- see
+    the module docstring."""
     occurrences = _all_occurrences(result)
     string_mentions = _all_string_mentions(result)
 
@@ -2238,11 +2099,9 @@ def build_report(result: AnalysisResult) -> dict:
                 "string_mentions": len(fa.string_mentions)
             }
 
-    # Full file lists behind the test/production split (F6): a per-file heuristic can silently
-    # misfile a whole tree (e.g. a `spec/` convention, or `--tree` pointed at a subdirectory
-    # that is itself already inside a test directory) with nothing wrong showing in the
-    # counts. Printing the actual lists makes a misfiled tree visible at a glance rather than
-    # only affecting a number nobody double-checked.
+    # Full file lists behind the test/production split: a path heuristic can misfile a whole
+    # tree -- a `spec/` convention, or `--tree` pointed at a subdirectory already inside a
+    # test directory -- with nothing wrong showing in the counts.
     test_files = sorted(fa.file for fa in result.files_analyzed if fa.is_test)
     production_files = sorted(fa.file for fa in result.files_analyzed if not fa.is_test)
 
@@ -2335,11 +2194,10 @@ def build_report(result: AnalysisResult) -> dict:
             for o in occurrences
             if ROLE_UNCLASSIFIED in o.roles
         ],
-        # Occurrences with a non-empty note that are NOT already UNCLASSIFIED (e.g. an
-        # accumulated-CONDUIT-plus-unhandled-parent case, or the walrus dual-role note): the
-        # text report used to print notes ONLY for UNCLASSIFIED occurrences, so this class of
-        # "a rule is missing here, but a role was still accumulated" signal existed only in
-        # --json -- adversarially found (N5, second review). Printed in its own section now.
+        # Occurrences carrying a note but NOT already UNCLASSIFIED -- an accumulated CONDUIT
+        # under an unhandled parent, or the walrus dual-role note. This is the "a rule is
+        # missing here, but a role was still recorded" signal, and it has its own printed
+        # section because the UNCLASSIFIED list does not cover it.
         "occurrences_with_notes": [
             {
                 "file": o.file,

@@ -17,7 +17,6 @@ class TestNormalizePath(unittest.TestCase):
 
     def tearDown(self):
         """Clean up test fixtures."""
-        # Clean up temp directory
         import shutil
 
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -57,7 +56,6 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied with that project root
         Then the path is normalized relative to the root as './test.txt'
         """
-        # Create a file in temp dir
         test_file = self.project_root / "test.txt"
         test_file.touch()
 
@@ -107,22 +105,15 @@ class TestNormalizePath(unittest.TestCase):
         Then the result resolves to the target ('target.txt' appears in it),
             or the test is skipped if symlinks are unsupported
         """
-        # Create a file and a symlink to it
         target_file = self.project_root / "target.txt"
         target_file.touch()
         symlink_path = self.project_root / "link.txt"
 
         try:
             symlink_path.symlink_to(target_file)
-
-            # Normalize the symlink path
             result = normalize_path(str(symlink_path))
-
-            # The result should be the resolved target
-            # (may be under home, so could be ~ prefixed)
             self.assertIn("target.txt", result)
         except OSError:
-            # Symlink creation might fail on some systems
             self.skipTest("Symlink creation not supported")
 
     def test_normalize_nonexistent_path(self):
@@ -131,7 +122,6 @@ class TestNormalizePath(unittest.TestCase):
         When normalize_path is applied
         Then the format is still normalized to '~/nonexistent/file.txt'
         """
-        # Should still normalize format even if path doesn't exist
         path = str(self.home / "nonexistent" / "file.txt")
         result = normalize_path(path)
         self.assertEqual(result, "~/nonexistent/file.txt")
@@ -152,7 +142,6 @@ class TestNormalizePath(unittest.TestCase):
         Then the result begins with '.' (it stays a relative reference)
         """
         result = normalize_path(".")
-        # Current directory should get ./ prefix if relative
         self.assertTrue(result.startswith("."))
 
 
@@ -232,7 +221,6 @@ class TestNormalizeCommand(unittest.TestCase):
         Then the slashes collapse to '/tmp' (or the macOS '/private/tmp' symlink target)
         """
         result = normalize_command("ls //tmp")
-        # On macOS, /tmp is a symlink to /private/tmp, so accept either
         self.assertIn(result, ["ls /tmp", "ls /private/tmp"])
 
     def test_normalize_command_no_paths(self):

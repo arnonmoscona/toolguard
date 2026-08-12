@@ -4,12 +4,8 @@ Working-tree cleanliness guard for the apply/migrate safety gate.
 Applying a config change onto a DIRTY git working tree mixes the tool's edits
 with the user's uncommitted work, making the change hard to review and hard to
 revert.  This module reports the working-tree state as a structured,
-decision-free result; the skill/CLI layer decides whether to proceed, warn, or
-refuse.  Read-only: it only ever runs ``git status``.
-
-This mirrors :mod:`toolguard.tools.project_root` -- a pure deterministic safety
-primitive that classifies the situation and leaves the ask/refuse policy to the
-caller.
+decision-free result; the caller decides whether to proceed, warn, or refuse.
+Read-only: it only ever runs ``git status``.
 """
 
 import subprocess
@@ -17,7 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
 
-# Bound the git subprocess so a hung/networked git can never stall the gate.
+#: Bound on the ``git status`` subprocess so a hung git cannot stall the gate.
+#: :exc:`subprocess.TimeoutExpired` is a :exc:`subprocess.SubprocessError`, so a
+#: timed-out git reports as "not a git repo" -- fail-safe, never as clean.
 _GIT_TIMEOUT_SECONDS = 10
 
 
@@ -27,12 +25,15 @@ class WorkingTreeStatus:
     Structured git working-tree state for the apply/migrate gate.
 
     Attributes:
-        is_git_repo: Whether ``root`` is inside a git work tree (``git status``
-            succeeded).  ``False`` when git is missing or the path is not a repo.
+        is_git_repo: Whether ``git status`` succeeded at ``root``.  ``False``
+            when git is missing, errored, or the path is not a repo.
         is_clean: Whether the work tree has no uncommitted changes.  Only
             meaningful when ``is_git_repo`` is ``True``.
-        dirty_paths: The changed paths reported by ``git status --porcelain``
-            (status prefix stripped), in git's order; empty when clean or non-repo.
+        dirty_paths: ``git status --porcelain`` lines with the 3-character
+            status prefix stripped, in git's order; empty when clean or
+            non-repo.  These are git's own strings rather than plain paths: a
+            rename reads ``old -> new``, and an untracked directory collapses
+            to a single trailing-slash entry covering everything beneath it.
     """
 
     is_git_repo: bool
@@ -44,10 +45,8 @@ class WorkingTreeStatus:
         """
         Whether the gate may write changes without escalating.
 
-        Only a git work tree with no uncommitted changes is safe: a dirty tree
-        would entangle the tool's edits with the user's work, and a non-repo has
-        no revert safety net.  Anything else must be escalated (warn/refuse) by
-        the caller.
+        A non-repo counts as unsafe, not as trivially clean: there is no revert
+        safety net.
         """
         return self.is_git_repo and self.is_clean
 
@@ -56,8 +55,8 @@ def working_tree_status(root: Path) -> WorkingTreeStatus:
     """
     Report the git working-tree state at ``root`` via ``git status --porcelain``.
 
-    This is read-only and never modifies anything.  A non-zero git exit, a
-    missing git binary, or a subprocess error is treated as "not a git repo".
+    A non-zero git exit, a missing git binary and a subprocess error are all
+    reported alike, as "not a git repo".
 
     Args:
         root: Directory to inspect (typically the resolved project root).
@@ -83,6 +82,6 @@ def working_tree_status(root: Path) -> WorkingTreeStatus:
     if not lines:
         return WorkingTreeStatus(is_git_repo=True, is_clean=True, dirty_paths=())
 
-    # Porcelain v1 lines are ``XY <path>`` (3-char status prefix); keep the path.
+    # Porcelain v1 prefixes every entry with two status characters and a space.
     dirty = tuple(line[3:] if len(line) > 3 else line for line in lines)
     return WorkingTreeStatus(is_git_repo=True, is_clean=False, dirty_paths=dirty)

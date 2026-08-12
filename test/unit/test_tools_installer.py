@@ -1,11 +1,6 @@
 """
 Unit tests for ``toolguard.tools.installer`` -- the agent-facing ``toolguard-install``
-console script (TOO-15).
-
-RED-PHASE NOTE: as of this commit ``toolguard/tools/installer.py`` does not exist yet.
-Every test in this module is expected to fail (ImportError at collection time, surfacing
-as an error on every test) until the module is implemented. This file defines the CLI
-surface / contract the implementation must satisfy.
+console script.
 
 All tests operate against a temporary fake HOME (``Path.home()`` patched) and, for
 project-scope cases, a separate temporary project directory. The real ``~/.claude`` and
@@ -35,20 +30,13 @@ from toolguard.tools.self_permission import required_self_permissions
 from toolguard.tools.uninstall_readiness import required_uninstall_readiness_permissions
 from toolguard.install_update import InstallInfo, InstallKind
 
-# Numbered journal entry header, e.g. "## [3] 2026-07-07 14:12 local -- register hooks".
 _JOURNAL_HEADER_RE = re.compile(
     r"^## \[(\d+)\] \d{4}-\d{2}-\d{2} \d{2}:\d{2} local -- .+$", re.MULTILINE
 )
 
 
 class InstallerTestCase(unittest.TestCase):
-    """
-    Shared fixture for installer CLI tests: a fake HOME and an isolated project dir.
-
-    ``Path.home()`` is patched for the lifetime of each test so that every subcommand
-    under test resolves ``~/.toolguard`` and ``~/.claude`` inside a throwaway
-    TemporaryDirectory, never the real user home.
-    """
+    """Shared fixture: fake HOME and isolated project dir; ``Path.home()`` stays patched throughout."""
 
     def setUp(self):
         """Create a fake HOME and a fake project directory, and patch Path.home()."""
@@ -63,15 +51,7 @@ class InstallerTestCase(unittest.TestCase):
         patcher.start()
 
     def run_cli(self, argv):
-        """
-        Invoke ``main(argv)`` capturing stdout/stderr, returning (returncode, stdout).
-
-        Args:
-            argv: The argument list to pass to ``main`` (excluding the program name).
-
-        Returns:
-            A ``(returncode, stdout_text)`` tuple.
-        """
+        """Invoke ``main(argv)`` capturing stdout/stderr; returns a ``(returncode, stdout_text)`` tuple."""
         out = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -79,16 +59,7 @@ class InstallerTestCase(unittest.TestCase):
         return code, out.getvalue()
 
     def run_help(self, argv):
-        """
-        Invoke ``main(argv)`` expecting an argparse ``--help`` exit, return stdout text.
-
-        Args:
-            argv: Argument list ending in ``--help`` or ``-h``.
-
-        Returns:
-            The captured stdout text (argparse prints help there and calls
-            ``sys.exit(0)``).
-        """
+        """Invoke ``main(argv)`` expecting an argparse ``--help`` exit (0); returns the captured stdout text."""
         out = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -110,13 +81,8 @@ class InstallerTestCase(unittest.TestCase):
         return [int(m.group(1)) for m in _JOURNAL_HEADER_RE.finditer(text)]
 
 
-# ---------------------------------------------------------------------------
-# Top-level CLI
-# ---------------------------------------------------------------------------
-
-
 class TestTopLevelHelp(InstallerTestCase):
-    """Requirement 4: the top-level --help must warn humans off direct use."""
+    """The top-level --help must warn humans off direct use."""
 
     def test_top_level_help_warns_humans_off(self):
         """
@@ -154,10 +120,7 @@ class TestTopLevelHelp(InstallerTestCase):
 
 
 class TestSubcommandHelp(InstallerTestCase):
-    """
-    Requirement 1: every subcommand's --help must be precise enough for an agent to
-    decide, without running it, whether the command will do exactly what is wanted.
-    """
+    """Every subcommand's --help must let an agent decide, without running it, what the command will do."""
 
     def test_init_state_help_names_files_and_journaling(self):
         """
@@ -187,8 +150,6 @@ class TestSubcommandHelp(InstallerTestCase):
         self.assertIn("backup", lowered)
         self.assertIn("journal", lowered)
         self.assertIn("reverse", lowered)
-        # Base install never enables takeover -- an agent must be able to see this
-        # without reading the source.
         self.assertIn("takeover", lowered)
 
     def test_register_hooks_help_names_files_and_merge_behavior(self):
@@ -291,11 +252,6 @@ class TestSubcommandHelp(InstallerTestCase):
         self.assertIn("consent", lowered)
 
 
-# ---------------------------------------------------------------------------
-# init-state
-# ---------------------------------------------------------------------------
-
-
 class TestInitState(InstallerTestCase):
     """Behavior of the init-state subcommand."""
 
@@ -316,7 +272,7 @@ class TestInitState(InstallerTestCase):
         readme = (state_dir / "README.txt").read_text()
         self.assertIn("git+https://example/repo", readme)
         self.assertIn("not deleted on uninstall", readme.lower())
-        # ASCII-only requirement.
+        # ASCII-only requirement -- encode() raises if it isn't.
         readme.encode("ascii")
 
     def test_creates_journal_with_session_header(self):
@@ -359,11 +315,6 @@ class TestInitState(InstallerTestCase):
         """
         code, out = self.run_cli(["init-state", "--source", "local checkout"])
         self.assertIn(str(self.home / ".toolguard"), out)
-
-
-# ---------------------------------------------------------------------------
-# write-config
-# ---------------------------------------------------------------------------
 
 
 class TestWriteConfig(InstallerTestCase):
@@ -540,17 +491,8 @@ class TestWriteConfig(InstallerTestCase):
         self.assertIn(f"[{index}]", out)
 
 
-# ---------------------------------------------------------------------------
-# PreToolUse hook hardening helpers (TOO-19)
-# ---------------------------------------------------------------------------
-
-
 def _make_fake_venv_bin(tmpdir: Path, python_name="python3", executable=True):
-    """
-    Build a fake ``<tmpdir>/bin/toolguard`` console script plus a
-    ``<tmpdir>/bin/<python_name>`` sibling, mirroring a real venv's ``bin/``
-    layout. Returns the console-script path.
-    """
+    """Build a fake ``<tmpdir>/bin/toolguard`` with a ``<python_name>`` sibling; returns the console-script path."""
     bin_dir = tmpdir / "bin"
     bin_dir.mkdir(parents=True)
     binary = bin_dir / "toolguard"
@@ -564,12 +506,8 @@ def _make_fake_venv_bin(tmpdir: Path, python_name="python3", executable=True):
 
 def _make_fake_venv_bin_with_space(tmpdir: Path, space_dirname: str) -> Path:
     """
-    Build a fake ``<tmpdir>/<space_dirname>/bin/toolguard`` console script plus
-    an executable ``python3`` sibling, where *space_dirname* (a directory
-    component containing a literal space, e.g. a relocated venv or a macOS
-    path under a directory with a space) sits between *tmpdir* and ``bin/`` --
-    mirroring the TOO-19 code review M2 repro scenario. Returns the
-    console-script path.
+    Build a fake ``<tmpdir>/<space_dirname>/bin/toolguard`` with an executable ``python3``
+    sibling, where *space_dirname* contains a literal space. Returns the console-script path.
     """
     bin_dir = tmpdir / space_dirname / "bin"
     bin_dir.mkdir(parents=True)
@@ -675,16 +613,11 @@ class TestHardenedHookCommand(unittest.TestCase):
 
 class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
     """
-    TOO-19 code review 2026-08-02, Major finding M2: the hardened hook
-    command was written unquoted into a shell string; a space in the
-    interpreter path produced the exact silent fail-open the hardening
-    exists to prevent.
-
-    Given an interpreter path containing a space,
-    ``_hardened_hook_command`` must write it QUOTED, and
-    ``_hook_registration_findings`` must parse it back correctly,
-    round-tripping through the exact JSON-embedded-shell-string path Claude
-    Code uses.
+    A space in the interpreter path must be shell-quoted when
+    ``_hardened_hook_command`` writes the registered command, and
+    ``_hook_registration_findings`` must parse that quoting back correctly --
+    unquoted, a space splits the path into two argv words and the hook
+    silently fails to launch.
     """
 
     def test_hardened_command_quotes_a_space_containing_interpreter_path(self):
@@ -700,10 +633,8 @@ class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
 
         self.assertTrue(hardened)
         tokens = shlex.split(command)
-        # If the path were written unquoted, shlex.split (and, in real use, the
-        # shell Claude Code hands the command to) would split "my venv" into
-        # TWO argv words and the launch would fail -- exactly the fail-open
-        # M2 describes. Quoted, it recovers as ONE token ending in bin/python3.
+        # Unquoted, shlex.split (and the real shell) would split "my venv" into TWO
+        # argv words and the hook launch would fail; quoted, it recovers as ONE token.
         self.assertTrue(tokens[0].endswith("bin/python3"))
         self.assertIn("my venv", tokens[0])
         self.assertEqual(tokens[1:], ["-E", "-P", "-m", "toolguard.hook"])
@@ -716,8 +647,8 @@ class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
             that command back
         Then it reports hardened=True and interpreter_missing=False -- NOT a
             false "BROKEN" diagnostic from misreading the quoted path as two
-            tokens (M2's second half: register-hooks quotes it, but a naive
-            command.split()[0] on read-back would still misdiagnose it)
+            tokens (register-hooks quotes it, but a naive command.split()[0]
+            on read-back would still misdiagnose it)
         """
         with TemporaryDirectory() as d:
             binary = _make_fake_venv_bin_with_space(Path(d), "my venv")
@@ -745,8 +676,8 @@ class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
         Given a hardened command naming an interpreter path that does NOT
             exist on disk (space in the path, but the venv was removed)
         When _hook_registration_findings runs
-        Then interpreter_missing is True -- the M2 fix must not silently
-            swallow a REAL broken-hook diagnostic while fixing the false one
+        Then interpreter_missing is True -- fixing the false positive must not
+            silently swallow a REAL broken-hook diagnostic
         """
         with TemporaryDirectory() as d:
             missing_path = str(Path(d) / "my venv" / "bin" / "python3")
@@ -763,13 +694,7 @@ class TestHardenedHookCommandSpacePathQuoting(unittest.TestCase):
 
 
 class TestSkipEnvWrapper(unittest.TestCase):
-    """
-    Tests for installer_module._skip_env_wrapper.
-
-    TOO-19 code review m3: isolates the token-walking logic that
-    _interpreter_missing relies on to find the real interpreter past a
-    leading ``env`` wrapper.
-    """
+    """Tests for installer_module._skip_env_wrapper, which walks past a leading ``env`` wrapper to the real interpreter token."""
 
     def test_no_env_wrapper_returns_tokens_unchanged(self):
         """
@@ -827,13 +752,11 @@ class TestSkipEnvWrapper(unittest.TestCase):
 
 class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
     """
-    TOO-19 code review m3: a correctly hardened registration was reported as
-    BROKEN when wrapped (e.g. ``env -u PYTHONPATH <python> ...``), because
-    ``_hook_registration_findings`` treated token 0 as the interpreter
-    unconditionally. These tests cover the five command shapes discussed in
-    the finding: plain console script, env-wrapped hardened, unwrapped
-    hardened, a bare name resolvable via PATH, and a genuinely nonexistent
-    interpreter (which must STILL be flagged missing).
+    Covers five command shapes ``_hook_registration_findings`` must classify: plain
+    console script, env-wrapped hardened, unwrapped hardened, a bare PATH-resolvable
+    name, and a genuinely missing interpreter -- an env-wrapped hardened command was
+    previously misdiagnosed as broken by treating token 0 as the interpreter
+    unconditionally.
     """
 
     def _findings_for(self, tmpdir: Path, command: str) -> list:
@@ -869,7 +792,6 @@ class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
         When _hook_registration_findings runs
         Then interpreter_missing is False -- token 0 being "env" (the
             wrapper), not the interpreter, must not be misread as missing
-            (this is the exact false-positive TOO-19 m3 reports)
         """
         with TemporaryDirectory() as d:
             binary = _make_fake_venv_bin(Path(d))
@@ -891,7 +813,7 @@ class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
         Given a hardened command with no wrapper, whose interpreter DOES exist
         When _hook_registration_findings runs
         Then interpreter_missing is False (baseline correctness, unaffected
-            by the env-wrapper handling added for m3)
+            by the env-wrapper handling)
         """
         with TemporaryDirectory() as d:
             binary = _make_fake_venv_bin(Path(d))
@@ -932,8 +854,8 @@ class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
             exist anywhere on disk and is not resolvable via PATH
         When _hook_registration_findings runs
         Then interpreter_missing is True -- the env-wrapper/PATH handling
-            added for m3 must not turn this into a false negative; a broken
-            hook still needs to be flagged
+            must not turn this into a false negative; a broken hook still
+            needs to be flagged
         """
         with TemporaryDirectory() as d:
             missing_path = str(Path(d) / "no" / "such" / "python3")
@@ -942,11 +864,6 @@ class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
             )
         self.assertEqual(len(findings), 1)
         self.assertTrue(findings[0]["interpreter_missing"])
-
-
-# ---------------------------------------------------------------------------
-# register-hooks
-# ---------------------------------------------------------------------------
 
 
 class TestRegisterHooks(InstallerTestCase):
@@ -987,18 +904,12 @@ class TestRegisterHooks(InstallerTestCase):
 
     def test_session_start_hook_is_never_hardened(self):
         """
-        TOO-19 code review s1: SessionStart must stay registered as the BARE
-        "<binary>-session-start" form, never hardened through
-        _hardened_hook_command (or any "-m ..." style equivalent). Hardening
-        it would make install_provenance.governing_package_root() -- which
-        _detect_shadow_status() in toolguard/session_start.py compares
-        against the active project's own source checkout -- resolve the
-        INSTALLED distribution unconditionally, ignoring PYTHONPATH/cwd. That
-        would make shadow/stale-install detection permanently and silently
-        blind to the exact condition it exists to catch (a checkout
-        shadowing the installed hook), with no error and no other test
-        failing to say so. See technical-notes.md, "Shadowed-hook detection
-        and install hardening (TOO-19)".
+        SessionStart must stay registered as the bare "<binary>-session-start" form,
+        never hardened through _hardened_hook_command. Hardening it would make
+        install_provenance.governing_package_root() resolve the INSTALLED distribution
+        unconditionally, making session_start.py's shadow/stale-install detection
+        permanently and silently blind to a checkout shadowing the installed hook.
+        See technical-notes.md, "Shadowed-hook detection and install hardening (TOO-19)".
 
         Given register-hooks registers the SessionStart hook for a binary
             whose sibling python3 WOULD be found by _hardened_hook_command
@@ -1187,7 +1098,7 @@ class TestRegisterHooks(InstallerTestCase):
 
     def test_hardened_form_registered_when_venv_python_is_locatable(self):
         """
-        TOO-19: Given --binary points at a real console-script whose bin/
+        Given --binary points at a real console-script whose bin/
             directory has an executable python3 sibling (a real venv shape)
         When register-hooks runs
         Then the registered PreToolUse command is the hardened
@@ -1214,7 +1125,7 @@ class TestRegisterHooks(InstallerTestCase):
 
     def test_unhardened_fallback_when_venv_python_not_locatable(self):
         """
-        TOO-19: Given --binary is a fake path with no locatable venv python
+        Given --binary is a fake path with no locatable venv python
             (the existing fixture shape used throughout this test class)
         When register-hooks runs
         Then the registered PreToolUse command is the bare --binary path,
@@ -1237,11 +1148,6 @@ class TestRegisterHooks(InstallerTestCase):
         command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         self.assertEqual(command, "/fake/toolguard")
         self.assertIn("UNHARDENED", out)
-
-
-# ---------------------------------------------------------------------------
-# seed-self-perms
-# ---------------------------------------------------------------------------
 
 
 class TestSeedSelfPerms(InstallerTestCase):
@@ -1279,8 +1185,9 @@ class TestSeedSelfPerms(InstallerTestCase):
         When seed-self-perms is run
         Then the config's [permissions] section also contains every rule from
         toolguard.tools.uninstall_readiness, scoped to the fake HOME's own
-        ~/.claude directory and settings.json -- seeded now (Phase 4, before
-        takeover is ever enabled) so a later uninstall never hits a hard block
+        ~/.claude directory and settings.json -- seeded now (docs/install.md
+        Phase 4, before takeover is ever enabled) so a later uninstall never
+        hits a hard block
         """
         self._write_base_config()
 
@@ -1335,7 +1242,6 @@ class TestSeedSelfPerms(InstallerTestCase):
         self.assertIn(f"Write({project_settings_path})", text)
         self.assertIn(f"Edit({project_settings_path})", text)
         self.assertIn(f"rm {project_claude_dir / 'toolguard_hook.toml'}:*", text)
-        # Must NOT contain the user-level equivalents.
         self.assertNotIn(f"Write({self.home / '.claude' / 'settings.json'})", text)
 
     def test_missing_base_config_is_rejected(self):
@@ -1388,8 +1294,8 @@ class TestSeedSelfPerms(InstallerTestCase):
         Then the config's [hard_deny] deny list contains every pattern from
         toolguard.tools.self_integrity.required_self_integrity_hard_deny_patterns()
         -- seeded unconditionally, alongside the self/uninstall-readiness
-        permissions, not gated behind the optional Phase 10.1 secret-protection
-        flow
+        permissions, not gated behind the optional docs/install.md Phase 10.1
+        secret-protection flow
         """
         self._write_base_config()
 
@@ -1484,11 +1390,6 @@ class TestSeedSelfPerms(InstallerTestCase):
                 )
 
 
-# ---------------------------------------------------------------------------
-# enable-takeover
-# ---------------------------------------------------------------------------
-
-
 class TestEnableTakeover(InstallerTestCase):
     """Behavior of the enable-takeover subcommand."""
 
@@ -1532,7 +1433,7 @@ class TestEnableTakeover(InstallerTestCase):
     def test_sets_allow_fallback(self):
         """
         Given a base config already exists
-        When enable-takeover is run with --no-match-fallback allow (TOO-19)
+        When enable-takeover is run with --no-match-fallback allow
         Then no_match_fallback is written as 'allow'
         """
         self._write_base_config()
@@ -1549,7 +1450,7 @@ class TestEnableTakeover(InstallerTestCase):
         """
         Given a base config already exists
         When enable-takeover is run with --no-match-fallback
-            allow_with_no_warnings (TOO-19's long-form alias)
+            allow_with_no_warnings (the long-form alias)
         Then no_match_fallback is written verbatim as
             'allow_with_no_warnings' -- the CLI writes the raw choice as-is;
             normalization to 'allow' happens at resolution time, not here
@@ -1613,17 +1514,10 @@ class TestEnableTakeover(InstallerTestCase):
         self.assertIn('"Read"', text)
 
 
-# ---------------------------------------------------------------------------
-# journal
-# ---------------------------------------------------------------------------
-
-
 class TestJournalSubcommand(InstallerTestCase):
     """
-    Dedicated journal-correctness tests (coordinator requirement 2). The journal is
-    the source of truth for uninstall, so its format and monotonicity are tested
-    directly via the standalone ``journal`` subcommand as well as indirectly through
-    every mutating subcommand above.
+    The journal is the source of truth for uninstall; its format and monotonicity are
+    tested directly here and indirectly through every mutating subcommand above.
     """
 
     def test_appends_one_correctly_formatted_entry(self):
@@ -1714,11 +1608,6 @@ class TestJournalSubcommand(InstallerTestCase):
         self.assertFalse(self.journal_path.exists())
 
 
-# ---------------------------------------------------------------------------
-# Output / summary content (coordinator requirement 3)
-# ---------------------------------------------------------------------------
-
-
 class TestSummaryOutput(InstallerTestCase):
     """
     Every subcommand must print a structured summary an agent can rely on for the
@@ -1747,16 +1636,14 @@ class TestSummaryOutput(InstallerTestCase):
         lowered = out.lower()
         self.assertIn("read", lowered)
         self.assertIn("bash", lowered)
-        # Some indication that Bash was already present / unchanged.
         self.assertTrue(
             "already" in lowered or "skip" in lowered or "unchanged" in lowered
         )
 
     def test_register_hooks_preserves_existing_native_permissions(self):
         """
-        TOO-19 review fix M2: given a user-scope settings.json that already
-        holds Claude Code's own NATIVE permissions.allow entries (unrelated
-        to toolguard's hooks)
+        Given a user-scope settings.json that already holds Claude Code's own
+        NATIVE permissions.allow entries (unrelated to toolguard's hooks)
         When register-hooks merges its PreToolUse/SessionStart hooks into
             that same file
         Then the pre-existing native permission entries are still present,
@@ -1788,14 +1675,13 @@ class TestSummaryOutput(InstallerTestCase):
         self.assertEqual(
             data["permissions"]["allow"], ["Bash(ls:*)", "Read(README.md)"]
         )
-        # And the hooks merge itself still happened.
         self.assertIn("PreToolUse", data["hooks"])
 
     def test_register_hooks_refuses_write_that_would_drop_native_permissions(self):
         """
-        TOO-19 review fix M2: given a user-scope settings.json that already
-        holds a native permissions.allow entry, and a (simulated) merge bug
-        that would drop it from the serialized output
+        Given a user-scope settings.json that already holds a native
+        permissions.allow entry, and a (simulated) merge bug that would
+        drop it from the serialized output
         When register-hooks attempts to write the merged file
         Then the write is refused (ConfigWriteVerificationError -> exit code
             2) and the original file on disk is left completely untouched,
@@ -1906,19 +1792,13 @@ class TestSummaryOutput(InstallerTestCase):
         self.assertIn("maintenance", lowered)
 
 
-# ---------------------------------------------------------------------------
-# discover-projects
-# ---------------------------------------------------------------------------
-
-
 class TestDiscoverProjects(InstallerTestCase):
     """
-    Behavior of the discover-projects subcommand (Phase 7.1 encapsulation).
-
-    READ-ONLY: no backup, no journal entry, no init-state precondition. Uses a
-    throwaway "projects root" directory (separate from the fake HOME) to hold real
-    fake project directories, since a candidate's own directory must genuinely exist
-    on disk to survive discovery's existence filter.
+    Behavior of the discover-projects subcommand (docs/install.md Phase 7.1):
+    READ-ONLY (no backup, no journal entry, no init-state precondition). Uses a
+    throwaway "projects root" directory, separate from the fake HOME, since a
+    candidate's directory must genuinely exist on disk to survive discovery's
+    existence filter.
     """
 
     def setUp(self):
@@ -1936,20 +1816,9 @@ class TestDiscoverProjects(InstallerTestCase):
         takeover_enabled=None,
     ):
         """
-        Create a real fake project directory, optionally with settings.local.json
-        and/or a toolguard_hook.toml carrying a [takeover_mode] section.
-
-        Args:
-            name: Subdirectory name under the throwaway projects root (avoid '-' in
-                the name for tests relying on lossy-encoding round-trips).
-            permissions: Dict with 'allow'/'deny'/'ask' lists for settings.local.json;
-                defaults to a single allow rule when write_settings is True.
-            write_settings: Whether to write .claude/settings.local.json at all.
-            takeover_enabled: If not None, writes .claude/toolguard_hook.toml with
-                [takeover_mode] enabled = <bool>.
-
-        Returns:
-            The created project directory Path.
+        Create a fake project directory, optionally with settings.local.json and/or a
+        takeover-enabled toolguard_hook.toml; returns the project dir. Avoid '-' in
+        *name* for tests relying on lossy-encoding round-trips.
         """
         proj_dir = self.projects_root / name
         claude_dir = proj_dir / ".claude"
@@ -2139,11 +2008,6 @@ class TestDiscoverProjects(InstallerTestCase):
         self.assertEqual(paths, sorted(paths))
 
 
-# ---------------------------------------------------------------------------
-# install-skills
-# ---------------------------------------------------------------------------
-
-
 class TestParseGitSource(unittest.TestCase):
     """Unit-level coverage of _parse_git_source's URL/ref splitting."""
 
@@ -2213,19 +2077,12 @@ class TestParseGitSource(unittest.TestCase):
 
 
 class TestInstallSkills(InstallerTestCase):
-    """Behavior of the install-skills subcommand (Phase 5 encapsulation)."""
+    """Behavior of the install-skills subcommand (docs/install.md Phase 5)."""
 
     def _make_source_repo(self, content_suffix=""):
         """
-        Build a throwaway local 'source repo' with skills/toolguard-security-audit/
-        and skills/toolguard-maintenance/, each holding a distinguishable SKILL.md.
-
-        Args:
-            content_suffix: Appended to each SKILL.md's content, so two calls with
-                different suffixes produce distinguishable "versions" of the source.
-
-        Returns:
-            The source repo root Path (cleanup registered via addCleanup).
+        Build a throwaway local 'source repo' with skills/toolguard-security-audit/ and
+        skills/toolguard-maintenance/, each with a distinguishable SKILL.md; returns the root.
         """
         ctx = TemporaryDirectory()
         self.addCleanup(ctx.cleanup)
@@ -2428,16 +2285,9 @@ class TestInstallSkills(InstallerTestCase):
         self.assertFalse((self.home / ".claude" / "skills").exists())
 
 
-# ---------------------------------------------------------------------------
-# seed-hard-deny
-# ---------------------------------------------------------------------------
-
-# Duplicated here (rather than imported) so this test module's collection does not
-# depend on the not-yet-implemented toolguard.tools.recommended_protections module --
-# see test_recommended_protections.py for direct coverage of that module itself.
-# Includes both the relative (project-anchored) forms and their home-anchored (~/...)
-# siblings; see docs/security.md's "Why both forms of the sensitive-file patterns are
-# needed" for the rationale.
+# Both project-anchored and home-anchored forms of each sensitive-file pattern -- see
+# docs/security.md's "Why both forms of the sensitive-file patterns are needed", and
+# test_recommended_protections.py for direct coverage of the canonical source list.
 _EXPECTED_HARD_DENY_PATTERNS = (
     "Read(**/.env)",
     "Read(**/.env.*)",
@@ -2460,7 +2310,7 @@ _EXPECTED_HARD_DENY_PATTERNS = (
 
 class TestSeedHardDeny(InstallerTestCase):
     """
-    Behavior of the seed-hard-deny subcommand (Phase 10.1 encapsulation).
+    Behavior of the seed-hard-deny subcommand (docs/install.md Phase 10.1).
 
     Architecturally mirrors seed-self-perms (see TestSeedSelfPerms) but targets
     [hard_deny].deny with the canonical patterns from
@@ -2555,16 +2405,6 @@ class TestSeedHardDeny(InstallerTestCase):
         self.assertFalse((self.home / ".claude" / "toolguard_hook.toml").exists())
 
 
-# ---------------------------------------------------------------------------
-# config-write-guard wiring (TOO-19 review fix): every installer.py write of a
-# toolguard_hook.toml / settings.json must go through
-# toolguard.config_write_guard.verified_write_config, never a raw
-# _atomic_write_text -- these tests simulate a rendering bug that would have
-# produced corrupt or pattern-dropping text and confirm the write is refused
-# and the file on disk is left completely untouched.
-# ---------------------------------------------------------------------------
-
-
 class TestConfigWriteGuardWiring(InstallerTestCase):
     """
     Confirms installer.py's config-file writers refuse corrupt output.
@@ -2586,7 +2426,7 @@ class TestConfigWriteGuardWiring(InstallerTestCase):
         with patch.object(
             installer_module,
             "_render_config_toml",
-            return_value="governed_tools = [\n",  # unterminated list -- invalid TOML
+            return_value="governed_tools = [\n",
         ):
             code, out = self.run_cli(
                 ["write-config", "--scope", "user", "--governed-tools", "Bash"]
@@ -2611,7 +2451,7 @@ class TestConfigWriteGuardWiring(InstallerTestCase):
         with patch.object(
             installer_module,
             "_render_takeover_section",
-            return_value="[takeover_mode\nenabled = true\n",  # missing closing bracket
+            return_value="[takeover_mode\nenabled = true\n",
         ):
             code, out = self.run_cli(["enable-takeover", "--scope", "user"])
 
@@ -2635,7 +2475,6 @@ class TestConfigWriteGuardWiring(InstallerTestCase):
         )
         original_bytes = config_path.read_bytes()
 
-        # Valid TOML, but silently drops the pre-existing custom-secret.key pattern.
         with patch.object(
             installer_module,
             "_render_hard_deny_section",
@@ -2647,14 +2486,10 @@ class TestConfigWriteGuardWiring(InstallerTestCase):
         self.assertEqual(config_path.read_bytes(), original_bytes)
 
 
-# ---------------------------------------------------------------------------
-# skills-status
-# ---------------------------------------------------------------------------
-
-
 class TestSkillsStatus(InstallerTestCase):
     """
-    Behavior of the skills-status subcommand (TOO-15 completion-gate check).
+    Behavior of the skills-status subcommand: a completion-gate check for toolguard's
+    own installation freshness.
 
     READ-ONLY: no backup, no journal entry, no init-state precondition. Covers
     both the bundled-skill classification (missing/installed/invalid, including
@@ -3019,7 +2854,7 @@ class TestSkillsStatus(InstallerTestCase):
 
     def test_no_settings_files_reports_no_hook_registrations(self):
         """
-        TOO-19: Given neither settings.json nor settings.local.json exists
+        Given neither settings.json nor settings.local.json exists
         When skills-status runs
         Then hook_registrations is an empty list
         """
@@ -3039,7 +2874,7 @@ class TestSkillsStatus(InstallerTestCase):
 
     def test_unhardened_registration_is_reported(self):
         """
-        TOO-19: Given settings.json has a bare-binary (unhardened) toolguard
+        Given settings.json has a bare-binary (unhardened) toolguard
             PreToolUse registration
         When skills-status runs
         Then hook_registrations reports it with hardened=False
@@ -3082,7 +2917,7 @@ class TestSkillsStatus(InstallerTestCase):
 
     def test_hardened_registration_with_existing_interpreter_is_reported_clean(self):
         """
-        TOO-19: Given settings.json has a hardened registration whose
+        Given settings.json has a hardened registration whose
             interpreter path DOES exist on disk
         When skills-status runs
         Then hardened=True and interpreter_missing=False
@@ -3127,7 +2962,7 @@ class TestSkillsStatus(InstallerTestCase):
 
     def test_hardened_registration_with_missing_interpreter_is_flagged(self):
         """
-        TOO-19: Given settings.json has a hardened registration whose recorded
+        Given settings.json has a hardened registration whose recorded
             interpreter path no longer exists on disk (the exact silent
             fail-open risk hardening's own docstring warns about)
         When skills-status runs
@@ -3178,7 +3013,7 @@ class TestSkillsStatus(InstallerTestCase):
 
     def test_non_toolguard_command_is_not_reported(self):
         """
-        TOO-19: Given a PreToolUse hook registered for an UNRELATED command
+        Given a PreToolUse hook registered for an UNRELATED command
         When skills-status runs
         Then it does not appear in hook_registrations
         """
@@ -3213,14 +3048,13 @@ class TestSkillsStatus(InstallerTestCase):
 
 class TestSeedCommandsWithStructuredEntries(InstallerTestCase):
     """
-    Regression guards for review finding M3: the seed commands used to read raw
-    ``tomllib`` output straight into the write path, so a config already holding
-    structured ``{ match = ..., additionalContext = ... }`` entries crashed with
-    ``TypeError: unhashable type: 'dict'`` (via ``sort_patterns``) or
-    ``AttributeError: 'dict' object has no attribute 'replace'`` (via
-    ``_render_hard_deny_section``), and a raw ``in`` membership test silently
-    missed a structured entry so its pattern was re-added as a duplicate bare
-    string on every run.
+    Regression guards: the seed commands used to read raw ``tomllib`` output straight
+    into the write path, so a config already holding structured
+    ``{ match = ..., additionalContext = ... }`` entries crashed with ``TypeError:
+    unhashable type: 'dict'`` (via ``sort_patterns``) or ``AttributeError: 'dict' object
+    has no attribute 'replace'`` (via ``_render_hard_deny_section``), and a raw ``in``
+    membership test silently missed a structured entry so its pattern was re-added as a
+    duplicate bare string on every run.
     """
 
     def user_config_path(self):
@@ -3236,8 +3070,6 @@ class TestSeedCommandsWithStructuredEntries(InstallerTestCase):
             structured entry's enrichment survives in the rewritten file
         """
         self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
-        # seed-self-perms creates the [permissions] section; only then can a
-        # structured entry be injected into it.
         self.run_cli(["seed-self-perms", "--scope", "user"])
         path = self.user_config_path()
         text = path.read_text()
@@ -3275,7 +3107,6 @@ class TestSeedCommandsWithStructuredEntries(InstallerTestCase):
         seeded = next((p for p in allow if isinstance(p, str)), None)
         self.assertIsNotNone(seeded, "expected at least one seeded plain pattern")
 
-        # Re-express that same pattern in structured form.
         text = path.read_text().replace(
             f'"{seeded}",',
             f'{{ match = "{seeded}", additionalContext = "note" }},',

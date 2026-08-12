@@ -429,7 +429,6 @@ class TestCompoundPermission(unittest.TestCase):
             _verdict.additional_context,
         )
         self.assertEqual(decision, "deny")
-        # Should report the first denied command
         self.assertIn("rm file1", reason)
 
     def test_quotes_in_compound(self):
@@ -519,7 +518,6 @@ class TestCompoundPermissionMatchDetails(unittest.TestCase):
             _verdict.additional_context,
         )
         self.assertEqual(decision, "allow")
-        # Single commands go through check_permission directly, no compound format
         self.assertNotIn("sub-commands allowed", reason)
 
 
@@ -587,7 +585,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then all three levels are extracted: outer, 'cat $(find .)', and 'find .'
         """
         result = extract_commands("echo $(cat $(find .))")
-        # Should extract: original, first level inner, second level inner
         self.assertEqual(len(result), 3)
         self.assertIn("echo $(cat $(find .))", result)
         self.assertIn("cat $(find .)", result)
@@ -613,7 +610,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then more than two parts are extracted including the inner 'rm file' and 'ls'
         """
         result = extract_commands("echo $(rm file) && $(ls)")
-        # Should extract: original compound, rm file, ls
         self.assertGreater(len(result), 2)
         self.assertIn("rm file", result)
         self.assertIn("ls", result)
@@ -625,7 +621,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then the outer command and both inner 'cat file1' and 'cat file2' are extracted
         """
         result = extract_commands("echo $(cat file1) $(cat file2)")
-        # Should extract: original, cat file1, cat file2
         self.assertEqual(len(result), 3)
         self.assertIn("echo $(cat file1) $(cat file2)", result)
         self.assertIn("cat file1", result)
@@ -638,7 +633,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then 'cat $(find .)', 'grep pattern', and inner 'find .' are all extracted
         """
         result = extract_commands("cat $(find .) | grep pattern")
-        # Should extract: cat $(find .), grep pattern, find .
         self.assertEqual(len(result), 3)
         self.assertIn("cat $(find .)", result)
         self.assertIn("grep pattern", result)
@@ -651,7 +645,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then 'git status', 'echo $(pwd)', and inner 'pwd' are all extracted
         """
         result = extract_commands("git status && echo $(pwd)")
-        # Should extract: git status, echo $(pwd), pwd
         self.assertEqual(len(result), 3)
         self.assertIn("git status", result)
         self.assertIn("echo $(pwd)", result)
@@ -664,7 +657,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then it does not crash and the outer command is still extracted
         """
         result = extract_commands("echo $()")
-        # Should handle gracefully, extracting at least the outer command
         self.assertIn("echo $()", result)
 
     def test_whitespace_in_substitution(self):
@@ -674,7 +666,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then the inner command is extracted with surrounding whitespace stripped ('ls -la')
         """
         result = extract_commands("echo $(  ls -la  )")
-        # Should strip whitespace from inner command
         self.assertIn("ls -la", result)
 
     def test_backtick_with_dollar_paren_mixed(self):
@@ -684,7 +675,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then both inner 'cat file' and 'ls' are extracted
         """
         result = extract_commands("echo $(cat file) `ls`")
-        # Should extract both types of substitutions
         self.assertIn("cat file", result)
         self.assertIn("ls", result)
 
@@ -695,7 +685,6 @@ class TestCommandSubstitution(unittest.TestCase):
         Then the inner 'rm -rf /' is extracted so it can be permission-checked
         """
         result = extract_commands("echo $(rm -rf /)")
-        # Critical: rm -rf / MUST be extracted for security checking
         self.assertIn("rm -rf /", result)
 
     def test_depth_limit_prevents_infinite_loop(self):
@@ -705,10 +694,8 @@ class TestCommandSubstitution(unittest.TestCase):
         Then it terminates without crashing and still extracts the outer command
             (depth limit may prevent reaching all levels)
         """
-        # Create a very deeply nested command (6+ levels)
         cmd = "echo $(level1 $(level2 $(level3 $(level4 $(level5 $(level6))))))"
         result = extract_commands(cmd)
-        # Should extract without crashing, but may not get all levels due to depth limit
         self.assertGreater(len(result), 1)
         self.assertIn(
             "echo $(level1 $(level2 $(level3 $(level4 $(level5 $(level6))))))", result
@@ -725,7 +712,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then both the subshell wrapper and the inner 'ls -la' are extracted
         """
         result = extract_commands("(ls -la)")
-        # Should extract: original, inner command
         self.assertIn("(ls -la)", result)
         self.assertIn("ls -la", result)
 
@@ -736,7 +722,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the wrapper, the inner compound, and both 'cd /tmp' and 'rm file' are extracted
         """
         result = extract_commands("(cd /tmp && rm file)")
-        # Should extract: original, inner compound, and both commands
         self.assertIn("(cd /tmp && rm file)", result)
         self.assertIn("cd /tmp && rm file", result)
         self.assertIn("cd /tmp", result)
@@ -749,7 +734,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the wrapper, the inner compound, and both || sides are extracted
         """
         result = extract_commands("(test -f file || echo not found)")
-        # Should extract: original, inner compound, and both commands
         self.assertIn("(test -f file || echo not found)", result)
         self.assertIn("test -f file || echo not found", result)
         self.assertIn("test -f file", result)
@@ -762,7 +746,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then all levels are extracted: '((ls))', '(ls)', and 'ls'
         """
         result = extract_commands("((ls))")
-        # Should extract: outermost, middle, innermost
         self.assertIn("((ls))", result)
         self.assertIn("(ls)", result)
         self.assertIn("ls", result)
@@ -774,7 +757,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then all four levels down to 'pwd' are extracted
         """
         result = extract_commands("(((pwd)))")
-        # Should extract all levels
         self.assertIn("(((pwd)))", result)
         self.assertIn("((pwd))", result)
         self.assertIn("(pwd)", result)
@@ -787,7 +769,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then '(rm file)', inner 'rm file', and 'echo done' are all extracted
         """
         result = extract_commands("(rm file) && echo done")
-        # Should extract all parts
         self.assertIn("(rm file)", result)
         self.assertIn("rm file", result)
         self.assertIn("echo done", result)
@@ -799,7 +780,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then 'echo start', '(rm file)', and inner 'rm file' are all extracted
         """
         result = extract_commands("echo start && (rm file)")
-        # Should extract all parts
         self.assertIn("echo start", result)
         self.assertIn("(rm file)", result)
         self.assertIn("rm file", result)
@@ -811,7 +791,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then both wrappers and their inner commands are extracted
         """
         result = extract_commands("(cmd1) && (cmd2)")
-        # Should extract all commands
         self.assertIn("(cmd1)", result)
         self.assertIn("cmd1", result)
         self.assertIn("(cmd2)", result)
@@ -824,7 +803,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the inner 'rm -rf /' is extracted for permission checking
         """
         result = extract_commands("(rm -rf /)")
-        # Critical: rm -rf / MUST be extracted for security checking
         self.assertIn("rm -rf /", result)
 
     def test_nested_subshell_security_bypass(self):
@@ -834,7 +812,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the inner 'rm -rf /' is extracted even when nested
         """
         result = extract_commands("((rm -rf /))")
-        # Critical: rm -rf / MUST be extracted even when deeply nested
         self.assertIn("rm -rf /", result)
 
     def test_simple_brace_group(self):
@@ -844,7 +821,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then both the brace wrapper and the inner 'rm file' are extracted
         """
         result = extract_commands("{ rm file; }")
-        # Should extract: original, inner command
         self.assertIn("{ rm file; }", result)
         self.assertIn("rm file", result)
 
@@ -855,7 +831,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the wrapper, the inner compound, and both 'cmd1' and 'cmd2' are extracted
         """
         result = extract_commands("{ cmd1; cmd2; }")
-        # Should extract all commands
         self.assertIn("{ cmd1; cmd2; }", result)
         self.assertIn("cmd1; cmd2", result)
         self.assertIn("cmd1", result)
@@ -868,7 +843,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then it does not crash and the '()' wrapper is present in the result
         """
         result = extract_commands("()")
-        # Should handle gracefully
         self.assertIn("()", result)
 
     def test_whitespace_in_subshell(self):
@@ -878,7 +852,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the inner command is extracted with whitespace stripped ('ls')
         """
         result = extract_commands("(  ls  )")
-        # Should strip whitespace from inner command
         self.assertIn("ls", result)
 
     def test_subshell_depth_limit(self):
@@ -887,10 +860,8 @@ class TestSubshellExtraction(unittest.TestCase):
         When extract_commands processes it
         Then it terminates without crashing and the outer wrapper is still extracted
         """
-        # Create very deeply nested subshells (6+ levels)
         cmd = "((((((ls))))))"
         result = extract_commands(cmd)
-        # Should extract without crashing, depth limit prevents all levels
         self.assertGreater(len(result), 1)
         self.assertIn("((((((ls))))))", result)
 
@@ -901,12 +872,10 @@ class TestSubshellExtraction(unittest.TestCase):
         Then both constructs are extracted separately: 'echo $(ls)'/'ls' and '(pwd)'/'pwd'
         """
         result = extract_commands("echo $(ls) && (pwd)")
-        # Should extract both $(ls) and (pwd) correctly
-        # Note: Original compound command NOT included (consistent with other compound command tests)
-        self.assertIn("echo $(ls)", result)  # From && split
-        self.assertIn("ls", result)  # From $(...) extraction
-        self.assertIn("(pwd)", result)  # From && split
-        self.assertIn("pwd", result)  # From (...) extraction
+        self.assertIn("echo $(ls)", result)
+        self.assertIn("ls", result)
+        self.assertIn("(pwd)", result)
+        self.assertIn("pwd", result)
 
     def test_mixed_subshell_and_substitution(self):
         """
@@ -915,7 +884,6 @@ class TestSubshellExtraction(unittest.TestCase):
         Then the wrapper, 'echo $(cat file)', and inner 'cat file' are all extracted
         """
         result = extract_commands("(echo $(cat file))")
-        # Should extract both types
         self.assertIn("(echo $(cat file))", result)
         self.assertIn("echo $(cat file)", result)
         self.assertIn("cat file", result)
@@ -930,9 +898,7 @@ class TestEdgeCases(unittest.TestCase):
         When extract_commands processes it
         Then it does not crash and returns at least one valid command
         """
-        # This is malformed but should not crash
         result = extract_commands("cmd1 && && cmd2")
-        # Should extract valid commands, may skip empty parts
         self.assertGreater(len(result), 0)
 
     def test_trailing_operator(self):
@@ -942,7 +908,6 @@ class TestEdgeCases(unittest.TestCase):
         Then it degrades gracefully, returning either 'git status' or the original string
         """
         result = extract_commands("git status &&")
-        # Either extract 'git status' or return original as graceful degradation
         self.assertTrue(
             "git status" in result or "git status &&" in result,
             f"Expected either extracted command or original, got: {result}",
@@ -955,7 +920,6 @@ class TestEdgeCases(unittest.TestCase):
         Then it handles the malformed input gracefully and returns at least one command
         """
         result = extract_commands("&& git status")
-        # Should handle gracefully
         self.assertGreater(len(result), 0)
 
     def test_very_long_command(self):
@@ -964,7 +928,6 @@ class TestEdgeCases(unittest.TestCase):
         When extract_commands processes it
         Then exactly 50 commands are extracted
         """
-        # Create a long chain of commands
         commands = [f"cmd{i}" for i in range(50)]
         command_line = " && ".join(commands)
         result = extract_commands(command_line)
@@ -992,8 +955,6 @@ class TestEdgeCases(unittest.TestCase):
 class TestCombinedConstructs(unittest.TestCase):
     """Test combinations of different bash constructs together."""
 
-    # --- Subshell + Command Substitution ---
-
     def test_subshell_containing_command_substitution(self):
         """
         Given a subshell containing a substitution ('(echo $(pwd))')
@@ -1001,7 +962,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then the wrapper, 'echo $(pwd)', and inner 'pwd' are all extracted
         """
         result = extract_commands("(echo $(pwd))")
-        # Should extract: original, subshell inner, and substitution inner
         self.assertIn("(echo $(pwd))", result)
         self.assertIn("echo $(pwd)", result)
         self.assertIn("pwd", result)
@@ -1013,7 +973,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then the outer command, the inner compound, and both 'cd /tmp' and 'ls' are extracted
         """
         result = extract_commands("echo $(cd /tmp && ls)")
-        # Should extract: original, substitution inner, and both compound commands
         self.assertIn("echo $(cd /tmp && ls)", result)
         self.assertIn("cd /tmp && ls", result)
         self.assertIn("cd /tmp", result)
@@ -1026,7 +985,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then every level is extracted down to 'find .'
         """
         result = extract_commands("(echo $(cat $(find .)))")
-        # Should extract all levels and types
         self.assertIn("(echo $(cat $(find .)))", result)
         self.assertIn("echo $(cat $(find .))", result)
         self.assertIn("cat $(find .)", result)
@@ -1039,7 +997,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then the brace wrapper, 'echo $(pwd)', and inner 'pwd' are all extracted
         """
         result = extract_commands("{ echo $(pwd); }")
-        # Should extract brace inner and substitution inner
         self.assertIn("{ echo $(pwd); }", result)
         self.assertIn("echo $(pwd)", result)
         self.assertIn("pwd", result)
@@ -1051,12 +1008,9 @@ class TestCombinedConstructs(unittest.TestCase):
         Then the wrapper, 'echo `hostname`', and inner 'hostname' are all extracted
         """
         result = extract_commands("(echo `hostname`)")
-        # Should extract both
         self.assertIn("(echo `hostname`)", result)
         self.assertIn("echo `hostname`", result)
         self.assertIn("hostname", result)
-
-    # --- Multiple constructs at same level ---
 
     def test_substitution_then_subshell(self):
         """
@@ -1065,7 +1019,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then 'echo $(pwd)', 'pwd', '(ls -la)', and 'ls -la' are all extracted
         """
         result = extract_commands("echo $(pwd) && (ls -la)")
-        # Should extract all parts
         self.assertIn("echo $(pwd)", result)
         self.assertIn("pwd", result)
         self.assertIn("(ls -la)", result)
@@ -1078,7 +1031,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then '(cd /tmp)', 'cd /tmp', 'echo $(pwd)', and 'pwd' are all extracted
         """
         result = extract_commands("(cd /tmp) && echo $(pwd)")
-        # Should extract all parts
         self.assertIn("(cd /tmp)", result)
         self.assertIn("cd /tmp", result)
         self.assertIn("echo $(pwd)", result)
@@ -1091,7 +1043,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then all three inner commands 'cmd1', 'cmd2', and 'cmd3' are extracted
         """
         result = extract_commands("echo $(cmd1) $(cmd2) && (cmd3)")
-        # Should extract all inner commands
         self.assertIn("cmd1", result)
         self.assertIn("cmd2", result)
         self.assertIn("cmd3", result)
@@ -1103,11 +1054,8 @@ class TestCombinedConstructs(unittest.TestCase):
         Then both inner commands 'cmd1' and 'cmd2' are extracted
         """
         result = extract_commands("{ cmd1; } && (cmd2)")
-        # Should extract both inner commands
         self.assertIn("cmd1", result)
         self.assertIn("cmd2", result)
-
-    # --- Three or more nested levels ---
 
     def test_three_level_mixed_nesting(self):
         """
@@ -1116,9 +1064,7 @@ class TestCombinedConstructs(unittest.TestCase):
         Then it does not crash and the full original string is present in the result
         """
         result = extract_commands("($(echo $((1+1))))")
-        # At minimum, should extract without crashing
         self.assertIn("($(echo $((1+1))))", result)
-        # Inner arithmetic expansion may or may not be extracted
 
     def test_subshell_in_substitution_in_subshell(self):
         """
@@ -1127,7 +1073,6 @@ class TestCombinedConstructs(unittest.TestCase):
         Then every level is extracted down to 'cmd1', '(cmd2)', and 'cmd2'
         """
         result = extract_commands("(echo $(cmd1 && (cmd2)))")
-        # Should extract all levels
         self.assertIn("(echo $(cmd1 && (cmd2)))", result)
         self.assertIn("echo $(cmd1 && (cmd2))", result)
         self.assertIn("cmd1 && (cmd2)", result)
@@ -1146,7 +1091,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then both inner commands 'cmd1' and 'cmd2' are extracted
         """
         result = extract_commands("echo $(cmd1)$(cmd2)")
-        # Should extract both inner commands
         self.assertIn("cmd1", result)
         self.assertIn("cmd2", result)
 
@@ -1157,7 +1101,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the outer command and the inner 'find . -name "*.tmp"' are extracted
         """
         result = extract_commands('rm $(find . -name "*.tmp")')
-        # Should extract find command
         self.assertIn('rm $(find . -name "*.tmp")', result)
         self.assertIn('find . -name "*.tmp"', result)
 
@@ -1178,7 +1121,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the outer command and the inner 'which python' are extracted
         """
         result = extract_commands("$(which python) --version")
-        # Should extract the which command
         self.assertIn("$(which python) --version", result)
         self.assertIn("which python", result)
 
@@ -1189,7 +1131,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the inner 'hostname' command is still extracted
         """
         result = extract_commands('echo "hostname: `hostname`"')
-        # Should still extract the inner command
         self.assertIn("hostname", result)
 
     def test_dollar_paren_inside_double_quotes(self):
@@ -1199,7 +1140,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the inner 'whoami' command is still extracted
         """
         result = extract_commands('echo "user: $(whoami)"')
-        # Should extract the inner command
         self.assertIn("whoami", result)
 
     def test_substitution_with_compound_inside(self):
@@ -1209,7 +1149,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the inner compound 'ls && pwd' and both 'ls' and 'pwd' are extracted
         """
         result = extract_commands('echo "$(ls && pwd)"')
-        # Should extract compound and its parts
         self.assertIn("ls && pwd", result)
         self.assertIn("ls", result)
         self.assertIn("pwd", result)
@@ -1221,7 +1160,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the inner pipeline 'ps aux | grep python' and both stages are extracted
         """
         result = extract_commands("echo $(ps aux | grep python)")
-        # Should extract both piped commands
         self.assertIn("ps aux | grep python", result)
         self.assertIn("ps aux", result)
         self.assertIn("grep python", result)
@@ -1232,9 +1170,7 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         When extract_commands processes it
         Then it does not crash and returns at least one command
         """
-        # Nested backticks require escaping in real shell, test graceful handling
         result = extract_commands("echo `echo \\`hostname\\``")
-        # Should at least not crash
         self.assertGreater(len(result), 0)
 
     def test_substitution_with_semicolon_inside(self):
@@ -1244,7 +1180,6 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         Then the inner 'cd /tmp; ls' and both 'cd /tmp' and 'ls' are extracted
         """
         result = extract_commands("echo $(cd /tmp; ls)")
-        # Should extract both commands separated by semicolon
         self.assertIn("cd /tmp; ls", result)
         self.assertIn("cd /tmp", result)
         self.assertIn("ls", result)
@@ -1260,7 +1195,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then the wrapper, the inner pipeline, and both stages are extracted
         """
         result = extract_commands("(cat file | grep pattern)")
-        # Should extract subshell inner, and both piped commands
         self.assertIn("(cat file | grep pattern)", result)
         self.assertIn("cat file | grep pattern", result)
         self.assertIn("cat file", result)
@@ -1273,7 +1207,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then the wrapper, the inner compound, and all three commands are extracted
         """
         result = extract_commands("(cmd1; cmd2; cmd3)")
-        # Should extract all semicolon-separated commands
         self.assertIn("(cmd1; cmd2; cmd3)", result)
         self.assertIn("cmd1; cmd2; cmd3", result)
         self.assertIn("cmd1", result)
@@ -1287,8 +1220,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then it degrades gracefully, yielding both inner commands or the original string
         """
         result = extract_commands("(cmd1) (cmd2)")
-        # Either extract both inner commands or return original as graceful degradation
-        # Note: Adjacent subshells without separator is unusual bash syntax
         self.assertTrue(
             ("cmd1" in result and "cmd2" in result) or "(cmd1) (cmd2)" in result,
             f"Expected either extracted commands or original, got: {result}",
@@ -1301,7 +1232,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then the wrapper and the inner 'echo test > /tmp/file' are extracted
         """
         result = extract_commands("(echo test > /tmp/file)")
-        # Should extract inner command
         self.assertIn("(echo test > /tmp/file)", result)
         self.assertIn("echo test > /tmp/file", result)
 
@@ -1312,7 +1242,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then the wrapper and the inner 'sleep 10 &' are extracted
         """
         result = extract_commands("(sleep 10 &)")
-        # Should extract inner command
         self.assertIn("(sleep 10 &)", result)
         self.assertIn("sleep 10 &", result)
 
@@ -1323,7 +1252,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then all three inner commands 'cd /tmp', 'export FOO=bar', and 'make' are extracted
         """
         result = extract_commands("(cd /tmp && export FOO=bar && make)")
-        # Should extract all inner commands
         self.assertIn("cd /tmp", result)
         self.assertIn("export FOO=bar", result)
         self.assertIn("make", result)
@@ -1335,7 +1263,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then '(cat file)', inner 'cat file', and 'grep pattern' are all extracted
         """
         result = extract_commands("(cat file) | grep pattern")
-        # Should extract subshell inner and grep
         self.assertIn("(cat file)", result)
         self.assertIn("cat file", result)
         self.assertIn("grep pattern", result)
@@ -1347,8 +1274,6 @@ class TestSubshellAdvanced(unittest.TestCase):
         Then the three real commands 'echo data', 'read line', and 'echo $line' are extracted
         """
         result = extract_commands("echo data | (read line && echo $line)")
-        # Should extract the three actual commands that need permission checking
-        # The subshell (...) is just grouping, not a command itself
         self.assertIn("echo data", result)
         self.assertIn("read line", result)
         self.assertIn("echo $line", result)
@@ -1364,7 +1289,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then at minimum the innermost 'cmd' is extracted
         """
         result = extract_commands("{ { cmd; }; }")
-        # Should extract at least inner command
         self.assertIn("cmd", result)
 
     def test_brace_group_with_pipe(self):
@@ -1374,7 +1298,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then both inner stages 'cat file' and 'grep pattern' are extracted
         """
         result = extract_commands("{ cat file | grep pattern; }")
-        # Should extract inner piped commands
         self.assertIn("cat file", result)
         self.assertIn("grep pattern", result)
 
@@ -1385,7 +1308,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then both inner commands 'cmd1' and 'cmd2' are extracted
         """
         result = extract_commands("{ cmd1 && cmd2; }")
-        # Should extract both commands
         self.assertIn("cmd1", result)
         self.assertIn("cmd2", result)
 
@@ -1396,7 +1318,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then the inner 'cmd' is still extracted despite the missing space
         """
         result = extract_commands("{cmd; }")
-        # Should still extract command (graceful handling)
         self.assertIn("cmd", result)
 
     def test_brace_group_with_subshell_inside(self):
@@ -1406,7 +1327,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then both the inner '(cmd)' subshell and 'cmd' are extracted
         """
         result = extract_commands("{ (cmd); }")
-        # Should extract both brace inner and subshell inner
         self.assertIn("(cmd)", result)
         self.assertIn("cmd", result)
 
@@ -1417,7 +1337,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then both 'echo $(pwd)' and inner 'pwd' are extracted
         """
         result = extract_commands("{ echo $(pwd); }")
-        # Should extract both brace inner and substitution inner
         self.assertIn("echo $(pwd)", result)
         self.assertIn("pwd", result)
 
@@ -1428,7 +1347,6 @@ class TestBraceGroupAdvanced(unittest.TestCase):
         Then both inner commands 'cmd1' and 'cmd2' are extracted
         """
         result = extract_commands("(cmd1) && { cmd2; }")
-        # Should extract both inner commands
         self.assertIn("cmd1", result)
         self.assertIn("cmd2", result)
 
@@ -1604,7 +1522,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it does not crash and returns at least one command
         """
         result = extract_commands("(cmd")
-        # Should not crash, may return original or handle gracefully
         self.assertGreater(len(result), 0)
 
     def test_unmatched_close_paren(self):
@@ -1614,7 +1531,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it does not crash and returns at least one command
         """
         result = extract_commands("cmd)")
-        # Should not crash
         self.assertGreater(len(result), 0)
 
     def test_unmatched_dollar_paren(self):
@@ -1624,7 +1540,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it does not crash and returns at least one command
         """
         result = extract_commands("echo $(cmd")
-        # Should not crash
         self.assertGreater(len(result), 0)
 
     def test_unmatched_backtick(self):
@@ -1634,7 +1549,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it does not crash and returns at least one command
         """
         result = extract_commands("echo `cmd")
-        # Should not crash
         self.assertGreater(len(result), 0)
 
     def test_unmatched_brace(self):
@@ -1644,7 +1558,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it does not crash and returns at least one command
         """
         result = extract_commands("{ cmd")
-        # Should not crash
         self.assertGreater(len(result), 0)
 
     def test_only_operators(self):
@@ -1653,8 +1566,6 @@ class TestParserRobustness(unittest.TestCase):
         When extract_commands processes it
         Then it completes without crashing
         """
-        # Should handle gracefully without crashing
-        # Not crashing is the main requirement
         extract_commands("&& || ; |")
 
     def test_very_deep_nesting(self):
@@ -1663,10 +1574,8 @@ class TestParserRobustness(unittest.TestCase):
         When extract_commands processes it
         Then it does not crash and returns at least one command
         """
-        # 10 levels of nesting
         cmd = "(" * 10 + "pwd" + ")" * 10
         result = extract_commands(cmd)
-        # Should handle without crashing (may not extract all levels due to depth limit)
         self.assertGreater(len(result), 0)
 
     def test_mixed_very_deep_nesting(self):
@@ -1675,10 +1584,8 @@ class TestParserRobustness(unittest.TestCase):
         When extract_commands processes it
         Then it does not crash and returns at least one command
         """
-        # Alternating subshells and substitutions
         cmd = "($(($(($(pwd)))))"
         result = extract_commands(cmd)
-        # Should handle without crashing
         self.assertGreater(len(result), 0)
 
     def test_unicode_in_command(self):
@@ -1698,7 +1605,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it handles the embedded newline and extracts 'ls'
         """
         result = extract_commands('echo "line1\nline2" && ls')
-        # Should handle embedded newline
         self.assertIn("ls", result)
 
     def test_tab_characters(self):
@@ -1708,7 +1614,6 @@ class TestParserRobustness(unittest.TestCase):
         Then tabs are treated like spaces and 'ls' is extracted
         """
         result = extract_commands('echo\t"test"\t&&\tls')
-        # Should handle tabs like spaces
         self.assertIn("ls", result)
 
     def test_empty_subshell(self):
@@ -1718,7 +1623,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it handles it gracefully and the '()' wrapper is present in the result
         """
         result = extract_commands("()")
-        # Should handle gracefully
         self.assertIn("()", result)
 
     def test_empty_substitution(self):
@@ -1728,7 +1632,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it handles it gracefully and the '$()' wrapper is present in the result
         """
         result = extract_commands("$()")
-        # Should handle gracefully
         self.assertIn("$()", result)
 
     def test_empty_brace_group(self):
@@ -1738,7 +1641,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it handles it gracefully and the '{ }' wrapper is present in the result
         """
         result = extract_commands("{ }")
-        # Should handle gracefully
         self.assertIn("{ }", result)
 
     def test_whitespace_only_subshell(self):
@@ -1748,7 +1650,6 @@ class TestParserRobustness(unittest.TestCase):
         Then it handles it gracefully and returns at least one element
         """
         result = extract_commands("(   )")
-        # Should handle gracefully
         self.assertGreater(len(result), 0)
 
     def test_nested_quotes(self):
@@ -1763,14 +1664,7 @@ class TestParserRobustness(unittest.TestCase):
 
 
 class TestExtractOuterCommand(unittest.TestCase):
-    """Characterization tests for ``_extract_outer_command`` (TOO-19).
-
-    ``_extract_outer_command`` had zero direct test coverage before this ticket.
-    These tests pin the expected behaviour for the outer-command stub used both
-    for the explicit-deny check on ASK-floor leaves and (bounded, see
-    ``TestExtractOuterCommandDenyStillFires`` /
-    ``TestAskFloorReasonTruncation``) for the user-visible reason string.
-    """
+    """Pins ``_extract_outer_command``'s outer-command stub, used for the ASK-floor deny check and display reason."""
 
     def test_python_dash_c_with_space(self):
         """
@@ -1859,13 +1753,7 @@ class TestExtractOuterCommand(unittest.TestCase):
 
 
 class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
-    """Ensure the fix to _extract_outer_command does not weaken deny detection.
-
-    resolve_one(outer_cmd) is how an explicit deny on an ASK-floor leaf is still
-    honoured (see _resolve_leaf).  Any change that shortens outer_cmd for display
-    purposes must not stop a deny pattern from matching against the *matching*
-    string.
-    """
+    """Confirms shortening ``_extract_outer_command``'s stub for display does not weaken deny-pattern matching on ASK-floor leaves."""
 
     def _leaf(self, text, ask_floor=True):
         return LeafCommand(text, ask_floor=ask_floor)
@@ -1951,12 +1839,7 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
 
 class TestAskFloorReasonTruncation(unittest.TestCase):
-    """Bound what reaches the user-visible ASK-floor reason string (compound.py:71).
-
-    The reason string must never dump an unbounded blob into the permission
-    prompt, but must still show enough of the command (executor + flag) for the
-    user to know what they are approving.
-    """
+    """Bounds the ASK-floor reason string: never an unbounded blob, but enough to identify the command."""
 
     def test_long_inline_code_is_truncated_with_marker(self):
         """
@@ -2015,16 +1898,7 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
 
 
 def _canned_resolver(mapping):
-    """Build a ``resolve_one`` closure returning a canned per-command triple.
-
-    Args:
-        mapping: Dict from exact sub-command string to its
-            ``(decision, reason, additional_context)`` triple.
-
-    Returns:
-        A callable suitable as the ``resolve_one`` argument to
-        :func:`resolve_compound_permission`.
-    """
+    """Build a ``resolve_one`` closure returning *mapping*'s canned ``(decision, reason, additional_context)`` triple per command."""
 
     def resolve_one(cmd):
         return mapping[cmd]
@@ -2033,11 +1907,7 @@ def _canned_resolver(mapping):
 
 
 class TestAdditionalContextThreading(unittest.TestCase):
-    """
-    TOO-19 Phase 1, increments 3 and 5: ``additionalContext`` threading through
-    the Bash/compound resolution path -- ``_resolve_leaf``,
-    ``_combine_strictest``, and ``resolve_compound_permission``.
-    """
+    """``additionalContext`` threading through ``_resolve_leaf``, ``_combine_strictest``, and ``resolve_compound_permission``."""
 
     def test_single_allowed_leaf_surfaces_its_context(self):
         """
@@ -2323,11 +2193,7 @@ class TestAdditionalContextThreading(unittest.TestCase):
 
 
 class TestAccumulateContexts(unittest.TestCase):
-    """
-    _accumulate_contexts (TOO-19 Phase 1 increment 4): the pure helper that
-    merges the per-leaf additionalContext texts of an all-allow compound into
-    the single block injected back to Claude.
-    """
+    """``_accumulate_contexts``: merges an all-allow compound's per-leaf additionalContext texts into one block."""
 
     def test_no_contexts_returns_none(self):
         """
@@ -2392,14 +2258,7 @@ class TestAccumulateContexts(unittest.TestCase):
 
 
 class TestCapContextWords(unittest.TestCase):
-    """
-    cap_context_words (TOO-19 code review M2): the word-budget enforcement
-    formerly lived inside _accumulate_contexts -- which only ran for the Bash
-    all-allow branch, leaving deny/ask/hard-deny/file-path contexts uncapped.
-    It now lives here, applied once at the actual injection boundary
-    (resolve.py), so these tests cover the budget algorithm directly rather
-    than via a single caller.
-    """
+    """``cap_context_words``: the word-budget enforcement applied once at the additionalContext injection boundary."""
 
     def test_none_passes_through_as_none(self):
         """
@@ -2479,9 +2338,6 @@ class TestCapContextWords(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result.startswith(" ".join(f"w{i}" for i in range(500))))
         self.assertIn("truncated to 500 words", result)
-        # The words actually kept (before the marker paragraph) are exactly
-        # the first 500 -- word 500 ("w500") must NOT appear in the kept
-        # prefix, only possibly inside the marker's own prose.
         kept_prefix = result.split("\n\n[toolguard:")[0]
         self.assertEqual(len(kept_prefix.split()), 500)
 
@@ -2514,12 +2370,7 @@ class TestCapContextWords(unittest.TestCase):
 def _resolve_with_fallback(
     command: str, allow: list, deny: list, undecidable_fallback: str = "ask"
 ) -> str:
-    """Resolve a (possibly compound/multi-line) command to a bare decision string.
-
-    Like ``test_multiline_bash.py``'s ``_resolve`` helper, but threads
-    *undecidable_fallback* through to ``resolve_compound_permission`` so
-    tests can exercise all three settings end to end (TOO-19).
-    """
+    """Resolve *command* to a bare decision string, threading *undecidable_fallback* through."""
     _verdict = resolve_compound_permission(
         command,
         lambda c: (*check_permission(c, allow, deny), None),
@@ -2534,15 +2385,7 @@ def _resolve_with_fallback(
 
 
 class TestApplyUndecidableFloor(unittest.TestCase):
-    """_apply_undecidable_floor: the pure strictest-wins floor helper (TOO-19).
-
-    Pins the full 3x3 matrix from the ticket (deny/ask/allow decisions under
-    ask/deny/allow_with_warning fallbacks): strictness order deny > ask >
-    allow, so the floor can only ever make a decision STRICTER than allow --
-    it never weakens an explicit deny or ask. Also pins that 'allow' (TOO-19
-    allow/allow_with_no_warnings work) is the SAME no-floor escape hatch as
-    'allow_with_warning' for every decision.
-    """
+    """``_apply_undecidable_floor``: pins the full decision x fallback strictness matrix (deny > ask > allow)."""
 
     def test_deny_is_never_weakened_by_ask_fallback(self):
         """
@@ -2678,10 +2521,7 @@ class TestApplyUndecidableFloor(unittest.TestCase):
 
 
 class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
-    """Foreign inline code / heredoc sinks (leaf.ask_floor) under each
-    undecidable_fallback setting, end to end through resolve_compound_permission
-    (TOO-19).
-    """
+    """Foreign inline code / heredoc sinks (leaf.ask_floor) under each undecidable_fallback setting, end to end."""
 
     def test_default_ask_fallback_asks(self):
         """
@@ -2820,16 +2660,8 @@ class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
 
 
 class TestUndecidableFallbackSegment(unittest.TestCase):
-    """UndecidableSegment (control structures, process substitution) under
-    each undecidable_fallback setting (TOO-19).
+    """UndecidableSegment: never resolved against a rule, so undecidable_fallback applies directly, not via strictest-wins."""
 
-    An UndecidableSegment is NEVER resolved against any rule -- there is no
-    underlying decision to floor, so it takes undecidable_fallback DIRECTLY
-    rather than via strictest-wins.
-    """
-
-    #: A command that resolves to a single UndecidableSegment (process
-    #: substitution cannot be safely decomposed today).
     _PROCSUB_CMD = "diff <(sort a) <(sort b)"
 
     def test_default_ask_fallback_asks(self):
@@ -2959,9 +2791,7 @@ class TestUndecidableFallbackSegment(unittest.TestCase):
 
 
 class TestCheckCompoundPermissionUndecidableFallback(unittest.TestCase):
-    """check_compound_permission threads undecidable_fallback through to
-    resolve_compound_permission (TOO-19).
-    """
+    """check_compound_permission threads undecidable_fallback through to resolve_compound_permission."""
 
     def test_default_preserves_pre_too19_ask_behaviour(self):
         """

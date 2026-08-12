@@ -1,8 +1,6 @@
 """
-Auto-migration module for toolguard.
-
-Provides automatic consolidation of permissions from settings.local.json
-to toolguard configuration files when divergence is detected.
+Unattended migration of divergent permissions from settings.local.json into
+the project's toolguard config, at most once per calendar day per project.
 """
 
 from pathlib import Path
@@ -19,41 +17,18 @@ from toolguard.error_reporter import report_notice, report_warning
 from toolguard.once_per import Repeat
 from toolguard.permission_migration import MigrationOutcome, migrate
 
-#: The single named object for this module's once-per-day throttling. One
-#: name carries both the key and the human description (TOO-45 punch-list
-#: #01 item 4) -- no separate _KEY constant to drift from it.
+#: Once-per-day throttle for the automatic migration below.
 AUTO_MIGRATION = once_per.day("auto_migration", "automatic permission migration")
 
-#: migrate()'s lock wait on THIS path only (TOO-45 punch-list #15 fix
-#: pass): this runs inside the synchronous PreToolUse hook, with a user
-#: waiting live on the tool call, so a contended lock should decline fast
-#: rather than stall it -- unlike the interactive CLI, which keeps
-#: migrate()'s longer default.
+#: How long ``migrate()`` waits for this project's lock when called from
+#: here. Sub-second deliberately: this runs on the synchronous PreToolUse
+#: hook's critical path, so a contended lock should decline fast rather than
+#: stall a live tool call.
 AUTO_MIGRATE_LOCK_TIMEOUT_SECONDS = 1.0
 
 
 def load_config_sync_settings(config_files: List[tuple]) -> Dict:
-    """
-    Load config_sync settings from toolguard_hook config files.
-
-    Only reads from toolguard_hook files (not Claude settings files).
-    Returns defaults for any missing values.
-
-    Args:
-        config_files: List of (path, source_type, format) tuples from discover_config_files()
-
-    Returns:
-        Dictionary with config_sync settings:
-        {
-            'auto_migrate': bool,
-            'backup_dir': str,
-            'auto_sort_on_migrate': bool
-        }
-        Returns defaults if no config_sync section found.
-    """
-    # Delegate parsing/format handling to the config module so this client never
-    # opens files or branches on file format. Last-occurrence-wins resolution
-    # and defaults are owned by the config module.
+    """Resolve the ``config_sync`` settings, reading only toolguard_hook sources."""
     return config_sync_settings_from_sources(config_files)
 
 
@@ -61,87 +36,57 @@ def run_auto_migration(
     project_root: Path, config_sync: Dict, takeover_config: Dict
 ) -> bool:
     """
-    Run automatic migration of permissions from settings.local.json to toolguard config.
+    Migrate this project's divergent permissions, at most once per day.
 
-    Creates backups and migrates divergent patterns, at most once per day.
-    The day's slot is claimed only immediately before ``migrate()`` itself --
-    the side effect being deduplicated -- never before the analysis that
-    decides whether there's anything to migrate, so an exception raised
-    during that analysis never leaves the day's slot claimed with nothing
-    done. That closes the real race this replaces: two concurrent processes
-    could previously both pass a stale "already ran today?" check and both
-    run ``migrate()`` (which writes settings.local.json and the toolguard
-    config) at once. A cheap read-only pre-check skips the analysis entirely
-    on an already-migrated day.
-
-    ``migrate()`` must NOT run when the once-per-day guarantee itself is
-    unavailable: two concurrent processes could then both migrate at once
-    with no mutual exclusion, and last-writer-wins can silently discard one
-    process's changes (TOO-45 punch-list #15). ``AUTO_MIGRATION.run(...,
-    repeating=Repeat.UNSAFE)`` makes that choice explicit; see
-    :class:`toolguard.once_per.Repeat`.
-
-    The claim is NOT released when ``migrate()`` fails. This function's only
-    production caller (:func:`toolguard.hook._run_divergence_check`) is only
-    reached when :func:`toolguard.config_divergence.check_and_warn_divergence`
-    itself claims the day's ``divergence_warning`` slot, which happens at
-    most once a day -- so there is never a later same-day call to retry
-    against. A failed migration is retried the next day (TOO-45 D4: an
-    earlier version released this claim on failure, but the release was
-    unreachable through the only real caller and existed only as a promise
-    two direct-call tests pinned).
+    The day's slot is claimed immediately before ``migrate()`` -- never
+    before the analysis that decides whether there is anything to migrate --
+    so an exception during that analysis does not burn the day. Nothing
+    releases the claim afterwards, so a migration that fails or is declined
+    waits for the next day rather than retrying. When the once-per-day
+    guarantee itself cannot be verified, the migration is skipped rather
+    than run.
 
     Args:
-        project_root: Path to project root directory
-        config_sync: Config sync settings (auto_sort_on_migrate, backup_dir)
-        takeover_config: Takeover mode configuration (for ignored patterns)
+        project_root: Project root.
+        config_sync: Supplies ``backup_dir`` and ``auto_sort_on_migrate``.
+        takeover_config: Takeover mode settings; its ignored patterns are
+            honoured only when ``enabled`` is set.
 
     Returns:
-        True if migration succeeded, False if failed, skipped, already
-        attempted today, or nothing needs migrating.
+        True if a migration ran and succeeded; False in every other case,
+        including "nothing to migrate" and "already attempted today".
 
     Side effects:
-        - Creates backup files
-        - Modifies settings.local.json
-        - Modifies or creates toolguard config file
-        - Reports status via :mod:`toolguard.error_reporter`
+        When ``migrate()`` finds anything to migrate it backs up and rewrites
+        ``settings.local.json`` and the toolguard config file. Progress and
+        outcome are reported via :mod:`toolguard.error_reporter`.
     """
     if AUTO_MIGRATION.done(project_root):
-        # Already migrated today -- skip the analysis entirely.
+        # The run() below would no-op anyway; this skips the analysis first.
         return False
 
-    # ignore_env_override=True: migration is project-scoped end-to-end (it writes
-    # to this project's files), so it must read this project's hierarchy rather
-    # than whatever CLAUDE_SETTINGS_PATH happens to point at.
+    # ignore_env_override=True: this writes the project's own files, so it must
+    # read the project's hierarchy, not whatever CLAUDE_SETTINGS_PATH points at.
     config = load_configuration(project_root, ignore_env_override=True)
 
-    # Determine backup directory. A relative backup_dir is anchored to the PROJECT
-    # ROOT via the config module's single anchoring rule (regardless of which
-    # level declared it); absolute and ~ paths are honoured as written.
     backup_dir_str = config_sync.get("backup_dir", "logs/config-backups")
     backup_dir = Path(config.resolve_config_path(backup_dir_str)).expanduser()
 
-    # Determine auto_sort setting
     auto_sort = config_sync.get("auto_sort_on_migrate", True)
 
-    # Check if there's anything to migrate
     settings_path = project_root / ".claude" / "settings.local.json"
     if not settings_path.exists():
-        # No claim was ever taken, so there's nothing to release.
         return False
 
     native_perms = get_native_permissions(settings_path)
     toolguard_perms = get_toolguard_permissions(config)
 
-    # Get ignored patterns from takeover config
     ignored_patterns = []
     if takeover_config.get("enabled", False):
         ignored_patterns = takeover_config.get(
             "ignored_allow_patterns", []
         ) + takeover_config.get("additional_ignored_patterns", [])
 
-    # Find divergent patterns (governed tools only: never auto-migrate a rule for a
-    # tool toolguard does not govern -- it would become inert; issue #1).
     divergent = find_divergent_patterns(
         native_perms,
         toolguard_perms,
@@ -151,11 +96,10 @@ def run_auto_migration(
     total_divergent = sum(len(patterns) for patterns in divergent.values())
 
     if total_divergent == 0:
-        # No claim was ever taken, so there's nothing to release.
         return False
 
     def _migrate() -> bool:
-        """Run migrate(), reporting outcome; the once-per-day slot is already ours."""
+        """Run migrate() and report its outcome. The day's slot is already claimed."""
         report_notice("[TOOLGUARD AUTO-MIGRATION] Running automatic migration...")
         try:
             outcome = migrate(
@@ -172,10 +116,8 @@ def run_auto_migration(
             )
             return False
         if outcome is MigrationOutcome.DECLINED_LOCKED:
-            # Nothing was attempted -- the other process holding the lock is
-            # doing the work itself, so there is nothing here to retry. The
-            # day's claim stays consumed (not released): that is deliberate,
-            # not an oversight (TOO-45 punch-list #15 fix pass, item 1).
+            # migrate() attempted nothing and wrote nothing, so this is a
+            # notice rather than a failure.
             report_notice(
                 "[TOOLGUARD AUTO-MIGRATION] Another migration is already "
                 "running for this project; skipping."

@@ -1,21 +1,13 @@
 """
-Permission migration script for toolguard.
+The ``toolguard-migrate`` console script.
 
-The ``toolguard-migrate`` console script: a thin CLI wrapper (argument parsing
-and project-root resolution) around :func:`toolguard.permission_migration.migrate`,
-which does the actual work of merging permission patterns from Claude's
-``settings.local.json`` into toolguard configuration files (TOML or JSON),
-with timestamped backups and a dry-run preview mode.
+A thin CLI wrapper -- argument parsing, project-root resolution, exit code --
+around :func:`toolguard.permission_migration.migrate`, which merges permission
+patterns from Claude's ``settings.local.json`` into toolguard configuration
+files with timestamped backups and a dry-run preview mode.
 
-TOO-45 R5b split the migration LOGIC out of this module into
-:mod:`toolguard.permission_migration`: this script is a console-script entry
-point (declared in ``pyproject.toml``'s ``[project.scripts]``), and R5's
-leafness predicate requires that no entry point also be a library other
-modules import for their logic. Before the split, :mod:`toolguard.
-auto_migrate`, :mod:`toolguard.tools.installer`, and
-:mod:`toolguard.tools.rule_apply` all imported functions from this module
-directly -- see :mod:`toolguard.permission_migration`'s docstring for the
-full rationale.
+Keep the logic on the other side of that call: as an entry point, this module
+must stay a leaf that nothing imports for its behaviour.
 """
 
 import argparse
@@ -27,12 +19,7 @@ from toolguard.permission_migration import migrate
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments.
-
-    Returns:
-        Parsed arguments namespace
-    """
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Migrate permissions from settings.local.json to toolguard config",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -79,19 +66,15 @@ script shown above, which works from any directory.
 
 def main() -> int:
     """
-    Main entry point for the migration script.
+    Resolve the project root and run the migration.
 
-    Resolves the project root, then delegates all actual migration work to
-    :func:`toolguard.permission_migration.migrate`, converting its
-    :class:`~toolguard.permission_migration.MigrationOutcome` to a shell
-    exit code here -- the only place in the call chain that should (TOO-45
-    punch-list #15 final item).
+    This is where a :class:`~toolguard.permission_migration.MigrationOutcome`
+    becomes a shell exit code, and it should stay the only such place.
 
     Returns:
-        1 if the project root itself cannot be resolved. Otherwise
-        :func:`~toolguard.permission_migration.migrate`'s outcome's
-        ``.exit_code``: 0 on success, 1 on error, or 3 if another migration
-        already holds this project's lock.
+        1 if the project root itself cannot be resolved. Otherwise the
+        outcome's ``.exit_code``: 0 on success, 1 on error, 3 if another
+        migration already holds this project's lock.
     """
     args = parse_args()
 

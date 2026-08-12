@@ -1,73 +1,49 @@
 #!/usr/bin/env python
 """
-Dev-only instrument (repo-root ``tools/``, NOT shipped -- see ``pyproject.toml``'s
-``[tool.hatch.build.targets.wheel] packages`` list, which does not include this
-directory) built for the TOO-45 architecture experiment. This is M2, "the
-expected touch set" -- see
-``toolguard-memories/TOO-45/reports/micro-canary-protocol.md``. It compares a
-hand-written PREDICTIONS file (what a blind predictor, given the requirement
+Dev-only instrument: the M2 "expected touch set" comparison built for the
+TOO-45 architecture experiment (see
+``toolguard-memories/TOO-45/reports/micro-canary-protocol.md``). It compares a
+hand-written PREDICTIONS file -- what a blind predictor, given the requirement
 text and :mod:`tools.touch_set_inventory`'s output for one tree, guessed would
-change) against one or two ACTUALS files (what a blinded human judge, looking
-at the real diff, says actually changed and what kind of change it was).
+change -- against one or two ACTUALS files, in which a judge reading the real
+diff says what actually changed and what kind of change it was.
 
 Evidence, not scoring
 ------------------------
-This tool computes NO rate, ratio, score, or cross-tree comparison of any
-kind. It produces auditable LISTS -- predicted-and-changed, changed-but-not-
-predicted, predicted-but-not-changed, kind agreements, kind mismatches, kind
-disagreements between judges, kind abstentions, location-set disagreements
-between judges, and every ambiguity bucket -- for a human to read and
-adjudicate. A `len()` of a list may be printed alongside it; nothing derived
-by division appears anywhere in this tool's output.
+The output is auditable LISTS for a human to adjudicate: predicted-and-
+changed, changed-but-not-predicted, predicted-but-not-changed, kind
+agreements, kind mismatches, kind disagreements between judges, kind
+abstentions, location-set disagreements between judges, and the duplicate-
+location buckets. The single quotient anywhere in the output is
+``location_counts.predicted_to_actual_ratio``, printed so that prediction
+VOLUME is visible without the reader computing it.
 
-This is a deliberate reversal of an earlier design, not a stylistic choice.
-An adversarial review (``toolguard-memories/TOO-45/reports/
-touch-set-adversarial-report.md``) proved, with a Monte Carlo sweep across
-n=1..12 actual locations and predictor recall p=1.0..0.4, that BOTH a
-surprise COUNT and a surprise RATE are unsafe cross-tree comparisons:
-
-    surprises = leaked_concepts + n * (1 - p)
-
-The count carries a noise term that scales with ``n`` -- the number of
-locations one tree's own decomposition happens to produce, which is exactly
-the variable factoring changes. Held against two trees with an IDENTICAL
-single genuine architecture leak, one graining the requirement into 3
-locations and the other into 8, the surprise COUNT picked the 3-location tree
-as "better" in 64.7% of 20,000 paired draws at a plausible per-location
-recall of 0.8 -- pure denominator noise, no architecture difference. The RATE
-is not the fix: at PERFECT recall (p=1.0), where the count correctly ties,
-the rate calls the two trees different (0.333 vs 0.125) when they are
-provably identical, because it divides the one real signal by ``n`` too.
-Neither number is safe at any prediction quality a real run will see. An
-earlier version of this tool promoted the count and demoted the rate with a
-warning, believing the count was the granularity-invariant one; the Monte
-Carlo evidence shows the OPPOSITE is closer to true in the regime that
-matters (imperfect recall), and in any case there is no per-location number,
-count or rate, that is safe. See :data:`KNOWN_LIMITATIONS` for the full
-statement, which replaces an earlier, now-retracted claim that counts were
-"immune to this bias".
+:data:`KNOWN_LIMITATIONS` #1 is the reason for that shape, and is the full
+statement of it: no per-location number, count or rate, compares two trees
+fairly, because a tree's own factoring granularity moves the denominator.
 
 The prediction unit is (location, kind) -- NEVER the file
 ------------------------------------------------------------
 A location is ``"<path>"`` (module level) or ``"<path>::<Qual.Name>"``
 (dot-joined nesting, e.g. ``toolguard/config.py::RuleEntry.allow_in_auto_mode``).
-Matching is exact string equality (after normalisation -- see "Location
-normalisation" below) on this pair -- there is deliberately no fuzzy or
-file-only fallback. A prediction naming the right file but the wrong function
-is BOTH an entry in predicted-but-not-changed (for what it named) and an
-entry in changed-but-not-predicted (for whatever actually changed), never a
-match.
+Locations are matched by exact string equality after normalisation, with no
+fuzzy and no file-only fallback: a prediction naming the right file but the
+wrong function is BOTH an entry in predicted-but-not-changed (for what it
+named) and an entry in changed-but-not-predicted (for whatever actually
+changed), never a match. KIND takes no part in matching: a location whose two
+kinds differ is still a match, and the kinds are compared afterwards, into the
+agreement/mismatch/disagreement/abstention buckets.
 
 Location normalisation
 --------------------------
-Every location string is NFKC-normalised (so visually identical Unicode
-identifiers spelled with different combining-character sequences compare
-equal, matching CPython's own identifier-normalisation behaviour), has
-internal whitespace around ``.`` collapsed, and has backslashes in the path
-half converted to forward slashes, IN ADDITION to the existing leading-``./``
-and leading-``/`` stripping. Case is deliberately left alone -- Python
-identifiers are case-sensitive, and silently folding case would hide a real
-mismatch rather than a cosmetic one.
+The path half is stripped of surrounding whitespace, has backslashes turned
+into forward slashes, and loses any leading ``./`` repetitions and any
+leading ``/``. The qualname half -- which exists only after a ``::`` -- is in
+addition NFKC-normalised (so an identifier spelled with different combining-
+character sequences compares equal, matching CPython's own identifier
+normalisation) and has whitespace around its ``.`` separators collapsed. Case
+is left alone in both halves: Python identifiers are case-sensitive, so
+folding case would hide a real mismatch rather than a cosmetic one.
 
 Predictions file format
 --------------------------
@@ -84,9 +60,8 @@ Required keys: ``location`` (a non-empty string after normalisation) and
 ``display``/``test``). Optional: ``rationale``. Any other key is a warning,
 not fatal. A repeated JSON key within one object (e.g. two ``"location"``
 keys in the same entry) is a FATAL schema error -- ordinary ``json.loads``
-silently keeps only the last occurrence, which would make the earlier value
-vanish with no trace; this tool refuses to accept that silently (see
-:func:`parse_entries_json`).
+keeps only the last occurrence, which would make the earlier value vanish
+with no trace (see :func:`parse_entries_json`).
 
 Actuals -- one judge or two independent files
 --------------------------------------------------
@@ -94,26 +69,15 @@ Symmetric with the predictions file: same schema, ``kind`` optional
 (``null``/omitted means the judge could not tell -> :data:`KIND_UNKNOWN`,
 assigned by this tool, never guessed).
 
-TWO JUDGES is now expressed as TWO SEPARATE, ORDINARY actuals files -- not a
-single file with paired ``kind_1``/``kind_2`` fields, which an earlier
-version of this tool used and which was found structurally unable to express
-the disagreement judges have most often: not "what kind is this" but "did
-this location change at all". Pass ``--actuals-judge-1``/``--actuals-judge-2``
-instead of ``--actuals`` to reconcile two independently-authored files (see
+Two judges are expressed as two separate, ordinary actuals files: pass
+``--actuals-judge-1``/``--actuals-judge-2`` instead of ``--actuals`` (see
 :func:`reconcile_two_judges`). A location listed by only one judge is real
-evidence -- it counts toward that judge's actuals for matching purposes AND
-is reported explicitly in ``location_set_disagreements``, distinct from a
-kind disagreement on a location both judges listed.
+evidence -- it counts toward the actuals for matching AND is reported in
+``location_set_disagreements``, distinct from a kind disagreement on a
+location both judges listed.
 
 ANY schema violation on a required field, on any file, is FATAL: this tool
 refuses to produce evidence from a partially valid file.
-
-Never silently drop anything
--------------------------------
-Every unmatched prediction, every actual location without a prediction,
-every ambiguous (duplicate-location) entry, every judge disagreement (of
-either kind), and every abstention is counted AND listed explicitly --
-never folded into another bucket. See :func:`build_report`.
 
 Usage::
 
@@ -144,8 +108,9 @@ KIND_DISPLAY = "display"
 KIND_TEST = "test"
 KIND_UNKNOWN = "kind_unknown"
 
-#: Every kind EITHER file is allowed to write explicitly. KIND_UNKNOWN is deliberately absent --
-#: it is this tool's own sentinel for "no kind given", never a value a human author writes.
+#: Every kind a predictions or actuals file may write explicitly. KIND_UNKNOWN is absent by
+#: design -- it is this tool's own sentinel for "the judge gave no kind", so a file naming it
+#: is rejected like any other unrecognised kind.
 WRITABLE_KINDS = frozenset(
     {
         KIND_DECIDE,
@@ -163,8 +128,8 @@ assert KIND_UNKNOWN not in WRITABLE_KINDS, (
     "same string. Pinned as a hard assertion, not just prose."
 )
 
-#: Sentinel actual-kind for a location where two judges disagreed on KIND -- never written by a
-#: human, never guessed at which judge is right.
+#: The ``actual_kind`` reported for a location whose two judges gave different kinds -- never
+#: written by an author, never a guess at which judge is right.
 KIND_DISAGREEMENT = "DISAGREEMENT"
 
 assert KIND_DISAGREEMENT not in WRITABLE_KINDS and KIND_DISAGREEMENT != KIND_UNKNOWN, (
@@ -233,11 +198,9 @@ KNOWN_LIMITATIONS = [
 
 
 def normalize_path_text(raw: str) -> str:
-    """Path-half normalisation applied to a hand-typed location: strips surrounding whitespace,
-    converts backslashes to forward slashes, strips a repeated leading ``./``, and strips any
-    leading ``/``. Applied identically everywhere so a location written slightly differently
-    across files (``./mod.py`` vs ``mod.py`` vs ``mod\\.py``) is still recognised as the same
-    location."""
+    """Path-half normalisation: strips surrounding whitespace, converts backslashes to forward
+    slashes, strips leading ``./`` repetitions, and strips any leading ``/`` -- so ``./mod.py``
+    and ``/mod.py`` both normalise to ``mod.py``."""
     text = raw.strip().replace("\\", "/")
     while text.startswith("./"):
         text = text[2:]
@@ -245,23 +208,21 @@ def normalize_path_text(raw: str) -> str:
 
 
 def normalize_qualname_text(raw: str) -> str:
-    """Qualname-half normalisation: NFKC Unicode normalisation (so two visually identical
-    identifiers spelled with different combining-character sequences, e.g. NFC vs NFD ``café``,
-    compare equal -- matching CPython's own identifier-normalisation behaviour) and collapsed
-    whitespace around ``.`` separators (``Outer. inner`` -> ``Outer.inner``). Case is
-    deliberately left untouched."""
+    """Qualname-half normalisation: NFKC (so NFC and NFD spellings of ``café`` compare equal,
+    matching CPython's own identifier normalisation) plus collapsed whitespace around ``.``
+    separators (``Outer. inner`` -> ``Outer.inner``). Case is deliberately left untouched."""
     normalized = unicodedata.normalize("NFKC", raw.strip())
     parts = [p.strip() for p in normalized.split(".")]
     return ".".join(parts)
 
 
 def normalize_location(raw: str) -> str:
-    """Normalises a hand-typed location string end to end. A location is either a bare path
-    (module level) or ``path::Qual.Name``; the path half uses :func:`normalize_path_text`, the
-    qualname half uses :func:`normalize_qualname_text`. The non-empty check on the RESULT (not
-    the raw input) is the caller's responsibility -- see :func:`load_entries`, which applies it
-    after normalisation so a location of ``"/"`` (which normalises to the empty string) is
-    correctly rejected rather than silently matching another empty-after-normalisation entry."""
+    """Normalises a hand-typed location string end to end -- a bare path (module level) through
+    :func:`normalize_path_text`, or ``path::Qual.Name`` through both halves' own function.
+
+    May return the empty string: ``"/"`` does. Callers must reject that on the RESULT rather
+    than on the raw input, or two different non-empty inputs both normalising to ``""`` match
+    each other."""
     stripped = raw.strip()
     if "::" in stripped:
         path_part, qual_part = stripped.split("::", 1)
@@ -270,17 +231,16 @@ def normalize_location(raw: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# JSON parsing with duplicate-key detection (D6)
+# JSON parsing with duplicate-key detection
 # --------------------------------------------------------------------------
 
 
 class _RawObject:
-    """Wraps one JSON object's raw ``(key, value)`` pairs IN DOCUMENT ORDER, including any
-    duplicates -- the ``object_pairs_hook`` value used by :func:`parse_entries_json`. Ordinary
-    ``json.loads`` collapses a repeated key to a plain dict, silently keeping only the LAST
-    occurrence; the whole point of this wrapper is to make that collapse visible before it
-    happens, since a duplicated ``location`` key makes a real location vanish with no bucket
-    (see the module docstring's D6 reference)."""
+    """One JSON object's raw ``(key, value)`` pairs IN DOCUMENT ORDER, duplicates included --
+    an ``object_pairs_hook`` value. Ordinary ``json.loads`` collapses a repeated key to a plain
+    dict keeping only the LAST occurrence; this wrapper exists to make that collapse visible
+    before it happens, since a duplicated ``location`` key makes a real location vanish with no
+    bucket at all."""
 
     __slots__ = ("pairs",)
 
@@ -290,9 +250,9 @@ class _RawObject:
 
 @dataclasses.dataclass(frozen=True)
 class _RawEntry:
-    """One successfully-parsed (no duplicate key) JSON object from the top-level array, tagged
-    with its ORIGINAL array index so error messages always point at the right line of the
-    author's file, even if earlier entries were rejected."""
+    """One accepted JSON object from the top-level array, tagged with its ORIGINAL array index
+    so error messages point at the author's own entry number even when earlier entries were
+    rejected."""
 
     index: int
     data: dict
@@ -301,12 +261,10 @@ class _RawEntry:
 def parse_entries_json(
     raw_text: str, path: Path
 ) -> tuple[list[_RawEntry] | None, list[str]]:
-    """Parses *raw_text* as a JSON array of flat objects, detecting a duplicate key within any
-    single entry and treating it as fatal (see :class:`_RawObject`). Returns
-    ``(entries, errors)``; *entries* is ``None`` only when the top-level JSON itself is invalid
-    or not an array -- a per-entry problem (wrong type, duplicate key) is instead recorded in
-    *errors* and that entry is simply absent from the returned list, exactly like every other
-    per-entry schema violation in this tool."""
+    """Parses *raw_text* as a JSON array of flat objects. Returns ``(entries, errors)``;
+    *entries* is ``None`` only when the top-level JSON is itself invalid or is not an array. A
+    per-entry problem -- wrong type, a nested object, a duplicate key -- is recorded in *errors*
+    and that entry is absent from the returned list."""
     try:
         raw = json.loads(raw_text, object_pairs_hook=_RawObject)
     except json.JSONDecodeError as exc:
@@ -363,15 +321,16 @@ MODE_DUAL_JUDGE = "dual_judge"
 
 @dataclasses.dataclass(frozen=True)
 class LocationEntry:
-    """One (location, kind) entry. ``kind_2`` is ``None`` for an ordinary single-judge entry;
-    :func:`reconcile_two_judges` populates it when combining two independently-authored files."""
+    """One (location, kind) entry from a predictions or actuals file. ``kind_2`` is ``None`` for
+    an ordinary single-judge entry; :func:`reconcile_two_judges` populates it when combining two
+    independently-authored files."""
 
     location: str
     raw_location: str
     kind: str  # one of WRITABLE_KINDS, or KIND_UNKNOWN if the source file omitted it
     rationale: str | None
     index: int  # position in the source file, for deterministic dedup ordering
-    kind_2: str | None = None  # set only by reconcile_two_judges
+    kind_2: str | None = None
 
     @property
     def has_disagreement(self) -> bool:
@@ -380,11 +339,8 @@ class LocationEntry:
 
     @property
     def is_abstention(self) -> bool:
-        """True when the resolved kind carries no real information: single-judge KIND_UNKNOWN,
-        or (post-reconciliation) both judges independently KIND_UNKNOWN. Deliberately checked
-        BEFORE has_disagreement is treated as the governing fact elsewhere -- an abstention is a
-        different finding from a disagreement (see D4: an earlier version of this tool folded an
-        abstention into 'the predictor was wrong', which this property exists to prevent)."""
+        """True when the resolved kind carries no information: a single judge's KIND_UNKNOWN,
+        or, post-reconciliation, both judges independently KIND_UNKNOWN."""
         return self.kind == KIND_UNKNOWN and (
             self.kind_2 is None or self.kind_2 == KIND_UNKNOWN
         )
@@ -396,14 +352,12 @@ _ALLOWED_ENTRY_KEYS = {"location", "kind", "rationale"}
 def load_entries(
     path: Path, *, kind_required: bool
 ) -> tuple[list[LocationEntry], list[str], list[str]]:
-    """Parses and schema-validates *path* as an ordinary (single-judge-shaped) entries file --
-    used for predictions always, and for EACH judge's file individually in two-judge mode (see
-    :func:`reconcile_two_judges`, which combines two already-loaded lists rather than this
-    function knowing anything about two judges itself). Returns ``(entries, errors, warnings)``;
-    ANY error is fatal for the caller.
+    """Parses and schema-validates *path* as ONE entries file -- the predictions file, or one
+    judge's actuals. Returns ``(entries, errors, warnings)``. A non-empty *errors* is fatal: the
+    entries that did validate are still returned, but no evidence may be built from them.
 
-    *kind_required* distinguishes predictions (always required) from actuals (may be omitted,
-    meaning "the judge could not tell" -> :data:`KIND_UNKNOWN`)."""
+    *kind_required* separates predictions (``kind`` always required) from actuals, where an
+    omitted or null ``kind`` means "the judge could not tell" -> :data:`KIND_UNKNOWN`."""
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -492,15 +446,14 @@ def _dedupe(
 
 
 # --------------------------------------------------------------------------
-# Two-judge reconciliation (D9)
+# Two-judge reconciliation
 # --------------------------------------------------------------------------
 
 
 @dataclasses.dataclass(frozen=True)
 class LocationSetDisagreement:
-    """One location that only ONE of the two judges listed as having changed at all -- the
-    disagreement a single-file kind_1/kind_2 format could never express, because that format
-    assumed both judges agreed on the location SET and could only disagree about KIND."""
+    """One location that only ONE of the two judges listed as having changed at all -- a
+    different finding from the two judges disagreeing about a location's KIND."""
 
     location: str
     judge: str  # "judge_1" | "judge_2"
@@ -510,15 +463,14 @@ class LocationSetDisagreement:
 def reconcile_two_judges(
     judge1: list[LocationEntry], judge2: list[LocationEntry]
 ) -> tuple[list[LocationEntry], list[LocationSetDisagreement]]:
-    """Combines two independently-authored, already-deduplicated actuals lists into one actuals
-    list for downstream evidence-building, plus an explicit location-set disagreement list.
+    """Combines two independently-authored actuals lists, each already deduplicated by the
+    caller, into one actuals list plus the location-set disagreements between them.
 
-    A location listed by BOTH judges becomes one LocationEntry with kind=judge1's kind,
-    kind_2=judge2's kind (feeding :attr:`LocationEntry.has_disagreement` exactly as before). A
-    location listed by only ONE judge is still real evidence -- at least one judge says it
-    changed -- so it is included in the returned actuals list (with kind_2 left at its default
-    ``None``, i.e. it will never spuriously show up as a KIND disagreement, only as the
-    location-set disagreement it actually is) AND recorded in the second return value."""
+    A location BOTH judges listed becomes one entry with ``kind`` from judge 1 and ``kind_2``
+    from judge 2, feeding :attr:`LocationEntry.has_disagreement`. A location only ONE judge
+    listed is still real evidence -- one judge says it changed -- so it goes into the actuals
+    list too, with ``kind_2`` left ``None`` so it can never read as a KIND disagreement, and is
+    recorded in the second return value."""
     j1_by_loc = {e.location: e for e in judge1}
     j2_by_loc = {e.location: e for e in judge2}
     all_locations = sorted(set(j1_by_loc) | set(j2_by_loc))
@@ -577,14 +529,14 @@ def build_evidence(
     actuals: list[LocationEntry],
     location_set_disagreements: list[LocationSetDisagreement] | None = None,
 ) -> EvidenceResult:
-    """Compares *predictions* against *actuals* by EXACT location string equality only -- see
-    the module docstring's "Location normalisation". Produces auditable lists, not a score.
+    """Compares *predictions* against *actuals* by EXACT location string equality -- see the
+    module docstring's "Location normalisation". Produces lists, not a score.
 
-    Every matched pair is classified into exactly one of kind_agreements / kind_mismatches /
-    kind_disagreements / kind_abstained, using :attr:`LocationEntry.is_abstention` FIRST (an
-    abstention is checked before disagreement, since a single-judge KIND_UNKNOWN or a
-    both-judges-abstained pair has ``has_disagreement`` False but is still not a real kind
-    comparison -- see D4)."""
+    Every matched pair lands in exactly one of kind_agreements / kind_mismatches /
+    kind_disagreements / kind_abstained. Abstention is tested first: an abstained pair has
+    ``has_disagreement`` False, so it would otherwise fall through to the agreement comparison,
+    where KIND_UNKNOWN never equals a predicted kind and the pair would be recorded as a
+    mismatch -- scoring the predictor against a kind nobody gave."""
     unique_predictions, ambiguous_predictions = _dedupe(predictions)
     unique_actuals, ambiguous_actuals = _dedupe(actuals)
 
@@ -635,17 +587,17 @@ def build_evidence(
 
 
 def _actual_kind_label(actual: LocationEntry) -> str:
-    """The kind label to DISPLAY for an actual: KIND_DISAGREEMENT if its two judges disagreed on
-    kind (never a guess at which is right), else its resolved kind (which may be KIND_UNKNOWN)."""
+    """The kind reported for an actual: KIND_DISAGREEMENT if its two judges disagreed on kind
+    (never a guess at which is right), else its resolved kind, which may be KIND_UNKNOWN."""
     return KIND_DISAGREEMENT if actual.has_disagreement else actual.kind
 
 
 def _graining_check(locations: list[LocationEntry]) -> dict:
-    """D2: a best-effort signal (not a gate -- this tool no longer gates on anything) that a
-    file's authors graded locations at a module level (bare path) vs. function level
-    (qualname-suffixed). Comparing this between predictions and actuals is how a reader notices
-    "these two files are not graining at the same level" before mis-reading a large surprise/miss
-    list as an architecture finding rather than an authoring mismatch."""
+    """Counts how many of *locations* are bare paths (module level) and how many are
+    qualname-suffixed (function level). Comparing the two sides is how a reader notices that a
+    predictions file and an actuals file were not authored at the same granularity, before
+    mis-reading a long surprise list as an architecture finding rather than an authoring
+    mismatch. Advisory only: nothing gates on it."""
     bare = sum(1 for e in locations if "::" not in e.location)
     qualified = len(locations) - bare
     return {"bare_path_count": bare, "qualname_count": qualified}
@@ -669,9 +621,11 @@ def build_report(
     actual_warnings: list[str],
     evidence: EvidenceResult,
 ) -> dict:
-    """Builds the full structured report (used for both text and --json output). No field here
-    is a rate, ratio, or score -- every numeric field is either a plain input count or a
-    ``len()`` of a list printed alongside that same list."""
+    """Builds the full structured report, shared by the text and ``--json`` presentations.
+
+    ``location_counts.predicted_to_actual_ratio`` is the one field anywhere in the report
+    derived by division, and it is a display string rather than a number, present so prediction
+    volume is visible (see :data:`KNOWN_LIMITATIONS` #2)."""
     total_actual = len(evidence.unique_actuals)
     total_predictions = len(evidence.unique_predictions)
     ratio = (
@@ -1108,6 +1062,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if two_judge:
+        # Discarding each judge's ambiguous map here means a location duplicated within one
+        # judge's file is never reported: reconcile_two_judges emits unique locations, so
+        # build_evidence's own _dedupe finds nothing left to flag and ambiguous_actuals comes
+        # out empty in two-judge mode. Single-judge mode does report it.
         j1_unique, _ = _dedupe(j1_entries)
         j2_unique, _ = _dedupe(j2_entries)
         actuals, location_set_disagreements = reconcile_two_judges(j1_unique, j2_unique)

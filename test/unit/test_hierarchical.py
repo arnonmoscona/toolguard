@@ -1,19 +1,4 @@
-"""
-Unit tests for TOO-8 Phase 2: hierarchical configuration discovery,
-more-specific-wins permission resolution, and project-root-relative paths.
-
-These tests exercise the new behavior introduced in Phase 2:
-
-- ``_discover_levels`` walks from the project root up to (and including) ``~``,
-  assigning a specificity index per level (0 = most specific).
-- ``permission_resolution.resolve_command_permission`` evaluates levels
-  most-specific first; the first level that matches anything decides
-  (deny-first within a level); no match anywhere => fail-closed deny.
-- Relative config paths always resolve against the project root.
-
-Tests use the standard-library ``unittest`` framework. Every test carries a
-Given/When/Then docstring describing the scenario and expected outcome.
-"""
+"""Hierarchical config discovery, more-specific-wins resolution, project-root-relative paths."""
 
 import os
 import tempfile
@@ -54,11 +39,8 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
         specs = {
             path.parent.parent.name: spec for path, _stype, _fmt, spec, _lvl in levels
         }
-        # project (.claude under 'proj') is most specific
         self.assertEqual(specs["proj"], 0)
-        # intermediate ancestor 'a' is between project and user
         self.assertGreater(specs["a"], 0)
-        # ~ is least specific (largest index)
         home_spec = max(spec for _p, _s, _f, spec, _lvl in levels)
         self.assertEqual(specs[home.name], home_spec)
 
@@ -121,7 +103,6 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
         paths = [str(path) for path, _s, _f, _spec, _lvl in levels]
         self.assertTrue(any(str(project) in p for p in paths))
         self.assertTrue(any(str(home / ".claude") in p for p in paths))
-        # User level is least specific (largest specificity index).
         user_specs = [
             spec
             for path, _s, _f, spec, _lvl in levels
@@ -136,12 +117,7 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
         When _discover_levels walks upward
         Then the walk never ascends above ~ (no level above home is collected)
         """
-        # ConfigIsolationMixin creates `home` as the top of the isolated tree, so
-        # it structurally cannot represent something ABOVE home -- this is the
-        # one genuinely irreducible hand-rolled case in this file. Clears
-        # CLAUDE_SETTINGS_PATH itself (rather than relying on a shared base
-        # class) since load_configuration() would otherwise honour an ambient
-        # one and bypass the patched hierarchy entirely.
+        # Hand-rolled: ConfigIsolationMixin cannot represent a .claude ABOVE home.
         self.enterContext(patch.dict(os.environ, {}, clear=True))
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -153,7 +129,6 @@ class TestHierarchicalTraversal(ConfigIsolationMixin, unittest.TestCase):
 
             _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
             _write(home / ".claude", "toolguard_hook.toml", "permissions = {}\n")
-            # A .claude ABOVE home that must never be collected.
             _write(
                 root / "home" / ".claude", "toolguard_hook.toml", "permissions = {}\n"
             )
@@ -193,11 +168,7 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
     """Test the more-specific-wins permission resolution cascade."""
 
     def _config(self, *level_specs):
-        """
-        Build a Configuration whose Bash levels are the given per-level
-        (allow, deny) tuples, most-specific first. Each spec is an
-        (allow_list, deny_list) pair. Avoids any file I/O.
-        """
+        """Build a Configuration from per-level (allow, deny) Bash pattern pairs, most-specific first."""
         from toolguard.config import ConfigLayer, Configuration, Provenance
         from types import MappingProxyType
 
@@ -222,12 +193,7 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         return Configuration(layers=tuple(layers))
 
     def _resolve(self, config, command):
-        """
-        Resolve a single command through the Bash level cascade.
-
-        Returns ``(decision, reason)`` extracted from the ``RuntimeVerdict``
-        so existing Given/When/Then assertions remain unchanged.
-        """
+        """Resolve one command through the Bash level cascade; return ``(decision, reason)``."""
         resolved = resolve_command_permission(config, "Bash", command)
         return resolved.decision, resolved.reason
 
@@ -295,7 +261,6 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         Then the middle level's decision wins and the least-specific level is
             never consulted
         """
-        # child: no match; middle: deny; parent: allow.
         config = self._config(
             (["ls *"], []),
             ([], ["git *"]),
@@ -352,11 +317,7 @@ class TestProjectRootRelativePaths(ConfigIsolationMixin, unittest.TestCase):
     """Test that relative config paths resolve against the project root."""
 
     def _config_with_backup_dir(self, level_dir_name, backup_dir, home, project):
-        """
-        Populate a toolguard_hook.toml declaring a relative backup_dir at the
-        requested level (project / intermediate / user), under the given
-        already-isolated home/project.
-        """
+        """Write a toolguard_hook.toml declaring a relative backup_dir at the requested level."""
         target = {
             "project": project / ".claude",
             "intermediate": home / "a" / ".claude",
@@ -367,7 +328,6 @@ class TestProjectRootRelativePaths(ConfigIsolationMixin, unittest.TestCase):
             "toolguard_hook.toml",
             f'[config_sync]\nbackup_dir = "{backup_dir}"\n',
         )
-        # Ensure project always has a hook file so the toggle reads as default-on.
         if level_dir_name != "project":
             _write(project / ".claude", "toolguard_hook.toml", "permissions = {}\n")
 
@@ -431,11 +391,7 @@ class TestRelativeFilePathPatterns(ConfigIsolationMixin, unittest.TestCase):
     """Test that relative Read/Write/Edit patterns anchor to the project root."""
 
     def _resolve_read(self, level_name):
-        """
-        Build a Configuration with a relative Read allow pattern at the given
-        level, then resolve a Read of <project_root>/src/x.py through the
-        more-specific-wins file-path cascade. Returns the decision.
-        """
+        """Resolve a Read of <project_root>/src/x.py against a relative pattern at the given level."""
         from toolguard.hook import resolve_file_path_permission_detailed
 
         home, project = self.isolate_config_environment(project_under_home="a/b/proj")
@@ -557,7 +513,6 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
             '[permissions]\nallow = ["Read(src/**)"]\n',
         )
 
-        # A path named src/x.py but OUTSIDE the project root (in an ancestor).
         outside_file = str(home / "a" / "src" / "x.py")
         config = load_configuration(project)
         result = resolve_file_path_permission_detailed("Read", outside_file, config)
@@ -636,18 +591,7 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
 
 
 class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
-    """
-    Pin that the migration/divergence READ path ignores CLAUDE_SETTINGS_PATH.
-
-    The migration tool selects its write target via project-based discovery, so
-    its analysis read path must be project-based too (load_configuration with
-    ignore_env_override=True). A stale CLAUDE_SETTINGS_PATH pointing at an
-    unrelated project must NOT leak into the analysis.
-
-    These tests set CLAUDE_SETTINGS_PATH themselves (on top of the isolated,
-    cleared environment ConfigIsolationMixin provides) to prove the override
-    is ignored.
-    """
+    """Test how load_configuration's ignore_env_override flag treats CLAUDE_SETTINGS_PATH."""
 
     def test_load_configuration_ignores_env_override_when_requested(self):
         """
@@ -661,7 +605,6 @@ class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
 
         home, project = self.isolate_config_environment()
 
-        # Unrelated project that CLAUDE_SETTINGS_PATH points at.
         other = home / "other"
         other.mkdir()
         (other / ".git").mkdir()
@@ -672,7 +615,6 @@ class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
             '{"permissions": {"allow": ["Bash(env-leak:*)"], "deny": [], "ask": []}}'
         )
 
-        # The project actually being migrated/analysed.
         _write(
             project / ".claude",
             "toolguard_hook.toml",
@@ -700,7 +642,6 @@ class TestMigrationIgnoresEnvOverride(ConfigIsolationMixin, unittest.TestCase):
         env_claude.mkdir(parents=True)
         env_settings = env_claude / "settings.local.json"
         env_settings.write_text('{"permissions": {"allow": [], "deny": [], "ask": []}}')
-        # Adjacent toolguard_hook with a distinctive permission.
         _write(
             env_claude,
             "toolguard_hook.toml",

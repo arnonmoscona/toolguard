@@ -1,9 +1,4 @@
-"""
-Unit tests for the working-tree cleanliness guard (toolguard.tools.working_tree).
-
-The git subprocess is patched (as elsewhere in the project) so the parsing and
-classification are exercised without a real repository.
-"""
+"""Unit tests for the working-tree cleanliness guard (toolguard.tools.working_tree)."""
 
 import subprocess
 import unittest

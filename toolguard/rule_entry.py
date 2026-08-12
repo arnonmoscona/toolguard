@@ -1,30 +1,24 @@
 """
 Structured allow/deny/ask rule entry: shape normalization and tool scoping.
 
-TOO-19 Phase 0a, increment 1. Centralizes the parsing of a single permission
-entry -- plain string or the new structured ``{match = "...", ...}`` table
-form -- into one immutable :class:`RuleEntry` type, so every consumer stops
-independently guessing at ``isinstance(perm, str)``.
+Centralizes the parsing of a single permission entry -- plain string or the
+structured ``{match = "...", ...}`` table form -- into one immutable
+:class:`RuleEntry`, so callers no longer need to guess at
+``isinstance(perm, str)``. :func:`normalize_entry` does shape normalization;
+:func:`entries_for_tool` does the separate tool-scoping step.
+:func:`normalize_entry` never silently drops an unusable element -- one that
+cannot be normalized always comes back with an
+:class:`~toolguard.issues.Issue` explaining why.
 
-:func:`normalize_entry` is the single chokepoint every consumer now goes
-through -- :meth:`toolguard.config.Configuration.permission_layers`,
-:meth:`~toolguard.config.Configuration.hard_deny`,
-:meth:`~toolguard.config.Configuration.toolguard_permissions`,
-:func:`toolguard.config_validation.validate_permissions`, and the write path
-(``rule_sort`` / ``migrate_permissions`` / ``rule_apply``) -- replacing the
-scattered ``isinstance(perm, str)`` checks that used to drop a non-string
-entry silently, DENY lists included.
-
-This module intentionally imports nothing from :mod:`toolguard` except
-:mod:`toolguard.issues`, so it stays a leaf that :mod:`toolguard.config` and
-:mod:`toolguard.config_validation` can both depend on without a circular
+This module imports nothing from :mod:`toolguard` except
+:mod:`toolguard.issues`, keeping it a leaf that both :mod:`toolguard.config`
+and :mod:`toolguard.config_validation` can depend on without a circular
 import (``config`` imports ``config_validation``, so neither could host this).
-:mod:`test.unit.test_architecture` enforces that layering.
 
 Structured entries are **single-line inline tables only**: TOML 1.0 requires an
 inline table on one line, and toolguard's loader is stdlib :mod:`tomllib`. A
 multi-line entry makes the whole file unparseable -- see
-``toolguard.config._multiline_structured_entry_diagnostic``.
+:func:`toolguard.config._multiline_structured_entry_diagnostic`.
 """
 
 import json
@@ -35,81 +29,59 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from toolguard.issues import Issue
 
-# The table key that carries the permission pattern in a structured entry,
-# e.g. ``{match = "Bash(git *)", additionalContext = "..."}``. Not itself an
-# enrichment key -- see KNOWN_ENRICHMENT_KEYS.
+#: The table key holding a structured entry's permission pattern, e.g.
+#: ``{match = "Bash(git *)", additionalContext = "..."}``. Not itself an
+#: enrichment key -- see :data:`KNOWN_ENRICHMENT_KEYS`.
 PATTERN_KEY = "match"
 
-# The enrichment key carrying text to inject into Claude's context when the
-# entry is the deciding match for a tool call (TOO-19 Phase 1).
+#: The enrichment key carrying text to inject into Claude's context when
+#: this entry is the deciding match for a tool call.
 ADDITIONAL_CONTEXT_KEY = "additionalContext"
 
-# Enrichment keys this toolguard version understands. A later ticket adds an
-# auto-mode flag. `match` is the pattern key (PATTERN_KEY), not an enrichment
-# key, and is deliberately absent here.
-# An unknown key is a WARNING, never an error -- a newer config read by an
-# older toolguard must degrade, not break.
+#: Enrichment keys this toolguard version understands. ``match`` is the
+#: pattern key (:data:`PATTERN_KEY`), not an enrichment key, and is
+#: deliberately absent here. An unknown key is a WARNING, never an error --
+#: a newer config read by an older toolguard must degrade, not break.
 KNOWN_ENRICHMENT_KEYS = frozenset({ADDITIONAL_CONTEXT_KEY})
 
-# Structural matcher for a ``Tool(inner)`` permission wrapper. An identifier
-# made of word characters followed by a parenthesised body. Greedy ``.*``
-# lets the inner body itself contain parentheses, e.g.
-# ``Bash(foo(bar))`` -> ``foo(bar)``. This needs no known-tool list.
-#
-# Deliberately NOT ``re.DOTALL``: this is used with ``fullmatch`` to validate
-# an ENTIRE pattern string is wrapper-shaped, and every wrapper-shaped
-# pattern this project writes or accepts is single-line -- structured
-# entries are single-line inline TOML tables (see module docstring), and a
-# plain pattern string has no legitimate reason to contain an embedded
-# newline either. With DOTALL, `.` also matches ``\n``, so e.g.
-# ``"Bash(a)\nEvil(b)"`` would wrongly fullmatch (the greedy ``.*`` simply
-# consumes through the embedded newline to the LAST ``)``) -- silently
-# accepting what looks like two concatenated tool-wrapper expressions as one
-# valid pattern, defeating the "strict, single tool wrapper" contract this
-# regex exists to enforce. Without DOTALL, ``.`` never matches ``\n``, so
-# such input correctly fails to fullmatch.
-#
-# Moved here, together with its two thin wrapper predicates below
-# (``is_tool_wrapper``, ``_strip_tool_wrapper``), from ``toolguard.config``
-# (TOO-19 Phase 0a, increment 1): ``normalize_entry`` needs the identical
-# wrapper-shape check for a structured entry's ``match`` value, and this
-# module must stay a leaf that ``config.py`` depends on -- not the reverse --
-# so the regex and every predicate over it live here in exactly one place,
-# and ``config.py`` imports and re-exports all three rather than any module
-# keeping its own copy.
+#: Structural matcher for a ``Tool(inner)`` permission wrapper: an
+#: identifier followed by a parenthesised body. The greedy ``.*`` lets the
+#: inner body itself contain parentheses (``Bash(foo(bar))`` ->
+#: ``foo(bar)``), so no known-tool list is needed.
+#:
+#: Deliberately NOT ``re.DOTALL``. Used with ``fullmatch``, this is the only
+#: check in this module that rejects a multi-line ``match`` value in a
+#: structured entry -- a single-line TOML inline table can still carry an
+#: embedded newline via a ``\n`` escape, so ``{match = "Bash(a)\nEvil(b)"}``
+#: arrives here as one string containing a real newline. Without DOTALL it
+#: correctly fails to match; with DOTALL the greedy ``.*`` spans the newline
+#: to the LAST ``)``, accepting two concatenated wrappers as one.
 _TOOL_WRAPPER_RE = re.compile(r"[A-Za-z0-9_]+\((.*)\)")
 
-# Sentinel for RuleEntry.raw's "no raw value recorded" state. MUST NOT be
-# Python's `None`: a genuine source element can itself BE `None` (e.g. a
-# JSON `permissions.allow` list containing a literal `null` -- TOML has no
-# null, but toolguard_hook.json is a first-class supported format), and
-# that value must round-trip through RuleEntry.to_source() unchanged rather
-# than being treated as "nothing to re-emit, render fresh". Using `None` as
-# both "unset" and "a real value" caused exactly that bug: to_source() fell
-# through to rendering the STRING "None" for a `raw=None` entry instead of
-# returning the value None, silently corrupting a user's config on write.
+#: Sentinel for :attr:`RuleEntry.raw`'s "no raw value recorded" state. MUST
+#: NOT be Python's ``None``: a genuine source element can itself BE
+#: ``None`` (a JSON ``permissions.allow`` list can contain a literal
+#: ``null`` -- TOML has no null, but ``toolguard_hook.json`` is a
+#: first-class supported format), and that value must round-trip through
+#: :meth:`RuleEntry.to_source` unchanged. Using ``None`` for both "unset"
+#: and "a real value" would make the two indistinguishable there: a genuine
+#: ``raw=None`` would render as the literal string ``"None"`` instead of
+#: the value ``None``, silently corrupting the write.
 _UNSET = object()
 
 
 def _strip_tool_wrapper(pattern: str) -> str:
     """
-    Strip a ``Tool(...)`` wrapper from a permission pattern, if present.
+    Remove a ``Tool(...)`` wrapper from a permission pattern, if present.
 
-    Permission patterns are authored wrapped as ``Tool(inner)`` (e.g.
-    ``Bash(git *)``) but the loaders compare against the unwrapped inner pattern
-    (``git *``). This is the single source of truth for that unwrapping. It is
-    purely STRUCTURAL: any ``identifier(...)`` shape is stripped, so no
-    hand-maintained tool list is needed and new tools require no change. The
-    inner body may itself contain parentheses (``Bash(foo(bar))`` -> ``foo(bar)``).
-
-    Returns the inner pattern when wrapped (e.g. ``'Bash(*)' -> '*'``); otherwise
-    returns the pattern unchanged (already in extracted form).
+    Patterns are authored wrapped (``Bash(git *)``) but matched on the
+    unwrapped inner pattern (``git *``).
 
     Args:
         pattern: A permission pattern, possibly wrapped in ``Tool(...)``.
 
     Returns:
-        The pattern with any tool wrapper removed.
+        The unwrapped pattern, or *pattern* unchanged if it was not wrapped.
     """
     match = _TOOL_WRAPPER_RE.fullmatch(pattern)
     if match:
@@ -120,13 +92,6 @@ def _strip_tool_wrapper(pattern: str) -> str:
 def is_tool_wrapper(pattern: object) -> bool:
     """
     Report whether a permission pattern is a ``Tool(...)`` wrapper.
-
-    Shares the single structural recogniser (``_TOOL_WRAPPER_RE``) with
-    :func:`_strip_tool_wrapper`, so the wrapper shape lives in exactly one
-    place. Used both by :func:`normalize_entry` (to validate a structured
-    entry's ``match`` value) and by external clients (e.g.
-    ``toolguard.config_divergence``) that need to recognise tool-scoped
-    native permission strings without re-deriving the regex.
 
     Args:
         pattern: A candidate value; only a ``str`` can match.
@@ -139,30 +104,8 @@ def is_tool_wrapper(pattern: object) -> bool:
 
 
 def strip_tool_wrapper(pattern: str) -> str:
-    """
-    Public sibling of :func:`_strip_tool_wrapper`, for callers with no ``RuleEntry``.
-
-    :attr:`RuleEntry.stripped_pattern` is the accessor when a caller already
-    owns a :class:`RuleEntry` (a toolguard rule read from ``toolguard_hook.toml``
-    or a structured entry). Some callers, though, strip a NATIVE Claude
-    settings permission string (e.g. a raw ``"Bash(*)"`` element read straight
-    out of a ``permissions.allow`` list in ``settings.json``) that was never
-    parsed into a :class:`RuleEntry` and has no reason to be -- constructing
-    one just to reach a single string transform would borrow a type modelling
-    a toolguard config rule (with enrichment metadata and raw-source
-    round-tripping) for a stateless piece of pattern syntax. This is that
-    caller's accessor: same structural rule (:data:`_TOOL_WRAPPER_RE`), same
-    single source of truth, just without a rule entry in scope (added
-    TOO-45 R6-S1 for :mod:`toolguard.tools.takeover_audit`, mirroring
-    :func:`is_tool_wrapper`'s existing public/private split over the same
-    regex).
-
-    Args:
-        pattern: A permission pattern, possibly wrapped in ``Tool(...)``.
-
-    Returns:
-        The pattern with any tool wrapper removed.
-    """
+    """Remove a ``Tool(...)`` wrapper from a bare pattern string -- the public
+    entry point for a caller holding no :class:`RuleEntry`."""
     return _strip_tool_wrapper(pattern)
 
 
@@ -174,78 +117,60 @@ class RuleEntry:
     synthesized-by-tooling entries, so every consumer sees one shape.
     """
 
-    # Wrapper-INTACT, exactly as written: "Bash([regex]^git .*)".
-    # Deliberately NOT stripped: permission_layers() is the ONLY consumer that
-    # wants the wrapper-free body, and it strips at its own call site. Every
-    # other consumer (toolguard_permissions, validate_permissions,
-    # with_layer_rules_replaced, the whole rule_sort/write path) is
-    # tool-agnostic and needs the wrapped form.
+    #: Wrapper-INTACT, exactly as written, e.g. ``"Bash([regex]^git .*)"``.
+    #: Deliberately NOT stripped here: most consumers are tool-agnostic and
+    #: need the wrapped form; a consumer that wants the bare inner pattern
+    #: strips it itself via :attr:`stripped_pattern`.
     pattern: str
 
-    # Plain Mapping, NOT a tuple of flat primitives. Constraining every future
-    # enrichment value to str/int/float/bool/None would permanently forbid the
-    # first field that wants a list (applies_to = ["Bash", "Read"]) or a
-    # sub-table, in a mechanism explicitly designed as a general extension
-    # point. Hashability is recovered via identity() instead.
-    # Always built as MappingProxyType(...) so "frozen" is not a lie.
+    #: Arbitrary key/value pairs from the entry's structured table (every
+    #: key except :data:`PATTERN_KEY`), unconstrained in value type -- an
+    #: unrecognized key's value is still recorded here for round-tripping,
+    #: so this cannot be narrowed to primitives. Always built as
+    #: ``MappingProxyType(...)`` so "frozen" is not a lie.
     metadata: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
 
-    # The exact source value this was parsed from (str, or the dict), OR
-    # `_UNSET` when this entry was synthesized (constructed directly, or
-    # produced by merge_entries()'s union-merge path) with no original
-    # source to preserve. `_UNSET` -- NOT `None` -- is the "no raw" sentinel;
-    # see its module-level docstring for why a genuine `raw=None` (a JSON
-    # `null` element) must stay distinguishable from "unset". Test presence
-    # via the `has_raw` property, not `raw is None`.
-    # Lets the write path re-emit an UNTOUCHED entry verbatim instead of
-    # re-rendering it -- this is what makes "maintenance tooling must not
-    # destroy enrichment on unrelated edits" hold byte-for-byte.
-    # compare=False: formatting is not identity.
+    #: The exact source value this was parsed from (a ``str`` or a
+    #: ``dict``), or :data:`_UNSET` when this entry was synthesized with
+    #: nothing original to preserve. Lets an untouched entry re-emit
+    #: byte-for-byte via :meth:`to_source` instead of being re-rendered.
+    #: Test presence via :attr:`has_raw`, never ``raw is None`` -- see
+    #: :data:`_UNSET`. compare=False: formatting is not identity.
     raw: object = field(default=_UNSET, compare=False, repr=False)
 
-    # True exactly when `pattern` is a SYNTHESIZED, non-matchable stand-in
-    # (``repr(raw)``) assigned by :func:`normalize_entries_preserving` for a
-    # raw element that could not be normalized into a real permission
-    # pattern -- e.g. a structured entry missing its ``match`` key, or a
-    # JSON list element of an unsupported type (``42``, ``None``, ...). Never
-    # set True for any entry constructed by :func:`normalize_entry` itself
-    # (which only ever returns a real pattern, or `None`).
-    #
-    # This is the explicit marker a write-path caller MUST check before
-    # feeding `.pattern` into `expected_patterns` for
-    # :func:`~toolguard.config_write_guard.verified_write_config`'s
-    # content-loss guard (TOO-19 review fix): that guard recomputes the set
-    # of "present" patterns from the ACTUAL text it is about to write, using
-    # only real pattern shapes (a plain string, or a structured entry's
-    # `match` value) -- it can never reproduce a synthesized `repr()`
-    # string. Passing a synthesized pattern as "expected" therefore always
-    # looks like a dropped rule to the guard, refusing an otherwise-safe
-    # write (confirmed repro: a single malformed structured entry blocked
-    # every subsequent config write). Deliberately an explicit field rather
-    # than re-deriving "looks synthetic" from the pattern's string shape at
-    # each call site -- inferring it (e.g. "starts with a brace-like
-    # `repr()` prefix") would be brittle and could itself misclassify a
-    # legitimate pattern.
-    #
-    # compare=False, repr=False: purely a write-path bookkeeping flag, not
-    # part of this entry's identity (mirrors `raw`).
+    #: True exactly when ``pattern`` is a SYNTHESIZED, non-matchable
+    #: stand-in (``repr(raw)``), assigned by
+    #: :func:`normalize_entries_preserving` for a raw element that could
+    #: not be normalized into a real pattern (e.g. a structured entry
+    #: missing its ``match`` key). Never ``True`` for an entry
+    #: :func:`normalize_entry` built directly.
+    #:
+    #: A write-path caller building
+    #: :func:`~toolguard.config_write_guard.verified_write_config`'s
+    #: ``expected_patterns`` MUST exclude entries where this is ``True``
+    #: (use :func:`real_patterns`, which already does): that guard checks
+    #: "expected" patterns against the real text about to be written, which
+    #: can never contain a synthesized ``repr()`` string, so passing one
+    #: through as "expected" always looks like a dropped rule, wrongly
+    #: refuses the write, and -- because ``expected_patterns`` is rebuilt
+    #: from the file's own contents on every run -- keeps refusing every
+    #: later write of that file until the malformed entry is fixed by hand.
+    #:
+    #: An explicit field rather than inferring "looks synthetic" from the
+    #: pattern's string shape, which would be brittle and could itself
+    #: misclassify a legitimate pattern.
+    #:
+    #: compare=False, repr=False: a write-path bookkeeping flag, not part
+    #: of this entry's identity (mirrors :attr:`raw`).
     synthesized_pattern: bool = field(default=False, compare=False, repr=False)
 
     @property
     def stripped_pattern(self) -> str:
         """
-        The wrapper-stripped form of :attr:`pattern` (see
-        :func:`_strip_tool_wrapper`).
-
-        TOO-45 R2a: the single accessor every consumer that wants the
-        wrapper-free pattern now goes through, so a stripped-pattern
-        collection (e.g. :class:`~toolguard.config_types.ToolPatternLayer`'s
-        ``allow``/``deny``/``ask`` properties) is always a live projection
-        over ``entries`` rather than a separately materialised, and
-        therefore driftable, copy.
+        The tool-wrapper-stripped form of :attr:`pattern`.
 
         Returns:
-            ``pattern`` with any ``Tool(...)`` wrapper removed.
+            :attr:`pattern` with any ``Tool(...)`` wrapper removed.
         """
         return _strip_tool_wrapper(self.pattern)
 
@@ -283,14 +208,9 @@ class RuleEntry:
         """
         Report whether this entry has an original source value to round-trip.
 
-        True whenever `raw` was explicitly recorded -- including the edge
-        case of a genuine `raw=None` (e.g. a parsed JSON `null` element) --
-        and False only for a synthesized entry (constructed with no `raw`
-        argument, or produced by merge_entries()'s union-merge path) that
-        has nothing original to preserve. This is the sentinel-aware
-        replacement for the naive (and buggy) `raw is None` check: use this,
-        never `raw is None`, to decide "does this entry have a raw to
-        re-emit".
+        True whenever ``raw`` was explicitly recorded, including a genuine
+        ``raw=None``. Use this rather than ``raw is None``, which cannot tell
+        a genuine null from unset -- see :data:`_UNSET`.
         """
         return self.raw is not _UNSET
 
@@ -307,11 +227,10 @@ class RuleEntry:
           not a divergence.
         - ``identity()`` (this method) answers "is this literally the same
           entry, enrichment included" (used for exact-duplicate detection).
-        - :func:`merge_entries` (TOO-19 increment 6) defines its own
-          consolidation semantics on top of both: it groups by ``.pattern``,
-          then uses ``identity()`` as an internal fast path to collapse
-          literal duplicates before applying its bare-vs-structured and
-          union/conflict rules.
+        - :func:`merge_entries` defines its own consolidation semantics on
+          top of both: it groups by ``.pattern``, then uses ``identity()``
+          as an internal fast path to collapse literal duplicates before
+          applying its own bare-vs-structured and union/conflict rules.
 
         Returns:
             A ``(pattern, metadata_json)`` tuple, where ``metadata_json`` is
@@ -328,11 +247,10 @@ class RuleEntry:
         """
         Hash consistent with :meth:`identity`, not with dataclass field equality.
 
-        ``set(entries)`` must work even when ``metadata`` holds a list value
-        (e.g. ``applies_to = ["Bash", "Read"]``) -- the dataclass-generated
-        ``__hash__`` would raise ``TypeError`` the moment ``metadata``
-        (a ``Mapping``) or one of its values is unhashable. Hashing the
-        JSON-canonicalized identity instead sidesteps that entirely.
+        A ``MappingProxyType`` is not hashable, with or without keys, so a
+        dataclass-generated ``__hash__`` over :attr:`metadata` would raise
+        ``TypeError`` on every entry. Hashing the JSON-canonicalized
+        identity sidesteps that.
         """
         return hash(self.identity())
 
@@ -340,13 +258,10 @@ class RuleEntry:
         """
         The value to write back into a config file (TOML table / JSON object).
 
-        Returns ``raw`` verbatim for an unmodified entry -- the round-trip
-        guarantee. This includes a genuine ``raw=None`` (e.g. a parsed JSON
-        ``null`` element): it is returned as ``None``, not re-rendered, since
-        it *was* recorded (``has_raw`` is True). Only truly synthesized/edited
-        entries (``has_raw`` is False -- no ``raw`` was ever recorded) are
-        re-rendered, as a bare string when there is no metadata or as a
-        ``{PATTERN_KEY: pattern, **metadata}`` table otherwise.
+        Returns ``raw`` verbatim whenever one was recorded -- the round-trip
+        guarantee, and why ``raw`` needs the :data:`_UNSET` sentinel.
+        Otherwise renders fresh: a bare string when there is no metadata, a
+        ``{PATTERN_KEY: pattern, **metadata}`` table when there is.
 
         Returns:
             ``raw`` unchanged if recorded (even when that value is ``None``);
@@ -362,24 +277,7 @@ class RuleEntry:
 def _reject(
     level: str, message: str, corrective_steps: str
 ) -> Tuple[None, Tuple[Issue, ...]]:
-    """
-    Build one of :func:`normalize_entry`'s ``(None, (Issue,))`` rejection returns.
-
-    Every branch of :func:`normalize_entry` that decides ``raw`` cannot be
-    normalized returns this exact shape -- ``None`` paired with a single
-    :class:`Issue` in a 1-tuple. Extracted once (TOO-19 review fix, pyscn
-    clone flag) so those near-identical blocks read as "reject because ...",
-    not several structurally-cloned literal tuples.
-
-    Args:
-        level: The Issue's severity (``"warning"`` or ``"error"``).
-        message: The Issue's human-readable explanation.
-        corrective_steps: The Issue's suggested fix.
-
-    Returns:
-        ``(None, (Issue(level=level, message=message,
-        corrective_steps=corrective_steps),))``.
-    """
+    """Build :func:`normalize_entry`'s ``(None, (Issue,))`` rejection return."""
     return None, (
         Issue(level=level, message=message, corrective_steps=corrective_steps),
     )
@@ -391,64 +289,46 @@ def normalize_entry(
     """
     Normalize one allow/deny/ask config element into a :class:`RuleEntry`.
 
-    Shape normalization ONLY -- tool-agnostic and wrapper-intact (the
-    returned ``pattern``, when present, is never stripped of its
-    ``Tool(...)`` wrapper). This is the single chokepoint intended to replace
-    every scattered ``isinstance(perm, str)`` check across the codebase.
-    Unlike those checks, an unusable element is never silently dropped: it
-    always comes back as ``(None, issues)`` with at least one issue
-    explaining why.
+    Shape normalization ONLY -- tool-agnostic, and the returned ``pattern``
+    (when present) keeps its ``Tool(...)`` wrapper intact; tool scoping is
+    :func:`entries_for_tool`'s separate job. An unusable element is never
+    silently dropped: it always comes back as ``(None, issues)`` with at
+    least one issue explaining why.
 
     Behaviour:
 
     - A plain, non-empty ``str`` always normalizes to a bare
       ``RuleEntry(pattern=raw, metadata={}, raw=raw)`` with no issues, even
-      if it is not ``Tool(...)``-wrapped. Wrapper-shape validation applies
-      to STRUCTURED entries only: today, a plain string that isn't
-      ``Tool(...)``-shaped is silently filtered out later by the
-      tool-prefix scan in ``permission_layers()``, not reported as an
-      error, and this function preserves that -- changing it would flood
-      existing configs with brand-new errors for old, already-accepted
-      config shapes. Structured entries are new syntax with no back-compat
-      surface, so strict wrapper validation there is free.
-    - An empty string is the ONE exception to the "plain strings are not
-      wrapper-validated" rule above, and normalizes to ``(None, issues)``
-      with a ``warning`` (not ``error``) :class:`Issue`. It is special-cased
-      rather than folded into the general non-wrapper-shaped case because it
-      is unambiguously a mistake -- there is no non-empty tool name an empty
-      string could ever be missing -- whereas a merely unwrapped string
-      (``"not-wrapped-at-all"``) might be a deliberately loose pattern this
-      function has no basis to second-guess. ``warning`` (rather than
-      ``error``) keeps this from being a louder-than-today diagnostic: an
-      empty entry already loads silently today (``"".startswith("Bash(")``
-      is False, so ``permission_layers()`` filters it out unnoticed), and
-      this function's job is to stop SILENT drops, not to newly reject
-      config that previously loaded without complaint.
+      if it is not ``Tool(...)``-wrapped -- :func:`entries_for_tool` simply
+      filters such an entry out later, without an issue. Wrapper-shape
+      validation is applied to STRUCTURED entries only: erroring on an
+      unwrapped plain string would newly report configs that load without
+      complaint today, while structured entries are new syntax with no
+      already-written configs to protect.
+    - An empty string is the one exception, normalizing to
+      ``(None, issues)`` with a ``warning``-level :class:`Issue`:
+      unambiguously a mistake (there is no pattern it could ever be), but
+      ``warning`` rather than ``error`` because the point is to stop the
+      SILENT drop, not to turn a loadable config into a failing one.
     - A ``dict`` with a valid (non-empty, wrapper-shaped, string)
       :data:`PATTERN_KEY` value normalizes to a :class:`RuleEntry` whose
-      ``metadata`` holds every other key. Keys outside
-      :data:`KNOWN_ENRICHMENT_KEYS` do not block normalization but each
-      produce a ``warning`` :class:`Issue` (typo protection / forward
-      compatibility -- a newer config read by an older toolguard degrades,
-      it does not break).
+      ``metadata`` holds every other key. A key outside
+      :data:`KNOWN_ENRICHMENT_KEYS` does not block normalization but
+      produces one ``warning`` :class:`Issue` each.
     - A ``dict`` missing :data:`PATTERN_KEY`, or whose value is not a
       non-empty, wrapper-shaped string, normalizes to ``(None, issues)``
-      with an ``error`` :class:`Issue`. Unlike the plain-string case, this
-      IS held to wrapper-shape validation, since a structured entry is new
-      syntax with no back-compat surface (see above).
+      with an ``error`` :class:`Issue`.
     - A ``dict`` is entirely rejected when ``is_native`` is True: structured
       entries are a toolguard extension and are never interpreted from a
-      native Claude ``settings.json`` layer (mirrors the existing
-      ``if layer.is_native: continue`` guards elsewhere in this codebase).
-      This normalizes to ``(None, issues)`` with a ``warning`` Issue -- a
-      native file with a stray table entry is unusual but not an error in
-      itself. A plain string under ``is_native=True`` is unaffected and
-      parses exactly as it would with ``is_native=False``.
+      native Claude ``settings.json`` layer. This normalizes to
+      ``(None, issues)`` with a ``warning`` Issue -- a stray table in a
+      native file is unusual, not an error in itself. A plain string under
+      ``is_native=True`` is unaffected.
     - Anything else (``int``, ``None``, ``list``, ``bool``, ...) normalizes
       to ``(None, issues)`` with an ``error`` Issue.
 
     Args:
-        raw: One element from a config's ``permissions.allow`` /ask`` /
+        raw: One element from a config's ``permissions.allow``/``ask``/
             ``deny`` list, of unknown/unvalidated shape.
         is_native: True when ``raw`` came from a native Claude settings
             layer (as opposed to a toolguard-owned config layer). Gates
@@ -548,7 +428,7 @@ def _additional_context_issues(pattern: str, metadata: Mapping[str, object]) -> 
     DELIBERATELY does not reject the entry. The permission rule itself is
     still perfectly valid, and dropping it because its advisory text has the
     wrong type would turn a cosmetic mistake into a silently missing rule --
-    exactly backwards for a `deny`. The rule keeps working; only the
+    exactly backwards for a ``deny``. The rule keeps working; only the
     enrichment is ignored (see :attr:`RuleEntry.additional_context`).
 
     Args:
@@ -588,14 +468,8 @@ def entries_for_tool(
     Tool scoping ONLY -- the second half of the shape-normalization /
     tool-scoping split (see :func:`normalize_entry` for the first half).
     Keeps entries whose ``.pattern`` starts with ``f"{tool_name}("`` and
-    ends with ``")"``, mirroring EXACTLY the equivalent inline filter in
-    ``Configuration.permission_layers()`` (``perm.startswith(prefix) and
-    perm.endswith(")")``) so that wiring this function in there in a later
-    increment is a pure refactor with no behaviour change.
-
-    Does NOT strip the ``Tool(...)`` wrapper -- stripping happens only at
-    ``permission_layers()``'s own call site, its sole consumer that wants
-    the unwrapped form.
+    ends with ``")"``. Does NOT strip the ``Tool(...)`` wrapper -- use
+    :attr:`RuleEntry.stripped_pattern` for that.
 
     Args:
         entries: Already-normalized entries (e.g. from :func:`normalize_entry`).
@@ -617,45 +491,33 @@ def normalize_entries_preserving(
     raw_list: object, is_native: bool
 ) -> Tuple["RuleEntry", ...]:
     """
-    Normalize a raw allow/deny/ask list for a WRITE-PATH caller, never dropping.
+    Normalize a raw allow/deny/ask list for a write-path caller, never dropping.
 
-    :func:`normalize_entry`'s existing direct callers all sit on the MATCH
-    path (``permission_layers``, ``hard_deny``, ``validate_permissions``,
-    ``with_layer_rules_replaced``): each drops an element that fails to
-    normalize, which is correct there -- an unusable entry cannot govern
-    anything, so it is simply absent from the pool being matched against.
+    A caller matching against rules can simply drop an element
+    :func:`normalize_entry` could not parse -- an unusable entry cannot
+    govern anything anyway. A caller about to WRITE the file back out
+    cannot: dropping it would silently delete part of the user's config.
 
-    A WRITE-PATH caller (TOO-19 Phase 0a increment 8: migration, ``rule_apply``,
-    ``Configuration.toolguard_permissions``) is different: it opened a config
-    file it is going to write back out, in whole or in part, so an element it
-    cannot parse must still round-trip -- dropping it would silently delete
-    part of the user's file. This is the single chokepoint for that
-    "never lose an element" contract: a raw element that fails to normalize
-    is wrapped as a :class:`RuleEntry` around the RAW value unchanged (so
+    A raw element that fails to normalize is instead wrapped as a
+    :class:`RuleEntry` around the RAW value unchanged (so
     :meth:`RuleEntry.to_source` reproduces it verbatim), with a synthesized
-    ``pattern`` of ``repr(raw)`` -- deliberately NOT a real ``Tool(...)``
-    pattern, so it can never collide with (dedupe against, or be mistaken
-    for) a legitimately normalized entry, while still being a deterministic,
-    sortable, hashable string for callers that key off ``.pattern``. Such an
-    entry's ``.synthesized_pattern`` is set ``True`` -- see that field's
-    docstring for why a write-path caller building ``expected_patterns`` for
-    :func:`~toolguard.config_write_guard.verified_write_config` MUST exclude
-    these (TOO-19 review fix: a synthesized pattern can never appear in text
-    the guard re-parses from disk, so passing one through wrongly looks like
-    a dropped rule and refuses an otherwise-safe write).
+    ``pattern`` of ``repr(raw)`` -- deliberately not a real ``Tool(...)``
+    pattern, so it can never collide with a legitimately normalized entry,
+    while still being a deterministic, sortable, hashable string for a
+    caller that keys off ``.pattern``. Such an entry's
+    ``.synthesized_pattern`` is ``True`` -- see that field's docstring for
+    the write-path contract this creates.
 
     Args:
         raw_list: The raw ``permissions.allow``/``deny``/``ask`` value from a
             config layer or file. Tolerated even when not a ``list`` (treated
-            as empty), matching the existing non-list tolerance elsewhere in
-            this codebase.
+            as empty).
         is_native: Passed through to :func:`normalize_entry` (gates
             structured-entry recognition).
 
     Returns:
         One :class:`RuleEntry` per input element, in original order --
-        always the same length as ``raw_list`` (when it is a ``list``),
-        unlike :func:`normalize_entry`'s direct match-path callers.
+        always the same length as ``raw_list`` (when it is a ``list``).
     """
     if not isinstance(raw_list, list):
         return ()
@@ -676,27 +538,20 @@ def normalize_entries_preserving(
 
 def real_patterns(entries: Sequence[Union[str, "RuleEntry"]]) -> List[str]:
     """
-    Extract the real, matchable pattern from each entry -- for
-    ``expected_patterns``, never a synthesized one.
+    Extract each entry's real, matchable pattern -- never a synthesized one.
 
     The single chokepoint every write-path caller MUST use to build
     :func:`~toolguard.config_write_guard.verified_write_config`'s
-    ``expected_patterns`` argument out of a list of entries that may include
-    output from :func:`normalize_entries_preserving` (TOO-19 review fix). That
-    function's synthesized fallback entries (``.synthesized_pattern`` is
-    ``True``, see that field's docstring) are silently DROPPED here rather
-    than contributing their ``repr(raw)`` stand-in: the content-loss guard
-    recomputes "present" patterns from the real text it is about to write,
-    which can never contain a synthesized ``repr()`` string, so passing one
-    through as "expected" always looks like a dropped rule and wrongly
-    refuses an otherwise-safe write (confirmed repro: a single malformed
-    structured entry blocked every subsequent config write). A genuinely
-    droppable, real pattern is NEVER filtered here, so the guard's actual
-    safety net -- refusing a write that would truly lose a rule -- is
-    unaffected.
+    ``expected_patterns`` out of entries that may include
+    :func:`normalize_entries_preserving`'s synthesized fallback entries
+    (``.synthesized_pattern`` True -- see that field's docstring for the
+    permanent write-block that results otherwise). Such an entry is silently
+    dropped here rather than contributing its ``repr(raw)`` stand-in. No real
+    pattern is ever dropped, so the guard's own safety net -- refusing a
+    write that would truly lose a rule -- is unaffected.
 
     Args:
-        entries: A mix of pattern ``str`` (legacy contract; always kept) and
+        entries: A mix of pattern ``str`` (always kept) and
             :class:`RuleEntry` (kept unless ``synthesized_pattern`` is
             ``True``).
 
@@ -723,16 +578,16 @@ class MergeConflict:
 
     A conflict is raised per contended metadata KEY, not per entry pair: if
     three entries share a pattern and two of them disagree on one key, that
-    is a single :class:`MergeConflict` naming all the entries that carry the
-    key (not just the first disagreeing pair), so a caller sees the full
-    picture in one record.
+    is a single :class:`MergeConflict` naming every entry carrying the key,
+    so a caller sees the full picture in one record.
 
     Attributes:
-        pattern: The shared ``.pattern`` (comparison #1 -- "same RULE") the
-            conflicting entries have in common.
+        pattern: The ``.pattern`` the conflicting entries have in common.
         key: The metadata key whose value differs across entries.
-        entries: Every entry in the pattern group that carries ``key``, in
-            their original relative order.
+        entries: Every entry in the DEDUPED pattern group that carries
+            ``key``, in their original relative order -- exact duplicates
+            are collapsed before the comparison, so three entries carrying
+            ``key`` can produce a conflict naming two.
     """
 
     pattern: str
@@ -774,10 +629,9 @@ def merge_entries(entries: Sequence["RuleEntry"]) -> MergeOutcome:
 
     1. **Bare string vs. structured -> drop the bare string.** The structured
        entry is clearly the intended rule; the bare one adds nothing. This is
-       a clean win, NOT a conflict and NOT reported. "Structured" here means
-       "carries metadata" (``bool(entry.metadata)``), not
-       ``entry.is_structured`` -- see the inline comment in the
-       implementation for why that distinction matters for chained calls.
+       a clean win, NOT a conflict and NOT reported. "Structured" throughout
+       means "carries metadata" (``bool(entry.metadata)``), not
+       :attr:`RuleEntry.is_structured`.
     2. **Multiple structured entries with COMPATIBLE metadata -> union
        merge.** "Compatible" means: for every key present in more than one
        entry, all its values are equal; remaining keys are disjoint. The
@@ -811,9 +665,8 @@ def merge_entries(entries: Sequence["RuleEntry"]) -> MergeOutcome:
     if not entries:
         return MergeOutcome(entries=(), conflicts=())
 
-    # Group by ".pattern" (comparison #1 -- "is this the same RULE"),
-    # preserving first-appearance order of both groups and entries within
-    # each group.
+    # Group by ".pattern", preserving first-appearance order of both the
+    # groups and the entries within each group.
     groups: Dict[str, List["RuleEntry"]] = {}
     group_order: List[str] = []
     for entry in entries:
@@ -828,10 +681,9 @@ def merge_entries(entries: Sequence["RuleEntry"]) -> MergeOutcome:
     for pattern in group_order:
         group = groups[pattern]
 
-        # Fast path: collapse entries that are literally identical
-        # (comparison #2 -- "identity()", enrichment included), so a
-        # repeated bare or repeated identical-structured entry doesn't
-        # inflate the group or fabricate a conflict against itself.
+        # Fast path: collapse literally identical entries, so a repeated bare
+        # or repeated identical-structured entry doesn't inflate the group or
+        # fabricate a conflict against itself.
         deduped: List["RuleEntry"] = []
         seen_identities = set()
         for entry in group:
@@ -841,15 +693,10 @@ def merge_entries(entries: Sequence["RuleEntry"]) -> MergeOutcome:
             seen_identities.add(ident)
             deduped.append(entry)
 
-        # "Structured" here means "carries metadata" (`bool(entry.metadata)`),
-        # NOT `entry.is_structured` (which reflects whether `raw` happens to
-        # be a `dict`, purely a round-trip-source concern -- see
-        # RuleEntry.to_source()). Using metadata presence instead is what
-        # keeps this self-consistent across repeated merge_entries() passes:
-        # a case-2 union-merge result is itself constructed with no `raw`
-        # recorded (so `is_structured`/`has_raw` would be False) but carries
-        # real metadata, and must still be treated as "structured" if merged
-        # again later.
+        # Metadata presence, not `is_structured` (which only reflects whether
+        # `raw` is a dict): a case-2 union-merge result records no `raw` yet
+        # carries real metadata, and must still count as structured if a
+        # later pass merges it again.
         structured = [e for e in deduped if e.metadata]
 
         if not structured:
@@ -896,13 +743,8 @@ def merge_entries(entries: Sequence["RuleEntry"]) -> MergeOutcome:
             continue
 
         # Case 2: compatible -- union merge into a single synthesized entry.
-        # `raw` is deliberately left at its default (`_UNSET`, i.e.
-        # `has_raw` is False): there is no single original source value for
-        # a union of two or more entries, so nothing should be preserved
-        # verbatim -- to_source() must re-render this one fresh. Passing
-        # `raw=None` here would be wrong: it would record a genuine `None`
-        # as the "original" source and to_source() would then round-trip
-        # that `None` instead of rendering the merged metadata.
+        # `raw` deliberately stays at `_UNSET`: a union has no single original
+        # source value, and `raw=None` would wrongly record one (see `_UNSET`).
         merged_entries.append(
             RuleEntry(
                 pattern=pattern,

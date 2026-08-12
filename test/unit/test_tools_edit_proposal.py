@@ -110,9 +110,9 @@ class TestWithLayerRulesReplaced(unittest.TestCase):
 
     def test_allow_wrapper_still_delegates(self):
         """
-        Given the retained allow-only wrapper
+        Given the allow-only wrapper
         When with_layer_allow_replaced is used
-        Then it edits the allow list exactly as before (single implementation).
+        Then the allow list has the removed pattern gone and the added one in place.
         """
         prov = _prov()
         config = _config(_layer(prov, allow=["git:*"]))
@@ -244,7 +244,7 @@ class TestWithLayerRulesReplaced(unittest.TestCase):
         """
         Given a layer with unexpected_keys, duplicate_format, and shadowed_path set
         When with_layer_rules_replaced modifies that layer's list
-        Then the rebuilt layer still carries those same field values (defect B).
+        Then the rebuilt layer still carries those same field values.
         """
         prov = _prov()
         layer = ConfigLayer(

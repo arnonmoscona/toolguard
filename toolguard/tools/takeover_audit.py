@@ -1,83 +1,34 @@
 """
 Takeover-mode invariant checker for toolguard.
 
-Takeover mode (see ``docs/takeover-mode.md``) is designed to make Claude operate
-in a "never prompt" mode where native blanket allows (``Bash(*)``, ``Read(*)``,
-etc.) tell Claude not to ask permission, while toolguard is the REAL gatekeeper.
-For this to work correctly, several invariants must hold simultaneously.  This
-module audits those invariants and emits ranked :class:`AuditFinding` records for
-any violation.
+Takeover mode (see ``docs/takeover-mode.md``) has Claude treat native blanket
+allows -- ``Bash(*)``, ``Read(*)`` and friends -- as "never prompt", leaving
+toolguard as the real gatekeeper. The arrangement only holds while several
+independent settings agree with each other. :func:`audit_takeover` checks them
+and returns one :class:`AuditFinding` per violation; a correctly configured
+setup yields none.
 
-Invariants checked
-------------------
-1. **CRITICAL / hook-not-registered**: The toolguard hook is NOT registered as a
-   ``PreToolUse`` hook for a governed tool.  In this state, Claude calls the tool
-   without consulting toolguard, so all blanket allows are live and toolguard
-   NEVER RUNS for that tool.
+What each finding reads:
 
-2. **HIGH / takeover-conflict-with-blanket-allows**: A cross-level
-   ``takeover_mode.enabled`` conflict is present (so effective takeover is OFF due
-   to fail-safe), but blanket allows ARE present in native settings.  The result is
-   that toolguard is silently disabled (fail-safe OFF) while native blanket allows
-   bypass Claude prompts.
-
-3. **HIGH / uncovered-blanket-allow**: Takeover is ON, but a blanket allow in a
-   native settings layer is NOT in the effective ``ignored_allow_patterns`` set.
-   Toolguard strips the ignored patterns; an uncovered blanket allow remains live
-   and bypasses the real-gatekeeper role.
-
-4. **LOW / loose-no-match-fallback**: ``no_match_fallback`` (the RAW,
-   un-normalized value read off :class:`~toolguard.config.TakeoverConfig`) is
-   set to anything other than ``'deny'`` -- e.g. the TOO-15 default
-   ``'ask'``, ``'allow_with_warning'``/its deprecated legacy alias
-   ``'warn_deny'``, or ``'allow'``/its TOO-19 long-form alias
-   ``'allow_with_no_warnings'``. This check is a blanket ``!= 'deny'``, so it
-   already covers the two TOO-19 values with NO code change needed: they are
-   simply two more non-``'deny'`` raw spellings. Looser fallbacks mean that
-   commands not matching any rule are prompted, allowed-with-a-warning, or
-   allowed-with-no-warning-at-all rather than blocked -- weakening the
-   fail-closed guarantee.
-
-5. **HIGH / loose-undecidable-fallback** (TOO-19): the top-level
-   ``undecidable_fallback`` setting resolves to ``'allow_with_warning'`` OR
-   ``'allow'`` (the latter added in the TOO-19 allow/allow_with_no_warnings
-   follow-up, including via its ``'allow_with_no_warnings'`` alias, already
-   normalized to ``'allow'`` by
-   :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`
-   before this check ever sees it). ``'allow'`` is flagged identically to
-   ``'allow_with_warning'``, not more leniently: it is STRICTLY less safe
-   (nothing is even logged), so it cannot be exempt from a finding that
-   ``'allow_with_warning'`` triggers. This is a DIFFERENT, and more severe,
-   weakening than ``loose-no-match-fallback`` above: ``no_match_fallback``
-   governs commands toolguard *read and understood* but that matched no
-   rule, whereas ``undecidable_fallback`` governs commands toolguard could
-   NOT safely decompose at all (foreign inline code, heredoc payloads,
-   process substitution, unparseable control structures -- see
-   :mod:`toolguard.compound`). Either loosened value here means those
-   commands EXECUTE with no rule ever evaluated against their contents,
-   which is precisely the case :mod:`toolguard.compound`'s stated governing
-   principle -- "when in doubt, ASK: any segment that cannot be safely
-   decomposed resolves to ASK rather than a silent allow of an undecomposed
-   blob" -- exists to prevent. See
-   :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`.
-   Unlike ``no_match_fallback``, ``undecidable_fallback`` has no
-   ``[takeover_mode]`` alias and applies in both takeover and non-takeover
-   modes, so this invariant is checked directly against ``config`` rather
-   than the resolved :class:`~toolguard.config.TakeoverConfig`.
-   ``undecidable_fallback = 'deny'`` is intentionally NOT flagged: it is
-   strictly more conservative than the ``'ask'`` default, and a finding on a
-   safe configuration would train users to ignore findings.
-
-Design
-------
-- Reuses :class:`~toolguard.config.Configuration`,
-  :class:`~toolguard.config.TakeoverConfig`, and
-  :class:`~toolguard.config.TakeoverEnabledConflict` directly -- no conflict
-  logic is reimplemented here.
-- Native settings hooks are read from the ``hooks.PreToolUse`` section of each
-  native (``is_native=True``) :class:`~toolguard.config.ConfigLayer`.
-- A correctly-configured takeover setup must yield NO findings from
-  :func:`audit_takeover`.
+``hook-not-registered`` (CRITICAL) and ``partial-hook-registration``
+    ``config.governed_tools()`` against the matchers that carry a toolguard
+    ``PreToolUse`` hook in a native settings layer. A governed tool with no such
+    hook is never handed to toolguard at all.
+``takeover-conflict-with-blanket-allows`` (HIGH)
+    a cross-level ``takeover_mode.enabled`` disagreement, which resolves
+    fail-safe to OFF, while native blanket allows are present and therefore
+    unfiltered.
+``uncovered-blanket-allow`` (HIGH)
+    takeover ON, and a native blanket allow absent from the raw
+    ``ignored_allow_patterns``/``additional_ignored_patterns`` lists.
+``loose-no-match-fallback`` (LOW)
+    the raw ``[takeover_mode].no_match_fallback`` value, which is ``'ask'`` when
+    unset, whenever it is anything other than ``'deny'``.
+``loose-undecidable-fallback`` (HIGH)
+    :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`, when
+    it is ``'allow_with_warning'`` or ``'allow'``. ``'deny'`` is deliberately
+    not flagged: it is stricter than the ``'ask'`` default, and a finding on a
+    safe configuration would train users to ignore findings.
 """
 
 from dataclasses import dataclass
@@ -89,16 +40,12 @@ from toolguard.rule_entry import strip_tool_wrapper
 
 
 # ---------------------------------------------------------------------------
-# Severity (mirrors danger.py for consistency)
+# Severity
 # ---------------------------------------------------------------------------
 
 
 class AuditSeverity(IntEnum):
-    """
-    Ranked severity for takeover audit findings.
-
-    Higher values are more severe.  Allows natural sorting (most severe first).
-    """
+    """Severity rank for a takeover audit finding; higher is more severe."""
 
     LOW = 1
     MEDIUM = 2
@@ -106,7 +53,7 @@ class AuditSeverity(IntEnum):
     CRITICAL = 4
 
     def label(self) -> str:
-        """Return the human-readable severity label."""
+        """Return the severity name, for display."""
         return self.name
 
 
@@ -121,13 +68,13 @@ class AuditFinding:
     A single takeover-invariant audit finding.
 
     Attributes:
-        finding_id: Stable string identifier (e.g. ``'hook-not-registered'``).
+        finding_id: Stable string identifier, e.g. ``'hook-not-registered'``.
         severity: :class:`AuditSeverity` rank.
-        tool: Tool name the finding concerns (e.g. ``'Bash'``).  May be ``None``
-            for configuration-wide findings.
+        tool: Tool the finding concerns, or ``None`` for a configuration-wide
+            one.
         provenance: Origin of the affected config element, when traceable.
-        description: Human-readable description of the invariant violation.
-        impact: Explanation of the security impact.
+        description: What the violation is.
+        impact: Its security consequence.
         remediation: Suggested fix.
     """
 
@@ -147,23 +94,19 @@ class AuditFinding:
 
 def _get_registered_toolguard_tools(config: Configuration) -> Set[str]:
     """
-    Return the set of tool names that have a toolguard ``PreToolUse`` hook registered.
+    Return the ``PreToolUse`` matchers that register a toolguard hook.
 
-    Reads the ``hooks.PreToolUse`` section from every NATIVE (``is_native=True``)
-    config layer.  An entry qualifies as "toolguard-registered" when its ``hooks``
-    list contains at least one entry whose ``command`` contains ``toolguard``
-    (case-insensitive substring match).
-
-    This is intentionally permissive in what qualifies as "the toolguard hook":
-    any command path containing the string ``toolguard`` is accepted so that
-    wrapper scripts and alternate install paths (e.g. ``uvx toolguard``,
-    ``~/.local/bin/toolguard``) are all recognised.
+    Scans the ``hooks.PreToolUse`` section of every native (``is_native``) layer.
+    A matcher qualifies when any of its hook entries has a ``command`` containing
+    ``toolguard``, case-insensitively -- so wrapper scripts and alternate install
+    paths (``uvx toolguard``, ``~/.local/bin/toolguard``) all count.
 
     Args:
         config: The resolved configuration.
 
     Returns:
-        Set of tool name strings for which a toolguard PreToolUse hook is registered.
+        Set of matcher strings, exactly as written in the settings file; they are
+        not interpreted here.
     """
     registered: Set[str] = set()
 
@@ -186,7 +129,6 @@ def _get_registered_toolguard_tools(config: Configuration) -> Set[str]:
             hooks = entry.get("hooks", [])
             if not isinstance(hooks, list):
                 continue
-            # Check if any hook command references toolguard
             for hook in hooks:
                 if not isinstance(hook, dict):
                     continue
@@ -203,27 +145,23 @@ def _get_blanket_allows_in_native(
     takeover: TakeoverConfig,
 ) -> List[Tuple[str, Provenance]]:
     """
-    Return native-layer blanket allow patterns that are NOT covered by the ignored set.
+    Return native-layer blanket allows absent from the ignored-pattern lists.
 
-    A "blanket allow" is a ``Tool(*)`` form (e.g. ``Bash(*)``) in a native Claude
-    settings layer.  When takeover is ON, these should all appear in the raw
-    ``ignored_allow_patterns`` (or ``additional_ignored_patterns``) list so they
-    are explicitly suppressed.
+    A blanket allow is a native ``permissions.allow`` entry whose body strips to
+    ``*`` -- ``Bash(*)``, ``mcp__custom__tool(*)``, or a bare ``*``.
 
-    Coverage check uses the RAW (wrapped) form rather than the normalised (stripped)
-    form.  This way a blanket allow for ``mcp__custom__tool(*)`` is NOT considered
-    covered by ``Bash(*)`` being in the ignored set -- they are different tools and
-    the user must explicitly list each one.  The normalised check (``'*' in ignored``)
-    would wrongly suppress the finding since all blanket-allow bodies strip to ``*``.
+    Membership is tested on the raw, wrapper-intact form, so ``Bash(*)`` in the
+    ignored lists does not make ``mcp__custom__tool(*)`` covered. Takeover's own
+    filtering compares the wrapper-stripped form instead, via
+    :meth:`~toolguard.config_types.TakeoverConfig.normalized_ignored_patterns`.
 
     Args:
         config: The resolved configuration.
         takeover: The resolved takeover config.
 
     Returns:
-        List of ``(pattern, provenance)`` tuples for uncovered blanket allows.
+        List of ``(pattern, provenance)`` pairs, pattern wrapper-intact.
     """
-    # Build the set of RAW (as-authored, wrapper-preserved) ignored patterns
     raw_ignored = frozenset(
         list(takeover.ignored_allow_patterns)
         + list(takeover.additional_ignored_patterns)
@@ -241,9 +179,7 @@ def _get_blanket_allows_in_native(
             if not isinstance(perm, str):
                 continue
             extracted = strip_tool_wrapper(perm)
-            # A blanket allow is a native permission whose BODY is exactly "*"
             if extracted == "*":
-                # Check if this EXACT wrapper form is in the raw ignored set
                 if perm not in raw_ignored:
                     uncovered.append((perm, layer.provenance))
 
@@ -252,17 +188,14 @@ def _get_blanket_allows_in_native(
 
 def _has_any_blanket_allow_in_native(config: Configuration) -> bool:
     """
-    Return True when any native layer has a blanket allow (``Tool(*)`` pattern).
-
-    Used to determine whether a takeover conflict is particularly dangerous: a
-    conflict (takeover effectively OFF) combined with live blanket allows means
-    toolguard is silently bypassed.
+    Return True when any native layer carries a blanket allow.
 
     Args:
         config: The resolved configuration.
 
     Returns:
-        True when at least one native blanket allow exists.
+        True when at least one native ``permissions.allow`` entry strips to
+        ``*``.
     """
     for layer in config.layers:
         if not layer.is_native:
@@ -288,21 +221,19 @@ def audit_takeover(
     """
     Audit takeover-mode invariants and return ranked findings.
 
-    Checks all four invariants (hook registration, conflict + blanket allows,
-    uncovered blanket allows, loose fallback) and returns a finding for each
-    violation.  A correctly-configured takeover setup returns an empty list.
+    See the module docstring for what each finding reads. An empty list means
+    every invariant held.
 
-    Findings are sorted by severity descending (CRITICAL first), then by tool
-    name, then by finding_id for deterministic output.
+    Findings are sorted by severity descending, then by tool name (``None``
+    sorts first), then by ``finding_id``, so the output is stable run to run.
 
     Args:
         config: The resolved configuration hierarchy to audit.
-        takeover: Pre-resolved takeover configuration (optional; read from
-            ``config.takeover_mode()`` when not provided).
+        takeover: Pre-resolved takeover configuration; read from
+            ``config.takeover_mode()`` when not given.
 
     Returns:
-        Sorted list of :class:`AuditFinding` records.  Empty when all
-        invariants hold.
+        Sorted list of :class:`AuditFinding` records.
     """
     if takeover is None:
         takeover = config.takeover_mode()
@@ -311,10 +242,7 @@ def audit_takeover(
 
     governed_set = set(config.governed_tools())
     registered_tools = _get_registered_toolguard_tools(config)
-    # A wildcard/empty matcher ("*" or "") registers the toolguard hook for ALL
-    # tools, so every governed tool is covered (review finding N1: without this,
-    # a valid wildcard registration produced a false-positive hook-not-registered
-    # for every governed tool).
+    # A "*" or "" matcher is taken to register the hook for every tool.
     if "*" in registered_tools or "" in registered_tools:
         registered_governed = set(governed_set)
         missing_governed: Set[str] = set()
@@ -322,10 +250,7 @@ def audit_takeover(
         registered_governed = governed_set & registered_tools
         missing_governed = governed_set - registered_tools
 
-    # Invariant 1a: Per-tool hook registration (CRITICAL). One finding per governed
-    # tool that has no toolguard PreToolUse hook. Under takeover the impact is
-    # sharper: that tool has live blanket allows AND no hook, so it is completely
-    # ungoverned.
+    # Invariant 1a: one CRITICAL finding per governed tool with no toolguard hook.
     for tool in sorted(missing_governed):
         if takeover.enabled:
             impact = (
@@ -360,12 +285,9 @@ def audit_takeover(
             )
         )
 
-    # Invariant 1b: Partial / asymmetric registration. Toolguard is registered for
-    # SOME governed tools but not all (the MIXED state). This is a high-confidence
-    # misconfiguration -- clear intent to use toolguard, with gaps -- and is worse
-    # than "nothing registered" because it silently splits the tool set into
-    # governed vs completely-ungoverned. (Distinct from the per-tool findings above,
-    # which fire regardless of whether the state is mixed or all-missing.)
+    # Invariant 1b: the MIXED state -- some governed tools hooked, some not.
+    # Reported in its own right, on top of the per-tool findings above, which
+    # fire whether the state is mixed or nothing-registered.
     if registered_governed and missing_governed:
         if takeover.enabled:
             severity = AuditSeverity.CRITICAL
@@ -458,16 +380,10 @@ def audit_takeover(
                 )
             )
 
-    # Invariant 4: Loose no_match_fallback (LOW)
+    # Invariant 4: Loose no_match_fallback (LOW).
     #
-    # A blanket "not 'deny'" check -- deliberately not an explicit allow-list
-    # of loose values -- so it needs NO code change for the TOO-19
-    # 'allow'/'allow_with_no_warnings' values (or any future spelling): any
-    # raw value other than the literal string 'deny' already fires this.
-    # Checked here, verified during the TOO-19 allow/allow_with_no_warnings
-    # follow-up: consistent with Invariant 5 below without needing the same
-    # explicit-set treatment, because this check was never an equality test
-    # against one specific loose value the way Invariant 5's was.
+    # A blanket "!= 'deny'" test rather than an enumeration of the loose values,
+    # so an added or renamed loose spelling needs no change here.
     expected_fallback = "deny"
     if takeover.no_match_fallback != expected_fallback:
         findings.append(
@@ -493,20 +409,12 @@ def audit_takeover(
             )
         )
 
-    # Invariant 5: Loose undecidable_fallback (HIGH) -- TOO-19.
+    # Invariant 5: Loose undecidable_fallback (HIGH).
     #
-    # Checked directly against ``config`` (not ``takeover``): unlike
-    # no_match_fallback, undecidable_fallback is a top-level toolguard_hook
-    # key with no [takeover_mode] alias and applies whether or not takeover
-    # is enabled -- see Configuration.resolved_undecidable_fallback for the
-    # full resolution rules (strictest-wins floor, parse-failure exemption).
-    # 'deny' is deliberately not flagged (see the module docstring's
-    # invariant 5 for why). 'allow' (TOO-19 allow/allow_with_no_warnings
-    # follow-up) is flagged in the SAME set as 'allow_with_warning' -- not a
-    # separate, lower-severity finding -- since it is strictly less safe
-    # (nothing is even logged). 'allow_with_no_warnings' never reaches this
-    # check as such: resolved_undecidable_fallback() already normalized it to
-    # 'allow' before returning.
+    # Read off ``config``, not ``takeover``: undecidable_fallback is a top-level
+    # toolguard_hook key with no [takeover_mode] alias, and applies whether or
+    # not takeover is enabled. 'allow_with_no_warnings' never arrives here as
+    # such -- resolved_undecidable_fallback() normalizes it to 'allow' first.
     resolved_undecidable = config.resolved_undecidable_fallback()
     if resolved_undecidable in ("allow_with_warning", "allow"):
         if resolved_undecidable == "allow_with_warning":
@@ -565,7 +473,6 @@ def audit_takeover(
             )
         )
 
-    # Sort: severity descending, then tool (None sorts first), then finding_id
     findings.sort(
         key=lambda f: (
             -f.severity.value,
@@ -581,9 +488,6 @@ def effective_takeover_state(
 ) -> TakeoverConfig:
     """
     Return the effective takeover-mode configuration for the given hierarchy.
-
-    Thin convenience wrapper over :meth:`~toolguard.config.Configuration.takeover_mode`
-    to make the entry point consistent with the audit module's API surface.
 
     Args:
         config: The resolved configuration.

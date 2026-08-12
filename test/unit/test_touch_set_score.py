@@ -1,14 +1,4 @@
-"""Tests for ``tools/touch_set_score.py`` (TOO-45 M2).
-
-This is also the committed HAZARD SUITE for the D-series defects found by the
-2026-08-06 adversarial review (``toolguard-memories/TOO-45/reports/
-touch-set-adversarial-report.md``): duplicate JSON keys (D6), abstention vs.
-mismatch (D4), location-set disagreement between two judges (D9), cosmetic
-location variance (D8), and the empty-after-normalisation hole (D10).
-
-This tool computes NO score/rate/ratio -- tests assert on the evidence LISTS
-(``EvidenceResult``'s buckets) directly.
-"""
+"""Tests for ``tools/touch_set_score.py`` (TOO-45 M2)."""
 
 import contextlib
 import dataclasses
@@ -87,7 +77,7 @@ class TestNormalizeLocation(unittest.TestCase):
         """
         nfc = "pkg/a.py::" + unicodedata.normalize("NFC", "café")
         nfd = "pkg/a.py::" + unicodedata.normalize("NFD", "café")
-        self.assertNotEqual(nfc, nfd)  # sanity: genuinely different byte sequences
+        self.assertNotEqual(nfc, nfd)
         self.assertEqual(tss.normalize_location(nfc), tss.normalize_location(nfd))
 
     def test_case_is_not_folded(self):
@@ -320,8 +310,8 @@ class TestLoadEntries(unittest.TestCase):
 
 
 class TestBuildEvidenceNoScoring(unittest.TestCase):
-    """The redesign's core claim: build_evidence produces LISTS, and there is no rate/score
-    anywhere in EvidenceResult or the report built from it."""
+    """build_evidence produces LISTS, and there is no rate/score anywhere in EvidenceResult or
+    the report built from it."""
 
     def test_evidence_result_has_no_rate_field(self):
         """
@@ -558,7 +548,6 @@ class TestD9LocationSetDisagreement(unittest.TestCase):
         evidence = tss.build_evidence(predictions, reconciled, set_disagreements)
         self.assertEqual(evidence.kind_disagreements, [])
         self.assertEqual(len(evidence.location_set_disagreements), 1)
-        # It still matched normally on the kind axis (only one judge, that judge agreed).
         self.assertEqual(len(evidence.kind_agreements), 1)
 
     def test_location_both_judges_saw_with_different_kinds_is_a_kind_disagreement(self):

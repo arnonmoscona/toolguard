@@ -1,18 +1,8 @@
 """
-Unit tests for toolguard.session_start (TOO-8 Phase 6).
+Unit tests for toolguard.session_start.
 
 Tests the SessionStart hook entry point, which surfaces configuration conflicts
 at the start of each Claude Code session.
-
-Coverage areas:
-- Static takeover conflict detection (TakeoverEnabledConflict present)
-- Dynamic conflict detection (entries in toolguard-conflict-*.md logs)
-- No-conflicts case produces no stdout
-- Malformed / empty stdin -> graceful exit 0 with no traceback
-- Missing project_root / log_dir -> static check still runs
-- Conflict counting in log files
-- Most-recent log file selection
-- Summary formatting
 """
 
 import contextlib
@@ -174,9 +164,7 @@ class TestRecentConflictLogs(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
-            (
-                log_dir / "toolguard-2025-01-01.md"
-            ).touch()  # resolution log, not conflict
+            (log_dir / "toolguard-2025-01-01.md").touch()
 
             self.assertEqual(_recent_conflict_logs(log_dir), [])
 
@@ -444,16 +432,14 @@ class TestFormatSummary(unittest.TestCase):
         """
         Given no static conflict, no dynamic conflict, and no broken files
         When _format_summary is called
-        Then the result is an empty string (main() only prints when at least
-            one section is non-empty; this documents that contract)
+        Then the result is an empty string
         """
         summary = _format_summary(None, None)
         self.assertEqual(summary, "")
 
     def test_includes_broken_file_section_when_present(self):
         """
-        TOO-19: Given one broken (unparseable) config file and no takeover
-            conflicts
+        Given one broken (unparseable) config file and no takeover conflicts
         When _format_summary is called with broken_files set
         Then the result names the broken file, its parse error, and states
             that toolguard is falling back to ask for every tool call
@@ -467,8 +453,7 @@ class TestFormatSummary(unittest.TestCase):
 
     def test_broken_file_section_coexists_with_conflict_section(self):
         """
-        TOO-19: Given both a broken config file AND a static takeover
-            conflict
+        Given both a broken config file AND a static takeover conflict
         When _format_summary is called with both
         Then the result contains both the broken-file section and the
             existing conflict-detected section, unmodified
@@ -497,15 +482,7 @@ class TestFormatSummary(unittest.TestCase):
 
 
 class TestDetectBrokenConfigFiles(unittest.TestCase):
-    """
-    Tests for _detect_broken_config_files (TOO-19).
-
-    TOO-19 review fix: this function now takes an already-loaded
-    Configuration directly (no load_configuration() call of its own -- see
-    the function's docstring for why), so these tests build and pass a
-    Configuration double straight in rather than patching
-    toolguard.session_start.load_configuration.
-    """
+    """Tests for _detect_broken_config_files."""
 
     def test_returns_parse_failures_from_configuration(self):
         """
@@ -536,14 +513,7 @@ class TestDetectBrokenConfigFiles(unittest.TestCase):
 
 
 class TestUnrecognizedFallbackAtSessionStart(unittest.TestCase):
-    """
-    TOO-19 m5: a ``*_fallback`` setting written with an unrecognized value must
-    warn LOUDLY at session start, not only in the resolution log.
-
-    The log alone is not enough for this failure mode: it presents as maximum
-    prompting with no stated cause, and on an unattended run nobody reads the
-    log until after the round trip has already been paid.
-    """
+    """Tests for the unrecognized-fallback warning surfaced at session start."""
 
     @staticmethod
     def _bad(key="no_match_fallback", value="allow_with_no_warning"):
@@ -643,15 +613,7 @@ class TestUnrecognizedFallbackAtSessionStart(unittest.TestCase):
 
 
 class TestDetectConflicts(unittest.TestCase):
-    """
-    Tests for _detect_conflicts.
-
-    TOO-19 review fix: this function now takes an already-loaded
-    Configuration directly (no load_configuration() call of its own -- see
-    the function's docstring for why), so these tests build and pass a
-    Configuration double straight in rather than patching
-    toolguard.session_start.load_configuration.
-    """
+    """Tests for _detect_conflicts."""
 
     def _make_config_with_conflict(self, conflict=None, project_root=None):
         """Build a Configuration mock with the given takeover conflict and project_root."""
@@ -751,14 +713,7 @@ def _write_fake_toolguard_checkout(root: Path) -> Path:
 
 
 class TestDetectShadowStatus(unittest.TestCase):
-    """
-    Tests for _detect_shadow_status (TOO-19).
-
-    Both messages are gated on the active session's project itself being a
-    toolguard source checkout; every other project must report the
-    all-empty/False _EMPTY_SHADOW_STATUS regardless of what
-    install_provenance's other primitives would say.
-    """
+    """Tests for _detect_shadow_status."""
 
     def _make_config(self, project_root):
         """Build a Configuration mock exposing only project_root."""
@@ -901,7 +856,7 @@ class TestDetectShadowStatus(unittest.TestCase):
 
 
 class TestFormatSummaryShadowStatus(unittest.TestCase):
-    """Tests for _format_summary's TOO-19 shadow/stale-install sections."""
+    """Tests for _format_summary's shadow/stale-install sections."""
 
     def test_no_shadow_status_produces_no_extra_section(self):
         """
@@ -999,14 +954,8 @@ class TestMain(unittest.TestCase):
     """End-to-end tests for main() -- the actual hook entry point."""
 
     def _run_main_with_stdin(self, stdin_text, config=None):
-        """
-        Run main() with the given stdin text, capturing stdout and the exit code.
-
-        Returns:
-            Tuple (stdout_text, exit_code)
-        """
+        """Run main() with the given stdin text; returns (stdout_text, exit_code)."""
         if config is None:
-            # Default: no conflicts
             config = MagicMock(spec=Configuration)
             config.takeover_mode.return_value = TakeoverConfig(
                 enabled=False,
@@ -1125,13 +1074,11 @@ class TestMain(unittest.TestCase):
 
     def test_stdout_alert_when_config_broken(self):
         """
-        TOO-19: Given a Configuration reporting a broken (unparseable) config
-            file via parse_failures, and no takeover conflicts
+        Given a Configuration reporting a broken (unparseable) config file via
+            parse_failures, and no takeover conflicts
         When main() is called
         Then stdout names the broken file and states toolguard is falling
-            back to ask -- the loudest channel (SessionStart stdout is
-            injected into the session context) surfaces this even when no
-            takeover conflict exists, and the hook still exits 0
+            back to ask, and the hook still exits 0
         """
         broken = Path("/proj/.claude/toolguard_hook.local.toml")
         config = MagicMock(spec=Configuration)
@@ -1154,14 +1101,13 @@ class TestMain(unittest.TestCase):
 
     def test_no_stdout_when_no_conflicts_or_broken_files_default_mock(self):
         """
-        TOO-19 regression guard: Given the default no-conflict MagicMock(spec=
-            Configuration) used throughout this test class, which does NOT
-            explicitly set parse_failures
+        Given the default no-conflict MagicMock(spec=Configuration) used
+            throughout this test class, which does NOT explicitly set
+            parse_failures
         When main() is called
         Then nothing is printed -- _detect_broken_config_files must treat an
             unconfigured mock's parse_failures the same as a real empty
-            tuple (via iteration, not bare truthiness), so this pre-existing
-            test fixture shape is unaffected by the new check
+            tuple (via iteration, not bare truthiness)
         """
         payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
         stdout_text, _exit = self._run_main_with_stdin(payload)
@@ -1169,8 +1115,8 @@ class TestMain(unittest.TestCase):
 
     def test_stdout_alert_when_running_from_shadowed_source_tree(self):
         """
-        TOO-19 end-to-end: Given the active project IS a toolguard checkout and
-            the copy governing THIS process resolves to that same checkout
+        Given the active project IS a toolguard checkout and the copy
+            governing THIS process resolves to that same checkout
         When main() is called
         Then stdout contains the RUNNING FROM A SOURCE TREE alert
         """
@@ -1247,16 +1193,12 @@ class TestMain(unittest.TestCase):
         Then os.getcwd() is used as the working directory (no KeyError)
         """
         payload = json.dumps({"hook_event_name": "SessionStart", "session_id": "x"})
-        # No cwd in payload; should fall back gracefully.
         _stdout, exit_code = self._run_main_with_stdin(payload)
         self.assertEqual(exit_code, 0)
 
 
 class TestSessionStartArgparseAndIsatty(unittest.TestCase):
-    """
-    Tests for the argparse --help flag and the interactive (TTY) guard added to
-    session_start.main (TOO-16 Change 2+3).
-    """
+    """Tests for the argparse --help flag and the interactive (TTY) guard in session_start.main."""
 
     def test_help_flag_exits_zero(self):
         """
@@ -1281,7 +1223,6 @@ class TestSessionStartArgparseAndIsatty(unittest.TestCase):
         Then it prints an explanation to stderr, exits 0, and does not read from stdin
         """
         err = StringIO()
-        # Empty stdin -- any attempt to parse it would fail cleanly but shouldn't happen
         stdin_mock = StringIO("")
 
         with (
@@ -1293,7 +1234,6 @@ class TestSessionStartArgparseAndIsatty(unittest.TestCase):
                 main()
 
         self.assertEqual(ctx.exception.code, 0)
-        # A meaningful explanation mentioning Claude Code should appear in stderr
         self.assertIn("Claude Code", err.getvalue())
 
     def test_isatty_false_processes_piped_event_normally(self):

@@ -1,19 +1,12 @@
 """
-Resolver tests for the ``ask`` permission list (regression: it was silently ignored).
+Resolver tests for the ``ask`` permission list, driving the real decision engine
+through :func:`toolguard.api.decide`.
 
-Toolguard's documented within-file model (see the clarity analyzer docstring) is:
-deny always wins; a broad ``ask`` with no matching allow is excluded from
-level-matching (it does not itself grant a prompt-match) and falls through to
-the shared ``no_match_fallback`` resolution -- 'ask' by default (TOO-15);
-otherwise more-specific-wins -- a more-specific allow bypasses the ask, a
-more-specific ask gates it; an exact tie resolves to ask (a prompt is the safe
-resolution).  Before the fix the ``ask`` list was never consulted during matching,
-so a rule in ``[permissions.ask]`` had no effect at all.
-
-These tests drive the real decision engine via
-:func:`toolguard.api.decide`, which mirrors what the hook would decide.
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
+The model under test: within a layer a deny wins over any allow or ask, however
+specific; otherwise the more specific of a matching allow and ask wins, with an
+exact tie going to ask; and a blanket ``*``-class ask is excluded from matching
+(:func:`toolguard.permissions.is_universal_pattern`), so a layer holding only
+that declines to decide and the cascade runs on to ``no_match_fallback``.
 """
 
 import unittest
@@ -87,7 +80,7 @@ class TestAskResolution(unittest.TestCase):
         """
         Given a single specific ask rule 'toolguard-maintain:*' and no allow
         When 'toolguard-maintain --write' is evaluated
-        Then the verdict is 'ask' (a specific ask alone prompts -- real ask mode)
+        Then the verdict is 'ask' (a specific ask matches and prompts on its own)
         """
         config = _config(_layer(ask=["toolguard-maintain:*"]))
         self.assertEqual(
@@ -98,11 +91,9 @@ class TestAskResolution(unittest.TestCase):
         """
         Given only a blanket ask '*' and no allow
         When any command is evaluated
-        Then the verdict is 'ask' (a catch-all ask does not itself grant a
-        prompt-match; it is excluded from level-matching entirely, so the
-        command falls through to the shared no_match_fallback resolution --
-        the same TOO-15 default as any other unmatched command, not a
-        separate hardcoded floor)
+        Then the verdict is 'ask' -- the blanket ask is excluded from
+        level-matching, so the command falls through to no_match_fallback,
+        whose default is also 'ask'
         """
         config = _config(_layer(ask=["*"]))
         self.assertEqual(decide(config, "Bash", "rm -rf /").decision, "ask")
@@ -168,8 +159,8 @@ class TestAskResolution(unittest.TestCase):
 
     def test_more_specific_layer_ask_gates_less_specific_layer_allow(self):
         """
-        Given a broad allow '*' at a less-specific (user) layer and a specific ask
-        'toolguard-maintain:*' at a more-specific (project) layer
+        Given a broad allow '*' in a layer of higher specificity index and a
+        specific ask 'toolguard-maintain:*' in the more-specific layer
         When 'toolguard-maintain --write' is evaluated
         Then the verdict is 'ask' (the more-specific LAYER decides, and its ask
         gates the broad allow below it)
@@ -197,9 +188,9 @@ class TestAskResolution(unittest.TestCase):
 
     def test_allow_only_still_allows_and_deny_only_still_denies(self):
         """
-        Given a config with only an allow (and separately only a deny)
+        Given a config with only an allow (and separately an allow plus a deny)
         When a matching command is evaluated
-        Then behavior is unchanged by the ask fix (allow -> allow, deny -> deny)
+        Then the verdict follows the matching list: allow -> allow, deny -> deny
         """
         self.assertEqual(
             decide(
@@ -216,10 +207,7 @@ class TestAskResolution(unittest.TestCase):
 
 
 class TestAskAllowTieBreak(unittest.TestCase):
-    """
-    Exercise the literal-prefix tie-break used when a broad allow and a specific
-    ask both match one command at one level (permissions._literal_prefix_specificity).
-    """
+    """The literal-prefix tie-break when a broad allow and a specific ask both match."""
 
     def test_fully_literal_ask_outranks_broad_allow(self):
         """
@@ -242,10 +230,8 @@ class TestAskAllowTieBreak(unittest.TestCase):
 
 class TestFilePathAskResolution(unittest.TestCase):
     """
-    The same ask-resolution model must hold for file-path tools (Read/Write/Edit),
-    not just Bash.  These drive resolve.py's file-path level resolver, whose ask
-    branch mirrors the Bash one (blanket ``*``-class ask ignored; otherwise
-    more-specific-wins between allow and ask).
+    The same ask-resolution model for file-path tools (Read/Write/Edit), whose
+    resolver is :func:`toolguard.file_matching.decide_file_path_at_level_detailed`.
     """
 
     def test_specific_file_ask_with_no_allow_prompts(self):
@@ -261,9 +247,9 @@ class TestFilePathAskResolution(unittest.TestCase):
         """
         Given a Read layer whose only rule is a blanket ask on * (universal)
         When an arbitrary file is read
-        Then the blanket ask is ignored (excluded from level-matching) and it
-        falls through to the shared no_match_fallback resolution, which is
-        'ask' by default (TOO-15)
+        Then the verdict is 'ask' -- the blanket ask is excluded from
+        level-matching and it falls through to no_match_fallback, whose
+        default is also 'ask'
         """
         cfg = _config(_file_layer(tool="Read", ask=["*"]))
         self.assertEqual(decide(cfg, "Read", "/etc/hosts").decision, "ask")

@@ -1,50 +1,8 @@
 """
-Unit tests for toolguard.rule_sort's comment-preserving TOML section machinery.
-
-Three groups of tests live here:
-
-* **Characterization tests** (TOO-19 Phase 0b increment 1, extended by
-  increments 3 and 4, corrected by a later TOO-19 corrective change) for
-  ``parse_permissions_section_with_comments`` and
-  ``reassemble_permissions_section``, and dedicated tests for
-  ``find_section_boundaries``. Most of these lock down parser behaviour that
-  predates and survives the increment-3 rewrite; a few characterize the
-  REWRITTEN parser directly (the escaped-quote test, renamed from
-  ``..._NOTE_bug`` once increment 3's tomllib-based rewrite fixed the
-  truncation bug it used to document) and the increment-4 reassembly
-  round-trip guarantees. A structured entry is single-line ONLY (TOML 1.0's
-  own requirement -- see ``rule_sort.py``'s top-of-file docstring): the tests
-  that used to characterize multi-line SUPPORT were replaced by one asserting
-  ``tomllib.TOMLDecodeError`` is raised instead, and the round-trip/reorder/
-  neighbour-removal tests were converted to single-line structured entries
-  (the underlying behaviour they exercise -- verbatim reuse, sort ordering,
-  comment recovery -- still matters; only the multi-line SHAPE was invalid).
-  Do not "fix" a still-characterized behaviour here casually; if it looks
-  wrong, that is either already-reported or worth reporting separately, not
-  silently changed. This module previously had no direct tests, only
-  indirect coverage via ``test_tools_annotate.py`` and
-  ``test_tools_config_access.py`` (both still pass, also converted to
-  single-line structured entries).
-
-* **Direct tests** (TOO-19 Phase 0b increment 2) for the
-  ``split_array_elements`` top-level array-element boundary scanner, wired
-  into production by the increment-3 rewrite of
-  ``parse_permissions_section_with_comments`` (see that function's own
-  docstring in ``rule_sort.py``). This scanner keeps its multi-line-SPAN
-  awareness even though a multi-line structured entry is no longer valid
-  content: it is what lets ``find_multiline_structured_entry_line`` point a
-  user at the exact offending line once ``tomllib`` has already rejected the
-  file (detection, not support -- see that function's own tests below).
-
-* **Direct tests** for ``find_multiline_structured_entry_line``, the
-  diagnostic-building scanner used by ``toolguard.config``'s
-  ``_parse_source`` to upgrade a raw ``TOMLDecodeError`` into an actionable
-  message.
-
-All tests here are pure text-in/text-out: no file I/O, no config discovery, so
-per ``test/unit/CLAUDE.md``'s isolation checklist, ``ConfigIsolationMixin`` is
-not needed (none of the functions under test reach ``toolguard.config``'s
-discovery path).
+Unit tests for rule_sort's comment-preserving TOML [permissions] machinery:
+parsing, sorting, and reassembly. Pure text-in/text-out: no file I/O, so per
+.claude/rules/test-config-isolation.md's checklist, no ConfigIsolationMixin
+is needed.
 """
 
 import tomllib
@@ -62,11 +20,6 @@ from toolguard.rule_sort import (
     render_toml_entry,
     split_array_elements,
 )
-
-
-# =============================================================================
-# Part 1 (increment 1): characterization tests for the existing parser
-# =============================================================================
 
 
 class TestFindSectionBoundaries(unittest.TestCase):
@@ -286,19 +239,7 @@ class TestFindSectionBoundaries(unittest.TestCase):
 
 
 class TestParsePermissionsSectionWithComments(unittest.TestCase):
-    """
-    Characterization tests for parse_permissions_section_with_comments().
-
-    Most of these predate the TOO-19 Phase 0b increment 3 tomllib-based
-    rewrite and still hold unmodified against it. ``test_single_line_structured_entry_*``
-    exercises the rewrite's capability directly: a structured ``{...}`` entry
-    parsing as one logical ``rule`` item -- something the old
-    one-pattern-per-physical-line scan could never do.
-    ``test_multiline_structured_entry_raises_tomldecodeerror`` characterizes
-    the complementary, deliberate NON-capability: a structured entry spanning
-    more than one physical line is invalid TOML 1.0 and this parser must fail
-    loudly on it, not accept or silently drop it (TOO-19 corrective change).
-    """
+    """Tests for parse_permissions_section_with_comments()."""
 
     def test_plain_double_quoted_entry_parsed_as_rule(self):
         """
@@ -599,10 +540,7 @@ class TestParsePermissionsSectionWithComments(unittest.TestCase):
 
 
 class TestReassemblePermissionsSectionRoundTrip(unittest.TestCase):
-    """
-    Characterization tests for reassemble_permissions_section()'s round-trip
-    behaviour with parse_permissions_section_with_comments().
-    """
+    """Round-trip tests for reassemble_permissions_section() with parse_permissions_section_with_comments()."""
 
     def test_round_trip_byte_identical_for_already_sorted_unchanged_input(self):
         """
@@ -642,13 +580,7 @@ class TestReassemblePermissionsSectionRoundTrip(unittest.TestCase):
         carry its missing trailing comma verbatim, so moving that element
         forward emitted "Unclosed array".
         """
-        text = (
-            "[permissions]\n"
-            "allow = [\n"
-            '  "Bash(zz)",\n'
-            '  "Bash(aa)"\n'  # last element, no trailing comma
-            "]\n"
-        )
+        text = '[permissions]\nallow = [\n  "Bash(zz)",\n  "Bash(aa)"\n]\n'
         parsed = parse_permissions_section_with_comments(text)
         reassembled = reassemble_permissions_section(
             parsed, {"allow": ["Bash(aa)", "Bash(zz)"], "deny": [], "ask": []}
@@ -1020,18 +952,8 @@ class TestReassemblePermissionsSectionRoundTrip(unittest.TestCase):
         self.assertEqual(reassembled, expected)
 
 
-# =============================================================================
-# Part 2 (increment 2): direct tests for the new split_array_elements scanner
-# =============================================================================
-
-
 class TestSplitArrayElements(unittest.TestCase):
-    """
-    Direct unit tests for split_array_elements() -- the tool-name-agnostic
-    top-level array-element boundary scanner added in TOO-19 Phase 0b
-    increment 2 and wired into production by increment 3's rewrite of
-    parse_permissions_section_with_comments (via _parse_array_body).
-    """
+    """Tests for split_array_elements(), the top-level array-element boundary scanner."""
 
     def test_empty_input_returns_no_elements(self):
         """
@@ -1308,18 +1230,8 @@ class TestSplitArrayElements(unittest.TestCase):
         self.assertIsInstance(elements[0], ArrayElement)
 
 
-# =============================================================================
-# Part 3 (TOO-19 corrective change): direct tests for the multi-line
-# structured entry diagnostic scanner
-# =============================================================================
-
-
 class TestFindMultilineStructuredEntryLine(unittest.TestCase):
-    """
-    Direct unit tests for find_multiline_structured_entry_line() -- the
-    scanner toolguard.config._parse_source uses to upgrade a raw
-    TOMLDecodeError into an actionable message naming the offending line.
-    """
+    """Tests for find_multiline_structured_entry_line(), the offending-line diagnostic scanner."""
 
     def test_returns_none_for_file_with_no_permissions_section(self):
         """
@@ -1355,13 +1267,13 @@ class TestFindMultilineStructuredEntryLine(unittest.TestCase):
             opening "{", not the file's first line or the array's own line
         """
         text = (
-            "[permissions]\n"  # line 1
-            "allow = [\n"  # line 2
-            '  "Bash(ls:*)",\n'  # line 3
-            "  {\n"  # line 4 -- the opening "{" of the offending entry
-            '    match = "Bash(git status)",\n'  # line 5
-            "  },\n"  # line 6
-            "]\n"  # line 7
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(ls:*)",\n'
+            "  {\n"
+            '    match = "Bash(git status)",\n'
+            "  },\n"
+            "]\n"
         )
         self.assertEqual(find_multiline_structured_entry_line(text), 4)
 
@@ -1373,15 +1285,15 @@ class TestFindMultilineStructuredEntryLine(unittest.TestCase):
         Then it still finds it -- every subsection is scanned, not just allow
         """
         text = (
-            "[permissions]\n"  # line 1
-            "allow = [\n"  # line 2
-            '  "Bash(ls:*)",\n'  # line 3
-            "]\n"  # line 4
-            "deny = [\n"  # line 5
-            "  {\n"  # line 6
-            '    match = "Bash(rm:*)",\n'  # line 7
-            "  },\n"  # line 8
-            "]\n"  # line 9
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(ls:*)",\n'
+            "]\n"
+            "deny = [\n"
+            "  {\n"
+            '    match = "Bash(rm:*)",\n'
+            "  },\n"
+            "]\n"
         )
         self.assertEqual(find_multiline_structured_entry_line(text), 6)
 
@@ -1398,23 +1310,8 @@ class TestFindMultilineStructuredEntryLine(unittest.TestCase):
         self.assertIsNone(find_multiline_structured_entry_line(text))
 
 
-# =============================================================================
-# Part 4 (TOO-19 review-round-2 fix): render_toml_entry must not crash on a
-# JSON permissions-list element that is neither a plain string nor a dict.
-# =============================================================================
-
-
 class TestRenderTomlEntry(unittest.TestCase):
-    """
-    Direct unit tests for render_toml_entry() -- confirmed repro was an
-    AttributeError for any non-str, non-dict entry value, since a JSON
-    config's permissions.allow list may legitimately hold any JSON value
-    (RuleEntry.to_source() deliberately preserves it -- see
-    normalize_entries_preserving()). The fix delegates to the module's
-    existing total scalar renderer, _render_toml_scalar; these tests cover
-    every new shape plus the two previously-supported ones, to confirm no
-    behaviour change for those.
-    """
+    """Tests for render_toml_entry() across every entry-value shape it accepts."""
 
     def test_plain_string_pattern_renders_as_quoted_string(self):
         """
@@ -1488,22 +1385,8 @@ class TestRenderTomlEntry(unittest.TestCase):
         self.assertEqual(render_toml_entry(entry), "42")
 
 
-# =============================================================================
-# Part 5 (TOO-19 review-round-2 fix): a malformed structured entry's parsed
-# pattern must be recognisable as SYNTHETIC, not mistaken for a real pattern.
-# =============================================================================
-
-
 class TestIsSyntheticPattern(unittest.TestCase):
-    """
-    Direct unit tests for is_synthetic_pattern() and the SyntheticPattern
-    marker _rule_pattern_of_value() now returns for a malformed ("rule") array
-    element (e.g. a structured entry missing its "match" key) -- previously a
-    bare str indistinguishable from a real pattern, which let
-    maintenance._permission_patterns_in_text() feed it into the config-write
-    content-loss guard as an "expected" pattern that could never actually
-    appear in the written text, wrongly refusing the write.
-    """
+    """Tests for is_synthetic_pattern() and the SyntheticPattern marker on a malformed entry."""
 
     def test_malformed_structured_entry_parses_to_synthetic_pattern(self):
         """

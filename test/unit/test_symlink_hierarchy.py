@@ -1,27 +1,11 @@
 """
-Hierarchy resolution through a SYMLINKED ``.claude`` directory.
+Hierarchy resolution through a SYMLINKED ``.claude`` directory: project-root
+anchoring, level attribution, end-to-end verdicts, and a symlinked rules file.
 
-Motivation (TOO-19, Part 4 of the safe-experimentation design): project
-``.claude`` directories are typically untracked, so the plan is to move them into
-a version-controlled store and symlink them back into the project. Three pieces
-of toolguard's discovery machinery decide behaviour by path shape and could
-change their answer under a symlink:
-
-- :func:`toolguard.config.find_project_root` anchors on ``.claude`` presence.
-- :func:`toolguard.config._level_for_path` attributes a config file to the
-  ``user`` or ``project`` level by comparing RESOLVED paths.
-- ``_shadowed_rules_stems`` compares rules files by resolved path (a symlinked
-  rules file was nearly false-flagged as shadowed during TOO-19).
-
-These tests prove the behaviour rather than assuming it, and pin down one real
-footgun: a store located UNDER ``~/.claude`` silently reclassifies every project
-rule as a user rule.
-
-Isolation note (per test/unit/CLAUDE.md): these tests deliberately do NOT use
-ConfigIsolationMixin. The mixin patches ``find_project_root``, which is one of
-the functions under test here, and its fixed sibling layout cannot express a
-symlink pointing from the project into a separate store. Hand-rolled
-``Path.home()`` patching is used instead -- this is the documented exception.
+Isolation exception (`.claude/rules/test-config-isolation.md`): these tests do NOT
+use ConfigIsolationMixin. It patches ``find_project_root``, one of the functions
+under test, and its fixed sibling layout cannot express a symlink pointing from the
+project into a separate store; ``Path.home()`` is patched by hand instead.
 """
 
 import tempfile
@@ -37,23 +21,10 @@ PROJECT_CONFIG = '[permissions]\nallow = ["Bash(ls *)"]\ndeny = ["Bash(curl *)"]
 
 
 class _SymlinkLayout:
-    """
-    A throwaway home/store/project layout for symlink experiments.
-
-    Attributes:
-        root: The temporary root containing everything.
-        home: Stands in for ``Path.home()``.
-        store: Where the real ``.claude`` directory lives.
-        project: The project root, carrying a ``.git`` marker.
-    """
+    """A throwaway home/store/project layout for symlink experiments."""
 
     def __init__(self, root: Path, *, store_under_home: bool = False):
-        """
-        Args:
-            root: An existing temporary directory.
-            store_under_home: When True the store is placed under
-                ``home/.claude``, reproducing the misattribution footgun.
-        """
+        """Build the layout under ``root``, optionally placing the store under ``home/.claude``."""
         self.root = root
         self.home = root / "home"
         (self.home / ".claude").mkdir(parents=True)
@@ -66,24 +37,14 @@ class _SymlinkLayout:
         (self.project / ".git").mkdir(parents=True)
 
     def with_real_claude(self) -> Path:
-        """
-        Create a REAL ``.claude`` directory in the project (the control case).
-
-        Returns:
-            The project's ``.claude`` path.
-        """
+        """Create a REAL ``.claude`` directory in the project and return its path."""
         claude = self.project / ".claude"
         claude.mkdir()
         (claude / "toolguard_hook.toml").write_text(PROJECT_CONFIG, encoding="utf-8")
         return claude
 
     def with_symlinked_claude(self) -> Path:
-        """
-        Create the project's ``.claude`` as a symlink into the store.
-
-        Returns:
-            The project's ``.claude`` symlink path.
-        """
+        """Create the project's ``.claude`` as a symlink into the store and return the link."""
         real = self.store / ".claude"
         real.mkdir()
         (real / "toolguard_hook.toml").write_text(PROJECT_CONFIG, encoding="utf-8")
@@ -96,15 +57,7 @@ class SymlinkHierarchyTestCase(unittest.TestCase):
     """Shared setup: a temp root and a patched Path.home()."""
 
     def build(self, *, store_under_home: bool = False) -> _SymlinkLayout:
-        """
-        Build an isolated layout and patch ``Path.home()`` at it.
-
-        Args:
-            store_under_home: Passed through to :class:`_SymlinkLayout`.
-
-        Returns:
-            The constructed layout.
-        """
+        """Build an isolated layout, patch ``Path.home()`` at it, and return it."""
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         layout = _SymlinkLayout(root, store_under_home=store_under_home)
         self.enterContext(patch.object(Path, "home", return_value=layout.home))
@@ -149,25 +102,13 @@ class TestProjectRootThroughSymlink(SymlinkHierarchyTestCase):
 
 class TestLevelAttributionThroughSymlink(SymlinkHierarchyTestCase):
     """
-    Level attribution decides precedence; a symlink must never shift it.
-
-    Levels come from :func:`toolguard.config._discover_levels`, the pass that
-    actually finds each file, so attribution follows WHERE THE FILE WAS FOUND
-    rather than where its bytes physically live. Before TOO-19's fix a second,
-    path-shape derivation (``_level_for_path``, now removed) answered the same
-    question differently under symlinks.
+    Level attribution decides precedence, and a symlink must never shift it. Levels
+    come from :func:`toolguard.config._discover_levels`, the pass that finds each
+    file, so attribution follows where the file was FOUND, not where its bytes live.
     """
 
     def _project_config_level(self, layout: "_SymlinkLayout") -> list:
-        """
-        Return the level(s) discovery assigns to the project's config file.
-
-        Args:
-            layout: The layout under test.
-
-        Returns:
-            A list of level labels for every discovered toolguard_hook.toml.
-        """
+        """Return the level labels discovery assigns to every discovered toolguard_hook.toml."""
         config_module._parse_config_file_cached.cache_clear()
         return [
             level
@@ -204,13 +145,6 @@ class TestLevelAttributionThroughSymlink(SymlinkHierarchyTestCase):
         Given a project .claude symlinked to a store located UNDER ~/.claude
         When the hierarchy levels are discovered
         Then it is STILL attributed to 'project'
-
-        This is the footgun fix. The removed path-shape derivation resolved the
-        symlink, saw a path under ~/.claude, and silently promoted every project
-        rule to the user level -- changing precedence across the hierarchy with
-        no error and no warning. A discovery-derived level cannot disagree with
-        where the file was found, so the store's location no longer matters.
-        Restore a resolve()-based derivation and this test fails.
         """
         layout = self.build(store_under_home=True)
         layout.with_symlinked_claude()
@@ -224,12 +158,8 @@ class TestLevelAttributionThroughSymlink(SymlinkHierarchyTestCase):
         When the hierarchy levels are discovered
         Then the config is STILL attributed to 'project'
 
-        Symlinking the contents rather than the directory used to hit exactly
-        the same footgun, because attribution resolved the FILE and so followed
-        a file symlink just as it followed a directory symlink. Covered
-        separately because contents-linking looks like a workaround for the
-        directory case and never was one -- it also loses version control for
-        newly created files, so it costs something and bought nothing.
+        Separate from the directory case: contents-linking looks like a workaround
+        for it and is not one.
         """
         layout = self.build(store_under_home=True)
         held = layout.store / "toolguard_hook.toml"
@@ -245,15 +175,7 @@ class TestEndToEndResolutionThroughSymlink(SymlinkHierarchyTestCase):
     """The verdicts themselves must be identical through a symlink."""
 
     def _verdicts(self, project: Path) -> dict:
-        """
-        Resolve a fixed set of commands against a project's configuration.
-
-        Args:
-            project: The project root to load configuration from.
-
-        Returns:
-            Mapping of command -> verdict.
-        """
+        """Resolve a fixed set of commands against a project's configuration, command -> verdict."""
         config_module._parse_config_file_cached.cache_clear()
         config = load_configuration(str(project))
         return {
@@ -286,9 +208,8 @@ class TestEndToEndResolutionThroughSymlink(SymlinkHierarchyTestCase):
         When the configuration is loaded
         Then the project's config file appears among the discovered sources
 
-        Guards against the failure mode where a symlinked directory is skipped
-        entirely and the suite still passes because the fallback happens to give
-        the same verdict.
+        Not covered by the verdict test above: a skipped symlink can still produce
+        the same verdict via the fallback.
         """
         layout = self.build()
         layout.with_symlinked_claude()
@@ -309,10 +230,6 @@ class TestSymlinkedRulesFile(SymlinkHierarchyTestCase):
         held elsewhere
         When the configuration is loaded
         Then the rule takes effect
-
-        This mirrors Arnon's real setup, where gh.rules.toml is symlinked into
-        the rules directory, and the TOO-19 near-miss where a symlinked rules
-        file was almost false-flagged as shadowed.
         """
         layout = self.build()
         layout.with_real_claude()

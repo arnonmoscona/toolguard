@@ -1,7 +1,6 @@
 """
-Unit tests for toolguard config hierarchy and pattern parsing.
-
-Tests config file discovery, loading, merging, and extended pattern syntax.
+Unit tests for toolguard config-file discovery, project-root detection, and
+extended pattern syntax.
 """
 
 import tempfile
@@ -114,20 +113,15 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
         When discover_config_files runs with the project root resolved
         Then both project config files appear in the discovered config paths
         """
-        # discover_config_files() also reads Path.home() / ".claude" for the
-        # user level -- isolate it so a real dogfooded ~/.claude cannot leak
-        # into the discovered list.
         _home, project_dir = self.isolate_config_environment()
         claude_dir = project_dir / ".claude"
         claude_dir.mkdir()
 
-        # Create some config files
         (claude_dir / "settings.local.json").write_text("{}")
         (claude_dir / "toolguard_hook.json").write_text("{}")
 
         configs = discover_config_files()
 
-        # Should find project configs
         config_paths = [str(path) for path, _, _ in configs]
         self.assertIn(str(claude_dir / "settings.local.json"), config_paths)
         self.assertIn(str(claude_dir / "toolguard_hook.json"), config_paths)
@@ -143,9 +137,6 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
             "toolguard.config.find_project_root", side_effect=RuntimeError("No project")
         ):
             configs = discover_config_files()
-            # Should only find user-level configs (if they exist) -- the isolated
-            # fake home has none, but this assertion stays deliberately loose
-            # (unchanged from before isolation): just verify it doesn't crash.
             self.assertIsInstance(configs, list)
 
     def test_discover_prioritizes_local_over_regular(self):
@@ -158,14 +149,12 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
         claude_dir = project_dir / ".claude"
         claude_dir.mkdir()
 
-        # Create both local and regular files
         (claude_dir / "settings.local.json").write_text("{}")
         (claude_dir / "settings.json").write_text("{}")
 
         configs = discover_config_files()
 
         config_paths = [path for path, _, _ in configs]
-        # settings.local.json should come before settings.json
         local_idx = next(
             i for i, p in enumerate(config_paths) if p.name == "settings.local.json"
         )
@@ -176,14 +165,7 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
 
 
 class TestFindProjectRoot(ConfigIsolationMixin, unittest.TestCase):
-    """
-    Real (unmocked) tests of toolguard.config.find_project_root's marker walk.
-
-    TOO-15: consolidates config.py's walk-up with env_config.py's onto a shared
-    "strong project anchor" tier (.git/.hg/.jj/.claude/CLAUDE.md) plus
-    pyproject.toml. These tests exercise the real function directly, since every
-    other test in this file mocks it (see discover_config_files tests above).
-    """
+    """Real (unmocked) tests of toolguard.config.find_project_root's marker walk."""
 
     def test_finds_git_directory(self):
         """

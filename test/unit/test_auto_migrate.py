@@ -1,9 +1,4 @@
-"""
-Unit tests for auto_migrate module.
-
-Tests automatic permission migration functionality including config loading,
-marker file management, and integration with migration script.
-"""
+"""Unit tests for auto_migrate."""
 
 import io
 import json
@@ -28,8 +23,6 @@ from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMi
 
 
 class TestConfigSyncSettings(unittest.TestCase):
-    """Test loading config_sync settings from config files."""
-
     def test_load_config_sync_defaults(self):
         """
         Given an empty list of config files
@@ -111,7 +104,6 @@ auto_sort_on_migrate = false
 
             result = load_config_sync_settings(config_files)
 
-            # Should return defaults (ignored claude file)
             self.assertEqual(result["auto_migrate"], False)
 
     def test_load_config_sync_partial_config(self):
@@ -134,8 +126,8 @@ auto_migrate = true
             result = load_config_sync_settings(config_files)
 
             self.assertEqual(result["auto_migrate"], True)
-            self.assertEqual(result["backup_dir"], "logs/config-backups")  # default
-            self.assertEqual(result["auto_sort_on_migrate"], True)  # default
+            self.assertEqual(result["backup_dir"], "logs/config-backups")
+            self.assertEqual(result["auto_sort_on_migrate"], True)
 
     def test_load_config_sync_last_file_wins(self):
         """
@@ -157,7 +149,6 @@ auto_migrate = true
 
             result = load_config_sync_settings(config_files)
 
-            # Last file (file2) should win
             self.assertEqual(result["auto_migrate"], True)
 
     def test_load_config_sync_invalid_file(self):
@@ -180,13 +171,10 @@ auto_migrate = true
 
             result = load_config_sync_settings(config_files)
 
-            # Should load from valid file despite invalid file present
             self.assertEqual(result["auto_migrate"], True)
 
 
 class TestAutoMigrationKey(unittest.TestCase):
-    """Locks in the key string other tests here claim directly against the store."""
-
     def test_key_matches_the_literal_used_by_other_tests(self):
         """
         Given the module-level AUTO_MIGRATION throttled-thing
@@ -199,8 +187,6 @@ class TestAutoMigrationKey(unittest.TestCase):
 
 
 class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
-    """Test run_auto_migration function."""
-
     def test_run_auto_migration_already_claimed_today(self):
         """
         Given today's slot is already claimed for this module's key
@@ -331,12 +317,11 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
 
             mock_get_native.return_value = {"allow": ["Bash(*)"], "deny": [], "ask": []}
             mock_get_toolguard.return_value = {"allow": [], "deny": [], "ask": []}
-            # find_divergent_patterns should filter out ignored patterns
             mock_find_divergent.return_value = {
                 "allow": [],
                 "deny": [],
                 "ask": [],
-            }  # Bash(*) was ignored
+            }
             mock_discover.return_value = []
 
             config_sync = {
@@ -352,7 +337,6 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
 
             result = run_auto_migration(project_root, config_sync, takeover_config)
 
-            # No divergence after filtering, so no migration
             self.assertFalse(result)
 
     @patch("toolguard.config_divergence.get_native_permissions")
@@ -376,7 +360,6 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
 
-            # Setup mocks
             settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
             settings_path.write_text(
@@ -394,7 +377,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = MigrationOutcome.SUCCEEDED  # Success
+            mock_migrate.return_value = MigrationOutcome.SUCCEEDED
             mock_discover.return_value = []
 
             config_sync = {
@@ -806,7 +789,6 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
 
             run_auto_migration(project_root, config_sync, takeover_config)
 
-            # Verify migrate was called with custom backup dir and no sorting
             mock_migrate.assert_called_once_with(
                 project_root=project_root,
                 dry_run=False,
@@ -856,7 +838,7 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
                 "deny": [],
                 "ask": [],
             }
-            mock_migrate.return_value = MigrationOutcome.FAILED  # Failure outcome
+            mock_migrate.return_value = MigrationOutcome.FAILED
             mock_discover.return_value = []
 
             config_sync = {
@@ -873,7 +855,6 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
             result = run_auto_migration(project_root, config_sync, takeover_config)
 
             self.assertFalse(result)
-            # Claim was NOT released on failure -- a fresh claim attempt reports HELD.
             self.assertEqual(
                 once_per_store.claim(
                     project_root,
@@ -958,8 +939,6 @@ class TestRunAutoMigration(_IsolatedStoreMixin, unittest.TestCase):
 
 
 class TestRunAutoMigrationExceptionSafety(_IsolatedStoreMixin, unittest.TestCase):
-    """TOO-45 follow-up defect 1 regression: a crash must not leak the claim."""
-
     def test_exception_during_analysis_leaves_period_unclaimed(self):
         """
         Given load_configuration raises during the analysis phase (e.g. a
@@ -990,8 +969,6 @@ class TestRunAutoMigrationExceptionSafety(_IsolatedStoreMixin, unittest.TestCase
                 with self.assertRaises(RuntimeError):
                     run_auto_migration(project_root, config_sync, takeover_config)
 
-            # A subsequent claim attempt the same day still succeeds -- the
-            # crash left nothing claimed.
             self.assertEqual(
                 once_per_store.claim(
                     project_root,

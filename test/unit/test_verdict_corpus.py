@@ -1,50 +1,19 @@
 """
-Replay tests for the TOO-45 verdict-equivalence corpus.
+Replay tests for the verdict-equivalence corpus: a HARD tier that must never be
+made to pass by regenerating a goldens file, and a TRACKED tier that may be.
+Read ``test/verdict_corpus/README.md`` before touching anything here.
 
-See ``test/verdict_corpus/README.md`` for what this corpus is for, how it is
-built, and -- critically -- what to do when a test in this module fails. The
-short version, repeated here because it is the single most important fact
-about this file: a failing :meth:`TestVerdictCorpus.test_no_verdict_changed`,
-:meth:`TestVerdictCorpus.test_no_sub_command_breakdown_changed` (TOO-45
-corpus sub-verdict extension -- the compound sub-command breakdown is a
-second, equally HARD invariant), or (for the end-to-end corpus)
-:meth:`TestVerdictCorpusEndToEnd.test_no_hard_output_changed` means STOP and
-investigate a real behaviour change. None of these is ever fixed by
-regenerating a goldens file.
+Two corpora, deliberately two ``TestCase`` classes so either can be run alone:
+the fast in-process one through :func:`toolguard.api.decide`, and a small
+end-to-end one through the REAL hook subprocess, which is the only one that
+reaches :func:`toolguard.hook.create_hook_output`.
 
-Two test classes, two corpora, run independently
---------------------------------------------------
-- :class:`TestVerdictCorpus` replays the fast, ~5,000-case in-process corpus
-  through :func:`toolguard.api.decide` directly.
-- :class:`TestVerdictCorpusEndToEnd` replays a small (~30-case), deliberately
-  chosen end-to-end corpus through the REAL hook binary in a subprocess (via
-  :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`). This exists because
-  ``decide()`` stops at the decision itself and cannot see
-  :func:`toolguard.hook.create_hook_output` -- the seam that turns a decision
-  into the actual JSON Claude Code receives. A real defect once silently
-  dropped ``additionalContext`` there, undetected by decision-level testing;
-  this class is what closes that specific gap.
-
-Kept as two separate ``TestCase`` classes (not two methods sharing one
-``setUpClass``) precisely so either corpus can be run and diagnosed on its
-own, e.g. ``python -m unittest test.unit.test_verdict_corpus.TestVerdictCorpusEndToEnd``.
-
-Isolation note: this module deliberately does NOT use
-``test.unit._config_isolation.ConfigIsolationMixin``. Every fixture's
-Configuration (or sandbox, for the end-to-end class) is built by
-:func:`test.verdict_corpus.fixture_loader.load_fixture_configuration` /
-:func:`~test.verdict_corpus.fixture_loader.load_fixture_sandbox`, both of
-which wrap :func:`toolguard.testing.sandbox.experiment` -- the SAME function
-``tools/corpus_build.py`` uses to generate the committed goldens in the first
-place. Sharing one isolation/loading path (rather than the test using
-``ConfigIsolationMixin`` and the dev tool using something else) is what makes
-``compare_goldens``/``compare_e2e_goldens`` meaningful: both sides are
-guaranteed to build a fixture the same way, so any behaviour difference these
-tests catch is a difference in the engine under test, never an artifact of
-divergent test scaffolding. ``toolguard.testing.sandbox.experiment`` already
-covers the same ground ``ConfigIsolationMixin`` does (``Path.home()``,
-``find_project_root``, a cleared/rebuilt environment) plus a write tripwire
-``ConfigIsolationMixin`` does not have.
+Isolation (`.claude/rules/test-config-isolation.md`): this module does NOT use
+ConfigIsolationMixin. Fixtures come from
+:mod:`test.verdict_corpus.fixture_loader`, which wraps
+:func:`toolguard.testing.sandbox.experiment` -- the same function
+``tools/corpus_build.py`` uses to generate the committed goldens, so a
+difference these tests catch is never an artifact of divergent scaffolding.
 """
 
 import os
@@ -67,18 +36,16 @@ from test.verdict_corpus.fixture_loader import (
 )
 from toolguard.tool_spec import ToolKind, ToolSpec
 
-#: Set to "1" to acknowledge reviewed reason/additional_context/provenance/
-#: matched_rule differences without regenerating goldens.jsonl. See README.md.
+#: Set to "1" to acknowledge already-reviewed TRACKED-tier differences without
+#: regenerating goldens.jsonl.
 _ACCEPT_PROSE_ENV_VAR = "TOOLGUARD_CORPUS_ACCEPT_PROSE"
 
 
 class TestVerdictCorpus(unittest.TestCase):
     """
-    Replays every ``(fixture, tool, target)`` case in ``cases.jsonl`` through
-    :func:`toolguard.api.decide` and compares the result to the
-    committed ``goldens.jsonl``, ONCE for the whole test class (replaying is
-    the expensive part; every ``test_*`` method below reuses the same
-    comparison rather than re-running it).
+    Replays every ``cases.jsonl`` case through :func:`toolguard.api.decide` and
+    compares it to ``goldens.jsonl``, ONCE per class -- replaying is the
+    expensive part, and every method below reuses that one comparison.
     """
 
     cases = None
@@ -115,12 +82,6 @@ class TestVerdictCorpus(unittest.TestCase):
         Given the committed cases.jsonl and goldens.jsonl
         When every (fixture, tool, target) key is compared between the two files
         Then no case lacks a committed golden and no golden lacks a matching case
-
-        A mismatch here means the two files were not regenerated together
-        (e.g. a case was added/removed without re-running --generate) -- a
-        corpus data-integrity problem, not a verdict-equivalence one, but
-        still always a hard failure: the corpus cannot guard anything if its
-        own two halves have drifted apart.
         """
         self.assertEqual(
             [],
@@ -139,12 +100,7 @@ class TestVerdictCorpus(unittest.TestCase):
         """
         Given every corpus case, replayed right now through decide()
         When its verdict (allow/ask/deny) is compared to the committed golden's verdict
-        Then no verdict differs
-
-        This is the HARD invariant the whole corpus exists to guard (TOO-45).
-        A failure here means STOP and investigate a real behaviour change --
-        it is NEVER fixed by regenerating goldens.jsonl. See
-        test/verdict_corpus/README.md.
+        Then no verdict differs -- the HARD invariant the corpus exists to guard
         """
         if not self.result.verdict_mismatches:
             return
@@ -162,19 +118,10 @@ class TestVerdictCorpus(unittest.TestCase):
     def test_no_sub_command_breakdown_changed(self):
         """
         Given every corpus case, replayed right now through decide()
-        When its sub_matches/overrides breakdown (TOO-45 corpus sub-verdict
-             extension) is compared to the committed golden
-        Then neither differs for any case
-
-        This is a second HARD invariant, same tier as
-        :meth:`test_no_verdict_changed`: the compound sub-command breakdown
-        is exactly the structural data whose silent loss was TOO-45's
-        headline audit-trail defect (813/975 compound-allow cases
-        under-logged, fixed in ``hook.py::_log_allowed_command`` by reading
-        ``verdict.sub_matches`` directly instead of regex-parsing the reason
-        string). A failure here means STOP and investigate a real behaviour
-        change -- it is NEVER fixed by regenerating goldens.jsonl. See
-        test/verdict_corpus/README.md.
+        When its sub_matches/overrides breakdown is compared to the committed
+             golden
+        Then neither differs for any case -- a second HARD invariant, same tier
+             as :meth:`test_no_verdict_changed`
         """
         if not self.result.breakdown_mismatches:
             return
@@ -200,15 +147,10 @@ class TestVerdictCorpus(unittest.TestCase):
         Then either nothing differs, or TOOLGUARD_CORPUS_ACCEPT_PROSE=1 explicitly
              acknowledges the (already reviewed) differences
 
-        Unlike verdict, these fields are TRACKED, not frozen: a legitimate
-        refactor step may reword a reason string without changing behaviour.
-        A single-tier golden would either block that legitimate rewording or
-        hide a real regression inside it -- both expensive here -- so this is
-        reported separately, fails by default (so a difference is never
-        silently ignored), and has exactly one acknowledgement path: either
-        regenerate goldens.jsonl after reviewing the diff (the normal case),
-        or set TOOLGUARD_CORPUS_ACCEPT_PROSE=1 for a one-off run. Editing this
-        test to loosen the check is not that path.
+        These fields are TRACKED, not frozen: a refactor may reword a reason
+        string without changing behaviour. Reviewing the diff and regenerating
+        goldens.jsonl, or setting the env var for one run, are the two
+        acknowledgement paths; loosening this check is not one.
         """
         if not self.result.prose_diffs:
             return
@@ -233,16 +175,11 @@ class TestVerdictCorpus(unittest.TestCase):
 
 class TestVerdictCorpusEndToEnd(unittest.TestCase):
     """
-    Replays every ``(fixture, tool, target)`` case in ``e2e_cases.jsonl``
-    through the REAL ``toolguard`` hook binary (one subprocess per case, via
-    :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`) and compares the full
-    hook JSON response to the committed ``e2e_goldens.jsonl``, ONCE for the
-    whole test class.
-
-    Deliberately separate from :class:`TestVerdictCorpus`: this corpus is
-    small (subprocess startup dominates its cost) and exists for a different
-    reason -- covering :func:`toolguard.hook.create_hook_output`, which the
-    in-process corpus's entry point never reaches.
+    Replays every ``e2e_cases.jsonl`` case through the REAL hook binary (one
+    subprocess each) and compares the full hook JSON response to
+    ``e2e_goldens.jsonl``, ONCE per class. Small on purpose: subprocess startup
+    dominates, and it exists to cover
+    :func:`toolguard.hook.create_hook_output`, which ``decide()`` never reaches.
     """
 
     e2e_cases = None
@@ -297,14 +234,9 @@ class TestVerdictCorpusEndToEnd(unittest.TestCase):
         Given every end-to-end case, replayed right now through the real hook subprocess
         When permissionDecision and additionalContext's PRESENCE (not its text) are
              compared to the committed golden
-        Then neither differs for any case
-
-        This is the HARD invariant this corpus exists to guard -- in particular
-        the ``additionalContext`` key silently disappearing from the hook's
-        real JSON output, which the in-process corpus cannot see at all (it
-        never reaches ``toolguard.hook.create_hook_output``). A failure here
-        means STOP and investigate a real behaviour change -- it is NEVER
-        fixed by regenerating e2e_goldens.jsonl. See test/verdict_corpus/README.md.
+        Then neither differs for any case -- the HARD invariant this corpus
+             exists to guard, in particular ``additionalContext`` silently
+             disappearing from the hook's real JSON output
         """
         if not self.result.hard_mismatches:
             return
@@ -328,9 +260,6 @@ class TestVerdictCorpusEndToEnd(unittest.TestCase):
              sides logged a conflict) are compared to the committed golden
         Then either nothing differs, or TOOLGUARD_CORPUS_ACCEPT_PROSE=1 explicitly
              acknowledges the (already reviewed) differences
-
-        Same rationale as :meth:`TestVerdictCorpus.test_tracked_fields_unchanged_or_acknowledged`,
-        applied to the end-to-end corpus's prose fields.
         """
         if not self.result.prose_diffs:
             return
@@ -354,10 +283,7 @@ class TestVerdictCorpusEndToEnd(unittest.TestCase):
 
 
 class TestBuildHookPayloadPayloadKeySeam(unittest.TestCase):
-    """
-    ``build_hook_payload`` must dispatch through the tool_spec registry, not a
-    hardcoded 'command' literal (TOO-45 punch-list #10 fix pass, m3).
-    """
+    """``build_hook_payload`` dispatches through the tool_spec registry, not a hardcoded literal."""
 
     @patch.dict(
         "toolguard.tool_spec.TOOLS_BY_NAME",

@@ -1,24 +1,16 @@
 """
 Error, warning, conflict, and crash logging for toolguard.
 
-Each concern is routed to its OWN date-stamped log file so the streams stay
-separable (TOO-8 Phase 4):
+Errors, warnings and conflicts each get their OWN date-stamped Markdown file
+in the caller-supplied log directory, so the streams stay separable:
+``toolguard-error-YYYY-MM-DD.md``, ``toolguard-warning-YYYY-MM-DD.md``,
+``toolguard-conflict-YYYY-MM-DD.md``. The similarly named high-volume
+resolution log, ``toolguard-YYYY-MM-DD.*``, is :mod:`toolguard.log_writer`'s,
+not this module's.
 
-- ``logs/toolguard-error-YYYY-MM-DD.md``   -- real errors only (:func:`log_error`)
-- ``logs/toolguard-warning-YYYY-MM-DD.md`` -- actionable warnings (:func:`log_warning`)
-- ``logs/toolguard-conflict-YYYY-MM-DD.md`` -- config conflicts (:func:`log_conflict`)
-
-The high-volume resolution log (``logs/toolguard-YYYY-MM-DD.md``) is handled
-separately by :mod:`toolguard.log_writer`. Every entry preserves the existing
-per-file Markdown format and echoes a concise line to stderr for visibility.
-
-:func:`log_crash` is a DIFFERENT concern from the three streams above: it captures
-full, unhandled-exception detail (type, message, traceback) for the hook's
-top-level ``except`` clauses. Those can fire before a project's configuration --
-and therefore its ``log_dir`` -- is even resolvable, so it writes to the fixed,
-user-level ``~/.toolguard/errors/`` directory instead of a project-scoped log
-(mirrors :data:`toolguard.tools.decision_ledger.USER_LEDGER_PATH`'s use of
-``Path.home() / ".toolguard"``).
+:func:`log_crash` is a DIFFERENT concern: full unhandled-exception detail
+(type, message, traceback), written to a fixed, user-level directory rather
+than to the caller's.
 """
 
 import sys
@@ -30,11 +22,9 @@ from typing import Any, Dict, Optional
 
 def log_warning(message: str, corrective_steps: str, log_dir: Path) -> None:
     """
-    Log an actionable warning to stderr and the WARNING log file.
+    Log an actionable warning to stderr and ``toolguard-warning-YYYY-MM-DD.md``.
 
-    Writes to ``logs/toolguard-warning-YYYY-MM-DD.md``. Use this for conditions
-    the user can and should act on (e.g. both a ``.toml`` and a ``.json`` config
-    present, an unsupported or ungoverned tool referenced in permissions).
+    For conditions the user can and should act on.
 
     Args:
         message: Warning message to log
@@ -46,10 +36,9 @@ def log_warning(message: str, corrective_steps: str, log_dir: Path) -> None:
 
 def log_error(message: str, corrective_steps: str, log_dir: Path) -> None:
     """
-    Log a real error to stderr and the ERROR log file.
+    Log a real error to stderr and ``toolguard-error-YYYY-MM-DD.md``.
 
-    Writes to ``logs/toolguard-error-YYYY-MM-DD.md``. Reserved for genuine
-    failures, never for warnings or conflicts.
+    Genuine failures only -- warnings and conflicts have their own streams.
 
     Args:
         message: Error message to log
@@ -61,17 +50,13 @@ def log_error(message: str, corrective_steps: str, log_dir: Path) -> None:
 
 def log_conflict(message: str, corrective_steps: str, log_dir: Path) -> None:
     """
-    Log a configuration conflict to stderr and the CONFLICT log file.
+    Log a configuration conflict to stderr and ``toolguard-conflict-YYYY-MM-DD.md``.
 
-    Writes to ``logs/toolguard-conflict-YYYY-MM-DD.md``. Conflict logging is ON
-    by default. A conflict is a MORE-specific level's ``allow`` overriding a
-    LESS-specific level's ``deny`` for the same command/path; the decision still
-    follows more-specific-wins, and this entry records both sides' provenance so
-    a human or LLM can understand the override. The entry is human/LLM-readable
-    Markdown -- NOT a structured/machine-readable record.
+    A conflict is a disagreement within the configuration that toolguard
+    resolved by policy rather than refusing to run.
 
     Args:
-        message: Human-readable conflict description (cites both provenances).
+        message: Human-readable conflict description.
         corrective_steps: Suggested corrective actions.
         log_dir: Directory where log files should be written.
     """
@@ -82,11 +67,15 @@ def _log_entry(
     level: str, stream: str, message: str, corrective_steps: str, log_dir: Path
 ) -> None:
     """
-    Write a single Markdown log entry to the per-concern stream file.
+    Write one Markdown entry to ``<log_dir>/toolguard-<stream>-YYYY-MM-DD.md``.
 
-    Each stream writes to ``logs/toolguard-<stream>-YYYY-MM-DD.md`` and echoes a
-    concise line to stderr. The Markdown entry format is shared across all
-    streams for consistency.
+    The ``## <timestamp> - <level>`` heading is parsed, not merely displayed:
+    :func:`toolguard.session_start._count_conflict_entries` counts conflict
+    entries by matching it, and a reformatted heading silently counts zero.
+
+    A failed write is swallowed -- a stderr warning, nothing raised. A ``log_dir``
+    that cannot be created is not: ``mkdir`` runs before both the stderr echo and
+    the ``try``, so the caller sees the exception and nothing is echoed.
 
     Args:
         level: Display label for the entry ('WARNING', 'ERROR', 'CONFLICT').
@@ -96,27 +85,21 @@ def _log_entry(
         corrective_steps: Suggested corrective actions.
         log_dir: Directory where log files should be written.
     """
-    # Create log directory if it doesn't exist
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate date-stamped, per-stream filename
     log_filename = f"toolguard-{stream}-{datetime.now().strftime('%Y-%m-%d')}.md"
     log_file = log_dir / log_filename
 
-    # Prepare log entry
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Format log entry in markdown (preserved per-file format)
     log_content = f"## {timestamp} - {level}\n\n"
     log_content += f"**Message**: {message}\n\n"
     log_content += f"**Corrective Steps**: {corrective_steps}\n\n"
     log_content += "---\n\n"
 
-    # Echo to stderr for visibility
     print(f"[{level}] {message}", file=sys.stderr)
     print(f"Corrective steps: {corrective_steps}", file=sys.stderr)
 
-    # Write to file
     try:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(log_content)
@@ -130,25 +113,15 @@ def log_crash(
     """
     Write a full crash report for an unhandled exception to ``~/.toolguard/errors/``.
 
-    Unlike :func:`log_error`/:func:`log_warning`/:func:`log_conflict`, this does
-    NOT depend on a resolved project ``log_dir`` -- it writes to the fixed,
-    user-level ``~/.toolguard/errors/`` directory (created on demand; does not
-    require ``init-state`` to have run first), so it works even when the
-    exception happened before or during config resolution. Each crash gets its
-    OWN Markdown file, named ``toolguard-error-<timestamp>.md`` (second
-    granularity). If two crashes land in the same rendered second, a
-    monotonically increasing ``-2``, ``-3``, ... suffix is appended so an
-    earlier crash report is never silently overwritten (same disambiguation
-    scheme as ``create_backup`` in
-    :mod:`toolguard.permission_migration`, reimplemented locally here to
-    avoid pulling in that module's config-resolution machinery from a path
-    that must keep working even when config resolution itself is what
-    failed).
+    Takes no ``log_dir``: the directory is fixed and created on demand, so this
+    works even when the exception happened before or during config resolution.
+    Each crash gets its own file, ``toolguard-error-<timestamp>.md`` at second
+    granularity, with a ``-2``, ``-3``, ... suffix on a same-second collision so
+    an earlier report is never silently overwritten.
 
-    Never raises: if writing the report fails for any reason (permissions, disk
-    full, etc.), the failure is caught, a short warning is printed to stderr,
-    and ``None`` is returned -- callers invoke this from inside an
-    already-failing ``except`` block and must not have that made worse.
+    A failure while writing the report (permissions, disk full, ...) is caught:
+    a short warning goes to stderr and ``None`` is returned, so a caller already
+    handling a failure is not handed a second one.
 
     Args:
         exc: The exception instance that was caught. ``type(exc).__name__`` and
@@ -156,8 +129,8 @@ def log_crash(
             (via :func:`traceback.format_exc`, so this must be called while the
             exception's context is still active).
         context: Whatever in-flight state is available at the catch site (e.g.
-            ``tool_name``/``tool_input``), rendered as readable ``key: value``
-            lines. May be empty if little or nothing was resolved yet.
+            ``tool_name``/``tool_input``), rendered as Markdown bullets. May be
+            empty if little or nothing was resolved yet.
         caught_as: Short label identifying which ``except`` clause caught the
             exception (e.g. ``"json.JSONDecodeError"``, ``"ValueError"``,
             ``"unexpected Exception"``).
@@ -171,8 +144,6 @@ def log_crash(
     try:
         errors_dir.mkdir(parents=True, exist_ok=True)
 
-        # Disambiguate same-second collisions with a "-2", "-3", ... suffix so
-        # an earlier crash report is never clobbered.
         base_name = f"toolguard-error-{now.strftime('%Y-%m-%d-%H%M%S')}"
         crash_file = errors_dir / f"{base_name}.md"
         sequence = 2

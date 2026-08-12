@@ -1,44 +1,21 @@
 """
-Hierarchy migration: move a rule up (or down) the config hierarchy, and detect
-rules made redundant by an identical rule in a broader layer.
+Hierarchy operations on a config: move a rule between layers, and find rules a
+broader layer already duplicates.  Allow-list rules only.
 
-Toolguard resolves permissions across a hierarchy of layers ordered by
-``Provenance.specificity`` (``0`` = most specific / project-level, higher =
-broader / user-level), most-specific-wins.  Two hierarchy operations live here:
+Layers are ordered by ``Provenance.specificity`` (``0`` = most specific,
+project-level) and resolve most-specific-wins.
 
-1. **Promotion / migration** -- move an allow rule from one layer to another
-   (typically a more-specific project layer UP to a broader user layer, so it
-   applies everywhere).  :func:`evaluate_migration` builds the migrated config
-   and replays the corpus to confirm the move is DECISION-NEUTRAL for the current
-   context; the genuine effect of a promotion -- broadening the rule to *other*
-   contexts the broader layer governs -- is outside any single corpus and is
-   surfaced as a scope note for the human to weigh.
+1. **Migration** -- :func:`migrate_config` relocates an allow rule between
+   layers, typically promoting one from a project layer UP to the user layer so
+   it applies everywhere.  :func:`evaluate_migration` replays a corpus across the
+   before/after pair.  The point of a promotion -- the rule now applying in every
+   OTHER context the destination layer governs -- lies outside any corpus, so it
+   is described in prose in ``MigrationEffect.scope_note`` for a human to weigh.
 
-   Not currently wired into any live auto-apply path: today's only user-facing
-   promotion flow (the ``toolguard-maintenance`` skill, pass 4) hand-applies
-   promotions as a two-file paste, always to ``~/.claude/toolguard_hook.toml``
-   specifically. If/when this module's ``to_provenance`` is ever wired to an
-   automated target-selection step, it MUST NEVER select a layer whose
-   ``source_type`` is ``"toolguard_hook_rules"`` (the optional
-   ``~/.config/toolguard/rules/`` split-file directory, TOO-30) as a promotion
-   destination. That directory is manually curated by the user; moving a rule
-   into one of its files must only ever happen on the user's explicit
-   instruction, never as something toolguard decides on its own. The "broader
-   user layer" a promotion targets means the primary
-   ``~/.claude/toolguard_hook.toml`` (or an equivalent single, canonical
-   user-level file the user has designated) -- not any arbitrary layer that
-   happens to share the user specificity.
-
-2. **Cross-layer redundancy** -- a rule in a more-specific layer that is
-   normalised-equal to a rule already present in a broader layer is redundant:
-   the broader copy already covers it, so the specific copy can be dropped with
-   no change in behaviour.  This is the cross-layer counterpart of
-   :mod:`toolguard.tools.redundancy` (which only handles intra-layer duplicates).
-
-Scope: allow-list rules only in this slice (consistent with the rest of the
-maintenance core).  Reuses ``with_layer_allow_replaced`` (the synthetic-config
-primitive), ``replay`` (the gate), and ``redundancy._normalised_body`` (the
-single normalisation helper) -- no reimplementation.
+2. **Cross-layer redundancy** -- :func:`find_cross_layer_redundancies` reports a
+   more-specific allow rule whose normalised body also appears in a broader
+   layer.  Purely static: it reads allow lists and replays nothing.  Its findings
+   are candidates for review, NOT verified-safe deletions -- see that function.
 """
 
 from collections import defaultdict
@@ -64,14 +41,15 @@ class HierarchyMigration:
 
     Attributes:
         tool: Tool the rule applies to (e.g. ``'Bash'``).
-        list_type: Permission list (``'allow'`` in this slice).
+        list_type: Permission list the rule belongs to.  Recorded but not acted
+            on -- :func:`migrate_config` edits the allow list whatever this says.
         pattern: Wrapper-free pattern body to move (e.g. ``'git status:*'``).
         from_provenance: The layer the rule currently lives in.
-        to_provenance: The layer to move it to. MUST NOT be a
-            ``source_type == "toolguard_hook_rules"`` layer (the user-maintained
-            ``~/.config/toolguard/rules/`` split-file directory) -- see the module
-            docstring. Any code that constructs this value automatically must
-            filter those out first.
+        to_provenance: The layer to move it to.  Any automated target selection
+            must exclude ``source_type == "toolguard_hook_rules"`` layers: those
+            sit at the SAME specificity as ``~/.claude``, so a plain "pick a
+            broader layer" step can land in the user's hand-curated
+            rules-directory files, which toolguard must never write to unasked.
         rationale: Human-readable reason for the move.
     """
 
@@ -93,9 +71,12 @@ class MigrationEffect:
         changed_count: Corpus entries whose verdict changed (broadened + tightened).
         broadened_count: Entries that became looser.
         tightened_count: Entries that became stricter.
-        decision_neutral: ``True`` when no corpus decision changed -- the move is
-            safe for the CURRENT context (its cross-context broadening is reported
-            separately in ``scope_note``).
+        decision_neutral: ``True`` when no corpus entry's verdict changed.  Not a
+            safety verdict, even for the current context: a command the corpus
+            never recorded can still flip.  Measured -- with a project ``git:*``
+            allow and an intermediate ``git push:*`` deny, promoting ``git:*`` to
+            an empty user layer over a corpus holding only ``git status`` is
+            reported neutral while ``git push`` goes from ``allow`` to ``deny``.
         scope_note: Human-readable note about how the move changes the rule's
             scope beyond what the corpus can show (e.g. promotion to a broader
             layer applies the rule to other projects too).
@@ -112,13 +93,13 @@ class MigrationEffect:
 @dataclass(frozen=True)
 class CrossLayerRedundancy:
     """
-    A more-specific allow rule already covered by an identical broader-layer rule.
+    A more-specific allow rule whose normalised body also appears in a broader layer.
 
     Attributes:
         tool: Tool the rule applies to.
-        pattern: The redundant (more-specific) pattern body.
-        redundant_provenance: The more-specific layer holding the redundant copy.
-        covered_by_provenance: The broader layer whose rule already covers it.
+        pattern: The more-specific pattern body.
+        redundant_provenance: The more-specific layer holding it.
+        covered_by_provenance: The nearest broader layer holding the same body.
         note: Human-readable explanation.
     """
 
@@ -140,9 +121,8 @@ def migrate_config(
     """
     Build a synthetic config with the rule moved between layers.
 
-    Removes ``migration.pattern`` from ``from_provenance``'s allow list and adds
-    it to ``to_provenance``'s, by composing two
-    :func:`~toolguard.tools.config_access.with_layer_allow_replaced` calls.
+    Removes ``migration.pattern`` from ``from_provenance``'s allow list and
+    appends it to ``to_provenance``'s.  Nothing on disk is touched.
 
     Args:
         config: The original configuration.
@@ -160,15 +140,7 @@ def migrate_config(
 
 
 def _scope_note(migration: HierarchyMigration) -> str:
-    """
-    Describe how a migration changes a rule's scope beyond the current corpus.
-
-    Args:
-        migration: The migration being described.
-
-    Returns:
-        A human-readable scope note.
-    """
+    """Describe how a migration changes a rule's scope, beyond what a corpus can show."""
     from_locus = migration.from_provenance.describe()
     to_locus = migration.to_provenance.describe()
     from_spec = migration.from_provenance.specificity
@@ -192,11 +164,10 @@ def migration_effect_to_dict(effect: MigrationEffect) -> Dict[str, object]:
     """
     Serialise a :class:`MigrationEffect` into a JSON-able dict.
 
-    This is the structured form passed to the AI-driven security audit (via
-    ``toolguard-audit --migrations``) so it can evaluate the risk of a PROPOSED,
-    not-yet-enacted migration -- the deterministic ``decision_neutral`` flag only
-    proves current-corpus neutrality, never cross-section/cross-layer intent
-    safety, which is exactly what the audit's judgement layer is for.
+    The form ``toolguard-audit --migrations`` ingests, so a judgement layer can
+    weigh a proposed, not-yet-enacted move: ``decision_neutral`` is corpus
+    evidence, never a statement about intent.  See technical-notes.md,
+    "As-if-enacted review: ``--edits`` vs ``--migrations``".
 
     Args:
         effect: The evaluated migration effect.
@@ -230,12 +201,11 @@ def evaluate_migration(
     corpus: List[LogEntry],
 ) -> MigrationEffect:
     """
-    Replay-measure the effect of a hierarchy migration on the current corpus.
+    Replay-measure the effect of a hierarchy migration on a corpus.
 
-    A safe promotion is DECISION-NEUTRAL here: the same commands resolve the same
-    way whether the rule sits in the specific or the broader layer (both govern
-    the current context).  A non-neutral result means a more-specific rule in
-    between would change the outcome -- inspect before moving.
+    A non-neutral result means at least one recorded command resolves differently
+    after the move -- inspect before moving.  A neutral one is weaker evidence
+    than it looks: see :class:`MigrationEffect`'s ``decision_neutral``.
 
     Args:
         config: The current configuration.
@@ -273,8 +243,8 @@ def _nearest_broader_cover(
     Return the nearest strictly-broader layer that also holds ``key``, or None.
 
     "Broader" means a higher ``specificity`` value (further from the project);
-    "nearest" is the smallest such value -- the layer that would take over if the
-    more-specific copy were dropped.
+    "nearest" is the smallest such value.  The comparison is strict, so two
+    layers sharing a specificity never cover each other.
 
     Args:
         coverage: Map of normalised key -> list of ``(specificity, provenance)``.
@@ -296,13 +266,18 @@ def find_cross_layer_redundancies(
     config: Configuration, tool: str
 ) -> List[CrossLayerRedundancy]:
     """
-    Find more-specific allow rules already covered by a broader-layer rule.
+    Find more-specific allow rules whose normalised body a broader layer repeats.
 
-    A rule in a more-specific layer (lower ``specificity``) whose body is
-    normalised-equal to a rule in a broader layer (higher ``specificity``) is
-    redundant: the broader copy already allows the same commands, so dropping the
-    specific copy changes no decision.  Only normalised-EQUAL matches are claimed
-    (conservative); cross-layer subsumption via globs is deferred.
+    Only normalised-EQUAL bodies are matched; cross-layer subsumption via globs
+    is not attempted.
+
+    A finding is a candidate for review, not a verified-safe deletion.  The scan
+    reads allow lists and nothing else, so it cannot see that dropping the
+    specific copy hands the decision to a layer that denies or asks the same
+    command.  Measured -- with a project ``git push:*`` allow, an intermediate
+    ``git push:*`` deny and a user ``git push:*`` allow, this reports the project
+    rule as covered by the user rule, and removing it turns ``git push`` from
+    ``allow`` into ``deny``.
 
     Args:
         config: The resolved configuration.
@@ -313,9 +288,6 @@ def find_cross_layer_redundancies(
     """
     layers = per_layer_rules(config, tool)
 
-    # Index every allow rule by its normalised body -> where it appears
-    # (specificity + provenance), then flag any rule that a strictly-broader
-    # layer also holds.
     coverage: Dict[Tuple[str, str], List[Tuple[int, Provenance]]] = defaultdict(list)
     for lr in layers:
         for pattern in lr.allow:

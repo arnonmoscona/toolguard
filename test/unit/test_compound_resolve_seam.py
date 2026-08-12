@@ -1,33 +1,5 @@
-"""
-TOO-45 compound/resolve cycle removal: characterization + refinement tests.
-
-This module is the actual safety net for the compound<->resolve cycle refactor
-(see basic-memory ``toolguard-memories/TOO-45/reports/compound-cycle-plan-B.md``
-and ``compound-cycle-judgment.md``). The golden verdict corpus
-(``tools/corpus_build.py --verify``) does NOT track ``RuntimeVerdict.sub_matches``
-or ``.overrides`` content/order (see ``test/verdict_corpus/fixture_loader.py``),
-so those two fields have no other pinning coverage across this refactor.
-
-Written BEFORE any production code in ``compound.py``/``resolve.py`` was
-touched (Plan B step 0), and kept afterwards as ordinary regression coverage.
-
-Three concerns, three test classes:
-
-- :class:`TestSubMatchesCharacterization` pins ``sub_matches``
-  ``(sub_command, decision, matched_rule, fallback_kind)`` in extraction
-  order for the seven shapes Plan B step 0 names.
-- :class:`TestAskFloorFallbackMatrix` (judgment R3) exhaustively covers the
-  ask-floor leaf's {stub decision} x {undecidable_fallback value} grid
-  against :func:`~toolguard.compound._apply_undecidable_floor`'s documented
-  table -- this is the one branch in the codebase where a silent inversion
-  during the refactor would be a security hole, so it must not rely on
-  incidental coverage from other test files.
-- :class:`TestAskFloorStubOverrideNeverLeaks` (judgment R3, importing Plan
-  A's A4 test) pins that an ask-floor leaf's outer-command-stub-level
-  allow-over-deny override never appears in the compound's own
-  ``RuntimeVerdict.overrides`` -- the stub is a probe, not a decision, and
-  must never contribute a conflict-log entry of its own.
-"""
+"""Tests for the compound/resolve seam: ``RuntimeVerdict.sub_matches`` content
+and order, the ask-floor fallback matrix, and ``judge_unit``'s invariants."""
 
 import unittest
 from pathlib import Path
@@ -47,20 +19,8 @@ from toolguard.resolve import resolve_bash_permission_detailed
 
 
 def _make_config(layers_content):
-    """
-    Build a minimal Configuration from a list of (level, source_type, content_dict).
-
-    Mirrors ``test_resolve.py``'s own helper of the same name (kept local
-    rather than imported so this module has no test-to-test import
-    dependency) -- specificity increases with index, so index 0 is the
-    MOST specific level.
-
-    Args:
-        layers_content: List of ``(level, source_type, content_dict)`` tuples.
-
-    Returns:
-        A :class:`~toolguard.config.Configuration` with those layers.
-    """
+    """Build a Configuration from ``(level, source_type, content_dict)`` tuples --
+    index 0 is the MOST specific level."""
     layers = []
     for i, (level, source_type, content) in enumerate(layers_content):
         prov = Provenance(
@@ -104,7 +64,7 @@ def _shape(sub_match):
 
 
 class TestSubMatchesCharacterization(unittest.TestCase):
-    """Pin ``RuntimeVerdict.sub_matches`` content and order (Plan B step 0)."""
+    """Pin ``RuntimeVerdict.sub_matches`` content and order."""
 
     def test_single_plain_command(self):
         """
@@ -123,9 +83,7 @@ class TestSubMatchesCharacterization(unittest.TestCase):
     def test_multi_part_plain_leaf(self):
         """
         Given a '&&'-chained compound of two plain commands (decompose splits
-            this into two separate 'plain' units, each with one part --
-            see TestJudgeUnitInvariants for a leaf whose OWN text still
-            contains a PEG-splittable multi-part compound)
+            this into two separate 'plain' units, each with one part)
         When resolve_bash_permission_detailed resolves it
         Then sub_matches has one entry per sub-command, in order
         """
@@ -190,8 +148,7 @@ class TestSubMatchesCharacterization(unittest.TestCase):
             with a plain trailing leaf ('diff <(cat a) <(cat b) && ls -la')
         When resolve_bash_permission_detailed resolves it
         Then sub_matches has TWO entries, in order: the judged undecidable
-            segment, then the plain leaf's own genuine match (TOO-45 R1e --
-            an undecidable segment is no longer a silent audit-loss case)
+            segment, then the plain leaf's own genuine match
         """
         config = _config(allow=["ls*", "diff*"])
         result = _resolve(config, "diff <(cat a) <(cat b) && ls -la")
@@ -221,14 +178,8 @@ class TestSubMatchesCharacterization(unittest.TestCase):
 
 
 class TestAskFloorFallbackMatrix(unittest.TestCase):
-    """
-    Judgment R3: exhaustive {stub decision} x {undecidable_fallback} grid for
-    an ask-floor leaf, checked directly against
-    :func:`~toolguard.compound._apply_undecidable_floor`'s documented
-    strictest-wins table. A stub 'deny' is ALWAYS the deciding match
-    regardless of *undecidable_fallback* (the floor is never consulted once
-    an explicit deny fires) -- see :func:`~toolguard.compound._resolve_leaf_detailed`.
-    """
+    """Exhaustive {stub decision} x {undecidable_fallback} grid for an ask-floor
+    leaf, against :func:`~toolguard.compound._apply_undecidable_floor`'s table."""
 
     _FALLBACKS = ("ask", "deny", "allow_with_warning", "allow")
 
@@ -279,7 +230,6 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
                 verdict = _resolve_leaf(self._leaf(), resolve_one, fallback)
                 self.assertEqual(verdict.decision, want)
                 if want == "ask":
-                    # Rule genuinely decided -- floor made no change.
                     self.assertEqual(verdict.reason, "matched ask pattern")
                 else:
                     self.assertIn("undecidable_fallback=deny", verdict.reason)
@@ -312,14 +262,8 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
 
 
 class TestAskFloorStubOverrideNeverLeaks(unittest.TestCase):
-    """
-    Judgment R3 (importing Plan A's A4 test): an ask-floor leaf's
-    outer-command-stub-level allow-over-deny override must produce ZERO
-    entries in the compound's own ``RuntimeVerdict.overrides`` -- the stub
-    check is a pure probe for an explicit deny, not a real per-sub-command
-    decision, so any override discovered while resolving it must never reach
-    the conflict log.
-    """
+    """An ask-floor leaf's outer-command-stub-level allow-over-deny override must
+    produce ZERO entries in the compound's own ``RuntimeVerdict.overrides``."""
 
     def test_stub_override_does_not_leak_into_compound_overrides(self):
         """
@@ -353,12 +297,7 @@ class TestAskFloorStubOverrideNeverLeaks(unittest.TestCase):
 
 
 class TestUnitFromTuple(unittest.TestCase):
-    """
-    Judgment R5: ``_unit_from_tuple``'s own unit test -- new code on the
-    legacy-driver path (TOO-45 step 3) that previously relied on transitive
-    coverage through ``_resolve_leaf``/``resolve_compound_permission_detailed``
-    only.
-    """
+    """``_unit_from_tuple``'s own unit tests."""
 
     def test_wraps_a_plain_allow_result(self):
         """
@@ -366,7 +305,7 @@ class TestUnitFromTuple(unittest.TestCase):
         When _unit_from_tuple adapts it
         Then the resulting UnitVerdict carries the sub_command, decision,
              reason, and additional_context verbatim, with matched_rule and
-             provenance both None -- unknowable from a bare 3-tuple
+             provenance both None
         """
         unit = _unit_from_tuple(
             "git status", ("allow", "Command matches allow pattern: git *", "note")
@@ -384,9 +323,7 @@ class TestUnitFromTuple(unittest.TestCase):
         Given an allow result whose reason names the
             no_match_fallback=allow_with_warning escape hatch
         When _unit_from_tuple adapts it
-        Then fallback_kind is 'warned' (via fallback_kind_for_reason,
-             TOO-45 R5 -- the one text-based classification that is still
-             correct for this bare-3-tuple adapter)
+        Then fallback_kind is 'warned' (via fallback_kind_for_reason)
         """
         unit = _unit_from_tuple(
             "rm -rf /tmp/x",
@@ -401,14 +338,8 @@ class TestUnitFromTuple(unittest.TestCase):
 
 
 class TestJudgeUnitInvariants(unittest.TestCase):
-    """
-    Judgment R5: judge_unit's two new failure modes -- a positional-length
-    mismatch between part_verdicts and unit.parts (a class of bug that
-    cannot exist in the pre-refactor callback-driven code, since the
-    callback resolved and consumed in the same expression), and an
-    unrecognized CommandUnit.kind (so a fifth kind cannot silently fall
-    through to a default that might mis-audit or mis-floor it).
-    """
+    """``judge_unit``'s two failure modes -- a positional-length mismatch between
+    ``part_verdicts`` and ``unit.parts``, and an unrecognized ``CommandUnit.kind``."""
 
     def test_raises_on_part_verdicts_length_mismatch(self):
         """
@@ -446,8 +377,7 @@ class TestJudgeUnitInvariants(unittest.TestCase):
         Given a LeafCommand with ask_floor=True and a long inline-code payload
         When _unit_for maps it via decompose's own mapping function
         Then kind is 'inline_code', audits_as_one is True, and parts holds
-             exactly the UNTRUNCATED outer-command stub (TOO-45 risk R1/R2 --
-             truncating here would risk weakening explicit-deny detection)
+             exactly the UNTRUNCATED outer-command stub
         """
         leaf = LeafCommand('python -c "import os; ' + "x" * 200 + '"', ask_floor=True)
         unit = _unit_for(leaf)
@@ -459,10 +389,7 @@ class TestJudgeUnitInvariants(unittest.TestCase):
     def test_unit_for_peg_splits_a_plain_leaf_into_multiple_parts(self):
         """
         Given a single LeafCommand whose own text is a '&&'-chained compound
-            ('git status && ls' -- extract_structured already splits most
-            top-level operators into separate leaves, so this exercises
-            _unit_for's OWN PEG re-split directly, on a leaf whose text
-            still contains one)
+            ('git status && ls'), exercising _unit_for's OWN PEG re-split
         When _unit_for maps it to a CommandUnit
         Then kind is 'plain', audits_as_one is False, and parts holds both
              PEG sub-commands in order

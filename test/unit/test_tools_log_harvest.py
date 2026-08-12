@@ -1,16 +1,4 @@
-"""
-Unit tests for toolguard.tools.log_harvest.
-
-Tests for parsing daily toolguard log files into structured LogEntry records,
-including:
-- Section parsing for EXECUTED and REFUSED entries
-- File-tool command detection (Read/Write/Edit)
-- Robustness to malformed sections
-- Time-window filtering
-- Multi-file corpus assembly
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
-"""
+"""Unit tests for toolguard.tools.log_harvest."""
 
 import tempfile
 import unittest
@@ -26,7 +14,6 @@ def _write_log(log_dir: Path, filename: str, content: str) -> Path:
     return path
 
 
-# Minimal log content snippets for use in tests
 _SIMPLE_EXECUTED = """\
 ## 2026-06-20 10:00:00
 
@@ -279,12 +266,7 @@ class TestParseSingleLogFile(unittest.TestCase):
         """
         from toolguard.tools.log_harvest import parse_log_file
 
-        content = (
-            _SIMPLE_EXECUTED
-            + _SIMPLE_REFUSED
-            + _DISCOVERY_ENTRY  # should be skipped
-            + _READ_ENTRY
-        )
+        content = _SIMPLE_EXECUTED + _SIMPLE_REFUSED + _DISCOVERY_ENTRY + _READ_ENTRY
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = _write_log(Path(tmpdir), "toolguard-2026-06-20.md", content)
             entries = parse_log_file(log_path)
@@ -375,7 +357,6 @@ class TestHarvest(unittest.TestCase):
             entries = harvest(logs_dir)
 
         self.assertEqual(2, len(entries))
-        # Should be in chronological order (oldest first)
         self.assertEqual(datetime(2026, 6, 19, 9, 0, 0), entries[0].timestamp)
         self.assertEqual(datetime(2026, 6, 20, 10, 0, 0), entries[1].timestamp)
 
@@ -444,11 +425,11 @@ class TestHarvest(unittest.TestCase):
             logs_dir = self._setup_log_dir(
                 tmpdir,
                 {
-                    "toolguard-2026-01-01.md": _SIMPLE_EXECUTED,  # very old
+                    "toolguard-2026-01-01.md": _SIMPLE_EXECUTED,
                     f"toolguard-{today_str}.md": today_content,
                 },
             )
-            entries = harvest(logs_dir, max_age_days=0)  # today only
+            entries = harvest(logs_dir, max_age_days=0)
 
         self.assertEqual(1, len(entries))
         self.assertEqual("ls -la", entries[0].command)
@@ -466,8 +447,8 @@ class TestHarvest(unittest.TestCase):
                 tmpdir,
                 {
                     "toolguard-2026-06-20.md": _SIMPLE_EXECUTED,
-                    "toolguard-error-2026-06-20.md": _SIMPLE_EXECUTED,  # should be ignored
-                    "toolguard-warning-2026-06-20.md": _SIMPLE_EXECUTED,  # should be ignored
+                    "toolguard-error-2026-06-20.md": _SIMPLE_EXECUTED,
+                    "toolguard-warning-2026-06-20.md": _SIMPLE_EXECUTED,
                     "some-other.log": "## Not a log\n- **Status**: EXECUTED\n- **Command**: `ls`\n",
                 },
             )

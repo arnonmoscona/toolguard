@@ -1,7 +1,7 @@
 """
-Environment variable configuration for toolguard.
-
-Provides centralized configuration loading from environment variables and .env files.
+Environment-variable and ``.env`` configuration for toolguard: where the
+project root is, where logs go, and whether extended pattern syntax is
+enabled. Nothing here reads permission rules.
 """
 
 import os
@@ -14,14 +14,11 @@ from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 
 def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
     """
-    Find the project root by searching for a project anchor or pyproject.toml.
+    Find the nearest project root at or above *start_dir*.
 
-    Climbs up from start_dir (or current directory) until finding the nearest
-    marker (a strong project anchor -- ``.git``/``.hg``/``.jj``/``.claude``/
-    ``CLAUDE.md`` -- or ``pyproject.toml``), stopping at the home directory or
-    filesystem root. This is a thin wrapper around the shared
-    :func:`toolguard.path_utils.resolve_project_root` primitive in its
-    ``strict=True`` ("nearest marker of any kind wins") shape (TOO-15).
+    The markers, the walk and where it stops are all
+    :func:`toolguard.path_utils.resolve_project_root`'s, in its ``strict=True``
+    ("nearest marker of any kind wins") shape.
 
     Args:
         start_dir: Starting directory for search (defaults to current directory)
@@ -38,19 +35,24 @@ def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
 
 def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:
     """
-    Load environment variables from .env file.
+    Read ``{project_root}/{source_root}/.env``.
 
-    Location: {project_root}/{source_root}/.env
+    Parsed by hand rather than with python-dotenv, since toolguard's runtime
+    is standard-library only, and the grammar is correspondingly small:
+    ``KEY=VALUE`` split on the first ``=``, blank lines and whole-line ``#``
+    comments skipped, matching leading/trailing quotes stripped from the
+    value. Nothing else is interpreted -- a trailing ``# comment`` ends up
+    inside the value, and ``export KEY=v`` yields the key ``"export KEY"``.
 
-    Uses python-dotenv if available, otherwise manual parsing.
-    Does NOT override existing environment variables.
+    Reads only; never sets or overrides anything in ``os.environ``.
 
     Args:
         project_root: Path to project root
         source_root: Relative path from project root to source root (default: '')
 
     Returns:
-        Dictionary of variables loaded from .env file (empty dict if not found)
+        The variables read from the file. Empty when the file is absent, or
+        when reading it failed (which also reports a warning).
     """
     env_path = project_root / source_root / ".env"
 
@@ -63,17 +65,13 @@ def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:
         with open(env_path, "r") as f:
             for line in f:
                 line = line.strip()
-                # Skip comments and empty lines
                 if not line or line.startswith("#"):
                     continue
-                # Skip lines without =
                 if "=" not in line:
                     continue
-                # Parse KEY=VALUE
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
-                # Remove quotes if present
                 if value.startswith('"') and value.endswith('"'):
                     value = value[1:-1]
                 elif value.startswith("'") and value.endswith("'"):
@@ -93,15 +91,11 @@ def get_bool_env(
     name: str, default: bool, env_vars: Optional[Dict[str, str]] = None
 ) -> bool:
     """
-    Get a boolean environment variable with case-insensitive parsing.
+    Read a boolean setting, case-insensitively.
 
-    Precedence:
-    1. Environment variable (if set)
-    2. env_vars dict (typically from .env file)
-    3. Default value
-
-    True values: 'true', 'True', 'TRUE', '1', 'yes', 'Yes', 'YES'
-    False values: 'false', 'False', 'FALSE', '0', 'no', 'No', 'NO'
+    Precedence: ``os.environ``, then *env_vars*, then *default*. Accepts
+    ``true``/``1``/``yes`` and ``false``/``0``/``no`` in any case; any other
+    value reports a warning and falls back to *default*.
 
     Args:
         name: Environment variable name
@@ -111,25 +105,20 @@ def get_bool_env(
     Returns:
         Boolean value
     """
-    # Check environment variable first (highest priority)
     value = os.environ.get(name)
 
-    # Fall back to env_vars dict (from .env file)
     if value is None and env_vars:
         value = env_vars.get(name)
 
-    # Fall back to default
     if value is None:
         return default
 
-    # Parse boolean
     value_lower = value.lower()
     if value_lower in ("true", "1", "yes"):
         return True
     elif value_lower in ("false", "0", "no"):
         return False
     else:
-        # Invalid value - warn and use default
         report_warning(
             f"Invalid boolean value for {name}: {value}. Using default: {default}",
             f"Set {name} to one of: true, false, 1, 0, yes, no.",
@@ -139,32 +128,28 @@ def get_bool_env(
 
 def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
     """
-    Load all toolguard configuration from environment variables and .env file.
+    Load toolguard's environment configuration.
 
-    Environment variables take precedence over .env file values.
+    ``os.environ`` wins over ``.env`` -- except for ``TOOLGUARD_PROJECT_ROOT``
+    and ``TOOLGUARD_SOURCE_ROOT``, which are read from the environment only,
+    since both are needed to locate the ``.env`` file in the first place.
 
     Args:
-        start_dir: When provided, anchor project-root discovery (and hence the
-            ``.env`` file that supplies ``extended_syntax`` etc.) to THIS directory,
-            ignoring the ``TOOLGUARD_PROJECT_ROOT`` override.  This mirrors
-            ``load_configuration(start_dir, ignore_env_override=True)`` and is used
-            by the read-only ``--eval`` probe so a cross-project sweep reads each
-            probed project's own settings rather than the sweep-runner's cwd.  When
-            ``None`` (the live hook's path), the original override / auto-detect
-            behaviour is preserved.
+        start_dir: When provided, anchor project-root discovery -- and hence
+            which project's ``.env`` is read -- to THIS directory, ignoring
+            ``TOOLGUARD_PROJECT_ROOT``. When ``None``, the override and
+            auto-detection apply.
 
     Returns:
         Dictionary with all config values:
         - logging_enabled: bool
-        - log_dir: Path
+        - log_dir: Path -- absolute; ``TOOLGUARD_LOG_DIR`` if set (a relative
+          value resolves against the project root), else ``{project_root}/logs``
         - extended_syntax: bool
         - project_root: Path
         - source_root: str
         - create_log_dir: bool
     """
-    # Get project root. An explicit start_dir (e.g. the --eval probe passing the
-    # event's cwd) anchors to that project and bypasses TOOLGUARD_PROJECT_ROOT, so
-    # the probe cannot be diverted to the wrong project's .env.
     if start_dir is not None:
         project_root = (
             find_project_root(Path(start_dir)) or Path(start_dir).expanduser().resolve()
@@ -176,33 +161,25 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
         else:
             project_root = find_project_root()
             if project_root is None:
-                # No project root found - use current directory
                 project_root = Path.cwd()
 
-    # Get source root (for .env file location)
     source_root = os.environ.get("TOOLGUARD_SOURCE_ROOT", "")
 
-    # Load .env file
     env_vars = load_env_file(project_root, source_root)
 
-    # Get configuration values
     logging_enabled = get_bool_env("TOOLGUARD_LOGGING_ENABLED", True, env_vars)
     extended_syntax = get_bool_env("TOOLGUARD_EXTENDED_SYNTAX", True, env_vars)
     create_log_dir = get_bool_env("TOOLGUARD_CREATE_LOG_DIR", False, env_vars)
 
-    # Get log directory
     log_dir_str = os.environ.get("TOOLGUARD_LOG_DIR")
     if log_dir_str is None and env_vars:
         log_dir_str = env_vars.get("TOOLGUARD_LOG_DIR")
 
     if log_dir_str:
-        # Explicit log directory specified
         log_dir = Path(log_dir_str).expanduser()
         if not log_dir.is_absolute():
-            # Relative to project root
             log_dir = project_root / log_dir
     else:
-        # Default: {project_root}/logs
         log_dir = project_root / "logs"
 
     return {

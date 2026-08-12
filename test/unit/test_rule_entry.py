@@ -1,16 +1,8 @@
 """
-Unit tests for :mod:`toolguard.rule_entry` (TOO-19 Phase 0a, increment 1).
-
-Pure unit tests: every :class:`~toolguard.rule_entry.RuleEntry` here is
-built directly from hand-constructed values, with zero file I/O and no call
-into ``toolguard.config``'s discovery path (``load_configuration()``,
-``_discover_levels()``, ``find_project_root()``, ``discover_config_files()``,
-or any function that calls one of those transitively). Per
-``test/unit/CLAUDE.md``'s first checklist item, that means no
-``ConfigIsolationMixin`` is needed for this file.
-
-Run with:
-    uv run python -m unittest discover -s test -t .
+Unit tests for :mod:`toolguard.rule_entry`. Every :class:`~toolguard.rule_entry.RuleEntry`
+here is built directly from hand-constructed values with zero file I/O, so per
+``.claude/rules/test-config-isolation.md``'s checklist, no ``ConfigIsolationMixin`` is
+needed for this file.
 """
 
 import unittest
@@ -85,12 +77,6 @@ class TestNormalizeEntryPlainString(unittest.TestCase):
         Given an empty string
         When normalize_entry parses it
         Then it returns (None, issues) with a WARNING (not error) Issue
-
-        An empty string is the one non-wrapper-shaped plain string that is
-        reported at all: it is unambiguously a mistake. It stays a warning
-        rather than an error because today such an entry is silently filtered
-        out by the tool-prefix scan, so an error would be a louder diagnostic
-        than the current behaviour for config that loads clean.
         """
         entry, issues = normalize_entry("", is_native=False)
 
@@ -128,10 +114,6 @@ class TestNormalizeEntryStructured(unittest.TestCase):
         When normalize_entry parses it
         Then the entry's metadata carries that key and no issue is raised
              for it
-
-        "additionalContext" is the real known key as of Phase 1, so no
-        monkeypatching is needed to exercise the "known key -> no warning"
-        branch.
         """
         raw = {PATTERN_KEY: "Bash(git *)", "additionalContext": "why"}
         entry, issues = normalize_entry(raw, is_native=False)
@@ -300,10 +282,8 @@ class TestNormalizeEntryOtherTypes(unittest.TestCase):
         """
         Given a variety of unusable inputs (empty string, bad dict, int, None, list)
         When each is normalized
-        Then every single one returns at least one Issue -- the whole point
-             of centralizing this parser is that nothing is EVER silently
-             dropped, unlike the scattered isinstance(perm, str) checks this
-             replaces
+        Then every single one returns at least one Issue -- normalize_entry
+             never silently drops an unusable element
         """
         unusable_inputs = ["", {}, {"nope": "x"}, {PATTERN_KEY: 1}, 42, None, []]
 
@@ -315,7 +295,7 @@ class TestNormalizeEntryOtherTypes(unittest.TestCase):
 
 
 class TestIsToolWrapper(unittest.TestCase):
-    """is_tool_wrapper() direct tests, incl. the TOO-19 embedded-newline fix."""
+    """is_tool_wrapper() direct tests, including the embedded-newline case."""
 
     def test_simple_wrapper_matches(self):
         """
@@ -413,8 +393,7 @@ class TestEntriesForTool(unittest.TestCase):
         """
         Given a Bash-scoped entry
         When entries_for_tool returns it
-        Then the pattern is returned wrapper-intact -- stripping is the
-             exclusive responsibility of permission_layers()'s own call site
+        Then the pattern is returned wrapper-intact
         """
         entry, _ = normalize_entry("Bash(git *)", is_native=False)
 
@@ -424,18 +403,14 @@ class TestEntriesForTool(unittest.TestCase):
 
 
 class TestNormalizeEntriesPreserving(unittest.TestCase):
-    """
-    normalize_entries_preserving() behaviour: the write-path "never drop an
-    element" contract (TOO-19 Phase 0a, increment 8).
-    """
+    """normalize_entries_preserving() behaviour: the write-path "never drop an element" contract."""
 
     def test_non_list_input_returns_empty_tuple(self):
         """
         Given a raw_list value that is not a list (None, a dict, an int, a
              plain string)
         When normalize_entries_preserving parses it
-        Then it returns an empty tuple for every one of them -- the existing
-             non-list tolerance elsewhere in this codebase, applied here too
+        Then it returns an empty tuple for every one of them
         """
         non_list_inputs = [None, {"allow": []}, 42, "Bash(git *)"]
 
@@ -475,15 +450,13 @@ class TestNormalizeEntriesPreserving(unittest.TestCase):
         for entry in result:
             self.assertIsInstance(entry, RuleEntry)
 
-        # The three genuinely unnormalizable elements: preserved verbatim
-        # via `raw`, with a repr()-based synthesized pattern that can never
-        # collide with a real Tool(...) pattern.
         malformed_entry, int_entry, none_entry, nested_entry = (
             result[2],
             result[3],
             result[4],
             result[5],
         )
+
         self.assertIs(malformed_entry.raw, malformed_dict)
         self.assertEqual(malformed_entry.pattern, repr(malformed_dict))
         self.assertEqual(int_entry.raw, 42)
@@ -494,11 +467,6 @@ class TestNormalizeEntriesPreserving(unittest.TestCase):
         self.assertIs(nested_entry.raw, nested_list)
         self.assertEqual(nested_entry.pattern, repr(nested_list))
 
-        # TOO-19 review-round-2 fix: every unnormalizable element's entry is
-        # explicitly flagged synthesized_pattern=True (not inferred later
-        # from the pattern's repr()-like string shape), and every VALID
-        # entry (the plain string and the well-formed structured entry) is
-        # NOT flagged.
         valid_string_entry, valid_structured_entry = result[0], result[1]
         self.assertFalse(valid_string_entry.synthesized_pattern)
         self.assertFalse(valid_structured_entry.synthesized_pattern)
@@ -512,9 +480,7 @@ class TestNormalizeEntriesPreserving(unittest.TestCase):
         When every resulting RuleEntry's to_source() is called
         Then each one reproduces its ORIGINAL raw_list element exactly,
              element-for-element in order -- including the None element,
-             which must come back as None, not the string "None" --
-             proving the write path never silently deletes or corrupts part
-             of a user's config file
+             which must come back as None, not the string "None"
         """
         raw_list = [
             "Bash(git *)",
@@ -533,12 +499,7 @@ class TestNormalizeEntriesPreserving(unittest.TestCase):
 
 
 class TestRuleEntryTypeContract(unittest.TestCase):
-    """
-    Contract tests protecting RuleEntry's specific design decisions:
-    the Mapping-valued (not flat-primitive) metadata field, the custom
-    identity()/__hash__, compare=False on raw, and to_source()'s round-trip
-    guarantee.
-    """
+    """Contract tests for RuleEntry: Mapping-valued metadata, identity()/__hash__, compare=False on raw, and to_source()'s round-trip guarantee."""
 
     def test_identity_distinguishes_metadata_but_pattern_does_not(self):
         """
@@ -561,9 +522,7 @@ class TestRuleEntryTypeContract(unittest.TestCase):
         Given a RuleEntry whose metadata holds a list value (e.g.
              applies_to = ["Bash", "Read"])
         When it is placed into a set() alongside another entry
-        Then set() construction succeeds -- proving the flat-primitive
-             constraint on metadata values is genuinely gone, not just
-             documented as gone
+        Then set() construction succeeds
         """
         entry_a = RuleEntry(
             pattern="Bash(git *)",
@@ -590,14 +549,9 @@ class TestRuleEntryTypeContract(unittest.TestCase):
             metadata=MappingProxyType({"applies_to": ["Bash", "Read"]}),
         )
 
-        # Simulate what the dataclass-generated __hash__ would do: hash the
-        # tuple of comparable fields directly (pattern, metadata) -- 'raw'
-        # is excluded there too since compare=False also excludes it from
-        # the generated __hash__.
         with self.assertRaises(TypeError):
             hash((entry.pattern, entry.metadata))
 
-        # But RuleEntry's own __hash__ succeeds.
         hash(entry)
 
     def test_to_source_returns_raw_verbatim_for_parsed_entry(self):
@@ -676,12 +630,8 @@ class TestRuleEntryTypeContract(unittest.TestCase):
              element, preserved by normalize_entries_preserving())
         When to_source() is called
         Then it returns None (the ORIGINAL value), never the string "None"
-             -- regression guard for the raw=None / "no raw recorded"
-             sentinel conflation bug (TOO-19 Phase 0a): before the _UNSET
-             sentinel existed, `if self.raw is not None: return self.raw`
-             fell through for this entry and to_source() re-rendered the
-             bare pattern string instead, silently corrupting the config on
-             write.
+             -- the case the _UNSET sentinel exists to keep distinct from
+             "no raw recorded"
         """
         entry = RuleEntry(pattern=repr(None), metadata=MappingProxyType({}), raw=None)
 
@@ -733,10 +683,10 @@ class TestRuleEntryTypeContract(unittest.TestCase):
 
 class TestMergeEntries(unittest.TestCase):
     """
-    merge_entries() consolidation semantics (TOO-19 Phase 0a, increment 6).
-
-    Every RuleEntry here is hand-constructed with zero file I/O, so (per
-    test/unit/CLAUDE.md's checklist) no ConfigIsolationMixin is needed.
+    merge_entries() consolidation semantics. Every RuleEntry here is
+    hand-constructed with zero file I/O, so per
+    ``.claude/rules/test-config-isolation.md``'s checklist, no
+    ConfigIsolationMixin is needed.
     """
 
     def test_bare_and_structured_same_pattern_collapses_to_structured(self):
@@ -966,7 +916,6 @@ class TestMergeEntries(unittest.TestCase):
 
         outcome = merge_entries([b1, a1, b2])
 
-        # b1+b2 collapse to b2 (structured wins over bare), a1 stays alone.
         self.assertEqual(outcome.entries, (b2, a1))
 
     def test_empty_input_returns_empty_outcome(self):
@@ -1015,7 +964,7 @@ class TestModuleConstants(unittest.TestCase):
 
     def test_known_enrichment_keys_holds_additional_context_only(self):
         """
-        Given the KNOWN_ENRICHMENT_KEYS constant after Phase 1
+        Given the KNOWN_ENRICHMENT_KEYS constant
         When inspected
         Then it is a frozenset holding exactly "additionalContext" --
              "match" (PATTERN_KEY) is never itself an enrichment key
@@ -1026,11 +975,7 @@ class TestModuleConstants(unittest.TestCase):
 
 
 class TestRealPatterns(unittest.TestCase):
-    """
-    real_patterns() (TOO-19 review-round-2 fix): the chokepoint every
-    write-path caller must use to build a config-write content-loss guard's
-    ``expected_patterns`` argument, excluding synthesized-pattern entries.
-    """
+    """real_patterns(): the chokepoint a write-path caller uses to build a config-write content-loss guard's ``expected_patterns`` argument, excluding synthesized-pattern entries."""
 
     def test_plain_strings_pass_through_unchanged(self):
         """
@@ -1058,9 +1003,7 @@ class TestRealPatterns(unittest.TestCase):
              element, e.g. a structured entry missing "match")
         When real_patterns() is called
         Then only the normal entry's pattern is returned -- the synthesized
-             repr()-based pattern is dropped, since it can never appear in
-             the actual text a write path produces (confirmed repro: passing
-             it through wrongly refused every subsequent config write)
+             repr()-based pattern is dropped
         """
         malformed = {"additionalContext": "oops"}
         entries = normalize_entries_preserving(["Bash(ls)", malformed], is_native=False)
@@ -1085,12 +1028,7 @@ class TestRealPatterns(unittest.TestCase):
 
 
 class TestAdditionalContext(unittest.TestCase):
-    """
-    The `additionalContext` enrichment key (TOO-19 Phase 1, increment 1).
-
-    Covers the registry entry, the string-only value constraint, and the
-    `RuleEntry.additional_context` accessor that every consumer goes through.
-    """
+    """The `additionalContext` enrichment key: registry entry, string-only value constraint, and the `RuleEntry.additional_context` accessor."""
 
     def test_additional_context_is_a_known_enrichment_key(self):
         """
@@ -1119,9 +1057,6 @@ class TestAdditionalContext(unittest.TestCase):
         When it is normalized
         Then an error-level issue is reported, the RULE still normalizes, and
         the accessor returns None so nothing is injected
-
-        Dropping the rule would turn a cosmetic mistake into a silently
-        missing rule -- exactly backwards for a deny.
         """
         entry, issues = normalize_entry(
             {PATTERN_KEY: "Bash(rm -rf *)", ADDITIONAL_CONTEXT_KEY: True},
@@ -1186,7 +1121,7 @@ class TestAdditionalContext(unittest.TestCase):
         """
         Given a structured entry carrying additionalContext
         When it is normalized
-        Then no 'Unknown key' warning is produced, unlike before increment 1
+        Then no 'Unknown key' warning is produced
         """
         _entry, issues = normalize_entry(
             {PATTERN_KEY: "Bash(ls *)", ADDITIONAL_CONTEXT_KEY: "text"},
@@ -1198,7 +1133,8 @@ class TestAdditionalContext(unittest.TestCase):
         """
         Given a structured entry with a key this version does not understand
         When it is normalized
-        Then it still warns, so adding additionalContext did not disable the check
+        Then it still warns -- additionalContext being a known key doesn't
+        suppress warnings for other unknown keys
         """
         _entry, issues = normalize_entry(
             {PATTERN_KEY: "Bash(ls *)", "notARealKey": "x"},

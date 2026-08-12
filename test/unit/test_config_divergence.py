@@ -27,8 +27,6 @@ from test.unit._subprocess_harness import release_barrier_when_ready, run_child
 
 
 class TestGetNativePermissions(unittest.TestCase):
-    """Test extracting permissions from settings.local.json."""
-
     def test_extract_bash_patterns(self):
         """
         Given a settings.local.json with Bash and non-governed-tool patterns across allow/deny/ask
@@ -43,8 +41,8 @@ class TestGetNativePermissions(unittest.TestCase):
                     "allow": [
                         "Bash(git status:*)",
                         "Bash(ls:*)",
-                        "mcp__basic-memory__read_note",  # Not a governed tool
-                        "WebSearch",  # Not a governed tool
+                        "mcp__basic-memory__read_note",
+                        "WebSearch",
                     ],
                     "deny": ["Bash(rm -rf:*)"],
                     "ask": ["Bash(git push:*)"],
@@ -157,13 +155,7 @@ class TestGetNativePermissions(unittest.TestCase):
 
 
 def _config_from_layers(*layers):
-    """
-    Build a Configuration from explicit (source_type, content) layer specs.
-
-    Each spec is a ``(source_type, content_dict)`` pair; layers are ordered
-    most-specific first. Lets divergence tests exercise get_toolguard_permissions
-    against the public Configuration surface without touching files.
-    """
+    """Build a Configuration from (source_type, content) layer specs, most-specific first."""
     built = []
     for i, (source_type, content) in enumerate(layers):
         prov = Provenance("project", source_type, "json", Path(f"/fake/{i}.json"), i)
@@ -172,8 +164,6 @@ def _config_from_layers(*layers):
 
 
 class TestGetToolguardPermissions(unittest.TestCase):
-    """Test extracting permissions from the resolved toolguard configuration."""
-
     def test_extract_from_json(self):
         """
         Given a toolguard_hook layer with allow and deny permissions
@@ -208,7 +198,6 @@ class TestGetToolguardPermissions(unittest.TestCase):
         )
         result = get_toolguard_permissions(config)
 
-        # Should be empty since we ignore claude settings
         self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
 
     def test_merge_multiple_files(self):
@@ -238,13 +227,10 @@ class TestGetToolguardPermissions(unittest.TestCase):
         )
         result = get_toolguard_permissions(config)
 
-        # Should only appear once
         self.assertEqual(result["allow"].count("Bash(git status:*)"), 1)
 
 
 class TestFindDivergentPatterns(unittest.TestCase):
-    """Test finding divergent patterns."""
-
     def test_find_new_patterns(self):
         """
         Given a native allow list with one pattern absent from toolguard
@@ -374,7 +360,6 @@ class TestFindDivergentPatterns(unittest.TestCase):
 
         result = find_divergent_patterns(native, toolguard, ignored)
 
-        # Should not include ignored patterns
         self.assertEqual(result["allow"], [])
 
     def test_exact_string_matching(self):
@@ -384,7 +369,7 @@ class TestFindDivergentPatterns(unittest.TestCase):
         Then the whitespace-different pattern is reported as divergent (matching is exact)
         """
         native = {
-            "allow": ["Bash(git status:*)", "Bash(git status:*)  "],  # Trailing space
+            "allow": ["Bash(git status:*)", "Bash(git status:*)  "],
             "deny": [],
             "ask": [],
         }
@@ -393,7 +378,6 @@ class TestFindDivergentPatterns(unittest.TestCase):
 
         result = find_divergent_patterns(native, toolguard, [])
 
-        # Trailing space makes it different
         self.assertIn("Bash(git status:*)  ", result["allow"])
 
     def test_all_permission_types(self):
@@ -432,19 +416,6 @@ class TestFindDivergentPatterns(unittest.TestCase):
 
 
 class TestDivergenceComparisonSemanticsGuard(unittest.TestCase):
-    """
-    Regression guard for TOO-19 Phase 0a increment 7.
-
-    Locks in that the divergence pipeline (get_toolguard_permissions ->
-    find_divergent_patterns) compares RuleEntry objects by ``.pattern`` ALONE
-    (comparison #1 in RuleEntry.identity()'s docstring), never by
-    ``identity()`` (which folds in metadata). An entry carrying metadata on
-    one side and none -- or different metadata -- on the other is the SAME
-    rule, not a divergence. Were this ever switched to identity(), migration
-    would re-add the "missing" native twin forever, since it would never
-    stop looking divergent.
-    """
-
     def test_structured_toolguard_entry_does_not_raise(self):
         """
         Given a toolguard_hook layer with a structured ({match=..., metadata})
@@ -470,7 +441,7 @@ class TestDivergenceComparisonSemanticsGuard(unittest.TestCase):
             )
         )
 
-        result = get_toolguard_permissions(config)  # must not raise
+        result = get_toolguard_permissions(config)
 
         self.assertEqual(result["allow"], ["Bash(git status:*)"])
 
@@ -583,8 +554,6 @@ class TestDivergenceComparisonSemanticsGuard(unittest.TestCase):
         )
         toolguard = get_toolguard_permissions(config)
 
-        # Pattern-only de-dup: exactly one occurrence despite differing
-        # metadata across the two layers.
         self.assertEqual(toolguard["allow"].count("Bash(git status:*)"), 1)
 
         native = {
@@ -594,15 +563,11 @@ class TestDivergenceComparisonSemanticsGuard(unittest.TestCase):
         }
         result = find_divergent_patterns(native, toolguard, [])
 
-        # The shared, differently-annotated pattern is not divergent...
         self.assertNotIn("Bash(git status:*)", result["allow"])
-        # ...but a genuinely different pattern absent from toolguard still is.
         self.assertEqual(result["allow"], ["Bash(git commit:*)"])
 
 
 class TestDivergenceWarningKey(unittest.TestCase):
-    """Locks in the key string other tests here claim directly against the store."""
-
     def test_key_matches_the_literal_used_by_other_tests(self):
         """
         Given the module-level DIVERGENCE_WARNING throttled-thing
@@ -615,8 +580,6 @@ class TestDivergenceWarningKey(unittest.TestCase):
 
 
 class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
-    """Test the main divergence check function."""
-
     def test_no_divergence(self):
         """
         Given matching native settings and toolguard_hook configs in a project
@@ -627,10 +590,8 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
 
-            # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
 
-            # Create matching configs
             settings_path = project_root / ".claude" / "settings.local.json"
             settings_path.parent.mkdir(parents=True)
 
@@ -647,7 +608,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
 
             result = check_and_warn_divergence(project_root, takeover_config)
 
-            # No divergence
             self.assertEqual(result.divergent_patterns, [])
             self.assertIsNone(result.warning_message)
             self.assertIsNone(result.corrective_steps)
@@ -664,7 +624,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
 
-            # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
 
             settings_path = project_root / ".claude" / "settings.local.json"
@@ -685,7 +644,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
 
             result = check_and_warn_divergence(project_root, takeover_config)
 
-            # Should find divergence
             self.assertIn("Bash(git push:*)", result.divergent_patterns)
             self.assertIsNotNone(result.warning_message)
             self.assertIn("Bash(git push:*)", result.warning_message)
@@ -701,7 +659,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
 
-            # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
 
             settings_path = project_root / ".claude" / "settings.local.json"
@@ -713,11 +670,9 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
 
             takeover_config = {"enabled": False, "ignored_allow_patterns": []}
 
-            # First call should find divergence
             result1 = check_and_warn_divergence(project_root, takeover_config)
             self.assertIn("Bash(git push:*)", result1.divergent_patterns)
 
-            # Second call should be deduplicated
             result2 = check_and_warn_divergence(project_root, takeover_config)
             self.assertEqual(result2.divergent_patterns, [])
             self.assertIsNone(result2.warning_message)
@@ -731,7 +686,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
 
-            # Create project marker so discover_config_files works
             (project_root / "pyproject.toml").touch()
 
             settings_path = project_root / ".claude" / "settings.local.json"
@@ -751,7 +705,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
 
             result = check_and_warn_divergence(project_root, takeover_config)
 
-            # Should only find git push, not pytest
             self.assertIn("Bash(git push:*)", result.divergent_patterns)
             self.assertNotIn("Bash(uv run pytest:*)", result.divergent_patterns)
 
@@ -863,8 +816,6 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
 
 
 class TestCheckAndWarnDivergenceExceptionSafety(_IsolatedStoreMixin, unittest.TestCase):
-    """TOO-45 follow-up defect 1 regression: a crash must not leak the claim."""
-
     def test_exception_during_analysis_leaves_period_unclaimed(self):
         """
         Given load_configuration raises during the analysis phase (e.g. a
@@ -902,8 +853,6 @@ class TestCheckAndWarnDivergenceExceptionSafety(_IsolatedStoreMixin, unittest.Te
 class TestDivergenceCheckCreatesNoStorageWhenNothingToReport(
     _IsolatedStoreMixin, unittest.TestCase
 ):
-    """TOO-45 follow-up defect 2 regression."""
-
     def test_no_divergence_creates_no_legacy_logs_dir_or_db(self):
         """
         Given a project with matching native and toolguard permissions (no
@@ -936,8 +885,6 @@ class TestDivergenceCheckCreatesNoStorageWhenNothingToReport(
 
 
 class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
-    """Two processes racing the new claim-immediately-before-the-print ordering."""
-
     def test_two_processes_only_one_warns(self):
         """
         Given two separate OS processes, both able to detect the same
@@ -953,9 +900,8 @@ class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
             project_root = Path(tmpdir)
             barrier = Path(tmpdir) / "go"
             ready_markers = [Path(tmpdir) / f"ready_{i}" for i in range(2)]
-            # Each subprocess is a fresh interpreter, outside this suite's
-            # own guard machinery -- it MUST isolate the shared store itself,
-            # or it would touch the developer's real ~/.toolguard/once_per.db.
+            # The child processes inherit no test isolation. Without _STORE_PATH
+            # pointed here they write to the developer's real ~/.toolguard/once_per.db.
             store_path = Path(tmpdir) / "once_per.db"
 
             (project_root / "pyproject.toml").touch()

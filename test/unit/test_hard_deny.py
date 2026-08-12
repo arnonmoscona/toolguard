@@ -1,22 +1,4 @@
-"""
-Unit tests for TOO-8 Phase 3: the [hard_deny] safety valve.
-
-`[hard_deny]` is an unoverridable hard-deny mechanism. A (typically less-specific)
-config declares ``deny``/``allow`` pattern lists in a ``[hard_deny]`` section of a
-``toolguard_hook`` file. The rules are:
-
-- ``[hard_deny]`` is a toolguard extension read ONLY from toolguard_hook files,
-  never from native Claude settings.
-- It is COLLECTED FROM ALL LEVELS INTO ONE POOL (union across the hierarchy).
-- It is checked FIRST, before the normal more-specific-wins cascade.
-- A command/path matching any hard_deny ``deny`` pattern AND no hard_deny ``allow``
-  carve-out is DENIED, and that decision cannot be overridden by any level's allow.
-- hard_deny ``allow`` is ONLY an exception to hard_deny ``deny`` -- it is not a
-  forced/normal allow and does not affect the normal cascade.
-
-Tests use the standard-library ``unittest`` framework. Every test carries a
-Given/When/Then docstring describing the scenario and expected outcome.
-"""
+"""Unit tests for the ``[hard_deny]`` safety valve: pooling, carve-outs, and enforcement."""
 
 import os
 import unittest
@@ -41,14 +23,7 @@ def _write(claude_dir: Path, filename: str, content: str) -> None:
 
 
 class _IsolatedEnvTestCase(unittest.TestCase):
-    """
-    Base class that isolates ``CLAUDE_SETTINGS_PATH`` for hierarchy tests.
-
-    Mirrors the pattern in test_hierarchical.py: the runtime hook exports
-    ``CLAUDE_SETTINGS_PATH``, which would bypass the patched temp hierarchy and
-    pull in unrelated config. Popping it in setUp makes these tests independent
-    of the ambient environment.
-    """
+    """Base class that removes ``CLAUDE_SETTINGS_PATH``, which would bypass the temp hierarchy."""
 
     def setUp(self):
         """Remove CLAUDE_SETTINGS_PATH for the duration of each test."""
@@ -59,16 +34,7 @@ class _IsolatedEnvTestCase(unittest.TestCase):
 
 
 def _layer(specificity, *, hard_deny=None, allow=None, deny=None, native=False):
-    """
-    Build a single ConfigLayer for in-memory Configuration assembly.
-
-    Args:
-        specificity: Hierarchy index (0 = most specific).
-        hard_deny: Optional dict with 'deny'/'allow' wrapped-pattern lists.
-        allow: Optional list of wrapped normal allow patterns.
-        deny: Optional list of wrapped normal deny patterns.
-        native: When True, model a native Claude settings layer (claude source).
-    """
+    """Build one ConfigLayer at *specificity* (0 = most specific); ``native`` models Claude settings."""
     content = {}
     if hard_deny is not None:
         content["hard_deny"] = hard_deny
@@ -154,11 +120,7 @@ class TestHardDenyAccessor(_IsolatedEnvTestCase):
 
 
 class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
-    """
-    TOO-19 Phase 0a, increment 3: structured (``{match=..., ...}``) entries in
-    ``[hard_deny]`` must contribute their pattern, and their enrichment
-    metadata must be reachable via the new ``hard_deny_entries`` accessor.
-    """
+    """Test structured (``{match=..., ...}``) entries in ``[hard_deny]`` and their metadata."""
 
     def test_hard_deny_structured_deny_entry_contributes_pattern(self):
         """
@@ -363,24 +325,12 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for commands."""
 
     def _resolve(self, config, command):
-        """Resolve a command, checking hard_deny first then the cascade.
-
-        Returns the legacy ``(decision, reason)`` 2-tuple: the
-        ``additional_context`` element (TOO-19 Phase 1) is discarded here
-        since none of this class's callers exercise it, so every existing
-        2-tuple-unpacking call site stays unchanged.
-        """
+        """Resolve a command, checking hard_deny first then the cascade; return (decision, reason)."""
         hd_deny, hd_allow = config.hard_deny("Bash")
 
         def _resolve_one(sub):
             hard = check_hard_deny(sub, list(hd_deny), list(hd_allow))
             if hard is not None:
-                # check_hard_deny returns a LevelMatch (decision, reason,
-                # matched_pattern) as of TOO-45 R1f (a bare tuple before
-                # that, TOO-19 code review m3); this helper's callers want
-                # the legacy (decision, reason, additional_context) shape,
-                # and none of them exercise additional_context, so it is
-                # None.
                 return hard.decision, hard.reason, None
 
             resolved = resolve_command_permission(config, "Bash", sub)
@@ -467,9 +417,9 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         """
         config = Configuration(
             layers=(
-                _layer(0, allow=["Bash(rm -rf *)"]),  # project: allows
-                _layer(1),  # intermediate: nothing
-                _layer(2, hard_deny={"deny": ["Bash(rm -rf *)"]}),  # user: hard deny
+                _layer(0, allow=["Bash(rm -rf *)"]),
+                _layer(1),
+                _layer(2, hard_deny={"deny": ["Bash(rm -rf *)"]}),
             )
         )
         decision, _reason = self._resolve(config, "rm -rf /tmp/x")
@@ -592,10 +542,7 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for Read/Write/Edit."""
 
     def _build_config(self, home, project, target_level, hard_deny_toml, project_allow):
-        """
-        Build a real Configuration over a temp hierarchy with a hard_deny section
-        at the chosen level and an allow at the project level.
-        """
+        """Write a hard_deny section at the chosen level plus a project-level allow."""
         target = {
             "project": project / ".claude",
             "user": home / ".claude",
@@ -689,17 +636,8 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         outside = str(home / "secrets" / "key.txt")
         config = load_configuration(project)
         inside_result = resolve_file_path_permission_detailed("Edit", inside, config)
-        # Outside the project root the anchored hard_deny must NOT
-        # match; with no allow match either, it falls through to the
-        # shared no_match_fallback ('ask' by default) -- but
-        # crucially not via the hard_deny path.
         outside_result = resolve_file_path_permission_detailed("Edit", outside, config)
-        # Security-relevant assertion: the hard_deny match itself (inside
-        # the project root) still denies, unoverridably.
         self.assertEqual(inside_result.decision, "deny")
-        # Anchoring assertion: outside the project root, the pattern does
-        # not leak into a hard-deny match -- it resolves via the ordinary
-        # (non-hard-deny) no_match_fallback path.
         self.assertEqual(outside_result.decision, "ask")
         self.assertNotIn("hard_deny", outside_result.reason)
 

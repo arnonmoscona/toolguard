@@ -1,20 +1,4 @@
-"""
-Unit tests for TOO-8 Phase 4: log streams, conflict logging, and provenance.
-
-Covers:
-- Four separate per-concern log streams (error/warning/conflict/resolution),
-  each writing to its OWN file.
-- Conflict logging: an allow-over-deny override IS recorded to the conflict log
-  citing both provenances; no conflict entry when there is no override; hard_deny
-  denials are NOT conflicts (they go to the resolution log).
-- Provenance threaded into resolution reasons.
-- Change-detecting config-discovery diagnostic in the resolution log (TOO-19).
-- M1: the both-.toml-and-.json warning is emitted exactly once, to the warning
-  stream.
-
-These tests use unittest (NOT pytest) with Given/When/Then docstrings, per the
-project's testing convention.
-"""
+"""Unit tests for the per-concern log streams, conflict logging, and provenance in reasons."""
 
 import json
 import unittest
@@ -147,11 +131,8 @@ class TestProvenanceInReasons(unittest.TestCase):
         resolved = resolve_command_permission(config, "Bash", "git status")
         self.assertIsInstance(resolved, RuntimeVerdict)
         self.assertEqual(resolved.decision, "allow")
-        # Backward-compatible substring still present.
         self.assertIn("matches allow pattern: git *", resolved.reason)
-        # Provenance suffix appended.
         self.assertIn("[project: /proj/.claude/toolguard_hook.toml]", resolved.reason)
-        # Existing split-based extraction still recovers the pattern (+ suffix).
         extracted = resolved.reason.split(": ", 1)[1]
         self.assertTrue(extracted.startswith("git *"))
         self.assertIsNotNone(resolved.provenance)
@@ -195,10 +176,6 @@ class TestConflictDetection(unittest.TestCase):
         )
         resolved = resolve_command_permission(config, "Bash", "git push")
         self.assertEqual(resolved.decision, "allow")
-        # RuntimeVerdict.overrides (TOO-45 R1c) is a list of (identifier,
-        # ConflictOverride) pairs -- at this internal per-level layer the
-        # identifier is always None (no sub_command/target in scope here;
-        # see RuntimeVerdict's docstring's "overrides" reconciliation).
         self.assertEqual(len(resolved.overrides), 1)
         identifier, override = resolved.overrides[0]
         self.assertIsNone(identifier)
@@ -258,7 +235,6 @@ class TestProvenanceHelpers(unittest.TestCase):
         """
         layer = _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml")
 
-        # The ToolPatternLayer view is what provenance_for_pattern consumes.
         cfg = Configuration(layers=(layer,))
         tool_layers = cfg.permission_layers("Bash")
         self.assertIsNone(provenance_for_pattern(tool_layers, "no-such", "allow"))
@@ -285,24 +261,7 @@ class TestProvenanceHelpers(unittest.TestCase):
 
 
 class TestDiscoveryDiagnostic(unittest.TestCase):
-    """
-    The change-detecting discovery diagnostic (TOO-19).
-
-    toolguard is a fresh process on every PreToolUse invocation, so there is
-    no in-process "once per session" to rely on. log_discovery itself is the
-    guard: it writes (to both the plain-text discovery log and the main
-    resolution log) only when the discovered levels differ from the last
-    recorded entry for the given project root; otherwise it writes nothing to
-    either file.
-
-    TOO-19 code review M3: the discovery log is plain text, one record per
-    line (``timestamp\\tproject_root\\tlevels``), not JSON -- the only thing
-    ever read back is the single most recent matching line, so JSON's
-    structure bought nothing. These tests were rewritten from JSON-record
-    assertions to plain-text ones for that reason; the scenarios they cover
-    (write-on-change, no-write-on-no-change, multi-project isolation,
-    tolerance of a torn line) are unchanged.
-    """
+    """The change-detecting discovery diagnostic: log_discovery writes only on a change."""
 
     _LEVELS_A = [
         "project: /proj/.claude/toolguard_hook.toml",
@@ -421,26 +380,20 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
         """
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
-            log_discovery(self._LEVELS_A, log_dir, "/proj-a")  # 1: A first ever
-            log_discovery(self._LEVELS_A, log_dir, "/proj-b")  # 2: B first ever
-            log_discovery(self._LEVELS_A, log_dir, "/proj-a")  # 3: A unchanged for A,
-            # but the most recent discovery-log record overall is B's -- must
-            # still compare against A's own last entry (1), not B's (2), so
-            # this must NOT log.
-            log_discovery(self._LEVELS_A, log_dir, "/proj-b")  # 4: same for B
+            log_discovery(self._LEVELS_A, log_dir, "/proj-a")
+            log_discovery(self._LEVELS_A, log_dir, "/proj-b")
+            log_discovery(self._LEVELS_A, log_dir, "/proj-a")
+            log_discovery(self._LEVELS_A, log_dir, "/proj-b")
 
             lines = self._discovery_lines(log_dir)
-            self.assertEqual(len(lines), 2)  # only calls 1 and 2 logged
+            self.assertEqual(len(lines), 2)
 
-            # Now change A's levels: must log even though B's record is the
-            # most recent line in the file.
             log_discovery(self._LEVELS_B, log_dir, "/proj-a")
             lines = self._discovery_lines(log_dir)
             self.assertEqual(len(lines), 3)
             _timestamp, last_root, _levels = _parse_discovery_line(lines[-1])
             self.assertEqual(last_root, "/proj-a")
 
-            # A repeat call for A with its now-current levels logs nothing.
             discovery_before = self._discovery_log_path(log_dir).read_bytes()
             log_discovery(self._LEVELS_B, log_dir, "/proj-a")
             self.assertEqual(
@@ -458,12 +411,11 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
             discovery_path = self._discovery_log_path(log_dir)
-            discovery_path.write_text("2026-01-01T00:00:00\t/proj")  # torn: no 2nd tab
+            discovery_path.write_text("2026-01-01T00:00:00\t/proj")
 
             log_discovery(self._LEVELS_A, log_dir, "/proj")
 
             lines = self._discovery_lines(log_dir)
-            # The torn line plus the freshly appended, valid one.
             self.assertEqual(len(lines), 2)
             _timestamp, _root, levels = _parse_discovery_line(lines[-1])
             self.assertEqual(levels, self._LEVELS_A)
@@ -485,7 +437,6 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
                 "user: /home/.claude/toolguard_hook.toml\n"
             )
             self.assertIn(expected, text)
-            # Not routed to other streams.
             self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
             self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
@@ -505,13 +456,8 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
             log_dir = Path(tmp)
             discovery_path = self._discovery_log_path(log_dir)
 
-            # Pad the file well past the old 1 MB cap with harmless filler
-            # records for OTHER project roots FIRST, so the real "/proj"
-            # entry (written after the padding) is the LAST line -- still
-            # within the bounded tail read even though the file overall is
-            # large.
             filler_line = "2026-01-01T00:00:00\t/other-project\t" + ("x" * 200)
-            padding = (filler_line + "\n") * 6000  # ~1.3 MB of filler
+            padding = (filler_line + "\n") * 6000
             log_dir.mkdir(parents=True, exist_ok=True)
             with open(discovery_path, "a", encoding="utf-8") as f:
                 f.write(padding)
@@ -547,8 +493,6 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
             discovery_path = self._discovery_log_path(log_dir)
 
             filler_line = "2026-01-01T00:00:00\t/other-project\t" + ("x" * 200)
-            # Enough filler to push the real record well outside the tail
-            # window (_DISCOVERY_TAIL_READ_BYTES).
             needed_lines = (_DISCOVERY_TAIL_READ_BYTES // len(filler_line)) + 50
             padding = (filler_line + "\n") * needed_lines
             with open(discovery_path, "a", encoding="utf-8") as f:
@@ -734,9 +678,7 @@ class TestHookConflictLogging(unittest.TestCase):
             self.assertIn(
                 "hard_deny", output["hookSpecificOutput"]["permissionDecisionReason"]
             )
-            # No conflict file.
             self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
-            # Resolution log holds the refused entry.
             resolution_files = [
                 p for p in log_dir.glob("toolguard-2*.md") if p.name.count("-") == 3
             ]
@@ -778,21 +720,12 @@ class TestM1SingleSourceWarning(ConfigIsolationMixin, unittest.TestCase):
         text = warning_files[0].read_text()
         occurrences = text.count("Both toolguard_hook.toml and toolguard_hook.json")
         self.assertEqual(occurrences, 1)
-        # Not routed to error/conflict streams.
         self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
         self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
 
 
 class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
-    """
-    TOO-45 R5d: config_divergence.check_and_warn_divergence no longer writes
-    to the structured error log itself -- a config-layer module must not
-    depend on error_log, a runtime-layer module. It returns the warning text
-    (DivergenceCheckResult) and toolguard.hook does the logging. This is the
-    end-to-end regression test for that hand-off actually happening: every
-    OTHER test touching this path mocks check_and_warn_divergence entirely,
-    so none of them would notice hook.py forgetting to log the result.
-    """
+    """End-to-end: hook.py, not config_divergence.py, logs the divergence warning."""
 
     def test_divergence_check_writes_warning_log_via_hook(self):
         """
@@ -844,9 +777,7 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
              claim the first call takes gates every later same-day call
              before it ever reaches run_auto_migration, so a failed
              migration is retried the next day, not the same day (TOO-45
-             D4). A test that called run_auto_migration directly instead of
-             going through the hook would not exercise that gate at all --
-             which is exactly what hid this defect the first time.
+             D4)
         """
         from toolguard import hook as hook_mod
         from toolguard import once_per_store

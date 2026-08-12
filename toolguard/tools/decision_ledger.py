@@ -1,28 +1,20 @@
 """
-Prior-decision ledger for the maintenance skill (TOO-15 Phase C).
+Prior-decision ledger for the maintenance skill.
 
-The maintenance skill is a dialogue: the user accepts, rejects, or modifies each
-proposed rule change. Some of those decisions attach to a *surviving* rule and are
-best recorded as an in-file ``# toolguard:`` annotation (see
-:mod:`toolguard.tools.annotate`). But a decision such as "do NOT re-suggest merging
-this family" or "do NOT re-suggest promoting these allows to the user level" has **no
-surviving rule to hang on** -- the thing the user rejected does not exist in the
-config. Without a durable record, every periodic maintenance run would re-litigate it.
+A decision taken during a maintenance dialogue that attaches to a *surviving* rule is
+recorded on it, as an in-file ``# toolguard:`` annotation. A rejected proposal -- "do NOT
+re-suggest merging this family", "do NOT re-suggest promoting these allows to the user
+level" -- has **no surviving rule to hang on**, because the thing rejected does not exist
+in the config. This module is the store for those, so a periodic run need not re-litigate
+them.
 
-This module is the canonical, tool-owned store for those meta-decisions. It is
-deliberately NOT outsourced to an arbitrary human-memory system: the maintenance skill
-re-parses it mechanically on every run to decide what is already settled, so it needs a
-stable schema and a stable location.
+Level-scoped like the config hierarchy: a **project** ledger at
+``<project_root>/.claude/toolguard_decisions.json`` and a **user** ledger at
+``~/.toolguard/decisions.json``. A decision is identified by ``(kind, family_id,
+target)`` rather than by which file holds it, so the two can be searched as one
+(``load_merged``).
 
-Location mirrors the config hierarchy (decisions are level-scoped like the rules):
-
-- **project** ledger travels with the repo at ``<project_root>/.claude/toolguard_decisions.json``
-  (git-tracked, so a project's settled decisions follow the code);
-- **user** ledger lives under toolguard's own namespace at ``~/.toolguard/decisions.json``.
-
-A decision is *identified* by what it is about -- ``(kind, family_id, target)`` -- not
-by where it is stored, so the same suppression recorded at either level answers a
-"is this settled?" query. Writes replace an existing same-id entry in place (idempotent).
+Design rationale: technical-notes.md, "Prior-decision ledger".
 """
 
 import json
@@ -34,17 +26,18 @@ from typing import List, Optional, Sequence, Tuple
 
 from toolguard.config import find_project_root
 
-#: Schema tag written into every ledger file so a future format change is detectable.
+#: Schema tag written into every ledger file. ``load_ledger`` does not check it.
 LEDGER_SCHEMA = "toolguard-decision-ledger/1"
 
 #: Project-level ledger location, relative to the resolved project root.
 PROJECT_LEDGER_RELPATH = Path(".claude") / "toolguard_decisions.json"
 
-#: User-level ledger location (toolguard's own namespace, not ``~/.claude``).
+#: User-level ledger location -- toolguard's own namespace, deliberately not
+#: ``~/.claude``.
 USER_LEDGER_PATH = Path.home() / ".toolguard" / "decisions.json"
 
-#: Decision kinds the skill records. ``custom`` is the escape hatch for a
-#: meta-decision that does not fit the enumerated shapes.
+#: Recognised decision kinds. ``custom`` is the escape hatch for a meta-decision
+#: that does not fit the enumerated shapes.
 VALID_KINDS = frozenset(
     {
         "reject-consolidation",  # do not re-propose merging this family
@@ -56,8 +49,8 @@ VALID_KINDS = frozenset(
     }
 )
 
-#: The recorded disposition. ``reject`` is the one that suppresses a re-raise;
-#: ``accept`` records that a change was taken; ``defer`` parks it for later.
+#: The recorded disposition. Only ``reject`` suppresses a suggestion (see
+#: ``is_suppressed``); ``accept`` and ``defer`` are recorded but do not.
 VALID_DECISIONS = frozenset({"reject", "accept", "defer"})
 
 #: Which ledger file stores the decision.
@@ -67,17 +60,13 @@ VALID_LEVELS = frozenset({"project", "user"})
 class LedgerError(Exception):
     """Raised when a ledger file is present but malformed or invalid.
 
-    A missing ledger is normal (returns empty); a *corrupt* one is surfaced rather
-    than silently dropped, because silently losing settled decisions would cause the
-    skill to re-litigate them -- the exact failure this module exists to prevent.
+    A missing ledger is normal and loads as empty. A corrupt one raises instead of
+    loading as empty, since dropping settled decisions silently re-opens them.
     """
 
 
 def decision_id(kind: str, family_id: str, target: str) -> str:
     """Return the stable, human-readable identity of a decision.
-
-    Identity is independent of which level stores the decision, so a suppression
-    recorded at either level matches the same future suggestion.
 
     Args:
         kind: One of :data:`VALID_KINDS`.
@@ -101,8 +90,9 @@ class LedgerDecision:
         target: Canonical description of the specific thing decided.
         decision: One of :data:`VALID_DECISIONS`.
         rationale: The user's own words for why (may be empty).
-        recorded_at: Local ISO timestamp when the decision was recorded.
-        toolguard_version: Version of toolguard that recorded it (provenance).
+        recorded_at: Local ISO timestamp; ``""`` on an entry loaded from a file
+            that omitted it.
+        toolguard_version: Version that recorded it, or ``"unknown"``.
         level: Which ledger stores it -- one of :data:`VALID_LEVELS`.
     """
 
@@ -122,7 +112,7 @@ class LedgerDecision:
 
 
 def _toolguard_version() -> str:
-    """Return the installed toolguard version, or ``"unknown"`` if undeterminable."""
+    """Return the installed distribution version, or ``"unknown"`` if not installed."""
     try:
         return metadata.version("toolguard")
     except metadata.PackageNotFoundError:
@@ -190,9 +180,8 @@ def _validate_enums(kind: str, decision: str, level: str) -> None:
 def decision_to_dict(decision: LedgerDecision) -> dict:
     """Serialise a :class:`LedgerDecision` to a JSON-ready dict (no ``level``).
 
-    The ``level`` is a property of the enclosing file, not of the entry, so it is
-    written once at the file level (see :func:`ledger_to_dict`) rather than repeated
-    on every decision.
+    ``level`` is a property of the enclosing file, so :func:`ledger_to_dict` writes it
+    once there rather than on every entry.
     """
     return {
         "id": decision.id,
@@ -240,15 +229,7 @@ def decision_from_dict(data: dict, level: str) -> LedgerDecision:
 
 
 def ledger_to_dict(decisions: Sequence[LedgerDecision], level: str) -> dict:
-    """Serialise a whole ledger file for ``level``.
-
-    Args:
-        decisions: The decisions to write (order preserved).
-        level: The level the file represents.
-
-    Returns:
-        A mapping with the schema tag, level, and serialised decisions.
-    """
+    """Serialise a whole ledger file for ``level``, in the order given."""
     return {
         "schema": LEDGER_SCHEMA,
         "level": level,
@@ -259,9 +240,8 @@ def ledger_to_dict(decisions: Sequence[LedgerDecision], level: str) -> dict:
 def project_ledger_path(project_dir: Path) -> Path:
     """Return the project-level ledger path for ``project_dir``.
 
-    Resolves the project root the same way config discovery does (nearest
-    ``.git``/``pyproject.toml``); if no root is found the ledger is anchored at
-    ``project_dir`` itself so a record still lands somewhere sensible.
+    When no project root is found the ledger is anchored at ``project_dir`` itself,
+    so a record still lands somewhere sensible.
     """
     start = Path(project_dir)
     try:
@@ -289,6 +269,9 @@ def ledger_path_for_level(level: str, project_dir: Path) -> Path:
 def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
     """Load decisions from a single ledger file.
 
+    Each decision's ``level`` comes from the file's own ``level`` field (``project``
+    when absent), not from which path was read.
+
     Args:
         path: The ledger file to read.
 
@@ -296,7 +279,7 @@ def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
         The parsed decisions, or an empty tuple if the file does not exist.
 
     Raises:
-        LedgerError: If the file exists but is not valid JSON or not a valid ledger.
+        LedgerError: If the file exists but cannot be read, or is not a valid ledger.
     """
     if not path.exists():
         return ()
@@ -314,16 +297,9 @@ def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
 
 
 def load_merged(project_dir: Path) -> Tuple[LedgerDecision, ...]:
-    """Load and concatenate the project and user ledgers for ``project_dir``.
+    """Load the project and user ledgers for ``project_dir``, the project file first.
 
-    Project decisions come first, then user decisions. Both files are optional; a
-    missing file contributes nothing.
-
-    Args:
-        project_dir: Directory to resolve the project ledger from.
-
-    Returns:
-        All decisions across both levels.
+    Both files are optional; a missing one contributes nothing.
     """
     project = load_ledger(project_ledger_path(Path(project_dir)))
     user = load_ledger(USER_LEDGER_PATH)
@@ -336,8 +312,8 @@ def find_decision(
     """Return the decision matching ``(kind, family_id, target)``, if any.
 
     Matches on identity regardless of disposition; the caller inspects
-    :attr:`LedgerDecision.decision` (use :func:`is_suppressed` for the common
-    "should I stay silent?" check).
+    :attr:`LedgerDecision.decision` itself. Use :func:`is_suppressed` for the
+    common "should I stay silent?" check.
     """
     wanted = decision_id(kind, family_id, target)
     for decision in decisions:
@@ -359,11 +335,10 @@ def is_suppressed(
 
 
 def record_decision(project_dir: Path, decision: LedgerDecision) -> Path:
-    """Append (or replace in place) ``decision`` in its level's ledger file.
+    """Write ``decision`` into its level's ledger file, creating the file if needed.
 
-    The write is idempotent by :attr:`LedgerDecision.id`: recording a decision whose
-    id already exists replaces that entry rather than duplicating it. The parent
-    directory is created if needed.
+    Idempotent by :attr:`LedgerDecision.id`: a same-id entry is replaced rather than
+    duplicated, and the replacement is written last.
 
     Args:
         project_dir: Directory used to resolve a project-level ledger path.

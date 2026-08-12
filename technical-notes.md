@@ -28,6 +28,7 @@ anyone cross-referencing against the project's own tracker.
   - [More-specific-wins permission resolution](#more-specific-wins-permission-resolution)
   - [Project-root-relative paths](#project-root-relative-paths)
   - [Hard-deny safety valve (TOO-8 Phase 3)](#hard-deny-safety-valve-too-8-phase-3)
+  - [Rules directories: XDG and legacy paths, and shadowing](#rules-directories-xdg-and-legacy-paths-and-shadowing)
 - [Logging streams, conflict logging, and provenance (TOO-8 Phase 4)](#logging-streams-conflict-logging-and-provenance-too-8-phase-4)
   - [Four separate log streams (one file per concern)](#four-separate-log-streams-one-file-per-concern)
   - [Conflict logging -- allow-over-deny overrides only](#conflict-logging----allow-over-deny-overrides-only)
@@ -37,6 +38,7 @@ anyone cross-referencing against the project's own tracker.
   - [Single source of truth for tool-wrapper stripping](#single-source-of-truth-for-tool-wrapper-stripping)
 - [Non-permission cross-level resolution (TOO-8 Phase 5)](#non-permission-cross-level-resolution-too-8-phase-5)
   - [Scalars and `no_match_fallback` -- more-specific-wins](#scalars-and-no_match_fallback----more-specific-wins)
+  - [`undecidable_fallback` vs `no_match_fallback` -- a deliberate asymmetry](#undecidable_fallback-vs-no_match_fallback----a-deliberate-asymmetry)
   - [`governed_tools` and takeover pattern lists -- UNION across all levels](#governed_tools-and-takeover-pattern-lists----union-across-all-levels)
   - [`takeover_mode.enabled` -- single-owner with fail-safe-on-conflict](#takeover_modeenabled----single-owner-with-fail-safe-on-conflict)
 - [SessionStart conflict alerting (TOO-8 Phase 6)](#sessionstart-conflict-alerting-too-8-phase-6)
@@ -51,6 +53,7 @@ anyone cross-referencing against the project's own tracker.
   - [The defect](#the-defect)
   - [Governing principle: when in doubt, ASK](#governing-principle-when-in-doubt-ask)
   - [Grammar-first, with a light AST -- no hand-rolled parsing](#grammar-first-with-a-light-ast----no-hand-rolled-parsing)
+  - [`compound.py`'s shape: pure functions, no callbacks (TOO-45)](#compoundpys-shape-pure-functions-no-callbacks-too-45)
   - [How deep we go -- and why not deeper](#how-deep-we-go----and-why-not-deeper)
   - [Lexical pre-pass vs. grammar](#lexical-pre-pass-vs-grammar)
   - [Heredocs, the sink sentinel, and executor classification](#heredocs-the-sink-sentinel-and-executor-classification)
@@ -205,7 +208,8 @@ Toolguard discovers configuration across a hierarchy of directories rather than
 just the project and the user level. Starting from the project root (the nearest
 ancestor with `pyproject.toml` or `.git`), it walks UP TO and INCLUDING the
 user's home directory `~`, collecting configs from every ancestor that has a
-`.claude/` subdirectory. The walk never ascends above `~`.
+`.claude/` subdirectory. The walk stops at `~` for a project located under
+`~`, or at the filesystem root for a project that is not.
 
 Within each `.claude/` directory the same within-level priority applies as
 before: `toolguard_hook.local.{toml,json}`, `settings.local.json`,
@@ -289,6 +293,30 @@ matched as authored. This is intentional under the more-specific-wins hierarchy
 (a shared ancestor config should not silently grant access to unrelated sibling
 trees) and is covered by a negative regression test in `test_hierarchical.py`.
 
+### Rules directories: XDG and legacy paths, and shadowing
+
+Beyond the `.claude/` hierarchy, toolguard also scans two flat, non-recursive
+directories of `*.toml`/`*.json` rule files, both merging into the user (least
+specific) level: `$XDG_CONFIG_HOME/toolguard/rules` (or `~/.config/toolguard/rules`
+when `XDG_CONFIG_HOME` is unset) and the older `~/.toolguard/rules`, which predates
+the XDG convention and is kept because a real, hand-authored ruleset placed there
+was once found to be silently unenforced -- only the XDG directory was being
+scanned. Both are now scanned, XDG first.
+
+A rules-directory file may define only `[permissions]` and `[hard_deny]`; any
+other top-level key is stripped and reported as a `validation_issues()` error
+(scalar/singleton settings have no multi-file merge rule and stay the sole
+responsibility of the primary `toolguard_hook.toml`).
+
+When the same filename stem exists in both directories, the XDG copy wins and the
+legacy copy is dropped entirely -- this must be loud, since it is exactly the
+"ruleset lives in the wrong directory and is silently unenforced" failure mode
+these directories exist to fix, so `validation_issues()` reports it as a warning.
+The one exception: if both directories' entries resolve to the *same* real file
+(e.g. one is a symlink into the other, a natural migration path), nothing is
+actually being dropped, so no warning fires -- reporting it would just train users
+to ignore the warning that matters.
+
 ### Hard-deny safety valve (TOO-8 Phase 3)
 
 `[hard_deny]` is an **unoverridable** hard-deny mechanism: a (typically
@@ -346,8 +374,8 @@ separable:
 | `logs/toolguard-YYYY-MM-DD.md`        | `log_writer.log_command`       | Resolution log (high volume): allowed/refused decisions, matched-rule provenance. Also `log_writer.log_discovery` (change-detecting discovery diagnostic, TOO-19) and `hard_deny` denials. |
 | `logs/toolguard-error-YYYY-MM-DD.md`  | `error_log.log_error`          | REAL errors only. |
 | `logs/toolguard-warning-YYYY-MM-DD.md`| `error_log.log_warning`        | Actionable warnings: both-`.toml`-and-`.json` present, unsupported/ungoverned tools. |
-| `logs/toolguard-conflict-YYYY-MM-DD.md`| `error_log.log_conflict`      | Config conflicts (allow-over-deny overrides), human/LLM-readable, ON by default. |
-| `logs/toolguard-discovery.log`        | `log_writer.log_discovery`     | Change-log backing the discovery diagnostic above: one PLAIN-TEXT line per project root per DISTINCT discovered level set (TOO-19 code review M3 -- not JSON). NOT date-partitioned, and never size-capped/rotated (see the module docstring in `log_writer.py`). |
+| `logs/toolguard-conflict-YYYY-MM-DD.md`| `error_log.log_conflict`      | Config conflicts, human/LLM-readable: allow-over-deny overrides and cross-level `takeover_mode.enabled` disagreements. |
+| `logs/toolguard-discovery.log`        | `log_writer.log_discovery`     | Change-log backing the discovery diagnostic above: one PLAIN-TEXT line per project root per DISTINCT discovered level set (TOO-19 code review M3 -- not JSON). NOT date-partitioned, and never size-capped/rotated (see `log_writer._DISCOVERY_LOG_FILENAME`). |
 
 `error_log._log_entry(level, stream, ...)` is the single shared writer; the
 `stream` argument selects the `toolguard-<stream>-...` filename. All three share
@@ -417,7 +445,7 @@ with -- a prior module-level flag (`_discovery_diagnostic_done`) advertised
 that guarantee and could never deliver it, since it reset to `False` on
 every invocation. `log_discovery` is the guard instead: it keeps a small,
 append-only, project-root-keyed change-log (`logs/toolguard-discovery.log`,
-deliberately NOT date-partitioned -- see its module docstring) and writes a
+deliberately NOT date-partitioned -- see `log_writer._DISCOVERY_LOG_FILENAME`) and writes a
 `discovered N config levels: <level: path>, ...` entry to the RESOLUTION
 log, plus a discovery-log record, ONLY when the discovered levels differ
 from the last recorded entry for this project root. On no change, it writes
@@ -469,11 +497,11 @@ keeps only the TOML), and also when two differing-format layers share a base.
 ### Single source of truth for tool-wrapper stripping
 
 Permission patterns are authored wrapped as `Tool(inner)` (e.g. `Bash(git *)`)
-but matched on the unwrapped inner pattern. `config._strip_tool_wrapper` is the
+but matched on the unwrapped inner pattern. `rule_entry.strip_tool_wrapper` is the
 single, purely STRUCTURAL strip (`re.fullmatch(r'[A-Za-z0-9_]+\((.*)\)')`): it
 needs no hand-maintained tool list and handles inner parentheses
 (`Bash(foo(bar))` -> `foo(bar)`). Divergence detection recognises tool-scoped
-native permissions via the shared `config.is_tool_wrapper` predicate, which uses
+native permissions via the shared `rule_entry.is_tool_wrapper` predicate, which uses
 the same `_TOOL_WRAPPER_RE` -- there is no duplicated regex in
 `config_divergence.py`. New governed tools require no change to any prefix list.
 
@@ -497,6 +525,30 @@ it wins; default `deny`).
 
 Single-level configs are unaffected: with one defining level, more-specific-wins
 and the old behaviour coincide.
+
+### `undecidable_fallback` vs `no_match_fallback` -- a deliberate asymmetry
+
+`no_match_fallback` and `undecidable_fallback` answer different questions:
+`no_match_fallback` is "I read this command and no rule covered it";
+`undecidable_fallback` is "I could not safely read this command at all" (foreign
+inline code, heredoc sinks, complex control structures, process substitution --
+see `toolguard.compound`). It is applied as a strictest-wins floor by
+`toolguard.compound._apply_undecidable_floor` against whatever the leaf/segment
+itself resolved to. Both resolve the same way (top-level key, most-specific
+layer wins, `'ask'`/`'deny'`/`'allow_with_warning'`/`'allow'`, unset or
+unrecognized falls back to `'ask'`) via the shared
+`Configuration._resolve_fallback_setting`.
+
+They deliberately do NOT share every alias. `no_match_fallback` carries two
+legacy spellings from before `undecidable_fallback` existed: a `[takeover_mode]`
+nested alias, and the deprecated value `'warn_deny'` (normalizes to
+`'allow_with_warning'`). `undecidable_fallback` is a brand-new top-level key with
+neither -- it has no prior spelling to stay compatible with, and there is no
+`[takeover_mode]` field for it on `TakeoverConfig`. Do not add either "for
+symmetry"; that history does not apply to it. The one alias both settings DO
+share is `'allow_with_no_warnings'` -> `'allow'` (see
+`config._ALLOW_NO_WARNINGS_ALIAS`), because it was introduced for both at once
+and is not part of `no_match_fallback`'s legacy history.
 
 ### `governed_tools` and takeover pattern lists -- UNION across all levels
 
@@ -668,6 +720,31 @@ The processing pipeline is layered for separation of concerns:
 
 Keeping raw-tree access isolated in one module is what makes the rest readable; the IR is the
 "early simplification / noise removal" boundary.
+
+### `compound.py`'s shape: pure functions, no callbacks (TOO-45)
+
+`compound.py` was originally built around injected callbacks (`resolve_one`/`resolve_outer`/
+`record_unit`) threaded through a `resolve.py`<->`compound.py` cycle: `compound.py` called back
+into `resolve.py` to resolve a leaf, and `resolve.py` called back into `compound.py` to combine
+results. That cycle made the ASK floor hard to test (it needed a fake resolver closure) and made
+an audit-log entry's very existence depend on which callback a given leaf kind happened to
+invoke -- an entry could go silently missing because a code path diverged, with no error anywhere.
+
+The module is now three pure functions with no callback dependency: `decompose` splits a command
+line into `CommandUnit`s (structure only -- decides nothing); `judge_unit` decides one unit given
+the caller's own resolution of its `parts`, handed in as data via `part_verdicts` (owns the ASK
+floor); `_combine_strictest` combines several already-judged units into the compound's own
+verdict. `compound.py` never calls back into `resolve.py`; the production caller
+(`resolve.resolve_bash_permission_detailed`) drives all three directly and builds its own
+`sub_matches`/`overrides` by ordinary `append`/`extend`. `CommandUnit.audits_as_one` is decided at
+construction time, in `_unit_for`, rather than re-derived from `kind` by a caller (see
+`judge_unit`'s own `Raises` docstring for why a fifth kind must be decided explicitly, not
+silently fall through).
+
+`resolve_compound_permission_detailed` (and its thin wrapper `resolve_compound_permission`)
+remain as a convenience driver over the same three functions, for callers -- `check_compound_permission`
+and many existing tests -- with only a plain `resolve_one` 3-tuple closure and no
+`UnitVerdict`-producing resolver of their own. Neither is on the production path.
 
 ### How deep we go -- and why not deeper
 
@@ -896,6 +973,12 @@ independently of `--corpus`. It is **necessary, not sufficient**: it only covers
 commands, an empty corpus is vacuous (not clean), a `broadened` is the red flag, and large
 `tightened` counts are expected for deny-hardening. It never gates an apply on its own.
 
+### The alembic landmine, stated correctly
+
+The worked example behind the replay gate: a project layer allows `uv run alembic upgrade:*` and `uv run alembic current:*`, while a broader layer asks on `uv run alembic:*`. Consolidating the two project allows into `uv run alembic:*` moves the broad pattern into the *more specific* layer, which then decides for every alembic subcommand -- so `uv run alembic downgrade -1` goes from `ask` to `allow`. Replay catches it only if some alembic command was actually logged.
+
+The layers are the whole point, and `replay.py`'s docstring stated it without them for a long time. With the allows and the ask in the **same** layer there is no landmine at all: ask beats allow within a layer, so the same consolidation *tightens* -- `upgrade head` goes `allow -> ask` and `downgrade -1` stays `ask` (measured 2026-08-12).
+
 ### Prior-decision ledger (`decision_ledger.py`)
 
 A periodic run must not re-litigate settled questions. Two stores hold "prior decisions":
@@ -1012,8 +1095,8 @@ the installed toolguard package for every process whose working directory happen
 checkout -- including the tool venv's own interpreter running the live PreToolUse hook. The
 hook silently governed real permission decisions with uncommitted, mid-refactor code for weeks
 before this was noticed. `toolguard/install_provenance.py` is the fix's detection layer;
-`toolguard/session_start.py`, `toolguard/tools/environment_audit.py`, and
-`toolguard/tools/installer.py` are its three consumers. User-facing rationale:
+`toolguard/session_start.py` and `toolguard/tools/environment_audit.py` are its consumers.
+User-facing rationale:
 [docs/security.md: The hook can be silently shadowed](docs/security.md#the-hook-can-be-silently-shadowed).
 
 ### Why the two footguns need different flags

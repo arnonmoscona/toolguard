@@ -47,25 +47,19 @@ class TestBackupCreation(unittest.TestCase):
         Then a timestamped backup is created in that directory, keeping the extension and content
         """
         with TemporaryDirectory() as tmpdir:
-            # Create source file
             source_file = Path(tmpdir) / "settings.local.json"
             source_file.write_text('{"test": true}')
 
-            # Create backup
             backup_dir = Path(tmpdir) / "backups"
             backup_path = create_backup(source_file, backup_dir)
 
-            # Check backup exists
             self.assertTrue(backup_path.exists())
 
-            # Check naming format: settings.local.YYYY-MM-DD-HHMMSS.json
             self.assertTrue(backup_path.name.startswith("settings.local."))
             self.assertTrue(backup_path.name.endswith(".json"))
 
-            # Check content is preserved
             self.assertEqual(backup_path.read_text(), '{"test": true}')
 
-            # Check it's in backup_dir
             self.assertEqual(backup_path.parent, backup_dir)
 
     def test_backup_without_extension(self):
@@ -75,21 +69,16 @@ class TestBackupCreation(unittest.TestCase):
         Then a timestamped backup named 'configfile.<timestamp>' is created with the same content
         """
         with TemporaryDirectory() as tmpdir:
-            # Create source file
             source_file = Path(tmpdir) / "configfile"
             source_file.write_text("test content")
 
-            # Create backup
             backup_dir = Path(tmpdir) / "backups"
             backup_path = create_backup(source_file, backup_dir)
 
-            # Check backup exists
             self.assertTrue(backup_path.exists())
 
-            # Check naming format: configfile.YYYY-MM-DD-HHMMSS
             self.assertTrue(backup_path.name.startswith("configfile."))
 
-            # Check content is preserved
             self.assertEqual(backup_path.read_text(), "test content")
 
     def test_backup_creates_directory(self):
@@ -148,14 +137,10 @@ class TestBackupCreation(unittest.TestCase):
                 source_file.write_text('{"version": 2}')
                 second_backup = create_backup(source_file, backup_dir)
 
-            # Two distinct files on disk -- the second call must not reuse
-            # the first call's path.
             self.assertNotEqual(first_backup, second_backup)
             self.assertTrue(first_backup.exists())
             self.assertTrue(second_backup.exists())
 
-            # The first backup's content must be exactly what it was at the
-            # time it was created -- proof the second write did not clobber it.
             self.assertEqual(first_backup.read_text(), '{"version": 1}')
             self.assertEqual(second_backup.read_text(), '{"version": 2}')
 
@@ -273,7 +258,7 @@ class TestPatternKeyExtraction(unittest.TestCase):
 
 
 class TestSimilarPatternDetection(unittest.TestCase):
-    """Test detection of similar patterns (legacy tests updated for new return format)."""
+    """Test detection of similar patterns."""
 
     def test_detect_similar_git_commands(self):
         """
@@ -286,7 +271,6 @@ class TestSimilarPatternDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing)
 
-        # Extract just the patterns from tuples
         similar_patterns = [p for p, _, _ in similar]
         self.assertIn("Bash(git push:*)", similar_patterns)
         self.assertNotIn("Bash(ls:*)", similar_patterns)
@@ -302,7 +286,6 @@ class TestSimilarPatternDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing)
 
-        # Extract just the patterns from tuples
         similar_patterns = [p for p, _, _ in similar]
         self.assertIn("Read(/tmp/*)", similar_patterns)
         self.assertNotIn("Read(/var/*)", similar_patterns)
@@ -318,10 +301,6 @@ class TestSimilarPatternDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing)
 
-        # difflib's get_close_matches typically returns the identical pattern itself
-        # since it has similarity of 1.0. This is acceptable behavior - the migration
-        # script handles this gracefully (won't create duplicates)
-        # We just verify the function doesn't crash with identical patterns
         self.assertIsInstance(similar, list)
 
     def test_no_similar_patterns(self):
@@ -330,7 +309,6 @@ class TestSimilarPatternDetection(unittest.TestCase):
         When detect_similar_patterns runs
         Then no similar patterns are returned (empty result)
         """
-        # Use very different patterns that won't match even with difflib
         existing = ["Read(/var/log/*)", "Write(/home/user/docs/*)", "Edit(/etc/config)"]
         new_pattern = "Bash(git:*)"
 
@@ -349,7 +327,6 @@ class TestSimilarPatternDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing)
 
-        # Extract just the patterns from tuples
         similar_patterns = [p for p, _, _ in similar]
         self.assertIn("Bash(git:*)", similar_patterns)
 
@@ -373,7 +350,6 @@ class TestPatternSorting(unittest.TestCase):
 
         sorted_patterns = sort_patterns(patterns)
 
-        # Check tool order: Bash, Read, Write, Edit, Others
         tools = [p.split("(")[0] for p in sorted_patterns]
         self.assertEqual(tools[0], "Bash")
         self.assertEqual(tools[1], "Read")
@@ -421,7 +397,6 @@ class TestPatternSorting(unittest.TestCase):
 
         sorted_patterns = sort_patterns(patterns)
 
-        # Lowercase comparison: abc, def, xyz, zsh
         expected_order = ["abc", "def", "XYZ", "Zsh"]
         actual_order = [p.split("(")[1].split(":")[0] for p in sorted_patterns]
         self.assertEqual(actual_order, expected_order)
@@ -456,8 +431,6 @@ class TestPatternSorting(unittest.TestCase):
 
         result = sort_patterns(entries)
 
-        # No TypeError raised (the fix). Bash sorts first regardless of the
-        # structured entry's metadata; Read then Write follow.
         self.assertIs(result[0], structured)
         self.assertEqual(result[1], "Read(/tmp/*)")
         self.assertEqual(result[2], "Write(/tmp/*)")
@@ -498,10 +471,8 @@ class TestTOMLConfigWriting(unittest.TestCase):
 
             write_toml_config(config_path, permissions, auto_sort=True)
 
-            # Read back content
             content = config_path.read_text()
 
-            # Check that patterns are sorted (Bash, Read, Write)
             self.assertIn("[permissions]", content)
             bash_pos = content.index("Bash(ls:*)")
             read_pos = content.index("Read(/tmp/*)")
@@ -528,7 +499,6 @@ class TestTOMLConfigWriting(unittest.TestCase):
 
             content = config_path.read_text()
 
-            # Check that order is preserved (Write before Bash)
             write_pos = content.index("Write(/tmp/*)")
             bash_pos = content.index("Bash(ls:*)")
             self.assertLess(write_pos, bash_pos)
@@ -552,15 +522,14 @@ class TestTOMLConfigWriting(unittest.TestCase):
 
             content = config_path.read_text()
 
-            # Check that quotes are escaped
             self.assertIn('echo \\"test\\"', content)
 
     def test_same_pattern_different_metadata_both_survive_write_round_trip(self):
         """
-        TOO-19 Change 4 fix: given an existing TOML file with two structured
-            entries sharing the same pattern but different additionalContext
-            values (the shape merge_entries's case-3 contradiction handling
-            deliberately preserves side-by-side)
+        Given an existing TOML file with two structured entries sharing the
+            same pattern but different additionalContext values (the shape
+            merge_entries's case-3 contradiction handling deliberately
+            preserves side-by-side)
         When write_toml_config() re-writes the file with both entries kept
             unchanged, in the same relative order
         Then BOTH entries' distinct additionalContext values are present in
@@ -606,9 +575,6 @@ class TestTOMLConfigWriting(unittest.TestCase):
             content = config_path.read_text()
             self.assertIn("first note", content)
             self.assertIn("second note", content)
-            # Both original structured-entry lines are reused byte-for-byte
-            # (not just their metadata substrings, which a bug limited to
-            # e.g. list ORDER could still pass).
             self.assertIn(
                 '{ match = "Bash(git push:*)", additionalContext = "first note" },',
                 content,
@@ -640,13 +606,11 @@ class TestJSONConfigWriting(unittest.TestCase):
 
             write_json_config(config_path, permissions, auto_sort=True)
 
-            # Read back and check
             with open(config_path, "r") as f:
                 config = json.load(f)
 
             allow_patterns = config["permissions"]["allow"]
 
-            # Check sorted order: Bash, Read, Write
             self.assertEqual(allow_patterns[0], "Bash(ls:*)")
             self.assertEqual(allow_patterns[1], "Read(/tmp/*)")
             self.assertEqual(allow_patterns[2], "Write(/tmp/*)")
@@ -660,7 +624,6 @@ class TestJSONConfigWriting(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "toolguard_hook.json"
 
-            # Create initial config with other keys
             initial_config = {
                 "governed_tools": ["Bash", "Read"],
                 "other_setting": "value",
@@ -668,15 +631,12 @@ class TestJSONConfigWriting(unittest.TestCase):
             with open(config_path, "w") as f:
                 json.dump(initial_config, f)
 
-            # Write permissions
             permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
             write_json_config(config_path, permissions, auto_sort=False)
 
-            # Read back and verify
             with open(config_path, "r") as f:
                 config = json.load(f)
 
-            # Check that other keys are preserved
             self.assertEqual(config["governed_tools"], ["Bash", "Read"])
             self.assertEqual(config["other_setting"], "value")
             self.assertEqual(config["permissions"]["allow"], ["Bash(ls:*)"])
@@ -718,14 +678,7 @@ class TestJSONConfigWriting(unittest.TestCase):
 
 
 class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
-    """
-    TOO-19 corrective change (Change 2): write_toml_config() and
-    write_json_config() must route every write through
-    toolguard.config_write_guard.verified_write_config(), never a raw
-    Path.write_text()/open(...).write() -- so a write that would produce
-    unparseable text or silently drop a pattern is refused before anything
-    touches disk.
-    """
+    """write_toml_config()/write_json_config() write only via verified_write_config(), never a raw file write."""
 
     def test_write_toml_config_new_file_calls_verified_write_config(self):
         """
@@ -843,17 +796,7 @@ class TestWriteConfigRoutesThroughVerificationGuard(unittest.TestCase):
 
 
 class TestWriteConfigToleratesMalformedEntries(unittest.TestCase):
-    """
-    TOO-19 review-round-2 fix: a single malformed structured entry (or any
-    other JSON element normalize_entry() can't normalize) must never block
-    writing the REST of the file. Before the fix,
-    normalize_entries_preserving()'s synthesized repr()-based pattern for
-    such an entry was fed straight into expected_patterns, which the guard
-    could never find in the real written text -- refusing every write
-    (confirmed repro). These exercise the REAL (unmocked)
-    verified_write_config path end-to-end, unlike
-    TestWriteConfigRoutesThroughVerificationGuard above.
-    """
+    """A malformed structured entry must never block writing the rest of the file; exercises the real (unmocked) verified_write_config path."""
 
     def test_toml_write_survives_a_malformed_structured_entry(self):
         """
@@ -946,12 +889,8 @@ class TestWriteConfigToleratesMalformedEntries(unittest.TestCase):
             entries = normalize_entries_preserving(
                 ["Bash(ls)", {"nope": "malformed"}], is_native=False
             )
-            # real_patterns() must still surface the genuine "Bash(ls)"
-            # pattern (excluding only the synthesized one) -- confirming the
-            # exclusion is targeted, not a blanket weakening.
             self.assertEqual(real_patterns(entries), ["Bash(ls)"])
 
-            # Text that drops "Bash(git status)" entirely -- a genuine loss.
             new_text = '[permissions]\nallow = ["Bash(ls)"]\n'
             with self.assertRaises(ConfigWriteVerificationError):
                 verified_write_config(
@@ -975,7 +914,6 @@ class TestSettingsFileUpdate(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.local.json"
 
-            # Create settings file
             settings = {
                 "permissions": {
                     "allow": ["Bash(ls:*)", "Bash(git:*)", "Read(/tmp/*)"],
@@ -986,7 +924,6 @@ class TestSettingsFileUpdate(unittest.TestCase):
             with open(settings_path, "w") as f:
                 json.dump(settings, f)
 
-            # Migrate some patterns
             migrated = {
                 "allow": ["Bash(git:*)", "Read(/tmp/*)"],
                 "deny": ["Bash(rm:*)"],
@@ -995,11 +932,9 @@ class TestSettingsFileUpdate(unittest.TestCase):
 
             update_settings_file(settings_path, migrated)
 
-            # Read back and verify
             with open(settings_path, "r") as f:
                 updated = json.load(f)
 
-            # Check that migrated patterns are removed
             self.assertEqual(updated["permissions"]["allow"], ["Bash(ls:*)"])
             self.assertEqual(updated["permissions"]["deny"], [])
 
@@ -1012,7 +947,6 @@ class TestSettingsFileUpdate(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.local.json"
 
-            # Create settings file
             settings = {
                 "permissions": {
                     "allow": ["Bash(ls:*)"],
@@ -1023,7 +957,6 @@ class TestSettingsFileUpdate(unittest.TestCase):
             with open(settings_path, "w") as f:
                 json.dump(settings, f)
 
-            # Migrate all patterns
             migrated = {
                 "allow": ["Bash(ls:*)"],
                 "deny": [],
@@ -1032,11 +965,9 @@ class TestSettingsFileUpdate(unittest.TestCase):
 
             update_settings_file(settings_path, migrated)
 
-            # Read back and verify
             with open(settings_path, "r") as f:
                 updated = json.load(f)
 
-            # Check that permissions structure still exists with empty lists
             self.assertIn("permissions", updated)
             self.assertEqual(updated["permissions"]["allow"], [])
             self.assertEqual(updated["permissions"]["deny"], [])
@@ -1044,18 +975,7 @@ class TestSettingsFileUpdate(unittest.TestCase):
 
 
 class TestMigration(ConfigIsolationMixin, unittest.TestCase):
-    """
-    Test full migration process.
-
-    Every test isolates Path.home() (via ConfigIsolationMixin), even though
-    migrate()'s target-selection logic itself already filters discovered
-    config files down to project_root's own .claude directory (TOO-15): an
-    unpatched Path.home() would still leak this repo's real, dogfooded
-    ~/.claude/toolguard_hook.toml into load_configuration()'s aggregated
-    toolguard_perms (used for divergent/redundant pattern detection), which
-    could silently change which patterns a test observes as "divergent" vs
-    "already present" depending on the real machine's config.
-    """
+    """Full migration process. Isolates Path.home() because load_configuration()'s aggregated toolguard_perms still reads it even though write-target selection is already restricted to project_root's own .claude directory."""
 
     def test_dry_run_mode(self):
         """
@@ -1067,7 +987,6 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create settings.local.json with patterns
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
@@ -1079,10 +998,8 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # Run dry-run migration
         outcome = migrate(project_root, dry_run=True)
 
-        # Check no changes were made
         with open(settings_path, "r") as f:
             after_settings = json.load(f)
 
@@ -1101,7 +1018,6 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create settings.local.json
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
@@ -1113,19 +1029,15 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # Run migration
         outcome = migrate(project_root)
 
-        # Check that toolguard_hook.toml was created
         toml_path = claude_dir / "toolguard_hook.toml"
         self.assertTrue(toml_path.exists())
 
-        # Check content
         content = toml_path.read_text()
         self.assertIn("Bash(ls:*)", content)
         self.assertIn("Bash(git:*)", content)
 
-        # Check settings.local.json was updated
         with open(settings_path, "r") as f:
             updated_settings = json.load(f)
 
@@ -1143,9 +1055,8 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create existing toolguard_hook.toml. Governs Bash AND Read so the
-        # Read pattern below is eligible to migrate (migration only moves rules
-        # for governed tools -- issue #1).
+        # Migration only moves rules for governed tools, so this config
+        # must govern Read for the Read pattern below to be eligible.
         toml_path = claude_dir / "toolguard_hook.toml"
         toml_content = """governed_tools = ["Bash", "Read"]
 
@@ -1157,7 +1068,6 @@ deny = []
 """
         toml_path.write_text(toml_content)
 
-        # Create settings.local.json with new patterns
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
@@ -1169,22 +1079,16 @@ deny = []
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # Run migration
         outcome = migrate(project_root)
 
-        # Check that new patterns were added
         content = toml_path.read_text()
         self.assertIn("Bash(ls:*)", content)
         self.assertIn("Bash(git:*)", content)
         self.assertIn("Read(/tmp/*)", content)
 
-        # Check settings.local.json
         with open(settings_path, "r") as f:
             updated_settings = json.load(f)
 
-        # All patterns should be removed:
-        # - Bash(ls:*) is redundant (exact duplicate in toolguard)
-        # - Bash(git:*) and Read(/tmp/*) were migrated
         self.assertEqual(updated_settings["permissions"]["allow"], [])
         self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
@@ -1198,13 +1102,6 @@ deny = []
              byte-identical, it keeps its sorted position ahead of the newly
              migrated pattern, and the file still parses as valid TOML with the
              entry's metadata intact.
-
-        This is the W1 headline regression guard: before the fix, this exact
-        scenario silently deleted the structured entry from the file (the last
-        remaining `isinstance(perm, str)` filter, in
-        Configuration.toolguard_permissions(), made the entry look
-        "divergent" from native, and the merge-then-rewrite path in migrate()
-        then wrote a merged_perms that never contained it).
         """
         _home, project_root = self.isolate_config_environment()
         claude_dir = project_root / ".claude"
@@ -1239,24 +1136,18 @@ deny = []
 
         content = toml_path.read_text()
 
-        # The structured entry's original line, byte-identical, INCLUDING its
-        # leading comment -- the round-trip guarantee.
         self.assertIn(
             "  # review this rule carefully\n"
             '  { match = "Bash(git *)", additionalContext = "review carefully" },\n',
             content,
         )
 
-        # Position: the structured entry (git) still sorts ahead of ls, which
-        # sorts ahead of the newly-migrated pwd pattern.
         git_pos = content.index('match = "Bash(git *)"')
         ls_pos = content.index('"Bash(ls *)"')
         pwd_pos = content.index('"Bash(pwd)"')
         self.assertLess(git_pos, ls_pos)
         self.assertLess(ls_pos, pwd_pos)
 
-        # The file is still valid TOML, and the structured entry's metadata is
-        # intact -- not stringified, not dropped.
         reparsed = tomllib.loads(content)
         allow = reparsed["permissions"]["allow"]
         structured = [e for e in allow if isinstance(e, dict)]
@@ -1274,7 +1165,6 @@ deny = []
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create toolguard config with existing pattern
         toml_path = claude_dir / "toolguard_hook.toml"
         toml_content = """[permissions]
 allow = [
@@ -1284,7 +1174,6 @@ deny = []
 """
         toml_path.write_text(toml_content)
 
-        # Create settings.local.json with same pattern
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
@@ -1296,14 +1185,11 @@ deny = []
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # Run migration
         outcome = migrate(project_root)
 
-        # Read config and count occurrences
         content = toml_path.read_text()
         occurrences = content.count("Bash(ls:*)")
 
-        # Should appear only once (not duplicated)
         self.assertEqual(occurrences, 1)
         self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
@@ -1317,7 +1203,6 @@ deny = []
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create toolguard config
         toml_path = claude_dir / "toolguard_hook.toml"
         toml_content = """[permissions]
 allow = [
@@ -1327,7 +1212,6 @@ deny = []
 """
         toml_path.write_text(toml_content)
 
-        # Create settings.local.json with same patterns
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
@@ -1339,10 +1223,8 @@ deny = []
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # Run migration
         outcome = migrate(project_root)
 
-        # Should return success with no changes
         self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
     def test_migration_creates_backups(self):
@@ -1355,7 +1237,6 @@ deny = []
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create settings.local.json
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
@@ -1369,16 +1250,13 @@ deny = []
 
         backup_dir = project_root / "logs" / "config-backups"
 
-        # Run migration
         outcome = migrate(project_root, backup_dir=backup_dir)
 
-        # Check backups were created
         self.assertTrue(backup_dir.exists())
 
         backups = list(backup_dir.glob("settings.local.*.json"))
         self.assertEqual(len(backups), 1)
 
-        # Check backup naming format
         backup_name = backups[0].name
         self.assertTrue(backup_name.startswith("settings.local."))
         self.assertTrue(backup_name.endswith(".json"))
@@ -1387,12 +1265,7 @@ deny = []
 
 
 class TestMigrationLocking(ConfigIsolationMixin, unittest.TestCase):
-    """
-    migrate()'s cross-process exclusion (TOO-45 punch-list #15). In-process
-    behaviour only -- see TestMigrationLockingAcrossProcesses below for the
-    genuine multi-process cases (a single-process test proves nothing about
-    an OS-level lock).
-    """
+    """migrate()'s cross-process exclusion, in-process behaviour only -- see TestMigrationLockingAcrossProcesses for the genuine multi-process cases."""
 
     def test_dry_run_never_takes_the_lock(self):
         """
@@ -1510,12 +1383,7 @@ class TestMigrationLocking(ConfigIsolationMixin, unittest.TestCase):
 
 
 class TestMigrationLockingAcrossProcesses(unittest.TestCase):
-    """
-    Real concurrent OS processes racing migrate() on the same project (TOO-45
-    punch-list #15). A test that only exercises the lock's happy path in one
-    process proves nothing -- see test_file_lock.py for the lock primitive's
-    own cross-process tests; these exercise migrate()'s USE of it.
-    """
+    """Real concurrent OS processes racing migrate() on the same project -- see test_file_lock.py for the lock primitive's own cross-process tests; these exercise migrate()'s use of it."""
 
     @staticmethod
     def _isolated_env(home: Path) -> dict:
@@ -1604,8 +1472,8 @@ class TestMigrationLockingAcrossProcesses(unittest.TestCase):
             for proc in procs:
                 stdout, stderr = proc.communicate(timeout=20)
                 self.assertEqual(proc.returncode, 0, msg=stderr)
-                # migrate() itself prints progress to stdout; the exit code
-                # this script prints is always its last line.
+                # migrate() prints progress to stdout; the exit code this
+                # script prints is always its last line.
                 outputs.append(stdout.strip().splitlines()[-1])
 
             self.assertEqual(outputs, ["0", "0"])
@@ -1690,12 +1558,7 @@ class TestMigrationLockingAcrossProcesses(unittest.TestCase):
 
 
 class TestMigrationOutcomeExitCodes(unittest.TestCase):
-    """
-    Pins the one mapping (TOO-45 punch-list #15 final item) standing between
-    MigrationOutcome and the shell -- the value migrate_permissions.main()
-    exposes to the OS. A change here is a deliberate exit-code contract
-    change, not an accident of enum member ordering.
-    """
+    """Pins the mapping between MigrationOutcome and the shell exit code migrate_permissions.main() exposes."""
 
     def test_exit_code_mapping(self):
         """
@@ -1711,12 +1574,7 @@ class TestMigrationOutcomeExitCodes(unittest.TestCase):
 
 
 class TestMigratePermissionsMainExitCodes(unittest.TestCase):
-    """
-    End-to-end check of the CLI boundary (TOO-45 punch-list #15 final item):
-    migrate_permissions.main() must still return a plain int, with the same
-    values as before the MigrationOutcome refactor, even though migrate()
-    itself no longer does.
-    """
+    """End-to-end check that migrate_permissions.main() returns a plain int exit code, even though migrate() itself returns a MigrationOutcome."""
 
     def _main_with_mocked_migrate(self, outcome: MigrationOutcome) -> int:
         """Run main() with find_project_root and migrate() both mocked."""
@@ -1768,7 +1626,6 @@ class TestSupersetDetection(unittest.TestCase):
         When is_superset compares the broader pattern against the narrower one
         Then it reports True (the broader pattern is a superset)
         """
-        # Bash(uv run ruff:*) is superset of Bash(uv run ruff format:*)
         self.assertTrue(
             is_superset("Bash(uv run ruff:*)", "Bash(uv run ruff format:*)")
         )
@@ -1899,11 +1756,10 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        # Should find the close match with high similarity
         self.assertTrue(len(similar) > 0)
         pattern, score, _ = similar[0]
         self.assertEqual(pattern, "Bash(~/bin/open_note_by_title.sh :*)")
-        self.assertGreater(score, 0.9)  # Very similar, just missing space
+        self.assertGreater(score, 0.9)
 
     def test_similarity_returns_ranked_results(self):
         """
@@ -1920,12 +1776,9 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        # Should rank by similarity, with ruff being most similar
         if len(similar) > 0:
             first_pattern, first_score, _ = similar[0]
-            # The most similar should be the ruff pattern
             self.assertEqual(first_pattern, "Bash(uv run ruff:*)")
-            # Scores should be in descending order
             for i in range(len(similar) - 1):
                 self.assertGreaterEqual(similar[i][1], similar[i + 1][1])
 
@@ -1962,7 +1815,6 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=2)
 
-        # Should return at most 2 matches
         self.assertLessEqual(len(similar), 2)
 
     def test_common_prefix_not_flagged_as_similar(self):
@@ -1971,18 +1823,16 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
         When detect_similar_patterns runs against a new same-prefix pattern
         Then no matches are returned because the shared prefix is not discriminating
         """
-        # Create many patterns with same prefix
         existing = [f"Bash(uv run tool{i}:*)" for i in range(20)]
         new_pattern = "Bash(uv run tool99:*)"
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        # Should return empty list because prefix isn't discriminating
         self.assertEqual(len(similar), 0)
 
 
 class TestTOMLSectionPreservation(unittest.TestCase):
-    """Test that write_toml_config preserves other sections (Bug 1)."""
+    """Test that write_toml_config preserves other sections."""
 
     def test_preserves_takeover_mode_section(self):
         """
@@ -1993,7 +1843,6 @@ class TestTOMLSectionPreservation(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "toolguard_hook.toml"
 
-            # Create initial config with multiple sections
             initial_content = """[takeover_mode]
 enabled = true
 no_match_fallback = "deny"
@@ -2009,7 +1858,6 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Write new permissions
             permissions = {
                 "allow": ["Bash(git:*)", "Read(/tmp/*)"],
                 "deny": [],
@@ -2017,16 +1865,13 @@ deny = []
             }
             write_toml_config(config_path, permissions, auto_sort=False)
 
-            # Read back and verify
             new_content = config_path.read_text()
 
-            # Check that other sections are preserved
             self.assertIn("[takeover_mode]", new_content)
             self.assertIn("enabled = true", new_content)
             self.assertIn("[config_sync]", new_content)
             self.assertIn("auto_migrate = false", new_content)
 
-            # Check that permissions were updated
             self.assertIn("Bash(git:*)", new_content)
             self.assertIn("Read(/tmp/*)", new_content)
 
@@ -2039,7 +1884,6 @@ deny = []
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "toolguard_hook.toml"
 
-            # Create initial config with top-level keys
             initial_content = """governed_tools = [
     "Bash",
     "Read",
@@ -2056,19 +1900,15 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Write new permissions
             permissions = {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
             write_toml_config(config_path, permissions, auto_sort=False)
 
-            # Read back and verify
             new_content = config_path.read_text()
 
-            # Check that top-level keys are preserved
             self.assertIn("governed_tools", new_content)
             self.assertIn("additional_supported_tools", new_content)
             self.assertIn("mcp__local-tools__checked_bash", new_content)
 
-            # Check permissions updated
             self.assertIn("Bash(ls:*)", new_content)
 
     def test_creates_permissions_section_when_missing(self):
@@ -2080,7 +1920,6 @@ deny = []
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "toolguard_hook.toml"
 
-            # Create config without [permissions] section
             initial_content = """[takeover_mode]
 enabled = true
 
@@ -2089,18 +1928,14 @@ auto_migrate = false
 """
             config_path.write_text(initial_content)
 
-            # Write permissions
             permissions = {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
             write_toml_config(config_path, permissions, auto_sort=False)
 
-            # Read back and verify
             new_content = config_path.read_text()
 
-            # Check that other sections are preserved
             self.assertIn("[takeover_mode]", new_content)
             self.assertIn("[config_sync]", new_content)
 
-            # Check that [permissions] was added
             self.assertIn("[permissions]", new_content)
             self.assertIn("Bash(git:*)", new_content)
 
@@ -2125,13 +1960,11 @@ auto_migrate = false
 """
             config_path.write_text(initial_content)
 
-            # Write new permissions
             permissions = {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
             write_toml_config(config_path, permissions, auto_sort=False)
 
             new_content = config_path.read_text()
 
-            # Check order is preserved: takeover_mode before permissions before config_sync
             takeover_pos = new_content.index("[takeover_mode]")
             permissions_pos = new_content.index("[permissions]")
             config_sync_pos = new_content.index("[config_sync]")
@@ -2141,12 +1974,7 @@ auto_migrate = false
 
 
 class TestStructuredEntryFallbackRendering(unittest.TestCase):
-    """
-    reassemble_permissions_section's synthesize-from-scratch fallback (TOO-19
-    Phase 0a increment 8): a NEW structured entry (no original source line to
-    reuse) must render as a valid single-line TOML inline table, never a
-    stringified dict.
-    """
+    """reassemble_permissions_section's synthesize-from-scratch fallback: a new structured entry must render as a valid single-line TOML inline table, never a stringified dict."""
 
     def test_new_structured_entry_renders_as_valid_inline_table(self):
         """
@@ -2181,7 +2009,6 @@ class TestStructuredEntryFallbackRendering(unittest.TestCase):
 
             content = config_path.read_text()
 
-            # Not a Python repr -- a real TOML inline table.
             self.assertNotIn("RuleEntry(", content)
             self.assertIn(
                 '{ match = "Bash(git *)", additionalContext = "review carefully" }',
@@ -2217,7 +2044,6 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Add a new pattern
             permissions = {
                 "allow": ["Bash(ls:*)", "Bash(git:*)", "Read(/tmp/*)"],
                 "deny": [],
@@ -2227,7 +2053,6 @@ deny = []
 
             new_content = config_path.read_text()
 
-            # Inline comments should be preserved
             self.assertIn("# This allows ls commands", new_content)
             self.assertIn("# Git commands", new_content)
 
@@ -2264,7 +2089,6 @@ deny = []
             write_toml_config(config_path, permissions, auto_sort=True)
 
             new_content = config_path.read_text()
-            # Verbatim single-quoted literal preserved, comment kept, new rule added.
             self.assertIn("'Bash([regex]\\bfind\\b(?!.*-exec))',", new_content)
             self.assertIn("# find guard", new_content)
             self.assertIn('"Bash(git status:*)"', new_content)
@@ -2290,7 +2114,6 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Rewrite with sorting (will change order)
             permissions = {
                 "allow": ["Bash(git:*)", "Bash(ls:*)"],
                 "deny": [],
@@ -2300,7 +2123,6 @@ deny = []
 
             new_content = config_path.read_text()
 
-            # Comments should still be present
             self.assertIn("# Allow git operations", new_content)
             self.assertIn("# Allow file listing", new_content)
 
@@ -2325,7 +2147,6 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Rewrite
             permissions = {
                 "allow": ["Bash(git:*)", "Bash(ls:*)", "Read(/tmp/*)"],
                 "deny": [],
@@ -2335,11 +2156,9 @@ deny = []
 
             new_content = config_path.read_text()
 
-            # Top comments should be preserved
             self.assertIn("# These permissions are equivalent", new_content)
             self.assertIn("# Extended syntax is supported", new_content)
 
-            # And they should be before the rules
             comment_pos = new_content.index("# These permissions")
             first_rule_pos = new_content.index("Bash(")
             self.assertLess(comment_pos, first_rule_pos)
@@ -2364,7 +2183,6 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Rewrite
             permissions = {
                 "allow": ["Bash(ls:*)", "Bash(git:*)", "Read(/tmp/*)"],
                 "deny": [],
@@ -2374,11 +2192,9 @@ deny = []
 
             new_content = config_path.read_text()
 
-            # Bottom comments should be preserved
             self.assertIn("# TODO: Add more patterns here", new_content)
             self.assertIn("# Review this list regularly", new_content)
 
-            # And they should be after the last rule
             last_rule_pos = new_content.rindex("Read(/tmp/*)")
             comment_pos = new_content.index("# TODO")
             self.assertGreater(comment_pos, last_rule_pos)
@@ -2403,13 +2219,11 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Rewrite
             permissions = {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
             write_toml_config(config_path, permissions, auto_sort=False)
 
             new_content = config_path.read_text()
 
-            # Comments should be preserved
             self.assertIn("# Section 1: Git commands", new_content)
             self.assertIn("# Allow all git operations", new_content)
 
@@ -2434,7 +2248,6 @@ deny = []
 """
             config_path.write_text(initial_content)
 
-            # Rewrite with sorting enabled
             permissions = {
                 "allow": ["Write(/tmp/*)", "Bash(ls:*)"],
                 "deny": [],
@@ -2444,24 +2257,20 @@ deny = []
 
             new_content = config_path.read_text()
 
-            # After sorting, Bash should come before Write
             bash_pos = new_content.index("Bash(ls:*)")
             write_pos = new_content.index("Write(/tmp/*)")
             self.assertLess(bash_pos, write_pos)
 
-            # Comments should move with their rules
             aaa_comment_pos = new_content.index("# AAA pattern")
             zzz_comment_pos = new_content.index("# ZZZ pattern")
 
-            # AAA comment should be before Bash rule
             self.assertLess(aaa_comment_pos, bash_pos)
 
-            # ZZZ comment should be before Write rule
             self.assertLess(zzz_comment_pos, write_pos)
 
 
 class TestBlanketPatternSimilarity(unittest.TestCase):
-    """Test that blanket patterns are not flagged as similar (Bug 3)."""
+    """Test that blanket patterns are not flagged as similar."""
 
     def test_blanket_bash_pattern_not_similar(self):
         """
@@ -2474,7 +2283,6 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        # Should return empty - blanket patterns have no meaningful prefix
         self.assertEqual(len(similar), 0)
 
     def test_blanket_read_pattern_not_similar(self):
@@ -2501,7 +2309,6 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        # New blanket pattern should not be compared
         self.assertEqual(len(similar), 0)
 
     def test_meaningful_prefix_extraction_blanket(self):
@@ -2550,7 +2357,6 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=2)
 
-        # Should return at most 2 matches
         self.assertLessEqual(len(similar), 2)
 
 
@@ -2569,7 +2375,6 @@ class TestMigrationWithRedundantPatterns(ConfigIsolationMixin, unittest.TestCase
         claude_dir = project_root / ".claude"
         claude_dir.mkdir()
 
-        # Create toolguard config with existing patterns
         toml_path = claude_dir / "toolguard_hook.toml"
         toml_content = """[permissions]
 allow = [
@@ -2580,15 +2385,14 @@ deny = []
 """
         toml_path.write_text(toml_content)
 
-        # Create settings.local.json with duplicates and subsets
         settings_path = claude_dir / "settings.local.json"
         settings = {
             "permissions": {
                 "allow": [
-                    "Bash(git:*)",  # Exact duplicate
-                    "Bash(git push:*)",  # Subset of git:*
-                    "Bash(uv run ruff format:*)",  # Subset of uv run ruff:*
-                    "Bash(ls:*)",  # New pattern to migrate
+                    "Bash(git:*)",
+                    "Bash(git push:*)",
+                    "Bash(uv run ruff format:*)",
+                    "Bash(ls:*)",
                 ],
                 "deny": [],
                 "ask": [],
@@ -2597,22 +2401,17 @@ deny = []
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # Run migration
         outcome = migrate(project_root)
 
-        # Check that redundant patterns were removed
         with open(settings_path, "r") as f:
             updated_settings = json.load(f)
 
-        # Should keep only Bash(ls:*) which was migrated (but not redundant before migration)
-        # All redundant patterns should be removed
         remaining = updated_settings["permissions"]["allow"]
-        self.assertNotIn("Bash(git:*)", remaining)  # Exact duplicate - removed
-        self.assertNotIn("Bash(git push:*)", remaining)  # Subset - removed
-        self.assertNotIn("Bash(uv run ruff format:*)", remaining)  # Subset - removed
-        self.assertNotIn("Bash(ls:*)", remaining)  # Migrated - removed
+        self.assertNotIn("Bash(git:*)", remaining)
+        self.assertNotIn("Bash(git push:*)", remaining)
+        self.assertNotIn("Bash(uv run ruff format:*)", remaining)
+        self.assertNotIn("Bash(ls:*)", remaining)
 
-        # Verify patterns were added to toolguard config
         content = toml_path.read_text()
         self.assertIn("Bash(ls:*)", content)
 
@@ -2621,24 +2420,11 @@ deny = []
 
 class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
     """
-    Test that migrate() always writes to the resolved project_root's OWN
-    ``.claude`` directory, never silently falling through to an existing
-    toolguard_hook file at a DIFFERENT directory (e.g. the user's home
-    ``~/.claude``) just because ``discover_config_files`` happened to return
-    one from a less-specific level (TOO-15, real-machine repro 2026-07-16).
-
-    Every test here isolates ``Path.home()`` to an isolated temporary
-    directory, distinct from ``project_root``, so the real developer machine's
-    ``~/.claude`` (which may itself have toolguard configs, per the project's
-    own dogfooded global install) can never leak into these assertions.
-
-    ``migrate()`` receives ``project_root`` directly (it does not call
-    ``find_project_root()`` itself), but internally calls
-    ``discover_config_files(project_root)``, which DOES re-resolve the project
-    root via ``find_project_root()``. So ``project_root`` here is always the
-    mixin's own isolated ``project`` (the same directory the mixin's
-    ``find_project_root`` patch returns) rather than an independently-created
-    directory, keeping the two consistent.
+    migrate() always writes to project_root's OWN .claude directory, never
+    falling through to a toolguard_hook file discover_config_files() found at
+    a less-specific level (e.g. the user's home ~/.claude). migrate() does
+    not call find_project_root() itself, but discover_config_files() does --
+    so project_root here is always the mixin's own isolated project.
     """
 
     def test_migration_targets_project_own_existing_config_not_user_level(self):
@@ -2695,11 +2481,6 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         When migrate runs
         Then it CREATES project_root/.claude/toolguard_hook.toml and adds the new
         pattern there, WITHOUT touching the existing user-level file
-
-        This pins down the actual bug: migrate() must not scan the whole,
-        multi-level discover_config_files() list for the first existing
-        toolguard_hook file -- it must restrict target selection to
-        project_root's own .claude directory.
         """
         home, project_root = self.isolate_config_environment()
         claude_dir = project_root / ".claude"
@@ -2771,9 +2552,8 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
         with open(settings_path, "w") as f:
             json.dump(settings, f)
 
-        # project_root here IS home (the collapsed case), which differs from
-        # the mixin's default (project_root separate from home) -- re-point
-        # find_project_root at project_root specifically for this test.
+        # project_root IS home here; the mixin's default project is home's
+        # sibling, so find_project_root must be re-pointed for this test.
         self.enterContext(
             patch("toolguard.config.find_project_root", return_value=project_root)
         )

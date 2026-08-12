@@ -1,22 +1,19 @@
 """
-Rule-interaction clarity analyzer (P2-F).
+Rule-interaction clarity analyzer.
 
-toolguard's within-file resolution has non-obvious semantics: a deny always wins
-(regardless of which rule is more specific), a broad ask with no matching allow
-collapses to deny, and otherwise the more-specific rule wins.  A rule set can
-therefore be CORRECT yet inscrutable -- even an expert cannot reliably eyeball
-the effective verdict.  A "correct but confusing" config is a latent bug, so
-clarity is a first-class concern alongside security.
+toolguard's within-file resolution has non-obvious semantics: a deny wins over
+any allow or ask in its own layer, however specific they are; otherwise the more
+specific of a matching allow and ask wins, with an exact tie going to ask; and a
+blanket ``*``-class ask is excluded from matching altogether, so a layer holding
+only that declines to decide and the cascade runs on past it.  A rule set can
+therefore be CORRECT yet inscrutable -- even an expert cannot reliably
+eyeball the effective verdict, and a "correct but confusing" config is a latent
+bug.
 
-This module detects a finite, curated catalog of confusing same-file interactions
-and explains the actual semantics, so the security audit and the maintenance
-skill can surface them.  Offering a clearer *equivalent* configuration (only when
-one provably exists) and emitting marker-tagged explanatory comments are later
-slices; this first slice ships the DETECTOR plus a canonical explanation.
-
-First detector: an allow rule whose DEFAULT command-space overlaps a deny or ask
-rule in the SAME config layer.  Overlap is textual (precedence-ignorant); the
-explanation states which rule actually wins so the reader is not surprised.
+This module detects a curated catalog of such interactions and states the
+resolution each one actually produces.  Overlap is decided TEXTUALLY, ignoring
+precedence: detection says two rules share command-space, and the explanation
+says which of them wins.
 """
 
 from dataclasses import dataclass
@@ -30,22 +27,24 @@ from toolguard.tools.pattern_overlap import default_prefix_tokens, prefixes_over
 @dataclass(frozen=True)
 class InteractionFinding:
     """
-    A confusing same-file rule interaction with a calibrated explanation.
+    One confusing rule interaction, with a render-ready explanation.
 
     Attributes:
         tool: Tool the interacting rules apply to (e.g. ``'Bash'``).
-        provenance: Provenance of the config layer/file holding both rules.
-        kind: The interaction class -- ``'deny-shadows-allow'`` or
-            ``'ask-overlaps-allow'``.
+        provenance: Layer holding the ALLOW.  For a same-layer finding the guard
+            is there too; for ``'cross-layer-dependent'`` the guard's layer is in
+            :attr:`guard_provenance`.
+        kind: ``'deny-shadows-allow'``, ``'ask-overlaps-allow'``,
+            ``'multi-section-interaction'`` or ``'cross-layer-dependent'``.
         allow_pattern: The wrapper-free allow body involved.
         guard_section: The section of the overlapping guard -- ``'deny'``,
             ``'ask'``, or ``'deny+ask'`` for a multi-section interaction.
-        guard_pattern: The wrapper-free guard body that overlaps the allow.
-        explanation: A render-ready explanation of the ACTUAL resolution, so the
-            confusing interaction is made legible rather than just flagged.
-        guard_provenance: For a ``'cross-layer-dependent'`` finding, the provenance
-            of the OTHER layer holding the overlapping guard (the allow lives in
-            :attr:`provenance`).  ``None`` for same-file interactions.
+        guard_pattern: The wrapper-free guard body, or ``'<deny> / <ask>'`` for a
+            multi-section interaction.
+        explanation: Prose stating the ACTUAL resolution, so the interaction is
+            made legible rather than merely flagged.
+        guard_provenance: Layer holding the guard, set only for
+            ``'cross-layer-dependent'``; ``None`` otherwise.
     """
 
     tool: str
@@ -59,17 +58,7 @@ class InteractionFinding:
 
 
 def _explain(kind: str, allow: str, guard: str) -> str:
-    """
-    Build the canonical explanation for an overlap finding.
-
-    Args:
-        kind: The interaction class.
-        allow: The allow body involved.
-        guard: The overlapping deny/ask body.
-
-    Returns:
-        A calibrated explanation of the real resolution for this interaction.
-    """
+    """Explanation for a same-layer pairwise overlap; ``kind`` selects the wording."""
     if kind == "deny-shadows-allow":
         return (
             f"deny `{guard}` and allow `{allow}` overlap in this file: for any "
@@ -86,17 +75,7 @@ def _explain(kind: str, allow: str, guard: str) -> str:
 
 
 def _explain_multi_section(allow: str, deny_guard: str, ask_guard: str) -> str:
-    """
-    Explain an allow whose command-space overlaps BOTH a deny and an ask in one file.
-
-    Args:
-        allow: The allow body governed by two guard sections.
-        deny_guard: The overlapping deny body.
-        ask_guard: The overlapping ask body.
-
-    Returns:
-        A calibrated explanation of the combined three-section resolution.
-    """
+    """Explanation for an allow overlapping BOTH a deny and an ask in one layer."""
     return (
         f"allow `{allow}` overlaps BOTH deny `{deny_guard}` and ask `{ask_guard}` "
         f"in this file: three sections govern this command family. Where the deny "
@@ -111,17 +90,10 @@ def _explain_cross_layer(
     section: str, allow: str, allow_more_specific: bool, guard: str
 ) -> str:
     """
-    Explain an allow whose effective verdict depends on a guard in ANOTHER layer.
+    Explanation for an allow whose verdict depends on a guard in ANOTHER layer.
 
-    Args:
-        section: The overlapping guard's section (``'deny'`` or ``'ask'``).
-        allow: The allow body (lives in the more/less specific layer per the flag).
-        allow_more_specific: True when the allow's layer is MORE specific than the
-            guard's layer (a lower specificity distance).
-        guard: The overlapping guard body in the other layer.
-
-    Returns:
-        A calibrated explanation of the cross-layer resolution.
+    ``allow_more_specific`` is True when the allow's layer carries the LOWER
+    specificity index (0 = project, the most specific level).
     """
     if section == "deny":
         if allow_more_specific:
@@ -154,18 +126,17 @@ def find_confusing_interactions(
     """
     Detect confusing allow/guard overlaps for ``tool``, within and across layers.
 
-    Three detector families, all on DEFAULT patterns (``[regex]``/``[glob]``/
-    ``[native]`` are not analysed) and all reported as textual overlaps with a
-    calibrated explanation of the REAL resolution:
+    Only prefix-shaped DEFAULT patterns (``cmd:*`` and ``cmd:**``) take part.
+    Everything else is skipped on whichever side of the comparison it appears --
+    ``[regex]``/``[glob]``/``[native]``, an args-bearing body like
+    ``git commit:-m *``, and a bare ``ls``.  Three families are reported:
 
-    - **Same-file pairwise** -- a DEFAULT allow overlapping a deny
-      (``deny-shadows-allow``) or an ask (``ask-overlaps-allow``) in the same layer.
-    - **Same-file multi-section** -- an allow overlapping BOTH a deny AND an ask in
-      the same layer (``multi-section-interaction``): three sections govern one
-      command family, so the verdict is especially non-obvious.
-    - **Cross-layer** -- an allow whose effective verdict depends on a deny/ask in a
-      DIFFERENT (more- or less-specific) layer (``cross-layer-dependent``): the
-      outcome cannot be understood from a single file.
+    - **Same-layer pairwise** -- an allow overlapping a deny
+      (``deny-shadows-allow``) or an ask (``ask-overlaps-allow``).
+    - **Same-layer multi-section** -- an allow overlapping BOTH a deny AND an ask
+      (``multi-section-interaction``).
+    - **Cross-layer** -- an allow overlapping a deny/ask in a layer of different
+      specificity (``cross-layer-dependent``).
 
     Args:
         config: The resolved configuration to inspect.
@@ -196,15 +167,16 @@ def find_confusing_interactions(
 
 def _same_layer_findings(tool: str, layer) -> List[InteractionFinding]:
     """
-    Same-file findings for one layer: pairwise overlaps plus multi-section overlaps.
+    Same-layer findings for one layer: pairwise overlaps plus multi-section overlaps.
 
-    Emits ``deny-shadows-allow`` / ``ask-overlaps-allow`` for each overlapping
-    (allow, guard) pair, and a ``multi-section-interaction`` for any allow that
-    overlaps BOTH a deny and an ask in this file.
+    Emits ``deny-shadows-allow`` / ``ask-overlaps-allow`` for every overlapping
+    (allow, guard) pair, and one ``multi-section-interaction`` for an allow that
+    overlaps both a deny and an ask -- naming the first overlapping guard from
+    each section.
     """
     findings: List[InteractionFinding] = []
     allow_tokens = [(a, default_prefix_tokens(a)) for a in layer.allow]
-    # Per allow, remember the guards it overlaps in each section (for multi-section).
+    # allow -> section -> overlapping guards, for the multi-section pass below.
     overlaps: dict = {}
     guard_sets = (
         ("deny", layer.deny, "deny-shadows-allow"),
@@ -254,11 +226,8 @@ def _cross_layer_findings(tool: str, layers: List) -> List[InteractionFinding]:
     """
     Findings where an allow's verdict depends on a guard in a different-specificity layer.
 
-    For every allow in one layer and every deny/ask in another layer at a DIFFERENT
-    specificity, a textual overlap yields a ``cross-layer-dependent`` finding whose
-    explanation reflects which layer is more specific (and therefore decides).
-    Same-specificity layers are skipped -- they resolve as one level, not a
-    cross-level dependency.
+    Layers of equal specificity are skipped: they resolve as one level, so a guard
+    there is not a cross-level dependency.
     """
     findings: List[InteractionFinding] = []
     entries = [
@@ -275,7 +244,7 @@ def _cross_layer_findings(tool: str, layers: List) -> List[InteractionFinding]:
         for guard_layer, _, guards in entries:
             guard_spec = guard_layer.provenance.specificity
             if guard_spec == allow_spec:
-                continue  # same level: resolved together, not a cross-level dependency
+                continue
             allow_more_specific = allow_spec < guard_spec
             for section, guard, guard_tokens in guards:
                 if guard_tokens is None:

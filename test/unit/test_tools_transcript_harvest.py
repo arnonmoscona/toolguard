@@ -1,17 +1,4 @@
-"""
-Unit tests for toolguard.tools.transcript_harvest -- harvesting Claude Code
-conversation transcripts into the shared LogEntry corpus shape.
-
-Tests cover:
-- Bash tool_use -> EXECUTED / REFUSED / ERROR / UNKNOWN status derivation.
-- File-tool (Write) uses input.file_path as the command/target.
-- Non-governed tools are skipped.
-- Timestamps are parsed to naive local datetimes; corpus is time-sorted.
-- since / max_age_days windowing.
-- isSidechain -> 'subagent' agent attribution.
-- Missing directory and malformed lines are handled gracefully.
-- transcript_dir_for_project path encoding.
-"""
+"""Unit tests for toolguard.tools.transcript_harvest -- transcripts into the LogEntry corpus shape."""
 
 import json
 import tempfile
@@ -265,10 +252,6 @@ class TestToolExtraction(_TempDirMixin, unittest.TestCase):
     )
     def test_command_for_tool_reads_the_registered_key(self):
         """
-        TOO-45 punch-list #10 fix pass (m3): _command_for_tool must dispatch
-        through the tool_spec registry, not a hardcoded 'command'/'file_path'
-        literal.
-
         Given a Read registry entry whose payload key is 'target_path'
         When a tool_input carrying only 'target_path' is extracted
         Then the target is returned (not None)
@@ -440,10 +423,7 @@ class TestRobustnessAndHelpers(_TempDirMixin, unittest.TestCase):
 
 
 class TestExtractText(unittest.TestCase):
-    """
-    _extract_text flattens a tool_result content value (string, list of blocks,
-    None, or other) into a single string.
-    """
+    """_extract_text flattens a tool_result content value into a single string."""
 
     def test_plain_string_passthrough(self):
         """

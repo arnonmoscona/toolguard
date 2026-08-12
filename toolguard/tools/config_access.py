@@ -1,14 +1,11 @@
 """
-Thin facade over :class:`~toolguard.config.Configuration` for toolguard tooling.
+Configuration access for toolguard's own skills and dev tooling: per-layer rule views
+with provenance, a structural summary, tool discovery, and a synthetic-config builder
+that applies a proposed rule edit in memory rather than to a file.
 
-This module provides a small, stable surface for skills and automation tooling to
-inspect the toolguard configuration hierarchy without reaching into hook internals
-or reimplementing config logic.
-
-All real work delegates to :func:`~toolguard.config.load_configuration` and the
-:class:`~toolguard.config.Configuration` methods. This facade only adds convenience
-wrappers tailored to the tooling use-cases (per-layer rule listing with provenance,
-effective takeover state, etc.).
+TOML parsers discard comments, so a loaded :class:`~toolguard.config.Configuration`
+cannot see the ``#NOSECURITY`` acknowledgement tag. This module re-reads the layer
+file to recover it -- see :func:`_layer_comment_map`.
 """
 
 import re
@@ -37,19 +34,20 @@ from toolguard.rule_sort import (
 @dataclass(frozen=True)
 class LayerRules:
     """
-    Allow, deny, and ask patterns for a single configuration layer, with provenance.
+    One configuration layer's allow, deny and ask patterns, with provenance.
 
-    This is the per-layer view of rules as exposed by the config facade.  It is
-    intentionally flat (no extended-syntax interpretation here) so the caller can
-    inspect raw patterns as the user authored them.
+    Patterns are wrapper-free but otherwise uninterpreted -- an extended-syntax
+    prefix such as ``[regex]`` is left on the string for the caller to read.
 
     Attributes:
         provenance: Origin of this layer (path, level, source type).
-        allow: Raw (wrapper-free) allow patterns from this layer.
-        deny: Raw (wrapper-free) deny patterns from this layer.
-        ask: Raw (wrapper-free) ask patterns from this layer.  These come from
-            toolguard_hook layers only (native Claude settings have no ``ask``
-            concept).
+        allow: Allow patterns from this layer. On a native layer under takeover
+            mode, the ignored blanket allows have already been removed.
+        deny: Deny patterns from this layer.
+        ask: Ask patterns from this layer. Always empty for a NATIVE layer --
+            :func:`per_layer_rules` drops those, though
+            :meth:`~toolguard.config.Configuration.permission_layers` returns
+            them.
     """
 
     provenance: Provenance
@@ -62,9 +60,6 @@ class LayerRules:
 class ConfigSummary:
     """
     High-level summary of the resolved toolguard configuration for a project.
-
-    Intended for skills that need a quick structural overview without stepping
-    through layers individually.
 
     Attributes:
         start_dir: The directory used to discover the configuration hierarchy.
@@ -88,11 +83,10 @@ def load_config(start_dir: Optional[Path] = None) -> Configuration:
     """
     Load the toolguard configuration hierarchy starting from ``start_dir``.
 
-    This is a thin re-export of :func:`~toolguard.config.load_configuration`
-    with ``ignore_env_override=True`` so that a stale ``CLAUDE_SETTINGS_PATH``
-    environment variable does not divert the hierarchy walk away from the
-    project.  Tools always want the project-rooted hierarchy, not a single
-    explicit file.
+    :func:`~toolguard.config.load_configuration` with
+    ``ignore_env_override=True``: tooling always wants the project-rooted
+    hierarchy, never the single explicit file a stale ``CLAUDE_SETTINGS_PATH``
+    would otherwise select.
 
     Args:
         start_dir: Directory to start project-root discovery from.  Defaults to
@@ -108,45 +102,26 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
     """
     Return per-layer allow/deny/ask rules for ``tool_name``, most-specific first.
 
-    Delegates entirely to
-    :meth:`~toolguard.config.Configuration.permission_layers` for all three
-    lists -- allow, deny, AND ask (takeover filtering, extraction, and
-    structured-entry normalization already applied there via
-    :class:`~toolguard.config.ToolPatternLayer`). TOO-19 correctness fix: this
-    function previously took ``allow``/``deny`` from ``ToolPatternLayer`` but
-    hand-rolled ``ask`` from the layer's raw content with a bare
-    ``isinstance(perm, str)`` filter -- inconsistent within one function body,
-    and it silently dropped a structured (``{match = ..., ...}``) ``ask``
-    entry, making it invisible to both maintenance and security-audit tooling.
+    All three lists come from
+    :meth:`~toolguard.config.Configuration.permission_layers`, which has
+    already applied takeover filtering and normalized structured
+    (``{match = ..., ...}``) entries. EVERY discovered layer gets a
+    :class:`LayerRules`, including one that contributes no rule for this tool.
+    Ask is dropped for native layers -- see :attr:`LayerRules.ask`.
 
     Args:
         config: The resolved configuration.
         tool_name: Tool to extract rules for (e.g. ``'Bash'``, ``'Read'``).
-
-    Returns:
-        List of :class:`LayerRules`, one per discovered config layer, ordered
-        most-specific first.
     """
-    # permission_layers returns ToolPatternLayer objects (allow + deny + ask,
-    # takeover-filtered, structured entries included)
     tool_layers: Tuple[ToolPatternLayer, ...] = config.permission_layers(tool_name)
 
-    # Build a provenance -> ToolPatternLayer index for quick lookup
     prov_to_tool_layer = {tl.provenance: tl for tl in tool_layers}
 
     result: List[LayerRules] = []
     for layer in config.layers:
         tl = prov_to_tool_layer.get(layer.provenance)
-        # allow/deny come from the ToolPatternLayer (with takeover filtering).
         allow = tl.allow if tl is not None else ()
         deny = tl.deny if tl is not None else ()
-        # ask is a toolguard extension: native ('claude') layers have no such
-        # concept, mirrored here exactly as allow/deny's own takeover/native
-        # handling lives in permission_layers() itself -- see that method's
-        # own per-tool-name extraction, which already gates every list on
-        # is_native being irrelevant to native json layers (they simply never
-        # populate `permissions.ask`); this explicit guard just keeps the
-        # historical "native layers never report ask" contract explicit here.
         ask = tl.ask if (tl is not None and not layer.is_native) else ()
 
         result.append(
@@ -162,36 +137,12 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
 
 
 def effective_takeover(config: Configuration) -> TakeoverConfig:
-    """
-    Return the resolved takeover-mode configuration.
-
-    Thin wrapper over :meth:`~toolguard.config.Configuration.takeover_mode`.
-
-    Args:
-        config: The resolved configuration.
-
-    Returns:
-        A :class:`~toolguard.config.TakeoverConfig` describing the effective
-        takeover state, the ignored allow patterns, and whether a conflict was
-        detected.
-    """
+    """Return the resolved takeover-mode configuration."""
     return config.takeover_mode()
 
 
 def config_summary(config: Configuration) -> ConfigSummary:
-    """
-    Return a high-level summary of the configuration.
-
-    Useful for skills that need a quick structural overview of what was
-    discovered (which files, how many levels, which tools are governed, etc.)
-    without stepping through individual layer details.
-
-    Args:
-        config: The resolved configuration.
-
-    Returns:
-        A :class:`ConfigSummary` describing the configuration.
-    """
+    """Return a high-level :class:`ConfigSummary` of the configuration."""
     return ConfigSummary(
         start_dir=config.start_dir,
         project_root=config.project_root,
@@ -209,21 +160,16 @@ def config_summary(config: Configuration) -> ConfigSummary:
 
 def discover_tools(config: Configuration) -> Tuple[str, ...]:
     """
-    Return a sorted tuple of all tool names mentioned in any layer's permission lists.
+    Return every tool name appearing in a ``[permissions]`` list, sorted.
 
-    A tool name is the text before the first ``"("`` in a ``"Tool(body)"``
-    permission pattern string.  Scans allow, deny, and ask lists across every
-    discovered config layer.  Each raw entry is normalized via
-    :func:`~toolguard.rule_entry.normalize_entry` (TOO-19 correctness fix):
-    the previous ``isinstance(perm, str)`` check silently skipped a
-    structured (``{match = ..., ...}``) entry, so a tool governed ONLY by
-    structured entries was never discovered -- invisible to maintenance and
-    security-audit tooling that depend on this function.
+    A tool name is the text before the first ``"("`` of a ``Tool(body)``
+    pattern. The ``allow``, ``deny`` and ``ask`` lists of every discovered
+    layer are scanned, native and toolguard alike; ``[hard_deny]`` is NOT, so a
+    tool governed only by a hard-deny rule does not appear here.
 
-    This is the canonical tool-discovery implementation extracted from the
-    inline loop that :func:`~toolguard.tools.danger.danger` formerly ran
-    internally.  Callers in both the audit and context paths share this
-    single implementation to prevent drift.
+    Each element is normalized first, so a structured (``{match = ..., ...}``)
+    entry names its tool exactly as a plain string does -- except in a native
+    layer, where a structured entry is not recognized at all.
 
     Args:
         config: The resolved configuration.
@@ -264,41 +210,32 @@ def with_layer_rules_replaced(
     added: List[str],
 ) -> Configuration:
     """
-    Return a new :class:`~toolguard.config.Configuration` where, in the single
-    layer identified by ``provenance``, the ``list_type`` list (``'allow'``,
-    ``'deny'``, or ``'ask'``) for ``tool`` has every pattern in ``removed``
-    deleted and every pattern in ``added`` appended.
+    Return a new :class:`~toolguard.config.Configuration` with one layer's
+    permission list edited.
 
-    This is the canonical synthetic-config builder shared by redundancy analysis,
-    consolidation proposals, hierarchy migration, and general edit-proposal
-    application (:func:`toolguard.tools.edit_proposal.apply_edits`).  Both
-    ``removed`` and ``added`` are wrapper-free pattern bodies; the function
-    handles the ``Tool(body)`` wrapping internally, preserving the same form used
-    in the raw layer content.
+    In the layer identified by ``provenance``, the ``list_type`` list for
+    ``tool`` loses every pattern in ``removed`` and gains every pattern in
+    ``added``, appended after the removals. Both hold wrapper-free pattern
+    bodies; the ``Tool(body)`` wrapping is applied here.
 
-    The modification is SHALLOW: only the target layer's ``list_type`` list is
-    reconstructed.  All other layer content -- the other permission lists and all
-    patterns for other tools -- is shared by reference via
-    :class:`types.MappingProxyType` rebuilding.
-
-    If no layer matches ``provenance``, the original ``config`` is returned
-    unchanged (safe fall-through).
+    The rewrite is SHALLOW: only the target layer's ``list_type`` list is
+    rebuilt. Every other permission list, and every other tool's patterns in
+    the same list, is shared by reference with the original.
 
     Args:
         config: The original :class:`~toolguard.config.Configuration`.
         tool: Tool name whose list is modified (e.g. ``'Bash'``).
-        provenance: The :class:`~toolguard.config.Provenance` identifying which
-            layer to modify.  Only the first matching layer is modified.
-        list_type: Which permission list to edit: ``'allow'``, ``'deny'``, or
-            ``'ask'``.
-        removed: Set of wrapper-free pattern bodies to remove.  All occurrences
-            of each pattern are removed.
-        added: List of wrapper-free pattern bodies to append, in the given order.
-            These are appended AFTER removals.
+        provenance: Identifies the layer to modify. Only the FIRST matching
+            layer is modified.
+        list_type: ``'allow'``, ``'deny'``, or ``'ask'``.
+        removed: Pattern bodies to remove; every occurrence of each one goes.
+        added: Pattern bodies to append, in the given order.
 
     Returns:
-        A new :class:`~toolguard.config.Configuration` with the modified layer,
-        or the original ``config`` when ``provenance`` matches no layer.
+        A new :class:`~toolguard.config.Configuration` with the modified layer.
+        The original ``config`` object is returned unchanged when ``provenance``
+        matches no layer, and also when the matched layer's ``permissions`` is
+        not a table or its ``list_type`` value is not a list.
 
     Raises:
         ValueError: When ``list_type`` is not one of ``allow``/``deny``/``ask``.
@@ -329,24 +266,14 @@ def with_layer_rules_replaced(
             new_layers.append(layer)
             continue
 
-        # Remove all occurrences of each pattern in ``removed``, then append added.
+        # Membership is decided on the NORMALIZED pattern, never on the raw
+        # element: a structured entry is a `dict`, so `element in
+        # wrapped_removed` would try to hash it and raise `TypeError`.
         #
-        # Removal membership is decided by PATTERN, never by the raw list
-        # element itself: a structured entry is a `dict`, and `wrapped_removed`
-        # is a `Set[str]`, so `element not in wrapped_removed` would try to
-        # hash the dict and raise `TypeError`. `normalize_entry` gives us the
-        # wrapper-intact pattern (matching `wrapped_removed`'s form) without
-        # needing to know the element's shape.
-        #
-        # A kept element is re-appended UNCHANGED (the original `str`/`dict`
-        # object, not a re-rendering of it) so that editing one pattern in a
-        # layer never touches -- byte-for-byte -- any enrichment on another
-        # entry in the same list.
-        #
-        # An element that fails to normalize (`entry is None`, e.g. a
-        # malformed structured entry) is kept as-is rather than dropped: this
-        # function's job is editing a list, not validating it. Its issues are
-        # surfaced separately by `validate_permissions` (TOO-19 increment 4).
+        # A kept element is re-appended as the original `str`/`dict` object,
+        # not a re-rendering of it, so editing one pattern never reformats a
+        # neighbour. An element that fails to normalize is kept for the same
+        # reason: this function edits a list, it does not validate one.
         new_list = []
         for element in target_list:
             entry, _issues = normalize_entry(element, is_native=layer.is_native)
@@ -358,10 +285,8 @@ def with_layer_rules_replaced(
         new_perms[list_type] = new_list
         new_content = dict(layer.content)
         new_content["permissions"] = new_perms
-        # `dataclasses.replace` (not a fresh `ConfigLayer(...)` call) so every
-        # non-`content` field -- `unexpected_keys`, `duplicate_format`,
-        # `shadowed_path`, and any field added to `ConfigLayer` in the future
-        # -- carries through automatically instead of silently resetting to
+        # `dataclasses.replace`, not a fresh `ConfigLayer(...)`: every
+        # non-`content` field carries through instead of silently resetting to
         # its default.
         new_layer = replace(layer, content=MappingProxyType(new_content))
         new_layers.append(new_layer)
@@ -383,21 +308,7 @@ def with_layer_allow_replaced(
     """
     Allow-list specialisation of :func:`with_layer_rules_replaced`.
 
-    Retained as the canonical allow-only builder used by redundancy analysis,
-    consolidation proposals, and hierarchy migration; it simply delegates with
-    ``list_type='allow'`` so there is a single implementation.
-
-    Args:
-        config: The original :class:`~toolguard.config.Configuration`.
-        tool: Tool name whose allow list is modified (e.g. ``'Bash'``).
-        provenance: The :class:`~toolguard.config.Provenance` identifying which
-            layer to modify.
-        removed: Set of wrapper-free pattern bodies to remove from the allow list.
-        added: List of wrapper-free pattern bodies to append to the allow list.
-
-    Returns:
-        A new :class:`~toolguard.config.Configuration` with the modified layer,
-        or the original ``config`` when ``provenance`` matches no layer.
+    Arguments and return value are that function's, with ``list_type='allow'``.
     """
     return with_layer_rules_replaced(config, tool, provenance, "allow", removed, added)
 
@@ -413,26 +324,14 @@ def neutralized_by_takeover(
     """
     Return True when a native allow pattern is intentionally neutralized by takeover mode.
 
-    A pattern is neutralized when all three conditions hold:
-
-    1. Takeover mode is enabled (``takeover.enabled`` is ``True``).
-    2. The pattern originates from a native Claude settings layer (``is_native``).
-    3. The extracted pattern appears in the effective ignored-allow set
-       (``takeover.normalized_ignored_patterns()``).
-
-    This is the single source of truth for the "native blanket allow
-    intentionally in the ignored set under takeover -- skip as a risk"
-    rule that :func:`~toolguard.tools.danger.danger` formerly applied
-    inline.
+    Such a pattern is still written in the config file, but takeover mode strips
+    it from the native layer's allow list before any resolution reads it.
 
     Args:
         pattern: The extracted (tool-wrapper-free) allow pattern to test.
         is_native: Whether the layer that owns the pattern is a native Claude
             settings layer (``provenance.source_type == 'claude'``).
         takeover: The resolved takeover configuration.
-
-    Returns:
-        ``True`` when all three conditions hold; ``False`` otherwise.
     """
     return (
         takeover.enabled
@@ -445,10 +344,9 @@ def neutralized_by_takeover(
 # Per-rule comment exposure (enables the #NOSECURITY acknowledge-not-hide tag)
 # ---------------------------------------------------------------------------
 
-# ``#NOSECURITY`` (optionally ``# NOSECURITY``), case-insensitive, with an
-# optional free-form reason after an optional colon.  Mirrors bandit's
-# ``# nosec`` precedent.  A bare tag yields an empty ("") reason; an absent tag
-# yields ``None`` (see :meth:`RuleComment.nosecurity_reason`).
+#: ``#NOSECURITY`` (or ``# NOSECURITY``), case-insensitive, with an optional
+#: free-form reason after an optional colon. Group 1 is the reason, empty for a
+#: bare tag.
 _NOSECURITY_RE = re.compile(r"#\s*NOSECURITY\b\s*:?\s*(.*)", re.IGNORECASE)
 
 
@@ -457,15 +355,13 @@ class RuleComment:
     """
     The source-file comments attached to a single permission rule.
 
-    TOML parsers discard comments, so these are recovered by re-reading the
-    layer file and re-associating leading/inline comments with their rule (via
-    :func:`~toolguard.rule_sort.parse_permissions_section_with_comments`).  Only
-    exists for ``toml`` layers; native ``json`` settings carry no comments.
+    Recovered by re-reading the layer file (see :func:`_layer_comment_map`), and
+    produced for TOML layers only.
 
     Attributes:
         list_type: Which list the rule lives in (``'allow'``/``'deny'``/``'ask'``).
-        pattern: The extracted inner pattern body (tool wrapper stripped), aligned
-            with the entries in :attr:`LayerContext.allow`/``deny``/``ask``.
+        pattern: The rule's inner pattern body, tool wrapper stripped -- the
+            same form as :attr:`LayerContext.allow`/``deny``/``ask``.
         leading: The comment block immediately preceding the rule line (``""``
             when none), newlines preserved.
         inline: The trailing ``#`` comment on the rule's own line (``""`` when none).
@@ -480,9 +376,8 @@ class RuleComment:
         """
         Return the ``#NOSECURITY`` reason for this rule, or ``None`` when untagged.
 
-        Checks the inline comment first (more specific to the rule), then the
-        leading block.  A bare ``#NOSECURITY`` returns ``""`` (tagged, no reason);
-        ``#NOSECURITY: <reason>`` returns the stripped reason text.
+        The inline comment wins over the leading block, being the more
+        specific of the two. A bare tag returns ``""``, not ``None``.
         """
         for text in (self.inline, self.leading):
             match = _NOSECURITY_RE.search(text)
@@ -493,10 +388,8 @@ class RuleComment:
 
 def _split_tool_pattern(full_pattern: str) -> Tuple[str, str]:
     """
-    Split a full ``Tool(body)`` pattern into ``(tool, body)``.
-
-    Falls back to ``("", full_pattern)`` when the pattern has no tool wrapper,
-    so bare patterns still key deterministically.
+    Split a full ``Tool(body)`` pattern into ``(tool, body)``, or into
+    ``("", full_pattern)`` when there is no wrapper.
     """
     if "(" in full_pattern and full_pattern.endswith(")"):
         return full_pattern[: full_pattern.index("(")], full_pattern[
@@ -509,21 +402,9 @@ def _inline_comment_after_pattern(line: str) -> str:
     """
     Extract a trailing ``#`` comment that follows a rule's own quoted value(s).
 
-    Locates the LAST quote character in *line* and returns the first ``#``-to-end
-    run after it, stripped.  Returns ``""`` when there is no trailing comment.
-    Anchoring on the closing quote avoids treating a ``#`` inside a quoted value
-    (e.g. a regex pattern, or a structured entry's ``additionalContext``) as a
-    comment.
-
-    Despite the parameter name, *line* is a rule's full original source span as
-    produced by :func:`~toolguard.rule_sort.parse_permissions_section_with_comments`
-    -- always a single physical line, for either a plain pattern or a
-    structured ``{...}`` entry (TOO-19 corrective change: a structured entry
-    spanning multiple physical lines is not valid TOML 1.0, and that function
-    now raises rather than returning one -- see its own docstring). This
-    still operates on the whole string rather than assuming "no embedded
-    newline", which costs nothing and stays correct even if a future
-    ``RuleEntry.raw`` shape were ever multi-valued in some other way.
+    Returns ``""`` when there is none. Anchoring on the LAST quote in *line*
+    is what keeps a ``#`` inside a quoted value -- a regex body, a structured
+    entry's ``additionalContext`` -- from being read as the start of a comment.
     """
     last_quote = max(line.rfind("'"), line.rfind('"'))
     if last_quote == -1:
@@ -539,27 +420,18 @@ def _layer_comment_map(
     """
     Build a ``(list_type, tool, inner_pattern) -> RuleComment`` map for a layer.
 
-    Reads the layer's TOML file and re-associates comments with rules.  Returns
-    an empty map for native (``json``) layers, an unreadable/absent file, a
-    file with no ``[permissions]`` section, or a file this module's own
-    parser cannot parse (``tomllib.TOMLDecodeError`` -- most notably a
-    structured entry written across multiple physical lines, which is not
-    valid TOML 1.0 -- see ``toolguard.rule_sort``'s top-of-file docstring) --
-    so callers can treat "no comments", "cannot read comments", and "cannot
-    parse comments" identically (all three degrade to no acknowledgement,
-    which is the safe direction: a finding is shown normally rather than
-    hidden). This is a best-effort ENRICHMENT read, independent of whether
-    ``toolguard.config`` itself already loaded (or fail-open-skipped) this
-    same file -- catching the parse error here, rather than letting it
-    propagate, keeps one malformed file from crashing an entire audit run
-    over what is, for this particular facade, a purely cosmetic recovery.
+    Best-effort ENRICHMENT read: it yields an empty map for a layer that is not
+    TOML, for a file that is missing or fails to open, for a file with no
+    ``[permissions]`` section, and for a ``[permissions]`` section that does not
+    parse as TOML. Failing quietly is deliberate -- one malformed file must not
+    abort a whole tooling run, and what is lost here is a comment, never a rule.
 
     Args:
         provenance: Origin of the layer whose file is read.
 
     Returns:
         Mapping from ``(list_type, tool, inner_pattern)`` to its
-        :class:`RuleComment`.  Rules without any comment are omitted.
+        :class:`RuleComment`. Rules without any comment are omitted.
     """
     if provenance.file_format != "toml":
         return {}
@@ -603,9 +475,7 @@ def rule_comments_for_tool(
     """
     Return all :class:`RuleComment` records for *tool* in the given layer.
 
-    Convenience wrapper over :func:`_layer_comment_map` that filters to a single
-    tool and drops the key, for embedding in :class:`LayerContext`.  Order is
-    stable (allow, then deny, then ask; insertion order within each).
+    Ordered allow, then deny, then ask; source order within each list.
     """
     return tuple(
         comment
@@ -620,20 +490,15 @@ def nosecurity_reason_for(
     """
     Return the ``#NOSECURITY`` reason tagged on a specific rule, or ``None``.
 
-    Looks the rule up by ``(list_type, tool, pattern)`` in its layer's recovered
-    comment map.  ``None`` means "not tagged" (or the comment could not be read);
-    ``""`` means "tagged with no reason"; any other string is the reason.  This
-    is the deterministic hook the audit uses to acknowledge-not-hide an
-    intentionally-insecure rule.
+    ``None`` means "not tagged" -- and also covers "the layer's comments could
+    not be read at all", which :func:`_layer_comment_map` does not distinguish.
+    ``""`` means "tagged with no reason"; any other string is the reason.
 
     Args:
         provenance: Origin of the rule (its layer file is read for comments).
         list_type: ``'allow'``/``'deny'``/``'ask'``.
         tool: Tool name the rule belongs to (e.g. ``'Bash'``).
         pattern: Extracted inner pattern body (tool wrapper stripped).
-
-    Returns:
-        The reason string (possibly empty) when tagged, else ``None``.
     """
     comment = _layer_comment_map(provenance).get((list_type, tool, pattern))
     return comment.nosecurity_reason() if comment is not None else None
@@ -647,11 +512,7 @@ def nosecurity_reason_for(
 @dataclass(frozen=True)
 class LayerContext:
     """
-    Per-layer rule view used by the audit context.
-
-    Carries the full pattern lists for a single configuration layer alongside
-    enough metadata for an AI pass to reason about layer identity without
-    reimplementing config logic.
+    One layer's rules for one tool, as the audit context carries them.
 
     Attributes:
         locus: Human-readable origin label from ``provenance.describe()``.
@@ -659,12 +520,11 @@ class LayerContext:
             (``provenance.source_type == 'claude'``).
         allow: Extracted allow patterns for this tool in this layer.
         deny: Extracted deny patterns for this tool in this layer.
-        ask: Extracted ask patterns for this tool in this layer
-            (empty for native layers, which have no ask concept).
-        comments: Per-rule comments recovered from the layer file for this tool
-            (leading + inline), one :class:`RuleComment` per commented rule.
-            Empty for native (``json``) layers and for rules without comments.
-            Exposes the ``#NOSECURITY`` annotations an AI pass reasons about.
+        ask: Extracted ask patterns for this tool in this layer -- always
+            empty for a native layer, see :attr:`LayerRules.ask`.
+        comments: One :class:`RuleComment` per commented rule for this tool,
+            carrying the ``#NOSECURITY`` tags. An uncommented rule is absent
+            from it, and a non-TOML layer contributes none at all.
     """
 
     locus: str
@@ -695,22 +555,17 @@ class AuditContext:
     """
     Consolidated configuration context for an AI-assisted security pass.
 
-    Bundles everything the deterministic analyzers see into a single
-    serializable object so an LLM skill can receive exactly the same
-    consolidated material without reimplementing config logic.
-
     Attributes:
         summary: High-level configuration summary (discovered files,
             governed tools, layer count, etc.).
         takeover: Resolved takeover-mode configuration.
-        tools: Per-tool rule hierarchy, one :class:`ToolContext` per
-            tool name found in any layer, sorted by tool name.
-        neutralized_allow_patterns: Flat sorted de-duplicated tuple of every
-            allow pattern (across all tools and layers) for which
-            :func:`neutralized_by_takeover` returns ``True``.  These are
-            native blanket allows that takeover mode intentionally suppresses,
-            listed here so the AI pass can identify them without rechecking
-            the takeover logic itself.
+        tools: Per-tool rule hierarchy, one :class:`ToolContext` per tool name
+            :func:`discover_tools` found, sorted by tool name.
+        neutralized_allow_patterns: Sorted, de-duplicated pattern BODIES of the
+            native allow rules takeover mode suppresses; empty when takeover
+            mode is off. The tool wrapper is dropped before de-duplication, so
+            ``Bash(*)`` and ``Read(*)`` collapse into a single ``'*'`` and the
+            tool they came from is not recoverable from this tuple.
     """
 
     summary: ConfigSummary
@@ -723,23 +578,9 @@ def audit_context(config: Configuration) -> AuditContext:
     """
     Build and return a consolidated :class:`AuditContext` for ``config``.
 
-    Assembles the full rule hierarchy, takeover state, and the set of
-    neutralized native blanket allow patterns into one value using only the
-    existing config-facade helpers -- no detection logic, no custom parsing.
-
     ``neutralized_allow_patterns`` is computed from the RAW native layer
-    content rather than from :func:`per_layer_rules`, because
-    :func:`per_layer_rules` (via ``Configuration.permission_layers``) already
-    filters out takeover-suppressed patterns before returning them.  Scanning
-    the raw content is the only way to discover which patterns were present in
-    the original config but suppressed by takeover mode.
-
-    Args:
-        config: The resolved configuration.
-
-    Returns:
-        An :class:`AuditContext` ready for serialization and hand-off to an
-        AI-assisted audit pass.
+    content, not from :func:`per_layer_rules`, which has already dropped the
+    takeover-suppressed patterns.
     """
     summary = config_summary(config)
     takeover = effective_takeover(config)
@@ -767,10 +608,6 @@ def audit_context(config: Configuration) -> AuditContext:
             )
         )
 
-    # Compute neutralized_allow_patterns from raw native layer content.
-    # per_layer_rules (via permission_layers) already filters out takeover-
-    # suppressed patterns, so we must look at the unfiltered raw allow lists
-    # to discover which native patterns are being suppressed.
     neutralized: Set[str] = set()
     if takeover.enabled:
         for layer in config.layers:

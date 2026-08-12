@@ -85,7 +85,6 @@ class TestHarvestCorpus(unittest.TestCase):
         ):
             corpus = harvest_corpus(Path("/proj"), max_age_days=30)
         self.assertEqual([e.command for e in corpus], ["ls -la", "git status"])
-        # The daily logs were read from <root>/logs, transcripts from the project dir.
         self.assertEqual(log_harvest.call_args.args[0], Path("/proj/logs"))
         self.assertEqual(log_harvest.call_args.kwargs["max_age_days"], 30)
         self.assertEqual(transcript_harvest.call_args.kwargs["max_age_days"], 30)

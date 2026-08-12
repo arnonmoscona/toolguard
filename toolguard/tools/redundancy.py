@@ -1,38 +1,17 @@
 """
-Redundancy detection for toolguard permission rules.
+Redundancy detection for toolguard permission rules.  Two independent strategies:
 
-Two complementary detection strategies are provided:
+1. **Static duplicates** -- within one layer's allow (or deny or ask) list for one
+   tool, patterns whose bodies normalise to the same string, e.g.
+   ``uv run pytest :*`` and ``uv run pytest:*``.  Purely textual; see
+   :func:`_normalised_body` for what normalisation does not preserve.
 
-1. **Static exact/normalized-equal duplicate detection.**
-   Within a tool's allow (or deny or ask) list, patterns that normalise to the
-   same form are flagged as duplicates.  Normalisation strips whitespace and
-   lowercases the body of the pattern (type prefix kept for grouping), using
-   :func:`~toolguard.patterns.parse_pattern`.  Example: ``uv run pytest :*`` and
-   ``uv run pytest:*`` normalise to the same body and are flagged.
+2. **Corpus-backed subsumption** -- an allow rule whose removal changes no
+   decision anywhere in a harvested command corpus, established by replaying the
+   corpus against the config with and without it.
 
-2. **Corpus-backed subsumption.**
-   A rule R is corpus-redundant when removing it from the config changes NO
-   decision across a harvested command corpus -- meaning another rule already
-   covers every command R would have matched.  This check uses
-   :func:`~toolguard.tools.replay.replay` (config-with-R vs config-without-R)
-   and classifies R as redundant when the diff contains zero broadened entries
-   (removing R never loosens anything) AND zero tightened entries (removing R
-   never tightens anything -- so no decision changes AT ALL).
-
-Scope / deferred work
----------------------
-Static family-based subsumption (literal-alternation, glob expansion) is
-deferred to P2.  This module only handles:
-- Exact / normalised-equal duplicates (static).
-- Corpus-backed "no decision changes when removed" (dynamic).
-
-Design note on `per_layer_rules` interaction
---------------------------------------------
-Redundancy is checked within a SINGLE tool's allow/deny/ask list for the static
-case, and within a SINGLE config for the corpus case.  Cross-level interaction
-(a rule at project level made redundant by a user-level rule) is NOT detected
-here -- that is more-specific-wins territory and must account for the full
-cascade.
+No static subsumption between two *different* patterns is attempted -- literal
+alternations and globs are never expanded.
 """
 
 import re
@@ -58,26 +37,25 @@ class RedundancyFinding:
     A single redundancy finding.
 
     Attributes:
-        redundant_pattern: The raw pattern identified as redundant.
-        provenance: Origin of the redundant pattern (config file, level).
-            May be ``None`` when the pattern was not traced to a specific source.
-        kind: ``'static'`` for normalized-equal duplicates or ``'corpus'`` for
-            corpus-backed subsumption findings.
-        list_type: Which list the redundant pattern lives in
-            (``'allow'``, ``'deny'``, or ``'ask'``).
+        redundant_pattern: The wrapper-free pattern identified as redundant.
+        provenance: Origin of the layer it came from; ``None`` only when the
+            caller supplied none.
+        kind: ``'static'`` or ``'corpus'``.
+        list_type: Which list the pattern lives in -- ``'allow'``, ``'deny'``,
+            or ``'ask'``.
         tool: The tool name this pattern applies to (e.g. ``'Bash'``).
-        covered_by: Patterns that cover the redundant one (for static findings,
-            the other duplicate; for corpus findings, always ``None`` since
-            determining the exact covering rule would require per-rule replay).
-        note: Human-readable explanation of why this pattern is redundant.
+        covered_by: For a static finding, the earlier pattern it duplicates.
+            Always ``None`` for a corpus finding -- the replay diff shows that
+            nothing changed, not which rule took over.
+        note: Human-readable explanation, for display.
     """
 
     redundant_pattern: str
     provenance: Optional[Provenance]
-    kind: str  # 'static' or 'corpus'
-    list_type: str  # 'allow', 'deny', or 'ask'
+    kind: str
+    list_type: str
     tool: str
-    covered_by: Optional[str]  # pattern that covers this one, if determinable
+    covered_by: Optional[str]
     note: str
 
 
@@ -88,35 +66,30 @@ class RedundancyFinding:
 
 def _normalised_body(pattern: str) -> Tuple[str, str]:
     """
-    Parse a pattern into ``(type_prefix_key, normalised_body)``.
+    Reduce a pattern to its duplicate-detection key.
 
-    The ``type_prefix_key`` is the string form of the :class:`PatternType`
-    (e.g. ``'regex'``, ``'default'``).  The ``normalised_body`` is the body
-    with whitespace stripped and lowercased, with additional normalisation for
-    the ``cmd:args`` separator syntax:
+    The key pairs the :class:`~toolguard.patterns.PatternType` value
+    (``'default'``, ``'regex'``, ``'glob'``, ``'native'``) with the body,
+    stripped and lowercased.  A DEFAULT body is normalised further: runs of two
+    or more spaces become one, and whitespace around every ``:`` is removed, so
+    ``uv run pytest :*`` and ``uv run pytest:*`` land on one key.
 
-    - For DEFAULT patterns, whitespace before and after ``:`` is collapsed so
-      that ``uv run pytest :*`` and ``uv run pytest:*`` normalise to the same
-      key.  Both patterns resolve identically in the toolguard matcher (the
-      trailing whitespace in the command portion is ignored when ``args`` is
-      ``*``).
-    - Internal whitespace sequences are collapsed to a single space.
-
-    Two patterns are considered normalised-equal when BOTH components match.
+    Coarser than matching -- two patterns can share a key and still match
+    different commands.  Measured: ``Git *`` and ``git *`` share a key and
+    ``git status`` matches only the second; ``a  b:*`` and ``a b:*`` share a key
+    and ``a  b x`` matches only the first.  A shared key is grounds for review,
+    not a safe deletion.
 
     Args:
-        pattern: A raw permission pattern (tool wrapper must be stripped by caller).
+        pattern: A raw permission pattern, tool wrapper already stripped.
 
     Returns:
-        Tuple of ``(type_prefix_key, normalised_body)``.
+        ``(type_key, normalised_body)``.
     """
     ptype, body = parse_pattern(pattern, extended_syntax=True)
     norm = body.strip().lower()
-    # For DEFAULT patterns: collapse whitespace around ':' and collapse internal runs
     if ptype.value == "default":
-        # Collapse multiple spaces to one
         norm = re.sub(r"  +", " ", norm)
-        # Remove whitespace immediately before or after ':'
         norm = re.sub(r"\s*:\s*", ":", norm)
     return ptype.value, norm
 
@@ -133,23 +106,22 @@ def find_static_duplicates(
     list_type: str,
 ) -> List[RedundancyFinding]:
     """
-    Find normalised-equal duplicate patterns within a single pattern list.
+    Flag normalised-equal duplicates within a single pattern list.
 
-    Scans ``patterns`` and groups them by their normalised form (type key +
-    lowercased body).  All but the FIRST occurrence in each group are flagged as
-    redundant (``kind='static'``).  The first occurrence is considered canonical;
-    subsequent occurrences are duplicates.
+    Patterns are grouped by :func:`_normalised_body`; every occurrence after the
+    first in a group is returned as a ``kind='static'`` finding naming the first
+    as its ``covered_by``.
 
     Args:
-        patterns: A list of raw patterns from a single allow/deny/ask array
-            (tool wrapper stripped by caller, e.g. just the inner content).
+        patterns: Raw patterns from one allow/deny/ask array, tool wrapper
+            already stripped.
         provenance: Origin of the layer these patterns came from.
         tool: Tool name (e.g. ``'Bash'``) for the finding record.
         list_type: Which list (``'allow'``, ``'deny'``, or ``'ask'``).
 
     Returns:
-        List of :class:`RedundancyFinding` records for each duplicate found.
-        Empty when no duplicates exist.
+        One :class:`RedundancyFinding` per duplicate, in input order.  Empty
+        when there are none.
     """
     seen: Dict[Tuple[str, str], str] = {}  # normalised key -> first-seen raw pattern
     findings: List[RedundancyFinding] = []
@@ -183,21 +155,17 @@ def find_static_duplicates_across_layers(
     tool: str,
 ) -> List[RedundancyFinding]:
     """
-    Find normalised-equal duplicate patterns across all layers for a single tool.
+    Find normalised-equal duplicates in every layer's allow, deny and ask list.
 
-    Checks for duplicates within each list type (allow, deny, ask) across all
-    layers independently.  Cross-layer duplicates (same rule in project and user
-    layer) are NOT flagged here -- those have different semantics (a more-specific
-    layer overrides a less-specific one, but that is subsumption, not duplication
-    in the same context).  Intra-layer duplicates within allow (or deny or ask)
-    are the target.
+    Each list is scanned on its own, so a pattern present in two layers, or in
+    both a layer's allow and its deny, is not a finding.
 
     Args:
         config: The resolved configuration.
         tool: Tool name to check (e.g. ``'Bash'``).
 
     Returns:
-        All static duplicate findings across all layers for ``tool``.
+        All static duplicate findings for ``tool``, layer by layer.
     """
     findings: List[RedundancyFinding] = []
     for layer in per_layer_rules(config, tool):
@@ -226,15 +194,8 @@ def _config_without_allow(
     """
     Return a synthetic :class:`Configuration` with one allow pattern removed.
 
-    Removes ``pattern_to_remove`` from the allow list of ``tool`` in the FIRST
-    layer that contains it.  All occurrences within that layer are removed
-    (duplicate patterns are fully purged).
-
-    Delegates to :func:`~toolguard.tools.config_access.with_layer_allow_replaced`
-    using ``removed={pattern_to_remove}`` and ``added=[]``, so the modification
-    technique is kept in exactly one place.  The SHALLOW modification semantics
-    (only the matching layer's allow list is rebuilt; all other content is shared
-    by reference) are inherited from the shared primitive.
+    Only the FIRST layer holding ``pattern_to_remove`` is edited, and every
+    occurrence in that layer goes.
 
     Args:
         config: The original configuration.
@@ -242,9 +203,9 @@ def _config_without_allow(
         pattern_to_remove: The wrapper-free pattern body to remove.
 
     Returns:
-        A new :class:`Configuration` with the pattern absent from the first
-        matching layer's allow list, or the original ``config`` when the pattern
-        is not found.
+        A new :class:`Configuration`, or the ``config`` object itself -- not a
+        copy of it -- when no layer holds the pattern, so a caller can tell
+        "nothing to remove" from "removed" by identity.
     """
     wrapped_target = wrap_tool_pattern(tool, pattern_to_remove)
 
@@ -255,15 +216,10 @@ def _config_without_allow(
         allow_list = permissions.get("allow", [])
         if not isinstance(allow_list, list):
             continue
-        # Locate the layer by PATTERN (".pattern" -- "is this the same RULE",
-        # per RuleEntry.identity()'s comparison-semantics note), not by raw
-        # element identity: an allow-list element may be a structured `dict`,
-        # and `wrapped_target in allow_list` (a `str in list` check) is
-        # always False against one, so a structured entry's layer was never
-        # found and the removal silently no-opped. Mirrors the exact
-        # normalize_entry-then-compare-pattern idiom used by
-        # with_layer_rules_replaced. An element that fails to normalize is
-        # simply not a match here -- never raises.
+        # Locate the layer by normalized `.pattern`, not by raw element: an
+        # allow-list element may be a structured `dict`, against which
+        # `wrapped_target in allow_list` is always False, so the layer would
+        # never be found and the removal would silently no-op.
         entries = (
             normalize_entry(element, is_native=layer.is_native)[0]
             for element in allow_list
@@ -275,7 +231,6 @@ def _config_without_allow(
                 config, tool, layer.provenance, {pattern_to_remove}, []
             )
 
-    # Pattern was not found in any layer's allow list.
     return config
 
 
@@ -285,20 +240,16 @@ def find_corpus_redundant_allows(
     corpus: List[LogEntry],
 ) -> List[RedundancyFinding]:
     """
-    Find allow rules that are corpus-redundant for ``tool``.
+    Find allow rules for ``tool`` whose removal changes no decision over ``corpus``.
 
-    A rule R is corpus-redundant when removing it changes NO decision across
-    the corpus: the replay of (config) vs (config-without-R) produces zero
-    broadened and zero tightened entries (i.e. all unchanged).  This means
-    every command that R would have matched is already covered by another rule.
+    Each allow pattern is removed in turn and the corpus replayed against the
+    config with and without it; the pattern is reported when the diff has zero
+    broadened and zero tightened entries.  A pattern occurring in more than one
+    layer is tested once.  Deny and ask rules are not tested at all.
 
-    Only allow rules are tested.  Deny and ask rules cannot generally be removed
-    safely without a deeper analysis (removing a deny might unexpectedly allow
-    something via the cascade).
-
-    Note: A corpus that does not cover the rule's match-set can give false
-    "redundant" signals for rules that protect against uncommon commands.  The
-    quality of the result depends on corpus coverage.
+    A corpus that never exercises a rule yields the same zero diff as a rule
+    another rule genuinely covers, so a finding is a candidate for review whose
+    strength is the corpus's coverage.
 
     Args:
         config: The resolved configuration.
@@ -306,18 +257,15 @@ def find_corpus_redundant_allows(
         corpus: Harvested command corpus from :func:`~toolguard.tools.log_harvest.harvest`.
 
     Returns:
-        Corpus-redundant :class:`RedundancyFinding` records for each allow rule
-        that changes no decision when removed.  Empty when no corpus-redundant
-        rules are found, or when the corpus is empty.
+        One :class:`RedundancyFinding` per reported pattern.  Always empty when
+        ``corpus`` is empty.
     """
     if not corpus:
         return []
 
-    # Get per-layer rules to identify each allow pattern and its provenance
     layer_rules = per_layer_rules(config, tool)
     findings: List[RedundancyFinding] = []
 
-    # Track which patterns we've already tested (to skip duplicates)
     tested: Set[str] = set()
 
     for lr in layer_rules:
@@ -326,16 +274,14 @@ def find_corpus_redundant_allows(
                 continue
             tested.add(pattern)
 
-            # Build a config without this pattern
             config_without = _config_without_allow(config, tool, pattern)
             if config_without is config:
-                # Could not find pattern -- skip
+                # Nothing was removed, so the replay below would trivially show
+                # no change and report the pattern redundant.
                 continue
 
-            # Replay corpus against config vs config_without
             diff = replay(corpus, config, config_without)
 
-            # If no decisions changed, this rule is corpus-redundant
             if diff.broadened_count == 0 and diff.tightened_count == 0:
                 findings.append(
                     RedundancyFinding(
@@ -344,7 +290,7 @@ def find_corpus_redundant_allows(
                         kind="corpus",
                         list_type="allow",
                         tool=tool,
-                        covered_by=None,  # exact covering rule not determinable from diff alone
+                        covered_by=None,
                         note=(
                             f"Removing this rule changes no decision across "
                             f"{len(corpus)} corpus entries -- another rule already "
@@ -367,17 +313,13 @@ def find_redundancy(
     corpus: Optional[List[LogEntry]] = None,
 ) -> List[RedundancyFinding]:
     """
-    Find all redundant rules for ``tool`` in ``config``.
-
-    Runs both static (exact/normalised-equal duplicate) detection and, when a
-    corpus is provided, corpus-backed subsumption detection.  Results are
-    returned in order: static findings first, then corpus findings.
+    Run both detection strategies for ``tool`` in ``config``.
 
     Args:
         config: The resolved configuration.
         tool: Tool name to check (e.g. ``'Bash'``).
-        corpus: Optional command corpus for corpus-backed analysis.  When
-            ``None`` or empty, only the static check is performed.
+        corpus: Optional command corpus.  When ``None`` or empty, only the
+            static check runs.
 
     Returns:
         All :class:`RedundancyFinding` records found, static before corpus.

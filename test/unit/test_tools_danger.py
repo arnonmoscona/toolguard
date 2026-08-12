@@ -1,14 +1,4 @@
-"""
-Unit tests for toolguard.tools.danger -- static risk finding detection.
-
-Tests cover all detector categories and takeover-mode awareness:
-- arbitrary-exec-allow (CRITICAL): flags 'uv run python:*' (required fixture)
-- destructive-cmd-allow (HIGH): flags 'rm -rf:*'
-- secrets-exposure-allow (HIGH): flags '.env', '.ssh' patterns
-- unanchored-regex-allow (MEDIUM): flags [regex] without '^' (required fixture)
-- blanket-allow-outside-takeover (CRITICAL): flags bare '*' allows (complete bypass)
-- Takeover-mode awareness: does NOT flag ignored blanket allows when takeover ON
-"""
+"""Unit tests for toolguard.tools.danger -- static risk finding detection."""
 
 import unittest
 from pathlib import Path
@@ -25,11 +15,6 @@ from toolguard.tools.danger import (
     Severity,
     danger,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_provenance(
@@ -54,11 +39,7 @@ def _make_layer(
     is_native: bool = False,
     specificity: int = 0,
 ) -> ConfigLayer:
-    """
-    Build a ConfigLayer with the given allow/deny patterns for ``tool``.
-
-    Patterns stored in wrapped ``Tool(inner)`` form.
-    """
+    """Build a ConfigLayer whose allow/deny patterns are wrapped as ``Tool(inner)``."""
     prefix = f"{tool}("
     wrapped_allow = [f"{prefix}{p})" for p in (allow or [])]
     wrapped_deny = [f"{prefix}{p})" for p in (deny or [])]
@@ -86,7 +67,6 @@ def _make_config(
 ) -> Configuration:
     """Build a Configuration with optional takeover settings."""
     if takeover_enabled:
-        # Add a toolguard_hook layer with takeover settings
         takeover_prov = _make_provenance()
         takeover_content = MappingProxyType(
             {
@@ -118,11 +98,6 @@ def _ids(findings: List[DangerFinding]) -> List[str]:
 def _patterns(findings: List[DangerFinding]) -> List[str]:
     """Extract patterns from a list of findings."""
     return [f.pattern for f in findings]
-
-
-# ---------------------------------------------------------------------------
-# Arbitrary-exec-allow (CRITICAL) - required fixture: Bash(uv run python:*)
-# ---------------------------------------------------------------------------
 
 
 class TestArbitraryExecAllow(unittest.TestCase):
@@ -181,12 +156,9 @@ class TestArbitraryExecAllow(unittest.TestCase):
 
     def test_exec_flagged(self):
         """
-        Given an allow rule 'exec:*' for Bash (the shell 'exec' builtin replaces the
-        process image and thus permits arbitrary execution)
+        Given an allow rule 'exec:*' for Bash
         When danger() is called
         Then a CRITICAL arbitrary-exec-allow finding is returned
-        (regression: 'exec' was previously undetected because its trailing-space and
-        colon prefix entries could never match)
         """
         layer = _make_layer("Bash", allow=["exec:*"])
         config = _make_config(layer)
@@ -200,7 +172,6 @@ class TestArbitraryExecAllow(unittest.TestCase):
         Given an anchored regex allow rule '[regex]^python:.*' for Bash
         When danger() is called
         Then a CRITICAL arbitrary-exec-allow finding is returned
-        (baseline that documents the intended symmetry with node/ruby/perl below)
         """
         layer = _make_layer("Bash", allow=[r"[regex]^python:.*"])
         config = _make_config(layer)
@@ -215,9 +186,6 @@ class TestArbitraryExecAllow(unittest.TestCase):
         and '[regex]^perl:.*' for Bash
         When danger() is called on each
         Then a CRITICAL arbitrary-exec-allow finding is returned for each
-        (regression: these escaped the REGEX branch because it matched only the
-        literal token 'node ' with a trailing space, absent in the ':' form,
-        while the equivalent DEFAULT pattern 'node:*' was correctly flagged)
         """
         for body in (r"[regex]^node:.*", r"[regex]^ruby:.*", r"[regex]^perl:.*"):
             with self.subTest(pattern=body):
@@ -235,16 +203,11 @@ class TestArbitraryExecAllow(unittest.TestCase):
         Given an allow rule 'uv run python manage.py test:*' (specific script, no wildcard exec)
         When danger() is called
         Then... it may be flagged because it starts with 'uv run python'
-        NOTE: The detector is conservative; specific scripts under 'uv run python' are
-        also flagged to ensure human review. This is by design.
         """
-        # This test documents that even specific python invocations trigger the detector
-        # The remediation message guides the user to verify intent
         layer = _make_layer("Bash", allow=["uv run python manage.py test:*"])
         config = _make_config(layer)
         findings = danger(config)
         exec_findings = [f for f in findings if f.detector_id == "arbitrary-exec-allow"]
-        # Conservative: flag anything starting with an interpreter prefix
         self.assertGreater(len(exec_findings), 0)
 
     def test_findings_sorted_critical_first(self):
@@ -257,15 +220,9 @@ class TestArbitraryExecAllow(unittest.TestCase):
         config = _make_config(layer)
         findings = danger(config)
         if len(findings) >= 2:
-            # First finding should be CRITICAL or equal severity
             self.assertGreaterEqual(
                 findings[0].severity.value, findings[-1].severity.value
             )
-
-
-# ---------------------------------------------------------------------------
-# Destructive-cmd-allow (HIGH)
-# ---------------------------------------------------------------------------
 
 
 class TestDestructiveCmdAllow(unittest.TestCase):
@@ -290,7 +247,7 @@ class TestDestructiveCmdAllow(unittest.TestCase):
         """
         Given 'rm -rf /tmp/testdir:*'
         When danger() is called
-        Then a HIGH destructive finding is returned (conservative: all rm -rf are flagged)
+        Then a HIGH destructive finding is returned
         """
         layer = _make_layer("Bash", allow=["rm -rf /tmp/testdir:*"])
         config = _make_config(layer)
@@ -313,11 +270,6 @@ class TestDestructiveCmdAllow(unittest.TestCase):
             f for f in findings if f.detector_id == "destructive-cmd-allow"
         ]
         self.assertEqual(dest_findings, [])
-
-
-# ---------------------------------------------------------------------------
-# Secrets-exposure-allow (HIGH)
-# ---------------------------------------------------------------------------
 
 
 class TestSecretsExposureAllow(unittest.TestCase):
@@ -381,17 +333,12 @@ class TestSecretsExposureAllow(unittest.TestCase):
         self.assertEqual(secret_findings, [])
 
 
-# ---------------------------------------------------------------------------
-# Unanchored-regex-allow (MEDIUM) - required fixture
-# ---------------------------------------------------------------------------
-
-
 class TestUnanchoredRegexAllow(unittest.TestCase):
-    """Tests for the unanchored-regex-allow MEDIUM detector (required fixture)."""
+    """Tests for the unanchored-regex-allow MEDIUM detector."""
 
     def test_unanchored_regex_flagged(self):
         """
-        Given an allow rule '[regex]find' (no ^ anchor, required fixture)
+        Given an allow rule '[regex]find' (no ^ anchor)
         When danger() is called
         Then a MEDIUM finding with detector_id='unanchored-regex-allow' is returned
         """
@@ -424,7 +371,6 @@ class TestUnanchoredRegexAllow(unittest.TestCase):
         Given '[regex]\\bfind\\b(?!.*exec)' (word-bounded but no ^ anchor)
         When danger() is called
         Then a MEDIUM unanchored-regex-allow finding is returned
-        (re.search matches anywhere in the string regardless of \\b)
         """
         layer = _make_layer("Bash", allow=[r"[regex]\bfind\b(?!.*exec)"])
         config = _make_config(layer)
@@ -449,11 +395,6 @@ class TestUnanchoredRegexAllow(unittest.TestCase):
         self.assertEqual(regex_findings, [])
 
 
-# ---------------------------------------------------------------------------
-# Takeover-mode awareness
-# ---------------------------------------------------------------------------
-
-
 class TestTakeoverModeAwareness(unittest.TestCase):
     """Tests for takeover-mode awareness in danger()."""
 
@@ -462,17 +403,13 @@ class TestTakeoverModeAwareness(unittest.TestCase):
         Given takeover mode is ON and Bash(*) is in native settings + in ignored set
         When danger() is called
         Then no finding is returned for the native blanket allow
-        (it is an intentional takeover-mode artefact)
         """
-        # Native layer with Bash(*) as a blanket allow
         native_layer = _make_layer("Bash", allow=["*"], is_native=True, specificity=1)
-        # Toolguard layer with takeover enabled and Bash(*) in ignored set
         config = _make_config(native_layer, takeover_enabled=True)
         takeover = config.takeover_mode()
         self.assertTrue(takeover.enabled)
 
         findings = danger(config, takeover=takeover)
-        # The native Bash(*) should NOT be flagged (it's in the ignored set)
         blanket_findings = [
             f
             for f in findings
@@ -484,9 +421,8 @@ class TestTakeoverModeAwareness(unittest.TestCase):
         """
         Given takeover mode is ON and a toolguard rule allows 'uv run python:*'
         When danger() is called
-        Then the CRITICAL finding IS returned (non-ignored toolguard rules are always audited)
+        Then the CRITICAL finding IS returned
         """
-        # Real toolguard layer with a dangerous allow
         tg_layer = _make_layer("Bash", allow=["uv run python:*"], specificity=0)
         config = _make_config(tg_layer, takeover_enabled=True)
         takeover = config.takeover_mode()
@@ -502,9 +438,7 @@ class TestTakeoverModeAwareness(unittest.TestCase):
         """
         native_layer = _make_layer("Bash", allow=["*"], is_native=True, specificity=1)
         config = _make_config(native_layer, takeover_enabled=True)
-        # Do NOT pass takeover= argument
         findings = danger(config)
-        # Should not raise; findings may or may not be empty depending on config
         self.assertIsInstance(findings, list)
 
     def test_live_blanket_allow_is_critical(self):
@@ -512,10 +446,9 @@ class TestTakeoverModeAwareness(unittest.TestCase):
         Given a toolguard rule that allows '*' for Bash with takeover OFF (live)
         When danger() is called
         Then a CRITICAL blanket-allow-outside-takeover finding is returned
-        (a live blanket wildcard is a complete governance bypass for the tool)
         """
         tg_layer = _make_layer("Bash", allow=["*"])
-        config = _make_config(tg_layer)  # takeover off by default
+        config = _make_config(tg_layer)
         findings = danger(config)
         blanket = [
             f for f in findings if f.detector_id == "blanket-allow-outside-takeover"
@@ -528,19 +461,14 @@ class TestTakeoverModeAwareness(unittest.TestCase):
         Given a '[regex].*' allow that is BOTH a blanket allow AND an unanchored regex
         When danger() is called
         Then the pattern is reported exactly ONCE (as blanket-allow-outside-takeover),
-        not also as unanchored-regex-allow (review finding M1: no double-reporting)
+        not also as unanchored-regex-allow
         """
         tg_layer = _make_layer("Bash", allow=["[regex].*"])
-        config = _make_config(tg_layer)  # takeover off
+        config = _make_config(tg_layer)
         findings = danger(config)
         for_pattern = [f for f in findings if f.pattern == "[regex].*"]
         self.assertEqual(len(for_pattern), 1)
         self.assertEqual(for_pattern[0].detector_id, "blanket-allow-outside-takeover")
-
-
-# ---------------------------------------------------------------------------
-# Finding attributes and sorting
-# ---------------------------------------------------------------------------
 
 
 class TestDangerFindingAttributes(unittest.TestCase):
@@ -582,7 +510,6 @@ class TestDangerFindingAttributes(unittest.TestCase):
         )
         config = _make_config(layer)
         findings = danger(config)
-        # uv run pytest should not trigger arbitrary-exec, and anchored regex is fine
         exec_findings = [f for f in findings if f.detector_id == "arbitrary-exec-allow"]
         dest_findings = [
             f for f in findings if f.detector_id == "destructive-cmd-allow"

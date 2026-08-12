@@ -1,23 +1,17 @@
 """
 Generated ``# toolguard:`` comments that explain confusing rule interactions.
 
-The clarity analyzer (:mod:`toolguard.tools.clarity`) detects "correct but
-confusing" allow/guard overlaps.  This module turns those findings into short
-leading comments written above the affected rules, so the real resolution is
-legible in the config file itself.
+Renders the clarity analyzer's "correct but confusing" allow/guard findings as
+leading comments above the allow rules they concern, so the real resolution is
+legible in the config file itself.  Nothing here changes a rule or writes to
+disk.
 
-Design guarantees:
-
-- **Stable marker.**  Every generated line begins with ``# toolguard:`` so a
-  re-run REPLACES the previous generation instead of accreting duplicates, and so
-  a rule that is no longer confusing has its stale generated comment removed.
-- **Never clobbers human comments.**  Only ``# toolguard:``-marked lines are ever
-  removed; any other comment line is preserved verbatim.
-- **Minimal diff.**  The writer is line-based: rule order, empty sections, blank
-  lines, inline comments and formatting are left byte-for-byte unchanged except
-  for the generated comment lines themselves.
-
-This module only computes and writes comments; it never changes a rule.
+The ``# toolguard:`` prefix is the whole mechanism: a re-run drops every line
+STARTING with it before re-inserting the current notes, so generations do not
+accrete and a rule that no longer has a note comes back with none.  A
+hand-written comment using that prefix is dropped too.  Every other line is carried
+through unchanged, so rule order, blank lines, inline comments and formatting
+survive byte for byte.
 """
 
 from pathlib import Path
@@ -35,10 +29,8 @@ TOOLGUARD_MARKER = "# toolguard:"
 
 def _annotation_text(finding: InteractionFinding) -> str:
     """
-    Build the concise one-line note for a single clarity finding.
-
-    Kept short (the full explanation lives in the audit/maintenance report); the
-    comment is a legibility nudge in the file, not the whole analysis.
+    One-line note for a clarity finding; an unrecognized *kind* falls back to the
+    finding's own (longer) explanation.
     """
     if finding.kind == "deny-shadows-allow":
         return f"deny '{finding.guard_pattern}' shadows part of this allow (deny wins)"
@@ -66,10 +58,11 @@ def clarity_annotations(
     """
     Map each config FILE to the generated comments its confusing allow rules need.
 
-    Grouped by the allow rule's own source file (its provenance), so a rule is only
-    annotated in the file where it is actually confusing -- an identical pattern in
-    another layer is left alone.  Only ``toml`` layers are annotated (native ``json``
-    settings carry no comments).
+    Grouped by the provenance of the allow rule each finding names, so a note lands
+    in the layer file that finding came from.  Only the finding's allow pattern
+    becomes a key; its overlapping guard pattern does not.  Non-``toml`` layers are
+    skipped -- native
+    ``json`` settings have nowhere to put a comment.
 
     Args:
         config: The resolved configuration to analyze.
@@ -100,14 +93,9 @@ def _rule_first_line_patterns(section_text: str) -> Dict[str, str]:
     """
     Map each rule's own FIRST physical line of source text to its full pattern.
 
-    A rule's ``content`` (from :func:`parse_permissions_section_with_comments`) is
-    always a single physical line, for either a plain pattern or a structured entry
-    (TOO-19 corrective change: a structured entry spanning multiple physical lines
-    is not valid TOML 1.0, and that function now raises rather than returning one
-    -- see its own docstring). ``.split("\\n", 1)[0]`` is kept rather than using
-    ``content`` directly so this still degrades safely (keys by the first line
-    only) if that guarantee were ever loosened again -- :func:`annotate_section_text`
-    anchors its generated comment above a rule's own first line either way.
+    One dict across allow, deny and ask, keyed by line text alone -- a pattern
+    written identically in two of them yields a single entry.  A rule's ``content``
+    is one physical line today, so the split is a no-op.
     """
     parsed = parse_permissions_section_with_comments(section_text)
     line_to_pattern: Dict[str, str] = {}
@@ -123,16 +111,9 @@ def annotate_section_text(section_text: str, annotations: Dict[str, List[str]]) 
     """
     Rewrite a ``[permissions]`` section's text with generated comments applied.
 
-    Idempotent and minimal-diff: every existing ``# toolguard:`` line is dropped,
-    then the current annotations are re-inserted immediately above their rule at
-    the rule's indentation.  All other lines (rules, human comments, blanks,
-    section brackets) are preserved exactly.
-
-    Still iterates ``section_text`` one physical line at a time (marker-stripping
-    inherently needs that: an existing ``# toolguard:`` comment is always its own
-    standalone physical line). :func:`_rule_first_line_patterns` maps a rule's own
-    first (and, per TOO-19, only) physical line to its pattern, so a structured
-    entry gets exactly ONE generated comment, inserted directly above its line.
+    Every line STARTING with ``# toolguard:`` is dropped first, then each rule's
+    current notes are inserted above it at the rule's own indentation, one line per
+    note.  Idempotent; every other line is emitted unchanged.
 
     Args:
         section_text: The full ``[permissions]`` section text.
@@ -145,7 +126,7 @@ def annotate_section_text(section_text: str, annotations: Dict[str, List[str]]) 
     out: List[str] = []
     for line in section_text.split("\n"):
         if line.strip().startswith(TOOLGUARD_MARKER):
-            continue  # drop stale generated comments (re-inserted below if still relevant)
+            continue  # re-inserted below if still current
         pattern = line_to_pattern.get(line)
         if pattern is not None and pattern in annotations:
             indent = line[: len(line) - len(line.lstrip())]
@@ -161,9 +142,7 @@ def annotate_config_file(
     """
     Compute the annotated text for a config file (does NOT write to disk).
 
-    Reads the file, rewrites only its ``[permissions]`` section, and returns the
-    before/after text so the caller can diff, preview, or write it under the same
-    safety gate used for other config edits.
+    Reads the file and rewrites only its ``[permissions]`` section.
 
     Args:
         path: The config file to annotate.

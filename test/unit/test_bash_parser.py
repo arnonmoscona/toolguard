@@ -1,9 +1,6 @@
 """
-Unit tests for the Canopy PEG bash parser.
-
-These tests verify that the parser produces correct AST structure
-for various bash constructs including subshells, brace groups,
-and command substitutions.
+Unit tests for the Canopy PEG bash parser: the AST structure it produces for
+operators, subshells, brace groups and command substitutions.
 """
 
 import unittest
@@ -34,7 +31,6 @@ class TestBashParserAST(unittest.TestCase):
         tree = bash_parser.parse("cmd1 | cmd2")
         self.assertIsNotNone(tree)
         self.assertTrue(hasattr(tree, "compound_command"))
-        # Pipeline should have multiple elements
         compound = tree.compound_command
         self.assertTrue(hasattr(compound, "pipeline"))
 
@@ -81,19 +77,16 @@ class TestSubshellParsing(unittest.TestCase):
         tree = bash_parser.parse("(ls -la)")
         self.assertIsNotNone(tree)
 
-        # Should have pipeline with pipeline_element
         compound = tree.compound_command
         self.assertTrue(hasattr(compound, "pipeline"))
 
         pipeline = compound.pipeline
         self.assertTrue(hasattr(pipeline, "pipeline_element"))
 
-        # pipeline_element should have compound_command (for subshells)
         elem = pipeline.pipeline_element
         self.assertTrue(hasattr(elem, "compound_command"))
         self.assertIsNotNone(elem.compound_command)
 
-        # The inner compound_command should have the command
         inner = elem.compound_command
         self.assertIsNotNone(inner.text.strip())
         self.assertIn("ls", inner.text)
@@ -107,7 +100,6 @@ class TestSubshellParsing(unittest.TestCase):
         tree = bash_parser.parse("(cd /tmp && ls)")
         self.assertIsNotNone(tree)
 
-        # Get to the subshell's compound_command
         pipeline_elem = tree.compound_command.pipeline.pipeline_element
         self.assertTrue(hasattr(pipeline_elem, "compound_command"))
 
@@ -124,11 +116,9 @@ class TestSubshellParsing(unittest.TestCase):
         tree = bash_parser.parse("((ls))")
         self.assertIsNotNone(tree)
 
-        # Outer subshell
         outer_elem = tree.compound_command.pipeline.pipeline_element
         self.assertTrue(hasattr(outer_elem, "compound_command"))
 
-        # Inner compound should contain another subshell
         inner_compound = outer_elem.compound_command
         self.assertIsNotNone(inner_compound)
 
@@ -142,7 +132,6 @@ class TestSubshellParsing(unittest.TestCase):
         self.assertIsNotNone(tree)
 
         compound = tree.compound_command
-        # Should have multiple parts connected by &&
         self.assertIsNotNone(compound)
 
 
@@ -158,11 +147,9 @@ class TestBraceGroupParsing(unittest.TestCase):
         tree = bash_parser.parse("{ cmd1; }")
         self.assertIsNotNone(tree)
 
-        # Should have pipeline with pipeline_element
         pipeline_elem = tree.compound_command.pipeline.pipeline_element
         self.assertTrue(hasattr(pipeline_elem, "compound_command"))
 
-        # The inner compound_command should have the command
         inner = pipeline_elem.compound_command
         self.assertIsNotNone(inner.text.strip())
         self.assertIn("cmd1", inner.text)
@@ -202,7 +189,6 @@ class TestCommandSubstitutionParsing(unittest.TestCase):
         """
         tree = bash_parser.parse("echo $(cat file)")
         self.assertIsNotNone(tree)
-        # Basic parse should succeed
         self.assertIn("$(", tree.text)
 
     def test_simple_backtick(self):
@@ -225,9 +211,7 @@ class TestCommandSubstitutionParsing(unittest.TestCase):
         try:
             tree = bash_parser.parse("echo $(cat $(find .))")
             self.assertIsNotNone(tree)
-            # If we get here, grammar was fixed!
         except bash_parser.ParseError:
-            # Expected to fail with current grammar
             self.skipTest("Nested substitution not yet supported by grammar")
 
 

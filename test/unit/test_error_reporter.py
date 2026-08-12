@@ -1,15 +1,4 @@
-"""
-Unit tests for toolguard.error_reporter (TOO-45 punch-list #04, and its
-follow-up: `Reporter` replaced the module-global fault buffer and the
-`invocation()` context manager with a plain, directly constructible class
-plus a declared `active()` registry for the ambient report_notice/
-report_warning call sites -- see that module's docstring).
-
-Every test asserts the DESTINATION a report reached -- stderr content, log
-file content, and the Claude buffer are checked separately -- never merely
-that something was emitted (that assertion stays green through wrong
-routing, which is exactly the failure mode this module exists to prevent).
-"""
+"""Unit tests for toolguard.error_reporter -- which destination each severity reaches."""
 
 import io
 import unittest
@@ -24,14 +13,7 @@ from toolguard.error_reporter import Reporter
 
 @contextmanager
 def _captured_stderr_reporter(log_dir):
-    """
-    Build a `Reporter(log_dir=log_dir)` with stderr redirected; yields
-    ``(reporter, capturing io.StringIO buffer)``.
-
-    Consolidates the TemporaryDirectory + redirect_stderr + Reporter
-    scaffolding repeated across this file's destination assertions (TOO-45
-    punch-list #04 fix pass item 8b).
-    """
+    """Build a `Reporter(log_dir=log_dir)` with stderr redirected; yields ``(reporter, buffer)``."""
     buf = io.StringIO()
     with redirect_stderr(buf):
         yield Reporter(log_dir=log_dir), buf
@@ -58,10 +40,7 @@ class TestDefaultReporterHasNoLogDir(unittest.TestCase):
         When warning() is called
         Then stderr carries the labeled message and corrective-steps line --
              the SAME shape `error_log`'s own echo would have produced had a
-             log write succeeded (TOO-45 punch-list #04 fix pass item 1/5:
-             an earlier version of this test claimed a bare message
-             reproduced the pre-refactor call sites "byte-for-byte", which
-             was false -- see the code review this fix pass addresses)
+             log write succeeded
         """
         buf = io.StringIO()
         with redirect_stderr(buf):
@@ -75,15 +54,9 @@ class TestDefaultReporterHasNoLogDir(unittest.TestCase):
         """
         Given a Reporter with no log_dir
         When fault() is called
-        Then stderr gets the labeled message (matching what `error_log.
-             log_error`'s own echo would have printed), AND
-             drain_claude_context() returns the fault text -- the Claude
-             buffer is per-instance state on the Reporter itself, not gated
-             on whether a log directory happened to resolve (TOO-45
-             punch-list #04 follow-up: the pre-refactor equivalent gated
-             this on "an invocation is active" rather than "a log directory
-             resolved" -- a Reporter now always has its own buffer once
-             constructed, matching hook.py's one-Reporter-per-invocation use)
+        Then stderr gets the labeled message AND drain_claude_context()
+             returns the fault text -- the Claude buffer is per-instance
+             state, not gated on a log directory having resolved
         """
         reporter = Reporter()
         buf = io.StringIO()
@@ -116,8 +89,6 @@ class TestReporterRoutesWarning(unittest.TestCase):
             stderr_text = buf.getvalue()
             self.assertIn("bad config", stderr_text)
             self.assertIn("fix the file", stderr_text)
-            # Not double-printed: the reporter must not ALSO print the bare
-            # message once the log stream already echoed it.
             self.assertEqual(stderr_text.count("bad config"), 1)
 
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))
@@ -195,9 +166,7 @@ class TestReporterRoutesFault(unittest.TestCase):
 
 
 class TestReporterRoutesNotice(unittest.TestCase):
-    """A notice keeps its pre-refactor stderr-only behaviour, even with a
-    resolvable log directory active -- the routing table's deliberate,
-    temporary exception."""
+    """A notice stays stderr-only even with a resolvable log directory."""
 
     def test_notice_writes_stderr_only_no_logs_no_claude(self):
         """
@@ -262,22 +231,18 @@ class TestReportersDoNotShareState(unittest.TestCase):
         Given a first Reporter reported a fault and was never drained
         When a second, separate Reporter is constructed
         Then the second Reporter's Claude buffer is empty -- the first
-             Reporter's unfinished state does not leak into it (the
-             in-process replay harness/test-suite concern this module's
-             docstring calls out)
+             Reporter's unfinished state does not leak into it
         """
         with TemporaryDirectory() as tmpdir:
             first = Reporter(log_dir=Path(tmpdir))
             first.fault("leftover from the first reporter", "n/a")
-            # Deliberately not drained.
 
             second = Reporter(log_dir=Path(tmpdir))
             self.assertIsNone(second.drain_claude_context())
 
 
 class TestFallbackShapeMatchesTheLoggedEcho(unittest.TestCase):
-    """TOO-45 punch-list #04 fix pass item 1/3/5: a reader of stderr cannot
-    tell whether the log write happened."""
+    """A reader of stderr cannot tell whether the log write happened."""
 
     def test_warning_stderr_is_identical_logged_or_degraded(self):
         """
@@ -299,11 +264,7 @@ class TestFallbackShapeMatchesTheLoggedEcho(unittest.TestCase):
 
 
 class TestRoutingLooksUpLogFnByName(unittest.TestCase):
-    """TOO-45 punch-list #04 fix pass item 7: `_ROUTING` must not bind
-    `error_log`'s functions at import time, or a test-time patch on
-    `toolguard.error_log` (which is how the real-log-dir guard protects the
-    reporter -- see test/unit/_real_log_dir_guard.py) would silently stop
-    applying."""
+    """`_ROUTING` must resolve `error_log`'s functions at dispatch time, not bind them at import."""
 
     def test_dispatch_calls_whatever_is_currently_bound_on_error_log(self):
         """
@@ -326,10 +287,7 @@ class TestRoutingLooksUpLogFnByName(unittest.TestCase):
 
 
 class TestActiveRegistersTheAmbientReporter(unittest.TestCase):
-    """
-    `error_reporter.active()` is the declared registry `report_notice`/
-    `report_warning` (the four config-layer modules' entry points) resolve.
-    """
+    """`active()` is the registry `report_notice`/`report_warning` resolve against."""
 
     def test_report_warning_routes_through_the_registered_reporter(self):
         """
@@ -367,8 +325,7 @@ class TestActiveRegistersTheAmbientReporter(unittest.TestCase):
         Given no Reporter has ever been registered via active()
         When report_warning() is called
         Then it degrades to the bare stderr-only default (a plain
-             `Reporter()`, no log_dir) -- matching the pre-refactor
-             "no invocation active" behaviour
+             `Reporter()`, no log_dir)
         """
         buf = io.StringIO()
         with redirect_stderr(buf):

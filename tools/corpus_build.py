@@ -1,19 +1,16 @@
 #!/usr/bin/env python
 """
-Dev-only tool (repo-root ``tools/``, NOT shipped -- see ``.pyproject.toml``'s
-``[tool.hatch.build.targets.wheel] packages`` list, which does not include
-this directory) that builds and verifies the TOO-45 verdict-equivalence
-corpus under ``test/verdict_corpus/``.
+Dev-only tool that builds and verifies the TOO-45 verdict-equivalence corpus
+under ``test/verdict_corpus/``.
 
-The corpus is the safety guard for the upcoming permission-engine refactor: it
-replays a fixed set of ``(config, tool, target)`` cases through
+The corpus is the safety guard for the permission-engine refactor: it replays
+a fixed set of ``(config, tool, target)`` cases through
 :func:`toolguard.api.decide` and pins the result. See
 ``test/verdict_corpus/README.md`` for what the corpus is for and how goldens
 are meant to be updated (never by blindly regenerating after a failure).
 
 Stdlib only -- this project's runtime carries no third-party dependency, and
-this tool, while not shipped, follows the same discipline so it never needs
-one either.
+this tool, while not shipped, follows the same discipline.
 
 Two corpora, one CLI
 --------------------
@@ -24,9 +21,7 @@ running the real hook binary in a subprocess via
 :meth:`~toolguard.testing.sandbox.Sandbox.run_hook`). The end-to-end corpus
 exists because the in-process one stops at the decision itself and cannot see
 :func:`toolguard.hook.create_hook_output` -- the seam that turns a decision
-into the actual JSON Claude Code receives (and where a real defect once
-silently dropped ``additionalContext`` from the hook's output entirely,
-undetected by decision-level testing). See
+into the actual JSON Claude Code receives. See
 ``test/verdict_corpus/README.md`` for the full rationale.
 
 Modes
@@ -43,16 +38,14 @@ Modes
     ``e2e_cases.jsonl`` through the real hook subprocess and (re)writes
     ``e2e_goldens.jsonl``.
 ``--verify``
-    Replay every case IN MEMORY and diff the result against the committed
-    goldens (both corpora). Writes nothing. Exits non-zero on any hard
-    difference (verdict; the compound sub-command breakdown --
-    ``sub_matches``/``overrides``, TOO-45 corpus sub-verdict extension, see
-    ``test/verdict_corpus/README.md``; for the end-to-end corpus, also the
-    presence/absence of the ``additionalContext`` key) or corpus
-    data-integrity problem (a case with no golden, or a golden with no case);
-    prints tracked-field (reason/context/provenance/matched_rule) differences
-    for human review without failing the exit code, UNLESS ``--strict-prose``
-    is also given.
+    Replay every case and diff the result against the committed goldens (both
+    corpora). Writes no corpus file. Exits non-zero on any hard difference, or
+    on a corpus data-integrity problem (a case with no golden, or a golden
+    with no case); prints tracked-field differences for human review without
+    failing the exit code, UNLESS ``--strict-prose`` is also given. For which
+    fields are hard and which are tracked, see
+    :class:`~test.verdict_corpus.fixture_loader.ComparisonResult` and
+    :class:`~test.verdict_corpus.fixture_loader.E2EComparisonResult`.
 
 Usage::
 
@@ -68,10 +61,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Repo root is already on sys.path (editable install of the `toolguard`
-# package adds it), so `import test...` and `import toolguard...` both work
-# regardless of the cwd this script is invoked from -- verified empirically
-# rather than assumed; see the TOO-45 coder task-recall note for the check.
+# The repo root is on sys.path via the editable install of `toolguard`, so
+# both `import test...` and `import toolguard...` work from any cwd.
 from test.verdict_corpus.fixture_loader import (
     CASES_PATH,
     CORPUS_DIR,
@@ -91,21 +82,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LOGS_DIR = REPO_ROOT / "logs"
 
 # ---------------------------------------------------------------------------
-# Sanitization -- machine-specific strings, applied to extracted commands AND
-# (once, by hand, when the `realistic` fixture's config files were snapshotted)
-# to the fixture's config text, so pattern matching is preserved on both sides.
+# Sanitization -- machine-specific strings. The SAME substitutions are baked
+# into the committed `realistic` fixture's config text, so pattern matching is
+# preserved on both sides; changing a placeholder here without changing the
+# fixture would break it.
 # ---------------------------------------------------------------------------
 
-#: The real project root, computed rather than hardcoded so this keeps working
-#: if the repo is ever cloned somewhere else. Replaced FIRST (an exact literal
-#: prefix), before the looser username-only rule below.
+#: The real project root. Replaced FIRST -- an exact literal prefix, before
+#: the looser username-only rule below.
 _REAL_PROJECT_ROOT = str(REPO_ROOT)
 
-#: `/home/arnon` followed by a non-word character (or end of string) is the
-#: real user's home. The trailing `\b` deliberately does NOT match
-#: `/home/arnontoho` or `/home/arno` -- both distinct, already-fake usernames
-#: that appear in the logs from unrelated sandboxed experiments -- since
-#: there is no word boundary between "arnon" and a following word character.
+#: `/home/arnon` at a word boundary -- the real user's home. The trailing
+#: `\b` is what stops `/home/arnontoho`, a different home that occurs in the
+#: logs, from being mangled into `/home/tgusertoho`.
 _HOME_ARNON_RE = re.compile(r"/home/arnon\b")
 
 
@@ -139,35 +128,25 @@ _FILE_TOOL_RE = re.compile(
 
 
 class LogFormatError(ValueError):
-    """Raised when a log entry does not match the verified format."""
+    """Raised when a log entry does not match the expected decision-log format."""
 
 
 def _extract_command(block: List[str], start_index: int) -> str:
     """
     Accumulate a (possibly multi-line) ``- **Command**: `...``` field's value.
 
-    A naive "keep reading until the total backtick count is even" parity rule
-    (the most literal reading of "accumulate until backticks balance") turns
-    out to be WRONG on real data: a genuine, verified single-line entry exists
-    (``logs/toolguard-2026-07-24.md:157``, ``grep -n "^#### \\`"``) whose
-    command text contains exactly one unpaired literal backtick, making the
-    line's total backtick count odd even though the field is not continued.
-    "Balance" therefore cannot mean literal parity of every backtick on the
-    line -- the log writer never escapes backticks inside the command, so a
-    lone one is indistinguishable from a delimiter by counting alone.
+    Deliberately NOT a backtick-parity rule ("read on until the backticks
+    balance"), which is wrong on real data: a genuine single-line entry exists
+    whose command text carries one unpaired literal backtick
+    (``logs/toolguard-2026-07-24.md:157``, ``grep -n "^#### \\`"``), making
+    that line's backtick count odd even though the field is not continued. The
+    log writer never escapes backticks inside a command, so counting alone
+    cannot tell a lone one from a delimiter.
 
-    The rule that IS reliable on this corpus (checked against all 9,896
-    Command entries, both single- and multi-line): the log writer always
-    places the closing delimiter as the LAST character of ITS line, with
-    nothing following it -- true for every observed single-line entry and
-    every observed multi-line one (the closing backtick sits at the very end
-    of the final continuation line, immediately before the next field or
-    blank line). So: keep appending whole lines until the current line ends
-    with a backtick, then take everything up to that backtick's position
-    (found via ``rfind``, which is exactly right even when the command's OWN
-    text also ends in a backtick, since that backtick and the closing
-    delimiter would then be adjacent and ``rfind`` still locates the last of
-    the two -- the true delimiter -- correctly).
+    What IS reliable, across every Command entry in ``logs/``: the closing
+    delimiter is the LAST character of its line, with nothing after it. So
+    keep appending whole lines until the current line ends with a backtick,
+    then cut at that backtick's ``rfind`` position.
 
     Args:
         block: All lines of this log entry.
@@ -203,8 +182,8 @@ def _parse_tool_target(command_text: str) -> Tuple[str, str]:
 
     Returns:
         ``(tool, target)`` -- a file-tool wrapper's name and inner argument
-        when the text matches ``^(Write|Edit|Read|MultiEdit|NotebookEdit)\\(.*\\)$``,
-        otherwise ``('Bash', command_text)``.
+        when the text is a :data:`_FILE_TOOL_RE` wrapper, otherwise
+        ``('Bash', command_text)``.
     """
     match = _FILE_TOOL_RE.match(command_text)
     if match:
@@ -213,7 +192,7 @@ def _parse_tool_target(command_text: str) -> Tuple[str, str]:
 
 
 class LogParseStats:
-    """Running counts across every parsed log file, for the verified-count check."""
+    """Running counts across every parsed log file, for :func:`check_log_counts`."""
 
     def __init__(self) -> None:
         self.total_entries = 0
@@ -223,7 +202,7 @@ class LogParseStats:
 
 def parse_log_file(path: Path, stats: LogParseStats) -> List[Tuple[str, str]]:
     """
-    Parse one ``logs/toolguard-*.md`` file into sanitized ``(tool, target)`` pairs.
+    Parse one decision-log file into sanitized ``(tool, target)`` pairs.
 
     Args:
         path: The log file to parse.
@@ -267,7 +246,9 @@ def parse_log_file(path: Path, stats: LogParseStats) -> List[Tuple[str, str]]:
     return pairs
 
 
-#: The three counts the spec requires the parser to reproduce exactly.
+#: A past snapshot of ``logs/``, kept as a reference point for
+#: :func:`check_log_counts`. ``logs/`` keeps growing, so today's counts are
+#: expected to be higher.
 EXPECTED_TOTAL_ENTRIES = 16906
 EXPECTED_DISCOVERY_ENTRIES = 7010
 EXPECTED_COMMAND_ENTRIES = 9896
@@ -275,23 +256,17 @@ EXPECTED_COMMAND_ENTRIES = 9896
 
 #: Matches ONLY the date-stamped decision logs (``toolguard-YYYY-MM-DD.md``).
 #: ``logs/`` also holds ``toolguard-warning-*.md`` and ``toolguard-error-*.md``,
-#: which use a completely different entry format (``## <timestamp> - WARNING``
-#: with ``**Message**``/``**Corrective Steps**`` fields, no Status/Command).
-#: Their headers happen not to collide with :data:`_ENTRY_HEADER_RE` (the
-#: trailing `` - WARNING`` breaks the anchored match), so a loose
-#: ``toolguard-*.md`` glob turned out NOT to be the cause of the count
-#: mismatch investigated below -- excluding them is still correct on intent
-#: (they are not decision-log entries and must never be parsed as one), just
-#: not what explained the discrepancy that day.
+#: a different format entirely (``## <timestamp> - WARNING`` with
+#: ``**Message**``/``**Corrective Steps**`` fields, no Status/Command) that
+#: must never be parsed as decision-log entries.
 _DECISION_LOG_RE = re.compile(r"^toolguard-\d{4}-\d{2}-\d{2}\.md$")
 
 
 def parse_all_logs() -> Tuple[List[Tuple[str, str]], LogParseStats]:
     """
     Parse every date-stamped ``logs/toolguard-YYYY-MM-DD.md`` decision log, in
-    sorted (deterministic) order. Deliberately excludes
-    ``toolguard-warning-*.md`` and ``toolguard-error-*.md`` -- see
-    :data:`_DECISION_LOG_RE`.
+    sorted (deterministic) order -- see :data:`_DECISION_LOG_RE` for what that
+    excludes.
 
     Returns:
         ``(pairs, stats)`` -- all extracted ``(tool, target)`` pairs (NOT yet
@@ -312,19 +287,13 @@ def dedupe_pairs(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
 
 def check_log_counts(stats: LogParseStats) -> None:
     """
-    Report parsed counts and compare them against the TOO-45 spec's verified
-    snapshot (7,010 Discovery / 9,896 Command / 16,906 total).
+    Report parsed counts and compare them against
+    :data:`EXPECTED_TOTAL_ENTRIES` and its two companions.
 
-    ``logs/`` is a live, append-only directory that keeps growing -- including
-    from this very tool's own read-only diagnostic runs during development --
-    so an exact match is not expected on every invocation; a HIGHER total than
-    the snapshot is normal, not a bug. What WOULD indicate a genuine parser
-    bug is a mismatched ``discovery_entries`` count specifically (config
-    discovery is logged at most once per session, so it grows far more slowly
-    than Command entries) -- checked and flagged separately from the other
-    two. See the TOO-45 coder task-recall note (basic-memory) for the
-    isolation experiment (excluding just the actively-growing file for today's
-    date reproduces the spec's three numbers exactly).
+    ``logs/`` is live and append-only, so an exact match is not expected on
+    every invocation and a HIGHER total is normal, not a bug. The
+    ``discovery_entries`` count is reported separately from the other two
+    because it grows far more slowly than the Command count.
 
     Args:
         stats: Aggregate counts from :func:`parse_all_logs`.
@@ -352,7 +321,7 @@ def check_log_counts(stats: LogParseStats) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Case source 2: synthetic fixtures (hand-authored, 15-30 cases per fixture)
+# Case source 2: synthetic fixtures (hand-authored)
 # ---------------------------------------------------------------------------
 
 #: Shared by the four `fallback_*` fixtures, whose configs differ ONLY in
@@ -376,18 +345,13 @@ _FALLBACK_CASES: List[Tuple[str, str]] = [
     ("Bash", "ls -la /tmp"),
 ]
 
-#: TOO-45 audit follow-up: `_FALLBACK_CASES` above matches `Bash(ls *)` /
-#: `Bash(pwd)` / (deny) `Bash(sudo *)` for most of its rows, or reaches the
-#: file-tool "unconfigured tool" branch for its Read/Write/Edit rows (that
-#: fixture never configures permissions for those tools) -- neither reaches
-#: the no_match_fallback dispatch tail itself. These 30 commands are chosen
-#: to match NEITHER the allow nor the deny pattern in any `fallback_*`
-#: fixture, and to avoid process substitution (`<(...)`/`$(...)`, which would
-#: land in the UNDECIDABLE branch instead -- a different code path), so every
-#: one of them genuinely falls through to `no_match_fallback` and shows the
-#: setting's effect distinctly. Appended (not merged into `_FALLBACK_CASES`)
-#: so the original 15-case list -- and every existing case's golden -- is
-#: untouched.
+#: 30 commands that match NEITHER the allow nor the deny pattern of any
+#: `fallback_*` fixture, and that contain no process substitution
+#: (`<(...)`/`$(...)`, which would land in the UNDECIDABLE branch instead --
+#: a different code path). So every one of them falls through to the
+#: `no_match_fallback` dispatch and shows the setting's effect distinctly.
+#: Appended to, not merged into, `_FALLBACK_CASES`, so the existing cases'
+#: goldens are untouched.
 _FALLBACK_DISPATCH_CASES: List[Tuple[str, str]] = [
     ("Bash", "uptime"),
     ("Bash", "hostname"),
@@ -421,12 +385,9 @@ _FALLBACK_DISPATCH_CASES: List[Tuple[str, str]] = [
     ("Bash", "printf 'hi\\n'"),
 ]
 
-#: TOO-45 audit follow-up: extra cases for the `empty` fixture (point 4 --
-#: the unconfigured-tool branch). `empty` has NO config file at all, so
-#: EVERY case here -- regardless of shape -- resolves via
-#: `Configuration.has_any_rules` returning False, unconditionally 'ask'.
-#: Content is varied purely for realism/breadth, not because it changes
-#: which branch fires.
+#: Extra cases for the `empty` fixture, which has NO config file at all:
+#: every one resolves to 'ask' on the unconfigured-tool branch. The content
+#: varies for breadth, not because it changes which branch fires.
 _EMPTY_EXTRA_CASES: List[Tuple[str, str]] = [
     ("Bash", "curl https://example.com"),
     ("Bash", "npm install"),
@@ -445,12 +406,10 @@ _EMPTY_EXTRA_CASES: List[Tuple[str, str]] = [
     ("Bash", "brew install wget"),
 ]
 
-#: TOO-45 audit follow-up: extra cases for the `parse_failure` fixture (point
-#: 5 -- the parse-failure ASK floor). None of these match the fixture's
-#: `[hard_deny]` pattern (`^rm\s+-rf\s+/$`), so every one is clamped from its
-#: pre-floor decision to 'ask' with the distinctive
-#: "toolguard config is BROKEN" reason -- observable proof the floor fired,
-#: independent of what the pre-clamp decision would have been.
+#: Extra cases for the `parse_failure` fixture's ASK floor. None matches the
+#: fixture's `[hard_deny]` pattern (`^rm\s+-rf\s+/$`), so every one is clamped
+#: to 'ask' with the distinctive "toolguard config is BROKEN" reason --
+#: observable proof the floor fired, whatever the pre-clamp decision was.
 _PARSE_FAILURE_EXTRA_CASES: List[Tuple[str, str]] = [
     ("Bash", "whoami"),
     ("Bash", "date"),
@@ -469,16 +428,12 @@ _PARSE_FAILURE_EXTRA_CASES: List[Tuple[str, str]] = [
     ("Bash", "cat file.txt && ls"),
 ]
 
-#: TOO-45 audit follow-up (point 6): cases matching `ask_provenance`'s
-#: patterns one-for-one, spanning all three contributing sources -- project
-#: level (specificity 0), the user level's own toolguard_hook.toml (12 + 9
-#: cases respectively), and a rules-dir file merged into that SAME user level
-#: as a second, distinct layer (4 cases) -- so
-#: `config_types.provenance_for_pattern` / `entry_for_pattern` take their
-#: `kind == "ask"` branch across more than one hierarchy level AND across
-#: more than one layer within the user level. See
-#: `configs/ask_provenance/*/.claude/toolguard_hook.toml` and
-#: `configs/ask_provenance/home/.toolguard/rules/extra.rules.toml`.
+#: Cases matching `ask_provenance`'s patterns one-for-one, spanning its three
+#: contributing sources: the project level (12 cases, specificity 0), the user
+#: level's own toolguard_hook.toml (9), and a rules-dir file merged into that
+#: SAME user level as a second, distinct layer (4). So an `ask` rule is
+#: attributed across more than one hierarchy level AND more than one layer
+#: within a level.
 _ASK_PROVENANCE_CASES: List[Tuple[str, str]] = [
     # -- project level (most specific) --
     ("Bash", "rm proj-file-a.txt"),
@@ -510,28 +465,15 @@ _ASK_PROVENANCE_CASES: List[Tuple[str, str]] = [
     ("Bash", "kill -9 5555"),
 ]
 
-#: TOO-45 audit follow-up (point 7): cases for `override_breadth`, matching
-#: its project-level allow patterns that each override a broader, less-
-#: specific user-level deny -- see
-#: `configs/override_breadth/*/.claude/toolguard_hook.toml`. 22 single-leaf
-#: cases (16 Bash + 2 Read + 2 Write + 2 Edit) + 6 compound-command cases
-#: (two overriding leaves each, overall verdict allow so both surface -- see
-#: `toolguard/resolve.py::resolve_bash_permission_detailed`, which clears
-#: `overrides` entirely for any non-allow overall verdict) + 3 negative
-#: controls (`echo hello`/`ls -R`: plain allow, no home-level counterpart at
-#: all; `sudo reboot`: home-level deny with NO project rule, so deny wins
-#: outright -- nothing to override). Registered here for the IN-PROCESS
-#: corpus too (the allow verdicts themselves are correct and worth pinning),
-#: but `permission_resolution._detect_override`'s actual firing is invisible
-#: to THIS corpus -- since TOO-45 R6-S3 unified `Decision` into
-#: `RuntimeVerdict`, :func:`toolguard.api.decide` DOES return
-#: `ConflictOverride` on its own `overrides` field, but
-#: `fixture_loader.decision_to_golden` deliberately excludes it from the
-#: golden schema (see that function's own docstring) and the hook's JSON
-#: output doesn't carry it either. It is observable ONLY via the conflict
-#: log side effect the end-to-end corpus can see (see :data:`E2E_CASES` and
-#: `fixture_loader.py`'s `conflict_logged`/`_new_stream_log_text`) -- the
-#: mutation test for this point must use the end-to-end corpus, not this one.
+#: Cases for `override_breadth`, matching its project-level allow patterns
+#: that each override a broader, less-specific user-level deny: 22 single-leaf
+#: (16 Bash + 2 Read + 2 Write + 2 Edit), then 6 compound cases with two
+#: overriding leaves each -- overall verdict allow, so both leaves surface
+#: (`resolve.resolve_bash_permission_detailed` clears `overrides` entirely for
+#: any non-allow overall verdict) -- then 3 negative controls: `echo hello`
+#: and `ls -R` are plain allows with no home-level counterpart at all, and
+#: `sudo reboot` is a home-level deny with NO project rule, so deny wins
+#: outright and there is nothing to override.
 _OVERRIDE_BREADTH_CASES: List[Tuple[str, str]] = [
     ("Bash", "git push origin main"),
     ("Bash", "git push --force origin main"),
@@ -734,9 +676,10 @@ def build_synthetic_cases() -> List[Dict[str, str]]:
 #: Deliberately small (subprocess startup dominates) and deliberately reuses
 #: EXISTING fixtures rather than inventing new ones -- no new configuration
 #: shape is needed to exercise the output-JSON seam, only a hand-picked subset
-#: of cases already known to hit allow/ask/deny, the enrichment paths (present,
-#: absent, and multi-part accumulated), the parse-failure ASK floor, the
-#: undecidable floor, hard_deny, a compound command, and a file-tool target.
+#: of cases already known to span allow/ask/deny, the enrichment paths
+#: (present, absent, and multi-part accumulated), the parse-failure ASK floor,
+#: the undecidable floor, hard_deny, a compound command, and a file-tool
+#: target.
 E2E_CASES: List[Tuple[str, str, str]] = [
     # --- enrichment: present / absent / multi-part accumulation ---
     ("enrichment", "Bash", "ls -la"),  # allow, additionalContext present
@@ -786,13 +729,13 @@ E2E_CASES: List[Tuple[str, str, str]] = [
     # --- the full realistic config stack, end to end ---
     ("realistic", "Bash", "git status"),
     ("realistic", "Bash", "gh status"),
-    # --- TOO-45 audit follow-up (point 7): every override_breadth case,
-    # end-to-end -- this is the ONLY corpus that can observe
-    # `permission_resolution._detect_override` firing at all (see
-    # `fixture_loader.py`'s `conflict_logged` golden key and its module
-    # docstring for why). Includes the 3 negative controls (echo hello /
-    # ls -R / sudo reboot) so the mutation battery can also confirm the
-    # signal stays False when there is genuinely nothing to override.
+    # --- every override_breadth case, end to end. An override's conflict-log
+    # entry is a side effect only the real hook subprocess writes, so the
+    # `conflict_logged`/`conflict_message` goldens are observable here and
+    # nowhere else (see `fixture_loader._new_stream_log_text`). The 3 negative
+    # controls (echo hello / ls -R / sudo reboot) are included so the mutation
+    # battery can also confirm the signal stays False with nothing to
+    # override.
     *(("override_breadth", tool, target) for tool, target in _OVERRIDE_BREADTH_CASES),
 ]
 
@@ -812,7 +755,7 @@ def build_e2e_cases() -> List[Dict[str, str]]:
 
 def build_realistic_cases() -> List[Dict[str, str]]:
     """
-    Parse ``logs/toolguard-*.md`` and build the ``realistic`` fixture's cases.
+    Parse the decision logs and build the ``realistic`` fixture's cases.
 
     Returns:
         One ``{"fixture": "realistic", "tool", "target"}`` dict per distinct
@@ -965,7 +908,7 @@ def _print_e2e_comparison(result) -> None:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Regenerate both corpora in memory and diff against their committed goldens. Writes nothing."""
+    """Replay both corpora and diff against their committed goldens. Writes no corpus file."""
     cases = read_jsonl(CASES_PATH)
     expected = read_jsonl(GOLDENS_PATH)
     e2e_cases = read_jsonl(E2E_CASES_PATH)

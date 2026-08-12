@@ -1,30 +1,22 @@
 """
-Self-protection guard for every toolguard config-file write.
+Self-protection gate for every toolguard config-file write.
 
-TOO-19 corrective change: toolguard's own configuration files (``toolguard_hook.toml`` /
-``toolguard_hook.json``, and anything else this project's tooling rewrites) are typically
-NOT under version control on a developer's machine. A write that produces text which fails
-to parse -- whether from a real bug in the writer, a not-yet-anticipated input shape, or a
-regression of a bug class like TOO-19's own ``find_section_boundaries`` defect -- is a
-PERMANENT, unrecoverable data loss for that user: the very next hook invocation reads a
-broken file and (by this project's own documented fail-open policy) silently disables every
-rule in it, with no un-corrupted copy left anywhere.
+``toolguard_hook.toml``/``.json`` and the native Claude settings files are usually not
+tracked anywhere else on a developer's machine, so a write that produces text this project
+cannot parse back leaves that file broken with no way back: toolguard skips it and clamps
+every governed decision, other than an already-``deny`` one, to ``ask`` until it is fixed.
 
-This module is the single, final gate every config-file write must pass through before
-touching disk: parse the text first (:func:`verify_config_text`), optionally confirm no
-existing rule pattern is about to be silently dropped (:func:`verified_write_config`'s
+This module is the only place a toolguard config write is allowed to happen: parse the
+candidate text first (:func:`verify_config_text`), optionally confirm no existing rule
+pattern is about to be silently dropped (:func:`verified_write_config`'s
 ``expected_patterns`` check), and only then write -- atomically, so a crash mid-write can
-never leave a half-written, truncated file on disk either.
+never leave a half-written file on disk either.
 
-Leaf module by design: this file imports ONLY the Python standard library (``tomllib``,
-``json``, ``os``, ``tempfile``, ``pathlib``, ``typing``) and nothing else from
-``toolguard`` -- not ``toolguard.config``, not ``toolguard.rule_sort``, not
-``toolguard.rule_entry``. That is what lets every writer (``toolguard.scripts.
-migrate_permissions``, ``toolguard.tools.maintenance``, and any future one) depend on this
-module without risking a circular import, and it is enforced by
-``test.unit.test_architecture``. A structured permission entry's pattern key ("match") is
-therefore a small literal constant duplicated here rather than imported from
-``toolguard.rule_entry.PATTERN_KEY`` -- see :func:`_entry_pattern`.
+Leaf module by design: imports only the Python standard library and nothing else from
+``toolguard``, so every writer can depend on this module without risking a circular import
+-- see ``test.unit.test_architecture``'s ``LAYERS`` for the enforced layering. A structured
+entry's pattern key ("match") is therefore a small literal constant duplicated here rather
+than imported from :data:`toolguard.rule_entry.PATTERN_KEY`.
 """
 
 import json
@@ -34,17 +26,11 @@ import tomllib
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
-#: The table key carrying a structured entry's permission pattern, e.g.
-#: ``{ match = "Bash(git *)", additionalContext = "..." }``. Deliberately a
-#: literal duplicate of ``toolguard.rule_entry.PATTERN_KEY`` -- this module
-#: must stay a true dependency-free leaf (see module docstring), so it cannot
-#: import that constant, and the value ("match") is part of this project's
-#: on-disk config format, not an implementation detail likely to drift.
+#: Structured entry's pattern key, e.g. ``{ match = "Bash(git *)", ... }``.
 _PATTERN_KEY = "match"
 
-#: The two top-level tables this guard scans for existing rule patterns.
-#: ``permissions`` carries ``allow``/``deny``/``ask``; ``hard_deny`` carries
-#: ``deny``/``allow`` (checked generically -- see :func:`_patterns_in_parsed`).
+#: The ``permissions`` table's three sub-lists scanned for existing rule
+#: patterns (see :func:`_patterns_in_parsed`).
 _PERMISSIONS_LIST_TYPES = ("allow", "deny", "ask")
 
 
@@ -57,9 +43,9 @@ class ConfigWriteVerificationError(Exception):
     (see :func:`verified_write_config`).
 
     Attributes:
-        path: The config file path the write was refused for (``None`` when
-            raised by :func:`verify_config_text` directly, which has no path
-            context of its own).
+        path: The config file path the write was refused for, or ``None``
+            when the caller invoked :func:`verify_config_text` directly
+            without supplying one.
         reason: Short machine-stable category of the failure, e.g.
             ``"invalid TOML"`` or ``"write would drop existing rule
             pattern(s)"``.
@@ -70,16 +56,6 @@ class ConfigWriteVerificationError(Exception):
     def __init__(
         self, path: Optional[Union[str, Path]], reason: str, message: str
     ) -> None:
-        """
-        Build the exception and its human-readable message.
-
-        Args:
-            path: The config file path involved, or ``None`` if unknown at
-                the point of raising.
-            reason: Short category of the failure.
-            message: Detailed explanation (parser error text, or missing
-                pattern list).
-        """
         self.path = path
         self.reason = reason
         self.message = message
@@ -120,24 +96,20 @@ def verify_config_text(
     """
     Parse *text* and raise if it does not parse as valid TOML/JSON.
 
-    Pure syntax check -- does no I/O and does not know or care what the
-    parsed content actually contains (see :func:`verified_write_config` for
-    the separate content-loss check). This is the minimum bar every write
-    must clear: a config file this project cannot even parse back is the
-    single highest-impact failure mode this module exists to prevent (see
-    module docstring).
+    Pure syntax check -- no I/O, and it does not look at what the parsed
+    content contains (:func:`verified_write_config` adds the separate
+    content-loss check on top of this).
 
     Args:
         text: The candidate config file text.
         file_format: ``'toml'`` or ``'json'``.
         path: Optional path to attach to the raised error for a more useful
-            message, when the caller has one (:func:`verified_write_config`
-            always supplies it; a caller invoking this function directly may
-            not have one yet).
+            message.
 
     Raises:
         ConfigWriteVerificationError: ``text`` fails to parse as
             ``file_format``.
+        ValueError: ``file_format`` is neither ``'toml'`` nor ``'json'``.
     """
     try:
         _parse(text, file_format)
@@ -217,15 +189,13 @@ def _atomic_write(path: Path, text: str) -> None:
     """
     Write *text* to *path* atomically: sibling temp file, fsync, then rename.
 
-    Writes to a temporary file created in *path*'s own parent directory (same
-    filesystem, required for :func:`os.replace` to be atomic), flushes and
-    calls :func:`os.fsync` before renaming, so a crash mid-write can never
-    leave a truncated *path* on disk -- *path* either keeps its old complete
-    content or gets the new complete content, never a partial write. The
-    temporary file is removed if any step fails. *path*'s parent directory is
-    created first if it does not exist yet, matching every writer this guard
-    replaces (e.g. a first-ever ``write-config`` into a not-yet-existing
-    ``.claude/`` directory).
+    Writes to a temporary file in *path*'s own parent directory (same
+    filesystem -- :func:`os.replace` fails across devices), flushes and
+    calls :func:`os.fsync` before renaming, so a crash mid-write leaves
+    *path* holding either its old complete content or the new complete
+    content, never a partial write. The temporary file is removed if any
+    step fails. *path*'s parent directory is created first if it does not
+    already exist.
 
     Args:
         path: Destination file path.
@@ -255,14 +225,11 @@ def patterns_in_config_text(text: str, file_format: str) -> set:
     """
     Parse *text* and return every rule pattern it contains.
 
-    Public counterpart of the internal ``expected_patterns`` bookkeeping
-    :func:`verified_write_config` does for its own callers: a caller that
-    needs to compute ``expected_patterns`` from an *existing* on-disk file
-    (rather than from the in-memory data structure it is about to write) --
-    e.g. before an edit that only touches an unrelated section and must not
-    let the pre-existing ``permissions``/``hard_deny`` patterns silently
-    vanish -- can read that file's current text and pass it here to get the
-    set to pass through unchanged.
+    Lets a caller compute ``expected_patterns`` (see
+    :func:`verified_write_config`) from an EXISTING on-disk file's text,
+    rather than from the in-memory data it is about to write -- e.g. before
+    an edit that only touches one section and must not let patterns
+    elsewhere in the file silently vanish.
 
     Args:
         text: Config file text to parse (normally freshly read from disk).
@@ -293,15 +260,14 @@ def verified_write_config(
     """
     Verify *text*, then atomically write it to *path*. Refuses on any failure.
 
-    Three steps, in order, ANY of which can refuse the write (leaving *path*
-    completely untouched on disk):
+    Three steps, in order, leaving *path* untouched on disk if any of them
+    fails:
 
     1. :func:`verify_config_text` -- *text* must parse as *file_format*.
     2. If *expected_patterns* is not ``None``: every pattern in it must still
-       be present somewhere in *text*'s parsed ``permissions``/``hard_deny``
-       structure (see :func:`_patterns_in_parsed`). A missing pattern means
-       this write would silently DELETE a rule -- refused, distinct from (and
-       checked after) the pure syntax check in step 1.
+       be present in *text*'s parsed ``permissions``/``hard_deny`` structure
+       (see :func:`_patterns_in_parsed`). A missing pattern means this write
+       would silently DELETE a rule -- refused.
     3. Atomic write via :func:`_atomic_write`.
 
     Args:
@@ -310,13 +276,14 @@ def verified_write_config(
         file_format: ``'toml'`` or ``'json'``.
         expected_patterns: When given, every pattern in this iterable must
             appear in *text* after parsing, or the write is refused. Pass
-            ``None`` (the default) to skip this content-loss check entirely
-            -- appropriate only when the caller has no meaningful "existing
-            patterns" set to compare against (e.g. writing a brand-new file).
+            ``None`` (the default) to skip this content-loss check --
+            appropriate when the caller has no meaningful "existing
+            patterns" to compare against (e.g. writing a brand-new file).
 
     Raises:
         ConfigWriteVerificationError: *text* fails to parse, or would drop
             one or more *expected_patterns*.
+        ValueError: ``file_format`` is neither ``'toml'`` nor ``'json'``.
         OSError: The atomic write itself fails (disk full, permissions, ...).
     """
     path = Path(path)

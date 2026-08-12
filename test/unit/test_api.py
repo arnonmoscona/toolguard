@@ -1,16 +1,4 @@
-"""
-Unit tests for toolguard.api.
-
-Tests that the side-effect-free decide() primitive reproduces the hook's
-permission decisions for Bash commands and file-path tools, including:
-- Simple allow/deny patterns
-- Compound Bash commands
-- Hard-deny rules
-- File-path tool matching with project-root anchoring
-- No log writes or side effects during evaluation
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
-"""
+"""Unit tests for toolguard.api: the side-effect-free decide() primitive."""
 
 import os
 import sys
@@ -31,15 +19,7 @@ from toolguard.resolve import UnitVerdict
 
 
 def _make_config(layers_content):
-    """
-    Build a minimal Configuration from a list of (level, source_type, content_dict).
-
-    Args:
-        layers_content: List of (level, source_type, content_dict) tuples.
-
-    Returns:
-        A Configuration with those layers (specificity increases with index).
-    """
+    """Build a Configuration from (level, source_type, content) tuples; specificity is the index."""
     layers = []
     for i, (level, source_type, content) in enumerate(layers_content):
         prov = Provenance(
@@ -423,12 +403,10 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
             initial_files = set(logs_dir.iterdir())
-            # Run several decisions
             decide(config, "Bash", "ls -la")
             decide(config, "Bash", "whoami")
             decide(config, "Bash", "git status")
             after_files = set(logs_dir.iterdir())
-            # No new files should have been created
             self.assertEqual(initial_files, after_files)
 
     def test_decide_does_not_call_sys_exit(self):
@@ -453,8 +431,6 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
                 )
             ]
         )
-        # If sys.exit were called, we'd get SystemExit -- this call should
-        # return normally with an 'ask' decision
         original_exit = sys.exit
         exit_called = []
         sys.exit = lambda code=0: exit_called.append(code)
@@ -497,25 +473,13 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
 
 
 class TestProvenanceRegression(_IsolatedEnvTestCase):
-    """
-    Regression guards for provenance surfacing through the decision layer.
-
-    These tests document and protect against the regression where a normal
-    (non-conflict) file allow returned provenance=None in the decision
-    (formerly the ``Decision`` DTO, unified into ``RuntimeVerdict`` by
-    TOO-45 R6-S3), and the original absence of any provenance for Bash
-    decisions.
-    """
+    """Regression guards for provenance surfacing through the decision layer."""
 
     def test_file_allow_provenance_is_non_none(self):
         """
         Given a config that allows Read under /tmp/**
         When decide() is called with tool='Read' and a matching path
         Then RuntimeVerdict.provenance is non-None and identifies the allowing layer
-
-        This is a regression guard: a prior implementation set provenance only
-        from override.winning_provenance, which was None for normal (non-conflict)
-        allows, silently discarding the provenance already present in the resolver.
         """
 
         config = _make_config(
@@ -538,7 +502,6 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             result.provenance,
             "provenance must be non-None for a normal (non-conflict) file allow",
         )
-        # The provenance should point at the project-level config.
         self.assertEqual("project", result.provenance.level)
 
     def test_file_no_match_provenance_is_none(self):
@@ -565,7 +528,6 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         )
         result = decide(config, "Read", "/etc/passwd")
         self.assertEqual("ask", result.decision)
-        # No rule matched; the no_match_fallback result carries no provenance.
         self.assertIsNone(result.provenance)
 
     def test_bash_single_allow_provenance_is_non_none(self):
@@ -607,20 +569,6 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
             extracts FIRST, the genuine match 'ls' second)
         Then RuntimeVerdict.provenance is non-None and identifies the project
             layer, consistent with RuntimeVerdict.matched_rule ('ls') -- NOT None
-
-        TOO-45 R1e finishing pass regression guard: this adapter used to
-        derive RuntimeVerdict.provenance independently as "the first sub-command's
-        provenance" rather than reusing RuntimeVerdict.provenance (which
-        already carries the correct, matched_rule-consistent attribution).
-        Extraction order is exactly why that was wrong: with the
-        escape-hatch leaf first, the old code returned the ESCAPE HATCH's
-        provenance -- None -- even though 'ls' genuinely matched and
-        RuntimeVerdict.matched_rule already correctly said so, an inconsistency
-        confirmed by temporarily reintroducing the old logic and watching
-        this test fail. See test_resolve.
-        TestUndecidableFallbackMultiLeafWarningParity's sibling test for the
-        RuntimeVerdict-level guard, and 'diff <(cat a) <(cat b) && ls -la' in
-        the corpus for the real-traffic case this shape was found in.
         """
         config = _make_config(
             [
@@ -721,8 +669,6 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
 
         self.assertEqual("ask", whoami_match.decision)
         self.assertIn("whoami", whoami_match.sub_command)
-        # No rule matched for this sub-command, so matched_rule and
-        # provenance are None even though the no_match_fallback resolved it.
         self.assertIsNone(whoami_match.matched_rule)
         self.assertIsNone(whoami_match.provenance)
 
@@ -759,19 +705,13 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
 
         sm = result.sub_matches[0]
         self.assertEqual("deny", sm.decision)
-        # matched_rule should contain the hard-deny pattern that triggered the deny.
         self.assertIsNotNone(sm.matched_rule)
         self.assertIn("rm -rf", sm.matched_rule)
-        # hard-deny is pooled; no single provenance.
         self.assertIsNone(sm.provenance)
 
 
 class TestDecideAdditionalContext(_IsolatedEnvTestCase):
-    """
-    TOO-19 Phase 1, increment 6: RuntimeVerdict.additional_context is populated by
-    decide() for both the file-path and Bash branches, sourced directly from
-    the resolver's own RuntimeVerdict with no re-derivation in decision.py.
-    """
+    """RuntimeVerdict.additional_context as decide() populates it, for both branches."""
 
     def test_file_allow_structured_entry_surfaces_additional_context(self):
         """
@@ -880,18 +820,6 @@ class TestDecideAdditionalContext(_IsolatedEnvTestCase):
         result = decide(config, "Bash", "git status")
         self.assertEqual("allow", result.decision)
         self.assertIsNone(result.additional_context)
-
-    # test_positional_construction_of_decision_still_works was removed here
-    # (TOO-45 R6-S3): it pinned toolguard.tools.decision.Decision's own
-    # positional field order (tool, target, verdict, reason, provenance,
-    # sub_matches) -- specifically, that a PRIOR field addition
-    # (additional_context) to Decision had been appended last so it never
-    # broke a positional caller. Decision itself is now deleted (unified
-    # into RuntimeVerdict), so there is nothing left for this test to pin;
-    # RuntimeVerdict's own field order was not touched by this stage and has
-    # no equivalent positional-construction regression test either before or
-    # after -- not manufactured here to avoid inventing coverage this stage
-    # did not require.
 
 
 class TestDecideBashToolOverride(unittest.TestCase):

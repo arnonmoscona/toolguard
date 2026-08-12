@@ -1,21 +1,4 @@
-"""
-Unit tests for toolguard.tools.security_audit -- unified security audit aggregator.
-
-Tests cover:
-- Empty/clean config -> no findings, highest_severity=0, "No security findings" rendered
-- Danger findings only -> source="rule", correct field mapping
-- Takeover audit findings only -> source="takeover"
-- Mixed danger+takeover -> combined list sorted severity DESC
-- takeover_active reflected in report and render banner
-- counts dict correctness
-- render output is ASCII-only (markdown and text)
-- JSON format produces parseable JSON with documented keys
-- --strict exit code: 0 on clean, highest_severity on findings
-- locus populated from provenance.describe_brief when finding has provenance
-
-Fixture helpers are reused from test_tools_danger.py and test_tools_takeover_audit.py
-patterns: MappingProxyType layers built directly from Configuration/ConfigLayer/Provenance.
-"""
+"""Unit tests for toolguard.tools.security_audit -- unified security audit aggregator."""
 
 import contextlib
 import io
@@ -55,20 +38,12 @@ _pythonpath_patcher = None
 
 def setUpModule():
     """
-    Isolate PYTHONPATH for this whole module (TOO-19).
-
-    security_audit() now calls audit_environment(), which reads PYTHONPATH
-    from the real environment by default (env=None). Without this, every
-    test in this module that calls security_audit()/render() without
-    passing env= explicitly would implicitly depend on whatever PYTHONPATH
-    happens to be set to on the machine running the suite -- the same class
-    of hazard test-config-isolation.md documents for the other three/four
-    config-discovery anchors, just for a NEW one this change introduces.
-    Popped (not merely read) for the module's lifetime via patch.dict's
-    save/restore, which restores the exact original value (present or
-    absent) on teardown regardless of how it was mutated meanwhile. Tests
-    that specifically want to exercise the environment finding pass env=
-    explicitly instead of relying on this module-wide patch.
+    Isolate PYTHONPATH for the module: security_audit() calls audit_environment(),
+    which reads PYTHONPATH from the real environment by default (env=None), so an
+    untouched test would depend on whatever happens to be set on the machine
+    running the suite. Popped for the module's lifetime via patch.dict's
+    save/restore. Tests exercising the environment finding pass env= explicitly
+    instead of relying on this module-wide patch.
     """
     global _pythonpath_patcher
     _pythonpath_patcher = patch.dict(os.environ, {})
@@ -83,7 +58,7 @@ def tearDownModule():
 
 
 # ---------------------------------------------------------------------------
-# Fixture helpers (mirroring test_tools_danger.py and test_tools_takeover_audit.py)
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -117,8 +92,8 @@ def _toolguard_layer(
 
     ``undecidable_fallback``, when given, is written as a TOP-LEVEL key
     (sibling of ``takeover_mode``/``governed_tools``), matching its real
-    schema (TOO-19): unlike ``no_match_fallback`` it has no
-    ``[takeover_mode]`` section and no legacy alias.
+    schema: unlike ``no_match_fallback`` it has no ``[takeover_mode]``
+    section and no legacy alias.
     """
     content: dict = {}
 
@@ -130,8 +105,6 @@ def _toolguard_layer(
         takeover_section["enabled"] = takeover_enabled
     if ignored_allow_patterns is not None:
         takeover_section["ignored_allow_patterns"] = ignored_allow_patterns
-    # takeover_section always carries at least no_match_fallback, so it is
-    # always attached.
     content["takeover_mode"] = takeover_section
 
     if undecidable_fallback is not None:
@@ -187,11 +160,7 @@ def _hooks_for(*tools: str) -> dict:
 def _danger_allow_layer(
     tool: str, allow: List[str], specificity: int = 0
 ) -> ConfigLayer:
-    """
-    Build a toolguard_hook layer with dangerous allow patterns for ``tool``.
-
-    Wraps each pattern in ``Tool(inner)`` form, as stored in real configs.
-    """
+    """Build a toolguard_hook layer with ``tool``'s dangerous allow patterns wrapped in ``Tool(inner)`` form, as stored in real configs."""
     wrapped = [f"{tool}({p})" for p in allow]
     return ConfigLayer(
         provenance=_prov(specificity=specificity),
@@ -213,13 +182,7 @@ def _make_config(*layers: ConfigLayer) -> Configuration:
 
 
 def _clean_config() -> Configuration:
-    """
-    Return a Configuration that produces NO findings from either analyser.
-
-    - One governed tool (Bash) with hook registered in native settings.
-    - No dangerous allow patterns.
-    - no_match_fallback='deny', takeover OFF, no conflicts.
-    """
+    """Return a Configuration with Bash governed and hooked, no_match_fallback='deny', and no dangerous rules -- produces no findings from either analyser."""
     tg_layer = _toolguard_layer(
         governed_tools=["Bash"],
         no_match_fallback="deny",
@@ -229,60 +192,37 @@ def _clean_config() -> Configuration:
 
 
 def _danger_only_config() -> Configuration:
-    """
-    Return a Configuration that produces danger (rule) findings only.
-
-    - Bash allowed to run 'uv run python:*' (triggers arbitrary-exec-allow CRITICAL).
-    - Hook properly registered for Bash -> no takeover audit findings.
-    """
+    """Return a Configuration with Bash allowed 'uv run python:*' (fires arbitrary-exec-allow) and hooked -- danger findings only."""
     tg_layer = _toolguard_layer(
         governed_tools=["Bash"],
         no_match_fallback="deny",
     )
-    # Dangerous allow rule in a separate toolguard layer
     danger_layer = _danger_allow_layer("Bash", ["uv run python:*"])
     native_layer = _native_layer(hooks=_hooks_for("Bash"))
     return _make_config(tg_layer, danger_layer, native_layer)
 
 
 def _takeover_only_config() -> Configuration:
-    """
-    Return a Configuration that produces takeover audit findings only.
-
-    - Governed tool Bash with NO hook registered -> hook-not-registered (CRITICAL).
-    - No dangerous allow patterns -> no danger findings.
-    """
+    """Return a Configuration with Bash governed but no hook registered -- takeover findings only."""
     tg_layer = _toolguard_layer(
         governed_tools=["Bash"],
         no_match_fallback="deny",
     )
-    # No native layer with hooks
     return _make_config(tg_layer)
 
 
 def _mixed_config() -> Configuration:
-    """
-    Return a Configuration that produces BOTH danger and takeover audit findings.
-
-    - Dangerous allow rule (arbitrary-exec-allow CRITICAL from danger).
-    - No hook registered for Bash (hook-not-registered CRITICAL from takeover audit).
-    """
+    """Return a Configuration with a dangerous allow rule and no hook registered -- both danger and takeover findings."""
     tg_layer = _toolguard_layer(
         governed_tools=["Bash"],
         no_match_fallback="deny",
     )
     danger_layer = _danger_allow_layer("Bash", ["uv run python:*"])
-    # No native layer with hooks
     return _make_config(tg_layer, danger_layer)
 
 
 def _takeover_on_config() -> Configuration:
-    """
-    Return a Configuration with takeover mode ON.
-
-    - Bash governed, hook registered, takeover enabled.
-    - No dangerous rules, so report shows takeover_active=True with no findings.
-    """
+    """Return a Configuration with takeover mode enabled, Bash governed and hooked, and no dangerous rules."""
     governed = ["Bash"]
     ignored = ["Bash(*)"]
     tg_layer = _toolguard_layer(
@@ -299,12 +239,7 @@ def _takeover_on_config() -> Configuration:
 
 
 def _loose_undecidable_fallback_config() -> Configuration:
-    """
-    Return a Configuration with undecidable_fallback='allow_with_warning' (TOO-19).
-
-    - Bash governed, hook registered, no_match_fallback='deny' -- isolates the
-      resulting finding to loose-undecidable-fallback only.
-    """
+    """Return a Configuration with undecidable_fallback='allow_with_warning', Bash governed and hooked -- isolates the finding to loose-undecidable-fallback only."""
     tg_layer = _toolguard_layer(
         governed_tools=["Bash"],
         no_match_fallback="deny",
@@ -315,28 +250,15 @@ def _loose_undecidable_fallback_config() -> Configuration:
 
 
 def _locus_config() -> Configuration:
-    """
-    Return a Configuration that produces a takeover finding WITH provenance.
-
-    Uses a custom tool name (mcp__custom__tool) that is NOT in the default
-    ignored_allow_patterns.  With takeover ON and the blanket allow
-    ``mcp__custom__tool(*)`` present in native settings but absent from the
-    ignored set, audit_takeover emits an ``uncovered-blanket-allow`` finding
-    whose provenance points to the native layer.
-
-    Note: Bash(*) is ALWAYS in the default ignored set, so it would never
-    produce an uncovered-blanket-allow finding regardless of configuration.
-    """
-    # Govern only our custom tool; hook is registered, so no hook-not-registered.
+    """Return a Configuration with a takeover finding carrying provenance -- uses a custom tool name because Bash(*) is always in the default ignored set."""
     tg_layer = _toolguard_layer(
         governed_tools=["mcp__custom__tool"],
         takeover_enabled=True,
         no_match_fallback="deny",
-        # Explicitly empty -- defaults cover Bash/Read/Write/Edit but NOT mcp__custom__tool
         ignored_allow_patterns=[],
     )
     native_layer = _native_layer(
-        allow=["mcp__custom__tool(*)"],  # blanket allow NOT in ignored set
+        allow=["mcp__custom__tool(*)"],
         hooks=_hooks_for("mcp__custom__tool"),
     )
     return _make_config(tg_layer, native_layer)
@@ -549,15 +471,12 @@ class TestSecurityAuditTakeoverOnly(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Loose-undecidable-fallback finding, end to end (TOO-19)
+# Loose-undecidable-fallback finding, end to end
 # ---------------------------------------------------------------------------
 
 
 class TestLooseUndecidableFallbackFinding(unittest.TestCase):
-    """
-    End-to-end tests: loose-undecidable-fallback reaches security_audit(),
-    render() (markdown and text), and the JSON --format output.
-    """
+    """End-to-end tests: loose-undecidable-fallback reaches security_audit(), render(), and the JSON --format output."""
 
     def setUp(self):
         """Set up the report for a configuration with undecidable_fallback='allow_with_warning'."""
@@ -699,14 +618,11 @@ class TestSecurityAuditMixed(unittest.TestCase):
         (because 'rule' < 'takeover' lexicographically, which is the defined sort key)
         """
         critical = [f for f in self.report.findings if f.severity_value == 4]
-        # The mixed fixture must yield at least two CRITICAL findings spanning
-        # both sources, otherwise this ordering test would be vacuous.
         self.assertGreaterEqual(
             len(critical), 2, msg="fixture must produce >=2 CRITICAL findings"
         )
         self.assertIn("rule", {f.source for f in critical})
         self.assertIn("takeover", {f.source for f in critical})
-        # Within the same severity, findings are ordered by source ascending.
         sources = [f.source for f in critical]
         self.assertEqual(
             sources,
@@ -798,7 +714,6 @@ class TestCountsDict(unittest.TestCase):
         report = security_audit(_danger_only_config())
         for label in report.counts:
             self.assertIn(label, ("LOW", "MEDIUM", "HIGH", "CRITICAL"))
-        # Only present labels should be in counts
         present_labels = {f.severity_label for f in report.findings}
         self.assertEqual(set(report.counts.keys()), present_labels)
 
@@ -935,7 +850,7 @@ class TestRenderJson(unittest.TestCase):
                 mock_load.return_value = MagicMock()
                 mock_sa.return_value = self._make_report()
                 out, _ = self._capture_main(["--dir", ".", "--format", "json"])
-        data = json.loads(out)  # raises if invalid
+        data = json.loads(out)
         self.assertIsInstance(data, dict)
 
     def test_json_has_required_top_level_keys(self):
@@ -1060,7 +975,6 @@ class TestRenderJson(unittest.TestCase):
         ]
         for field in expected_fields:
             self.assertIn(field, fd, msg=f"Missing field in JSON finding: {field}")
-        # remediation stays a human string; the structured fix is a separate sidecar.
         self.assertEqual(fd["remediation"], "remediation text")
         self.assertIsNone(fd["remediation_proposal"])
 
@@ -1196,9 +1110,7 @@ class TestLocusFromProvenance(unittest.TestCase):
         report = security_audit(_danger_only_config())
         rule_findings = [f for f in report.findings if f.source == "rule"]
         self.assertGreater(len(rule_findings), 0, "Expected at least one rule finding")
-        # The danger layer has provenance level="project", path="/fake/.claude/toolguard_hook.toml"
         expected_locus = "project: /fake/.claude/toolguard_hook.toml"
-        # At least one rule finding should carry this locus
         loci = [f.locus for f in rule_findings]
         self.assertIn(
             expected_locus,
@@ -1220,7 +1132,6 @@ class TestLocusFromProvenance(unittest.TestCase):
         self.assertGreater(
             len(uncovered), 0, "Expected uncovered-blanket-allow finding"
         )
-        # Native layer provenance: level="project", path="/fake/.claude/settings.local.json"
         expected_locus = "project: /fake/.claude/settings.local.json"
         for f in uncovered:
             self.assertEqual(
@@ -1274,10 +1185,7 @@ class TestWithContextFlag(unittest.TestCase):
         )
 
     def _run_with_context_json(self, config_fn=None) -> dict:
-        """
-        Run main() with --format json --with-context using either a real config
-        function or mocked objects, and return the parsed JSON dict.
-        """
+        """Run main() with --format json --with-context (real config or mocked objects) and return the parsed JSON dict."""
         if config_fn is not None:
             with patch("toolguard.tools.security_audit.load_config") as mock_load:
                 mock_load.return_value = config_fn()
@@ -1456,7 +1364,6 @@ class TestWithContextFlag(unittest.TestCase):
                 out, _ = self._capture_main(
                     ["--dir", ".", "--format", "markdown", "--with-context"]
                 )
-        # The markdown should not contain a raw JSON "context" key block
         self.assertNotIn('"context"', out)
 
     def test_json_with_context_is_ascii_safe(self):
@@ -1507,11 +1414,7 @@ class TestSecurityAuditClarity(unittest.TestCase):
 
 
 class TestSecurityAuditEnvironment(unittest.TestCase):
-    """
-    The audit surfaces environment (PYTHONPATH-shadow) findings at HIGH
-    severity (TOO-19) -- silent by default, one finding when PYTHONPATH would
-    shadow the installed hook.
-    """
+    """The audit surfaces environment (PYTHONPATH-shadow) findings at HIGH severity -- silent by default, one finding when PYTHONPATH would shadow the installed hook."""
 
     def test_clean_config_and_no_pythonpath_has_no_environment_finding(self):
         """
@@ -1588,7 +1491,7 @@ def _danger_finding(
 
 
 class TestStructuredRemediation(unittest.TestCase):
-    """S2: RankedFinding.remediation carries a structured, appliable proposal."""
+    """RankedFinding.remediation carries a structured, appliable proposal."""
 
     def test_remove_kind_builds_removal_edit(self):
         """
@@ -1615,7 +1518,6 @@ class TestStructuredRemediation(unittest.TestCase):
         edit = proposal.edits[0]
         self.assertEqual(edit.removed_patterns, ("uv run python:*",))
         self.assertEqual(edit.added_patterns, ())
-        # And it actually removes the rule when applied.
         layer = ConfigLayer(
             provenance=prov,
             content=MappingProxyType(
@@ -1726,7 +1628,7 @@ class TestStructuredRemediation(unittest.TestCase):
 
 
 class TestEditsReview(unittest.TestCase):
-    """S3: --edits audits the config AS IF the proposed edits were enacted."""
+    """--edits audits the config AS IF the proposed edits were enacted."""
 
     def _dangerous_config(self):
         """A config with an arbitrary-exec allow (fires arbitrary-exec-allow)."""
@@ -1828,16 +1730,7 @@ class TestNoSecurityAcknowledgement(unittest.TestCase):
     """The #NOSECURITY tag acknowledges (labels + de-prioritizes) but never hides."""
 
     def _real_toml_layer(self, dir_path, allow_lines, allow_patterns):
-        """
-        Write a real toolguard_hook.toml (so comments can be recovered from disk)
-        and return a matching ConfigLayer whose provenance points at that file.
-
-        Args:
-            dir_path: Directory to write the file into.
-            allow_lines: Full ``allow`` array element lines, INCLUDING any comments.
-            allow_patterns: The parsed pattern strings (no comments) for the layer
-                content, matching what a TOML parser would produce.
-        """
+        """Write a real toolguard_hook.toml (so comments can be recovered from disk) and return a matching ConfigLayer."""
         elements = "".join(f"    {ln}\n" for ln in allow_lines)
         text = "[permissions]\nallow = [\n" + elements + "]\ndeny = []\nask = []\n"
         path = Path(dir_path) / "toolguard_hook.toml"
@@ -1919,7 +1812,6 @@ class TestNoSecurityAcknowledgement(unittest.TestCase):
             ]
             self.assertTrue(ack, "acknowledged CRITICAL should still be present")
             self.assertTrue(unack_rule, "un-acknowledged MEDIUM should be present")
-            # Every un-acknowledged rule finding precedes the acknowledged one(s).
             first_ack_index = min(report.findings.index(f) for f in ack)
             last_unack_index = max(report.findings.index(f) for f in unack_rule)
             self.assertLess(last_unack_index, first_ack_index)
@@ -1988,10 +1880,7 @@ def _ranked(finding_id, acknowledged=False, acknowledgement=None, pattern="git p
 
 
 class TestAcknowledgementRendering(unittest.TestCase):
-    """
-    #NOSECURITY-acknowledged findings are still reported, but carry a visible
-    acknowledgement marker in both render formats.
-    """
+    """#NOSECURITY-acknowledged findings are still reported, but carry a visible acknowledgement marker in both render formats."""
 
     def test_acknowledgement_label_with_reason(self):
         """
@@ -2043,10 +1932,7 @@ class TestAcknowledgementRendering(unittest.TestCase):
 
 
 class TestFindingDeltaAndBanner(unittest.TestCase):
-    """
-    The as-if-enacted (--edits) review computes a finding delta between the
-    current and proposed audits and renders it as a banner.
-    """
+    """The as-if-enacted (--edits) review computes a finding delta between the current and proposed audits and renders it as a banner."""
 
     def _report(self, *findings):
         return SecurityReport(

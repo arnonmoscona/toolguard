@@ -1,10 +1,8 @@
 """
 Unit tests for toolguard.tools.self_permission.
 
-Covers the declarative self-permission table, the precise "already permitted?"
+Covers the declarative self-permission table, the "already permitted?"
 evaluation (via the real decision engine), and the risk-aware recommendations.
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
 """
 
 import unittest
@@ -84,16 +82,12 @@ class TestSelfPermissionEvaluation(unittest.TestCase):
 
     def test_unconfigured_config_flags_audit_as_needed(self):
         """
-        Given a config with no rules at all (TOO-15: an entirely unconfigured
-        tool now resolves to 'ask', not a fail-closed 'deny' -- so a fresh
-        install is never bricked)
+        Given a config with no rules at all, where every tool resolves to
+        'ask' rather than a fail-closed 'deny'
         When missing_self_permissions is evaluated
-        Then toolguard-audit (read-only) still needs action -- its current
-        verdict is 'ask', not 'allow', so read-only audit calls would still
-        interrupt with a prompt -- but toolguard-maintain (mutating) needs NO
-        action: its current verdict is already 'ask', which is exactly the
-        desired per-invocation-consent posture for a mutating tool, so no
-        additional rule is required
+        Then only toolguard-audit needs action -- 'ask' would interrupt a
+        read-only call, while for the mutating toolguard-maintain 'ask' is
+        already the wanted per-invocation-consent posture
         """
         missing = missing_self_permissions(Configuration(layers=(), start_dir=None))
         by_cmd = {s.permission.command: s for s in missing}

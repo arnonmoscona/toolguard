@@ -1,37 +1,38 @@
 """
 Toolguard SessionStart Hook for Claude Code.
 
-This hook runs at the start of every Claude Code session and surfaces any
-configuration conflicts that are present so the agent (and user) become aware
-of them immediately. Claude Code injects SessionStart stdout directly into the
-session context, so printing a summary here makes it visible to the agent.
+Runs at the start of every Claude Code session and surfaces configuration
+problems the agent and user should notice immediately. Claude Code injects
+SessionStart stdout directly into the session context, so printing a
+summary here makes it visible to the agent.
 
-Two sources of conflict are checked:
+Checks performed, independent of each other:
 
 1. **Static conflicts** (recomputed live): ``config.takeover_mode().conflict``
-   detects a cross-level disagreement on ``takeover_mode.enabled`` in real time.
-   The check self-clears when the configuration is fixed -- no stale state.
-
+   detects a cross-level disagreement on ``takeover_mode.enabled``. Self-clears
+   once the configuration is fixed -- no stale state.
 2. **Dynamic conflicts** (previously recorded): the conflict log file(s) in
-   ``logs/toolguard-conflict-YYYY-MM-DD.md`` accumulate allow-over-deny overrides
-   that can only be detected at tool-use time (when an actual command is evaluated).
-   The most recent file with recorded entries is surfaced here.
+   ``logs/toolguard-conflict-YYYY-MM-DD.md`` accumulate conflict entries
+   written by the PreToolUse hook -- allow-over-deny overrides, and also
+   ``takeover_mode.enabled`` disagreements, which persist in the log after
+   the configuration is fixed. The most recent file with recorded entries is
+   surfaced.
+3. Any governed config file that failed to parse -- see
+   :func:`_detect_broken_config_files`.
+4. Any ``*_fallback`` setting written with an unrecognized value -- see
+   :func:`_detect_unrecognized_fallbacks`.
+5. Whether the toolguard governing this machine is a shadowed source
+   checkout, or an installed copy that has drifted from its own checkout --
+   see :func:`_detect_shadow_status`, and ``docs/security.md`` ("The hook can
+   be silently shadowed") for the rationale. Meaningful only when the active
+   session's project is toolguard's own source repo; silent otherwise.
 
-The hook nags every session while conflicts remain. There is no deduplication
-marker: persistent nagging is intentional to encourage resolution.
+None of the above is deduplicated: the hook nags every session while a
+condition remains true, by design.
 
-A THIRD, unrelated check runs alongside the two above (TOO-19): whether the
-toolguard governing this machine is a shadowed source checkout, or a properly
-installed copy that has drifted from its own checkout. See
-:func:`_detect_shadow_status` and :mod:`toolguard.install_provenance` for the
-detection primitives, and ``docs/security.md`` ("The hook can be silently
-shadowed") for the full rationale. Both messages are gated on the ACTIVE
-session's project being toolguard's own source repo -- meaningless for any
-other project, so they stay silent there.
-
-Input: JSON via stdin (SessionStart shape -- ``hook_event_name``, ``cwd``,
-       ``session_id``; NO ``tool_name`` / ``tool_input`` fields).
-Output: A short conflict summary on stdout when conflicts exist; nothing otherwise.
+Input: JSON via stdin (SessionStart shape -- ``hook_event_name``, ``cwd``;
+       NO ``tool_name`` / ``tool_input`` fields).
+Output: A short summary on stdout when anything above is found; nothing otherwise.
 Exit code: Always 0 (a SessionStart hook must never block the session).
 """
 
@@ -51,13 +52,8 @@ def _parse_session_start_input() -> dict:
     """
     Parse the SessionStart JSON payload from stdin.
 
-    The SessionStart payload has ``hook_event_name``, ``session_id``, and ``cwd``
-    but does NOT have ``tool_name`` or ``tool_input``. This parser is intentionally
-    lenient: it falls back gracefully on missing or malformed input rather than
-    raising, because a broken SessionStart hook must never block a session.
-
-    Returns:
-        Parsed JSON data as a dictionary, or an empty dict on failure.
+    Lenient by design: missing or malformed input yields an empty dict rather
+    than an exception.
     """
     try:
         raw = sys.stdin.read()
@@ -72,15 +68,8 @@ def _recent_conflict_logs(log_dir: Path) -> list:
     """
     Return existing ``toolguard-conflict-*.md`` files, most recent first.
 
-    Sorts by filename descending; a lexicographic sort on the date suffix is
-    correct because dates are in ``YYYY-MM-DD`` ISO format. Returns an empty list
-    when ``log_dir`` does not exist or contains no conflict log files.
-
-    Args:
-        log_dir: Directory to search for conflict log files.
-
-    Returns:
-        List of conflict-log Paths, most recent first (possibly empty).
+    Sorting by filename descending is correct because the date suffix is ISO
+    ``YYYY-MM-DD``.
     """
     if not log_dir.exists():
         return []
@@ -89,17 +78,11 @@ def _recent_conflict_logs(log_dir: Path) -> list:
 
 def _count_conflict_entries(log_file: Path) -> int:
     """
-    Count the number of conflict entries recorded in a conflict log file.
+    Count the conflict entries recorded in a conflict log file.
 
     Each entry written by :func:`toolguard.error_log.log_conflict` begins with a
-    Markdown heading of the form ``## YYYY-MM-DD HH:MM:SS - CONFLICT``. Counting
-    lines that match this pattern gives the entry count without a full parse.
-
-    Args:
-        log_file: Path to a ``toolguard-conflict-*.md`` file.
-
-    Returns:
-        Number of entries found, or 0 if the file cannot be read.
+    Markdown heading of the form ``## YYYY-MM-DD HH:MM:SS - CONFLICT``. An
+    unreadable file counts as zero.
     """
     try:
         with open(log_file, "r", encoding="utf-8") as f:
@@ -114,18 +97,15 @@ def _check_dynamic_conflicts(log_dir: Optional[Path]):
     """
     Check for previously recorded dynamic conflicts in the conflict log.
 
-    Walks the conflict-log files in ``log_dir`` from most recent to least recent
-    and returns a description of the FIRST one that has recorded entries. Walking
-    (rather than only inspecting the single most-recent file) matters because an
-    empty current-day log must not shadow an older log that still has unresolved
-    conflicts -- the nag should persist until they are actually cleared.
-
-    Args:
-        log_dir: The directory to search for conflict log files, or None.
+    Walks the conflict-log files in *log_dir* from most recent to least recent
+    and describes the FIRST one that has recorded entries. Walking, rather than
+    inspecting only the single most-recent file, matters because an empty
+    current-day log must not shadow an older log whose conflicts are still
+    unresolved -- the nag should persist until they are actually cleared.
 
     Returns:
-        Tuple of ``(relative_path_str, entry_count)`` describing the conflict log,
-        or None when no recorded dynamic conflicts exist.
+        ``(relative_path_str, entry_count)``, or None when no recorded dynamic
+        conflicts exist.
     """
     if log_dir is None:
         return None
@@ -133,9 +113,7 @@ def _check_dynamic_conflicts(log_dir: Optional[Path]):
         count = _count_conflict_entries(log_file)
         if count == 0:
             continue
-        # Express the path relative to the log dir's parent (the project root) for
-        # a concise, human-readable display. Fall back to the absolute path when the
-        # relationship cannot be established.
+        # log_dir's parent is the project root; show the path relative to it.
         try:
             display_path = log_file.relative_to(log_dir.parent)
         except ValueError:
@@ -152,52 +130,22 @@ def _format_summary(
     unrecognized_fallbacks=(),
 ) -> str:
     """
-    Format a brief conflict/broken-config/shadow-status summary for stdout.
-
-    Produces a short, human-readable summary for injection into the Claude
-    Code session context, built from up to five independent sections:
-
-    - A broken-config section (TOO-19) when *broken_files* is non-empty:
-      names each broken file with its parse error and states that toolguard
-      is falling back to ``ask`` for every tool call. This is unconditional
-      -- it does not depend on either conflict argument.
-    - The pre-existing conflict-detected section when *static_conflict* or
-      *dynamic_conflict* is not None: a header line, one bullet per conflict
-      source, and a closing action prompt -- byte-identical to this
-      function's behaviour before *broken_files* was added.
-    - A "running from a source tree" section (TOO-19) when
-      *shadow_status* is given and ``shadow_status.running_from_checkout``
-      is True: names both the governing and installed paths.
-    - A "stale install" section (TOO-19) when *shadow_status* is given and
-      ``shadow_status.stale`` is True: names both paths and the reinstall
-      command. Independent of the section above -- either, neither, or both
-      may fire.
-    - An unrecognized-fallback-value section (TOO-19 m5) when
-      *unrecognized_fallbacks* is non-empty: one bullet per offending setting,
-      naming the value, the setting, the file, and the accepted spellings,
-      plus the fact that it is resolving to ``ask``.
-
-    When every input is absent, the result is an empty string (callers only
-    print when at least one is present).
+    Format the session-start summary printed to stdout.
 
     Args:
         static_conflict: A ``TakeoverEnabledConflict`` describing cross-level
             disagreement on ``takeover_mode.enabled``, or None.
         dynamic_conflict: A ``(path_str, count)`` tuple for the most recent
             conflict log file with recorded entries, or None.
-        broken_files: ``(path, message)`` pairs for governed config files that
-            failed to parse (:attr:`~toolguard.config.Configuration.parse_failures`,
-            TOO-19). Defaults to ``()`` so existing 2-argument call sites are
-            unaffected.
-        shadow_status: A :class:`ShadowStatus` (see :func:`_detect_shadow_status`),
-            or ``None`` so existing call sites are unaffected.
-        unrecognized_fallbacks: :class:`~toolguard.config_types.UnrecognizedFallbackSetting`
-            records from :func:`_detect_unrecognized_fallbacks` (TOO-19 m5).
-            Defaults to ``()`` so existing call sites are unaffected.
+        broken_files: ``(path, message)`` pairs for governed config files
+            that failed to parse.
+        shadow_status: A :class:`ShadowStatus`, or ``None``.
+        unrecognized_fallbacks:
+            :class:`~toolguard.config_types.UnrecognizedFallbackSetting` records.
 
     Returns:
-        A multi-line string suitable for printing to stdout, or "" when
-        there is nothing to report.
+        A multi-line string suitable for printing to stdout, or "" when there
+        is nothing to report.
     """
     sections = []
 
@@ -236,9 +184,6 @@ def _format_summary(
         conflict_lines = ["toolguard: configuration conflicts detected --"]
 
         if static_conflict is not None:
-            # Build a compact provenance string: cite the first disagreeing
-            # source so the human knows where to look, without flooding the
-            # session context.
             provenance_parts = [
                 f"{value} [{prov.describe_brief()}]"
                 for value, prov in static_conflict.sources
@@ -297,64 +242,31 @@ def _format_summary(
 
 def _detect_broken_config_files(config: Configuration):
     """
-    Return every governed config file that failed to parse (TOO-19).
+    Return every governed config file that failed to parse.
 
-    A non-empty result means
-    :func:`~toolguard.permission_resolution.resolve_permission_cascade`
-    is clamping EVERY toolguard decision to ``'ask'`` (see that function's
-    docstring) until the file(s) are fixed -- the single most severe class of
-    configuration problem, so it is surfaced unconditionally here, independent
-    of (and in addition to) the existing static/dynamic conflict summary.
-
-    Takes an already-loaded :class:`~toolguard.config.Configuration` (see
-    :func:`_detect_conflicts`, called with the SAME instance by ``main()``)
-    rather than loading its own -- ``main()`` calls ``load_configuration()``
-    exactly once per session-start invocation and both checks derive from
-    that one call (TOO-19 review fix: this used to make a second, redundant
-    ``load_configuration()`` call purely to avoid widening
-    :func:`_detect_conflicts`'s 2-tuple return shape).
-
-    Args:
-        config: An already-loaded ``Configuration``.
+    A non-empty result means toolguard is clamping every decision to ``'ask'``
+    -- except one already resolved to ``'deny'``, which is never weakened --
+    until the file(s) are fixed.
 
     Returns:
-        ``config.parse_failures``, materialized via ``tuple(...)`` so it
-        behaves identically for a real ``Configuration`` and for a test
-        double that only implements iteration (see
-        ``test_session_start.py``'s pre-existing ``MagicMock(spec=Configuration)``
-        fixtures, which do not set ``parse_failures`` explicitly).
+        A tuple of ``(path, message)`` pairs, empty when every governed config
+        file parsed.
     """
     return tuple(config.parse_failures)
 
 
 def _detect_unrecognized_fallbacks(config: Configuration):
     """
-    Return every ``*_fallback`` setting written with an unrecognized value (TOO-19 m5).
+    Return every ``*_fallback`` setting written with an unrecognized value.
 
-    Both fallback settings resolve an unrecognized value to ``'ask'`` -- the
-    safe direction -- but they used to do so with no diagnostic anywhere. A
-    one-character typo (``allow_with_no_warning`` for
-    ``allow_with_no_warnings``) therefore presented as maximum friction with no
-    stated cause, which reads as a broken feature rather than a typo. The
-    resolution-log warning added alongside this is not enough on its own: an
-    unattended session stalls on prompts and nobody reads the log until after
-    the round trip, so it is repeated here where Claude Code injects it into
-    the session context.
-
-    Takes the already-loaded ``Configuration`` ``main()`` built, like the other
-    ``_detect_*`` helpers.
-
-    Args:
-        config: An already-loaded ``Configuration``.
+    Surfaced here in addition to the resolution log because an unattended
+    session stalls on prompts and nobody reads the log until after the round
+    trip.
 
     Returns:
         A tuple of
         :class:`~toolguard.config_types.UnrecognizedFallbackSetting`, empty
-        when every fallback setting is valid or unset. Materialized via
-        ``tuple(...)`` for the same reason as
-        :func:`_detect_broken_config_files`: it behaves identically for a real
-        ``Configuration`` and for a ``MagicMock(spec=Configuration)`` test
-        double that does not stub this method explicitly.
+        when every fallback setting is valid or unset.
     """
     return tuple(config.unrecognized_fallback_settings())
 
@@ -363,33 +275,16 @@ def _detect_conflicts(config: Configuration):
     """
     Detect both static and dynamic configuration conflicts.
 
-    This is the core logic of the SessionStart hook. It is extracted from
-    ``main()`` so it can be unit-tested independently without needing to mock
-    stdin or sys.exit.
-
-    Takes an already-loaded :class:`~toolguard.config.Configuration` --
-    ``main()`` loads it once and passes the same instance to this function
-    and to :func:`_detect_broken_config_files` (TOO-19 review fix: this
-    function used to call ``load_configuration()`` itself, requiring a
-    second, redundant call from ``_detect_broken_config_files`` rather than
-    widening this function's return shape).
-
-    Args:
-        config: An already-loaded ``Configuration``.
-
     Returns:
-        Tuple ``(static_conflict, dynamic_conflict)`` where either may be None
-        when no conflict of that type exists.
+        ``(static_conflict, dynamic_conflict)``; either may be None when no
+        conflict of that type exists.
     """
-    # Determine log directory from project root (same logic as the PreToolUse hook).
     project_root = config.project_root
     log_dir = project_root / "logs" if project_root is not None else None
 
-    # 1. Static conflict: cross-level disagreement on takeover_mode.enabled.
     takeover = config.takeover_mode()
     static_conflict = takeover.conflict  # TakeoverEnabledConflict or None
 
-    # 2. Dynamic conflict: previously recorded entries in the conflict log.
     dynamic_conflict = _check_dynamic_conflicts(log_dir)
 
     return static_conflict, dynamic_conflict
@@ -398,11 +293,11 @@ def _detect_conflicts(config: Configuration):
 @dataclass(frozen=True)
 class ShadowStatus:
     """
-    TOO-19 shadow/stale-install status for the CURRENT session.
+    Shadow/stale-install status for the current session.
 
-    Gated on the active session's project being toolguard's own source
-    checkout (see :func:`_detect_shadow_status`) -- meaningless, and always
-    the all-empty/False values below, for every other project.
+    Every field carries its empty/False value unless the active session's
+    project is toolguard's own source checkout (see
+    :func:`_detect_shadow_status`).
 
     Attributes:
         checkout_root: The active project's root, when it IS a toolguard
@@ -434,21 +329,14 @@ _EMPTY_SHADOW_STATUS = ShadowStatus(
 
 def _detect_shadow_status(config: Configuration) -> ShadowStatus:
     """
-    Detect TOO-19 shadow/stale-install status for the current session.
+    Detect shadow/stale-install status for the current session.
 
-    Gated on the active session's project (``config.project_root``) itself
-    being a toolguard source checkout -- both checks are meaningless for any
-    other project (a Claude Code session in an unrelated repo has no
-    "working tree" for toolguard to compare against), so this returns
-    :data:`_EMPTY_SHADOW_STATUS` immediately when that gate fails.
-
-    Args:
-        config: An already-loaded ``Configuration`` (reused from ``main()``,
-            matching the pattern in :func:`_detect_conflicts` /
-            :func:`_detect_broken_config_files`).
-
-    Returns:
-        A :class:`ShadowStatus`.
+    Gated on the active project (``config.project_root``) being a toolguard
+    source checkout: a session in an unrelated repo has no working tree to
+    compare against, so this returns :data:`_EMPTY_SHADOW_STATUS` immediately
+    when the gate fails. :func:`~toolguard.install_provenance.source_checkout_root`
+    is passed the PACKAGE directory (``project_root / "toolguard"``), not the
+    project root.
     """
     project_root = config.project_root
     if project_root is None:
@@ -475,13 +363,7 @@ def _detect_shadow_status(config: Configuration) -> ShadowStatus:
 
 
 def _build_session_start_argparser() -> argparse.ArgumentParser:
-    """
-    Build the argument parser for the toolguard SessionStart hook.
-
-    Returns:
-        Configured :class:`~argparse.ArgumentParser` with a description explaining
-        that this is a Claude Code SessionStart hook (not meant to be run directly).
-    """
+    """Build the argument parser for the toolguard SessionStart hook."""
     return argparse.ArgumentParser(
         prog="toolguard-session-start",
         description=(
@@ -501,31 +383,18 @@ def main() -> None:
     """
     Main entry point for the SessionStart hook.
 
-    Reads the SessionStart JSON payload from stdin, checks for static and dynamic
-    configuration conflicts, any governed config file that failed to parse
-    (TOO-19), any ``*_fallback`` setting written with an unrecognized value
-    (TOO-19 m5, see :func:`_detect_unrecognized_fallbacks`), and -- when the
-    active project is toolguard's own source repo -- a shadowed/stale install
-    (TOO-19, see :func:`_detect_shadow_status`), and
-    prints a brief summary to stdout when any are found. Claude Code injects
-    this stdout into the session context so the agent immediately learns of
-    any unresolved conflicts, broken config, or install-provenance problem.
-    Always exits 0 -- a SessionStart hook must never block or break a session.
-
-    Exit codes:
-        0: Always (including --help, isatty guard, and error cases).
+    Reads the SessionStart JSON payload from stdin, runs the checks described
+    in this module's docstring, and prints a summary to stdout when any of
+    them fire.
     """
     parser = _build_session_start_argparser()
-    # parse_known_args() is used instead of parse_args() so that the hook still
-    # works correctly when invoked via the test runner (which places test names
-    # in sys.argv). This hook accepts NO arguments -- it only reads stdin -- so
-    # unknown args are silently discarded. --help still exits 0 via argparse.
+    # parse_known_args(), not parse_args(): this hook takes no arguments, and
+    # the test runner's own args land in sys.argv, so unknown args must be
+    # discarded rather than rejected.
     parser.parse_known_args()
 
-    # Interactive guard: if a human runs 'toolguard-session-start' in a terminal
-    # without piping a JSON event, do not block on stdin. Print a brief explanation
-    # and exit. Claude always pipes JSON (not a TTY), so this guard is inert in real use.
-    # Exit code 0: informational (Arnon: change to non-zero if preferred).
+    # Claude always pipes JSON (never a TTY), so this guard is inert in real
+    # use -- it only stops a manual run from blocking on stdin.
     if sys.stdin.isatty():
         print(
             "toolguard-session-start: this is a Claude Code SessionStart hook, "
@@ -540,10 +409,8 @@ def main() -> None:
         payload = _parse_session_start_input()
         cwd = payload.get("cwd") or os.getcwd()
 
-        # Loaded exactly once and passed to both checks below (TOO-19 review
-        # fix -- see _detect_conflicts / _detect_broken_config_files
-        # docstrings for why this used to be two separate load_configuration()
-        # calls).
+        # Loaded once and shared by every _detect_* check below, so they see
+        # a consistent snapshot.
         config = load_configuration(cwd)
         static_conflict, dynamic_conflict = _detect_conflicts(config)
         broken_files = _detect_broken_config_files(config)

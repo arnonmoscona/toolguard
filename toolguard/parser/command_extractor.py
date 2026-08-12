@@ -1,27 +1,19 @@
 """
-Command extraction module for bash compound commands.
+Split a bash command line into the leaf commands a permission rule can match.
 
-This module provides functionality to extract individual commands
-from compound bash command lines for security permission checking.
+Two extractors, both over the typed IR that
+:mod:`toolguard.parser.command_model` builds from the Canopy PEG parse tree.
+Nothing here reads a raw Canopy node's attributes.
 
-Uses the Canopy-generated PEG parser to walk the AST tree via the
-Abstract Command Model (IR) defined in :mod:`toolguard.parser.command_model`.
+- :func:`extract_structured_from_grammar` takes an already-parsed tree and
+  returns :class:`LeafCommand` / :class:`UndecidableSegment` objects, so a
+  segment that cannot be decomposed says so instead of vanishing.
+- :func:`extract_commands` parses the string itself and returns plain command
+  strings. It never reports an undecidable segment, and it runs no lexical
+  pre-pass.
 
-ALL raw Canopy node access is isolated in :mod:`~toolguard.parser.command_model`
-(:func:`~toolguard.parser.command_model.build_ir`).  This module operates
-exclusively on the typed IR types.
-
-TOO-17: Extended to handle multi-line programs.  The grammar now recognises:
-  - Multiple statements separated by newlines / ``;``
-  - Shell control structures (for/while/until/if/case) with both
-    ``;``-delimited and newline-separated bodies
-  - Process substitution ``<(...)`` / ``>(...)``
-  - Trailing-operator line continuation (``&&`` / ``||`` / ``|`` + newline)
-
-The structured extractor (``extract_structured_from_grammar``) returns a
-list of :class:`LeafCommand` and :class:`UndecidableSegment` objects for
-use by the compound resolution layer.  The legacy ``extract_commands``
-function is preserved for backward compatibility.
+Business policy -- what counts as foreign inline code, what earns the ASK
+floor -- lives here rather than in the grammar or the IR.
 """
 
 import logging
@@ -44,99 +36,78 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Structured result types (also imported from multiline.py for convenience)
+# Structured result types
 # ---------------------------------------------------------------------------
 
 
 class LeafCommand(object):
-    """A fully-decomposed leaf command suitable for permission matching.
+    """A decomposed leaf command, ready for permission matching.
+
+    Also indexes and iterates as the 2-tuple ``(text, ask_floor)``.
 
     Attributes:
-        text: The command string (newline-free, whitespace-collapsed).
-        ask_floor: When True the verdict for this leaf is clamped to at most
-            ASK (an explicit deny still applies; a plain allow cannot downgrade
-            to allow).  Used for foreign inline code and foreign heredoc sinks.
+        text: The command string.
+        ask_floor: Set for foreign inline code and for a heredoc bound for a
+            foreign sink. Nothing here decomposes such a payload: an inline
+            one stays whole in *text*, while a heredoc body is already gone by
+            this point, leaving only a ``__HEREDOC_TO_<sink>__`` sentinel.
     """
 
     __slots__ = ("text", "ask_floor")
 
     def __init__(self, text: str, ask_floor: bool = False) -> None:
-        """Initialise a LeafCommand.
-
-        Args:
-            text: The command string.
-            ask_floor: Whether to clamp the verdict to ASK.
-        """
         self.text = text
         self.ask_floor = ask_floor
 
     def __eq__(self, other: object) -> bool:
-        """Return True if *other* is a LeafCommand with the same fields."""
         if isinstance(other, LeafCommand):
             return self.text == other.text and self.ask_floor == other.ask_floor
         return NotImplemented
 
     def __repr__(self) -> str:
-        """Return a developer-friendly representation."""
         return f"LeafCommand(text={self.text!r}, ask_floor={self.ask_floor!r})"
 
     def __hash__(self) -> int:
-        """Return a hash for use in sets."""
         return hash((self.text, self.ask_floor))
 
-    # NamedTuple compatibility: support positional indexing.
     def __getitem__(self, index: int):
-        """Support tuple-style indexing for backward compatibility."""
         return (self.text, self.ask_floor)[index]
 
     def __iter__(self):
-        """Support tuple-style iteration for backward compatibility."""
         return iter((self.text, self.ask_floor))
 
 
 class UndecidableSegment(object):
-    """A segment that cannot be safely decomposed into individual commands.
+    """A segment the extractor refused to decompose into individual commands.
 
-    Resolves to ASK in the compound-resolution layer.
+    Also indexes and iterates as the 2-tuple ``(original, reason)``.
 
     Attributes:
-        original: The original (pre-processed) text of the segment.
+        original: The undecomposed segment text.
         reason: Human-readable description of why it is undecidable.
     """
 
     __slots__ = ("original", "reason")
 
     def __init__(self, original: str, reason: str) -> None:
-        """Initialise an UndecidableSegment.
-
-        Args:
-            original: The original text.
-            reason: Why decomposition is not possible.
-        """
         self.original = original
         self.reason = reason
 
     def __eq__(self, other: object) -> bool:
-        """Return True if *other* is an UndecidableSegment with the same fields."""
         if isinstance(other, UndecidableSegment):
             return self.original == other.original and self.reason == other.reason
         return NotImplemented
 
     def __repr__(self) -> str:
-        """Return a developer-friendly representation."""
         return f"UndecidableSegment(original={self.original!r}, reason={self.reason!r})"
 
     def __hash__(self) -> int:
-        """Return a hash for use in sets."""
         return hash((self.original, self.reason))
 
-    # NamedTuple compatibility: support positional indexing.
     def __getitem__(self, index: int):
-        """Support tuple-style indexing for backward compatibility."""
         return (self.original, self.reason)[index]
 
     def __iter__(self):
-        """Support tuple-style iteration for backward compatibility."""
         return iter((self.original, self.reason))
 
 
@@ -145,27 +116,25 @@ ExtractionResult = Union[LeafCommand, UndecidableSegment]
 
 
 # ---------------------------------------------------------------------------
-# Executor classification (shared with multiline.py)
+# Executor classification
 # ---------------------------------------------------------------------------
 
-#: Shells whose payload (``-c`` arg or heredoc body) is bash-compatible and
-#: can be decomposed by this pipeline.
+#: Shells whose payload (``-c`` arg or heredoc body) is bash-compatible, so
+#: this pipeline decomposes it instead of flooring the leaf.
 BASH_FAMILY: frozenset = frozenset({"bash", "sh", "dash", "ksh", "zsh"})
 
-#: Interpreters / non-bash shells whose inline code is foreign (not bash).
-#: Any ``<foreign> -c/-e/-r "..."`` or heredoc/stdin into these triggers the
-#: ASK floor (cannot be downgraded by a plain ``allow``).
+#: Interpreters and non-bash shells whose inline code this pipeline cannot
+#: read. A flag from :data:`_FOREIGN_INLINE_FLAGS`, or a heredoc whose sink is
+#: one of these, sets ``ask_floor`` on the leaf.
 #:
-#: Only CANONICAL (un-versioned) names belong here. Do NOT enumerate version
-#: suffixes such as ``python3.13`` / ``pypy3.11`` / ``node18``: those are matched
-#: dynamically by :func:`_is_foreign_executor` via prefix, so this list never
-#: needs updating for new interpreter releases (it is not year-dependent).
+#: A versioned name needs its own entry unless it belongs to one of the seven
+#: families :func:`_is_foreign_executor` prefix-matches -- python, pypy, node,
+#: nodejs, perl, ruby, php. ``python3.13`` is covered without an entry;
+#: ``Rscript4.4`` and ``gawk5`` are not covered at all.
 #:
-#: KNOWN LIMITATION: this list is not exhaustive. An interpreter we do not
-#: recognize (e.g. ``lua``, ``deno``, ``bun``, ``julia``) does NOT get the ASK
-#: floor, so a broad ``allow`` for it would permit its inline code. The fail-safe
-#: position holds (the command is still validated and an explicit ``deny`` works);
-#: making this user-configurable is a deliberate YAGNI for now.
+#: KNOWN LIMITATION: the list is not exhaustive, and an interpreter missing
+#: from it (``lua``, ``deno``, ``bun``, ``julia``) gets no ASK floor at all,
+#: so a broad allow rule would cover its inline code too.
 FOREIGN_EXECUTORS: frozenset = frozenset(
     {
         "python",
@@ -186,7 +155,10 @@ FOREIGN_EXECUTORS: frozenset = frozenset(
     }
 )
 
-# Inline code flags per executor type.
+#: Flags that make :func:`_detect_foreign_inline_code` treat a leaf as foreign
+#: inline code, keyed by executor basename. An executor absent from this table
+#: falls back to ``-c``/``-e``/``-r``, which is what makes ``csh``/``tcsh``/
+#: ``fish`` work without their own entry.
 _FOREIGN_INLINE_FLAGS = {
     "python": ["-c"],
     "python3": ["-c"],
@@ -199,57 +171,37 @@ _FOREIGN_INLINE_FLAGS = {
     "awk": ["-f"],
 }
 
-#: Matches a short-option token that carries (or is) an inline-code flag: an
-#: optional bundle of up to two other short flags, one of the inline-code
-#: letters ``c``/``e``/``r``, and an optional attached remainder (quoted or
-#: bare code with no separating space, e.g. ``-cimport``, ``-c'code'``).
-#: The ``{0,2}`` bound on the flag-bundle prefix is deliberate: it lets
-#: combined short flags like ``-uc`` match while rejecting unrelated
-#: word-like single-dash flags such as ``-name`` or ``-recurse`` (whose
-#: prefix before a trailing c/e/r would be longer than 2 letters).
+#: Matches a short-option token that carries, or is, an inline-code flag: an
+#: optional bundle of up to two other short flags, one of the letters
+#: ``c``/``e``/``r``, and an optional payload attached with no separating
+#: space (``-uc``, ``-cimport``, ``-c'code'``).
 #:
-#: TOO-19: this is the single shared definition. :mod:`toolguard.compound`
-#: imports it from here (rather than each module keeping its own copy) so
-#: the bundled/attached-flag matching logic used for ASK-floor *detection*
-#: (this module) and for outer-command *extraction* (``compound.py``)
-#: cannot drift apart.
+#: It is not specific to real inline-code flags: it rejects ``-name`` but
+#: matches ``-recurse`` on an incidental ``r``. :func:`_scan_for_inline_flag`
+#: narrows a match by also requiring the matched letter to be one the executor
+#: in hand actually uses.
+#:
+#: Deliberately shared rather than re-derived: ASK-floor detection and
+#: outer-command extraction must recognise the same flag forms.
 INLINE_FLAG_TOKEN_RE: re.Pattern = re.compile(r"^-([a-zA-Z]{0,2})([cer])(.*)$")
 
 
 def _basename(name: str) -> str:
-    """Return the basename (no path) of a command name.
-
-    Args:
-        name: Command name, possibly with a path prefix.
-
-    Returns:
-        The basename of the command.
-    """
+    """Return the basename (no path) of a command name."""
     return name.split("/")[-1]
 
 
 def _is_bash_family(name: str) -> bool:
-    """Return True if *name* (basename) is a bash-family shell.
-
-    Args:
-        name: The bare command basename (no path, no arguments).
-
-    Returns:
-        True if the command is in the bash-family executor set.
-    """
+    """Return True if *name* names a bash-family shell. Path prefixes are stripped."""
     return _basename(name) in BASH_FAMILY
 
 
 def _is_foreign_executor(name: str) -> bool:
-    """Return True if *name* (basename) is a known foreign executor.
+    """Return True if *name* names a known foreign executor.
 
-    Handles version-suffixed names like ``python3.11``.
-
-    Args:
-        name: The bare command basename (no path, no arguments).
-
-    Returns:
-        True if the command is a known foreign interpreter / non-bash shell.
+    Path prefixes are stripped, and a version suffix on one of the interpreter
+    families below is accepted (``python3.11``, ``node18``) -- the suffix must
+    not start with a letter, so ``pythonic`` is not a match.
     """
     bn = _basename(name)
     if bn in FOREIGN_EXECUTORS:
@@ -268,42 +220,31 @@ def _is_foreign_executor(name: str) -> bool:
 
 
 def _scan_for_inline_flag(remaining: List[str], inline_flags: List[str]) -> bool:
-    """Scan tokens after a foreign executor for an inline-code flag.
+    """Scan the tokens after a foreign executor for an inline-code flag.
 
-    TOO-19: previously only ``remaining[0]`` (the single token immediately
-    after the executor) was checked, which meant an intervening flag (e.g.
-    ``python -u -c "..."``) or an attached/bundled flag (e.g. ``-cimport``,
-    ``-uc``) silently bypassed the ASK-floor security control. This scans
-    forward through any number of flag-shaped tokens, matching either an
-    exact flag (e.g. ``-c``) or a bundled/attached form recognised by
-    :data:`INLINE_FLAG_TOKEN_RE`.
+    Matches an exact flag (``-c``) or one of the bundled/attached forms
+    :data:`INLINE_FLAG_TOKEN_RE` recognises (``-uc``, ``-cimport``), and
+    stops at the first token that does not start with ``-``: everything past
+    that belongs to the script or module being run, not to the interpreter.
+    That is what keeps ``python script.py -c foo`` and ``python -m mymod -c
+    foo`` at False.
 
-    Scanning **stops at the first token that is not itself a flag** (does
-    not start with ``-``): everything after such a token belongs to the
-    script/module being invoked, not to the interpreter itself. This is what
-    keeps ``python script.py -c foo`` and ``python -m mymod -c foo`` at
-    ``False`` -- ``script.py`` / ``mymod`` are non-flag tokens that end the
-    interpreter's own option list.
-
-    KNOWN LIMITATION (see TOO-19 implementation report): a flag whose value
-    is a SEPARATE non-flag token (e.g. Python's ``-X dev``) is
-    indistinguishable, under this rule, from a script/module argument, so
-    ``python -X dev -c "..."`` still scans as ``False``. Fixing that would
-    require a per-executor table of which flags consume a following
-    value-token without changing execution context -- judged out of scope
-    here and reported as a residual gap rather than silently accepted.
+    KNOWN LIMITATION: a flag whose value is a separate token is
+    indistinguishable from a script argument under that rule, so
+    ``python -X dev -c "..."`` also scans as False. Closing it needs a
+    per-executor table of which flags consume the following token.
 
     Args:
         remaining: Tokens following the foreign executor token.
-        inline_flags: The exact flag strings (e.g. ``["-c"]``) that denote
-            inline code for this executor.
+        inline_flags: The flag strings that denote inline code for this
+            executor, e.g. ``["-c"]``.
 
     Returns:
         True if an inline-code flag was found before the first non-flag
         token (or end of input).
     """
-    # Only single-letter flags (e.g. "-c") can appear in bundled/attached
-    # form via INLINE_FLAG_TOKEN_RE (which only recognises c/e/r letters).
+    # Bundled/attached forms exist only for single-letter flags, and the
+    # regex knows only c/e/r.
     inline_letters = {f[1:] for f in inline_flags if len(f) == 2 and f[0] == "-"}
     for tok in remaining:
         if tok in inline_flags:
@@ -313,24 +254,27 @@ def _scan_for_inline_flag(remaining: List[str], inline_flags: List[str]) -> bool
         match = INLINE_FLAG_TOKEN_RE.match(tok)
         if match and match.group(2) in inline_letters:
             return True
-        # Some other flag we don't specifically recognise (e.g. -u, -B, -O,
-        # a long --flag) -- keep scanning, it doesn't end the option list.
+        # Any other flag (-u, -B, --long) does not end the option list.
     return False
 
 
 def _detect_foreign_inline_code(cmd_text: str) -> bool:
-    """Return True if cmd_text is a foreign executor with an inline code flag.
+    """Return True if *cmd_text* runs a foreign executor with an inline-code flag.
 
-    Detects patterns like ``python3 -c "..."``, ``node -e "..."``,
-    ``uv run python -c "..."``, and (TOO-19) forms with an intervening flag
-    (``python -u -c "..."``) or a bundled/attached flag (``python -uc
-    "..."``, ``python -cimport os``).
+    Covers ``python3 -c "..."``, ``node -e "..."``, a wrapped executor
+    (``uv run python -c "..."``), an intervening flag (``python -u -c "..."``)
+    and bundled/attached flags (``python -uc "..."``, ``python -cimport os``).
+
+    Does NOT cover code that reaches an interpreter without a flag: stdin
+    (``cat prog | python``) and awk's bare program argument
+    (``awk '{...}' f``) both return False.
 
     Args:
         cmd_text: The command text to check.
 
     Returns:
-        True if this is a foreign interpreter with an inline code flag.
+        True if a foreign executor appears with one of the inline-code flags
+        :data:`_FOREIGN_INLINE_FLAGS` gives it.
     """
     tokens = cmd_text.split()
     if not tokens:
@@ -346,7 +290,12 @@ def _detect_foreign_inline_code(cmd_text: str) -> bool:
 
 
 def _detect_bash_dash_c(cmd_text: str) -> Optional[str]:
-    """Return the inner bash code if cmd_text is ``<bash-family> -c "<bash>"``.
+    """Return the inner bash code if *cmd_text* is ``<bash-family> -c "<bash>"``.
+
+    Only that exact shape is recognised: ``-c`` must be the second token, and
+    the code must be single- or double-quoted. ``bash -x -c '...'`` and
+    ``bash -c $'...'`` both return None, and the leaf then stays undecomposed
+    -- matched whole, with no ASK floor, since bash is not a foreign executor.
 
     Args:
         cmd_text: The command text to check.
@@ -372,7 +321,9 @@ def _extract_quoted_string(text: str) -> Optional[str]:
         text: Text starting (possibly after whitespace) with a quote.
 
     Returns:
-        The unquoted content, or None if no clean quoted string was found.
+        The unquoted content, or None if *text* does not open with a plain
+        ``'`` or ``"`` or the quote is never closed. A ``$'...'`` opener
+        returns None -- the ``$`` is not a quote character here.
     """
     text = text.strip()
     if not text:
@@ -410,27 +361,16 @@ def _extract_quoted_string(text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Control structure helpers
 #
-# These helpers operate EXCLUSIVELY on IRControlStructure objects (Stage 2
-# refactor: all raw Canopy node access has been moved into command_model.py).
-# IRControlStructure now carries:
-#   - Pre-computed complexity flags (has_else_or_elif, has_complex_condition,
-#     body_has_nested_control).
-#   - body_stmts_ir: pre-built List[IRCompound] for every body statement, so
-#     this layer can iterate over IR without touching raw Canopy nodes.
-#   - ctrl_condition_text: pre-extracted condition text (semicolons stripped).
+# The SIMPLE/COMPLEX split lives here; the flags it reads
+# (has_else_or_elif, has_complex_condition, body_has_nested_control) and the
+# body statements are pre-computed on IRControlStructure.
 # ---------------------------------------------------------------------------
 
 
 def _is_posix_test(text: str) -> bool:
-    """Return True if *text* is a POSIX ``[ ... ]`` test construct.
+    """Return True if *text* is a POSIX ``[ ... ]`` test, which is not a command to check.
 
-    These are test conditions, not commands to validate.
-
-    Args:
-        text: The condition text.
-
-    Returns:
-        True if the text is a POSIX [ ... ] test.
+    ``[[ ... ]]`` is excluded: it is handled as a complex condition elsewhere.
     """
     t = text.strip()
     return t.startswith("[") and t.endswith("]") and not t.startswith("[[")
@@ -439,18 +379,10 @@ def _is_posix_test(text: str) -> bool:
 def _extract_from_body_ir(
     body_stmts_ir: List[IRCompound],
 ) -> List[ExtractionResult]:
-    """Extract structured results from a pre-built list of body-statement IR nodes.
+    """Extract structured results from a control structure's pre-built body statements.
 
-    This replaces the old ``_extract_from_ctrl_body`` / ``_extract_from_ctrl_stmt``
-    pair.  All raw Canopy walking has been moved to :func:`command_model._build_body_stmts_ir`;
-    this function operates only on IR types.
-
-    Args:
-        body_stmts_ir: Pre-built :class:`IRCompound` list from
-            :attr:`IRControlStructure.body_stmts_ir`.
-
-    Returns:
-        Ordered list of :class:`ExtractionResult` items from all body statements.
+    Deduplicates within the body only -- the ``seen`` set is local to this
+    call, so ``for i in 1 2; do ls; done; ls`` yields two ``ls`` leaves.
     """
     results: List[ExtractionResult] = []
     seen: Set[str] = set()
@@ -462,23 +394,20 @@ def _extract_from_body_ir(
 def _extract_from_do_loop_ir(ctrl: IRControlStructure) -> List[ExtractionResult]:
     """Extract structured results from a for/while/until :class:`IRControlStructure`.
 
-    All complexity decisions use the pre-computed flags on *ctrl*; no raw
-    Canopy node access is needed.
+    Emits the commands of the loop BODY only, and only when the body has no
+    nested control structure and (for while/until) the condition avoids
+    ``[[ ]]``/``(( ))``.
 
-    Classification (SIMPLE vs COMPLEX):
-      - A loop with no body statements (empty ``body_stmts_ir``) indicates
-        an incomplete parse -- treat as undecidable.
-      - A loop with a nested control structure in its body is COMPLEX.
-      - A while/until loop with a complex condition is COMPLEX.
-      - Otherwise SIMPLE: extract the inner commands from ``body_stmts_ir``.
-
-    Args:
-        ctrl: An :class:`IRControlStructure` for a for/while/until loop.
+    The loop's own condition contributes NOTHING, even when it is an ordinary
+    command that bash will run -- unlike an if condition, which
+    :func:`_extract_from_if_stmt_ir` does emit. So
+    ``while rm -rf /tmp/x; do :; done`` decomposes to the single leaf ``:``
+    and the ``rm`` is never matched against any rule.
 
     Returns:
-        List of ExtractionResult items.
+        The body's results, or a single :class:`UndecidableSegment` naming
+        which guard fired.
     """
-    # An empty body_stmts_ir with no do_clause means the loop did not parse fully.
     if not ctrl.body_stmts_ir and ctrl.do_clause is None:
         return [
             UndecidableSegment(
@@ -512,20 +441,15 @@ def _extract_from_do_loop_ir(ctrl: IRControlStructure) -> List[ExtractionResult]
 def _extract_from_if_stmt_ir(ctrl: IRControlStructure) -> List[ExtractionResult]:
     """Extract structured results from an if_stmt :class:`IRControlStructure`.
 
-    All complexity decisions use the pre-computed flags on *ctrl*; no raw
-    Canopy node access is needed.
-
-    Classification (SIMPLE vs COMPLEX):
-      - If the if statement has else/elif clauses -> COMPLEX -> ASK.
-      - If the then-body has nested control structures -> COMPLEX -> ASK.
-      - If the condition uses [[ ]] or (( )) -> COMPLEX -> ASK.
-      - Otherwise SIMPLE: extract condition commands + body commands.
-
-    Args:
-        ctrl: An :class:`IRControlStructure` for an if statement.
+    Emits the condition command AND the then-body commands, but only for a
+    plain if: else/elif, a nested control structure in the body, or a
+    ``[[ ]]``/``(( ))`` condition each make the whole statement undecidable.
+    A POSIX ``[ ... ]`` condition is dropped rather than emitted -- it is a
+    test, not a command.
 
     Returns:
-        List of ExtractionResult items.
+        The condition and body results, or a single
+        :class:`UndecidableSegment` naming which guard fired.
     """
     if ctrl.has_else_or_elif:
         return [
@@ -553,13 +477,10 @@ def _extract_from_if_stmt_ir(ctrl: IRControlStructure) -> List[ExtractionResult]
 
     results: List[ExtractionResult] = []
 
-    # Condition: may be a POSIX [ ... ] test (not a command) or a plain command.
-    # ctrl_condition_text is pre-computed in the IR builder (semicolons stripped).
     cond_text = ctrl.ctrl_condition_text
     if cond_text and not _is_posix_test(cond_text):
         results.append(LeafCommand(text=cond_text, ask_floor=False))
 
-    # Then-body commands: use the pre-built body_stmts_ir list.
     results.extend(_extract_from_body_ir(ctrl.body_stmts_ir))
 
     return results
@@ -571,38 +492,37 @@ def _extract_from_if_stmt_ir(ctrl: IRControlStructure) -> List[ExtractionResult]
 
 
 def _apply_leaf_policy(cmd_text: str, seen: Set[str]) -> List[ExtractionResult]:
-    """Apply business policy to a leaf simple command text.
+    """Apply the module's leaf-level business policy to one leaf command's text.
 
-    Handles (in order):
-    1. Deduplication via *seen*.
-    2. ``bash -c "<inner>"`` recursion.
-    3. Foreign inline code (ASK floor).
-    4. Heredoc sentinel with foreign sink (ASK floor).
-    5. Plain leaf (plain allow/deny).
+    ``<bash-family> -c "<code>"`` recurses into the inner code and yields its
+    leaves instead of itself; foreign inline code and a heredoc bound for a
+    foreign sink get ``ask_floor``; anything else is a plain leaf. Text
+    already in *seen* yields nothing, which is why a line's result can be
+    shorter than its command count.
 
     Args:
         cmd_text: The cleaned command text for the leaf node.
         seen: Set of already-seen texts (mutated by this function).
 
     Returns:
-        A list with zero or one :class:`ExtractionResult` items.
+        Zero or one :class:`ExtractionResult` items -- except on the
+        ``bash -c`` recursion, which returns the inner code's whole result.
     """
     if not cmd_text or cmd_text in seen:
         return []
     seen.add(cmd_text)
 
-    # bash -c "..." -> decompose inner bash.
     inner_bash = _detect_bash_dash_c(cmd_text)
     if inner_bash is not None:
+        # Local import: multiline imports this module at module scope, so the
+        # pre-pass entry point is only reachable from inside a function.
         from toolguard.parser.multiline import extract_structured  # noqa: PLC0415
 
         return extract_structured(inner_bash)
 
-    # Foreign inline code -> ASK floor.
     if _detect_foreign_inline_code(cmd_text):
         return [LeafCommand(text=cmd_text, ask_floor=True)]
 
-    # Heredoc sentinel with foreign sink -> ASK floor.
     if "__HEREDOC_TO_" in cmd_text:
         m = re.search(r"__HEREDOC_TO_(\w+)__", cmd_text)
         if m and _is_foreign_executor(m.group(1)):
@@ -614,12 +534,15 @@ def _apply_leaf_policy(cmd_text: str, seen: Set[str]) -> List[ExtractionResult]:
 def _structured_from_ir_element(
     element, results: List[ExtractionResult], seen: Set[str]
 ) -> None:
-    """Extract structured results from a single IR pipeline element.
+    """Append one IR pipeline element's structured results to *results*.
 
-    Args:
-        element: An IR pipeline element (IRSimpleCmd, IRSubshell, etc.).
-        results: Accumulator for ExtractionResult items.
-        seen: Set of already-seen command texts.
+    An element type not handled below contributes nothing at all, rather
+    than an undecidable segment.
+
+    A simple command's ``cmd_substs`` are not walked here, so
+    ``echo $(rm -rf /)`` produces one leaf carrying the whole text and no
+    separate leaf for the substitution. The command-text projection below
+    does walk them; the two extractors differ on this point.
     """
     if isinstance(element, IRProcSubst):
         text = element.text
@@ -664,7 +587,8 @@ def _structured_from_ir_element(
         return
 
     if isinstance(element, IRSubshell):
-        # Subshells/brace groups in structured extraction: recurse into inner.
+        # Only the inner commands: the `(...)`/`{...}` wrapper text is not
+        # itself a leaf here, unlike in the extract_commands projection.
         _structured_from_compound(element.inner, results, seen)
         return
 
@@ -672,13 +596,6 @@ def _structured_from_ir_element(
 def _structured_from_pipeline(
     pipeline: IRPipeline, results: List[ExtractionResult], seen: Set[str]
 ) -> None:
-    """Extract structured results from an IR pipeline.
-
-    Args:
-        pipeline: An :class:`IRPipeline` to process.
-        results: Accumulator for ExtractionResult items.
-        seen: Set of already-seen command texts.
-    """
     for element in pipeline.elements:
         _structured_from_ir_element(element, results, seen)
 
@@ -686,13 +603,6 @@ def _structured_from_pipeline(
 def _structured_from_compound(
     compound: IRCompound, results: List[ExtractionResult], seen: Set[str]
 ) -> None:
-    """Extract structured results from an IR compound command.
-
-    Args:
-        compound: An :class:`IRCompound` to process.
-        results: Accumulator for ExtractionResult items.
-        seen: Set of already-seen command texts.
-    """
     for pipeline in compound.pipelines:
         _structured_from_pipeline(pipeline, results, seen)
 
@@ -705,22 +615,15 @@ def _structured_from_compound(
 def extract_structured_from_grammar(
     tree,
 ) -> List[ExtractionResult]:
-    """Extract structured results by walking the grammar parse tree.
-
-    Walks a ``program`` or ``compound_command`` parse tree and returns a
-    list of :class:`LeafCommand` and :class:`UndecidableSegment` objects.
-
-    This is the grammar-first structured extractor used by the compound
-    resolution layer (via :func:`toolguard.parser.multiline.extract_structured`).
-
-    All raw Canopy tree access is performed by :func:`~toolguard.parser.command_model.build_ir`;
-    this function operates exclusively on the resulting IR.
+    """Extract structured results from an already-parsed grammar tree.
 
     Args:
         tree: The canopy parse tree root node (program or compound_command).
 
     Returns:
-        Ordered list of structured extraction results.
+        Ordered list of :class:`LeafCommand` and :class:`UndecidableSegment`
+        objects. Text this saw before is dropped, so ``ls && ls`` yields one
+        leaf.
     """
     results: List[ExtractionResult] = []
     seen: Set[str] = set()
@@ -733,31 +636,23 @@ def extract_structured_from_grammar(
 # ---------------------------------------------------------------------------
 # Command text projection: IR -> List[str]
 #
-# This implements the semantics of the legacy _extract_from_tree, which
-# includes both the wrapper text and the inner text for subshell/brace nodes.
+# Wider than the structured extraction above: it emits a subshell's wrapper
+# text as well as its contents, and it follows $(...) substitutions, so a
+# permission rule can match either form.
 # ---------------------------------------------------------------------------
 
 
 def _collect_commands_from_element(
     element, commands: List[str], seen: Set[str]
 ) -> None:
-    """Collect plain command strings from a single IR pipeline element.
+    """Append one IR pipeline element's plain command strings to *commands*.
 
-    For subshell/brace nodes this emits:
-    1. The wrapper text (e.g. ``(ls -la)``).
-    2. The inner compound text (e.g. ``ls -la``) if different.
-    3. Recurse into the inner compound for sub-commands.
-
-    For simple commands it emits just the command text.
-
-    Args:
-        element: An IR pipeline element.
-        commands: Accumulator list of command strings.
-        seen: Set of already-seen command texts (deduplication).
+    A subshell or brace group emits its wrapper text (``(ls -la)``), its
+    inner text (``ls -la``), and then the inner compound's own commands. A
+    control structure emits its whole text and nothing from inside it.
     """
 
     def add(text: str) -> None:
-        """Add *text* to *commands* if not empty and not already seen."""
         text = text.strip()
         if text and text not in seen:
             seen.add(text)
@@ -765,7 +660,6 @@ def _collect_commands_from_element(
 
     if isinstance(element, IRSimpleCmd):
         add(element.text)
-        # Also collect any embedded command substitutions $(...)
         for subst_compound in element.cmd_substs:
             _collect_commands_from_compound(subst_compound, commands, seen)
         return
@@ -781,7 +675,6 @@ def _collect_commands_from_element(
         return
 
     if isinstance(element, IRControlStructure):
-        # Control structures in extract_commands: emit text only.
         if element.node_text:
             add(element.node_text)
         return
@@ -790,13 +683,6 @@ def _collect_commands_from_element(
 def _collect_commands_from_pipeline(
     pipeline: IRPipeline, commands: List[str], seen: Set[str]
 ) -> None:
-    """Collect plain command strings from an IR pipeline.
-
-    Args:
-        pipeline: An :class:`IRPipeline` to process.
-        commands: Accumulator list of command strings.
-        seen: Set of already-seen command texts.
-    """
     for element in pipeline.elements:
         _collect_commands_from_element(element, commands, seen)
 
@@ -804,19 +690,12 @@ def _collect_commands_from_pipeline(
 def _collect_commands_from_compound(
     compound: IRCompound, commands: List[str], seen: Set[str]
 ) -> None:
-    """Collect plain command strings from an IR compound command.
+    """Append an IR compound's command strings to *commands*.
 
-    When *compound* has a ``raw_text`` (set for cmd_substitution inner
-    compounds), that text is emitted first so that a compound like
-    ``$(ps aux | grep python)`` contributes ``"ps aux | grep python"`` as
-    well as the individual pipeline stages.
-
-    Args:
-        compound: An :class:`IRCompound` to process.
-        commands: Accumulator list of command strings.
-        seen: Set of already-seen command texts.
+    A ``raw_text`` -- set only on a command substitution's inner compound --
+    is emitted first, so ``$(ps aux | grep python)`` contributes
+    ``"ps aux | grep python"`` as well as the individual pipeline stages.
     """
-    # Emit compound-level text for cmd_substitution inner nodes.
     if compound.raw_text:
         rt = compound.raw_text.strip()
         if rt and rt not in seen:
@@ -834,37 +713,28 @@ def _collect_commands_from_compound(
 def extract_commands(command_line: str) -> List[str]:
     """Extract individual commands from a compound bash command line.
 
-    This function handles command lines with operators:
-    - && (AND operator)
-    - || (OR operator)
-    - ; (semicolon separator)
-    - | (pipe operator)
+    Splits on ``&&``, ``||``, ``;`` and ``|``, and descends into command
+    substitutions (``$(...)`` and backticks), subshells and brace groups.
+    A control structure contributes only its own whole text -- nothing from
+    inside it.
 
-    It also extracts commands from nested constructs:
-    - Command substitutions: $(...) and backticks
-    - Subshells: (...)
-    - Brace groups: { ...; }
+    NO LEXICAL PRE-PASS: heredocs, comments and line continuations are not
+    handled, so a multi-line blob belongs in
+    :func:`toolguard.parser.multiline.extract_structured` instead. Here a
+    heredoc's body lines and its terminator word each come back as commands of
+    their own.
 
-    For subshell and brace-group pipeline elements the function emits both
-    the wrapper text (e.g. ``(ls -la)``) and the inner command text, so that
-    permission rules can match either form.
-
-    The function uses the Canopy PEG parser to parse the command line and
-    builds the Abstract Command Model (IR) via
-    :mod:`toolguard.parser.command_model`.  All raw Canopy tree access is
-    isolated there.
-
-    NOTE: For multi-line commands use
-    :func:`toolguard.parser.multiline.extract_structured` which runs the
-    full pre-pass pipeline and then calls the grammar-based extractor.
-    This function is preserved for backward compatibility with single-line
-    commands.
+    FAILS OPEN, unlike the structured extractor: when the grammar rejects
+    *command_line*, or extraction raises anything else, the whole line comes
+    back as one command string. Nothing in the return value distinguishes
+    that from a genuine single-command line.
 
     Args:
         command_line: The bash command line to parse.
 
     Returns:
-        List of individual command strings.
+        List of individual command strings, deduplicated, in extraction
+        order. Empty for blank input.
 
     Examples:
         extract_commands('git status && rm -rf /')
@@ -873,8 +743,8 @@ def extract_commands(command_line: str) -> List[str]:
         extract_commands('cat file | grep pattern')
         ['cat file', 'grep pattern']
 
-        extract_commands('command1; command2; command3')
-        ['command1', 'command2', 'command3']
+        extract_commands('(ls -la)')
+        ['(ls -la)', 'ls -la']
     """
     if not command_line or not command_line.strip():
         return []
@@ -895,23 +765,6 @@ def extract_commands(command_line: str) -> List[str]:
         return [command_line.strip()] if command_line.strip() else []
 
 
-# Legacy compatibility - maintain old function names
 def parse_command_line(command_line: str) -> List[str]:
-    """Parse a bash command line and extract individual commands.
-
-    This is a legacy compatibility function that wraps :func:`extract_commands`.
-    New code should use :func:`extract_commands` directly.
-
-    Args:
-        command_line: The bash command line to parse.
-
-    Returns:
-        List of individual command strings.
-
-    Example:
-        parse_command_line('git status && rm -rf /')
-        ['git status', 'rm -rf /']
-        parse_command_line('cat file | grep pattern')
-        ['cat file', 'grep pattern']
-    """
+    """Alias for :func:`extract_commands`, with no behaviour of its own."""
     return extract_commands(command_line)

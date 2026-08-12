@@ -1,12 +1,4 @@
-"""
-Unit tests for toolguard.tools.environment_audit (TOO-19).
-
-Covers the PYTHONPATH-shadowing finding: silent in the normal case (no
-PYTHONPATH, or one with no shadowing entry) and a single HIGH finding when a
-shadowing entry is present, following the same "silent unless the specific
-loosened condition is measured" pattern as
-test_tools_takeover_audit.py's loose-undecidable-fallback coverage.
-"""
+"""Unit tests for toolguard.tools.environment_audit -- the PYTHONPATH-shadowing finding."""
 
 import os
 import unittest
@@ -63,10 +55,10 @@ class TestAuditEnvironment(unittest.TestCase):
 
     def test_defaults_to_os_environ_when_env_not_given(self):
         """
-        Given no explicit env mapping is passed and PYTHONPATH is unset in
-        the real environment
+        Given no explicit env mapping is passed and os.environ is emptied
         When audit_environment runs
-        Then it delegates to os.environ and returns no findings
+        Then it reads the environment itself, without raising, and returns
+        no findings
         """
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(audit_environment(), [])

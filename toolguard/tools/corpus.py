@@ -1,23 +1,16 @@
 """
 Corpus harvesting: combine daily-log and transcript evidence for a project.
 
-The rule-maintenance engines (mining, replay-backed redundancy/broadening) take a
-``List[LogEntry]`` corpus of observed tool invocations.  Two harvesters produce
-those entries from different sources:
+Resolves both source directories for a project, harvests each, and merges the
+:class:`~toolguard.tools.log_harvest.LogEntry` records into one
+chronologically-sorted corpus:
 
-* :func:`toolguard.tools.log_harvest.harvest` -- toolguard's own daily resolution
-  logs (``logs/toolguard-YYYY-MM-DD.md``), the authoritative record of what the
-  hook actually permitted or refused.
-* :func:`toolguard.tools.transcript_harvest.harvest_transcripts` -- Claude Code's
-  session transcripts (``~/.claude/projects/<encoded>/*.jsonl``), which capture
-  tool calls the hook may not have logged (e.g. on a machine where logging was
-  off, or for tools that bypass the log).
+* toolguard's own daily resolution logs (``logs/toolguard-YYYY-MM-DD.md``), the
+  record of what the hook permitted or refused;
+* Claude Code's session transcripts (``~/.claude/projects/<encoded>/*.jsonl``)
+  -- see :mod:`toolguard.tools.transcript_harvest` for why both are harvested.
 
-This module is the single, tested seam that resolves both source directories for
-a project and merges them into one chronologically-sorted corpus.  It performs IO
-(directory discovery + file reads) and is therefore kept OUT of the pure
-:func:`toolguard.tools.maintenance.run_maintenance` aggregator: the CLI/skill
-harvests here and passes the resulting corpus in.  Read-only; nothing is written.
+Read-only; nothing is written.
 """
 
 from pathlib import Path
@@ -30,8 +23,8 @@ from toolguard.tools.transcript_harvest import (
     transcript_dir_for_project,
 )
 
-# Default daily-log subdirectory, matching log_writer's documented default
-# (``logs/toolguard-YYYY-MM-DD.md`` under the project root).
+#: Daily-log subdirectory under the project root, mirroring ``log_writer``'s own
+#: fallback.  If the two diverge, harvesting finds nothing and reports nothing.
 DEFAULT_LOGS_SUBDIR = "logs"
 
 
@@ -39,17 +32,15 @@ def resolve_logs_dir(project_dir: Optional[Path] = None) -> Path:
     """
     Resolve the toolguard daily-log directory for a project.
 
-    Resolves the project root (version-control root or explicit override, via
-    :func:`toolguard.tools.project_root.resolve_project_root`) and returns its
-    ``logs/`` subdirectory, the documented default location of the daily
-    resolution logs.  Existence is NOT checked.
+    Existence is NOT checked.
 
     Args:
         project_dir: Directory to resolve from (defaults to the current
             directory when ``None``).
 
     Returns:
-        The expected daily-log directory (``<project-root>/logs``).
+        ``<project-root>/logs``, falling back to ``<project_dir>/logs`` (or
+        ``./logs``) when no project root resolves.
     """
     resolution = resolve_project_root(project_dir)
     root = (
@@ -71,10 +62,11 @@ def harvest_corpus(
 
     Both sources are time-bounded by the same ``max_age_days`` rolling window
     (relative to today's local date) and the merged result is sorted by
-    timestamp (oldest first), so replay/mining see one coherent timeline.  A
-    missing or unreadable source directory contributes nothing rather than
-    raising -- a project with no logs yet still yields whatever transcripts
-    exist, and vice versa.
+    timestamp, oldest first; both harvesters return naive LOCAL datetimes, so
+    the two interleave meaningfully.  Entries are NOT de-duplicated -- a command
+    recorded in both sources appears twice.  A missing or unreadable source
+    directory contributes nothing rather than raising, so a project with no logs
+    yet still yields whatever transcripts exist, and vice versa.
 
     Args:
         project_dir: Project directory whose corpus to harvest (defaults to the

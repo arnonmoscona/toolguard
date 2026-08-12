@@ -1,10 +1,10 @@
 """
 Unit tests for toolguard.config_write_guard -- the self-protection gate every
-config-file write must pass through (TOO-19 corrective change).
+config-file write must pass through.
 
-All tests here are file-I/O-only within a throwaway TemporaryDirectory; none
-of them reach toolguard.config's discovery path, so per test/unit/CLAUDE.md's
-isolation checklist, ConfigIsolationMixin is not needed.
+Isolation (`.claude/rules/test-config-isolation.md`): these tests do file I/O
+inside a throwaway TemporaryDirectory only and never reach toolguard.config's
+discovery path, so ConfigIsolationMixin is not needed.
 """
 
 import json
@@ -44,8 +44,6 @@ class TestVerifyConfigText(unittest.TestCase):
     def test_invalid_toml_raises_config_write_verification_error(self):
         """
         Given TOML text with an illegal unescaped newline inside a string
-            (the exact corruption shape TOO-19's find_section_boundaries bug
-            used to produce)
         When verify_config_text() is called with file_format="toml"
         Then ConfigWriteVerificationError is raised, carrying the reason and
             the underlying parser's message
@@ -111,15 +109,11 @@ class TestVerifiedWriteConfigSyntaxGuard(unittest.TestCase):
 
     def test_reintroduced_change1_corruption_scenario_is_refused(self):
         """
-        Given the EXACT corruption shape TOO-19 Change 1 fixed (a rewritten
-            [permissions] section spliced into the middle of an EARLIER
-            structured entry's quoted additionalContext string, containing
-            an unescaped newline) -- reproducing what the old, non-line-
-            anchored find_section_boundaries() used to produce
+        Given a rewritten [permissions] section spliced into the middle of an
+            EARLIER structured entry's quoted additionalContext string,
+            leaving an unescaped newline
         When verified_write_config() is called with that corrupted text
-        Then it is refused by the syntax guard (belt-and-braces regression
-            net for that exact defect class, independent of whether
-            find_section_boundaries() itself is ever broken again)
+        Then it is refused by the syntax guard
         """
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "toolguard_hook.toml"
@@ -134,8 +128,6 @@ class TestVerifiedWriteConfigSyntaxGuard(unittest.TestCase):
             )
             path.write_bytes(original.encode("utf-8"))
 
-            # This mirrors exactly what the old str.find()-based scan used to
-            # splice: the new [permissions] section injected mid-string.
             corrupted = (
                 "[hard_deny]\n"
                 "deny = [\n"
@@ -173,7 +165,6 @@ class TestVerifiedWriteConfigContentLossGuard(unittest.TestCase):
             )
             path.write_bytes(original.encode("utf-8"))
 
-            # Valid TOML, but the hard_deny rule got silently dropped.
             new_text = '[permissions]\nallow = ["Bash(ls *)"]\n'
 
             with self.assertRaises(ConfigWriteVerificationError) as ctx:
@@ -265,12 +256,7 @@ class TestVerifiedWriteConfigAtomicity(unittest.TestCase):
 
 
 class TestVerifiedWriteConfigCreatesParentDirectory(unittest.TestCase):
-    """
-    TOO-19 review fix: installer.py's first-ever write-config call targets a
-    not-yet-existing ``.claude/`` directory (a fresh fake HOME in tests, or a
-    genuinely fresh machine); the guard's atomic write must create it, just as
-    the raw ``_atomic_write_text`` helper it replaces already did.
-    """
+    """The atomic write must create a not-yet-existing destination directory."""
 
     def test_write_creates_missing_parent_directory(self):
         """
@@ -288,11 +274,7 @@ class TestVerifiedWriteConfigCreatesParentDirectory(unittest.TestCase):
 
 
 class TestPatternsInConfigText(unittest.TestCase):
-    """
-    Tests for :func:`patterns_in_config_text`, the public helper a caller uses
-    to compute ``expected_patterns`` from an existing on-disk file's text
-    (rather than from the in-memory structure it is about to write).
-    """
+    """:func:`patterns_in_config_text`, the helper that computes ``expected_patterns``."""
 
     def test_collects_permissions_and_hard_deny_patterns(self):
         """
@@ -338,8 +320,7 @@ class TestPatternsInConfigText(unittest.TestCase):
         """
         Given text that is not valid TOML
         When patterns_in_config_text() is called
-        Then the underlying tomllib.TOMLDecodeError propagates (this helper is
-            a pure parse-and-extract, not a verification gate itself)
+        Then the underlying tomllib.TOMLDecodeError propagates
         """
         with self.assertRaises(tomllib.TOMLDecodeError):
             patterns_in_config_text("[permissions\n", "toml")
@@ -355,7 +336,7 @@ class TestPrivateHelpers(unittest.TestCase):
         Then it does not raise (cross-check against the real parser)
         """
         text = '[permissions]\nallow = ["Bash(ls:*)"]\n'
-        tomllib.loads(text)  # sanity: this text is itself valid
+        tomllib.loads(text)
         verify_config_text(text, "toml")
 
     def test_atomic_write_cleans_up_temp_file_on_replace_failure(self):

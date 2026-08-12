@@ -1,11 +1,4 @@
-"""
-Unit tests for toolguard.tools.config_access.
-
-Tests for the thin facade over Configuration: per-layer rule listing,
-effective takeover exposure, and config summary.
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
-"""
+"""Unit tests for toolguard.tools.config_access, the thin facade over Configuration."""
 
 import json
 import os
@@ -94,13 +87,11 @@ class TestLoadConfig(_IsolatedEnvTestCase):
                 "toolguard_hook.toml",
                 '[permissions]\nallow = ["Bash(git:*)"]',
             )
-            # Set env override to a nonexistent path
             with patch.dict(
                 os.environ,
                 {"CLAUDE_SETTINGS_PATH": "/nonexistent/settings.json"},
             ):
                 config = load_config(proj)
-            # Should still find the project config (ignoring the bad env path)
             allow, _ = config.allow_deny_for("Bash")
             self.assertIn("git:*", allow)
 
@@ -135,7 +126,6 @@ ask = ["Bash(sudo:*)"]
                 layers = per_layer_rules(config, "Bash")
 
             self.assertGreater(len(layers), 0)
-            # The project-level layer should have the expected patterns
             project_layer = layers[0]
             self.assertIn("git:*", project_layer.allow)
             self.assertIn("rm -rf:*", project_layer.deny)
@@ -231,7 +221,6 @@ ask = [{ match = "Bash(sudo:*)", additionalContext = "needs review" }]
                 layers = per_layer_rules(config, "Bash")
 
             self.assertGreater(len(layers), 1)
-            # First layer (most specific = project) should have 'git:*'
             self.assertIn("git:*", layers[0].allow)
 
 
@@ -447,7 +436,7 @@ class TestDiscoverTools(unittest.TestCase):
         """
 
         layer1 = _toolguard_layer(allow=["Bash(ls:*)", "Read(*.py)"])
-        layer2 = _toolguard_layer(allow=["Bash(git:*)"])  # Bash again
+        layer2 = _toolguard_layer(allow=["Bash(git:*)"])
         config = _make_config(layer1, layer2)
         tools = discover_tools(config)
         self.assertIn("Bash", tools)
@@ -473,7 +462,7 @@ class TestDiscoverTools(unittest.TestCase):
         Then an empty tuple is returned
         """
 
-        layer = _toolguard_layer()  # no permissions
+        layer = _toolguard_layer()
         config = _make_config(layer)
         tools = discover_tools(config)
         self.assertEqual(tools, ())
@@ -541,7 +530,6 @@ class TestNeutralizedByTakeover(unittest.TestCase):
         Then True is returned
         """
 
-        # normalized_ignored_patterns strips the tool wrapper, so "*" maps to "Bash(*)"
         takeover = self._takeover_on(["Bash(*)"])
         result = neutralized_by_takeover("*", is_native=True, takeover=takeover)
         self.assertTrue(result)
@@ -575,7 +563,7 @@ class TestNeutralizedByTakeover(unittest.TestCase):
         Then False is returned (specific pattern is not suppressed)
         """
 
-        takeover = self._takeover_on(["Bash(*)"])  # only Bash(*) is ignored
+        takeover = self._takeover_on(["Bash(*)"])
         result = neutralized_by_takeover(
             "git status", is_native=True, takeover=takeover
         )
@@ -594,7 +582,6 @@ class TestNeutralizedByTakeover(unittest.TestCase):
             additional_ignored_patterns=("Read(*)",),
             no_match_fallback="deny",
         )
-        # normalized_ignored_patterns strips "Read(" and ")" -> "*"
         result = neutralized_by_takeover("*", is_native=True, takeover=takeover)
         self.assertTrue(result)
 
@@ -712,7 +699,6 @@ class TestAuditContext(unittest.TestCase):
         config = _make_config(tg_layer, native)
         ctx = audit_context(config)
         self.assertTrue(ctx.takeover.enabled)
-        # normalized_ignored_patterns strips the wrapper -> "*"
         self.assertIn("*", ctx.neutralized_allow_patterns)
 
     def test_layer_context_locus_matches_describe(self):
@@ -898,20 +884,7 @@ class TestRuleCommentExposure(unittest.TestCase):
 
 
 class TestRuleCommentExposureStructuredEntries(unittest.TestCase):
-    """
-    Comment/NOSECURITY recovery for a structured (``{ match = ..., ... }``) entry.
-
-    A structured entry is valid TOML only on a single physical line (TOML 1.0
-    forbids an inline table from spanning multiple physical lines -- see
-    ``toolguard.rule_sort``'s top-of-file docstring); a ``#`` inside one of its
-    quoted metadata values must never be mistaken for a comment. This class
-    previously also covered a MULTI-line variant of each scenario; TOO-19's
-    corrective change made that variant a parse FAILURE (not a supported
-    shape), so those cases were converted to instead assert the safe
-    degrade-on-parse-failure behaviour ``_layer_comment_map`` now has (see
-    ``test_multiline_structured_entry_degrades_to_no_comments_recovered``
-    below) rather than testing content-recovery details that no longer apply.
-    """
+    """Comment/NOSECURITY recovery for a structured (``{ match = ..., ... }``) entry, valid TOML only on a single physical line."""
 
     _SINGLE_LINE_NOSECURITY = (
         "[permissions]\n"

@@ -6,26 +6,13 @@ Toolguard's bundled skills shell out to the installed toolguard console scripts
 mode -- those invocations are themselves ``Bash`` commands toolguard must permit,
 or the skill's own call is denied (a chicken-and-egg bootstrapping problem).
 
-This module is the SINGLE SOURCE OF TRUTH for which toolguard tools a skill runs
-via ``Bash`` and how each should be permitted.  It is deliberately declarative and
-does NOT write anything: toolguard must never self-grant a privilege.  Callers
-(the setup/maintenance skills) SUGGEST the rules, get explicit user consent, and
-write them at the chosen scope; a self-healing skill can also detect its own
-denial and offer to add the exact rule.
+The table is declarative and writes nothing: toolguard must never self-grant a
+privilege.  A caller suggests the rules, gets explicit user consent, and writes
+them at the chosen scope.
 
-Design guard-rails (see the plan's "Self-permissioning" section):
-
-- **Only what skills actually run via Bash.**  ``toolguard`` and
-  ``toolguard-session-start`` are HOOK entry points invoked by Claude Code's hook
-  machinery, not as Bash tool calls -- they never need a Bash allow rule and are
-  intentionally absent here.
-- **Granularity by risk.**  Read-only tools (``toolguard-audit``) are fine to
-  ``allow``.  A config-MUTATING tool (``toolguard-maintain``, which can
-  ``--apply --write``) must NOT be blanket-allowed -- the recommendation is
-  ``ask`` (per-invocation consent), so the model cannot silently mutate the
-  security config and bypass the human-approves-edits principle.
-- **Suggest, never auto-apply.**  This module reports what is missing; the write
-  is always an explicit, consented action performed elsewhere.
+Each entry's recommended list follows from its risk, not from convenience: a
+read-only tool can stand on ``allow``, a config-mutating one is recommended as
+``ask``.
 """
 
 from dataclasses import dataclass
@@ -67,9 +54,9 @@ class SelfPermission:
     rationale: str
 
 
-# The toolguard tools a bundled skill invokes via Bash.  Hook entry points
-# (``toolguard``, ``toolguard-session-start``, ``toolguard-update-check``) are
-# intentionally excluded: they run under the hook machinery, not as Bash calls.
+#: Hook entry points (``toolguard``, ``toolguard-session-start``,
+#: ``toolguard-update-check``) are deliberately absent from this table: Claude
+#: Code's hook machinery runs them, never a Bash tool call.
 _SELF_PERMISSIONS: Tuple[SelfPermission, ...] = (
     SelfPermission(
         command="toolguard-audit",
@@ -107,13 +94,11 @@ class SelfPermissionStatus:
 
     Attributes:
         permission: The self-permission entry being evaluated.
-        current_verdict: What the hook would decide for ``permission.probe`` today
-            (``'allow'``/``'ask'``/``'deny'``).
-        needs_action: ``True`` when a rule should be suggested -- a read-only tool
-            that is not currently allowed, or a mutating tool that is currently
-            denied (i.e. the skill's own call would be blocked).
-        recommendation: Human-readable next step (add an allow/ask rule, or a
-            note that a mutating tool is over-broadly allowed).
+        current_verdict: :func:`~toolguard.api.decide`'s verdict for
+            ``permission.probe`` (``'allow'``/``'ask'``/``'deny'``).
+        needs_action: ``True`` for a read-only tool that is not ``'allow'``, or a
+            mutating tool that is ``'deny'``.
+        recommendation: Human-readable next step.
     """
 
     permission: SelfPermission
@@ -123,7 +108,7 @@ class SelfPermissionStatus:
 
 
 def required_self_permissions() -> Tuple[SelfPermission, ...]:
-    """Return the declarative set of self-permission rules toolguard skills need."""
+    """Return the fixed self-permission table."""
     return _SELF_PERMISSIONS
 
 
@@ -163,11 +148,8 @@ def _status_for(permission: SelfPermission, verdict: str) -> SelfPermissionStatu
 
 def evaluate_self_permissions(config: Configuration) -> List[SelfPermissionStatus]:
     """
-    Evaluate every self-permission against *config* using the real decision engine.
-
-    Reuses :func:`~toolguard.api.decide` (no reimplementation) to learn
-    what the hook would actually decide for each tool's probe command, then
-    classifies the result.
+    Evaluate every self-permission's probe through :func:`~toolguard.api.decide`
+    and classify the verdict.
 
     Args:
         config: The resolved configuration hierarchy to evaluate against.
@@ -185,17 +167,13 @@ def evaluate_self_permissions(config: Configuration) -> List[SelfPermissionStatu
 
 def missing_self_permissions(config: Configuration) -> List[SelfPermissionStatus]:
     """
-    Return only the self-permissions that need a rule suggested (``needs_action``).
-
-    These are the tools whose skill invocation would be blocked (or, for a
-    read-only tool, not allowed) under *config* -- the concrete rules the setup /
-    maintenance skill should offer to add with the user's consent.
+    Return only the self-permissions whose status has ``needs_action`` set.
     """
     return [s for s in evaluate_self_permissions(config) if s.needs_action]
 
 
 # ---------------------------------------------------------------------------
-# Serialization (for the skill's JSON contract)
+# Serialization
 # ---------------------------------------------------------------------------
 
 

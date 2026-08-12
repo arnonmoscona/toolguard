@@ -1,9 +1,4 @@
-"""
-Unit tests for toolguard permission checking logic.
-
-Tests the permission checking, pattern matching, and configuration loading
-functionality of the toolguard pre-tool-use hook.
-"""
+"""Unit tests for toolguard permission checking logic."""
 
 import unittest
 
@@ -332,7 +327,6 @@ class TestExtendedPatterns(unittest.TestCase):
         """
         patterns = ["[regex]^git (log|diff|status).*"]
 
-        # Should match
         matched, pattern = match_command("git log --oneline", patterns)
         self.assertTrue(matched)
         self.assertEqual(pattern, "[regex]^git (log|diff|status).*")
@@ -343,7 +337,6 @@ class TestExtendedPatterns(unittest.TestCase):
         matched, pattern = match_command("git status --short", patterns)
         self.assertTrue(matched)
 
-        # Should not match
         matched, pattern = match_command("git push origin", patterns)
         self.assertFalse(matched)
         self.assertIsNone(pattern)
@@ -360,14 +353,12 @@ class TestExtendedPatterns(unittest.TestCase):
         allow_patterns = ["git *"]
         deny_patterns = ["[regex]^git push.*"]
 
-        # Should be denied by regex pattern
         decision, reason = check_permission(
             "git push origin main", allow_patterns, deny_patterns
         )
         self.assertEqual(decision, "deny")
         self.assertIn("[regex]^git push.*", reason)
 
-        # Should be allowed
         decision, reason = check_permission("git status", allow_patterns, deny_patterns)
         self.assertEqual(decision, "allow")
 
@@ -377,28 +368,23 @@ class TestExtendedPatterns(unittest.TestCase):
         When match_command checks commands with matching and mismatching paths/extensions
         Then only commands matching the full glob match
         """
-        # GLOB patterns match the entire command string, so we need to include the command
         patterns = ["[glob]cat /Users/*/projects/**/*.py"]
 
-        # Should match
         matched, pattern = match_command(
             "cat /Users/arnon/projects/flowers/main.py", patterns
         )
         self.assertTrue(matched)
         self.assertEqual(pattern, "[glob]cat /Users/*/projects/**/*.py")
 
-        # Should not match - different user path
         matched, pattern = match_command(
             "vim /Users/bob/projects/myapp/src/app.py", patterns
         )
         self.assertFalse(matched)
 
-        # Should not match - wrong path
         matched, pattern = match_command("cat /Users/arnon/documents/file.py", patterns)
         self.assertFalse(matched)
         self.assertIsNone(pattern)
 
-        # Should not match - wrong extension
         matched, pattern = match_command(
             "cat /Users/arnon/projects/flowers/main.txt", patterns
         )
@@ -413,18 +399,15 @@ class TestExtendedPatterns(unittest.TestCase):
         allow_patterns = ["cat *"]
         deny_patterns = ["[glob]cat *.env*", "[glob]cat*/**/.env*"]
 
-        # Should be denied by glob pattern - simple case
         decision, reason = check_permission("cat .env", allow_patterns, deny_patterns)
         self.assertEqual(decision, "deny")
         self.assertIn(".env", reason)
 
-        # Should be denied by glob pattern - recursive path with **
         decision, reason = check_permission(
             "cat /path/to/.env.production", allow_patterns, deny_patterns
         )
         self.assertEqual(decision, "deny")
 
-        # Should be allowed
         decision, reason = check_permission(
             "cat normal_file.txt", allow_patterns, deny_patterns
         )
@@ -437,29 +420,25 @@ class TestExtendedPatterns(unittest.TestCase):
         Then each command matches its corresponding pattern and an unrelated command matches none
         """
         patterns = [
-            "git status:*",  # DEFAULT
-            "[regex]^git (log|diff).*",  # REGEX
-            "[glob]cat /Users/*/projects/**/*.py",  # GLOB
+            "git status:*",
+            "[regex]^git (log|diff).*",
+            "[glob]cat /Users/*/projects/**/*.py",
         ]
 
-        # DEFAULT pattern should match
         matched, pattern = match_command("git status", patterns)
         self.assertTrue(matched)
         self.assertEqual(pattern, "git status:*")
 
-        # REGEX pattern should match
         matched, pattern = match_command("git log --oneline", patterns)
         self.assertTrue(matched)
         self.assertEqual(pattern, "[regex]^git (log|diff).*")
 
-        # GLOB pattern should match
         matched, pattern = match_command(
             "cat /Users/arnon/projects/flowers/main.py", patterns
         )
         self.assertTrue(matched)
         self.assertEqual(pattern, "[glob]cat /Users/*/projects/**/*.py")
 
-        # None should match
         matched, pattern = match_command("rm -rf /", patterns)
         self.assertFalse(matched)
 
@@ -469,9 +448,8 @@ class TestExtendedPatterns(unittest.TestCase):
         When match_command checks a command against it
         Then it reports no match and returns None instead of raising
         """
-        patterns = ["[regex]^git (unclosed"]  # Invalid regex - unclosed parenthesis
+        patterns = ["[regex]^git (unclosed"]
 
-        # Should not match (invalid regex returns False)
         matched, pattern = match_command("git anything", patterns)
         self.assertFalse(matched)
         self.assertIsNone(pattern)
@@ -482,23 +460,18 @@ class TestExtendedPatterns(unittest.TestCase):
         When match_command checks commands with and without a ./ prefix
         Then matching is literal with no path normalization applied
         """
-        # Pattern that matches exactly "cat file.txt"
         patterns = ["[regex]^cat file\\.txt$"]
 
-        # SHOULD match - regex matches the literal command string
         matched, pattern = match_command("cat file.txt", patterns)
         self.assertTrue(matched)
 
-        # Should NOT match with ./ prefix
         matched, pattern = match_command("cat ./file.txt", patterns)
         self.assertFalse(matched)
 
-        # Pattern that explicitly requires ./ prefix
         patterns = ["[regex]^cat \\./file\\.txt$"]
         matched, pattern = match_command("cat ./file.txt", patterns)
         self.assertTrue(matched)
 
-        # Should NOT match without the ./ prefix
         matched, pattern = match_command("cat file.txt", patterns)
         self.assertFalse(matched)
 
@@ -508,14 +481,11 @@ class TestExtendedPatterns(unittest.TestCase):
         When match_command checks commands with and without that colon
         Then the colon is treated as part of the regex, not a command:args separator
         """
-        # Colon in regex is part of the pattern, not a separator
         patterns = ["[regex]^git log:.*"]
 
-        # Should match "git log:" literally
         matched, pattern = match_command("git log:something", patterns)
         self.assertTrue(matched)
 
-        # Should NOT match "git log" without colon
         matched, pattern = match_command("git log something", patterns)
         self.assertFalse(matched)
 
@@ -527,11 +497,9 @@ class TestExtendedPatterns(unittest.TestCase):
         """
         patterns = ["[glob]cat file.txt"]
 
-        # Should match exactly
         matched, pattern = match_command("cat file.txt", patterns)
         self.assertTrue(matched)
 
-        # Should NOT match with ./ prefix (glob is literal)
         matched, pattern = match_command("cat ./file.txt", patterns)
         self.assertFalse(matched)
 
@@ -543,11 +511,9 @@ class TestExtendedPatterns(unittest.TestCase):
         """
         patterns = ["[glob]git log:*"]
 
-        # Should match "git log:" literally with glob wildcard
         matched, pattern = match_command("git log:something", patterns)
         self.assertTrue(matched)
 
-        # Should NOT match "git log " (space instead of colon)
         matched, pattern = match_command("git log something", patterns)
         self.assertFalse(matched)
 
@@ -558,13 +524,13 @@ class TestExtendedPatterns(unittest.TestCase):
         Then the first matching pattern in the list is the one returned
         """
         patterns = [
-            "[regex]^git .*",  # This should match first
-            "git status:*",  # This would also match but comes second
+            "[regex]^git .*",
+            "git status:*",
         ]
 
         matched, pattern = match_command("git status", patterns)
         self.assertTrue(matched)
-        self.assertEqual(pattern, "[regex]^git .*")  # First pattern wins
+        self.assertEqual(pattern, "[regex]^git .*")
 
     def test_env_special_handling_only_for_default(self):
         """
@@ -573,27 +539,21 @@ class TestExtendedPatterns(unittest.TestCase):
         Then the **/.env/** path-component special handling applies only to DEFAULT patterns,
         while regex and glob must match the full command literally
         """
-        # DEFAULT pattern with special handling
         default_patterns = ["**/.env/**"]
         matched, pattern = match_command("cat .env", default_patterns)
-        self.assertTrue(matched)  # Special handling applies
+        self.assertTrue(matched)
 
-        # REGEX pattern - no special handling (must match full command literally)
         regex_patterns = ["[regex].*\\.env.*"]
         matched, pattern = match_command("cat .env", regex_patterns)
-        self.assertTrue(
-            matched
-        )  # Regex matches, but no path component special handling
+        self.assertTrue(matched)
 
-        # GLOB pattern - no special handling, must match the full command string
         glob_patterns = ["[glob]cat .env"]
         matched, pattern = match_command("cat .env", glob_patterns)
-        self.assertTrue(matched)  # Exact glob match
+        self.assertTrue(matched)
 
-        # GLOB with wildcard
         glob_patterns = ["[glob]* .env"]
         matched, pattern = match_command("cat .env", glob_patterns)
-        self.assertTrue(matched)  # Glob wildcard matches
+        self.assertTrue(matched)
 
     def test_native_pattern_uses_native_semantics(self):
         """
@@ -610,8 +570,6 @@ class TestExtendedPatterns(unittest.TestCase):
         matched, pattern = match_command("git merge main", patterns)
         self.assertTrue(matched)
 
-        # "git * main" should NOT match commands where 'main' is not the final token
-        # position in an expected-order-sequence way via NATIVE semantics
         matched, pattern = match_command("git checkout develop", patterns)
         self.assertFalse(matched)
 
@@ -630,7 +588,6 @@ class TestExtendedPatterns(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertIn("[native]git push *", reason)
 
-        # git status is allowed because only "git push *" is denied
         decision, _ = check_permission("git status", allow_patterns, deny_patterns)
         self.assertEqual(decision, "allow")
 

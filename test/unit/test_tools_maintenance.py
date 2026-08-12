@@ -1,9 +1,8 @@
 """
 Unit tests for the maintenance aggregator (toolguard.tools.maintenance).
 
-These verify that run_maintenance composes the individual maintenance engines into
-a single structured report, and that render produces a readable summary.  Local
-fixture helpers mirror the other maintenance-tool tests for consistency.
+Verifies that run_maintenance composes the individual maintenance engines into a
+single structured report, and that render produces a readable summary.
 """
 
 import argparse
@@ -235,7 +234,6 @@ class TestReportToDict(unittest.TestCase):
         group = payload["mining"]["groups"][0]
         self.assertEqual(group["tool"], "Bash")
         self.assertIsInstance(group["observed_counts"], dict)
-        # Must be JSON-serializable end to end.
         self.assertIsInstance(json.dumps(payload), str)
 
     def test_empty_report_serializes_to_empty_findings(self):
@@ -544,11 +542,7 @@ class TestNoSecurityWithholding(unittest.TestCase):
     _ALLOWS = ["git diff:*", "git status:*", "git log:*"]
 
     def _config_with_real_file(self, tmpdir: str, tagged: bool) -> Configuration:
-        """
-        Write a real toolguard_hook.toml (with a #NOSECURITY comment on 'git diff:*'
-        when *tagged*) and return a Configuration whose layer provenance points at it,
-        so the comment can be recovered from disk during consolidation withholding.
-        """
+        """Write a real toolguard_hook.toml, optionally #NOSECURITY-tagging 'git diff:*', and return its Configuration."""
         lines = []
         for body in self._ALLOWS:
             if tagged and body == "git diff:*":
@@ -651,11 +645,7 @@ class TestAnnotateMode(unittest.TestCase):
     """The --annotate mode previews/writes '# toolguard:' clarity comments, gated."""
 
     def _confusing_config(self, tmpdir: str) -> Configuration:
-        """
-        Write a real toolguard_hook.toml with a confusing interaction (allow 'git:*'
-        shadowed by deny 'git push:*') and a human comment, and return a matching
-        Configuration whose layer provenance points at it.
-        """
+        """Write a real toolguard_hook.toml with a confusing git:*/git push:* interaction and return its Configuration."""
         text = (
             "[permissions]\n"
             "allow = [\n"
@@ -677,7 +667,6 @@ class TestAnnotateMode(unittest.TestCase):
             specificity=0,
         )
         layer = _make_layer("Bash", allow=["git:*"], deny=["git push:*"])
-        # Rebuild the layer with the real-file provenance.
         layer = ConfigLayer(provenance=prov, content=layer.content)
         return _make_config(layer)
 
@@ -862,7 +851,6 @@ class TestReplayCandidate(unittest.TestCase):
         Build (config_a, config_b, corpus) where one command is broadened and one
         tightened, then return the resulting ReplayDiff.
         """
-        # A: rm allowed, git push denied.  B: the reverse.
         config_a = _make_config(
             _make_layer("Bash", allow=["rm:*"], deny=["git push:*"])
         )
@@ -1146,7 +1134,7 @@ class TestLedgerMode(unittest.TestCase):
                     [
                         {"kind": "custom", "family_id": "a", "target": "t"},
                         {"kind": "custom", "family_id": "b", "target": "t"},
-                        {"kind": "custom", "family_id": "c"},  # missing target
+                        {"kind": "custom", "family_id": "c"},
                     ]
                 )
             )
@@ -1158,7 +1146,6 @@ class TestLedgerMode(unittest.TestCase):
                 rc = _run_record_decision(args)
             self.assertEqual(rc, 2)
             self.assertIn("malformed", buf.getvalue())
-            # Nothing from the batch was persisted despite two valid leading entries.
             self.assertFalse((root / ".claude" / "toolguard_decisions.json").exists())
 
     def test_record_rejects_combining_with_apply(self):

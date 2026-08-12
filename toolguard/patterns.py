@@ -1,11 +1,10 @@
 """
 Extended pattern matching for toolguard.
 
-Supports four pattern types:
-- DEFAULT: Standard fnmatch patterns (with special handling for path components)
-- REGEX: Patterns prefixed with [regex] for regular expression matching
-- GLOB: Patterns prefixed with [glob] for true glob matching with globstar support
-- NATIVE: Patterns prefixed with [native] for word-level wildcard matching
+Four pattern types, selected by an optional ``[type]`` prefix that
+:func:`parse_pattern` strips: DEFAULT (no prefix), REGEX (``[regex]``), GLOB
+(``[glob]``), NATIVE (``[native]``). :func:`match_pattern` applies the
+selected type's semantics.
 """
 
 import re
@@ -18,37 +17,36 @@ from .normalization import expand_tilde
 
 
 class PatternType(Enum):
-    """Type of pattern for command matching."""
+    """Pattern syntax selected by a pattern string's ``[type]`` prefix (see :func:`parse_pattern`)."""
 
-    DEFAULT = "default"  # Standard fnmatch with special path component handling
-    REGEX = "regex"  # Regular expression pattern
-    GLOB = "glob"  # True glob pattern with globstar support
-    NATIVE = "native"  # Word-level wildcard matching (Claude Code 2.10 style)
+    DEFAULT = "default"
+    REGEX = "regex"
+    GLOB = "glob"
+    NATIVE = "native"
 
 
 def parse_pattern(
     pattern_str: str, extended_syntax: bool = True
 ) -> Tuple[PatternType, str]:
     """
-    Parse a pattern string to determine its type and extract the actual pattern.
+    Split a pattern string into its :class:`PatternType` and prefix-stripped body.
 
-    Supports:
-    - [regex]<pattern> - Regular expression pattern
-    - [glob]<pattern> - True glob pattern with globstar support
-    - [native]<pattern> - Word-level wildcard pattern
-    - <pattern> - Default fnmatch pattern with special handling
+    A ``[regex]``/``[glob]``/``[native]`` prefix selects that type; anything
+    else (or ``extended_syntax=False``, which skips prefix recognition
+    entirely) is DEFAULT.
 
     Args:
-        pattern_str: The pattern string to parse
-        extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes
+        pattern_str: The pattern string to parse.
+        extended_syntax: If False, treat pattern_str as DEFAULT regardless of
+            any ``[...]`` prefix it starts with.
 
     Returns:
-        Tuple of (PatternType, pattern) where pattern is the extracted pattern string
+        ``(pattern_type, body)`` -- body has the ``[type]`` prefix, if any,
+        and surrounding whitespace stripped.
     """
     pattern_str = pattern_str.strip()
 
     if not extended_syntax:
-        # Extended syntax disabled - treat everything as DEFAULT
         return PatternType.DEFAULT, pattern_str
 
     if pattern_str.startswith("[regex]"):
@@ -63,83 +61,84 @@ def parse_pattern(
 
 def match_pattern(pattern_type: PatternType, pattern: str, command: str) -> bool:
     """
-    Match a command against a pattern using the specified pattern type.
+    Match a command against a pattern under pattern_type's own matching semantics.
 
     Args:
-        pattern_type: The type of pattern matching to use
-        pattern: The pattern to match against
-        command: The command string to match
+        pattern_type: Selects the matching semantics -- see the corresponding
+            branch below.
+        pattern: The pattern to match against (already stripped of its
+            ``[type]`` prefix by :func:`parse_pattern`, if any).
+        command: The command string to match.
 
     Returns:
-        True if the command matches the pattern, False otherwise
+        True if command matches under pattern_type's semantics, False
+        otherwise -- a malformed REGEX pattern is treated as non-matching
+        rather than raised.
     """
     if pattern_type == PatternType.REGEX:
-        # Use re.search to match anywhere in the command
+        # re.search: matches anywhere in command, not anchored to the start.
         try:
             return bool(re.search(pattern, command))
         except re.error:
-            # Invalid regex pattern - treat as non-matching
             return False
 
     elif pattern_type == PatternType.GLOB:
-        # True glob matching with globstar support using PurePath.full_match()
-        # Expand ~ in both pattern and command for proper matching
+        # PurePath.full_match(): anchored to the whole string. * does not
+        # cross a path separator; ** does, but only as a whole path
+        # component. ~ is expanded on both sides first since full_match()
+        # has no notion of home-directory expansion.
         expanded_pattern = expand_tilde(pattern)
         expanded_command = expand_tilde(command)
         try:
-            # PurePath.full_match() properly distinguishes * from **:
-            # - * matches any characters EXCEPT path separator /
-            # - ** matches any characters INCLUDING path separators (recursive)
             return PurePath(expanded_command).full_match(expanded_pattern)
         except ValueError, TypeError:
-            # Invalid pattern or command - treat as non-matching
             return False
 
     elif pattern_type == PatternType.NATIVE:
-        # Word-level wildcard matching (Claude Code 2.10 style)
-        # * matches any sequence of non-whitespace characters
-        # Pattern segments must appear in order in the command
+        # Intended as Claude Code's own wildcard syntax: * matches any run of
+        # characters, including whitespace. The literal segments between *s
+        # must occur in order, each found from just past the previous one.
+        #
+        # The search never backtracks -- worth the paragraph, because the
+        # resulting failure is silent. A wildcard pattern ending in * always
+        # matches correctly. One NOT ending in * fails whenever its final
+        # segment is found short of the command's end: the end-anchor check
+        # tests that occurrence, not the last one. So "*id_rsa" does not
+        # match "cat id_rsa.pub id_rsa". Every deviation is a false negative
+        # -- on a deny rule, a bypass.
         if "*" not in pattern:
-            # No wildcards - must match exactly
             return pattern == command
 
-        # Split pattern by * to get literal segments
         segments = pattern.split("*")
 
-        # Start searching from the beginning of the command
         pos = 0
         for i, segment in enumerate(segments):
             if not segment:
-                # Empty segment (e.g., from ** or leading/trailing *)
+                # Adjacent *s, or a leading/trailing *, split to an empty
+                # segment here -- nothing to search for.
                 continue
 
-            # Find the segment in the remaining command
             idx = command.find(segment, pos)
             if idx == -1:
-                # Segment not found
                 return False
 
-            # For first segment, check if it should be at the start
             if i == 0 and not pattern.startswith("*"):
-                # Pattern doesn't start with *, so first segment must be at start
+                # No leading * -- the first segment must start at position 0.
                 if idx != 0:
                     return False
 
-            # Move position past this segment
             pos = idx + len(segment)
 
-        # For last segment, check if it should be at the end
         if segments and segments[-1] and not pattern.endswith("*"):
-            # Pattern doesn't end with *, so last segment must be at end
+            # No trailing * -- the last segment must end at the command's end.
             if pos != len(command):
                 return False
 
         return True
 
     elif pattern_type == PatternType.DEFAULT:
-        # For DEFAULT type, we defer to the existing match_command logic
-        # in permissions.py which has special handling for path components
-        # This is a fallback - typically match_command should be used directly
+        # fnmatch.fnmatch: also a full-string match, but unlike GLOB its *
+        # DOES cross a path separator.
         return fnmatch.fnmatch(command, pattern)
 
     return False

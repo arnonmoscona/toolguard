@@ -1,21 +1,19 @@
 """
 Abstract Command Model (IR) for the bash command extractor.
 
-This module defines a small typed Intermediate Representation (IR) that sits
-between the raw Canopy parse tree and the business-policy extraction layer in
-``command_extractor.py``.
+A small typed Intermediate Representation that sits between the raw Canopy
+parse tree and the business-policy extraction layer. :func:`build_ir` turns a
+parse tree into an :class:`IRProgram`; :class:`NodeKind` and the IR node types
+are the rest of the public surface.
 
-**Design contract**:
-  - ALL code that touches raw Canopy ``TreeNode*`` objects, ``hasattr`` checks,
-    or the ``elements`` lists lives here -- specifically in :func:`build_ir`.
-  - The rest of the codebase operates only on the IR types defined in this
-    module.
+**Design contract**: raw Canopy ``TreeNode*`` objects, ``hasattr`` probing and
+the untyped ``elements`` lists are confined to this module. The contract is
+per-module, not per-function: several private helpers here probe raw nodes,
+not just :func:`build_ir`. :class:`IRControlStructure` does hand raw nodes
+back out, but only as opaque handles.
 
 The IR is intentionally shallow: it models only the constructs the extractor
 cares about, not a full bash AST.
-
-Node kind dispatch is centralised in :func:`node_kind`, which collapses the
-~12 ``_is_*`` predicates previously scattered across ``command_extractor.py``.
 """
 
 from __future__ import annotations
@@ -33,49 +31,52 @@ from typing import List, Optional
 class NodeKind(Enum):
     """Classification of a raw Canopy parse-tree node.
 
-    This enum covers every node type the IR builder needs to distinguish.
-    Nodes that don't match any specific pattern are classified as GENERIC
-    and handled by recursive descent into their children.
+    Everything the IR builder needs to distinguish. Anything else is GENERIC,
+    which the builder descends into rather than modelling.
     """
 
-    PROGRAM = auto()  # top-level program node (has rest_stmts)
-    FOR_LOOP = auto()  # for_loop (has for_kw + do_clause)
-    WHILE_LOOP = auto()  # while_loop (has while_kw + do_clause)
-    UNTIL_LOOP = auto()  # until_loop (has until_kw + do_clause)
-    IF_STMT = auto()  # if_stmt (has if_kw + then_clause)
-    CASE_STMT = auto()  # case_stmt (has case_kw + esac_kw)
-    PROC_SUBST = auto()  # process substitution <(...) or >(...)
-    SIMPLE_CMD = auto()  # pipeline_element with command_name
-    SUBSHELL_OR_BRACE = (
-        auto()
-    )  # pipeline_element with compound_command (not proc_subst)
-    COMPOUND_CMD = auto()  # compound_command node (has pipeline, no control_op)
-    CONTROL_OP_PAIR = auto()  # control_op + pipeline pair
-    PIPELINE = auto()  # pipeline node (has pipeline_element)
-    GENERIC = auto()  # anything else -- walk children
+    # Most of these name a bash_parser.peg rule. The two that do not:
+    # CONTROL_OP_PAIR is the anonymous `(control_op pipeline)` repetition
+    # inside compound_command, and SUBSHELL_OR_BRACE covers subshell,
+    # brace_group AND cmd_substitution -- see node_kind.
+    PROGRAM = auto()
+    FOR_LOOP = auto()
+    WHILE_LOOP = auto()
+    UNTIL_LOOP = auto()
+    IF_STMT = auto()
+    CASE_STMT = auto()
+    PROC_SUBST = auto()
+    SIMPLE_CMD = auto()
+    SUBSHELL_OR_BRACE = auto()
+    COMPOUND_CMD = auto()
+    CONTROL_OP_PAIR = auto()
+    PIPELINE = auto()
+    GENERIC = auto()
 
 
 def node_kind(node) -> NodeKind:
     """Classify a raw Canopy parse-tree *node* into a :class:`NodeKind`.
 
-    This is the SINGLE point of ``hasattr`` / TreeNodeN dispatch.  All
-    classification logic that previously lived in the ``_is_*`` predicates
-    is consolidated here.
+    Canopy names its generated node classes ``TreeNodeN``, so a node's type
+    carries no meaning and the only identity it has is which grammar labels
+    it exposes. The tests below are ordered, not independent: ``proc_subst``,
+    ``subshell``, ``brace_group`` and both command-substitution forms all carry
+    a ``compound_command`` label, so each later test means only "and none of
+    the earlier ones matched".
 
     Args:
-        node: A raw Canopy TreeNode (any subclass).
+        node: A raw Canopy TreeNode (any subclass), or ``None``.
 
     Returns:
-        The :class:`NodeKind` that best describes *node*.
+        The :class:`NodeKind` that best describes *node*; ``GENERIC`` for
+        ``None`` and for anything that matches no test.
     """
     if node is None:
         return NodeKind.GENERIC
 
-    # Program node: uniquely identified by rest_stmts label.
     if hasattr(node, "rest_stmts"):
         return NodeKind.PROGRAM
 
-    # Control structures -- check before other hasattr tests.
     if hasattr(node, "for_kw") and hasattr(node, "do_clause"):
         return NodeKind.FOR_LOOP
     if hasattr(node, "while_kw") and hasattr(node, "do_clause"):
@@ -87,7 +88,8 @@ def node_kind(node) -> NodeKind:
     if hasattr(node, "case_kw") and hasattr(node, "esac_kw"):
         return NodeKind.CASE_STMT
 
-    # Process substitution: compound_command AND text starts with <( or >(.
+    # Must precede SUBSHELL_OR_BRACE: <(...) also carries compound_command,
+    # and only the leading "<("/">(" tells them apart.
     if (
         hasattr(node, "compound_command")
         and hasattr(node, "text")
@@ -98,29 +100,22 @@ def node_kind(node) -> NodeKind:
     ):
         return NodeKind.PROC_SUBST
 
-    # Simple command (pipeline_element leaf): has command_name.
     if hasattr(node, "command_name"):
         return NodeKind.SIMPLE_CMD
 
-    # Subshell or brace group at pipeline_element level:
-    # has compound_command but is NOT proc_subst.
-    # NOTE: cmd_substitution nodes (TreeNode59) also have compound_command,
-    # but they appear as children of a simple_command's element list, not
-    # as the top-level pipeline_element.  Context determines interpretation;
-    # the builder uses _build_pipeline_element (top-level) vs
-    # _collect_cmd_substs (within arguments) to distinguish the two cases.
+    # SUBSHELL_OR_BRACE is not a pure classification: a `$(...)`/backtick
+    # substitution node carries compound_command too and lands here as well.
+    # Position disambiguates them, so the caller must -- _build_pipeline_element
+    # treats this kind as a subshell, _collect_cmd_substs as a substitution.
     if hasattr(node, "compound_command"):
         return NodeKind.SUBSHELL_OR_BRACE
 
-    # Control-op + pipeline pair (e.g. "&& pipeline" from the rest-of-compound list).
     if hasattr(node, "control_op") and hasattr(node, "pipeline"):
         return NodeKind.CONTROL_OP_PAIR
 
-    # Compound command: has pipeline but no control_op.
     if hasattr(node, "pipeline") and not hasattr(node, "control_op"):
         return NodeKind.COMPOUND_CMD
 
-    # Pipeline: has pipeline_element.
     if hasattr(node, "pipeline_element"):
         return NodeKind.PIPELINE
 
@@ -137,14 +132,14 @@ class IRSimpleCmd:
     """A leaf simple command from a pipeline_element node.
 
     Attributes:
-        text: The cleaned command text (stripped, trailing operators removed).
-        has_proc_subst: True if the argument list contains any process
-            substitution argument (``<(...)`` or ``>(...)``).
-        cmd_substs: Ordered list of IRCompound nodes for any ``$(...)`` or
-            backtick command substitutions found in the argument list.
-            These must be extracted for security checking (an inner
-            ``$(rm -rf /)`` argument is just as dangerous as a top-level
-            ``rm -rf /`` command).
+        text: The command text, per :func:`_clean_simple_cmd_text`.
+        has_proc_subst: True if any descendant is a process substitution
+            (``<(...)`` or ``>(...)``), however deeply nested.
+        cmd_substs: Ordered list of :class:`IRCompound` nodes for the
+            ``$(...)`` and backtick substitutions in the command name and the
+            argument list. Broken out because an inner ``$(rm -rf /)``
+            argument is as dangerous as a top-level ``rm -rf /``, and *text*
+            alone would only ever be matched as one string.
     """
 
     text: str
@@ -156,14 +151,10 @@ class IRSimpleCmd:
 class IRSubshell:
     """A subshell ``(...)`` or brace group ``{...}`` pipeline element.
 
-    Both wrappers contain an inner compound.  The *wrapper_text* includes
-    the surrounding parens/braces; *inner_text* is the content without them
-    (may equal the compound's text after stripping trailing ``;``).
-
     Attributes:
-        wrapper_text: Full text of the pipeline element (e.g. ``(ls -la)``).
+        wrapper_text: Full text of the pipeline element, e.g. ``(ls -la)``.
         inner_text: Text of the inner compound_command node, stripped and
-            with trailing ``;`` removed.
+            with one trailing ``;`` removed.
         inner: The :class:`IRCompound` built from the inner compound_command.
     """
 
@@ -176,7 +167,8 @@ class IRSubshell:
 class IRProcSubst:
     """A process substitution ``<(...)`` or ``>(...)`` node.
 
-    These cannot be statically decomposed and resolve to UndecidableSegment.
+    The inner compound is not modelled: a process substitution is never
+    decomposed, so there would be no reader for it.
 
     Attributes:
         text: Full text of the process substitution.
@@ -189,35 +181,38 @@ class IRProcSubst:
 class IRControlStructure:
     """A control structure (for/while/until/if/case) node.
 
-    All complexity flags and the body statements are pre-computed here during
-    the IR build phase so that the extraction layer in ``command_extractor.py``
-    does NOT need to access raw Canopy nodes directly.
+    Every flag and body statement is computed during the IR build, so the
+    extraction layer decides SIMPLE-versus-COMPLEX from this dataclass alone.
+    ``raw_node`` and the four fields after ``ctrl_condition_text`` are raw
+    Canopy handles, not data: no consumer dereferences one, and only
+    ``do_clause`` is looked at at all -- tested for ``None`` to tell a
+    malformed loop from a loop with an empty body.
+
+    A ``CASE_STMT`` carries only *kind*, *raw_node* and *node_text*; the
+    build skips every other field for it, since a case statement is never
+    decomposed.
 
     Attributes:
         kind: The :class:`NodeKind` of the control structure.
-        raw_node: The original Canopy TreeNode (kept for diagnostics / fallback;
-            not accessed by the extraction layer after Stage 2 refactor).
-        node_text: Pre-extracted ``.text`` of the raw node (stripped).
-        has_else_or_elif: For ``IF_STMT``: True if elif/else clauses present.
-        has_complex_condition: True if condition uses ``[[``/``((`` constructs.
-        body_has_nested_control: True if body contains nested control structures.
-        body_stmts_ir: Pre-built :class:`IRCompound` list for every statement in
-            the body (do_clause body for loops, then-clause body for if).
-            The extraction layer iterates this instead of walking raw Canopy nodes.
-        ctrl_condition_text: Pre-extracted, semicolon-stripped text of the
-            condition node (if/while/until only).  Empty string if absent.
-        do_clause: Pre-fetched ``do_clause`` child node (for loops; raw node,
-            retained for diagnostics but not used by extraction layer).
-        ctrl_body: Pre-fetched ``ctrl_body`` from ``do_clause`` (raw node,
-            retained for diagnostics but not used by extraction layer).
-        ctrl_condition: Pre-fetched ``ctrl_condition`` node (raw node, retained
-            for diagnostics; the extraction layer uses ``ctrl_condition_text``).
-        then_clause: Pre-fetched ``then_clause`` node (raw node, retained for
-            diagnostics; the extraction layer uses ``body_stmts_ir``).
+        raw_node: The original Canopy TreeNode.
+        node_text: ``.text`` of the raw node, stripped.
+        has_else_or_elif: ``IF_STMT`` only: elif/else clauses are present.
+        has_complex_condition: The condition text contains ``[[`` or ``((``.
+        body_has_nested_control: The body contains a nested control structure.
+        body_stmts_ir: One :class:`IRCompound` per body statement -- the
+            do_clause body for loops, the then-clause body for if.
+        ctrl_condition_text: The condition node's text, stripped of a trailing
+            ``;`` (if/while/until only). Empty string if absent.
+        do_clause: The ``do_clause`` child node (loops only).
+        ctrl_body: The ``ctrl_body`` reached through ``do_clause``.
+        ctrl_condition: The ``ctrl_condition`` node -- consumers want
+            ``ctrl_condition_text``.
+        then_clause: The ``then_clause`` node -- consumers want
+            ``body_stmts_ir``.
     """
 
     kind: NodeKind
-    raw_node: object  # raw Canopy node -- retained for diagnostics only
+    raw_node: object
     node_text: str = ""
     has_else_or_elif: bool = False
     has_complex_condition: bool = False
@@ -230,7 +225,7 @@ class IRControlStructure:
     then_clause: object = None
 
 
-# A single element of a pipeline.
+#: A single element of a pipeline.
 IRPipelineElement = IRSimpleCmd | IRSubshell | IRProcSubst | IRControlStructure
 
 
@@ -251,11 +246,11 @@ class IRCompound:
 
     Attributes:
         pipelines: Ordered list of pipelines.
-        raw_text: Optional raw command text from the parse tree node.  Set
-            when building from a cmd_substitution inner node so that the
-            command-text projection can emit the compound's text as well as
-            the individual sub-commands (e.g. ``"ps aux | grep python"``
-            alongside ``"ps aux"`` and ``"grep python"``).
+        raw_text: Set only when building a command substitution's inner node,
+            so the command-text projection can emit the compound's own text
+            (``"ps aux | grep python"``) alongside its stages. ``None``
+            everywhere else, which is what marks a compound as NOT a
+            substitution.
     """
 
     pipelines: List[IRPipeline] = field(default_factory=list)
@@ -267,56 +262,31 @@ class IRProgram:
     """The top-level program node: one or more statements.
 
     Attributes:
-        statements: Ordered list of compound statements (one per statement
-            in the input).
+        statements: Ordered list of compound statements. A statement whose
+            compound has no pipelines is dropped, so this can be shorter than
+            the input's statement count -- and empty.
     """
 
     statements: List[IRCompound] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
-# IR builder: the SINGLE function allowed to touch raw Canopy nodes
+# IR builder: the raw-Canopy side of the module
 # ---------------------------------------------------------------------------
 
 
 def _get_elements(node) -> list:
-    """Return the ``elements`` list of *node*, or empty list.
-
-    This is the ONLY place we access the raw ``elements`` attribute.
-
-    Args:
-        node: A raw Canopy TreeNode.
-
-    Returns:
-        The ``elements`` list, or an empty list if absent / None.
-    """
     return node.elements if hasattr(node, "elements") and node.elements else []
 
 
 def _get_text(node) -> str:
-    """Return the ``text`` attribute of *node*, stripped, or empty string.
-
-    Args:
-        node: A raw Canopy TreeNode.
-
-    Returns:
-        The stripped text, or empty string if absent.
-    """
     return node.text.strip() if hasattr(node, "text") and node.text else ""
 
 
 def _clean_simple_cmd_text(text: str) -> str:
-    """Strip trailing control operators from a simple command text.
+    """Strip trailing ``;``, ``&&`` and ``||`` from a command's text.
 
-    These trailing operators (``;``, ``&&``, ``||``) are separator artefacts
-    introduced by the grammar's ``trailing_semicolon`` rule and should not
-    be included in the command text used for permission matching.
-
-    Args:
-        text: Raw text from a simple_command or compound_command node.
-
-    Returns:
-        The command text with trailing operators removed.
+    A lone trailing ``&`` is left in place.
     """
     text = text.strip()
     while text.endswith(";") or text.endswith("&&") or text.endswith("||"):
@@ -325,17 +295,7 @@ def _clean_simple_cmd_text(text: str) -> str:
 
 
 def _tree_has_proc_subst(node) -> bool:
-    """Return True if the subtree rooted at *node* contains a proc_subst node.
-
-    Used to determine whether a simple_command argument list includes any
-    process substitution (anywhere, even nested).
-
-    Args:
-        node: A raw Canopy TreeNode.
-
-    Returns:
-        True if any descendant node is a process substitution.
-    """
+    """Return True if any descendant of *node* is a process substitution."""
     if node is None:
         return False
     if node_kind(node) == NodeKind.PROC_SUBST:
@@ -349,11 +309,8 @@ def _tree_has_proc_subst(node) -> bool:
 def _if_has_else_or_elif(node) -> bool:
     """Return True if the if_stmt *node* has else or elif clauses.
 
-    Args:
-        node: An if_stmt TreeNode.
-
-    Returns:
-        True if the if statement has any elif or else clauses.
+    Searches two levels only: the if_stmt's own elements and their immediate
+    children, which is where the grammar puts ``elif_clause``/``else_clause``.
     """
     for elem in _get_elements(node):
         if hasattr(elem, "elif_kw") or hasattr(elem, "else_kw"):
@@ -365,14 +322,7 @@ def _if_has_else_or_elif(node) -> bool:
 
 
 def _body_has_nested_control(body_node) -> bool:
-    """Return True if *body_node* contains nested control structures.
-
-    Args:
-        body_node: A ctrl_body or ctrl_stmt TreeNode.
-
-    Returns:
-        True if the body contains any nested for/while/until/if/case.
-    """
+    """Return True if *body_node* contains a nested for/while/until/if/case, at any depth."""
     if body_node is None:
         return False
     for elem in _get_elements(body_node):
@@ -391,13 +341,11 @@ def _body_has_nested_control(body_node) -> bool:
 
 
 def _has_complex_condition(condition_node) -> bool:
-    """Return True if the condition node uses [[...]] or ((...)) constructs.
+    """Return True if the condition node's text contains ``[[`` or ``((``.
 
-    Args:
-        condition_node: The ctrl_condition TreeNode.
-
-    Returns:
-        True if the condition uses complex test constructs.
+    A substring test, not a parse: a condition merely *mentioning* either
+    sequence -- inside a quoted argument, say -- also counts. That errs
+    towards calling a condition complex, which costs an ASK.
     """
     if condition_node is None:
         return False
@@ -406,42 +354,34 @@ def _has_complex_condition(condition_node) -> bool:
 
 
 def _build_body_stmts_ir(body_node) -> "List[IRCompound]":
-    """Build :class:`IRCompound` objects for each statement in a ``ctrl_body`` node.
+    """Build one :class:`IRCompound` per statement in a ``ctrl_body`` node.
 
-    A ``ctrl_body`` node (TreeNode32) contains:
-      - ``.ctrl_stmt``: the first ctrl_stmt (named attribute).
-      - ``.elements[1]``: an unnamed list of TreeNode33 items, each carrying
-        a ``.ctrl_stmt`` attribute for additional body statements.
-
-    Each ``ctrl_stmt`` is compiled to an :class:`IRCompound` via
-    :func:`_build_compound`, which correctly handles both simple compound
-    commands and nested control structures.
-
-    This is the ONLY new place in this module that reads the raw
-    ``ctrl_body.elements[1]`` unnamed-list structure; all raw Canopy
-    walking is therefore contained within this module.
+    Canopy labels only the FIRST body statement (``.ctrl_stmt``); the rest
+    live in an unnamed repetition at ``.elements[1]``, whose items each carry
+    their own ``.ctrl_stmt``. That positional index is the fragile part --
+    it tracks ``ctrl_body <- ctrl_stmt (ctrl_sep ctrl_stmt)*`` in the
+    grammar, and reordering that rule silently drops every statement after
+    the first.
 
     Args:
         body_node: A ``ctrl_body`` raw Canopy TreeNode, or ``None``.
 
     Returns:
-        Ordered list of :class:`IRCompound` for every body statement.
-        Returns an empty list if *body_node* is ``None`` or empty.
+        Ordered list of :class:`IRCompound` for every body statement,
+        skipping any that built no pipelines. Empty if *body_node* is
+        ``None``.
     """
     if body_node is None:
         return []
 
     stmts: List[IRCompound] = []
 
-    # First statement: accessible via the named attribute ``ctrl_stmt``.
     first_stmt = getattr(body_node, "ctrl_stmt", None)
     if first_stmt is not None:
         comp = _build_compound(first_stmt)
         if comp.pipelines:
             stmts.append(comp)
 
-    # Remaining statements: body_node.elements[1] is an unnamed list of
-    # TreeNode33 items, each with a ``.ctrl_stmt`` attribute.
     raw_elems = _get_elements(body_node)
     if len(raw_elems) > 1:
         rest_list = raw_elems[1]
@@ -456,18 +396,18 @@ def _build_body_stmts_ir(body_node) -> "List[IRCompound]":
 
 
 def _build_control_structure(node, kind: NodeKind) -> "IRControlStructure":
-    """Build a pre-populated :class:`IRControlStructure` from a raw control node.
+    """Build an :class:`IRControlStructure` from a raw control node.
 
-    Pre-computes all complexity flags AND the body statements (as
-    :class:`IRCompound` objects in ``body_stmts_ir``) so that the extraction
-    layer does not need to access raw Canopy nodes at all.
+    Computes the complexity flags and the body statements up front, so the
+    extraction layer never has to walk back into the raw tree. A ``CASE_STMT``
+    gets neither -- see :class:`IRControlStructure`.
 
     Args:
         node: A raw Canopy control-structure TreeNode.
         kind: The :class:`NodeKind` of the node.
 
     Returns:
-        A fully-populated :class:`IRControlStructure`.
+        The populated :class:`IRControlStructure`.
     """
     node_text = _get_text(node)
     do_clause = getattr(node, "do_clause", None)
@@ -514,24 +454,22 @@ def _build_control_structure(node, kind: NodeKind) -> "IRControlStructure":
 
 
 def _collect_cmd_substs(node, depth: int = 0) -> List["IRCompound"]:
-    """Collect all ``$(...)`` and backtick command substitutions from *node*'s subtree.
+    """Collect the ``$(...)`` and backtick substitutions in *node*'s subtree.
 
-    This is called on the element list of a simple_command to find embedded
-    command substitutions (nodes that have a ``compound_command`` child but
-    are NOT proc_subst and NOT a pipeline_element-level subshell).
-
-    The ``compound_command`` child is compiled to an :class:`IRCompound` and
-    added to the result.  The search recurses into elements to find nested
-    substitutions.
-
-    A depth limit of 5 prevents unbounded recursion on pathological inputs.
+    Call this only from inside a simple_command. It reads a
+    ``SUBSHELL_OR_BRACE`` node as a substitution, which is the right reading
+    in that position and the wrong one at pipeline-element level, where
+    :func:`_build_pipeline_element` reads the same kind as a subshell.
 
     Args:
-        node: A raw Canopy TreeNode (typically an element within a simple_command).
-        depth: Current recursion depth (0 = top-level call).
+        node: A raw Canopy TreeNode.
+        depth: Substitution nesting depth, not tree depth. The ``> 5`` cutoff
+            is inert -- the count restarts at 0 whenever the walk re-enters
+            through :func:`_build_compound`, so 20 nested ``$( )`` layers are
+            all collected.
 
     Returns:
-        Ordered list of :class:`IRCompound` nodes for each cmd_substitution found.
+        Ordered list of :class:`IRCompound` nodes, one per substitution found.
     """
     if node is None or depth > 5:
         return []
@@ -539,23 +477,17 @@ def _collect_cmd_substs(node, depth: int = 0) -> List["IRCompound"]:
     results: List[IRCompound] = []
     k = node_kind(node)
 
-    # A node that has compound_command (and is NOT proc_subst) is a cmd_substitution.
-    # Build its inner compound and recurse into it for nested substitutions.
     if k == NodeKind.SUBSHELL_OR_BRACE:
         inner_raw = node.compound_command
         inner_compound = _build_compound(inner_raw)
-        # Capture the inner compound text so extract_commands can emit it
-        # alongside the individual commands (e.g. "ps aux | grep python").
         inner_text = _get_text(inner_raw)
         if inner_text.endswith(";"):
             inner_text = inner_text[:-1].strip()
         inner_compound.raw_text = inner_text if inner_text else None
         results.append(inner_compound)
-        # Recurse into the inner compound's raw node for deeply nested substitutions.
         results.extend(_collect_cmd_substs(inner_raw, depth + 1))
         return results
 
-    # For other nodes: recurse into children.
     for child in _get_elements(node):
         results.extend(_collect_cmd_substs(child, depth))
 
@@ -569,8 +501,9 @@ def _build_pipeline_element(node) -> Optional[IRPipelineElement]:
         node: A raw Canopy pipeline_element TreeNode.
 
     Returns:
-        The appropriate :class:`IRPipelineElement`, or ``None`` if the node
-        cannot be interpreted.
+        The corresponding :class:`IRPipelineElement`, or ``None`` for a kind
+        that has no pipeline-element form. A ``None`` is dropped silently by
+        every caller, so the element simply disappears from the IR.
     """
     kind = node_kind(node)
 
@@ -589,17 +522,16 @@ def _build_pipeline_element(node) -> Optional[IRPipelineElement]:
     if kind == NodeKind.SIMPLE_CMD:
         text = _clean_simple_cmd_text(_get_text(node))
         has_ps = _tree_has_proc_subst(node)
-        # Collect command substitutions from both command_name and argument elements.
-        # elements[0] is command_name (may be cmd_sub_as_cmd); elements[1] is the args.
+        # simple_command <- command_name (proc_subst / redirection /
+        # cmd_substitution / command_arg)* -- so elements[1] is the argument
+        # repetition. Both halves can hold a substitution: `$(which python) -V`
+        # puts one in the command name, `echo $(id)` in the arguments.
         elems = _get_elements(node)
         cmd_substs: List[IRCompound] = []
-        # Check command_name for cmd_sub_as_cmd (e.g. $(ls) used as a command).
         cmd_name = getattr(node, "command_name", None)
         if cmd_name is not None:
             cmd_substs.extend(_collect_cmd_substs(cmd_name))
-        # Check argument list for embedded substitutions.
         if len(elems) > 1:
-            # elements[1] is the list of argument nodes (proc_subst / cmd_sub / arg).
             for arg_item in _get_elements(elems[1]):
                 cmd_substs.extend(_collect_cmd_substs(arg_item))
         return IRSimpleCmd(text=text, has_proc_subst=has_ps, cmd_substs=cmd_substs)
@@ -617,23 +549,23 @@ def _build_pipeline_element(node) -> Optional[IRPipelineElement]:
             inner=inner_compound,
         )
 
-    # Unexpected node type at pipeline element level -- fall through to None.
     return None
 
 
 def _build_pipeline(pipeline_node) -> IRPipeline:
     """Build an :class:`IRPipeline` from a raw pipeline TreeNode.
 
-    A pipeline node has:
-    - ``.pipeline_element``: the first pipeline element (named attribute).
-    - ``.elements``: a list that may contain TreeNode12 items with their own
-      ``.pipeline_element`` attributes for the rest of the piped stages.
+    Canopy labels only the first stage (``.pipeline_element``); the rest are
+    reached by walking ``.elements`` for further ``pipeline_element`` labels.
 
     Args:
-        pipeline_node: A raw Canopy pipeline TreeNode.
+        pipeline_node: A raw pipeline TreeNode, or a single pipeline-element
+            node -- callers pass both, so a node that is already an element
+            is wrapped in a one-stage pipeline rather than rejected.
 
     Returns:
-        An :class:`IRPipeline` containing all pipeline elements.
+        An :class:`IRPipeline`; empty for ``None`` and for a node that yields
+        no interpretable element.
     """
     pl = IRPipeline()
     if pipeline_node is None:
@@ -641,7 +573,6 @@ def _build_pipeline(pipeline_node) -> IRPipeline:
 
     kind = node_kind(pipeline_node)
 
-    # Direct pipeline element (e.g. within a proc_subst compound).
     if kind not in (
         NodeKind.PIPELINE,
         NodeKind.COMPOUND_CMD,
@@ -653,16 +584,18 @@ def _build_pipeline(pipeline_node) -> IRPipeline:
             pl.elements.append(elem)
         return pl
 
-    # First element via named attribute.
     first_pe = getattr(pipeline_node, "pipeline_element", None)
     if first_pe is not None:
         elem = _build_pipeline_element(first_pe)
         if elem is not None:
             pl.elements.append(elem)
 
-    # Rest of pipe stages: walk elements list looking for pipeline_element refs.
     def _collect_pipeline_elements(node) -> None:
-        """Recursively collect additional pipeline elements from node's elements."""
+        """Append the remaining pipe stages found under *node* to the enclosing pipeline.
+
+        Does not descend into a simple command: its own subtree is already
+        covered by the element built for it.
+        """
         for child in _get_elements(node):
             if (
                 hasattr(child, "pipeline_element")
@@ -681,18 +614,17 @@ def _build_pipeline(pipeline_node) -> IRPipeline:
 def _build_compound(compound_node) -> IRCompound:
     """Build an :class:`IRCompound` from a raw compound_command TreeNode.
 
-    A compound_command node has:
-    - ``.pipeline``: the first pipeline (named attribute).
-    - ``.elements``: a list that may contain TreeNode4 items (control_op +
-      pipeline pairs) for the rest of the && / || / ; separated pipelines.
-
-    Also handles control structures appearing directly as a compound.
+    Canopy labels only the first pipeline (``.pipeline``); the ``&&``/``||``/
+    ``;``-separated remainder is reached by walking ``.elements`` for
+    control-op-plus-pipeline pairs.
 
     Args:
-        compound_node: A raw Canopy compound_command (or similar) TreeNode.
+        compound_node: A raw compound_command TreeNode -- or a control
+            structure, a process substitution or a simple command, each of
+            which is wrapped in a one-pipeline compound instead.
 
     Returns:
-        An :class:`IRCompound` containing all pipelines.
+        An :class:`IRCompound`; empty for ``None``.
     """
     comp = IRCompound()
     if compound_node is None:
@@ -700,8 +632,6 @@ def _build_compound(compound_node) -> IRCompound:
 
     kind = node_kind(compound_node)
 
-    # Control structures at the compound level produce a single-element compound
-    # wrapping an IRControlStructure so that the extractor can route them correctly.
     if kind in (
         NodeKind.FOR_LOOP,
         NodeKind.WHILE_LOOP,
@@ -737,16 +667,19 @@ def _build_compound(compound_node) -> IRCompound:
         comp.pipelines.append(sc_pl)
         return comp
 
-    # Standard compound_command: has .pipeline for first pipeline.
     first_pipeline = getattr(compound_node, "pipeline", None)
     if first_pipeline is not None:
         pl = _build_pipeline(first_pipeline)
         if pl.elements:
             comp.pipelines.append(pl)
 
-    # Walk elements for additional (control_op + pipeline) pairs.
     def _collect_rest_pipelines(node) -> None:
-        """Recursively collect control_op+pipeline pairs from node's elements."""
+        """Append the ``control_op``-separated pipelines under *node* to the compound.
+
+        Descends only through GENERIC nodes -- the unlabelled repetition
+        wrappers Canopy interposes. Anything it can name is either the pair
+        it wants or already accounted for.
+        """
         for child in _get_elements(node):
             ck = node_kind(child)
             if ck == NodeKind.CONTROL_OP_PAIR:
@@ -755,7 +688,6 @@ def _build_compound(compound_node) -> IRCompound:
                     comp.pipelines.append(pl)
             elif ck == NodeKind.GENERIC:
                 _collect_rest_pipelines(child)
-            # Skip pipeline/simple_cmd/etc. that aren't control_op pairs.
 
     _collect_rest_pipelines(compound_node)
     return comp
@@ -764,35 +696,30 @@ def _build_compound(compound_node) -> IRCompound:
 def build_ir(tree) -> IRProgram:
     """Build an :class:`IRProgram` from a raw Canopy parse tree.
 
-    This is the **single entry point** for all raw-tree access.  After this
-    function returns, no code outside this module should touch raw Canopy
-    nodes.
-
-    Handles both:
-    - A ``program`` node (TOO-17 grammar, has ``rest_stmts``).
-    - A legacy single-statement tree (the first statement is accessible via
-      ``compound_command``).
+    Accepts either a ``program`` node or a bare single-statement tree. On a
+    ``program`` node the FIRST statement carries the grammar label
+    ``compound_command``; only the remainder are reached through
+    ``rest_stmts``. That naming is deliberate in ``bash_parser.peg`` -- do not
+    "fix" it to ``statement`` without following it here.
 
     Args:
-        tree: The root Canopy parse tree node returned by ``bash_parser.parse()``.
+        tree: The root node returned by ``bash_parser.parse()``, or ``None``.
 
     Returns:
-        An :class:`IRProgram` whose ``statements`` list contains one
-        :class:`IRCompound` per top-level statement.
+        An :class:`IRProgram`, one :class:`IRCompound` per top-level
+        statement that produced any pipeline.
     """
     prog = IRProgram()
     if tree is None:
         return prog
 
     if node_kind(tree) == NodeKind.PROGRAM:
-        # Process first statement (grammar label: compound_command).
         first = getattr(tree, "compound_command", None)
         if first is not None:
             comp = _build_compound(first)
             if comp.pipelines:
                 prog.statements.append(comp)
 
-        # Process rest_stmts: each pair_node has a .statement attribute.
         rest = getattr(tree, "rest_stmts", None)
         if rest is not None and hasattr(rest, "elements"):
             for pair_node in rest.elements:
@@ -802,7 +729,6 @@ def build_ir(tree) -> IRProgram:
                     if comp.pipelines:
                         prog.statements.append(comp)
     else:
-        # Legacy single-statement: top node has compound_command.
         first = getattr(tree, "compound_command", tree)
         comp = _build_compound(first)
         if comp.pipelines:

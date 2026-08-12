@@ -1,19 +1,15 @@
 """
-Cross-process OS advisory file locking (TOO-45 punch-list #15).
+Cross-process OS advisory file locking: one context manager, :func:`exclusive`.
 
-One context manager, :func:`exclusive`, wrapping the platform primitive:
-POSIX ``fcntl.flock`` (never ``fcntl.lockf`` -- POSIX record locks are
+POSIX uses ``fcntl.flock``, never ``fcntl.lockf``: POSIX record locks are
 released when ANY descriptor for the path closes anywhere in the process, so
-an unrelated ``open()``/``close()`` elsewhere would silently drop the lock;
-``flock`` is bound to the descriptor and has no such behaviour), Windows
-``msvcrt.locking``. Both imports are gated so a missing module on either
-platform is not an import-time crash.
+an unrelated ``open()``/``close()`` elsewhere would silently drop the lock.
+Windows uses ``msvcrt.locking``. Both imports are gated, so a missing module
+on either platform is not an import-time crash.
 
-The lock is released by closing its file descriptor, so the OS releases it
-if the holding process dies -- never a hand-rolled ``O_EXCL`` lockfile,
-which strands on a crash.
-
-Foundation layer: stdlib only, no toolguard imports.
+The lock is bound to an open file *description* and released when that
+closes, so the OS releases it if the holding process dies -- never a
+hand-rolled ``O_EXCL`` lockfile, which strands on a crash.
 """
 
 import os
@@ -38,8 +34,7 @@ _POLL_SECONDS = 0.05
 #: exclusive()'s default wait before giving up.
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
-#: LockUnavailable.reason values -- short, machine-stable categories, not
-#: the detailed message (see LockUnavailable's docstring).
+#: The recognised :attr:`LockUnavailable.reason` values.
 REASON_NO_PRIMITIVE = "no OS advisory-lock primitive available on this platform"
 REASON_DIRECTORY_UNAVAILABLE = "lock directory unavailable"
 REASON_FILE_UNAVAILABLE = "lock file unavailable"
@@ -50,16 +45,15 @@ class LockUnavailable(Exception):
     """
     Raised when exclusive access to a path could not be GUARANTEED.
 
-    The single failure mode :func:`exclusive` raises -- deliberately not
-    split into "busy" vs "broken": a caller that must not proceed without
-    the guarantee has nothing useful to do with a finer distinction, and
-    offering one invites proceeding on the wrong branch.
+    The only failure mode :func:`exclusive` raises: one exception type, with
+    the distinction carried on *reason* rather than in a class hierarchy, so
+    a caller that must not proceed without the guarantee catches one thing.
 
     Attributes:
         path: The lock file path involved.
         reason: Short, machine-stable category (one of the ``REASON_*``
-            constants above) -- structured data a caller can act on without
-            parsing the message.
+            constants above) -- structured data a caller can branch on
+            without parsing the message.
         detail: The underlying error's detail, for display only.
     """
 
@@ -81,7 +75,7 @@ def _try_acquire_posix(fd: int) -> bool:
 
 
 def _release_posix(fd: int) -> None:
-    """No-op: flock is bound to the descriptor and releases when it closes."""
+    """No-op: closing the descriptor releases the flock."""
 
 
 def _try_acquire_windows(fd: int) -> bool:
@@ -122,8 +116,11 @@ def exclusive(
     Polls at a short fixed interval until *timeout_seconds* elapses. Creates
     *path*'s parent directory if needed, and *path* itself if it does not
     exist. Released when the block exits, on success or exception, and by
-    the OS if the holding process dies -- the lock is bound to an open file
-    descriptor, never a lockfile that could strand.
+    the OS if the holding process dies.
+
+    Not reentrant: each call opens its own descriptor, so a second
+    ``exclusive(path)`` inside a block already holding *path* contends with
+    itself and times out.
 
     Args:
         path: The lock file to acquire exclusive access to.
@@ -133,8 +130,8 @@ def exclusive(
     Raises:
         LockUnavailable: the lock could not be guaranteed -- no platform
             primitive is available, the lock directory/file could not be
-            created or opened, or the timeout elapsed while the lock was
-            held elsewhere.
+            created or opened, or the timeout elapsed with the lock still
+            held.
     """
     backend = _select_backend()
     if backend is None:

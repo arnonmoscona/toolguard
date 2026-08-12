@@ -1,27 +1,23 @@
 """
-Structural regression guard (TOO-45 R2): the developer's real
+Structural regression guard: the developer's real
 ``~/.toolguard/once_per.db`` must never be touched by the test suite.
 
-Same problem, different shape from ``_real_log_dir_guard.py``
--------------------------------------------------------------
-That guard wraps functions whose destination is an ARGUMENT (``log_dir`` /
-``logs_dir``), so it can inspect the call and compare. The claim store
-lives at ``~/.toolguard/``, and ``claim``/``is_claimed``/``release`` take no
-directory argument at all; a test that forgets to isolate it (e.g. via
-``patch.object(once_per_store, "_STORE_PATH", tmp_path)``, the same technique
-:mod:`toolguard.tools.decision_ledger`'s tests use for its own
-``~/.toolguard``-anchored constant) would silently read and write the real
-file.
+Different shape from ``_real_log_dir_guard.py``: that guard wraps functions
+whose destination is an ARGUMENT (``log_dir``/``logs_dir``), so it can
+inspect the call and compare. The claim store lives at ``~/.toolguard/``,
+and ``claim``/``is_claimed``/``release`` take no directory argument at all;
+a test that forgets to isolate it (via
+``patch.object(once_per_store, "_STORE_PATH", tmp_path)``) would silently
+read and write the real file.
 
 So this guard checks a different thing: at CALL TIME, does the store path
 that would ACTUALLY be opened resolve to the real one? It calls
 ``once_per_store._resolve_store_path()`` -- the exact function
 ``_connect``/``_connect_existing`` use -- rather than reading
-``once_per_store._STORE_PATH`` directly. That distinction matters:
-``_STORE_PATH`` is an ``Optional[Path]`` OVERRIDE FLAG (``None`` means "use
-the default"), not the path itself, so comparing it directly against the
-real path would be comparing the wrong thing whenever no override is set.
-If a test patched the override, the resolved path differs and the call
+``once_per_store._STORE_PATH`` directly, which is an ``Optional[Path]``
+OVERRIDE FLAG (``None`` means "use the default"), not the path itself;
+comparing it directly would compare the wrong thing whenever no override is
+set. If a test patched the override, the resolved path differs and the call
 passes through unchanged; if a test forgot, resolution falls through to the
 real default and the call is intercepted -- recorded as a leak and answered
 with the same fail-soft value the real function would return on a genuine
@@ -29,8 +25,7 @@ storage error, so a regression can never land a read or write on disk.
 
 Guards ``claim``, ``is_claimed``, ``release``, and ``reap`` (its
 ``~/.toolguard/``-facing expiry sweep only -- its ``logs_dir``-facing legacy
-sweep is already covered by ``_real_log_dir_guard.py``, and the two compose
-cleanly since each checks an independent condition).
+sweep is covered by ``_real_log_dir_guard.py`` instead).
 
 Installed from ``test/unit/__init__.py``, before any test module is
 imported, for the same ordering guarantee ``_real_log_dir_guard.py``'s

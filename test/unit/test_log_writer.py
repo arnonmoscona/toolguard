@@ -1,8 +1,4 @@
-"""
-Unit tests for toolguard logging functionality.
-
-Tests the logging functionality including file creation, format, and content.
-"""
+"""Unit tests for toolguard's logging functionality: file creation, format, and content."""
 
 import contextlib
 import io
@@ -34,12 +30,10 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Log a command
             log_command(
                 LogRecord(command_str="git status", status="executed"), log_dir=log_dir
             )
 
-            # Check that log file was created with correct name
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             log_file = log_dir / expected_filename
 
@@ -56,17 +50,14 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Log a command
             log_command(
                 LogRecord(command_str="git status", status="executed"), log_dir=log_dir
             )
 
-            # Read the log file
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             log_file = log_dir / expected_filename
             content = log_file.read_text()
 
-            # Check markdown structure
             self.assertIn("##", content, "Missing markdown header")
             self.assertIn("**Status**:", content, "Missing status field")
             self.assertIn("**Command**:", content, "Missing command field")
@@ -83,7 +74,6 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Log a refused command with violated rules
             violated_rules = ["git push:*", "**/.env/**"]
             log_command(
                 LogRecord(
@@ -94,12 +84,10 @@ class TestLogging(unittest.TestCase):
                 log_dir=log_dir,
             )
 
-            # Read the log file
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             log_file = log_dir / expected_filename
             content = log_file.read_text()
 
-            # Check that all required information is present
             self.assertIn("REFUSED", content, "Status not found")
             self.assertIn("git push origin main", content, "Command not found")
             self.assertIn("Violated Rules", content, "Violated rules section not found")
@@ -117,7 +105,6 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Log multiple commands
             log_command(
                 LogRecord(command_str="git status", status="executed"), log_dir=log_dir
             )
@@ -133,17 +120,14 @@ class TestLogging(unittest.TestCase):
                 log_dir=log_dir,
             )
 
-            # Read the log file
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             log_file = log_dir / expected_filename
             content = log_file.read_text()
 
-            # Check that all commands are present
             self.assertIn("git status", content, "First command not found")
             self.assertIn("ls -la", content, "Second command not found")
             self.assertIn("rm file.txt", content, "Third command not found")
 
-            # Count the number of entries (by counting markdown headers)
             header_count = content.count("## ")
             self.assertEqual(
                 header_count, 3, f"Expected 3 entries, found {header_count}"
@@ -179,10 +163,8 @@ class TestLogging(unittest.TestCase):
         When a command is logged
         Then logging is ON -- a log file is created
 
-        TOO-19 m5 regression guard: the no-config default used to be read from
-        a legacy CHECKED_BASH_LOGGING_ON environment variable that defaulted to
-        "true". That variable is gone; this asserts the removal left the
-        default unchanged rather than accidentally switching the audit log off.
+        Regression guard: a since-removed CHECKED_BASH_LOGGING_ON env var used
+        to supply this default; this pins it unchanged now that var is gone.
         """
         import tempfile
 
@@ -209,8 +191,7 @@ class TestLogging(unittest.TestCase):
         Then they are ignored entirely: a markdown log file is still written
             into the default location the caller asked for
 
-        TOO-19 m5: these checked_bash.py-era fallbacks were removed. This test
-        is the guard against one being quietly reintroduced.
+        Regression guard against one of these being quietly reintroduced.
         """
         import tempfile
 
@@ -254,14 +235,12 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Set logging format to jsonlines
             log_command(
                 LogRecord(command_str="git status", status="executed"),
                 log_dir=log_dir,
                 log_format=LOG_FORMAT_JSONLINES,
             )
 
-            # Check that log file was created with .jsonlines extension
             expected_filename = (
                 f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.jsonlines"
             )
@@ -271,12 +250,10 @@ class TestLogging(unittest.TestCase):
                 log_file.exists(), f"JSONLines log file {log_file} was not created"
             )
 
-            # Read and parse the JSON content
             content = log_file.read_text().strip()
             lines = [line for line in content.split("\n") if line.strip()]
             self.assertGreater(len(lines), 0, "No JSON entries found")
 
-            # Parse the first entry
             entry = json.loads(lines[0])
             self.assertIn("timestamp", entry)
             self.assertIn("status", entry)
@@ -320,17 +297,14 @@ class TestLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Log a command without violated rules
             log_command(
                 LogRecord(command_str="git status", status="executed"), log_dir=log_dir
             )
 
-            # Read the log file
             expected_filename = f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
             log_file = log_dir / expected_filename
             content = log_file.read_text()
 
-            # Check that violated rules section is not present
             self.assertNotIn(
                 "Violated Rules", content, "Violated rules should not be present"
             )
@@ -364,13 +338,9 @@ class TestLogging(unittest.TestCase):
 
     def test_missing_log_dir_does_not_block_caller(self):
         """
-        Given a log directory path that does not exist (TOO-45)
+        Given a log directory path that does not exist
         When a command is logged
         Then log_command returns normally instead of exiting, warning to stderr
-
-        Superseding contract for test_log_directory_must_exist above: exiting
-        the process from the audit path means the tool call proceeds with no
-        verdict recorded at all. See _existing_log_dir_or_warn.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir) / "nonexistent"
@@ -584,11 +554,7 @@ class TestMatchedRuleLogging(unittest.TestCase):
 
 
 class TestProvenanceLogging(unittest.TestCase):
-    """
-    TOO-45 R3 follow-up: provenance is its OWN log field, not folded back
-    into matched_rule/violated_rules text -- see log_command's provenance
-    parameter docstring for why.
-    """
+    """Provenance is logged as its own field, not folded into Matched Rule or Violated Rules text."""
 
     def test_provenance_in_markdown_format_for_allow(self):
         """
@@ -788,12 +754,7 @@ class TestProvenanceLogging(unittest.TestCase):
 
 
 class TestPermissionModeLogging(unittest.TestCase):
-    """
-    Test the permission_mode parameter in log entries (TOO-15: recorded so a
-    later investigation can tell whether Claude Code's own mode was a factor
-    in what happened to a command after toolguard decided -- never affects
-    the decision itself).
-    """
+    """Test the permission_mode field in log entries, recorded for post-hoc diagnosis."""
 
     def test_permission_mode_in_markdown_format(self):
         """
@@ -897,12 +858,7 @@ class TestPermissionModeLogging(unittest.TestCase):
 
 
 class TestAdditionalContextLogging(unittest.TestCase):
-    """
-    Test the additional_context parameter in log entries (TOO-19 Phase 1,
-    increment 7: records WHY a matching rule nudged Claude, so "why did Claude
-    get this nudge" is answerable after the fact -- capped to a short preview,
-    see TestPreviewAdditionalContext, so the log stays scannable).
-    """
+    """Test the additional_context parameter in log entries."""
 
     def test_additional_context_in_markdown_format(self):
         """
@@ -1036,20 +992,7 @@ class TestAdditionalContextLogging(unittest.TestCase):
 
 
 class TestLogFormatGoldenFile(unittest.TestCase):
-    """
-    TOO-19 m5 review "Recommended follow-ups": pin the on-disk log contract
-    (exact content, field/key order, falsy-omission) that
-    toolguard/tools/log_harvest.py and the audit skill parse. Every other
-    test in this module checks substrings or pairwise orderings; nothing
-    before this asserted a full entry's exact bytes. Covers markdown and
-    jsonlines, each with every optional field populated and with none, since
-    falsy-omission is part of the contract in both formats.
-
-    ``datetime.now()`` is patched to a single fixed value for the whole
-    class so the rendered entry (which embeds the current time in both the
-    filename and the entry body) is fully deterministic and comparable
-    byte-for-byte.
-    """
+    """Pins the on-disk log format byte-for-byte -- field order and falsy-omission -- with datetime.now() patched to a fixed instant for determinism."""
 
     def setUp(self):
         """Pin datetime.now() to a fixed instant."""

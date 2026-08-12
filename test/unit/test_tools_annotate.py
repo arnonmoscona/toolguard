@@ -1,10 +1,6 @@
 """
-Unit tests for toolguard.tools.annotate (generated ``# toolguard:`` comments).
-
-Covers annotation building from clarity findings and the idempotent, minimal-diff,
-human-comment-preserving section writer.
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
+Unit tests for toolguard.tools.annotate (generated ``# toolguard:`` comments):
+annotation building from clarity findings, and the section writer.
 """
 
 import tempfile
@@ -177,7 +173,7 @@ class TestClarityAnnotations(unittest.TestCase):
 
 
 class TestAnnotateSectionText(unittest.TestCase):
-    """The section writer is idempotent, minimal-diff, and human-safe."""
+    """The section writer is idempotent and minimal-diff."""
 
     _ANN = {"Bash(git:*)": ["deny 'git push:*' shadows part of this allow (deny wins)"]}
 
@@ -252,15 +248,9 @@ _STRUCTURED_ENTRY_SECTION = (
 
 class TestAnnotateSectionTextStructuredEntry(unittest.TestCase):
     """
-    A single-line structured ({ match = ..., ... }) entry is annotated like any
-    other rule.
-
-    TOO-19 corrective change: a structured entry is only ever valid TOML on a
-    single physical line (see toolguard.rule_sort's top-of-file docstring), so
-    this class now uses ONLY single-line structured entries -- it previously
-    also covered a multi-line entry, which parse_permissions_section_with_comments
-    (called transitively by annotate_section_text) now correctly rejects with
-    tomllib.TOMLDecodeError rather than accepting.
+    A single-line structured ({ match = ..., ... }) entry is annotated like any other
+    rule. Single-line only: a multi-line one is not valid TOML, and
+    parse_permissions_section_with_comments rejects it.
     """
 
     _ANN = {
@@ -328,7 +318,7 @@ class TestAnnotateConfigFile(unittest.TestCase):
             old, new = annotate_config_file(path, ann)
             self.assertNotEqual(old, new)
             self.assertIn(TOOLGUARD_MARKER, new)
-            self.assertIn("[meta]", new)  # content outside the section is preserved
+            self.assertIn("[meta]", new)
 
     def test_no_permissions_section_is_a_noop(self):
         """

@@ -1,47 +1,38 @@
 """
-Uninstall readiness: the allow rules a governed installing agent needs so its
-OWN later teardown never gets hard-blocked.
+Uninstall readiness: the fixed rule set an install seeds so toolguard's OWN
+later teardown is not hard-blocked.
 
-Toolguard's guided install runbook can put the installing agent under full
-takeover governance. If none of the actions a clean uninstall needs (editing
+Toolguard's guided install can put the installing agent under full takeover
+governance. If nothing permits the actions a clean uninstall needs -- editing
 Claude's native settings to remove the hook registration, running
-``uv tool uninstall``, deleting toolguard's own config/skill files) are
-permitted anywhere, the agent's own tool calls for those actions are denied
-outright -- forcing an out-of-band hand-off instead of a prompt. A real
-install hit exactly this (TOO-15).
+``uv tool uninstall``, deleting toolguard's own config and skill files --
+teardown can block and has to be handed off out of band. A real install hit
+exactly that (TOO-15).
 
-This module is the SINGLE SOURCE OF TRUTH for that fixed rule set. Like
-:mod:`toolguard.tools.self_permission` (a sibling module, not extended here --
-that one is scoped to what a bundled SKILL runs via Bash; this one is scoped
-to what the INSTALLING AGENT itself needs for its own later teardown, a
-different concern), it is deliberately declarative and writes nothing itself:
-callers (the install runbook, via ``toolguard-install seed-self-perms``) get
-explicit user consent and write the rules at the chosen scope.
+The table is declarative and writes nothing itself: a caller gets explicit
+user consent and writes the rules at the chosen scope.
 
-Design guard-rails:
+What is easy to get wrong here:
 
-- **Every entry here is ``allow``, not ``ask``.** This is a deliberate change
-  from an earlier ``ask``-gated design (Arnon, TOO-15): an ``ask`` verdict was
-  observed NOT reliably reaching an interactive prompt in at least one real
-  install (root cause still unconfirmed as of this writing), which means
-  seeding ``ask`` rules does not actually guarantee uninstall completes --
-  it can reproduce the exact hard-block this module exists to prevent.
-  ``allow`` is immune to that failure mode. This is judged an acceptable
-  trade-off specifically for this fixed, narrow set of actions because: (1)
-  every pattern here is a literal, single-purpose command or exact file path
-  -- not a wildcard grant -- so it can only do the one thing it is scoped to;
-  and (2) by the time any of these would fire, the user has already given
-  explicit, global consent by starting a guided uninstall conversation --
-  the meaningful consent moment is "yes, uninstall toolguard," not each
-  individual step of carrying that out.
-- **``cd`` is included for the same reason it always was.** It cannot execute
-  code by itself -- it only changes the shell's working directory -- and
-  toolguard's own command parser already extracts and separately checks any
-  embedded ``$(...)``/backtick command substitution in its argument, so
-  allowing it does not create an enforcement gap on its own merits (this was
-  true independent of the ``ask``-reliability question above).
-- **Suggest, never auto-apply.** This module reports what is missing; the
-  write is always an explicit, consented action performed elsewhere.
+- **Every entry is ``allow``, and ``ask`` is not a safe substitute.** An
+  ``ask`` verdict was observed not reaching an interactive prompt during a
+  real install (TOO-15; root cause unconfirmed), so seeding ``ask`` can
+  reproduce the very hard-block this table exists to prevent.
+- **Every ``rm``/``uv tool uninstall`` pattern grants more than it names.**
+  Each is a multi-token DEFAULT prefix, and
+  :func:`~toolguard.permissions.match_command` glues the trailing ``*``
+  directly onto the pattern's last token, which therefore matches as a bare
+  string prefix -- and ``fnmatch``'s ``*`` crosses spaces. Measured against
+  the matcher: ``rm -rf <skill dir>:*`` also matches
+  ``rm -rf <skill dir> <any other path>`` and ``rm -rf <skill dir>-BACKUP``;
+  ``uv tool uninstall toolguard:*`` also matches
+  ``uv tool uninstall toolguard-other``. The single-token ``cd:*`` and the two
+  literal ``Write``/``Edit`` paths are unaffected. The cause is in
+  ``match_command``, not in these strings.
+- **``cd`` is here for ordinary navigation, and is safe to allow on its own
+  merits.** ``cd`` itself runs no program, and the PEG parser extracts a
+  ``$(...)``/backtick substitution in its argument as a separate sub-command
+  that is checked in its own right.
 """
 
 from dataclasses import dataclass
@@ -94,19 +85,14 @@ def required_uninstall_readiness_permissions(
     Args:
         claude_dir: The resolved ``.claude`` directory for the install's
             chosen scope (``~/.claude`` for user scope, or
-            ``<project_dir>/.claude`` for project scope) -- the same value
-            :func:`toolguard.tools.installer._claude_dir` resolves.
+            ``<project_dir>/.claude`` for project scope).
         settings_path: The resolved Claude Code settings file for that scope
             (``settings.json`` for user scope, ``settings.local.json`` for
-            project scope) -- the same value
-            :func:`toolguard.tools.installer._settings_path` resolves.
+            project scope).
 
     Returns:
-        A fixed tuple of :class:`UninstallReadinessPermission` entries, in
-        declaration order: ``cd`` navigation, restoring native settings
-        (Write and Edit), uninstalling the package, removing the two
-        toolguard config files, and removing the two bundled skill
-        directories. Every entry is ``allow``.
+        The fixed tuple of :class:`UninstallReadinessPermission` entries, in
+        declaration order. Every entry is ``allow``.
     """
     settings_str = str(settings_path)
     hook_toml = str(claude_dir / "toolguard_hook.toml")
@@ -209,11 +195,9 @@ class UninstallReadinessStatus:
 
     Attributes:
         permission: The uninstall-readiness entry being evaluated.
-        current_verdict: What the hook would decide for ``permission.probe``
-            today (``'allow'``/``'ask'``/``'deny'``).
-        needs_action: ``True`` when the entry is not yet ``allow`` -- i.e. the
-            action could still be blocked or merely prompted (not guaranteed
-            to complete) during a later uninstall.
+        current_verdict: :func:`~toolguard.api.decide`'s verdict for
+            ``permission.probe`` (``'allow'``/``'ask'``/``'deny'``).
+        needs_action: ``True`` when ``current_verdict`` is not ``'allow'``.
         recommendation: Human-readable next step.
     """
 
@@ -247,12 +231,8 @@ def evaluate_uninstall_readiness_permissions(
     config: Configuration, claude_dir: Path, settings_path: Path
 ) -> List[UninstallReadinessStatus]:
     """
-    Evaluate every uninstall-readiness entry against *config* using the real
-    decision engine.
-
-    Reuses :func:`~toolguard.api.decide` (no reimplementation) to
-    learn what the hook would actually decide for each entry's probe, then
-    classifies the result.
+    Evaluate every uninstall-readiness entry's probe through
+    :func:`~toolguard.api.decide` and classify the verdict.
 
     Args:
         config: The resolved configuration hierarchy to evaluate against.
@@ -276,11 +256,7 @@ def missing_uninstall_readiness_permissions(
     config: Configuration, claude_dir: Path, settings_path: Path
 ) -> List[UninstallReadinessStatus]:
     """
-    Return only the uninstall-readiness entries that need a rule suggested.
-
-    These are the actions that are not yet ``allow`` under *config* -- the
-    concrete rules the install runbook should offer to add, with the user's
-    consent, at the chosen scope.
+    Return only the entries that are not yet ``allow`` under *config*.
     """
     return [
         s

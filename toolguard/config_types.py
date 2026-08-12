@@ -1,35 +1,10 @@
 """
-Thin configuration data types, separated from :mod:`toolguard.config`'s logic.
+Plain configuration data types, split out of :mod:`toolguard.config` so this module can
+stay a leaf.
 
-TOO-19 structural refactor. :mod:`toolguard.config` mixes these plain
-``@dataclass(frozen=True)`` shapes with the much larger ``Configuration`` class
-and all the discovery/parsing machinery that builds and resolves them. Moving
-the types here lets type definitions live apart from implementation logic,
-continuing the pattern already established for :class:`~toolguard.issues.Issue`
-(in :mod:`toolguard.issues`) and :class:`~toolguard.rule_entry.RuleEntry` (in
-:mod:`toolguard.rule_entry`).
-
-Most classes below are unchanged from their original home in ``config.py``,
-docstrings and comments intact. These types reference only each other and
-:class:`~toolguard.rule_entry.RuleEntry`, so this module stays a leaf that
-:mod:`toolguard.config` depends on -- not the reverse -- exactly like
-``issues.py`` and ``rule_entry.py``. It must never import from
-:mod:`toolguard.config`.
-
-:mod:`toolguard.config` re-exports every class here, so existing
-``from toolguard.config import Provenance`` (etc.) call sites are unaffected.
-
-:class:`RuntimeVerdict` and :class:`UnitVerdict` are the exception to "pure
-move": TOO-45 R1c collapsed ``ResolvedDecision`` (formerly here) with
-``BashResolution``/``FileResolution`` (formerly in
-:mod:`toolguard.resolve`) into :class:`RuntimeVerdict`, and moved
-``SubMatch`` here (renamed :class:`UnitVerdict`) from
-:mod:`toolguard.resolve` -- both live here rather than in ``resolve.py``
-because :mod:`toolguard.permission_resolution` constructs the former
-directly and cannot import ``resolve.py`` (circular: ``resolve.py`` imports
-FROM ``permission_resolution``). :mod:`toolguard.resolve` re-exports both for
-existing callers. See :class:`RuntimeVerdict`'s own docstring for the full
-rationale.
+It imports only :mod:`toolguard.rule_entry`, and must never import :mod:`toolguard.config`
+in return -- see :class:`RuntimeVerdict`, :class:`UnitVerdict`, and :class:`LevelMatch`'s
+own docstrings for the specific circular imports this leaf avoids.
 """
 
 from dataclasses import dataclass, field
@@ -45,14 +20,14 @@ class Provenance:
     """
     Display-only origin of a single configuration source.
 
-    Carries enough information to tell a human (or a future permission-mover)
-    where a layer's content physically came from, without exposing file/format
-    decisions as control flow to clients.
+    Carries enough for a human to tell where a layer's content came from, without exposing
+    file/format decisions as control flow to clients.
 
     Attributes:
         level: Conceptual level label ('project', 'user', or 'explicit' for
-            a CLAUDE_SETTINGS_PATH single-file source).
-        source_type: Either 'claude' (native settings) or 'toolguard_hook'.
+            a CLAUDE_SETTINGS_PATH source).
+        source_type: 'claude' (native settings), 'toolguard_hook', or
+            'toolguard_hook_rules' (a rules-directory file).
         file_format: Either 'json' or 'toml'.
         path: Absolute path to the source file (display only).
         specificity: Hierarchy distance from the project root. 0 = most specific
@@ -73,13 +48,8 @@ class Provenance:
 
     def describe_brief(self) -> str:
         """
-        Return a compact ``level: path`` label.
-
-        Two uses: appended to a decision *reason* as a bracketed suffix
-        (e.g. ``[project: /home/me/proj/.claude/toolguard_hook.toml]``), and
-        rendered as the audit log's standalone ``Provenance`` field (see
-        ``hook._provenance_brief``). Kept terse so it does not bloat the
-        resolution log.
+        Return a compact ``level: path`` label, terse enough not to bloat a decision reason
+        (e.g. ``[project: /home/me/proj/.claude/toolguard_hook.toml]``) or the audit log.
         """
         return f"{self.level}: {self.path}"
 
@@ -92,38 +62,33 @@ class ConfigLayer:
     Layers are produced most-specific first (project before user, ``.local``
     before regular). The parsed content is exposed as a read-only mapping so it
     cannot be mutated by clients. Pattern matching is intentionally NOT done
-    here; layers carry typed pattern lists that matching code consumes.
+    here; ``content`` is the raw parsed dict, not yet the typed pattern lists
+    :class:`ToolPatternLayer` carries.
 
     Attributes:
         provenance: Display-only origin of this layer.
         content: Read-only view of the parsed config dict for this source.
         unexpected_keys: Top-level keys present in the raw source file that are
-            NOT permitted for this layer's source type and were stripped from
+            not permitted for this layer's source type and were stripped from
             ``content`` before it was built. Always empty for ``~/.claude``
-            sources (which permit any toolguard_hook key). Non-empty only for
-            ``toolguard_hook_rules`` (XDG rules-directory, TOO-30) layers, which
-            are restricted to ``[permissions]``/``[hard_deny]``;
-            :meth:`Configuration.validation_issues` reports these as errors.
-            Defaults to ``()`` so existing direct-construction call sites are
-            unaffected.
+            sources (which permit any toolguard_hook key). Non-empty only for a
+            rules-directory layer, which is restricted to
+            ``[permissions]``/``[hard_deny]``; :meth:`Configuration.validation_issues`
+            reports these as errors.
         duplicate_format: True when discovery found a same-stem sibling in the
             other format (TOML+JSON both present) that lost the TOML-over-JSON
             precedence and so does NOT get its own layer. Recorded at discovery
             time -- while the source directory is known to exist -- so
             :meth:`Configuration.validation_issues` can report the "both
-            formats" warning without re-touching the filesystem later (relevant
-            for ``toolguard_hook_rules`` layers, TOO-30). Computed WITHIN a
-            single (the winning) rules directory only -- see ``shadowed_path``
-            for the cross-directory case (TOO-19). Defaults to False.
+            formats" warning without re-touching the filesystem later. Computed
+            WITHIN a single (the winning) rules directory only -- see
+            ``shadowed_path`` for the cross-directory case.
         shadowed_path: Set to the representative path of a same-stem file that
             was found in one of the OTHER candidate rules directories (see
-            :func:`_rules_dirs`) and lost the cross-directory,
+            :func:`~toolguard.config._rules_dirs`) and lost the cross-directory,
             first-directory-wins precedence, so it does NOT get its own layer.
-            Recorded at discovery time -- while the source directories are
-            known to exist -- so :meth:`Configuration.validation_issues` can
-            report the shadowing warning without re-touching the filesystem
-            later. Only ever set on ``toolguard_hook_rules`` layers (TOO-19).
-            Defaults to None (no cross-directory shadowing).
+            Recorded at discovery time, for the same reason as
+            ``duplicate_format`` above. Only ever set on a rules-directory layer.
     """
 
     provenance: Provenance
@@ -134,7 +99,7 @@ class ConfigLayer:
 
     @property
     def source_type(self) -> str:
-        """Convenience accessor for the source type ('claude'/'toolguard_hook')."""
+        """Convenience accessor for :attr:`Provenance.source_type`."""
         return self.provenance.source_type
 
     @property
@@ -153,27 +118,17 @@ class ToolPatternLayer:
     """
     Per-layer allow/deny/ask entries for a single tool, with provenance.
 
-    This is the per-layer shape returned by ``Configuration.permission_layers``.
-    Takeover filtering has already been applied. Phase 1 callers flatten +
-    union the ``allow``/``deny``/``ask`` pattern views (below); a future
-    per-layer resolver can consume the same shape without changes.
+    Takeover-mode filtering, if any, has already been applied -- to allow entries on native
+    layers only. Deny and ask entries are never filtered.
 
-    TOO-45 R2: the wrapper-INTACT :class:`~toolguard.rule_entry.RuleEntry`
-    tuples (``allow_entries``/``deny_entries``/``ask_entries``) are the ONLY
-    storage. The wrapper-stripped pattern tuples (``allow``/``deny``/``ask``)
-    are derived properties over them, not separately stored -- there is no
-    longer a second, independently-populated collection that could drift out
-    of alignment with the entries. Before this change the two were parallel
-    dataclass fields with a hand-documented "same order, same membership,
-    index-for-index" invariant; that invariant is gone because there is only
-    one collection left to be misaligned with itself.
+    The wrapper-intact :class:`~toolguard.rule_entry.RuleEntry` tuples (``allow_entries``/
+    ``deny_entries``/``ask_entries``) are the only storage; ``allow``/``deny``/``ask`` below
+    are derived properties over them, not independently populated -- so the two can never
+    drift out of alignment with each other.
 
     Attributes:
         provenance: Origin of the patterns in this layer.
-        allow_entries: The wrapper-INTACT :class:`~toolguard.rule_entry.RuleEntry`
-            objects for this layer's allow rules (order preserved). Defaults
-            to ``()`` for back-compatibility with constructors that predate
-            structured-entry support.
+        allow_entries: This layer's allow rules, wrapper-intact, in order.
         deny_entries: As ``allow_entries``, for ``deny``.
         ask_entries: As ``allow_entries``, for ``ask``. A command matching an
             ask pattern resolves to an ``ask`` (prompt) verdict per the
@@ -202,12 +157,8 @@ class ToolPatternLayer:
 
 
 def _entries_for_kind(layer: "ToolPatternLayer", kind: str) -> Tuple["RuleEntry", ...]:
-    """
-    Return *layer*'s entries for ``kind`` ('allow', 'ask', or anything else
-    treated as 'deny') -- the single 3-branch dispatch shared by
-    :func:`provenance_for_pattern` and :func:`entry_for_pattern`, so the two
-    cannot disagree about which side of a layer a ``kind`` string selects.
-    """
+    """Return *layer*'s entries for ``kind``; anything but ``'allow'``/``'ask'`` selects
+    ``deny_entries``."""
     if kind == "allow":
         return layer.allow_entries
     if kind == "ask":
@@ -220,12 +171,6 @@ def provenance_for_pattern(
 ) -> Optional["Provenance"]:
     """
     Find the provenance of the layer that contributed a matched pattern.
-
-    TOO-45 R2d: moved off ``Configuration`` (formerly
-    ``Configuration.provenance_for_pattern``, a ``@staticmethod`` taking
-    ``layers`` as a parameter) to live beside :class:`ToolPatternLayer`,
-    whose entries this function searches -- it held no configuration state
-    and its whole job is reading this type.
 
     Args:
         layers: The contributing layers for one level (most-specific first).
@@ -249,27 +194,10 @@ def entry_for_pattern(
     """
     Find the :class:`~toolguard.rule_entry.RuleEntry` behind a matched pattern.
 
-    TOO-45 R2d: moved off ``Configuration`` for the same reason as
-    :func:`provenance_for_pattern` (same file, same reasoning -- see that
-    function's docstring).
-
-    TOO-45 R2: searches ``entries`` directly by
-    :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` instead of
-    locating ``pattern`` in a separately-stored stripped-pattern tuple and
-    then reading the entry off a second, parallel tuple at the same index.
-    Before this change a drifted pair of parallel lists could make that
-    index lookup return the wrong entry (or, when guarded, silently return
-    None); with only one collection to search, that failure mode no longer
-    exists to guard against.
-
-    Companion to :func:`provenance_for_pattern` (same first-layer-wins
-    search), kept as a separate function rather than folded into it: the
-    other caller of ``provenance_for_pattern``
-    (:func:`~toolguard.permission_resolution._detect_override`, for the
-    OVERRIDDEN deny) has no use for the entry, so merging the two would hand
-    every call site an unused value. The two functions do re-walk the same
-    (small, per-level) layer list, but that repeat scan is cheap relative to
-    the readability cost of a combined return type.
+    Companion to :func:`provenance_for_pattern` (same first-layer-wins search), kept as a
+    separate function rather than folded into it: not every caller of
+    ``provenance_for_pattern`` has a use for the entry, so a combined return type would hand
+    those call sites an unused value.
 
     Args:
         layers: The contributing layers for one level (most-specific first).
@@ -292,13 +220,13 @@ def entry_for_pattern(
 @dataclass(frozen=True)
 class TakeoverEnabledConflict:
     """
-    A cross-level disagreement on ``takeover_mode.enabled`` (TOO-8 Phase 5).
+    A cross-level disagreement on ``takeover_mode.enabled``.
 
     takeover_mode is a single-owner policy; different levels setting ``enabled``
     to DIFFERING values is a misconfiguration. When detected, the resolver
     fail-safes ``enabled`` to ``False`` (native Claude prompts stay active --
     nothing is silently bypassed) and carries this record so the hook can log a
-    conflict entry and warn once per session.
+    conflict entry and surface a warning.
 
     Attributes:
         sources: Tuple of ``(value, provenance)`` pairs, one per layer that
@@ -309,12 +237,7 @@ class TakeoverEnabledConflict:
     sources: Tuple[Tuple[bool, "Provenance"], ...]
 
     def describe(self) -> str:
-        """
-        Return a human-readable summary citing each disagreeing source.
-
-        Lists every level that set ``enabled`` with its value and provenance,
-        most-specific first, for the conflict log entry.
-        """
+        """Return a one-line summary citing every disagreeing source, most-specific first."""
         parts = [f"{value} [{prov.describe_brief()}]" for value, prov in self.sources]
         return "takeover_mode.enabled set to conflicting values: " + "; ".join(parts)
 
@@ -322,18 +245,13 @@ class TakeoverEnabledConflict:
 @dataclass(frozen=True)
 class UnrecognizedFallbackSetting:
     """
-    A ``*_fallback`` setting written with a value toolguard does not recognize.
+    A ``*_fallback`` setting written with an unrecognized value.
 
-    TOO-19 m5. ``no_match_fallback`` and ``undecidable_fallback`` both resolve
-    an unrecognized value to the safe default ``'ask'`` and keep going -- that
-    part is deliberate and unchanged, because ``'ask'`` is the safe direction
-    when a policy setting cannot be read. What was NOT acceptable is that it
-    happened SILENTLY: a single-character typo (``allow_with_no_warnings``
-    written as ``allow_with_no_warning``) produced maximum-friction behaviour
-    with no diagnostic anywhere, which reads as "the feature is broken" rather
-    than "you have a typo". This record carries everything a warning needs to
-    say so, including the accepted spellings -- a warning that omits those is
-    what turns a typo into a round trip.
+    Both settings resolve such a value to the safe ``'ask'`` and keep going; without this
+    record that happens with no diagnostic anywhere, so a one-character typo reads as
+    maximum-friction behaviour rather than a typo (see
+    :meth:`~toolguard.config.Configuration.unrecognized_fallback_settings`, which produces
+    these).
 
     Attributes:
         key: The setting name -- ``'no_match_fallback'`` or
@@ -343,9 +261,9 @@ class UnrecognizedFallbackSetting:
             unusable and equally silent, so it is reported the same way).
         provenance: Origin of the layer that set it, so the warning can name
             the file to edit.
-        accepted: The accepted spellings for *key*, sorted, INCLUDING the
-            aliases that are normalized away before validation -- the user
-            needs the spellings they may type, not the internal canonical set.
+        accepted: The spellings to advertise in the warning -- the same set for both
+            keys, and deliberately not the internal canonical set (see
+            ``_ACCEPTED_FALLBACK_SPELLINGS``).
     """
 
     key: str
@@ -355,8 +273,8 @@ class UnrecognizedFallbackSetting:
 
     def describe(self) -> str:
         """
-        Return a one-line human-readable description naming value, setting,
-        file, and accepted spellings.
+        Return a one-line description naming the bad value, the setting, the file, and the
+        accepted spellings.
         """
         return (
             f"{self.key} = {self.value!r} in {self.provenance.describe_brief()} "
@@ -368,7 +286,7 @@ class UnrecognizedFallbackSetting:
 @dataclass(frozen=True)
 class TakeoverConfig:
     """
-    Resolved takeover-mode configuration (TOO-8 Phase 5).
+    Resolved takeover-mode configuration.
 
     ``enabled`` is resolved as a SINGLE-OWNER policy with fail-safe-on-conflict:
     levels that explicitly set it must agree; if they disagree, ``enabled`` is
@@ -382,7 +300,7 @@ class TakeoverConfig:
         ignored_allow_patterns: Blanket allow patterns suppressed from native config.
         additional_ignored_patterns: Extra user-supplied ignored patterns.
         no_match_fallback: the RAW configured value (e.g. 'ask', 'deny',
-            'allow_with_warning', or the deprecated legacy 'warn_deny' alias)
+            'allow_with_warning', 'allow', or the deprecated legacy 'warn_deny' alias)
             -- not normalized at this layer; see
             :meth:`Configuration.resolved_no_match_fallback` for the
             normalized, alias-resolved value actually used to decide.
@@ -413,16 +331,17 @@ class TakeoverConfig:
 @dataclass(frozen=True)
 class ConflictOverride:
     """
-    A more-specific ``allow`` overriding a less-specific ``deny`` (Phase 4).
+    A more-specific ``allow`` overriding a less-specific ``deny``.
 
     Records BOTH sides of an allow-over-deny override so the conflict log can
     cite the winning allow and the overridden deny by provenance. The decision
     itself is unchanged (more-specific-wins keeps the allow); this is purely a
     record of the override for human/LLM review.
 
-    The command/path that triggered the override is known by the caller (the
-    hook), so it is NOT stored here; the hook composes the conflict-log message
-    from this record plus the command it already holds.
+    The command/path that triggered the override is NOT stored here -- it travels
+    alongside this record instead, as the other half of :attr:`RuntimeVerdict.overrides`'s
+    ``(identifier, ConflictOverride)`` pair (see that attribute's own docstring for what
+    *identifier* is per verdict kind).
 
     Attributes:
         winning_pattern: The more-specific ``allow`` pattern that won.
@@ -442,85 +361,25 @@ class LevelMatch:
     """
     A single hierarchy-level (or hard-deny-pool) pattern-match result.
 
-    TOO-45 R1f: replaces the bare ``(decision, reason, matched_pattern)``
-    tuple that :func:`~toolguard.permissions.check_hard_deny`,
-    :func:`~toolguard.permissions.decide_command_at_level_detailed`,
-    :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`, and
-    :func:`~toolguard.file_matching.check_file_path_hard_deny` used to return
-    (or ``None`` when nothing at this level/pool matched -- every real
-    caller wraps this type in ``Optional``, never constructs a
-    ``LevelMatch`` for "no match").
+    "No match" is represented by the caller returning ``None`` instead of constructing a
+    ``LevelMatch``, never by an empty/placeholder ``matched_pattern``.
 
-    This is the per-level result :func:`~toolguard.permission_resolution.resolve_permission_cascade`
-    (TOO-45 punch-list #03: the pure fold over already-computed per-level
-    matches) folds over, paired one-to-one with the level's
-    :class:`~toolguard.config.ToolPatternLayer` tuple, so the winning
-    pattern can be mapped back to its owning layer/provenance.
+    A third, lower altitude than :class:`UnitVerdict` (one sub-command's outcome) and
+    :class:`RuntimeVerdict` (the whole runtime verdict): the raw match at one hierarchy level
+    or hard-deny pool, before any provenance lookup, ``additionalContext`` enrichment, or
+    allow-over-deny override detection is attached. Deliberately not named with a "Verdict"
+    suffix: a hierarchy-level match is not itself a governed-tool decision, only an input to
+    one.
 
-    A THIRD, lower altitude than :class:`UnitVerdict` (one sub-command's
-    outcome) and :class:`RuntimeVerdict` (the whole runtime verdict): this
-    is the raw match at ONE hierarchy level or hard-deny pool, before any
-    provenance lookup, ``additionalContext`` enrichment, or allow-over-deny
-    override detection is attached -- all of which
-    :func:`~toolguard.permission_resolution._resolve_unclamped` does with
-    the ``matched_pattern`` this type carries. Deliberately NOT named with
-    a "Verdict" suffix (unlike ``UnitVerdict``/``RuntimeVerdict``): it isn't
-    one -- a hierarchy-level match is not itself a governed-tool decision,
-    only an input to one.
-
-    ``tools/architecture_fitness.py`` reports this class under its own
-    **LEVEL** altitude, excluded from R1's "exactly one runtime verdict
-    type" gate but always visible with its reason. The test that decides
-    this is whether the class can carry a :class:`Provenance` -- this one
-    cannot, because none exists in scope until
-    :func:`~toolguard.permission_resolution._resolve_unclamped` resolves it
-    one layer up.
-
-    TOO-45 R1g corrected an earlier version of this paragraph, which claimed
-    the ``matched_pattern`` spelling was "the one deliberate naming choice
-    that keeps it out of that count". That was true and was the problem: the
-    class was invisible to the predicate rather than excluded by it, so R1's
-    PASS rested on a field name. The classifier no longer inspects the
-    winning-pattern field at all, and a test renames it to ``matched_rule``
-    to prove the classification does not move.
-
-    ``check_file_path_hard_deny``'s use (TOO-45 R1f reconciliation)
-    -------------------------------------------------------------------
-    Before R1f, ``check_file_path_hard_deny`` computed its own
-    ``additionalContext`` lookup internally and returned
-    ``(decision, reason, additional_context)`` -- a DIFFERENT shape from
-    the other three functions' ``(decision, reason, matched_pattern)``,
-    and the matched hard-deny pattern itself was discarded (a TOO-45 R3
-    comment at the call site explained why closing that gap was out of
-    R3's scope). R1f reconciles this onto ONE shared type instead of
-    inventing a second: ``check_file_path_hard_deny`` now returns its
-    matched pattern in ``matched_pattern`` (mirroring
-    :func:`~toolguard.permissions.check_hard_deny`'s Bash-side
-    convention), and its caller
-    (:func:`~toolguard.resolve.resolve_file_path_permission_detailed`)
-    computes the ``additionalContext`` lookup itself from that pattern --
-    exactly mirroring how the Bash side already does it in
-    :func:`~toolguard.resolve.resolve_bash_permission_detailed`'s
-    ``_decide`` closure. The final ``RuntimeVerdict.matched_rule`` for a
-    file-path hard-deny STILL deliberately stays ``None`` (unchanged
-    behaviour, unlike the Bash side, which does attribute it) -- R1f is a
-    structural conversion only, not the R3 fix; see that call site's own
-    comment for why the asymmetry is preserved rather than closed here.
-
-    Lives in :mod:`toolguard.config_types`, not :mod:`toolguard.resolve`,
-    :mod:`toolguard.permissions`, or :mod:`toolguard.file_matching`, for the
-    same reason :class:`RuntimeVerdict`/:class:`UnitVerdict` do: it is the
-    shared leaf every one of those modules imports, so defining it here adds
-    no import edge in any direction. :mod:`toolguard.permission_resolution`
-    consumes it directly, as the per-level fold input (TOO-45 punch-list
-    #03) and as :func:`~toolguard.permission_resolution._detect_override`'s
-    scan target; :mod:`toolguard.permissions`, :mod:`toolguard.resolve`, and
-    :mod:`toolguard.file_matching` all re-export it for their own callers.
+    Lives here rather than in :mod:`toolguard.resolve`: :mod:`toolguard.permissions` and
+    :mod:`toolguard.file_matching` both construct it, and ``resolve.py`` imports FROM both of
+    them, so either importing a type back out of ``resolve.py`` would be circular. This
+    shared leaf lets all three import it.
 
     Attributes:
         decision: ``'allow'``, ``'ask'``, or ``'deny'`` -- this level's/
             pool's own decision, before any cascade-wide clamp (e.g. the
-            TOO-19 parse-failure ASK floor, applied later by
+            parse-failure ASK floor, applied later by
             :func:`~toolguard.permission_resolution.resolve_permission_cascade`)
             is applied.
         reason: Human-readable reason for THIS level's/pool's own match,
@@ -528,10 +387,7 @@ class LevelMatch:
             happens one layer up, in
             :func:`~toolguard.permission_resolution._resolve_unclamped`).
         matched_pattern: The winning (wrapper-free) pattern text. Always a
-            genuine ``str`` when a ``LevelMatch`` is constructed at all --
-            "no match" is represented by the caller returning ``None``
-            instead of a ``LevelMatch``, never by an empty/placeholder
-            pattern here.
+            genuine ``str`` when a ``LevelMatch`` is constructed at all.
     """
 
     decision: str
@@ -544,108 +400,53 @@ class UnitVerdict:
     """
     Per-sub-command resolution record inside a compound Bash permission check.
 
-    TOO-45 R1c: renamed from ``SubMatch`` so its ALTITUDE is visible in its
-    name -- this is the UNIT verdict, one decidable unit inside a compound,
-    the phase-6 shape in the ideal picture (see the R1 scoping trace). It is
-    deliberately NOT collapsed into :class:`RuntimeVerdict`: doing so would
-    destroy the only structured record of what a compound command did,
-    which is exactly what TOO-45 R1e needs to fix an audit-loss defect
-    (813 of 975 compound-allow corpus cases writing fewer audit entries than
-    sub-commands run, because the log reconstructs this information by
-    re-parsing prose instead of reading it structurally).
+    Deliberately not collapsed into :class:`RuntimeVerdict`: doing so would destroy the only
+    structured, per-sub-command record of what a compound command did, forcing a consumer to
+    re-derive it by re-parsing the combined reason string.
 
-    ``reason``/``additional_context`` merged in (TOO-45 R1e finishing pass)
-    from a short-lived second type, ``compound.py``'s own ``LeafOutcome``,
-    that an earlier pass of this same step introduced to carry a single
-    leaf's/segment's ``(decision, reason, additional_context, fallback_kind)``
-    outcome back to its caller. Both types described exactly ONE leaf --
-    ``LeafOutcome``'s own docstring argued it had to stay separate from
-    :class:`RuntimeVerdict` because ``fallback_kind`` (a tri-state tag for
-    ONE leaf) is a different concept from ``RuntimeVerdict.fallback_warning``
-    (an aggregate boolean over an entire compound); that argument is correct
-    about ``RuntimeVerdict`` -- and says nothing about ``UnitVerdict``, which
-    is ALSO per-leaf and is the type whose entire purpose is to be the unit
-    altitude. Keeping them apart was exactly the kind of near-duplicate this
-    ticket exists to remove: every ``LeafOutcome`` construction site in
-    ``compound.py`` sat inside what was then ``_resolve_leaf_detailed`` (TOO-45
-    compound/resolve cycle removal: that function's body is now
-    :func:`~toolguard.compound.judge_unit`), which already knew the leaf's
-    real, full ``sub_command`` text at that point (``unit.text``, the
-    function's own :class:`~toolguard.compound.CommandUnit` parameter), so
-    there was never a construction site that genuinely lacked one to justify
-    a ``sub_command``-less type.
+    Lives here rather than in :mod:`toolguard.resolve` (where it is also constructed):
+    :mod:`toolguard.compound` constructs it too, and ``resolve.py`` imports FROM
+    ``compound.py``, so ``compound.py`` importing a type back out of ``resolve.py`` would be
+    circular. This shared leaf lets both import it.
 
-    Lives here (not in :mod:`toolguard.resolve`, where it is actually
-    constructed) for the same reason :class:`RuntimeVerdict` does -- see that
-    class's docstring's "Why this lives in config_types.py" note. Re-exported
-    by :mod:`toolguard.resolve` for existing callers.
-
-    Callers (e.g. :func:`toolguard.api._decide_bash`) can use
-    ``sub_matches`` to identify WHICH sub-command of a compound command produced
-    the verdict (first deny => compound deny, first ask => compound ask, else
-    allow) and to surface per-sub-command provenance to tooling.
+    A caller can use ``sub_matches`` to identify which sub-command of a compound command
+    produced the verdict (first deny => compound deny, first ask => compound ask, else
+    allow) and to surface per-sub-command provenance.
 
     Attributes:
-        sub_command: The individual sub-command string as extracted by the
-            compound splitter.  For an ask-floor leaf (foreign inline code /
-            heredoc sink, see :func:`~toolguard.compound.judge_unit`'s
-            ``'inline_code'`` branch) or an
-            undecidable segment, this is the leaf's/segment's real, full
-            source text -- NOT the truncated outer-command stub
-            ``compound.py`` resolves internally to check for an explicit deny
-            (TOO-45 R1e; see ``fallback_kind`` below for why the stub's own
-            match must not be attributed here).
-        decision: The decision for this sub-command: ``'allow'``, ``'ask'``, or
-            ``'deny'`` -- always the leaf's TRUE FINAL decision, after any
-            ``undecidable_fallback`` floor has been applied (TOO-45 R1e). For
-            an ask-floor leaf this can differ from what the truncated stub
-            itself resolved to; see ``fallback_kind``.
-        matched_rule: The winning rule pattern string (wrapper-free, as stored in
-            the layer) if one matched, or the hard-deny pattern string when the
-            sub-command was hard-denied.  ``None`` when no rule matched (default
-            fail-closed deny) OR when ``fallback_kind`` is not ``None`` (an
-            escape-hatch outcome, TOO-45 R1e): a rule matching the
-            ask-floor leaf's truncated stub never verified the leaf's real,
-            unread content, so it must never be recorded here as the reason
-            this leaf's decision stands -- the escape hatch decided, not the
-            rule.
+        sub_command: The sub-command's real, full source text. For an undecidable segment
+            this is the segment's own text (it has no rule-matched parts at all). For an
+            ask-floor leaf (foreign inline code / heredoc sink) this is NOT the
+            outer-command stub :mod:`toolguard.compound` resolves internally to check for an
+            explicit deny; see ``matched_rule`` below for why the stub's own match must not
+            be attributed here.
+        decision: ``'allow'``, ``'ask'``, or ``'deny'`` -- the leaf's final decision, after
+            any ``undecidable_fallback`` floor has been applied. For an ask-floor leaf this
+            can differ from what the stub itself resolved to; see ``fallback_kind``.
+        matched_rule: The winning rule pattern (wrapper-free), or the hard-deny pattern when
+            hard-denied. ``None`` when no rule matched, or when ``fallback_kind`` is not
+            ``None``: a rule matching the ask-floor leaf's stub never verified the
+            leaf's real, unread content, so it must never be recorded here as the reason the
+            decision stands -- the escape hatch decided, not the rule.
         provenance: Origin of the layer whose rule matched, or ``None`` for a
             hard-deny (pooled across levels, no single provenance), a
             fail-closed default deny, or an escape-hatch outcome (same
             reasoning as ``matched_rule`` above).
-        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None``
-            (TOO-45 R1e) -- structural counterpart of
-            :func:`~toolguard.compound.fallback_kind_for_reason`, computed
-            once at the point this record is built instead of re-derived by
-            re-parsing ``reason`` text downstream. ``'warned'``/``'silent'``
-            name the ``no_match_fallback``/``undecidable_fallback`` allow
-            escape hatch (with/without a warning); ``'denied'`` names the
-            ``undecidable_fallback=deny`` escape hatch. ``None`` for a
-            genuine rule match (including a genuine ``ask`` match that an
-            ask-floor leaf's own stub happened to also decide) or a
-            fail-closed default with no fallback setting in play (e.g. plain
-            ``no_match_fallback=deny``, which is not an "escape hatch" in
-            this sense -- see :func:`~toolguard.compound.fallback_kind_for_reason`'s
-            own docstring). This is what lets a consumer (e.g.
-            ``hook.py::_log_allowed_command``) substitute an honest
-            placeholder for ``matched_rule`` without re-parsing ``reason``.
-        reason: Human-readable reason for THIS unit's own decision (TOO-45
-            R1e finishing pass; merged in from ``LeafOutcome``). For a leaf
-            resolved through the normal (non-ask-floor) path this is the
-            same reason text :func:`~toolguard.compound._combine_strictest`
-            would build for it standing alone; for an ask-floor leaf or an
-            undecidable segment it already names the escape hatch (see
-            ``compound.py``'s branches). Distinct from
-            :attr:`RuntimeVerdict.reason`, which is the WHOLE compound's
-            combined reason, not any one unit's.
-        additional_context: This unit's own ``additionalContext`` enrichment
-            (TOO-19 Phase 1), or ``None``. ``None`` on the genuinely-floored
-            path (the floor, not a rule match, decided -- see
-            :func:`~toolguard.compound.judge_unit`'s own docstring for why).
-            Distinct from :attr:`RuntimeVerdict.additional_context`, which is
-            the compound-wide accumulation across every contributing unit
-            (:func:`~toolguard.compound._accumulate_contexts`), not any one
-            unit's own value.
+        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- structural
+            counterpart of :func:`~toolguard.compound.fallback_kind_for_reason`, computed
+            once here rather than re-derived by parsing ``reason`` downstream.
+            ``'warned'``/``'silent'`` name the ``allow`` escape hatch (with/without a
+            warning); ``'denied'`` names the ``undecidable_fallback=deny`` escape hatch.
+            ``None`` whenever no allow/deny escape hatch produced this outcome -- including
+            the ASK floor itself, which is not an allow or deny escape hatch.
+        reason: Human-readable reason for THIS unit's own decision -- for an ask-floor leaf
+            or an undecidable segment, it already names the escape hatch. Distinct from
+            :attr:`RuntimeVerdict.reason`, which is the WHOLE compound's combined reason,
+            not any one unit's.
+        additional_context: This unit's own ``additionalContext`` enrichment, or ``None``
+            when the floor (not a rule match) decided. Distinct from
+            :attr:`RuntimeVerdict.additional_context`, the compound-wide accumulation
+            across every contributing unit.
     """
 
     sub_command: str
@@ -660,92 +461,48 @@ class UnitVerdict:
 @dataclass(frozen=True)
 class RuntimeVerdict:
     """
-    The single runtime verdict type every governed-tool resolution returns
-    (TOO-45 R1c).
+    The single runtime verdict type every governed-tool resolution returns.
 
-    Collapses THREE previously-separate types that all represented the same
-    thing at slightly different points in the pipeline: ``ResolvedDecision``
-    (the raw per-level/per-sub-command result, formerly defined here),
-    ``BashResolution`` (the compound-aggregated Bash result), and
-    ``FileResolution`` (the file-path result) -- all formerly in
-    :mod:`toolguard.resolve`. The R1 scoping trace's runtime census showed
-    they were never three different SHAPES, just three different SITES that
-    each declared their own dataclass for the same decision/reason/
-    provenance/matched_rule/additional_context/fallback_warning bundle.
-
-    Named ``RuntimeVerdict`` (not just ``Verdict``) deliberately, to match
-    the altitude language the R1 scoping trace uses and
-    ``tools/architecture_fitness.py``'s predicate now enforces: this is the
-    RUNTIME altitude, distinct from :class:`UnitVerdict` (the UNIT altitude
-    nested inside it via ``sub_matches``). A fourth, TOOLING altitude used to
-    exist here too: :mod:`toolguard.tools.decision`'s own ``Decision`` DTO,
-    a field-for-field re-render of this class kept apart only pending TOO-45
-    R6. TOO-45 R6-S3 unified it into this class (measured behavioural cost:
-    zero, across the full verdict corpus and unit suite) -- ``decide()`` now
-    returns this type directly, and ``Decision`` no longer exists. "Exactly
-    one type represents a permission verdict end-to-end" was too blunt a
-    predicate; "exactly one RUNTIME verdict type, with the other altitudes
-    declared and justified" is what actually holds on this tree, and is what
-    ``tools/architecture_fitness.py --predicates`` now reports.
+    Used for the Bash cascade, the file-path cascade, and the internal cascade verdict each
+    one folds over -- see the per-field notes below for what varies between those uses. A
+    RUNTIME altitude, distinct from :class:`UnitVerdict` (the UNIT altitude nested inside it
+    via ``sub_matches``).
 
     Why this lives in config_types.py, not resolve.py
     ---------------------------------------------------
-    :mod:`toolguard.permission_resolution` constructs this type directly (it
-    is the per-level/per-sub-command result, the old ``ResolvedDecision``'s
-    role) and is architecturally forbidden from importing
-    :mod:`toolguard.resolve` (see that module's own docstring: it imports
-    FROM ``permission_resolution``, so the reverse would be circular).
-    :mod:`toolguard.config_types` is the shared leaf both modules can import.
-    A useful side effect: :class:`Provenance` and :class:`ConflictOverride`
-    are ALSO defined in this module, so ``provenance``/``overrides`` below
-    can be typed precisely instead of falling back to ``Any`` the way the old
-    ``BashResolution``/``FileResolution`` had to, to dodge a circular import
-    with :mod:`toolguard.config`.
+    :mod:`toolguard.permission_resolution` constructs this type directly, as the internal
+    cascade verdict, and its own docstring declares it never imports
+    :mod:`toolguard.resolve` -- correctly, since ``resolve.py`` imports FROM
+    ``permission_resolution``, so the reverse would be circular.
+    :mod:`toolguard.config_types` is the shared leaf both modules can import -- and since
+    :class:`Provenance` and :class:`ConflictOverride` are also defined here,
+    ``provenance``/``overrides`` below can be typed precisely instead of falling back to
+    ``Any``.
 
-    ``tool``/``target`` (TOO-45 R1c placeholder for R1d)
-    -------------------------------------------------------
-    Carried even though NOTHING consumes them yet -- ``toolguard.hook``'s
-    ``log_command``/``create_hook_output`` call sites (R1d) still reconstruct
-    this information by hand from the tool_name/command/file_path already in
-    scope at the call site. Populating them here is what lets R1d stop doing
-    that. Only :mod:`toolguard.resolve`'s two PUBLIC entry points
+    ``tool``/``target``
+    --------------------
+    ``None`` until populated by one of :mod:`toolguard.resolve`'s two public entry points
     (:func:`~toolguard.resolve.resolve_bash_permission_detailed`,
-    :func:`~toolguard.resolve.resolve_file_path_permission_detailed`)
-    populate them, since only they have the actual command/file_path string
-    in scope; the internal per-level verdict built by
-    :func:`~toolguard.permission_resolution.resolve_command_permission`/
-    :func:`~toolguard.permission_resolution.resolve_file_path_permission`
-    leaves both ``None`` (neither is handed a target string at this layer --
-    only the tool-specific matcher below it closes over one privately).
-    ``tool`` for a
-    Bash/MCP-terminal resolution is always the literal string ``'Bash'``,
-    matching :func:`~toolguard.resolve.resolve_bash_permission_detailed`'s
-    existing convention of always evaluating against the Bash rule set
-    regardless of the actual invoking tool name (the hook does not thread
-    the true MCP-terminal tool name down to the resolver).
+    :func:`~toolguard.resolve.resolve_file_path_permission_detailed`), the only callers with
+    an actual command/file_path string in scope; the internal cascade verdict leaves both
+    ``None``. ``tool`` for a Bash/MCP-terminal resolution is always the literal string
+    ``'Bash'``, matching :func:`~toolguard.resolve.resolve_bash_permission_detailed`'s
+    convention of always evaluating against the Bash rule set regardless of the invoking
+    tool's real name; a caller that needs the real name (e.g. an MCP terminal tool routed
+    through the Bash rule set) restores it on the returned verdict afterwards.
 
-    ``overrides`` (TOO-45 R1c reconciliation)
-    --------------------------------------------
-    The three collapsed types disagreed on shape: ``BashResolution`` carried
-    a LIST of ``(sub_command, ConflictOverride)`` pairs (a compound can have
-    one override per sub-command); ``FileResolution``/``ResolvedDecision``
-    each carried a single ``Optional[ConflictOverride]`` (never compound).
-    The list generalises, so this type always carries a list of
-    ``(identifier, ConflictOverride)`` pairs:
+    ``overrides``
+    -------------
+    A list of ``(identifier, ConflictOverride)`` pairs rather than a single optional one,
+    because a compound Bash command can have one override per sub-command:
 
-    - Bash compound (:func:`~toolguard.resolve.resolve_bash_permission_detailed`):
-      *identifier* is the deciding sub-command string, one entry per
-      sub-command whose more-specific allow overrode a less-specific deny --
-      unchanged from ``BashResolution.overrides``' old shape.
-    - File path (:func:`~toolguard.resolve.resolve_file_path_permission_detailed`):
-      *identifier* is the file path itself (== ``target``); 0 or 1 entries.
-    - The internal per-level verdict
-      (:func:`~toolguard.permission_resolution.resolve_command_permission`/
-      :func:`~toolguard.permission_resolution.resolve_file_path_permission`):
-      *identifier* is ``None`` -- that layer has no sub_command/target string
-      in scope (see the ``tool``/``target`` note above); the two public
-      ``resolve.py`` entry points re-pair the bare override with the real
-      identifier once they have one.
+    - Bash compound: *identifier* is the overriding sub-command string, one entry per
+      sub-command whose more-specific allow overrode a less-specific deny.
+    - File path: *identifier* is the file path itself (== ``target``); 0 or 1 entries.
+    - The internal cascade verdict: *identifier* is ``None`` -- no sub_command/target
+      string is in scope at that layer (see ``tool``/``target`` above); the two public
+      ``resolve.py`` entry points re-pair the bare override with the real identifier once
+      they have one.
 
     Attributes:
         decision: ``'allow'``, ``'ask'``, or ``'deny'``.
@@ -758,64 +515,53 @@ class RuntimeVerdict:
             fail-closed default deny, a hard-deny match (pooled across
             levels, no single provenance), or when there is no single
             decider to attribute.
-        overrides: See "``overrides`` (TOO-45 R1c reconciliation)" above.
-            Empty when the overall decision is not ``'allow'`` (only
-            allow-over-deny overrides on an ALLOWED verdict are conflicts).
-        sub_matches: One :class:`UnitVerdict` per extracted Bash sub-command,
-            in order. Empty for a file-path verdict (file paths are never
-            compound) and for the internal per-level verdict. Allows callers
-            to identify the deciding sub-command and its provenance/
-            matched-rule without re-running the resolver.
+        overrides: See "``overrides``" above. Empty when the overall decision is
+            not ``'allow'`` (only allow-over-deny overrides on an ALLOWED verdict
+            are conflicts).
+        sub_matches: One :class:`UnitVerdict` per audited unit, in order -- one per
+            sub-command for an ordinary leaf, but one for the WHOLE leaf where a floor
+            (not a sub-command's own rule match) decided it (see
+            :attr:`~toolguard.compound.CommandUnit.audits_as_one`). Empty for a
+            file-path verdict (file paths are never compound) and for the internal cascade
+            verdict. Lets a caller identify the deciding sub-command and its
+            provenance/matched-rule without re-running the resolver.
         additional_context: The accumulated ``additionalContext`` enrichment
-            text (TOO-19 Phase 1), or ``None`` when no contributing rule
-            carried one, no rule matched, or the ASK floor cleared the match
-            (see :func:`~toolguard.permission_resolution._apply_ask_floor`).
-            Word-capped via :func:`toolguard.compound.cap_context_words`
-            regardless of whether the decision was allow, ask, or deny.
+            text, or ``None`` when no contributing rule carried one, no rule
+            matched, or the ASK floor cleared the match. Word-capped via
+            :func:`toolguard.compound.cap_context_words` regardless of
+            whether the decision was allow, ask, or deny.
         fallback_warning: ``True`` when this 'allow' decision should be
-            routed to the WARNING log stream (TOO-19
-            allow/allow_with_no_warnings work) -- ``True`` only for an
+            routed to the WARNING log stream -- only for an
             'allow' produced by the WARNED value of ``no_match_fallback`` or
             (for Bash) ``undecidable_fallback``. ``False`` for every other
             decision, including an explicit rule match and an 'allow'
-            produced by the newer no-warning fallback values. Real,
-            structurally-known data, never derived from *reason* -- see
-            :func:`toolguard.hook._log_fallback_allow_warning`.
+            produced by a no-warning fallback value. Structurally-known
+            data on the production path (never derived from *reason*
+            there); :mod:`toolguard.compound`'s own test-only legacy
+            driver still derives it from *reason* text.
         matched_rule: The deciding rule's pattern text (wrapper-free), or
-            ``None`` when there is no single rule to attribute (fail-closed
-            default, fallback, a floor that cleared the match, or -- for a
-            compound Bash verdict -- no single sub-command decided). NOT
-            derived from *reason*. TOO-45 R1e: for a compound Bash verdict
-            produced by an ``undecidable_fallback`` escape-hatch leaf, this is
-            now correctly ``None`` even when the escape-hatch leaf's own
-            pre-floor decision happened to equal the final decision -- the
-            leaf's recorded :class:`UnitVerdict` (see ``sub_matches``) is
-            built as the leaf's TRUE final decision/attribution in the first
-            place, by :func:`~toolguard.compound.judge_unit`, not left
-            holding the truncated stub's own, possibly-misleading
-            match. Before R1e this field could carry that misleading match
-            and callers had to re-classify *reason* themselves before
-            logging it; that re-classification is no longer needed for this
-            field, though ``hook.py`` still uses the reason-based
-            :func:`~toolguard.compound.fallback_kind_for_reason` for the
-            deny/ask log entry itself (a rendering choice, not a data-
-            correctness one -- see :func:`~toolguard.resolve._deciding_sub_match`'s
-            docstring for the full mechanism).
-        tool: See "``tool``/``target`` (TOO-45 R1c placeholder for R1d)"
-            above. ``None`` until populated by one of ``resolve.py``'s two
-            public entry points.
+            ``None`` when there is no single RULE to attribute -- a
+            fail-closed default, a fallback/floor escape hatch (even when
+            the escape-hatch leaf's own pre-floor decision happens to equal
+            the final decision), or, for a compound Bash verdict, no single
+            sub-command decided. Also deliberately ``None`` for a file-path
+            hard-deny (unlike a Bash hard-deny, which does record its
+            pattern here -- see :func:`~toolguard.resolve.resolve_file_path_permission_detailed`'s
+            own comment for why). Not derived from *reason*, though
+            ``hook.py``'s deny log entry still uses the reason-based
+            :func:`~toolguard.compound.fallback_kind_for_reason` for its own
+            rendering (the ask log entry uses the full ``reason`` text verbatim
+            and never reaches that classifier).
+        tool: See "``tool``/``target``" above.
         target: As ``tool``, the command string (Bash) or file path
             (file-path tools) under evaluation.
     """
 
     decision: str
     reason: str
-    # TOO-45 R1d: defaulted to None (was required with no default) so a
-    # synthetic guard-clause verdict -- e.g. hook.py's
-    # RuntimeVerdict(decision="deny", reason="No command provided in tool
-    # input") for an input that never reached the resolver at all -- can be
-    # constructed with only decision/reason, the same way every other
-    # "nothing to attribute" field on this class already defaults away.
+    # Defaults to None so a synthetic guard-clause verdict (e.g. one built for an input that
+    # never reached the resolver at all) can be constructed from just decision/reason --
+    # every other "nothing to attribute" field below defaults away too.
     provenance: Optional["Provenance"] = None
     overrides: List[Tuple[Optional[str], "ConflictOverride"]] = field(
         default_factory=list
@@ -830,74 +576,44 @@ class RuntimeVerdict:
 
 # ---------------------------------------------------------------------------
 # Configuration-surface Protocols for the permission_resolution / resolve /
-# file_matching seam (TOO-45 D2, narrowed by punch-list #03)
+# file_matching seam.
 # ---------------------------------------------------------------------------
 #
-# ``permission_resolution.py`` is architecturally forbidden from importing
-# :mod:`toolguard.config`, so ``config`` cannot be typed as
-# :class:`~toolguard.config.Configuration` at its entry points. These
-# Protocols close that gap by stating, structurally, the exact subset of
-# ``Configuration`` each caller's ``config`` parameter needs -- checked by
-# pyright without adding an import edge to :mod:`toolguard.config`.
-#
-# Punch-list #03 removed the runtime cycle a static import graph could not
-# see (``resolve.py`` importing FROM ``permission_resolution`` while
-# ``permission_resolution`` called back into a closure ``resolve.py`` handed
-# it): ``permission_resolution`` now imports its per-level matchers directly
-# from :mod:`toolguard.permissions` and :mod:`toolguard.file_matching`
-# instead of receiving one back as an injected callable, so there is no
-# longer a callback-shaped contract to type here -- only the ``config``
-# surface each entry point reads.
+# permission_resolution.py is architecturally forbidden from importing
+# toolguard.config, so config cannot be typed as Configuration at its entry
+# points. These Protocols close that gap by stating, structurally, the exact
+# subset of Configuration each caller's config parameter needs -- checked by
+# pyright without adding an import edge to toolguard.config.
 
 
 class ResolutionConfig(Protocol):
     """
-    The minimal configuration surface :mod:`toolguard.permission_resolution`
-    reads from ``config`` to run its decision cascade.
+    The minimal configuration surface :mod:`toolguard.permission_resolution` reads from
+    ``config`` to run its decision cascade.
 
-    :mod:`toolguard.permission_resolution` is architecturally forbidden from
-    importing :mod:`toolguard.config` (that module's own docstring: it stays
-    decoupled from :mod:`toolguard.config`, importing only
-    :mod:`toolguard.config_types`, :mod:`toolguard.permissions`,
-    :mod:`toolguard.file_matching`, and the stdlib), so ``config`` cannot be
-    typed as :class:`~toolguard.config.Configuration` there. This Protocol
-    is what closes that gap: any object handed in as ``config`` --
-    in practice always a real ``Configuration``, but a test double needs
-    only THIS surface -- must structurally supply exactly these four
-    members, no more. Restating the whole of ``Configuration`` here would
-    defeat the purpose; the value of this type is that it documents the
-    SMALL SUBSET :mod:`toolguard.permission_resolution` actually touches
-    (verified against that module's own source, not guessed).
+    Closes the gap left by :mod:`toolguard.permission_resolution` being architecturally
+    forbidden from importing :mod:`toolguard.config`: any object handed in as ``config`` --
+    in practice always a real :class:`~toolguard.config.Configuration`, but a test double
+    needs only this surface -- must structurally supply exactly these four members.
+    Restating the whole of ``Configuration`` here would defeat the purpose.
 
-    Note that :mod:`toolguard.resolve` -- the module that actually
-    constructs the ``config`` objects passed through this seam -- needs a
-    WIDER surface than this (``resolve_config_path``,
-    ``resolved_undecidable_fallback``, ``hard_deny``, ``hard_deny_entries``,
-    project-root anchoring, and more), so ``resolve.py``'s own ``config``
-    parameters are deliberately NOT typed against this Protocol; it
-    describes only what :mod:`toolguard.permission_resolution` itself needs.
+    :mod:`toolguard.resolve` needs a wider surface, so none of its ``config`` parameters
+    are typed against this Protocol -- see :class:`ResolveConfig`.
     """
 
     @property
     def parse_failures(self) -> Tuple[Tuple[Path, str], ...]:
         """
-        Every governed config file that failed to parse, as ``(path,
-        message)`` pairs -- read directly (never derived or filtered) by
-        :func:`~toolguard.permission_resolution._apply_ask_floor` /
-        :func:`~toolguard.permission_resolution.apply_parse_failure_floor`
-        to clamp a decision to ``'ask'`` whenever ANY governed file is
-        broken (the TOO-19 fail-open-via-undecidable-segments fix). A
-        caller supplying a filtered or empty value here silently disables
-        that floor for whatever it omits.
+        Every governed config file that failed to parse, as ``(path, message)`` pairs. Read
+        directly by callers and passed to
+        :func:`~toolguard.permission_resolution.apply_parse_failure_floor` to clamp a
+        decision to ``'ask'`` whenever any governed file is broken -- a caller supplying a
+        filtered or empty value here silently disables that floor for whatever it omits.
 
-        Declared as a read-only ``@property`` (not a plain attribute)
-        specifically because the real implementer,
-        :class:`~toolguard.config.Configuration`, is
-        ``@dataclass(frozen=True)`` -- pyright treats a frozen dataclass
-        field as read-only, so a Protocol member declared as a plain
-        writable attribute would NOT structurally match it (verified: this
-        exact mismatch was pyright's reported error before this was made a
-        property).
+        A read-only ``@property``, not a plain attribute: the real implementer,
+        :class:`~toolguard.config.Configuration`, is a frozen dataclass, and pyright treats
+        a frozen dataclass field as read-only, so a plain writable attribute here would not
+        structurally match it.
         """
         ...
 
@@ -913,111 +629,74 @@ class ResolutionConfig(Protocol):
         ...,
     ]:
         """
-        Return ``tool_name``'s ``(allow, deny, ask, layers)`` pattern tuples,
-        one per hierarchy level, most-specific first.
+        Return ``tool_name``'s ``(allow, deny, ask, layers)`` pattern tuples, one per
+        hierarchy level, most-specific first.
 
-        Drives the more-specific-wins cascade: each level's ``(allow, deny,
-        ask)`` triple is matched by :func:`~toolguard.permissions.decide_command_at_level_detailed`
-        or :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`
-        (TOO-45 punch-list #03: called directly by
-        :func:`~toolguard.permission_resolution.resolve_command_permission`/
-        :func:`~toolguard.permission_resolution.resolve_file_path_permission`,
-        one per level, eagerly), and ``layers`` is kept around so a winning
-        pattern can be mapped back to its source :class:`Provenance` via
-        :func:`provenance_for_pattern`/:func:`entry_for_pattern` inside the
-        pure fold, :func:`~toolguard.permission_resolution.resolve_permission_cascade`.
+        Drives the more-specific-wins cascade: each level's ``(allow, deny, ask)`` triple is
+        matched by :func:`~toolguard.permissions.decide_command_at_level_detailed` or
+        :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`, and ``layers``
+        is kept around so a winning pattern can be mapped back to its source
+        :class:`Provenance` via :func:`provenance_for_pattern`/:func:`entry_for_pattern`.
         """
         ...
 
     def has_any_rules(self, tool_name: str) -> bool:
         """
-        Return whether ``tool_name`` has ANY rule configured anywhere
-        (allow, deny, ask, or hard_deny, at any level) -- TOO-15.
+        Return whether ``tool_name`` has any rule configured anywhere (allow, deny, ask, or
+        hard_deny, at any level).
 
-        Lets :func:`~toolguard.permission_resolution._resolve_unclamped`
-        distinguish a genuinely UNCONFIGURED tool (always resolves to
-        ``'ask'``, so a fresh install is never bricked by a blanket deny)
-        from a CONFIGURED tool whose rules simply did not match the current
-        command/path (governed by :meth:`resolved_no_match_fallback`
-        instead).
+        Distinguishes a genuinely unconfigured tool (always resolves to ``'ask'``, so a
+        fresh install is never bricked by a blanket deny) from a configured tool whose rules
+        simply did not match the current command/path (governed by
+        :meth:`resolved_no_match_fallback` instead).
         """
         ...
 
     def resolved_no_match_fallback(self) -> str:
         """
-        Return the effective ``no_match_fallback`` policy: one of ``'ask'``,
-        ``'deny'``, ``'allow_with_warning'``, or ``'allow'`` -- already
-        alias-normalized and defaulted, never a raw/unrecognized config
-        value.
+        Return the effective ``no_match_fallback`` policy: one of ``'ask'``, ``'deny'``,
+        ``'allow_with_warning'``, or ``'allow'`` -- already alias-normalized and defaulted,
+        never a raw/unrecognized config value.
 
-        Read by :func:`~toolguard.permission_resolution._resolve_unclamped`
-        only once every hierarchy level has matched nothing, to decide the
-        TOO-15 no-match branch.
+        Consulted only in the no-match branch, once every hierarchy level has matched
+        nothing.
         """
         ...
 
 
 class ResolveConfig(ResolutionConfig, Protocol):
     """
-    The configuration surface :mod:`toolguard.resolve` itself needs -- a
-    STRICT SUPERSET of :class:`ResolutionConfig` (TOO-45 D2 follow-up).
+    The configuration surface :mod:`toolguard.resolve` itself needs -- a strict superset of
+    :class:`ResolutionConfig`.
 
-    ``resolve.py`` is the module that actually constructs and threads
-    ``config`` through this seam, so unlike :mod:`toolguard.permission_resolution`
-    it cannot be typed against the narrower Protocol: it genuinely reads four
-    more members directly (found by reading every ``config.`` use in
-    ``resolve.py``, not guessed), on top of the four ``ResolutionConfig``
-    already declares. Inheriting ``ResolutionConfig`` rather than restating
-    those four is deliberate: structural subtyping then makes a
-    ``ResolveConfig`` valid wherever a ``ResolutionConfig`` is expected, so
-    passing ``config`` from a ``resolve.py`` entry point down into
+    ``resolve.py`` reads four more members than :class:`ResolutionConfig` declares -- two
+    directly (``hard_deny_entries``, ``resolved_undecidable_fallback``), two through the
+    file-path helpers it forwards ``config`` into (``hard_deny``, ``resolve_config_path``).
+    Inheriting rather than restating those four is deliberate: structural subtyping then
+    makes a ``ResolveConfig`` valid wherever a
+    ``ResolutionConfig`` is expected, so passing ``config`` down into
     :func:`~toolguard.permission_resolution.resolve_command_permission`/
-    :func:`~toolguard.permission_resolution.resolve_file_path_permission`
-    stays sound without a cast.
-
-    This is what closes the gap the first pass of this work (TOO-45 D2)
-    left open and explicitly flagged rather than papering over: with only
-    ``ResolutionConfig`` defined, ``resolve.py``'s OWN ``config`` parameters
-    had nowhere correct to be typed (too narrow for what they actually use),
-    so they stayed bare/untyped, and pyright performed NO check at the one
-    boundary that matters at runtime -- the real call from ``resolve.py``
-    into the resolver entry points. Typing ``resolve.py``'s entry
-    points (:func:`~toolguard.resolve.resolve_file_path_permission_detailed`,
-    :func:`~toolguard.resolve.resolve_bash_permission_detailed`) against
-    THIS Protocol instead makes that call site checked for real -- see the
-    implementation report for the verification (a broken call site was
-    observed to fail exactly there).
-
-    Still does not import :mod:`toolguard.config`, and still adds no new
-    import edge: lives in the same shared leaf as ``ResolutionConfig`` for
-    the same reason.
+    :func:`~toolguard.permission_resolution.resolve_file_path_permission` stays sound
+    without a cast.
     """
 
     def resolve_config_path(self, raw_path: str) -> str:
         """
         Anchor a relative file-path pattern's body to the project root.
 
-        Used by ``file_matching.py``'s own ``_anchor_file_pattern`` for every
-        file-path pattern match (allow, deny, ask, and hard-deny carve-outs
-        alike) -- ``permission_resolution.py`` reaches this only through
-        :class:`PathAnchoring` (below), for the file-path cascade; it is
-        purely a file-path-side concern.
+        A file-path-side concern only -- the Bash cascade never calls it.
         """
         ...
 
     def hard_deny(self, tool_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
         """
-        Return the pooled ``(deny_patterns, allow_patterns)`` hard-deny pair
-        for ``tool_name``, wrapper-stripped, unioned across every level.
+        Return the pooled ``(deny_patterns, allow_patterns)`` hard-deny pair for
+        ``tool_name``, wrapper-stripped, unioned across every level.
 
-        Used by ``file_matching.py``'s ``check_file_path_hard_deny`` to check the
-        unoverridable hard-deny pool FIRST, before the normal cascade --
-        entirely outside ``permission_resolution.py``'s own scope (the
-        Bash-side equivalent pool is fetched by ``resolve.py``'s OWN caller
-        and handed to :func:`~toolguard.resolve.resolve_bash_permission_detailed`
-        as plain arguments, not read from ``config`` inside the file-path
-        resolver itself, which is why this Protocol declares the method
-        anyway -- the file-path path uses it directly).
+        Checked FIRST, before the normal cascade, for the unoverridable hard-deny pool. The
+        file-path path reads this pool from ``config`` directly; the Bash-side equivalent
+        pool is instead fetched by the caller and passed to
+        :func:`~toolguard.resolve.resolve_bash_permission_detailed` as a plain argument.
         """
         ...
 
@@ -1025,43 +704,40 @@ class ResolveConfig(ResolutionConfig, Protocol):
         self, tool_name: str
     ) -> Tuple[Tuple["RuleEntry", ...], Tuple["RuleEntry", ...]]:
         """
-        Return the pooled hard-deny ``(deny_entries, allow_entries)`` pair
-        for ``tool_name`` as wrapper-intact :class:`~toolguard.rule_entry.RuleEntry`
-        objects (carrying ``additionalContext`` enrichment).
+        Return the pooled hard-deny ``(deny_entries, allow_entries)`` pair for ``tool_name``
+        as wrapper-intact :class:`~toolguard.rule_entry.RuleEntry` objects (carrying
+        ``additionalContext`` enrichment).
 
-        Used by ``resolve.py``'s ``_hard_deny_additional_context`` to look up
-        a matched hard-deny pattern's enrichment text, for BOTH the Bash and
+        Used to look up a matched hard-deny pattern's enrichment text, for both the Bash and
         file-path hard-deny paths.
         """
         ...
 
     def resolved_undecidable_fallback(self) -> str:
         """
-        Return the effective ``undecidable_fallback`` policy: one of
-        ``'ask'``, ``'deny'``, or ``'allow'`` -- already alias-normalized and
-        defaulted.
+        Return the effective ``undecidable_fallback`` policy: one of ``'ask'``, ``'deny'``,
+        ``'allow_with_warning'``, or ``'allow'`` -- already alias-normalized and defaulted.
 
-        Used directly by :func:`~toolguard.resolve.resolve_bash_permission_detailed`
-        to floor a compound Bash verdict built from a grammar-level
-        undecidable segment (one with no leaves, so it never reaches
-        :func:`~toolguard.permission_resolution.resolve_command_permission`
-        at all) -- a concern specific to the Bash compound pipeline that
-        ``permission_resolution.py`` has no reason to know about.
+        Passed to :func:`~toolguard.compound.judge_unit` for every unit of a compound Bash
+        command -- a Bash-compound-only concern, unused by the file-path cascade. It floors
+        two cases: a grammar-level undecidable segment (no leaves, so it never reaches
+        :func:`~toolguard.permission_resolution.resolve_command_permission` at all), and an
+        ask-floor leaf (foreign inline code / heredoc sink), which does have a part and does
+        reach that resolver, but is floored anyway once the explicit-deny check clears it.
         """
         ...
 
 
 class PathAnchoring(Protocol):
     """
-    The one member :mod:`toolguard.file_matching` needs from ``config`` to
-    anchor a relative file-path pattern to the project root.
+    The ``config`` member file_matching's matching functions need: project-root anchoring
+    for a relative file-path pattern.
 
-    Deliberately narrower than :class:`ResolveConfig`: ``file_matching.py``'s
-    matching functions (:func:`~toolguard.file_matching._anchor_file_pattern`,
-    :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`)
-    touch nothing else on ``config``, so typing them against this one-member
-    Protocol documents that tight coupling instead of the wider surface
-    :class:`ResolveConfig` grants ``resolve.py`` itself.
+    Deliberately narrower than :class:`ResolveConfig`: file-matching's matching functions
+    touch nothing else on ``config``, so this one-member Protocol documents that tight
+    coupling instead of granting the wider surface ``resolve.py`` itself needs. (The module
+    as a whole needs more -- :func:`~toolguard.file_matching.check_file_path_hard_deny` is
+    typed :class:`ResolveConfig`, not this Protocol.)
     """
 
     def resolve_config_path(self, raw_path: str) -> str:

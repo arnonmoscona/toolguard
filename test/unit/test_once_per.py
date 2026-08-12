@@ -1,12 +1,6 @@
 """
 Unit tests for toolguard.once_per: the once-per-period facade
 (``day`` / ``OncePer`` / ``Repeat``).
-
-Moved here from test_session_warnings.py (TOO-45 punch-list #01, conceptual
-overhaul, second pass) when the facade itself moved out of
-toolguard.session_warnings into toolguard.once_per -- session_warnings now
-holds only the takeover-mode notice, which no longer touches this facade at
-all (see test_session_warnings.py).
 """
 
 import unittest
@@ -124,7 +118,7 @@ class TestOncePerWarn(_IsolatedStoreMixin, unittest.TestCase):
         Given sqlite3 is unavailable
         When warn() is called twice with description "a thing"
         Then the degraded-mode notice mentions "a thing" and the reason, and
-             is printed only ONCE across both calls -- not duplicated per call
+             is printed only ONCE across both calls
         """
         thing = once_per.day("k", "a thing")
         with TemporaryDirectory() as tmpdir:
@@ -145,9 +139,8 @@ class TestOncePerWarn(_IsolatedStoreMixin, unittest.TestCase):
         Given a project=None (the once-per-period guarantee cannot be
             verified for a different reason than sqlite3)
         When warn() is called
-        Then the degraded-mode notice mentions the store's own reason text
-             rather than the facade asserting a specific storage technology
-             on its own authority (TOO-45 punch-list #01, item 1)
+        Then the degraded-mode notice carries the store's own reason text
+             rather than the facade naming a storage technology
         """
         thing = once_per.day("k", "a thing")
 
@@ -252,10 +245,7 @@ class TestOncePerRun(_IsolatedStoreMixin, unittest.TestCase):
             per-period guarantee cannot be verified for this call) and
             repeating=UNSAFE
         When run() is called
-        Then the action does NOT run -- this is the exact defect TOO-45
-             punch-list #01 item 1 identifies and fixes: project=None used
-             to be silently treated as "proceed", defeating a caller's
-             fail-closed policy on EVERY invocation
+        Then the action does NOT run
         """
         thing = once_per.day("k", "a thing")
         calls = []
@@ -273,8 +263,7 @@ class TestOncePerRun(_IsolatedStoreMixin, unittest.TestCase):
         """
         Given project=None and repeating=SAFE
         When run() is called
-        Then the action DOES run -- the caller declared repeats safe, so
-             an unverifiable guarantee still fails open for this action
+        Then the action DOES run -- the caller declared repeats safe
         """
         thing = once_per.day("k", "a thing")
 
@@ -286,8 +275,8 @@ class TestOncePerRun(_IsolatedStoreMixin, unittest.TestCase):
         """
         Given sqlite3 is unavailable and repeating=UNSAFE
         When run() is called
-        Then a notice is printed naming *description* and mentioning it will
-             be skipped -- the caller is never left silent
+        Then a notice is printed naming *description* and saying it will be
+             skipped
         """
         thing = once_per.day("k", "automatic permission migration")
         with TemporaryDirectory() as tmpdir:
@@ -309,10 +298,7 @@ class TestOncePerRun(_IsolatedStoreMixin, unittest.TestCase):
 
 
 class TestOncePerInternalHousekeeping(_IsolatedStoreMixin, unittest.TestCase):
-    """
-    Housekeeping is internal to OncePer -- no client code calls anything
-    named "sweep" or "reap" (TOO-45 punch-list #01, item 2).
-    """
+    """Housekeeping is internal to OncePer: a caller never asks for it."""
 
     def test_successful_claim_triggers_reap(self):
         """
@@ -348,10 +334,7 @@ class TestOncePerInternalHousekeeping(_IsolatedStoreMixin, unittest.TestCase):
 
 
 class TestOncePerDegradedNoticeIsPerInstance(_IsolatedStoreMixin, unittest.TestCase):
-    """
-    TOO-45 punch-list #01 item 8: the degraded-notice dedup is an instance
-    attribute, not a shared registry keyed on the throttled key alone.
-    """
+    """The degraded-notice dedup is per instance, not a registry keyed on the key alone."""
 
     def test_two_things_with_the_same_key_notify_independently(self):
         """
@@ -359,8 +342,7 @@ class TestOncePerDegradedNoticeIsPerInstance(_IsolatedStoreMixin, unittest.TestC
             key string (as two different periods throttling the same key
             would)
         When both hit an unguaranteed claim and call warn()
-        Then BOTH print their own degraded-mode notice -- one instance's
-             dedup does not swallow the other's
+        Then BOTH print their own degraded-mode notice
         """
         thing_a = once_per.day("shared-key", "thing A")
         thing_b = once_per.day("shared-key", "thing B")

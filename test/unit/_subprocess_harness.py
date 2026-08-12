@@ -1,13 +1,10 @@
 """
-Shared cross-process test harness (TOO-45 punch-list #15 fix pass, item 6).
-
-Extracted from four independent copies of the same pattern
-(test_once_per_store.py, test_config_divergence.py, test_file_lock.py,
-test_migration.py): spawn a ``python -c <script>`` child with this repo as
-its working directory, and poll a marker/barrier file with a monotonic
-deadline instead of asserting on a guessed ``sleep()`` duration. The child
-scripts themselves stay per-test -- they run in a separate process, so there
-is nothing here to share beyond launching them and watching the filesystem.
+Shared cross-process test harness: spawn a ``python -c <script>`` child with
+this repo as its working directory, and poll a marker/barrier file with a
+monotonic deadline instead of asserting on a guessed ``sleep()`` duration.
+The child scripts themselves stay per-test -- they run in a separate
+process, so there is nothing here to share beyond launching them and
+watching the filesystem.
 """
 
 import subprocess

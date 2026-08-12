@@ -1,12 +1,4 @@
-"""
-Unit tests for toolguard.tools.redundancy -- redundant rule detection.
-
-Tests cover:
-- Static duplicate detection (exact and normalised-equal)
-- The required fixture: 'uv run pytest :*' vs 'uv run pytest:*'
-- Corpus-backed subsumption detection
-- Integration with a minimal Configuration built in-memory
-"""
+"""Unit tests for toolguard.tools.redundancy -- redundant rule detection."""
 
 import unittest
 from datetime import datetime
@@ -47,11 +39,7 @@ def _make_layer(
     is_native: bool = False,
     specificity: int = 0,
 ) -> ConfigLayer:
-    """
-    Build a ConfigLayer with the given allow/deny/ask patterns for ``tool``.
-
-    Patterns are stored in the wrapped ``Tool(inner)`` form as config files do.
-    """
+    """Build a ConfigLayer whose allow/deny/ask hold the given patterns, wrapped as ``Tool(inner)``."""
     prefix = f"{tool}("
     wrapped_allow = [f"{prefix}{p})" for p in (allow or [])]
     wrapped_deny = [f"{prefix}{p})" for p in (deny or [])]
@@ -125,13 +113,11 @@ class TestFindStaticDuplicates(unittest.TestCase):
         When find_static_duplicates() is called
         Then a finding is returned because both normalise to the same body
         """
-        # These differ only in whitespace inside the body
         patterns = ["uv run pytest :*", "uv run pytest:*"]
         prov = _make_provenance()
         findings = find_static_duplicates(patterns, prov, "Bash", "allow")
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].kind, "static")
-        # The second one is the duplicate; first is canonical
         self.assertEqual(findings[0].redundant_pattern, "uv run pytest:*")
         self.assertEqual(findings[0].covered_by, "uv run pytest :*")
 
@@ -232,7 +218,6 @@ class TestFindStaticDuplicatesAcrossLayers(unittest.TestCase):
         findings = find_static_duplicates_across_layers(config, "Bash")
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].kind, "static")
-        # The second pattern is the duplicate
         self.assertIn("pytest", findings[0].redundant_pattern)
 
 
@@ -251,9 +236,6 @@ class TestCorpusRedundancy(unittest.TestCase):
         When find_redundancy() is called with a corpus
         Then a corpus-backed finding is returned for A (removing A changes nothing)
         """
-        # Config: allow "git status:*" AND "git:*" (git:* covers everything git)
-        # Corpus: only "git status" commands
-        # "git status:*" is corpus-redundant because "git:*" already covers it
         layer = _make_layer("Bash", allow=["git status:*", "git:*"])
         config = _make_config(layer)
         corpus = [
@@ -262,7 +244,6 @@ class TestCorpusRedundancy(unittest.TestCase):
         ]
         findings = find_redundancy(config, "Bash", corpus)
         corpus_findings = [f for f in findings if f.kind == "corpus"]
-        # "git status:*" should be corpus-redundant (covered by "git:*")
         redundant_patterns = [f.redundant_pattern for f in corpus_findings]
         self.assertIn("git status:*", redundant_patterns)
 
@@ -303,7 +284,7 @@ class TestCorpusRedundancy(unittest.TestCase):
         """
         layer = _make_layer(
             "Bash",
-            allow=["ls:*", "ls:*", "git:*", "git status:*"],  # 'ls:*' is exact dupe
+            allow=["ls:*", "ls:*", "git:*", "git status:*"],
         )
         config = _make_config(layer)
         corpus = [
@@ -313,8 +294,6 @@ class TestCorpusRedundancy(unittest.TestCase):
         findings = find_redundancy(config, "Bash", corpus)
         kinds = {f.kind for f in findings}
         self.assertIn("static", kinds)
-        # corpus finding may or may not appear depending on config coverage
-        # but static finding must be present
         static_findings = [f for f in findings if f.kind == "static"]
         self.assertGreater(len(static_findings), 0)
 
@@ -343,21 +322,6 @@ class TestCorpusRedundancy(unittest.TestCase):
             bare rule 'git:*' in the same layer, and a corpus exercising it
         When find_redundancy() is called with the corpus
         Then the structured entry IS reported corpus-redundant.
-
-        Regression test for the confirmed TOO-19 Phase 0a increment 6 defect
-        in `_config_without_allow`: matching the layer to edit via
-        `wrapped_target in allow_list` is always False against a structured
-        (dict) element, so the removal ALWAYS silently no-opped for a
-        structured pattern. Empirically (see probe scripts run during
-        implementation), this did not surface as a false "REDUNDANT" report
-        -- the pre-existing `config_without is config` identity guard in
-        `find_corpus_redundant_allows` intercepts the unchanged-object case
-        and SKIPS it instead. The net effect was an unconditional coverage
-        gap: a structured entry could NEVER be detected as corpus-redundant,
-        genuinely redundant or not, because `_config_without_allow` could
-        never produce a modified config for one. This test proves the check
-        is now meaningful for structured entries by exercising a case that
-        IS genuinely redundant and confirming it fires.
         """
         prov = Provenance(
             level="project",
@@ -398,10 +362,6 @@ class TestCorpusRedundancy(unittest.TestCase):
             removing it necessarily changes that command's decision
         When find_redundancy() is called with a corpus exercising it
         Then the structured entry is NOT reported corpus-redundant.
-
-        Complements the positive regression test above: proves the fix does
-        not overcorrect into flagging every structured entry as redundant
-        regardless of whether it is actually covered by another rule.
         """
         prov = Provenance(
             level="project",

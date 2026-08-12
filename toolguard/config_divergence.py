@@ -1,16 +1,6 @@
 """
-Config divergence detection for toolguard.
-
-Detects when Claude adds permissions to settings.local.json that are not
-present in toolguard config, helping users identify configuration drift.
-
-This module DETECTS divergence; it does not write to toolguard's structured
-error log itself (TOO-45 R5d). ``config_divergence`` is a ``config``-layer
-module, and :mod:`toolguard.error_log` is ``runtime``-layer -- a config-layer
-module depending on it would be an upward layer violation. The caller
-(:mod:`toolguard.hook`, which already legitimately imports ``error_log``) is
-responsible for logging the warning message :func:`check_and_warn_divergence`
-returns. See :class:`DivergenceCheckResult`.
+Config divergence detection: permissions present in Claude's native
+settings.local.json but absent from toolguard's own configuration.
 """
 
 import json
@@ -23,9 +13,7 @@ from toolguard.config import is_tool_wrapper, load_configuration
 from toolguard.config_validation import extract_tool_name
 from toolguard.error_reporter import report_warning
 
-#: The single named object for this module's once-per-day throttling. One
-#: name carries both the key and the human description (TOO-45 punch-list
-#: #01 item 4) -- no separate _KEY constant to drift from it.
+#: Once-per-day throttle for the divergence warning.
 DIVERGENCE_WARNING = once_per.day(
     "divergence_warning", "the configuration divergence warning"
 )
@@ -33,17 +21,19 @@ DIVERGENCE_WARNING = once_per.day(
 
 def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
     """
-    Load allow/deny/ask permissions from Claude's native settings.local.json.
+    Read tool-scoped allow/deny/ask patterns from a Claude settings file.
 
-    Extracts patterns for governed tools (Bash, Read, Write, Edit) from the
-    permissions.allow, permissions.deny, and permissions.ask lists.
+    Every ``Tool(...)``-wrapped entry is kept, whatever the tool -- including
+    tools toolguard does not govern. Restricting to governed tools is a
+    separate step, in :func:`find_divergent_patterns`.
 
     Args:
-        settings_path: Path to settings.local.json file
+        settings_path: Path to a ``settings.local.json``.
 
     Returns:
-        Dictionary with keys 'allow', 'deny', 'ask', each containing list of patterns.
-        Returns empty dict if file doesn't exist or can't be parsed.
+        ``{'allow': [...], 'deny': [...], 'ask': [...]}``, wrappers intact.
+        A missing file yields three empty lists silently; an unreadable or
+        unparseable one yields the same after reporting a warning.
     """
     if not settings_path.exists():
         return {"allow": [], "deny": [], "ask": []}
@@ -62,10 +52,6 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
 
     result = {"allow": [], "deny": [], "ask": []}
 
-    # Keep only tool-scoped permission strings (``Tool(...)``). Recognised
-    # structurally via the shared config.is_tool_wrapper helper -- no
-    # hand-maintained tool list and no duplicated regex (single source of truth
-    # lives in config.py), so newly governed tools need no change here.
     for perm_type in ["allow", "deny", "ask"]:
         for perm in permissions.get(perm_type, []):
             if is_tool_wrapper(perm):
@@ -76,26 +62,16 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
 
 def get_toolguard_permissions(config) -> Dict[str, List[str]]:
     """
-    Extract raw permission patterns from the resolved toolguard configuration.
+    Extract raw permission patterns from a resolved toolguard configuration.
 
-    Only processes toolguard_hook layers (not native Claude settings), merged
-    across all hierarchy levels with tool wrappers intact. Delegates entirely to
-    the :class:`~toolguard.config.Configuration` abstraction, so this client never
-    opens files, parses formats, or branches on discovery order.
-
-    ``Configuration.toolguard_permissions()`` returns
-    :class:`~toolguard.rule_entry.RuleEntry` tuples (TOO-19 Phase 0a increment
-    8); this function's own contract stays plain pattern strings, since every
-    caller here (divergence set-comparison, migration's redundancy/similarity
-    checks) only ever needs ``.pattern`` -- so the ``.pattern`` projection
-    happens once, right here, rather than pushing ``RuleEntry`` into callers
-    that have no use for its metadata.
+    Patterns keep their ``Tool(...)`` wrappers, so they compare directly
+    against the output of :func:`get_native_permissions`.
 
     Args:
         config: A resolved :class:`~toolguard.config.Configuration`.
 
     Returns:
-        Dictionary with keys 'allow', 'deny', 'ask', each a list of patterns.
+        ``{'allow': [...], 'deny': [...], 'ask': [...]}``.
     """
     perms = config.toolguard_permissions()
     return {
@@ -110,26 +86,25 @@ def find_divergent_patterns(
     governed_tools: Optional[Set[str]] = None,
 ) -> Dict[str, List[str]]:
     """
-    Find patterns in native config that are not in toolguard config.
+    Find patterns present in *native* but not in *toolguard*.
 
-    Uses exact string matching for pattern comparison. In takeover mode,
-    patterns matching ignored_patterns are excluded (expected blanket allows).
+    Comparison is exact string equality over whole wrapped patterns, so a
+    native ``Bash(git *)`` and a toolguard ``Bash(git*)`` are two different
+    rules.
 
     Args:
-        native: Native permissions from settings.local.json
-        toolguard: Toolguard permissions from toolguard_hook files
-        ignored_patterns: Patterns to ignore (from takeover_mode.ignored_allow_patterns)
-        governed_tools: When provided, restrict the result to patterns whose tool is
-            in this set (compared via :func:`extract_tool_name`). A pattern for a tool
-            toolguard does NOT govern (e.g. ``WebFetch(...)``, ``Skill(...)``) must not
-            be reported divergent -- migrating it would move it out of
-            ``settings.local.json`` and leave it enforced by neither toolguard nor
-            native Claude (issue #1). The set is the config's live governed-tools list,
-            so this tracks changes over time (e.g. WebFetch becoming governed) with no
-            code change here. When ``None``, no tool filtering is applied.
+        native: Permissions read from ``settings.local.json``.
+        toolguard: Permissions read from ``toolguard_hook`` files.
+        ignored_patterns: Patterns dropped from the ``allow`` result only.
+        governed_tools: When given, keep only patterns whose tool (per
+            :func:`extract_tool_name`) is in this set; ``None`` applies no
+            tool filter. A rule for a tool toolguard does not govern (e.g.
+            ``WebFetch(...)``) must never be reported divergent -- migrating
+            it removes it from ``settings.local.json``, leaving it enforced
+            by neither toolguard nor native Claude.
 
     Returns:
-        Dictionary with keys 'allow', 'deny', 'ask', each containing divergent patterns
+        ``{'allow': [...], 'deny': [...], 'ask': [...]}``, each sorted.
     """
     ignored_set = set(ignored_patterns)
 
@@ -139,21 +114,11 @@ def find_divergent_patterns(
         native_patterns = set(native.get(perm_type, []))
         toolguard_patterns = set(toolguard.get(perm_type, []))
 
-        # Find patterns in native but not in toolguard. Comparison #1 from
-        # RuleEntry.identity()'s docstring ("same RULE", pattern-only): both
-        # sides are already projected down to bare `.pattern` strings (see
-        # get_toolguard_permissions), never `identity()`, so a rule carrying
-        # metadata on one side and none/different metadata on the other is
-        # never reported divergent -- switching this to identity() would make
-        # migration re-add the "missing" native twin forever.
         divergent = native_patterns - toolguard_patterns
 
-        # Filter out ignored patterns (only for 'allow' type in takeover mode)
         if perm_type == "allow":
             divergent = divergent - ignored_set
 
-        # Restrict to governed tools when a set was supplied, so rules for
-        # ungoverned tools are never treated as migratable divergences.
         if governed_tools is not None:
             divergent = {
                 pattern
@@ -169,27 +134,17 @@ def find_divergent_patterns(
 @dataclass(frozen=True)
 class DivergenceCheckResult:
     """
-    Outcome of a single :func:`check_and_warn_divergence` call.
-
-    ``check_and_warn_divergence`` DETECTS divergence and decides whether a
-    new warning is due (once per day); it deliberately does NOT write to
-    toolguard's structured error log itself -- doing so
-    would make this ``config``-layer module depend on
-    :mod:`toolguard.error_log`, a ``runtime``-layer module (TOO-45 R5d). The
-    caller (:mod:`toolguard.hook`, which already legitimately depends on
-    ``error_log``) is responsible for calling
-    :func:`toolguard.error_log.log_warning` with ``warning_message`` and
-    ``corrective_steps`` when they are not ``None``.
+    Outcome of one :func:`check_and_warn_divergence` call.
 
     Attributes:
         divergent_patterns: Patterns found in native config but not in
-            toolguard config (flattened across allow/deny/ask), or an empty
-            list when there is nothing to report -- either no divergence was
-            found, or a warning was already issued today.
-        warning_message: The human-readable warning text to log, or ``None``
+            toolguard config, flattened across allow/deny/ask. Empty when
+            there is nothing to report -- either no divergence was found, or
+            a warning had already been issued today.
+        warning_message: The warning text, for the caller to log; ``None``
             when there is nothing new to warn about.
         corrective_steps: Suggested corrective-action text to log alongside
-            ``warning_message``, or ``None`` under the same conditions.
+            ``warning_message``; ``None`` under the same conditions.
     """
 
     divergent_patterns: List[str]
@@ -201,50 +156,42 @@ def check_and_warn_divergence(
     project_root: Path, takeover_config: Dict
 ) -> DivergenceCheckResult:
     """
-    Check for config divergence and prepare a warning if found.
+    Compare settings.local.json against toolguard config, warning once a day.
 
-    Scans settings.local.json for patterns not present in toolguard config.
-    A new warning is deduplicated once per day. It is only actually printed
-    immediately before returning (the side effect being deduplicated) -- not
-    before the analysis above it -- so an exception raised while
-    loading/comparing config (e.g. a malformed config file) never leaves the
-    day's slot claimed with nothing to show for it. A cheap read-only
-    pre-check skips the analysis entirely on an already-warned day.
+    A new warning is printed to stderr here, and also returned so the caller
+    can log it too.
 
-    This function DETECTS divergence, prints an immediate stderr notice, and
-    marks that a warning has been issued. It does NOT write to toolguard's
-    structured error log -- see :class:`DivergenceCheckResult`'s docstring
-    for why; the caller is responsible for that.
+    The day's claim is taken at the very end, once there is something to
+    show for it: an exception while loading or comparing config never
+    consumes the day, and a day that found no divergence stays open for
+    divergence appearing later that day.
 
     Args:
-        project_root: Path to project root
-        takeover_config: Takeover mode configuration dict with ignored_allow_patterns
+        project_root: Path to the project root.
+        takeover_config: Takeover-mode settings.
+            ``ignored_allow_patterns`` is always honoured;
+            ``additional_ignored_patterns`` only when ``enabled``.
 
     Returns:
-        A :class:`DivergenceCheckResult`. ``divergent_patterns`` is empty,
-        and ``warning_message``/``corrective_steps`` are ``None``, when there
-        is nothing new to report.
+        A :class:`DivergenceCheckResult`, empty and ``None``-valued when
+        there is nothing new to report.
     """
+    # Cheap read-only pre-check, so an already-warned day skips the analysis.
     if DIVERGENCE_WARNING.done(project_root):
-        # Already warned today -- skip the analysis entirely.
         return DivergenceCheckResult(divergent_patterns=[])
 
-    # Load native permissions from settings.local.json
     settings_path = project_root / ".claude" / "settings.local.json"
     native_perms = get_native_permissions(settings_path)
 
-    # Load toolguard permissions via the config abstraction (no direct file I/O).
-    # ignore_env_override=True: divergence analysis is project-scoped (it compares
-    # this project's settings.local.json against this project's toolguard config),
-    # so it must ignore CLAUDE_SETTINGS_PATH and discover the project hierarchy,
-    # consistent with the migration tool's project-based behaviour.
+    # ignore_env_override=True: this compares one project's
+    # settings.local.json against that same project's toolguard config, so a
+    # stale CLAUDE_SETTINGS_PATH pointing at an unrelated project must not be
+    # honoured.
     config = load_configuration(project_root, ignore_env_override=True)
     toolguard_perms = get_toolguard_permissions(config)
 
-    # Find divergent patterns
     ignored_patterns = takeover_config.get("ignored_allow_patterns", [])
     if takeover_config.get("enabled", False):
-        # In takeover mode, also include additional_ignored_patterns
         ignored_patterns = ignored_patterns + takeover_config.get(
             "additional_ignored_patterns", []
         )
@@ -256,17 +203,13 @@ def check_and_warn_divergence(
         governed_tools=set(config.governed_tools()),
     )
 
-    # Collect all divergent patterns
     all_divergent = []
     for perm_type in ["allow", "deny", "ask"]:
         all_divergent.extend(divergent[perm_type])
 
     if not all_divergent:
-        # Nothing to report -- no claim was ever taken, so a later call
-        # today can still catch divergence appearing mid-day.
         return DivergenceCheckResult(divergent_patterns=[])
 
-    # Format warning message
     warning_lines = [
         "[TOOLGUARD WARNING] New permission(s) found in settings.local.json but not in toolguard config:"
     ]
@@ -279,9 +222,9 @@ def check_and_warn_divergence(
     warning_message = "\n".join(warning_lines)
     corrective_steps = "Consider migrating to toolguard config. Run: toolguard-migrate"
 
-    # Immediate, direct stderr notice -- independent of the structured error
-    # log the caller writes via log_warning (see DivergenceCheckResult). A
-    # loss here means another process just warned -- stay quiet.
+    # warn() prints and takes the day's claim in one step. False means
+    # another invocation claimed it since the pre-check above and has
+    # already printed.
     if not DIVERGENCE_WARNING.warn(project_root, warning_message):
         return DivergenceCheckResult(divergent_patterns=[])
 

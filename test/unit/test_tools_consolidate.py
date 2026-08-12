@@ -1,14 +1,4 @@
-"""
-Unit tests for toolguard.tools.consolidate -- consolidation proposal engine.
-
-Tests cover:
-- Step-0 primitive: with_layer_allow_replaced correctness
-- _config_without_allow delegation (regression for refactored redundancy helper)
-- Family-1 (literal-alternation): git-family happy path acceptance
-- Family-1 (literal-alternation): alembic landmine rejection via token-count guard
-- Family-2 (static-subsumption): mkdir drop acceptance
-- Family-2 (static-subsumption): conservative non-claim for unrelated patterns
-"""
+"""Unit tests for toolguard.tools.consolidate -- consolidation proposal engine."""
 
 import unittest
 from datetime import datetime
@@ -57,11 +47,7 @@ def _make_layer(
     ask: Optional[List[str]] = None,
     provenance: Optional[Provenance] = None,
 ) -> ConfigLayer:
-    """
-    Build a ConfigLayer with the given allow/deny/ask patterns for ``tool``.
-
-    Patterns are stored in the wrapped ``Tool(inner)`` form as config files do.
-    """
+    """Build a ConfigLayer whose allow/deny/ask hold the given patterns, wrapped as ``Tool(inner)``."""
     if provenance is None:
         provenance = _make_provenance()
     prefix = f"{tool}("
@@ -136,7 +122,7 @@ class TestWithLayerAllowReplaced(unittest.TestCase):
         """
         Given a layer with one allow pattern
         When with_layer_allow_replaced is called with an added pattern
-        Then the returned config's allow list contains the new pattern appended.
+        Then the returned config's allow list contains the new pattern.
         """
         prov = _make_provenance()
         layer = _make_layer("Bash", allow=["git diff:*"], provenance=prov)
@@ -211,7 +197,6 @@ class TestWithLayerAllowReplaced(unittest.TestCase):
 
         from toolguard.tools.config_access import per_layer_rules
 
-        # Layer_b should still have git status:*
         rules_b = [r for r in per_layer_rules(result, "Bash") if r.provenance == prov_b]
         self.assertEqual(len(rules_b), 1)
         self.assertIn("git status:*", rules_b[0].allow)
@@ -298,12 +283,6 @@ class TestConfigWithoutAllowDelegation(unittest.TestCase):
             normalize_entry, not by raw `dict in list-of-str` identity, which
             is always False for a structured element) and the returned config
             is a NEW object, not the input unchanged.
-
-        Regression test for the confirmed TOO-19 Phase 0a increment 6 defect:
-        `wrapped_target in allow_list` compared a str against a list holding a
-        dict element and was always False, so the removal silently no-opped
-        and the corpus-redundancy replay saw "no decision changed", falsely
-        reporting the structured entry as redundant.
         """
         prov = _make_provenance()
         structured = {"match": "Bash(git push:*)", "additionalContext": "careful"}
@@ -337,10 +316,7 @@ class TestFamily1GitHappyPath(unittest.TestCase):
     """Family-1 consolidation: git sub-commands collapsed into one regex."""
 
     def _make_git_config(self) -> tuple:
-        """
-        Build a config with six git sub-command allow patterns and return
-        (config, provenance) for use in tests.
-        """
+        """Build a config with six git sub-command allow patterns; return (config, provenance)."""
         prov = _make_provenance()
         patterns = [
             "git diff:*",
@@ -402,10 +378,7 @@ class TestFamily1GitHappyPath(unittest.TestCase):
         added = family1[0].added_pattern
         self.assertIsNotNone(added)
         self.assertTrue(added.startswith("[regex]^git ("), f"Unexpected: {added}")
-        # Equivalence-preserving: must NOT tighten with a trailing word boundary.
         self.assertNotIn("\\b", added)
-        # Tokens are inserted via re.escape, so 'ls-files' becomes 'ls\-files'.
-        # Check for the escaped form of each token.
         for token in ("diff", "flake8", "isort", "log", "ls-files", "status"):
             escaped = _re.escape(token)
             self.assertIn(
@@ -474,12 +447,7 @@ class TestFamily1GitHappyPath(unittest.TestCase):
 
 
 class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
-    """
-    Family-1 is EQUIVALENCE-PRESERVING.  The no-changed-decision gate (not any
-    incidental token-count structure) is the real mechanism that prevents the
-    alembic landmine -- a consolidation that silently widened an ask/deny command
-    to allow (or tightened an allowed one) changes a decision and is rejected.
-    """
+    """Family-1 is equivalence-preserving: the no-changed-decision gate, not token-count structure, prevents the alembic landmine."""
 
     def test_different_token_count_patterns_produce_no_proposals(self):
         """
@@ -494,8 +462,8 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
         layer = _make_layer(
             "Bash",
             allow=[
-                "uv run alembic db upgrade:*",  # 5 cmd tokens
-                "uv run alembic downgrade:*",  # 4 cmd tokens
+                "uv run alembic db upgrade:*",
+                "uv run alembic downgrade:*",
             ],
             provenance=prov,
         )
@@ -519,8 +487,6 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
              tightened a previously-allowed command.
         """
         prov = _make_provenance()
-        # The deny guard on 'alembic db downgrade' must remain denied after
-        # consolidation; an equivalence-preserving regex never widens it.
         layer = _make_layer(
             "Bash",
             allow=[
@@ -571,16 +537,13 @@ class TestFamily2MkdirSubsumption(unittest.TestCase):
     """Family-2 consolidation: structurally subsumed mkdir pattern dropped."""
 
     def _make_mkdir_config(self) -> tuple:
-        """
-        Build a config where 'mkdir -p /tmp/claude-code:*' is subsumed
-        by 'mkdir -p /tmp/:*'.  Returns (config, provenance).
-        """
+        """Build a config where 'mkdir -p /tmp/claude-code:*' is subsumed by 'mkdir -p /tmp/:*'; return (config, provenance)."""
         prov = _make_provenance()
         layer = _make_layer(
             "Bash",
             allow=[
-                "mkdir -p /tmp/:*",  # larger: covers /tmp/<anything>
-                "mkdir -p /tmp/claude-code:*",  # smaller: subset of the above
+                "mkdir -p /tmp/:*",
+                "mkdir -p /tmp/claude-code:*",
             ],
             provenance=prov,
         )
@@ -754,7 +717,6 @@ class TestConsolidateEdgeCases(unittest.TestCase):
              literal-alternation grouping).
         """
         prov = _make_provenance()
-        # 'git diff*:*' has wildcard in cmd token, should not be grouped
         layer = _make_layer(
             "Bash",
             allow=["git diff*:*", "git status:*"],
@@ -772,7 +734,6 @@ class TestConsolidateEdgeCases(unittest.TestCase):
         Then the results are in the same order both times (deterministic sort).
         """
         prov = _make_provenance()
-        # Mix of patterns that should produce family-1 proposals
         layer = _make_layer(
             "Bash",
             allow=[
@@ -805,10 +766,7 @@ class TestConsolidateEdgeCases(unittest.TestCase):
 
 
 class TestPrefixBroadening(unittest.TestCase):
-    """
-    Tests for propose_broadening_consolidations() -- the agent-judged broadening
-    enumerator and its replay/overlap/probe evidence (families 3-4, P2-D).
-    """
+    """Tests for propose_broadening_consolidations() -- the agent-judged broadening enumerator (families 3-4)."""
 
     def test_git_broadening_newly_admits_corpus_subcommand(self):
         """
@@ -899,10 +857,7 @@ class TestPrefixBroadening(unittest.TestCase):
 
 
 class TestStaticPrefixOf(unittest.TestCase):
-    """
-    _static_prefix_of structurally proves that a smaller command's match-set is a
-    subset of a larger command's, across the several boundary forms.
-    """
+    """_static_prefix_of structurally proves a smaller command's match-set is a subset of a larger command's."""
 
     def test_identical_commands_subsume(self):
         """

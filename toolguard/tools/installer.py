@@ -1,40 +1,32 @@
 """
-toolguard-install: an AGENT-FACING installer helper for toolguard (TOO-15).
+``toolguard-install``: an AGENT-FACING installer helper for toolguard.
 
-This console script exists to be driven by an AI coding agent following the guided
-install runbook at ``docs/install.md`` in the toolguard repository. Each subcommand
-performs one mechanical, journaled, reversible step -- writing the base config,
-registering hooks, seeding toolguard's own self-permission rules, enabling takeover
-mode, discovering migration candidates, installing skills, seeding hard-deny
-protections, or appending a journal entry -- so the agent issues ONE approvable
-``Bash(toolguard-install ...)`` command per step instead of several separate
-Read/Write/Edit tool calls (each of which would otherwise trigger its own Claude Code
-permission prompt). Because the file writes happen inside this process, they never hit
-Claude's own permission layer at all.
+Driven by an AI coding agent working through the guided install runbook at
+``docs/install.md``. Each subcommand is one mechanical step, so the agent issues ONE
+approvable ``Bash(toolguard-install ...)`` command instead of several Read/Write/Edit
+tool calls, each of which would trigger its own Claude Code permission prompt --
+and because the writes happen inside this process, they never reach Claude's own
+permission layer at all.
 
-It is NOT a general-purpose installer and is deliberately NOT meant for direct human
-use -- see the top-level ``--help`` text for the full warning. Every subcommand's own
-``--help`` states exactly which files it reads/writes/backs up, the journal entry it
-appends (action + reverse), its preconditions, and what it refuses to do, so an agent
-can decide whether a step does exactly what is wanted without running it first.
+NOT a general-purpose installer, and deliberately not meant for direct human use.
+Each subcommand's ``--help`` states what it touches, its preconditions, what it
+refuses to do, and what it journals, so an agent can decide whether a step does what
+is wanted without running it first.
 
 Design notes
 ------------
-- Every mutating subcommand backs up any file it is about to replace/edit into
-  ``~/.toolguard/backups/`` (reusing
-  :func:`toolguard.permission_migration.create_backup`) and appends exactly one
-  numbered, reversible entry to ``~/.toolguard/install-journal.md`` (see
-  :func:`_append_journal_entry`), matching the format documented in
-  ``docs/install.md`` ("The install journal").
-- All file writes are atomic (write to a sibling ``.tmp`` file, then ``Path.replace``)
-  so a failure never leaves a half-written config, settings file, or journal.
-- TOML writing reuses
-  :func:`toolguard.permission_migration.write_toml_config` (preserves
-  everything outside the ``[permissions]`` section) and
-  :func:`toolguard.rule_sort.find_section_boundaries` (generic TOML section locator,
-  reused here for ``[takeover_mode]``) rather than hand-rolling a TOML parser/writer.
-- The self-permission rules seeded by ``seed-self-perms`` are the single source of
-  truth in :mod:`toolguard.tools.self_permission` -- never re-declared here.
+- Changes are made recoverable two ways: the file being replaced is copied into
+  ``~/.toolguard/backups/`` first, and a numbered entry naming the reverse action is
+  appended to ``~/.toolguard/install-journal.md``. Which of the two a subcommand
+  does, how many entries it appends, and when it does neither -- read-only,
+  refused, or nothing to change -- is stated in that subcommand's own ``--help``.
+- Config and settings writes go through
+  :func:`~toolguard.config_write_guard.verified_write_config`, which parses the
+  candidate text -- and, given the prior patterns, refuses a write that would drop
+  one -- before writing it atomically.
+- TOML editing reuses ``write_toml_config`` (preserves everything outside the
+  ``[permissions]`` section) and ``find_section_boundaries`` rather than hand-rolling
+  a TOML parser/writer.
 """
 
 import argparse
@@ -80,38 +72,22 @@ from toolguard.tool_spec import FILE_KIND_TOOLS
 
 def _entry_pattern(entry: RuleEntryOrStr) -> str:
     """
-    Return the wrapped pattern string for a permission/hard_deny entry.
-
-    Mirrors :func:`toolguard.rule_sort._pattern_of` (kept as a separate, tiny
-    local helper rather than importing that private name): this module's
-    seeding commands build ``existing_patterns`` membership sets out of lists
-    that mix normalized :class:`~toolguard.rule_entry.RuleEntry` objects
-    (from :func:`~toolguard.rule_entry.normalize_entries_preserving`) with
-    freshly-appended plain ``str`` candidates in the SAME list, across
-    multiple loop iterations (TOO-19 review fix M3) -- a bare ``.pattern``
-    access on every element crashes as soon as one candidate from an earlier
-    iteration was appended as a plain ``str``.
-
-    Args:
-        entry: A pattern ``str``, or a :class:`RuleEntry`.
-
-    Returns:
-        The wrapped pattern string, e.g. ``"Bash(git:*)"``.
+    Return the wrapped pattern string (e.g. ``"Bash(git:*)"``) of a plain or
+    structured entry.
     """
     return entry.pattern if isinstance(entry, RuleEntry) else entry
 
 
 class InstallerError(Exception):
     """
-    Raised for an expected, user-facing installer failure (never a programming bug).
+    An expected, user-facing installer failure (never a programming bug).
 
-    :func:`main` catches this at the top level, prints ``error: <message>`` to
-    stderr, and returns a non-zero exit code -- callers (an agent) are expected to
-    read the message and either fix the invocation or fall back to a manual step.
+    :func:`main` prints ``error: <message>`` to stderr and exits non-zero, so the
+    calling agent can fix the invocation or fall back to a manual step.
     """
 
 
-# Numbered journal entry header, e.g. "## [3] 2026-07-07 14:12 local -- ...".
+#: Numbered journal entry header, e.g. "## [3] 2026-07-07 14:12 local -- ...".
 _JOURNAL_HEADER_RE = re_compile(
     r"^## \[(\d+)\] \d{4}-\d{2}-\d{2} \d{2}:\d{2} local -- ", MULTILINE
 )
@@ -160,17 +136,17 @@ _README_TEMPLATE = (
 
 
 def _state_dir() -> Path:
-    """Return ``~/.toolguard`` (toolguard's per-user state directory)."""
+    """Return toolguard's per-user state directory."""
     return Path.home() / ".toolguard"
 
 
 def _backups_dir() -> Path:
-    """Return ``~/.toolguard/backups`` (where every mutating step backs up to)."""
+    """Return the backups directory inside the state directory."""
     return _state_dir() / "backups"
 
 
 def _journal_path() -> Path:
-    """Return ``~/.toolguard/install-journal.md``."""
+    """Return the install journal's path."""
     return _state_dir() / "install-journal.md"
 
 
@@ -178,10 +154,10 @@ def _ensure_state() -> None:
     """
     Create ``~/.toolguard`` (with ``backups/`` and ``stage/``) and the journal if absent.
 
-    The mutating config subcommands call this before journaling so they work even
-    when run standalone (before ``init-state``); it never clobbers an existing journal
-    or README. The bare ``journal`` subcommand deliberately does NOT call this -- it
-    requires ``init-state`` to have run first.
+    Exists so that a mutating subcommand works when run standalone, before
+    ``init-state``; an existing journal is never clobbered. The bare ``journal``
+    subcommand deliberately does NOT call this -- it requires ``init-state`` to
+    have run first.
     """
     (_state_dir() / "stage").mkdir(parents=True, exist_ok=True)
     _backups_dir().mkdir(parents=True, exist_ok=True)
@@ -224,7 +200,7 @@ def _settings_path(scope: str, project_dir: Optional[str]) -> Path:
 
     User scope governs every project on the machine, so hooks go in the shared
     ``settings.json``. Project scope governs one repo, so hooks go in that
-    project's own ``settings.local.json`` (matching ``docs/agent-guides.md``).
+    project's own ``settings.local.json``.
     """
     claude_dir = _claude_dir(scope, project_dir)
     if scope == "user":
@@ -234,21 +210,13 @@ def _settings_path(scope: str, project_dir: Optional[str]) -> Path:
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """
-    Write *content* to *path* atomically (temp file + rename).
+    Write *content* to *path* atomically (sibling temp file, then rename),
+    creating *path*'s parent directory if needed.
 
-    Ensures *path*'s parent directory exists. Writing to a sibling ``.tmp`` file and
-    then calling :meth:`Path.replace` guarantees a reader never observes a
-    half-written file, and that a failure partway through never corrupts the
-    original.
-
-    For files this project's own configuration (``toolguard_hook.toml`` /
-    ``.json``), do NOT call this directly -- use
-    :func:`~toolguard.config_write_guard.verified_write_config` instead, which
-    parses the candidate text (and, when given ``expected_patterns``, checks
-    for silently-dropped rules) before delegating to an equivalent atomic
-    write. This helper remains the right tool for non-config files this
-    module also writes atomically: the install journal and the state-dir
-    README, neither of which is parseable, rule-bearing config.
+    Do NOT use this for a rule-bearing config or settings file:
+    :func:`~toolguard.config_write_guard.verified_write_config` does an
+    equivalent atomic write, but parses the candidate text first and, given
+    ``expected_patterns``, catches silently-dropped rules.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
@@ -285,8 +253,7 @@ def _append_journal_entry(
     """
     Append one numbered, reversible entry to ``~/.toolguard/install-journal.md``.
 
-    Requires ``~/.toolguard`` to already exist (i.e. ``init-state`` has run) --
-    refuses to silently create the state directory here, since that would skip the
+    Requires ``~/.toolguard`` to already exist: creating it here would skip the
     README/backups/stage scaffolding ``init-state`` is responsible for.
 
     Args:
@@ -464,10 +431,9 @@ def cmd_write_config(args: argparse.Namespace) -> int:
         backup_path = create_backup(config_path, _backups_dir())
 
     content = _render_config_toml(governed_tools, additional)
-    # No expected_patterns: this always renders a fresh, minimal file with no
-    # [permissions]/[hard_deny] rules at all (even on --force overwrite, per
-    # this subcommand's documented "base config" contract) -- there is no
-    # pre-existing rule set this write is supposed to preserve.
+    # No expected_patterns: this renders a fresh, minimal file with no
+    # [permissions]/[hard_deny] rules at all, even on a --force overwrite, so
+    # there is no pre-existing rule set the write is supposed to preserve.
     verified_write_config(config_path, content, "toml")
 
     reverse = (
@@ -534,28 +500,24 @@ edited and the matchers added; its reverse is "restore the backup" (or
 "delete the file" if it was freshly created).
 """
 
-#: The module the hardened PreToolUse hook command runs via "-m" (TOO-19).
+#: The module the hardened PreToolUse hook command runs via ``-m``.
 _HOOK_MODULE = "toolguard.hook"
 
 
 def _tool_venv_python(binary: str) -> Optional[str]:
     """
-    Best-effort: resolve the tool venv's python interpreter next to *binary*.
+    Resolve the tool venv's python interpreter next to *binary*.
 
-    *binary* is the installed console-script path for the toolguard hook
-    (e.g. a ``uv tool install`` shim, or a venv's ``bin/toolguard``).
-    Resolving *one* level of symlinks (``Path.resolve()``) lands on the
-    script's REAL location -- for a ``uv tool install`` this is
-    ``.../uv/tools/toolguard/bin/toolguard`` -- and every such ``bin/``
-    directory ships a ``python3`` (or ``python``) sibling that is the correct
-    interpreter for that exact venv. The SIBLING NAME (not its own further
-    symlink target) is what gets returned, so the path stays stable across a
-    later ``uv tool install --force`` reinstall, which recreates the same
-    venv directory in place.
+    *binary* is the installed console-script path for the toolguard hook (a
+    ``uv tool install`` shim, or a venv's ``bin/toolguard``).
+    :meth:`Path.resolve` follows it to the script's real location, whose
+    ``bin/`` directory holds the ``python3``/``python`` belonging to that venv.
+    The sibling is returned by name, never further resolved: in a ``uv tool``
+    venv ``bin/python3`` is itself a symlink to the base interpreter OUTSIDE
+    the venv, which under ``-E -P`` cannot import toolguard at all.
 
-    Never guesses: returns ``None`` when no such sibling exists or is not
-    executable, so the caller can fall back to the unhardened bare-binary
-    registration rather than writing an interpreter path that might not run.
+    Never guesses: returns ``None`` rather than an interpreter path that might
+    not run.
 
     Args:
         binary: Path to the installed toolguard console-script.
@@ -577,29 +539,23 @@ def _tool_venv_python(binary: str) -> Optional[str]:
 
 def _hardened_hook_command(binary: str) -> Tuple[str, bool]:
     """
-    Build the command to register for the toolguard PreToolUse hook (TOO-19).
+    Build the command to register for the toolguard PreToolUse hook.
 
     Prefers the hardened form ``<venv python> -E -P -m toolguard.hook`` (see
     docs/security.md, "The hook can be silently shadowed"), which cannot be
-    shadowed by a PYTHONPATH or cwd-relative ``toolguard/`` package. Falls
-    back to the bare *binary* path, UNHARDENED, when the venv python cannot
-    be located: a working unhardened hook is strictly better than a broken
-    absolute path the OS cannot exec -- a launch failure is a non-blocking
-    Claude Code hook error, so the tool call proceeds with NO toolguard
-    decision at all, silently, which is worse than the shadowing risk this
-    hardens against.
+    shadowed by a ``PYTHONPATH`` or cwd-relative ``toolguard/`` package. Falls
+    back to the bare *binary* path, UNHARDENED, when the venv python cannot be
+    located. That fallback is deliberate: a hook that fails to launch is a
+    NON-BLOCKING Claude Code error, so the tool call proceeds with no toolguard
+    decision at all and nothing says so -- worse than the shadowing this
+    hardens against. Hence an interpreter path is never written unverified.
 
-    TOO-19 code review M2: *python_path* is written through :func:`shlex.quote`
-    before being embedded in the command string. Claude Code hands this string
-    to a shell, so an interpreter path containing a space (a relocated venv, or
-    a macOS path under a directory with a space) would otherwise split into
-    multiple argv words and fail to launch -- silently, since a hook launch
-    failure is a non-blocking Claude Code error -- exactly the fail-open this
-    hardening exists to close. ``register-hooks`` verifying the interpreter
-    exists and is executable is not sufficient on its own: existence says
-    nothing about whether the written string will re-parse back into that same
-    single path. See :func:`_hook_registration_findings`, which parses the
-    command back with :func:`shlex.split` for the same reason.
+    The interpreter path goes through :func:`shlex.quote` because Claude Code
+    hands the registered string to a shell: an unquoted path with a space (a
+    relocated venv, a macOS directory with a space) would split into several
+    argv words and fail to launch, into that same silent fail-open. Verifying
+    the interpreter exists does not cover this -- existence says nothing about
+    how the written string re-parses.
 
     Args:
         binary: Path to the installed toolguard console-script.
@@ -633,23 +589,16 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
     governed_tools = _split_csv(args.governed_tools)
     binary = args.binary
     hook_command, hook_hardened = _hardened_hook_command(binary)
-    # TOO-19 code review s1: SessionStart is registered as the BARE
-    # "<binary>-session-start" form -- deliberately, and NEVER through
-    # _hardened_hook_command(). Hardening it (an "-E -P -m
-    # toolguard.session_start" style command) would make Python resolve the
-    # "toolguard" package via the interpreter's own site-packages ALWAYS,
-    # ignoring PYTHONPATH/cwd -- which is exactly what
-    # toolguard.session_start's _detect_shadow_status() is trying to observe:
-    # it compares governing_package_root() (which copy of toolguard is
-    # ACTUALLY governing this process) against the active project's source
-    # checkout to detect live shadowing. A hardened SessionStart could never
-    # resolve anything but the installed distribution, so shadow/stale-install
-    # detection would go permanently, silently blind for every session -- no
-    # test failure, no error, just a feature that stopped noticing anything.
-    # See technical-notes.md, "Shadowed-hook detection and install hardening
-    # (TOO-19)", and test_tools_installer.py's
-    # test_session_start_hook_is_never_hardened, which fails specifically on
-    # this if it regresses.
+    # SessionStart is registered as the BARE "<binary>-session-start" form,
+    # deliberately, and never through _hardened_hook_command(). Hardened, the
+    # comparison session_start._detect_shadow_status() makes -- whichever copy of
+    # toolguard produced THIS process, against the active project's source checkout
+    # -- could only ever answer "the installed distribution", so live-shadow
+    # detection would go permanently and silently blind: no error, and no other test
+    # failing to say so. (The stale-install half does not go through
+    # governing_package_root() and would survive.) See technical-notes.md,
+    # "Shadowed-hook detection and install hardening (TOO-19)";
+    # test_session_start_hook_is_never_hardened catches a regression here.
     session_start_binary = f"{binary}-session-start"
 
     backup_path: Optional[Path] = None
@@ -693,18 +642,13 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
             {"hooks": [{"type": "command", "command": session_start_binary}]}
         )
 
-    # expected_patterns (TOO-19 review fix M2): Claude's settings.json CAN carry
-    # its own native `permissions.allow/deny/ask` alongside the hooks/matchers
-    # this function edits, and this write rewrites the WHOLE file -- a merge
-    # bug here could silently drop the user's native permission rules with no
-    # guard to catch it. patterns_in_config_text already supports
-    # file_format="json" generically (it just reads permissions/hard_deny keys,
-    # ignoring "hooks" and everything else), so there is no reason to skip it.
-    # When the file is brand new or empty (original_text falsy/blank) there
-    # are no prior patterns to preserve, so expected_patterns stays None
-    # rather than an empty set that would otherwise mask a real drop --
-    # and passing blank text to patterns_in_config_text would itself raise
-    # (empty string is not valid JSON).
+    # expected_patterns: settings.json can carry Claude's own native
+    # `permissions.allow/deny/ask` alongside the hooks edited here, and this
+    # rewrites the WHOLE file -- a merge bug would otherwise drop the user's
+    # native rules with nothing to catch it. A brand-new or blank file has no
+    # prior patterns, so it passes None rather than an empty set; blank text
+    # would in any case raise out of patterns_in_config_text, an empty string
+    # not being valid JSON.
     expected_patterns = (
         patterns_in_config_text(original_text, "json")
         if original_text is not None and original_text.strip()
@@ -772,23 +716,15 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
 # seed-self-perms
 # ---------------------------------------------------------------------------
 
-# A governed Bash tool call's shell state does not persist across separate
-# invocations (only cwd does), so an agent invoking toolguard's own console
-# scripts by bare name (rather than a full absolute path) has to defensively
-# re-export PATH="$HOME/.local/bin:$PATH" before EVERY call -- uv tool
-# update-shell's PATH registration (shell RC files) never takes effect for
-# Claude Code's own non-interactive Bash invocations. This has been happening
-# since early TOO-15 install rounds (confirmed unrelated to any particular
-# Claude Code version or platform -- observed identically across multiple
-# rounds and machines); it only became VISIBLE as an interactive prompt once
-# the recommended no_match_fallback default changed from allow_with_warning
-# (silently executed with a log warning) to ask (an actual prompt, every
-# time, since no rule covers a bare `export`). This ONE narrowly-scoped
-# pattern allows ONLY that exact safe operation -- prepending the well-known
-# uv tool bin dir to PATH -- never an arbitrary PATH value (which would be a
-# real hijacking vector: `export PATH="/malicious:$PATH"` could make a later
-# command silently resolve to a planted binary). Anchored start-to-end so
-# nothing else can be appended to the same export statement.
+#: Scoped to the one operation an agent needs here: prepending the uv tool bin
+#: dir to ``PATH``. A
+#: governed Bash call's shell state does not persist between invocations, so an
+#: agent that runs toolguard's console scripts by bare name re-exports ``PATH``
+#: before nearly every call; with ``no_match_fallback`` at its recommended
+#: ``ask``, each one is a prompt. Deliberately not a general ``PATH`` rule --
+#: ``export PATH="/malicious:$PATH"`` would make a later command resolve to a
+#: planted binary. Anchored, with one optional quote character permitted at
+#: each end.
 _UV_BIN_PATH_PREPEND_ALLOW = r"Bash([regex]^export PATH=.?\$HOME/\.local/bin:\$PATH.?$)"
 
 
@@ -857,22 +793,10 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
             f"{config_path} does not exist -- run 'write-config' first."
         )
 
-    # Read the raw TOML directly: we need the true, unfiltered [permissions]
-    # and [hard_deny] sections to detect which rules are already present.
-    #
-    # Every raw element is normalized into a RuleEntry via
-    # normalize_entries_preserving (is_native=False -- a toolguard config
-    # file, never Claude native settings) rather than assigned straight
-    # through (TOO-19 review fix M3): a raw structured (dict) entry fed
-    # straight into write_toml_config -> sort_patterns -> get_tool_priority
-    # crashed with "TypeError: cannot use 'dict' as a dict key (unhashable
-    # type: 'dict')" (confirmed repro), and separately made the
-    # `pattern in permissions[list_type]` membership test below silently miss
-    # a self-permission already present in structured form, re-adding it as a
-    # duplicate bare string on every run. normalize_entries_preserving never
-    # drops an element (even one that fails to normalize is preserved
-    # verbatim), matching permission_migration._build_merged_permissions and
-    # rule_apply._read_raw_permissions, which fixed this same defect class.
+    # normalize_entries_preserving, not the raw tomllib values: a structured entry
+    # parses as a plain dict, and a dict is unhashable, so the membership sets built
+    # below would raise TypeError. is_native=False -- this is a toolguard config
+    # file, never Claude's native settings.
     original_text = config_path.read_text()
     current = tomllib.loads(original_text)
     current_permissions = current.get("permissions", {})
@@ -911,14 +835,8 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
 
     added: List[Tuple[str, str]] = []
     already_present: List[Tuple[str, str]] = []
-    # Membership by `.pattern` via `_entry_pattern`, never by raw element
-    # identity (TOO-19 review fix M3): `permissions[list_type]` mixes
-    # normalized RuleEntry objects (from the normalization above) with plain
-    # `str` candidates appended by this very loop, so `pattern in
-    # permissions[list_type]` (a bare str never equal to a RuleEntry) would
-    # ALWAYS miss an already-present structured self-permission, re-adding it
-    # as a duplicate on every run. One growing set per list_type keeps this
-    # a single pass instead of rebuilding from the whole list every iteration.
+    # Membership is by pattern: a bare str never compares equal to the RuleEntry
+    # carrying the same pattern.
     existing_patterns_by_list = {
         list_type: {_entry_pattern(entry) for entry in permissions[list_type]}
         for list_type in ("allow", "deny", "ask")
@@ -932,15 +850,12 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
             added.append((pattern, list_type))
 
     # Self-integrity hard_deny: stop ~/.toolguard from ever being deleted by a
-    # Bash rm/find command, regardless of takeover choice -- seeded here,
-    # unconditionally, alongside the self/uninstall-readiness permissions
-    # above, not gated behind the optional Phase 10.1 secret-protection flow.
+    # Bash rm/find command. Seeded unconditionally here rather than behind the
+    # optional secret-protection flow, because it protects toolguard's own
+    # operational integrity rather than the user's files.
     #
-    # Same normalization as `permissions` above, and for the same reason:
-    # `[hard_deny]` also supports structured entries (see
-    # toolguard.config.Configuration._pool_hard_deny_entries), and
-    # _render_hard_deny_section below renders via render_toml_entry, which
-    # requires a RuleEntry or str, never a raw dict.
+    # [hard_deny] also accepts structured entries, so it is normalized like
+    # `permissions` above and for the same reason.
     current_hard_deny = current.get("hard_deny", {})
     hard_deny_patterns: List[RuleEntryOrStr] = list(
         normalize_entries_preserving(current_hard_deny.get("deny", []), is_native=False)
@@ -983,17 +898,10 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
         updated_text = _replace_or_append_toml_section(
             pre_write_text, "hard_deny", new_hard_deny_section
         )
-        # expected_patterns: everything already in the file right before this
-        # write (permissions patterns, including any just added above, plus
-        # any pre-existing hard_deny patterns) union the full new hard_deny
-        # deny/allow lists (which already include hard_deny_already_present) --
-        # nothing this write is expected to preserve may go missing. Built via
-        # real_patterns() (TOO-19 review fix M3), never a bare `set(...)` of
-        # the entry lists themselves: those now hold RuleEntry objects (after
-        # normalize_entries_preserving above), and a synthesized-pattern entry
-        # (a malformed hard_deny element preserved verbatim) must be excluded
-        # here -- its repr()-based pattern can never appear in the text this
-        # write actually produces, so including it would wrongly look like a
+        # expected_patterns: everything in the file immediately before this
+        # write, plus the full new hard_deny lists -- nothing the write should
+        # preserve may go missing. Via real_patterns(), never a bare set() of
+        # the entry lists, so a synthesized-pattern entry cannot look like a
         # dropped rule and refuse an otherwise-safe write.
         expected_patterns = (
             patterns_in_config_text(pre_write_text, "toml")
@@ -1073,10 +981,6 @@ def _replace_or_append_toml_section(
 ) -> str:
     """
     Replace an existing ``[section_name]`` section in *text*, or append it.
-
-    Reuses :func:`toolguard.rule_sort.find_section_boundaries` (the same locator
-    ``write_toml_config`` uses for ``[permissions]``) so this needs no bespoke TOML
-    parsing.
 
     Args:
         text: Full TOML file content.
@@ -1237,11 +1141,10 @@ def _decode_transcript_dir_name(name: str) -> str:
     """
     Best-effort, LOSSY decode of a ``~/.claude/projects/`` directory name to a path.
 
-    The encoding (leading ``/`` and every ``/`` replaced with ``-``) is decoded here
-    by simply reversing that single substitution. This is ambiguous whenever the
-    original path itself contained a literal ``-`` -- callers MUST verify the decoded
-    path actually exists as a directory before trusting it; this function performs no
-    such verification.
+    The encoding replaces the leading ``/`` and every ``/`` with ``-``, so reversing
+    it is ambiguous whenever the original path itself contained a literal ``-``.
+    Verify the decoded path exists as a directory before trusting it; this function
+    does not.
 
     Args:
         name: A directory name found under ``~/.claude/projects/``.
@@ -1256,9 +1159,8 @@ def _load_claude_json_projects(claude_json_path: Path) -> List[str]:
     """
     Return the absolute project paths listed in ``~/.claude.json``'s ``projects`` key.
 
-    Best-effort: returns an empty list if the file is absent, unreadable, not valid
-    JSON, or lacks the expected shape -- this source augments, but is not required
-    for, discovery to proceed.
+    A missing file, an :class:`OSError`, invalid JSON or an unexpected shape each
+    yield an empty list.
 
     Args:
         claude_json_path: Path to ``~/.claude.json``.
@@ -1387,7 +1289,7 @@ def cmd_discover_projects(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments; must have ``format``.
 
     Returns:
-        ``0`` always (read-only, best-effort discovery never fails structurally).
+        ``0``. A candidate that does not qualify is dropped, not reported.
     """
     home = Path.home()
     seen: "dict[str, None]" = {}
@@ -1482,9 +1384,8 @@ def _backup_directory(source_dir: Path, backups_dir: Path, name_prefix: str) -> 
     """
     Copy *source_dir* whole-tree into ``~/.toolguard/backups/<name_prefix>-<timestamp>/``.
 
-    Mirrors :func:`toolguard.permission_migration.create_backup`'s timestamp
-    format and same-second collision handling, generalized to a directory backup
-    (``create_backup`` only handles single files).
+    Exists because ``create_backup`` handles single files only; the timestamp
+    format and the ``-2``/``-3`` same-second collision suffixing match it.
 
     Args:
         source_dir: The directory to back up (must exist).
@@ -1511,21 +1412,18 @@ def _parse_git_source(source: str) -> Tuple[str, Optional[str]]:
     Parse a possibly uv-style VCS source into a plain ``git clone`` URL and an
     optional ref (branch/tag/commit).
 
-    ``uv tool install`` accepts (and this project's docs recommend) the
-    ``git+https://host/owner/repo@ref`` form -- but that literal string is NOT
-    a valid ``git clone`` argument (``git+https`` is a pip/uv pseudo-scheme,
-    not a real git transport; ``git clone git+https://...`` fails with
-    ``git: 'remote-git+https' is not a git command``). This strips the
-    ``git+`` prefix (if present) and splits off a trailing ``@ref`` into a
-    separate ref, so branch pinning survives the same ``--source`` string
-    that worked for ``uv tool install`` in Phase 3.
+    ``git+https`` is a pip/uv pseudo-scheme, not a git transport, so the
+    ``git+https://host/owner/repo@ref`` string that ``uv tool install`` accepts
+    is not a valid ``git clone`` argument. Stripping the prefix and splitting a
+    trailing ``@ref`` lets the same ``--source`` value serve both, branch
+    pinning included.
 
-    A plain URL with no ``git+`` prefix is returned unchanged with no ref --
-    this function only recognizes ``@ref`` when the uv-style prefix is
-    present, so an ssh URL's ``user@host`` (e.g. ``git@github.com:owner/repo``)
-    is never mistaken for a ref split. As a second guard, even under the
-    ``git+`` prefix, an ``@`` is only treated as a ref split when the text
-    after it contains no ``/`` -- a real ref (branch/tag/commit) never does.
+    A plain URL with no ``git+`` prefix comes back unchanged with no ref, so an
+    ssh URL's ``user@host`` (``git@github.com:owner/repo``) is never mistaken
+    for a ref split. Second guard, even under the prefix: an ``@`` splits only
+    when the text after it contains no ``/``. That also declines to split a
+    slash-bearing branch name such as ``release/1.2``, which is therefore not
+    supported here.
 
     Args:
         source: The ``--source`` value as given (local path, plain git URL,
@@ -1704,16 +1602,6 @@ def _render_hard_deny_section(
     """
     Render a ``[hard_deny]`` section body with the given deny/allow lists.
 
-    Renders each entry via :func:`~toolguard.rule_sort.render_toml_entry`
-    (TOO-19 review fix M3), never by assuming ``str`` and calling
-    ``.replace(...)`` directly: a ``[hard_deny]`` entry may be a structured
-    :class:`~toolguard.rule_entry.RuleEntry` (e.g. carrying
-    ``additionalContext``), and the previous ``pattern.replace(...)`` call
-    raised ``AttributeError: 'dict' object has no attribute 'replace'`` on
-    one read straight from a raw ``tomllib.loads()`` result (confirmed
-    repro). ``render_toml_entry`` also accepts a plain ``str`` unchanged, so
-    every existing plain-pattern caller keeps working.
-
     Args:
         deny_patterns: The ``[hard_deny] deny`` entries, plain and/or
             structured.
@@ -1757,12 +1645,8 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
             f"{config_path} does not exist -- run 'write-config' first."
         )
 
-    # Normalized via normalize_entries_preserving (TOO-19 review fix M3), for
-    # the same reason as cmd_seed_self_perms above: a raw structured entry
-    # read straight from tomllib.loads() would otherwise crash
-    # _render_hard_deny_section's rendering below, and a raw-element
-    # membership test would silently miss an already-present structured
-    # protection, re-adding it as a duplicate bare string on every run.
+    # Normalized, not raw: a structured entry parses as a plain dict, and a dict is
+    # unhashable, so the membership set built below would raise TypeError.
     original = config_path.read_text()
     current = tomllib.loads(original)
     current_hard_deny = current.get("hard_deny", {})
@@ -1796,13 +1680,10 @@ def cmd_seed_hard_deny(args: argparse.Namespace) -> int:
     backup_path = create_backup(config_path, _backups_dir())
     new_section = _render_hard_deny_section(deny_patterns, allow_patterns)
     new_text = _replace_or_append_toml_section(original, "hard_deny", new_section)
-    # expected_patterns: everything already in the file before this edit
-    # (permissions patterns, untouched here, plus pre-existing hard_deny
-    # patterns) union the full new deny/allow lists (already include
-    # already_present) -- nothing may be silently dropped. Built via
-    # real_patterns() (TOO-19 review fix M3) to exclude any synthesized
-    # pattern from a malformed hard_deny element -- see the matching comment
-    # in cmd_seed_self_perms above.
+    # expected_patterns: everything in the file before this edit, plus the
+    # full new deny/allow lists -- nothing may be silently dropped. Via
+    # real_patterns() to exclude a synthesized pattern; see the matching
+    # comment in cmd_seed_self_perms.
     expected_patterns = (
         patterns_in_config_text(original, "toml")
         | set(real_patterns(deny_patterns))
@@ -1892,14 +1773,11 @@ def _classify_skill_dir(path: Path) -> str:
             ``~/.claude/skills/toolguard-maintenance``.
 
     Returns:
-        ``'missing'`` when *path* does not exist -- this correctly reports a
-        broken/dangling symlink as missing, since :meth:`Path.exists` follows
-        symlinks and returns ``False`` when the target is absent.
-        ``'installed'`` when *path* is a directory (real, or a symlink
-        resolving to a real directory) containing a ``SKILL.md`` file.
-        ``'invalid'`` for anything else that exists at *path* (e.g. an empty
-        directory, or a plain file) -- a distinct, reportable state from
-        ``'missing'``.
+        ``'installed'`` when *path* is a directory containing ``SKILL.md``;
+        ``'missing'`` when it does not exist -- which includes a dangling
+        symlink, the footgun this check exists to catch, since
+        :meth:`Path.exists` follows symlinks; ``'invalid'`` for anything else
+        that exists there, such as an empty directory or a plain file.
     """
     if not path.exists():
         return "missing"
@@ -1911,12 +1789,6 @@ def _classify_skill_dir(path: Path) -> str:
 def _binary_status() -> dict:
     """
     Summarize toolguard's own binary install freshness.
-
-    Reuses :func:`toolguard.install_update.detect_install` for install-kind
-    detection and :func:`toolguard.install_update.remote_head` /
-    :func:`toolguard.install_update.local_remote_head` for the remote
-    comparison -- no git/network logic is reimplemented here, only the same
-    up-to-date comparison ``toolguard-update-check`` itself performs.
 
     Returns:
         A dict with ``kind`` (``'git'``/``'local'``/``'unknown'``),
@@ -1996,24 +1868,16 @@ def _skip_env_wrapper(tokens: List[str]) -> List[str]:
     """
     Skip a leading ``env`` wrapper -- and its own options/assignments -- in *tokens*.
 
-    TOO-19 code review m3: a hand-edited hook registration wrapped in ``env``
-    (e.g. ``env -u PYTHONPATH <venv python> -E -P -m toolguard.hook``, used to
-    scrub an inherited ``PYTHONPATH`` before launching the hardened
-    interpreter) has the wrapper, not the interpreter, as token 0. Treating
-    token 0 as "the interpreter" unconditionally reports a correctly hardened,
-    working registration as ``interpreter_missing`` -- a false BROKEN
-    diagnostic on exactly the configuration the hardening recommends.
+    A hand-edited registration such as ``env -u PYTHONPATH <venv python> -E -P
+    -m toolguard.hook`` has the wrapper, not the interpreter, as token 0.
+    Without this, :func:`_interpreter_missing` calls a correctly hardened,
+    working registration BROKEN -- a false alarm on exactly the shape the
+    hardening recommends.
 
-    ``env [OPTION]... [NAME=VALUE]... [COMMAND [ARG]...]`` is the realistic
-    shape: some options take a following argument (``-u NAME``), most don't
-    (``-i``), and any number of ``NAME=VALUE`` assignments may precede the
-    actual command. This is deliberately NOT a general shell/env parser --
-    only enough to walk past ``env``'s own tokens to whatever comes next,
-    which is treated as the interpreter regardless of what it turns out to
-    be. Any other leading wrapper (``sudo``, a shell, ...) is not recognized
-    and its first token is treated as the interpreter, same as before this
-    fix -- a narrower false positive than the one this closes, and not one
-    ``register-hooks`` itself ever produces.
+    Not a shell parser: it walks the realistic
+    ``env [OPTION]... [NAME=VALUE]... [COMMAND ...]`` shape just far enough to
+    reach the next token, which the caller treats as the interpreter whatever
+    it is. Any other wrapper (``sudo``, a shell) is unrecognized.
 
     Args:
         tokens: The shlex-split (or naive-split, on unbalanced quotes)
@@ -2043,19 +1907,14 @@ def _interpreter_missing(command: str) -> bool:
     """
     Determine whether a hardened hook *command*'s interpreter is missing.
 
-    TOO-19 code review m3: the interpreter is not always token 0 -- a hand
-    wrapped command (``env -u PYTHONPATH <python> ...``) puts the wrapper
-    there instead (see :func:`_skip_env_wrapper`). And a bare command name
-    that resolves on ``PATH`` (rather than an absolute path that must
-    ``Path.exists()``) is also not missing, so :func:`shutil.which` is
-    checked in addition to a direct existence check.
+    The interpreter is not always token 0 (see :func:`_skip_env_wrapper`), and
+    an interpreter given as a bare name resolves on ``PATH`` rather than as an
+    existing path -- hence :func:`shutil.which` alongside :meth:`Path.exists`.
 
-    Deliberately biased toward under-reporting: a command shape this
-    function cannot make sense of (tokens exhausted after skipping the ``env``
-    wrapper, for instance) is reported as NOT missing, per this diagnostic's
-    own asymmetry -- a missed warning costs nothing here, but crying BROKEN on
-    a correct registration teaches readers to ignore the diagnostic entirely
-    (see :func:`_hook_registration_findings`'s docstring).
+    Deliberately biased toward under-reporting: a shape this cannot make sense
+    of -- tokens exhausted after the ``env`` wrapper, say -- is reported as
+    NOT missing. A missed warning costs little, whereas crying BROKEN over a
+    correct registration teaches the reader to ignore the diagnostic.
 
     Args:
         command: The full hook command string as registered in settings.json.
@@ -2079,14 +1938,11 @@ def _hook_registration_findings(settings_path: Path) -> List[dict]:
     """
     Classify each toolguard PreToolUse hook command registered in *settings_path*.
 
-    READ-ONLY: reads (never writes) the settings file, if it exists, and
-    returns one entry per PreToolUse hook whose command mentions "toolguard"
-    (case-insensitive substring, matching the permissive detection convention
-    used elsewhere in this project -- see
-    :func:`~toolguard.tools.takeover_audit._get_registered_toolguard_tools`),
-    classified as hardened (contains ``-m toolguard.hook``) or not (TOO-19).
-    A missing, unreadable, or unparseable settings file, or one with no such
-    hook, yields an empty list -- this is a diagnostic, never an error.
+    READ-ONLY. Returns one entry per PreToolUse hook whose command contains
+    "toolguard" (case-insensitively), classified as hardened (containing
+    ``-m toolguard.hook``) or not. A missing settings file, an
+    :class:`OSError`, invalid JSON, or a file with no such hook yields an
+    empty list.
 
     Args:
         settings_path: The ``settings.json``/``settings.local.json`` path to
@@ -2094,13 +1950,10 @@ def _hook_registration_findings(settings_path: Path) -> List[dict]:
 
     Returns:
         A list of dicts: ``{"matcher": str, "command": str, "hardened":
-        bool, "interpreter_missing": bool}``. ``interpreter_missing`` is
-        ``True`` only for a hardened command whose interpreter (identified by
-        :func:`_interpreter_missing`, which understands a leading ``env``
-        wrapper and a bare PATH-resolvable name, not just token 0 as an
-        absolute path) resolves nowhere -- the exact silent-fail-open risk
-        the hardening's own docstring warns about, caught here proactively
-        instead of only at hook-launch time.
+        bool, "interpreter_missing": bool}``. ``interpreter_missing`` is set
+        only for a hardened command, and catches at report time an interpreter
+        path that has stopped resolving -- which at hook-launch time would be a
+        silent, non-blocking failure.
     """
     try:
         raw = settings_path.read_text()
@@ -2124,17 +1977,6 @@ def _hook_registration_findings(settings_path: Path) -> List[dict]:
             if not isinstance(command, str) or "toolguard" not in command.lower():
                 continue
             hardened = f"-m {_HOOK_MODULE}" in command
-            # TOO-19 code review M2 (quoting) and m3 (interpreter
-            # identification): interpreter resolution is delegated entirely
-            # to _interpreter_missing(), which shlex-splits the command
-            # (falling back to a naive split on unbalanced quotes from a
-            # hand-edited command, rather than raising out of a read-only
-            # diagnostic), skips a leading "env" wrapper and its own
-            # options/assignments, and accepts a bare PATH-resolvable name in
-            # addition to an absolute path that exists -- see that function's
-            # docstring for why an "env"-wrapped hardened command (e.g. "env
-            # -u PYTHONPATH <python> -E -P -m toolguard.hook") is NOT
-            # interpreter_missing.
             interpreter_missing = hardened and _interpreter_missing(command)
             findings.append(
                 {
@@ -2155,13 +1997,13 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments; must have ``project_dir``, ``format``.
 
     Returns:
-        ``0`` always (diagnostic only; never a pass/fail gate).
+        ``0``. The exit code carries no findings -- this is a diagnostic, not a
+        pass/fail gate.
 
     Raises:
-        InstallerError: If a genuine filesystem/permissions failure prevents
-            reading one of the checked paths. Never raised for a missing or
-            invalid skill, or an undeterminable binary status -- those are
-            normal, reportable outcomes, not errors.
+        InstallerError: An :class:`OSError` prevented reading one of the checked
+            paths. A missing or invalid skill, or an undeterminable binary
+            status, is a reportable outcome, not an error.
     """
     project_dir = args.project_dir or str(Path.cwd())
     scoped_claude_dirs = (
@@ -2283,7 +2125,7 @@ def _add_scope_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the ``toolguard-install`` argument parser and its nine subcommands."""
+    """Build the ``toolguard-install`` argument parser and its subcommands."""
     parser = argparse.ArgumentParser(
         prog="toolguard-install",
         description=_TOP_LEVEL_DESCRIPTION,
@@ -2464,11 +2306,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         argv: Argument list (excluding the program name); defaults to ``sys.argv[1:]``.
 
     Returns:
-        Process exit code: ``0`` on success, ``2`` on an expected
-        :class:`InstallerError` (refusal or unmet precondition) or a
+        The subcommand's own exit code -- ``0`` on success, ``2`` when it
+        refuses -- or ``2`` for an :class:`InstallerError` (unmet
+        precondition) or a
         :class:`~toolguard.config_write_guard.ConfigWriteVerificationError`
-        (a config write was refused to avoid writing a corrupt or
-        pattern-dropping file -- the original file on disk is untouched).
+        (a config write refused as corrupt or pattern-dropping; the file on
+        disk is untouched either way).
     """
     parser = _build_parser()
     args = parser.parse_args(argv)

@@ -17,32 +17,28 @@ from test.unit._real_once_per_home_guard import (
     install as install_once_per_home_guard,
 )
 
-# TOO-19: install the real-logs-dir write guard before any test_*.py module in
-# this package is imported. Python guarantees a package's __init__.py runs
-# before any of its submodules are imported, including via
-# `unittest discover` and `python -m unittest test.unit.<module>` alike -- see
-# test/unit/_real_log_dir_guard.py's module docstring for the full mechanism
-# and why installing here (rather than in a fixture some tests might skip) is
-# what makes this reliable regardless of which tests run or in what order.
+# Install the real-logs-dir write guard before any test_*.py module in this
+# package is imported. Python guarantees a package's __init__.py runs before
+# any of its submodules, including via `unittest discover` and
+# `python -m unittest test.unit.<module>` alike -- see
+# test/unit/_real_log_dir_guard.py's module docstring for the full mechanism.
 install()
-# TOO-45 R2: same guarantee, for the shared ~/.toolguard/once_per.db --
-# see test/unit/_real_once_per_home_guard.py's module docstring.
+# Same guarantee, for the shared ~/.toolguard/once_per.db -- see
+# test/unit/_real_once_per_home_guard.py's module docstring.
 install_once_per_home_guard()
 
-# TOO-45 R2: toolguard.once_per_store._STORE_PATH is a fixed module-level
-# constant (~/.toolguard/once_per.db), unlike logs_dir, which almost
-# every test already passes as a per-test tmp path. Now that
-# check_and_warn_divergence/run_auto_migration key their claims by PROJECT
-# ROOT rather than logs_dir, they are reachable from ordinary
-# toolguard.hook.main() end-to-end tests that never intended to exercise the
-# claim store at all (e.g. most of test_hook.py) -- and those tests' real,
-# resolved project root is genuinely this repository, so without a default
-# redirect they would hit the real store. Point the default at a
-# process-wide tmp file so no test needs to opt in just to avoid that;
-# tests that verify claim-store semantics themselves still layer their own
-# per-test patch.object(once_per_store, "_STORE_PATH", ...) on top of this for
-# independent claims between test methods (see test.unit._once_per_isolation
-# .IsolatedStoreMixin).
+# toolguard.once_per_store._STORE_PATH is a fixed module-level constant
+# (~/.toolguard/once_per.db), unlike logs_dir, which almost every test
+# already passes as a per-test tmp path. check_and_warn_divergence and
+# run_auto_migration key their claims by PROJECT ROOT, not logs_dir, so
+# they are reachable from ordinary toolguard.hook.main() end-to-end tests
+# that never intended to exercise the claim store at all -- and those
+# tests' real, resolved project root is genuinely this repository, so
+# without a default redirect they would hit the real store. Point the
+# default at a process-wide tmp file so no test needs to opt in just to
+# avoid that; tests that verify claim-store semantics themselves still
+# layer their own per-test patch.object(once_per_store, "_STORE_PATH", ...)
+# on top of this (see test.unit._once_per_isolation.IsolatedStoreMixin).
 _default_once_per_store_dir = tempfile.mkdtemp(prefix="toolguard-test-once-per-")
 once_per_store._STORE_PATH = Path(_default_once_per_store_dir) / "once_per.db"
 atexit.register(shutil.rmtree, _default_once_per_store_dir, ignore_errors=True)
@@ -54,22 +50,19 @@ def _fail_hard_on_real_log_dir_leak_at_exit() -> None:
     re-check the leak registry and force a nonzero exit with a clear stderr
     banner if anything leaked -- regardless of whether the dedicated
     test_zz_real_log_dir_guard.py test ran, was discovered, or ran before
-    every leaking test. This is what actually delivers "reliable regardless
-    of test order"; the dedicated test is the readable unittest-report signal
-    for the common case.
+    every leaking test.
 
-    Uses os._exit() rather than sys.exit(): verified empirically (TOO-19,
-    2026-07-31, Python 3.14.5) that a SystemExit raised from inside an
-    atexit callback is caught by CPython's own exit-function runner and
+    Uses os._exit() rather than sys.exit(): a SystemExit raised from inside
+    an atexit callback is caught by CPython's own exit-function runner and
     reported as "Exception ignored in atexit callback" WITHOUT changing the
-    process's exit code -- sys.exit() here would make this function look
-    like a working backstop while silently not being one. os._exit() bypasses
-    that entirely by terminating the process immediately at the C level, so
-    stdout/stderr are flushed explicitly first since os._exit() skips normal
-    buffered-stream flushing.
+    process's exit code (verified empirically, Python 3.14.5) -- sys.exit()
+    here would make this function look like a working backstop while
+    silently not being one. os._exit() bypasses that by terminating the
+    process immediately at the C level, so stdout/stderr are flushed
+    explicitly first since os._exit() skips normal buffered-stream flushing.
 
-    Checks BOTH the real-logs-dir registry and the real-once-per-home
-    registry (TOO-45 R2), so a leak in either fails the whole run the same way.
+    Checks both the real-logs-dir registry and the real-once-per-home
+    registry, so a leak in either fails the whole run the same way.
     """
     log_dir_events = get_leak_events()
     once_per_events = get_once_per_home_leak_events()

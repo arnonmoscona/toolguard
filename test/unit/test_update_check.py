@@ -1,21 +1,8 @@
 """
-Unit tests for toolguard.install_update (TOO-16; split from toolguard.update_check
-by TOO-45 R5c).
+Unit tests for toolguard.install_update and the toolguard.update_check CLI wrapper.
 
-Cover the update-check exit-code contract (0 up-to-date / 1 update-available /
-2 unknown), the ``--upgrade`` and ``--quiet`` flags, the offline/not-a-git-install
-fallbacks, and the parsing of installed origin and remote HEAD. All side effects
-(metadata, git, uv) are stubbed -- no real network, subprocess, or install runs.
-
-toolguard.update_check itself is now a thin CLI wrapper (argument parsing,
-exit-code plumbing) around toolguard.install_update._check -- see TestMain,
-the only class here that still exercises toolguard.update_check directly.
-
-New in this update (local-kind support):
-- ``detect_install`` resolves git / local / unknown from direct_url.json.
-- Local kind: editable vs non-editable, up-to-date vs behind.
-- Local repo discovered via file:// URL and via __file__ walk-up.
-- Unknown kind falls through to exit 2.
+All side effects (metadata, git, uv) are stubbed -- no real network, subprocess,
+or install runs.
 """
 
 import io
@@ -100,10 +87,7 @@ class TestInstalledOrigin(unittest.TestCase):
 
 
 class TestDetectInstall(unittest.TestCase):
-    """
-    Tests for detect_install: resolves git / local / unknown from direct_url.json
-    or from __file__ walk-up.
-    """
+    """Resolving git / local / unknown from direct_url.json or a __file__ walk-up."""
 
     def _dist_returning(self, text):
         """Return a fake distribution whose read_text yields ``text``."""
@@ -381,8 +365,6 @@ class TestCheck(unittest.TestCase):
             editable=editable,
         )
 
-    # --- git kind tests ---
-
     def test_git_up_to_date_returns_zero(self):
         """
         Given a git install where the installed commit equals the remote HEAD
@@ -519,8 +501,6 @@ class TestCheck(unittest.TestCase):
         mock_upgrade.assert_not_called()
         self.assertEqual(code, install_update.EXIT_UP_TO_DATE)
 
-    # --- local kind tests ---
-
     def test_local_up_to_date_returns_zero(self):
         """
         Given a local install where HEAD equals the remote origin HEAD
@@ -631,7 +611,6 @@ class TestCheck(unittest.TestCase):
             code, _, err = self._run_check(do_upgrade=True)
         mock_upgrade.assert_not_called()
         self.assertEqual(code, install_update.EXIT_UPDATE_AVAILABLE)
-        # A note about not auto-running should be in stderr
         self.assertIn("manual", err.lower())
 
     def test_local_remote_unreachable_returns_unknown(self):
@@ -665,10 +644,7 @@ class TestCheck(unittest.TestCase):
         ):
             code, _, err = self._run_check()
         self.assertEqual(code, install_update.EXIT_UNKNOWN)
-        # Error message should mention the checkout
         self.assertTrue(len(err) > 0)
-
-    # --- unknown kind tests ---
 
     def test_unknown_install_returns_exit_two(self):
         """
@@ -683,7 +659,6 @@ class TestCheck(unittest.TestCase):
         ):
             code, _, err = self._run_check()
         self.assertEqual(code, install_update.EXIT_UNKNOWN)
-        # Error message should guide the user
         self.assertTrue(len(err) > 0)
 
 
@@ -761,7 +736,6 @@ class TestMain(unittest.TestCase):
             patch.object(
                 update_check.sys, "argv", ["toolguard-update-check", "--help"]
             ),
-            # Suppress the help text from appearing in test output
             patch("sys.stdout", io.StringIO()),
         ):
             with self.assertRaises(SystemExit) as ctx:
@@ -769,12 +743,8 @@ class TestMain(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
 
 
-# Legacy shim test: installed_origin is still used by some existing callers.
 class TestInstalledOriginLegacyBehavior(unittest.TestCase):
-    """
-    Validate that installed_origin continues to return None for non-git installs
-    even after the refactor to detect_install.
-    """
+    """installed_origin still returns None for non-git installs."""
 
     def test_installed_origin_still_returns_none_for_local_install(self):
         """

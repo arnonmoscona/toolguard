@@ -1,19 +1,4 @@
-"""
-Unit tests for toolguard.tools.replay - THE KEYSTONE.
-
-Critical tests proving the replay diff correctly classifies:
-- broadened: config B is looser than A (allow->ask, allow->deny reversed, or
-  ask->allow, deny->allow, deny->ask)
-- tightened: config B is stricter than A
-- unchanged: same verdict under both configs
-
-The alembic landmine test is included: a consolidation that naively turns
-'uv run alembic <sub>:*' allow rules into a broader 'uv run alembic:*' allow
-would change alembic commands from 'ask' -> 'allow', which replay catches as
-broadened.
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
-"""
+"""Unit tests for toolguard.tools.replay."""
 
 import unittest
 from datetime import datetime
@@ -29,15 +14,7 @@ from toolguard.tools.log_harvest import LogEntry
 
 
 def _make_config(layers_content):
-    """
-    Build a minimal Configuration from (level, source_type, content_dict) triples.
-
-    Args:
-        layers_content: Iterable of (level, source_type, content_dict) tuples.
-
-    Returns:
-        A Configuration with those layers (specificity increases with index).
-    """
+    """Build a Configuration from (level, source_type, content_dict) triples, in order."""
     layers = []
     for i, (level, source_type, content) in enumerate(layers_content):
         prov = Provenance(
@@ -100,7 +77,6 @@ class TestClassifyChange(unittest.TestCase):
         """
         from toolguard.tools.replay import classify_change
 
-        # deny -> allow: B is much looser -> broadened
         self.assertEqual("broadened", classify_change("deny", "allow"))
 
     def test_tightened_allow_to_deny(self):
@@ -173,7 +149,7 @@ class TestReplayUnchanged(unittest.TestCase):
             _make_bash_entry("git status"),
             _make_bash_entry("git log"),
             _make_bash_entry("ls -la"),
-            _make_bash_entry("whoami"),  # denied in both
+            _make_bash_entry("whoami"),
         ]
         diff = replay(corpus, config_a=config, config_b=config)
 
@@ -207,7 +183,7 @@ class TestReplayUnchanged(unittest.TestCase):
         )
         corpus = [
             _make_file_entry("Read", f"{home}/projects/foo/bar.py"),
-            _make_file_entry("Read", "/etc/passwd"),  # denied in both
+            _make_file_entry("Read", "/etc/passwd"),
         ]
         diff = replay(corpus, config_a=config, config_b=config)
 
@@ -251,7 +227,7 @@ class TestReplayTightening(unittest.TestCase):
                     "toolguard_hook",
                     {
                         "permissions": {
-                            "allow": ["Bash(git:*)"],  # ls:* removed
+                            "allow": ["Bash(git:*)"],
                             "deny": [],
                         }
                     },
@@ -259,8 +235,8 @@ class TestReplayTightening(unittest.TestCase):
             ]
         )
         corpus = [
-            _make_bash_entry("git status"),  # still allowed in B
-            _make_bash_entry("ls -la"),  # no longer allowed in B
+            _make_bash_entry("git status"),
+            _make_bash_entry("ls -la"),
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -301,15 +277,15 @@ class TestReplayTightening(unittest.TestCase):
                     {
                         "permissions": {
                             "allow": ["Bash(git:*)"],
-                            "deny": ["Bash(git push:*)"],  # deny added
+                            "deny": ["Bash(git push:*)"],
                         }
                     },
                 )
             ]
         )
         corpus = [
-            _make_bash_entry("git status"),  # still allowed
-            _make_bash_entry("git push origin main"),  # now denied
+            _make_bash_entry("git status"),
+            _make_bash_entry("git push origin main"),
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -323,9 +299,7 @@ class TestReplayTightening(unittest.TestCase):
 
 
 class TestReplayBroadening(unittest.TestCase):
-    """
-    Tests that broadening permissions is detected -- this is the CRITICAL safety check.
-    """
+    """Tests that broadening permissions is detected."""
 
     def test_adding_allow_rule_broadens_decisions(self):
         """
@@ -362,7 +336,7 @@ class TestReplayBroadening(unittest.TestCase):
                     {
                         "no_match_fallback": "deny",
                         "permissions": {
-                            "allow": ["Bash(git:*)", "Bash(whoami)"],  # whoami added
+                            "allow": ["Bash(git:*)", "Bash(whoami)"],
                             "deny": [],
                         },
                     },
@@ -370,8 +344,8 @@ class TestReplayBroadening(unittest.TestCase):
             ]
         )
         corpus = [
-            _make_bash_entry("git status"),  # unchanged
-            _make_bash_entry("whoami"),  # broadened: A=deny, B=allow
+            _make_bash_entry("git status"),
+            _make_bash_entry("whoami"),
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -394,32 +368,8 @@ class TestReplayBroadening(unittest.TestCase):
         And config B that 'consolidates' all alembic allows into 'uv run alembic:*' allow
         When replay is called with alembic commands in the corpus
         Then the previously-ask entries are classified as 'broadened' (ask -> allow)
-
-        This is the critical landmine test: naive consolidation silently broadens
-        access from 'ask' to 'allow' for all alembic commands, including dangerous ones
-        like 'uv run alembic downgrade'. Replay catches this.
         """
         from toolguard.tools.replay import replay
-
-        # Config A: specific alembic subcommands are allowed, but general alembic:* is ask
-        # In the more-specific-wins model, the project level (most specific) that
-        # allows specific subcommands would win for those, while general alembic:*
-        # ends up as ask because the ask pattern in the user level gets used for
-        # unspecific commands.
-        # We simulate this with:
-        # - project level: allows only 'uv run alembic upgrade head:*' and
-        #   'uv run alembic current:*'
-        # - user level: has 'uv run alembic:*' in ask -> we simulate this by
-        #   putting general alembic in deny (since ask == "denied by pattern" in
-        #   the more-specific-wins model for our test; we can also do it via ask patterns)
-        #
-        # A simpler but faithful simulation:
-        # Config A allows only specific alembic subcommands; general 'uv run alembic downgrade:*'
-        # is NOT in allow -> gets deny (== not permitted without explicit ask).
-        # Config B puts 'uv run alembic:*' in allow -> suddenly downgrade is allowed.
-        #
-        # This correctly models the landmine: moving from "specific allows + deny fallback"
-        # to "broad allow" is a broadening that replay must catch.
 
         config_a = _make_config(
             [
@@ -440,7 +390,6 @@ class TestReplayBroadening(unittest.TestCase):
                 )
             ]
         )
-        # Config B "consolidates" into a single broad pattern -- the landmine
         config_b = _make_config(
             [
                 (
@@ -450,7 +399,7 @@ class TestReplayBroadening(unittest.TestCase):
                         "no_match_fallback": "deny",
                         "permissions": {
                             "allow": [
-                                "Bash(uv run alembic:*)",  # consolidation: now allows ALL alembic
+                                "Bash(uv run alembic:*)",
                             ],
                             "deny": [],
                         },
@@ -459,30 +408,24 @@ class TestReplayBroadening(unittest.TestCase):
             ]
         )
         corpus = [
-            # These were already allowed in A
             _make_bash_entry("uv run alembic upgrade head"),
             _make_bash_entry("uv run alembic current"),
-            # This was NOT allowed in A (dangerous -- rolls back the schema!)
             _make_bash_entry("uv run alembic downgrade -1", status="REFUSED"),
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
-        # The safe commands should still be allowed (unchanged or still allowed in B)
         upgrade_diffs = [d for d in diff.diffs if "upgrade" in d.entry.command]
         self.assertEqual(1, len(upgrade_diffs))
         self.assertEqual("allow", upgrade_diffs[0].decision_a.decision)
         self.assertEqual("allow", upgrade_diffs[0].decision_b.decision)
         self.assertEqual("unchanged", upgrade_diffs[0].classification)
 
-        # The DANGEROUS command should be classified as broadened:
-        # config A denies it, config B allows it
         downgrade_diffs = [d for d in diff.diffs if "downgrade" in d.entry.command]
         self.assertEqual(1, len(downgrade_diffs))
         self.assertEqual("deny", downgrade_diffs[0].decision_a.decision)
         self.assertEqual("allow", downgrade_diffs[0].decision_b.decision)
         self.assertEqual("broadened", downgrade_diffs[0].classification)
 
-        # Broadening should be detected
         self.assertGreater(diff.broadened_count, 0)
 
     def test_removing_deny_rule_broadens_decisions(self):
@@ -493,7 +436,6 @@ class TestReplayBroadening(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        # Use 'curl *' (no colon) as the broad allow so it matches 'curl http://example.com'
         config_a = _make_config(
             [
                 (
@@ -501,12 +443,8 @@ class TestReplayBroadening(unittest.TestCase):
                     "toolguard_hook",
                     {
                         "permissions": {
-                            "allow": [
-                                "Bash(curl *)"
-                            ],  # broad allow matching 'curl <anything>'
-                            "deny": [
-                                "Bash(curl:*)"
-                            ],  # but curl without specific arg is blocked
+                            "allow": ["Bash(curl *)"],
+                            "deny": ["Bash(curl:*)"],
                         }
                     },
                 )
@@ -519,8 +457,8 @@ class TestReplayBroadening(unittest.TestCase):
                     "toolguard_hook",
                     {
                         "permissions": {
-                            "allow": ["Bash(curl *)"],  # same broad allow
-                            "deny": [],  # deny removed -> curl now fully allowed
+                            "allow": ["Bash(curl *)"],
+                            "deny": [],
                         }
                     },
                 )
@@ -549,7 +487,6 @@ class TestReplaySummaryAndHelpers(unittest.TestCase):
         """
         from toolguard.tools.replay import replay
 
-        # Config A: allows git and ls, denies curl
         config_a = _make_config(
             [
                 (
@@ -564,7 +501,6 @@ class TestReplaySummaryAndHelpers(unittest.TestCase):
                 )
             ]
         )
-        # Config B: allows git and curl (removes ls, adds curl allow)
         config_b = _make_config(
             [
                 (
@@ -575,7 +511,7 @@ class TestReplaySummaryAndHelpers(unittest.TestCase):
                             "allow": [
                                 "Bash(git:*)",
                                 "Bash(curl:*)",
-                            ],  # ls removed, curl added
+                            ],
                             "deny": [],
                         }
                     },
@@ -583,9 +519,9 @@ class TestReplaySummaryAndHelpers(unittest.TestCase):
             ]
         )
         corpus = [
-            _make_bash_entry("git status"),  # unchanged: allow -> allow
-            _make_bash_entry("ls -la"),  # tightened: allow -> deny
-            _make_bash_entry("curl http://x.com"),  # broadened: deny -> allow
+            _make_bash_entry("git status"),
+            _make_bash_entry("ls -la"),
+            _make_bash_entry("curl http://x.com"),
         ]
         diff = replay(corpus, config_a=config_a, config_b=config_b)
 
@@ -707,9 +643,7 @@ class TestReplaySingleConfig(unittest.TestCase):
         ]
         results = replay_single(corpus, config)
 
-        # git status: allow verdict matches EXECUTED -> True
         self.assertTrue(results[0].matches_observed)
-        # whoami: deny verdict matches REFUSED -> True
         self.assertTrue(results[1].matches_observed)
 
     def test_replay_single_empty_corpus_returns_empty_list(self):

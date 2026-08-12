@@ -1,29 +1,9 @@
 """
-Unit tests for toolguard._git -- the shared git-subprocess helper (TOO-19 code
-review 2026-08-02, Major finding M3).
+Unit tests for toolguard._git -- the shared git-subprocess helper.
 
-``update_check.py`` and ``install_provenance.py`` each ran their own
-``subprocess.run(["git", ...], capture_output=True, text=True, timeout=...)``
-in a try/except at five call sites, independently catching the same exception
-pair and duplicating the same argv-building shape. :func:`toolguard._git.run_git`
-is the one place that boilerplate now lives, and :mod:`toolguard.constants`
-holds the distribution-name and timeout values both modules previously
-re-declared. This module verifies the deduplication itself -- that the two
-call sites and the shared helper genuinely stay in sync rather than drifting
-back into three near-identical copies -- which is why it lives here rather
-than folded into either call site's own test file: neither
-``test_update_check.py`` nor ``test_install_provenance.py`` is a natural home
-for a cross-module identity/delegation guarantee about a module neither of
-them owns.
-
-TOO-45 R5c split ``update_check.py``'s git/metadata logic into
-:mod:`toolguard.install_update` (``update_check.py`` itself is now a thin CLI
-wrapper with no git calls of its own), so the ``update_check`` side of this
-module's assertions now targets :mod:`toolguard.install_update`.
-
-No config-isolation machinery needed: every test here either patches
-``toolguard._git.subprocess.run`` directly or compares object identity, with
-zero file I/O and no ``toolguard.config`` discovery involved.
+Its two callers, :mod:`toolguard.install_update` and
+:mod:`toolguard.install_provenance`, are checked here rather than in their own
+test files: the subject is the cross-module delegation, which neither owns.
 """
 
 import unittest
@@ -34,14 +14,13 @@ from toolguard import _git, constants, install_provenance, install_update
 
 
 class TestSharedConstants(unittest.TestCase):
-    """Both modules now read the SAME constant objects, not re-declared copies."""
+    """The distribution name and git timeout come from toolguard.constants."""
 
     def test_update_check_dist_name_is_the_shared_constant(self):
         """
-        Given install_update.py's distribution_name() fallback (the library
-            update_check.py's CLI now delegates to)
+        Given install_update.py's distribution_name() fallback
         When compared to toolguard.constants.DIST_NAME
-        Then it is the identical object (not a re-declared duplicate)
+        Then it is that value
         """
         self.assertIs(install_update._DEFAULT_DIST_NAME, constants.DIST_NAME)
 
@@ -49,7 +28,7 @@ class TestSharedConstants(unittest.TestCase):
         """
         Given install_provenance.py's default project/distribution name
         When compared to toolguard.constants.DIST_NAME
-        Then it is the identical object (not a re-declared duplicate)
+        Then it is that value
         """
         self.assertIs(install_provenance._DEFAULT_NAME, constants.DIST_NAME)
 
@@ -57,26 +36,20 @@ class TestSharedConstants(unittest.TestCase):
         """
         Given toolguard._git.run_git's default timeout parameter (keyword-only)
         When compared to toolguard.constants.GIT_TIMEOUT_SECONDS
-        Then it is the identical object (not a re-declared '10')
+        Then it is that value
         """
         default_timeout = _git.run_git.__kwdefaults__["timeout"]
         self.assertIs(default_timeout, constants.GIT_TIMEOUT_SECONDS)
 
 
 class TestRunGitSharedHelper(unittest.TestCase):
-    """
-    Both modules' git-touching functions now delegate through the single
-    toolguard._git.run_git helper instead of five near-identical
-    subprocess.run blocks.
-    """
+    """Both modules' git-touching functions delegate through run_git."""
 
     def test_update_check_local_repo_head_uses_run_git(self):
         """
-        Given local_repo_head() is called (now in toolguard.install_update,
-            the library update_check.py's CLI delegates to)
+        Given install_update.local_repo_head() is called
         When toolguard._git.run_git is patched to a spy
-        Then it is invoked with a "-C <repo> rev-parse HEAD" argv, proving
-            install_update.py no longer runs its own subprocess.run for this
+        Then it is invoked with a "-C <repo> rev-parse HEAD" argv
         """
         with patch("toolguard.install_update.run_git", wraps=_git.run_git) as spy:
             spy.return_value = None  # short-circuit: no real git needed
@@ -90,9 +63,7 @@ class TestRunGitSharedHelper(unittest.TestCase):
         Given _git_subtree_is_clean() is called
         When toolguard._git.run_git is patched to a spy
         Then it is invoked with a "-C <repo> status --porcelain -- <subtree>"
-            argv, proving install_provenance.py no longer runs its own
-            subprocess.run for this -- the fifth near-identical block the
-            review identified
+            argv
         """
         with patch("toolguard.install_provenance.run_git", wraps=_git.run_git) as spy:
             spy.return_value = None
@@ -110,8 +81,7 @@ class TestRunGitSharedHelper(unittest.TestCase):
         """
         Given the underlying subprocess.run raises OSError (git missing)
         When run_git executes
-        Then it returns None rather than propagating the exception -- the
-            single place this used to be caught five times independently
+        Then it returns None rather than propagating the exception
         """
         with patch.object(_git.subprocess, "run", side_effect=OSError("no git")):
             self.assertIsNone(_git.run_git(["status"]))

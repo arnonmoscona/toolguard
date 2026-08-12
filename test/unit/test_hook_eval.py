@@ -5,14 +5,6 @@ Unit tests for the read-only ``toolguard --eval`` evaluation mode.
 floor -- evaluating a synthetic command against the project's config and reading
 the verdict -- WITHOUT the live hook's side effects (logging, divergence checks,
 auto-migration).
-
-Two properties are guarded here:
-
-* Anti-drift: :func:`toolguard.hook._resolve_event` must return the same verdict
-  the decision facade (:func:`toolguard.api.decide`) produces, so the
-  probe reflects the real resolver and cannot silently diverge from it.
-* Read-only: driving ``main()`` with ``--eval`` must never call ``log_command``
-  or ``run_auto_migration``.
 """
 
 import json
@@ -29,21 +21,14 @@ from toolguard.tool_spec import ToolKind, ToolSpec
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
-# TOO-19: --eval mode itself never logs (see _run_eval_mode's docstring), but
-# TestEvalMatchesLiveHookUnderFallback also drives main() WITHOUT --eval (the
-# live-hook path) to compare verdicts, and that path unconditionally reaches
-# toolguard.env_config.get_env_config() to resolve TOOLGUARD_LOG_DIR for the
-# config-discovery diagnostic log, before load_configuration() is even
-# consulted. Without this, that resolution falls back to the real process cwd
-# (the repo root under `unittest discover`) and writes real entries into the
-# developer's live logs/ directory. See test/unit/_config_isolation.py's
-# module docstring and .claude/rules/test-config-isolation.md.
+# This module also drives main() WITHOUT --eval, which resolves TOOLGUARD_LOG_DIR
+# before load_configuration() is consulted -- see .claude/rules/test-config-isolation.md.
 _log_tmp_dir = None
 _log_patcher = None
 
 
 def setUpModule():
-    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module (TOO-19)."""
+    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module."""
     global _log_tmp_dir, _log_patcher
     _log_tmp_dir, _log_patcher, _ = isolate_log_dir_for_module()
 
@@ -83,10 +68,7 @@ def _config(tool="Bash", allow=(), deny=(), ask=()):
 
 
 class TestResolveEventAntiDrift(unittest.TestCase):
-    """
-    _resolve_event must agree with the decision facade for governed tools, so the
-    --eval probe never drifts from the resolver the live hook uses.
-    """
+    """_resolve_event must agree with the decision facade for governed tools."""
 
     def test_bash_verdicts_match_decide(self):
         """
@@ -169,11 +151,8 @@ class TestResolveEventEdgeCases(unittest.TestCase):
 
 
 class TestResolveEventPayloadKeySeam(unittest.TestCase):
-    """
-    _resolve_event must read the payload key from the tool_spec registry, not
-    a hardcoded 'file_path' literal (TOO-45 punch-list #10 fix pass, M2/m4):
-    pins the seam by swapping in a fake registry entry for 'Read'.
-    """
+    """_resolve_event must read the payload key from the tool_spec registry, not
+    a hardcoded 'file_path' literal -- pinned by a fake registry entry for 'Read'."""
 
     @patch.dict(
         "toolguard.tool_spec.TOOLS_BY_NAME",
@@ -259,12 +238,11 @@ class TestEvalModeMain(unittest.TestCase):
 
     def test_eval_surfaces_additional_context_for_enriched_allow_rule(self):
         """
-        TOO-19 Phase 1: Given a structured allow rule carrying
+        Given a structured allow rule carrying
             additionalContext = 'prefer --short', and --eval mode
         When main() probes the matching command
         Then the printed JSON's hookSpecificOutput carries that
-            additionalContext -- --eval exists to preview what the live hook
-            would do, so it must not silently omit a real output field
+            additionalContext
         """
         content = {
             "governed_tools": ["Bash"],
@@ -299,10 +277,7 @@ class TestEvalModeMain(unittest.TestCase):
         Given a config with rules configured (allows 'ls:*') but no explicit
             no_match_fallback, and --eval mode
         When main() probes 'rm -rf /' (matches no rule)
-        Then it prints an 'ask' verdict (TOO-15: the new default
-            no_match_fallback) -- per the security-audit skill's floor
-            classification, 'ask' on a catastrophic command IS a breach signal,
-            just not the literal string 'deny'
+        Then it prints an 'ask' verdict (the default no_match_fallback)
         """
         hook_input = {
             "tool_name": "Bash",
@@ -320,7 +295,7 @@ class TestEvalModeMain(unittest.TestCase):
         Given a config that allows 'ls:*' and explicitly sets
             no_match_fallback='deny', and --eval mode
         When main() probes 'rm -rf /' (matches no rule)
-        Then it prints a deny verdict (the safety-floor probe's breach signal)
+        Then it prints a deny verdict
         """
         hook_input = {
             "tool_name": "Bash",
@@ -329,7 +304,6 @@ class TestEvalModeMain(unittest.TestCase):
             "hook_event_name": "PreToolUse",
         }
         cfg = _config(allow=["ls:*"])
-        # Layer content is a MappingProxyType; rebuild with the fallback added.
         content = dict(cfg.layers[0].content)
         content["no_match_fallback"] = "deny"
         cfg = Configuration(
@@ -349,12 +323,7 @@ class TestEvalModeMain(unittest.TestCase):
         Given --eval mode and non-JSON stdin
         When main() runs
         Then it emits a deny decision (fail-safe) on STDOUT, empty stderr,
-             and never logs or auto-migrates -- TOO-45 punch-list #04 fix
-             pass M2: this used to print the deny decision to stderr with an
-             empty stdout, which the security-audit skill's --eval probe
-             (stdout-only, see SKILL.md's "How the floor is checked" section)
-             read as no verdict at all, not a deny -- this test previously
-             pinned exactly that defect
+             and never logs or auto-migrates
         """
         with (
             patch("sys.argv", ["toolguard", "--eval"]),
@@ -376,16 +345,11 @@ class TestEvalModeMain(unittest.TestCase):
 
     def test_eval_reflects_parse_failure_ask_floor(self):
         """
-        TOO-19: Given a Configuration with a normally-allowed command AND a
+        Given a Configuration with a normally-allowed command AND a
             recorded parse_failures entry (a governed config file failed to
             parse), and --eval mode
         When main() probes that command
-        Then --eval prints 'ask', not 'allow' -- the ASK floor applies inside
-            permission_resolution.resolve_permission_cascade, the single
-            chokepoint both the live hook and --eval delegate to, so the
-            cross-project
-            security-audit skill never reports a safety floor the live hook
-            does not actually have
+        Then --eval prints 'ask', not 'allow', naming the unparseable file
         """
         hook_input = {
             "tool_name": "Bash",
@@ -408,14 +372,8 @@ class TestEvalModeMain(unittest.TestCase):
 
 
 class TestEvalMatchesLiveHookUnderFallback(unittest.TestCase):
-    """
-    TOO-15: for every no_match_fallback value (including the default and the
-    deprecated 'warn_deny' alias), the read-only --eval probe and the live
-    hook (main() without --eval) must agree on an unmatched command's
-    verdict. This guards the bug where --eval used to omit the
-    no_match_fallback resolution and show a raw/deny verdict where the live
-    hook actually allowed under 'allow_with_warning' (formerly 'warn_deny').
-    """
+    """For every no_match_fallback value, the read-only --eval probe and the live
+    hook (main() without --eval) must agree on an unmatched command's verdict."""
 
     @staticmethod
     def _config_with_fallback(fallback_value):

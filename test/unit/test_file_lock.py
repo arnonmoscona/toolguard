@@ -1,12 +1,8 @@
 """
-Unit tests for toolguard.file_lock (TOO-45 punch-list #15).
-
-Covers the exclusive() context manager: single-process acquire/release
-(including release-on-exception), the failure modes that all collapse into
-LockUnavailable, the Windows backend (exercised via patching -- this suite
-runs on Linux), and real cross-process behaviour (contention, independent
-paths, release on process death) via subprocess.Popen, following
-test_once_per_store.py's harness.
+Unit tests for toolguard.file_lock's exclusive() context manager: single-process
+acquire/release, the failure modes that all collapse into LockUnavailable, the
+Windows backend (reachable only by patching -- this suite runs on Linux), and
+real cross-process behaviour via subprocess.
 """
 
 import unittest
@@ -51,7 +47,7 @@ class TestExclusiveSingleProcess(unittest.TestCase):
             with file_lock.exclusive(lock_path, timeout_seconds=1):
                 pass
             with file_lock.exclusive(lock_path, timeout_seconds=1):
-                pass  # must not raise
+                pass
 
     def test_creates_missing_parent_directory(self):
         """
@@ -69,14 +65,13 @@ class TestExclusiveSingleProcess(unittest.TestCase):
 
     def test_nested_acquire_on_same_path_times_out(self):
         """
-        Given a lock already held (via a separate file descriptor -- flock
-            locks are per-open-file-description, so two exclusive() calls on
-            the same path genuinely contend even within one process)
+        Given a lock already held (flock binds to the open file DESCRIPTION,
+            so two exclusive() calls on the same path contend even within
+            one process)
         When a second exclusive() call on the same path is attempted with a
             short timeout
         Then it raises LockUnavailable with reason=REASON_TIMEOUT and a
-             detail naming how long it waited -- real output, not a shape
-             only ever produced by hand-constructing the exception
+             detail naming how long it waited
         """
         with TemporaryDirectory() as tmpdir:
             lock_path = Path(tmpdir) / "x.lock"
@@ -105,7 +100,7 @@ class TestExclusiveSingleProcess(unittest.TestCase):
                     raise ValueError("boom")
 
             with file_lock.exclusive(lock_path, timeout_seconds=1):
-                pass  # must not raise -- the prior lock was released
+                pass
 
     def test_different_paths_do_not_contend(self):
         """
@@ -119,7 +114,7 @@ class TestExclusiveSingleProcess(unittest.TestCase):
 
             with file_lock.exclusive(path_a, timeout_seconds=1):
                 with file_lock.exclusive(path_b, timeout_seconds=1):
-                    pass  # must not raise
+                    pass
 
 
 class TestLockUnavailableFailureModes(unittest.TestCase):
@@ -197,11 +192,7 @@ class TestLockUnavailableFailureModes(unittest.TestCase):
 
 
 class TestWindowsBackendViaPatching(unittest.TestCase):
-    """
-    Exercises the msvcrt branch by patching, since this suite runs on
-    Linux. Kept deliberately small: this is the one branch that cannot be
-    reached natively here.
-    """
+    """Exercises the msvcrt branch by patching -- the one branch a Linux run cannot reach."""
 
     def test_successful_lock_calls_locking_and_unlocking_before_close(self):
         """
@@ -247,7 +238,7 @@ class TestWindowsBackendViaPatching(unittest.TestCase):
         self.assertEqual(ctx.exception.reason, file_lock.REASON_TIMEOUT)
 
 
-#: Shared child-process script prelude: import, resolve the lock path from argv.
+#: Child-process script prelude: the imports, plus lock_path from argv[1].
 _PRELUDE = (
     "import sys, time\n"
     "from pathlib import Path\n"
@@ -257,11 +248,7 @@ _PRELUDE = (
 
 
 class TestConcurrentProcesses(unittest.TestCase):
-    """
-    Real cross-process behaviour -- a single-process test proves nothing
-    about an OS-level advisory lock. Follows test_once_per_store.py's
-    subprocess harness.
-    """
+    """Real cross-process behaviour: a single-process test proves nothing about an OS lock."""
 
     def test_second_process_declines_while_first_holds(self):
         """
@@ -271,8 +258,7 @@ class TestConcurrentProcesses(unittest.TestCase):
             shorter than the holder's hold duration, once the marker
             confirms the first process actually holds it
         Then the first process reports it acquired the lock and the second
-             reports it was declined -- genuine cross-process mutual
-             exclusion, not merely in-process fd contention
+             reports it was declined
         """
         with TemporaryDirectory() as tmpdir:
             lock_path = Path(tmpdir) / "x.lock"
@@ -313,8 +299,7 @@ class TestConcurrentProcesses(unittest.TestCase):
         Given two DIFFERENT lock paths (standing in for two different
             projects), each held by its own process concurrently
         When both processes run at the same time
-        Then both acquire successfully -- one project's migration never
-             blocks another's
+        Then both acquire successfully
         """
         with TemporaryDirectory() as tmpdir:
             path_a = Path(tmpdir) / "a.lock"
@@ -344,8 +329,7 @@ class TestConcurrentProcesses(unittest.TestCase):
         When that process is killed (SIGKILL, simulating a crash) and a
             fresh acquire is then attempted in THIS process
         Then the lock is acquired -- the OS released it when the holder's
-             file descriptor closed on process death, exactly why flock
-             (never a hand-rolled O_EXCL lockfile) is used
+             file descriptor closed on process death
         """
         with TemporaryDirectory() as tmpdir:
             lock_path = Path(tmpdir) / "x.lock"
@@ -367,7 +351,7 @@ class TestConcurrentProcesses(unittest.TestCase):
             holder.communicate(timeout=15)
 
             with file_lock.exclusive(lock_path, timeout_seconds=5):
-                pass  # must not raise -- proves the OS released the dead holder's lock
+                pass
 
 
 if __name__ == "__main__":

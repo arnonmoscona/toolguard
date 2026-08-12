@@ -1,18 +1,10 @@
 """
-Unit tests for toolguard.tools.self_integrity (TOO-15).
+Unit tests for toolguard.tools.self_integrity: the declarative [hard_deny]
+patterns covering the rm and find ... -delete forms that target ~/.toolguard.
 
-Covers the declarative [hard_deny] pattern(s) that stop ~/.toolguard from
-being deleted by a Bash rm/find command, even one the installing agent
-decides to run on its own initiative -- root-caused from a real install
-where an agent ran `rm -rf ~/.toolguard` unprompted while "going further for
-a true clean slate," directly contradicting docs/uninstall.md's repeated,
-explicit "do not delete ~/.toolguard/" policy.
-
-Behavioral coverage (does the pattern actually block/allow the right
-things) lives here via the REAL decision engine (toolguard.api.decide),
-not just structural assertions on the table -- a hard_deny pattern that looks
-right but does not actually match is worse than no protection at all, since
-it would be trusted.
+Behaviour is exercised through the REAL decision engine (toolguard.api.decide)
+rather than only structurally against the table -- a hard_deny pattern that
+looks right but does not match is worse than none, because it is trusted.
 """
 
 import unittest
@@ -88,8 +80,7 @@ class TestSelfIntegrityTable(unittest.TestCase):
         """
         Given one required self-integrity hard-deny entry
         When an attempt is made to mutate its pattern
-        Then it raises (the table is immutable, matching self_permission.py's
-        and recommended_protections.py's frozen-dataclass convention)
+        Then it raises -- the table is immutable
         """
         protection = required_self_integrity_hard_deny_patterns()[0]
         with self.assertRaises(Exception):
@@ -98,8 +89,8 @@ class TestSelfIntegrityTable(unittest.TestCase):
 
 class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
     """
-    End-to-end: the patterns actually block the real failure mode through the
-    live decision engine, and do not over-reach into unrelated commands.
+    End-to-end through the live decision engine: what the patterns block, and
+    what they leave alone.
     """
 
     def setUp(self):
@@ -108,11 +99,11 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
 
     def test_rm_variants_targeting_toolguard_are_hard_denied(self):
         """
-        Given the real toolguard state directory referenced with ~, $HOME, or a
-        resolved absolute path (three different literal command strings)
+        Given five rm forms naming ~/.toolguard -- spelled with ~, $HOME and a
+        resolved absolute path, with and without -r/-rf, and one naming a file
+        inside it
         When each is evaluated through decide()
-        Then every variant is denied -- this is exactly the command that
-        deleted a real install's ~/.toolguard
+        Then every variant is denied
         """
         commands = [
             "rm -rf ~/.toolguard",
@@ -145,8 +136,8 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         Given a config that explicitly ALLOWs rm/find outright (Bash(rm:*),
         Bash(find:*), set up in _config_with_hard_deny)
         When a command targeting ~/.toolguard is evaluated
-        Then it is still denied -- hard_deny cannot be overridden by any
-        level's normal allow, which is the whole point of using it here
+        Then it is still denied -- hard_deny is not overridable by a normal
+        allow at any level
         """
         self.assertEqual(
             decide(self.config, "Bash", "rm -rf ~/.toolguard").decision, "deny"
@@ -157,8 +148,7 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         Given an rm command that has nothing to do with .toolguard
         When evaluated through decide()
         Then it resolves per the normal cascade (allowed here, since
-        Bash(rm:*) is configured as an explicit allow) -- the hard_deny
-        pattern must not over-reach into unrelated deletions
+        Bash(rm:*) is configured as an explicit allow)
         """
         self.assertEqual(
             decide(self.config, "Bash", "rm -rf /tmp/scratch").decision, "allow"
@@ -169,9 +159,8 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         Given commands that merely READ ~/.toolguard (ls, cat) rather than
         deleting it
         When evaluated through decide()
-        Then they are NOT hard-denied -- only deletion is blocked; toolguard's
-        own tooling and a debugging agent still need to be able to inspect
-        ~/.toolguard's contents (e.g. reading the journal, backups, or traces)
+        Then they are NOT hard-denied -- only deletion is blocked, so toolguard's
+        own tooling can still inspect ~/.toolguard's contents
         """
         for command in ("ls ~/.toolguard", "cat ~/.toolguard/README.txt"):
             with self.subTest(command=command):

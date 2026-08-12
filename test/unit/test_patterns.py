@@ -1,8 +1,4 @@
-"""
-Unit tests for extended pattern matching in toolguard.
-
-Tests GLOB globstar support and NATIVE pattern matching.
-"""
+"""Unit tests for extended pattern matching in toolguard."""
 
 import unittest
 from toolguard.patterns import PatternType, parse_pattern, match_pattern
@@ -71,7 +67,6 @@ class TestGlobGlobstar(unittest.TestCase):
         When matched against a command path spanning multiple directory levels
         Then it does not match, because * covers only one level
         """
-        # Pattern with single * should NOT match multiple directory levels
         self.assertFalse(
             match_pattern(
                 PatternType.GLOB, "~/projects/*/*.py", "~/projects/a/b/c/file.py"
@@ -84,7 +79,6 @@ class TestGlobGlobstar(unittest.TestCase):
         When matched against a command path spanning multiple directory levels
         Then it matches, because ** recurses across levels
         """
-        # Pattern with ** should match multiple directory levels
         self.assertTrue(
             match_pattern(
                 PatternType.GLOB, "~/projects/**/*.py", "~/projects/a/b/c/file.py"
@@ -163,7 +157,6 @@ class TestGlobGlobstar(unittest.TestCase):
         When matched against a path with one level there versus two levels
         Then the single-level path matches and the two-level path does not
         """
-        # Single star - should match only one level per star
         self.assertTrue(
             match_pattern(PatternType.GLOB, "/a/*/c/*.txt", "/a/b/c/file.txt")
         )
@@ -303,7 +296,6 @@ class TestNativePattern(unittest.TestCase):
         When matched against commands with a single intervening word
         Then the adjacent wildcards behave like a single wildcard and match
         """
-        # Adjacent wildcards should work like single wildcard
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "git ** main", "git checkout main")
         )
@@ -320,7 +312,6 @@ class TestNativePattern(unittest.TestCase):
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "git * main", "git checkout main")
         )
-        # "main" appears before "git" - should not match
         self.assertFalse(
             match_pattern(PatternType.NATIVE, "git * main", "main checkout git")
         )
@@ -345,13 +336,10 @@ class TestNativePattern(unittest.TestCase):
         Then a segment without a space can match within a word, while a spaced segment
         requires a matching space in the command
         """
-        # This should match because "log" is found in the command
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "* log *", "git log --oneline")
         )
-        # This should match - "log" segment with space matches " log" in command
         self.assertTrue(match_pattern(PatternType.NATIVE, "cat *log", "cat app.log"))
-        # With space in pattern, it requires space in command
         self.assertFalse(match_pattern(PatternType.NATIVE, "cat * log", "cat app.log"))
         self.assertTrue(match_pattern(PatternType.NATIVE, "cat * log", "cat error log"))
 
@@ -383,15 +371,11 @@ class TestPatternTypeComparison(unittest.TestCase):
         When matched against commands containing spaces in the wildcard region
         Then GLOB's * spans spaces within a component while NATIVE finds the segments in order
         """
-        # GLOB: * matches any characters including spaces within path component
         self.assertTrue(
             match_pattern(PatternType.GLOB, "cat *.txt", "cat file name.txt")
         )
 
-        # NATIVE: * matches non-whitespace sequences
-        # "cat *.txt" would try to find "cat " then ".txt" in sequence
         self.assertTrue(match_pattern(PatternType.NATIVE, "cat *.txt", "cat file.txt"))
-        # This should also match because we find "cat " and then ".txt" exists
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "cat *.txt", "cat file name.txt")
         )
@@ -405,15 +389,10 @@ class TestPatternTypeComparison(unittest.TestCase):
         """
         command = "git log --oneline"
 
-        # GLOB: Must match entire command
         self.assertTrue(match_pattern(PatternType.GLOB, "git log *", command))
-        self.assertFalse(
-            match_pattern(PatternType.GLOB, "log", command)
-        )  # Doesn't match full string
+        self.assertFalse(match_pattern(PatternType.GLOB, "log", command))
 
-        # NATIVE with wildcards: Finds segments in order
         self.assertTrue(match_pattern(PatternType.NATIVE, "git * --oneline", command))
-        # Without wildcards, NATIVE requires exact match
         self.assertFalse(match_pattern(PatternType.NATIVE, "log", command))
 
 

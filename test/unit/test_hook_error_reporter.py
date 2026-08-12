@@ -1,22 +1,15 @@
 """
-Unit tests for the error-reporter wiring in toolguard.hook (TOO-45 punch-list
-#04, and its follow-up: main() now owns exactly one error_reporter.Reporter
-for the whole invocation, threaded explicitly, instead of the module-global
-fault buffer and the two nested error_reporter "invocation" scopes -- see
-toolguard/error_reporter.py's module docstring). The fault buffer is drained
-into hookSpecificOutput.additionalContext.
+Unit tests for the error-reporter wiring in toolguard.hook: main() owns one
+error_reporter.Reporter per invocation, and drains its fault buffer into
+hookSpecificOutput.additionalContext.
+
+In production a fault comes only from an exception main() itself catches, so
+these tests raise from a step inside main()'s try block -- the real path a
+fault reaches additionalContext through.
 
 Reuses test_hook.py's _fake_config/_NO_TAKEOVER doubles rather than
 duplicating them (private-but-test-shared, per the project's API-visibility
 convention).
-
-A fault now has exactly ONE production trigger: an exception main() itself
-catches (report_fault's only caller is _report_crash_fault, in the three
-except handlers) -- there is no longer a module-level report_fault an
-arbitrary call site can reach, by design (the Claude-facing buffer is
-per-invocation instance state on hook.py's own Reporter, not ambient). Tests
-below trigger a fault by making a step inside the try block raise, which is
-the real path a fault reaches additionalContext through.
 """
 
 import json
@@ -44,7 +37,7 @@ _HOOK_INPUT = {
 
 
 def setUpModule():
-    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module (TOO-19)."""
+    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module."""
     global _log_tmp_dir, _log_patcher
     _log_tmp_dir, _log_patcher, _ = isolate_log_dir_for_module()
 
@@ -86,9 +79,7 @@ def _run_main(divergence_side_effect=None, takeover=_NO_TAKEOVER):
 
 
 class TestFaultReachesAdditionalContext(unittest.TestCase):
-    """A crash mid-resolution still reaches the final JSON response, via
-    main()'s own crash-fault handling (the sole production path -- see the
-    module docstring)."""
+    """A crash mid-resolution still reaches the final JSON response."""
 
     def test_crash_during_divergence_check_reaches_additional_context(self):
         """
@@ -120,18 +111,16 @@ class TestFaultReachesAdditionalContext(unittest.TestCase):
 
 
 class TestInvocationStateDoesNotLeakBetweenCalls(unittest.TestCase):
-    """TOO-45 punch-list #04 item 4: no state leak across invocations -- each
-    main() call constructs its own Reporter (see toolguard.hook.main)."""
+    """No state leak across invocations: each main() call constructs its own Reporter."""
 
     def test_second_invocations_output_carries_no_trace_of_the_first_faults(self):
         """
         Given a first main() invocation crashes and reports a fault
         When a second, separate main() invocation runs afterward in the same
             process and nothing raises
-        Then the second invocation's output has no additionalContext at all
-             -- proving the per-invocation Reporter resets rather than
-             persisting as a module global (the in-process replay harness
-             concern this item exists to close)
+        Then the second invocation's output has no additionalContext at all --
+             the per-invocation Reporter resets rather than persisting as a
+             module global, which an in-process replay harness would expose
         """
         first_output, _ = _run_main(
             divergence_side_effect=RuntimeError("first invocation's crash")
@@ -147,11 +136,9 @@ class TestInvocationStateDoesNotLeakBetweenCalls(unittest.TestCase):
 
 class TestOuterReporterCoversGetEnvConfigAndHandlers(unittest.TestCase):
     """
-    TOO-45 punch-list #04 fix pass items 1 and 2, still true under the
-    single-Reporter design: main()'s Reporter is constructed and registered
-    via error_reporter.active() BEFORE get_env_config() runs, so a crash
-    there still has a Reporter to report through, and the except handlers
-    (which share that same instance) can still deliver a decision.
+    main()'s Reporter is constructed and registered via error_reporter.active()
+    BEFORE get_env_config() runs, so a crash there still has a Reporter to
+    report through, and the except handlers share that same instance.
     """
 
     def test_get_env_config_raising_reaches_the_crash_response_on_stdout(self):
@@ -159,18 +146,13 @@ class TestOuterReporterCoversGetEnvConfigAndHandlers(unittest.TestCase):
         Given get_env_config() itself raises
         When main()'s top-level `except Exception` handler builds its JSON
             response
-        Then the response -- printed to STDOUT (TOO-45 punch-list #04
-            hook.py fix: the except handlers used to print here to stderr
-            and exit 0, the fail-open) -- is a deny carrying the crash fault
-            in additionalContext, and stdout is non-empty
+        Then the response is printed to STDOUT, not stderr, and is a deny
+            carrying the crash fault in additionalContext
         """
         with TemporaryDirectory() as tmpdir:
-            # get_env_config() raising happens before load_configuration()
-            # runs, so main()'s Reporter resolves its log directory via
-            # toolguard.log_writer.require_project_root(), independently of
-            # this module's TOOLGUARD_LOG_DIR isolation -- redirect it too,
-            # or this test would resolve (and, via the real-log-dir guard,
-            # trip) the real repo's logs/ directory.
+            # Crashing before load_configuration() makes the Reporter fall back
+            # to require_project_root(), which this module's TOOLGUARD_LOG_DIR
+            # isolation does not cover: unpatched, this trips the real-log-dir guard.
             isolated_root = Path(tmpdir)
             (isolated_root / "logs").mkdir()
 
@@ -191,7 +173,6 @@ class TestOuterReporterCoversGetEnvConfigAndHandlers(unittest.TestCase):
                                     except SystemExit:
                                         pass
 
-        # What must NOT be on stderr is the decision itself.
         self.assertNotIn('"permissionDecision"', mock_stderr.getvalue())
         stdout_text = mock_stdout.getvalue()
         self.assertTrue(stdout_text.strip(), "expected a non-empty decision on stdout")
@@ -204,10 +185,7 @@ class TestOuterReporterCoversGetEnvConfigAndHandlers(unittest.TestCase):
 
 
 class TestOrdinaryInvocationStderr(unittest.TestCase):
-    """
-    Machine-checks the ticket's disputed premise: what actually reaches
-    stderr on a clean, uneventful invocation.
-    """
+    """What actually reaches stderr on a clean, uneventful invocation."""
 
     def test_takeover_disabled_writes_nothing_to_stderr(self):
         """

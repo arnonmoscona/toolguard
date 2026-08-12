@@ -1,11 +1,7 @@
 """
-Unit tests for toolguard.tools.uninstall_readiness.
-
-Covers the declarative uninstall-readiness table, its scope-awareness
-(claude_dir / settings_path substitution), the precise "already permitted?"
-evaluation (via the real decision engine), and serialization.
-
-All tests use stdlib unittest with BDD Given/When/Then docstrings.
+Unit tests for toolguard.tools.uninstall_readiness: the declarative table, its
+claude_dir / settings_path substitution, the "already permitted?" evaluation
+against the real decision engine, and serialization.
 """
 
 import unittest
@@ -64,11 +60,9 @@ class TestUninstallReadinessTable(unittest.TestCase):
         """
         Given the required uninstall-readiness table
         When each entry's list_type is inspected
-        Then every entry is 'allow' -- an 'ask' verdict was observed NOT
-        reliably reaching a prompt in a real install (root cause still
-        unconfirmed), so seeding 'ask' rules does not actually guarantee
-        uninstall completes; 'allow' is immune to that failure mode, and each
-        pattern here is a literal, single-purpose action, not a broad grant
+        Then every entry is 'allow' -- an 'ask' verdict was observed not
+        reaching a prompt in a real install, so seeding 'ask' would not
+        guarantee the uninstall completes
         """
         perms = required_uninstall_readiness_permissions(_CLAUDE_DIR, _SETTINGS_PATH)
         self.assertTrue(all(p.list_type == "allow" for p in perms))
@@ -139,11 +133,11 @@ class TestUninstallReadinessTable(unittest.TestCase):
 
     def test_user_vs_project_scope_produce_different_settings_filenames(self):
         """
-        Given the user-scope settings.json path and the project-scope
-        settings.local.json path (mirroring installer._settings_path)
+        Given a user-scope settings.json path and a project-scope
+        settings.local.json path
         When the table is built for each
         Then the native-settings entries reflect the exact filename passed in
-        -- this module does no scope resolution of its own, only substitution
+        -- this module substitutes, it does not resolve scope
         """
         user_perms = required_uninstall_readiness_permissions(
             Path("/home/x/.claude"), Path("/home/x/.claude/settings.json")
@@ -164,16 +158,15 @@ class TestUninstallReadinessTable(unittest.TestCase):
 
 
 class TestUninstallReadinessEvaluation(unittest.TestCase):
-    """Evaluation uses the real decision engine and is risk-aware."""
+    """Evaluation of the table against a configuration, via the real decision engine."""
 
     def test_fresh_unconfigured_config_needs_every_entry(self):
         """
         Given a config with no rules at all (an entirely unconfigured tool
-        always resolves to 'ask', never a fail-closed 'deny')
+        resolves to 'ask', never a fail-closed 'deny')
         When missing_uninstall_readiness_permissions is evaluated
-        Then every entry needs action: 'ask' is not 'allow', and every entry
-        here requires an explicit allow rule -- there is no ask-satisfies-me
-        exemption anymore, since none of these entries are ask-type
+        Then all eight entries need action, each with a current verdict of
+        'ask' -- only an explicit allow satisfies an entry
         """
         missing = missing_uninstall_readiness_permissions(
             _config(), _CLAUDE_DIR, _SETTINGS_PATH
@@ -222,10 +215,8 @@ class TestUninstallReadinessEvaluation(unittest.TestCase):
         """
         Given a config that ALLOWs the package-uninstall Bash command outright
         When it is evaluated
-        Then it does not need action, and its recommendation does NOT warn
-        about anything (allow is the correct, intended state here -- unlike
-        self_permission.py's mutating tools, there is no "should have been
-        ask instead" caveat for this module's entries)
+        Then it does not need action and its recommendation carries no warning
+        -- allow is the intended end state for every entry in this table
         """
         config = _config(permissions={"allow": ["Bash(uv tool uninstall toolguard:*)"]})
         statuses = {

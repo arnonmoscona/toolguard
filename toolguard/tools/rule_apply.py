@@ -1,38 +1,16 @@
 """
-Apply accepted consolidation proposals to config files, comment-preservingly,
-and produce a structured change report.
+Apply accepted consolidation proposals to config files and report what changed.
 
-This module turns a list of :class:`~toolguard.tools.consolidate.ConsolidationProposal`
-records into edits on the underlying config files and reports exactly what
-changed.  It is the deterministic "apply" half of the maintenance core; deciding
-*which* proposals to apply, refusing to run on a dirty git tree, and obtaining
-the user's approval are the SKILL's responsibility, not this module's.
+Turns :class:`~toolguard.tools.consolidate.ConsolidationProposal` records into
+edits on the config files their provenance names.  It applies the proposals it
+is given; whether they are worth making is not decided here.
 
-Reuse (no reimplementation)
----------------------------
-- The comment-preserving file writers
-  :func:`~toolguard.permission_migration.write_toml_config` and
-  :func:`~toolguard.permission_migration.write_json_config` perform the
-  actual section rewrite (TOML comments are preserved via
-  :mod:`toolguard.rule_sort`; JSON is rewritten structurally).
-- Current (raw, unresolved) permissions are read with the canonical
-  :func:`toolguard.config.load_config_file` loader -- deliberately NOT from a
-  loaded :class:`Configuration`, whose layer content may have been
-  takeover-filtered (writing that back would silently drop the blanket allows
-  takeover strips).
-- The unified diff is produced with :func:`difflib.unified_diff` by rendering the
-  change onto a throwaway copy, so a dry run never touches the real file.
+``allow``-list proposals only -- a proposal naming any other list is skipped
+and reported.
 
-Scope
------
-This slice applies ALLOW-list proposals only (the only kind
-:func:`~toolguard.tools.consolidate.propose_consolidations` currently emits).  A
-proposal whose target patterns are absent from the file (config drift) is skipped
-and reported rather than applied.  A proposal is also skipped, with a "would
-lose rule enrichment" reason, when applying it would require silently
-resolving a genuine metadata CONTRADICTION among the file's own existing
-entries for the pattern it would write (TOO-19 Phase 0a increment 9) -- see
-:func:`_resolve_added_entry`.
+The whole ``permissions`` section is rewritten from what
+:func:`_read_raw_permissions` returns, so an entry missing from that read is
+deleted from the user's config.
 """
 
 import difflib
@@ -70,12 +48,16 @@ class FileChange:
         applied: Proposals that were successfully applied.
         skipped: ``(proposal, reason)`` pairs for proposals that were not applied
             (e.g. config drift, unsupported list type, missing file path).
-        patterns_removed: Wrapped patterns (e.g. ``Bash(git diff:*)``) removed.
-        patterns_added: Wrapped patterns added (the consolidated rules).
-        diff: Unified diff of the file's text before vs after (empty when nothing
-            changed).
-        written: Whether the file was actually modified on disk (always ``False``
-            for a dry run or a no-op).
+        patterns_removed: Each applied proposal's ``removed_patterns``, wrapped
+            (e.g. ``Bash(git diff:*)``).
+        patterns_added: Each applied proposal's ``added_pattern``, wrapped;
+            a pure-drop proposal contributes nothing here.
+        diff: Unified diff of the file's current text against the text this
+            module would write.  Re-rendering is not identity, so this can be
+            non-empty even when no proposal applied.
+        written: Whether the file was modified on disk.  ``False`` for a dry
+            run, when no proposal applied, or when the rendered text matched
+            the file's current text.
     """
 
     path: Optional[Path]
@@ -94,7 +76,8 @@ class ChangeReport:
     The result of applying a batch of proposals across one or more files.
 
     Attributes:
-        files: One :class:`FileChange` per distinct target file, in first-seen order.
+        files: One :class:`FileChange` per distinct ``(path, format)`` the
+            proposals name, in first-seen order.
     """
 
     files: Tuple[FileChange, ...]
@@ -122,18 +105,11 @@ class ChangeReport:
 
 def _read_raw_permissions(path: Path, file_format: str) -> Dict[str, List[RuleEntry]]:
     """
-    Read the raw (unresolved, unfiltered) allow/deny/ask lists from a config file.
+    Read a config file's allow/deny/ask lists, unresolved and unfiltered.
 
-    Uses the canonical :func:`toolguard.config.load_config_file` loader so the
-    values are exactly what is on disk -- NOT what a loaded :class:`Configuration`
-    would expose (which may be takeover-filtered).  Missing keys yield empty lists.
-
-    Every raw element is normalized into a :class:`~toolguard.rule_entry.RuleEntry`
-    via :func:`~toolguard.rule_entry.normalize_entries_preserving` (TOO-19 Phase
-    0a increment 8) -- an element that fails to normalize is preserved verbatim,
-    never dropped: this reads a file that gets written back out (whole or in
-    part) by :func:`_apply_to_file`, so silently losing an entry here would
-    silently delete it from the user's config.
+    :func:`~toolguard.rule_entry.normalize_entries_preserving` keeps an element
+    it cannot parse rather than dropping it, which is what this read needs: the
+    lists returned here are the ones written back.
 
     Args:
         path: Config file path.
@@ -141,7 +117,8 @@ def _read_raw_permissions(path: Path, file_format: str) -> Dict[str, List[RuleEn
 
     Returns:
         Dict with ``'allow'``, ``'deny'``, ``'ask'`` keys mapping to lists of
-        :class:`RuleEntry`.
+        :class:`RuleEntry`.  All three are empty when the file is absent, or
+        when it has no ``permissions`` table.
     """
     empty: Dict[str, List[RuleEntry]] = {"allow": [], "deny": [], "ask": []}
     if not path.exists():
@@ -174,10 +151,9 @@ def _render_via_writer(
     """
     Render the post-change file text WITHOUT modifying the real file.
 
-    Copies the original file into a temporary directory, runs the comment-preserving
-    writer on the copy, and returns the resulting text.  This lets a dry run
-    compute the exact diff the real apply would produce while leaving the target
-    untouched.
+    Copies the original into a temporary directory, runs the comment-preserving
+    writer on the copy, and returns the result.  A real apply writes this text
+    verbatim, so a dry run's diff is the one it would produce.
 
     Args:
         path: The real config file (read for its current content/comments).
@@ -204,22 +180,11 @@ def _resolve_added_entry(
     """
     Resolve what a proposal's ``added_pattern`` should write into ``allow``.
 
-    A :class:`ConsolidationProposal` always adds a PLAIN (metadata-free)
-    pattern -- see its ``added_pattern`` docstring -- but the FILE may
-    already carry one or more entries for that exact pattern, possibly
-    structured (e.g. a prior manual annotation, or leftovers from an earlier
-    partial consolidation run). This delegates entirely to
-    :func:`~toolguard.rule_entry.merge_entries` (the single source of truth
-    for bare-vs-structured / union / contradiction semantics -- see its
-    docstring, cases 1-3) rather than re-deriving those rules here:
-
-    - Case 1 (bare dropped, structured wins) and case 2 (multiple structured,
-      compatible metadata -> union merge) resolve with no conflict -- safe
-      to apply.
-    - Case 3 (a genuine metadata CONTRADICTION -- same key, different values
-      -- among the file's own existing entries for this pattern) means
-      writing this proposal's result would silently discard one side of that
-      contradiction. This is the ONLY case that refuses the proposal.
+    The proposal contributes a bare pattern string, but the file may already
+    carry entries for that same pattern, some of them structured. Grouping,
+    union and contradiction semantics all belong to
+    :func:`~toolguard.rule_entry.merge_entries`; this only turns its outcome
+    into an apply-or-refuse answer.
 
     Args:
         allow: The current allow list (as read from the file, or as already
@@ -228,14 +193,14 @@ def _resolve_added_entry(
             proposal wants to add.
 
     Returns:
-        A ``(skip_reason, resolved_entries)`` pair. ``skip_reason`` is
-        ``None`` when it is safe to apply, in which case ``resolved_entries``
-        is the merge_entries-consolidated tuple of entries that should
-        replace every existing ``allow`` entry for ``added_wrapped`` (in
-        practice always exactly one entry, since a single pattern group with
-        no conflict always collapses to one). When refused, ``skip_reason``
-        explains why (containing the literal phrase "would lose rule
-        enrichment") and ``resolved_entries`` is empty.
+        A ``(skip_reason, resolved_entries)`` pair. On a clean merge
+        ``skip_reason`` is ``None`` and ``resolved_entries`` holds the single
+        entry that should replace every existing ``allow`` entry for
+        ``added_wrapped`` -- one entry, because every input shares one
+        pattern. When :func:`merge_entries` reports a metadata conflict among
+        them the proposal is refused instead: ``skip_reason`` names the
+        contended key and contains the literal phrase "would lose rule
+        enrichment", and ``resolved_entries`` is empty.
     """
     new_entry, _issues = normalize_entry(added_wrapped, is_native=False)
     if new_entry is None:
@@ -264,14 +229,14 @@ def _apply_to_file(
     """
     Apply all proposals targeting a single file and return the outcome.
 
-    Each allow-list proposal removes its ``removed_patterns`` (and appends its
-    ``added_pattern``) from the file's allow list.  A proposal whose removed
-    patterns are not all present in the file is skipped (config drift).  A
-    proposal whose ``added_pattern`` would silently discard a genuine
-    metadata contradiction among the file's own existing entries for that
-    pattern is also skipped -- see :func:`_resolve_added_entry` (TOO-19 Phase
-    0a increment 9).  The file is rewritten only when at least one proposal
-    applied, the content actually changed, and ``dry_run`` is False.
+    A proposal is skipped, with its reason recorded, when it names a list
+    other than ``allow``, when any of its ``removed_patterns`` is absent from
+    the file (config drift), or when :func:`_resolve_added_entry` refuses its
+    ``added_pattern``.  The rest are applied in order to one in-memory copy of
+    the allow list, so each sees its predecessors' effect.
+
+    The file is written only when at least one proposal applied, ``dry_run``
+    is False, and the rendered text differs from the file's current text.
 
     Args:
         path: Target config file (``None`` is reported as a skip for all proposals).
@@ -295,7 +260,7 @@ def _apply_to_file(
         )
 
     raw = _read_raw_permissions(path, file_format)
-    allow = list(raw["allow"])  # List[RuleEntry]
+    allow = list(raw["allow"])
 
     applied: List[ConsolidationProposal] = []
     skipped: List[Tuple[ConsolidationProposal, str]] = []
@@ -312,21 +277,15 @@ def _apply_to_file(
         removed_wrapped = [
             wrap_tool_pattern(prop.tool, body) for body in prop.removed_patterns
         ]
-        # `allow` holds RuleEntry (TOO-19 Phase 0a increment 8), so membership
-        # and removal are keyed on `.pattern` (comparison #1, "same RULE" --
-        # see RuleEntry.identity()'s docstring), recomputed each iteration
-        # since `allow` mutates as proposals in this loop are applied in order.
+        # Recomputed per proposal: `allow` mutates as earlier ones apply.
         allow_patterns = [entry.pattern for entry in allow]
         missing = [w for w in removed_wrapped if w not in allow_patterns]
         if missing:
             skipped.append((prop, f"patterns not found in file: {missing}"))
             continue
 
-        # Enrichment guard (TOO-19 Phase 0a increment 9): resolved BEFORE any
-        # mutation of `allow`, so a refused proposal leaves the file
-        # untouched rather than applying half of it. See
-        # _resolve_added_entry's docstring for the case-1/2/3 semantics --
-        # only a genuine case-3 contradiction refuses.
+        # Resolved BEFORE any mutation of `allow`, so a refused proposal
+        # contributes nothing rather than half of itself.
         added_wrapped: Optional[str] = None
         resolved_added_entries: Tuple[RuleEntry, ...] = ()
         if prop.added_pattern is not None:
@@ -339,9 +298,7 @@ def _apply_to_file(
                 continue
 
         for wrapped in removed_wrapped:
-            # Remove exactly one occurrence per removed pattern (mirrors
-            # list.remove()'s first-match semantics from before this entries
-            # widened from str to RuleEntry).
+            # One occurrence per removed pattern, not every match.
             for i, entry in enumerate(allow):
                 if entry.pattern == wrapped:
                     del allow[i]
@@ -351,11 +308,6 @@ def _apply_to_file(
         if added_wrapped is not None:
             existing_at_added = [e for e in allow if e.pattern == added_wrapped]
             if list(resolved_added_entries) != existing_at_added:
-                # Only rewrite this pattern's entries when the resolved
-                # (merge_entries-consolidated) result actually differs from
-                # what's already there -- avoids reordering/diff noise for
-                # the common case of a brand-new pattern or a true no-op
-                # re-application.
                 allow[:] = [e for e in allow if e.pattern != added_wrapped]
                 allow.extend(resolved_added_entries)
             added_all.append(added_wrapped)
@@ -384,17 +336,9 @@ def _apply_to_file(
 
     written = False
     if applied and not dry_run and old_text != new_text:
-        # Route through the same self-protection gate write_toml_config/
-        # write_json_config already use internally (TOO-19 corrective
-        # change): new_text was rendered onto a throwaway temp copy by
-        # _render_via_writer, so this is the first time it is written to the
-        # REAL target path -- refuse rather than write if it somehow fails to
-        # parse or would drop one of new_permissions's own patterns.
-        # real_patterns() (TOO-19 review fix) drops any synthesized-pattern
-        # entry (see RuleEntry.synthesized_pattern's docstring) -- a
-        # malformed entry `_read_raw_permissions` preserved verbatim earlier
-        # would otherwise wrongly refuse this write, since its `repr(raw)`
-        # pattern can never appear in `new_text`.
+        # _render_via_writer produced `new_text` on a throwaway copy, so this
+        # is the first write to the real path -- take it through the write
+        # guard rather than writing the text directly.
         expected_patterns = [
             pattern
             for entries in new_permissions.values()
@@ -431,17 +375,16 @@ def apply_proposals(
     Apply consolidation proposals to their config files and report the changes.
 
     Proposals are grouped by target file (from each proposal's
-    ``layer_provenance``) and applied per file.  With ``dry_run=True`` nothing is
-    written, but the diffs and the full report are still produced -- this is what
-    a skill uses to show the user the change before asking for approval.
+    ``layer_provenance``) and applied per file.  ``dry_run=True`` still
+    produces the diffs and the full report; only the writes are withheld.
 
     Args:
-        proposals: Accepted proposals to apply (allow-list proposals in this slice).
+        proposals: Accepted proposals to apply.
         dry_run: When True, compute and report the change without writing any file.
 
     Returns:
-        A :class:`ChangeReport`, one :class:`FileChange` per distinct target file
-        in first-seen order.
+        A :class:`ChangeReport`, one :class:`FileChange` per target file, in
+        first-seen order.
     """
     by_file: Dict[Tuple[Optional[Path], str], List[ConsolidationProposal]] = {}
     order: List[Tuple[Optional[Path], str]] = []
@@ -464,17 +407,16 @@ def apply_proposals(
 
 def render_change_report(report: ChangeReport, fmt: str = "text") -> str:
     """
-    Render a :class:`ChangeReport` as a human-readable ASCII summary.
+    Render a :class:`ChangeReport` as a human-readable summary.
 
     Args:
         report: The change report to render.
         fmt: ``'text'`` (default) or ``'markdown'``.
 
     Returns:
-        An ASCII-only string summarising, per file, the applied and skipped
-        proposals and the patterns removed/added.  Diffs are NOT inlined here
-        (they are available on each :class:`FileChange.diff` for a caller that
-        wants to display them).
+        A per-file summary of the applied and skipped proposals and the
+        patterns removed/added.  Diffs are NOT inlined here -- each
+        :class:`FileChange` carries its own.
 
     Raises:
         ValueError: When ``fmt`` is not ``'text'`` or ``'markdown'``.

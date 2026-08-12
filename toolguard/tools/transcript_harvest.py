@@ -1,33 +1,27 @@
 """
-Transcript harvester: parse Claude Code conversation transcripts into the SAME
-:class:`~toolguard.tools.log_harvest.LogEntry` corpus shape as the daily-log
-harvester, so :mod:`~toolguard.tools.replay`, ``redundancy``, and ``consolidate``
-operate on it unchanged.
+Transcript harvester: parse Claude Code conversation transcripts into the same
+:class:`~toolguard.tools.log_harvest.LogEntry` records the daily-log harvester
+produces, so one corpus can hold both sources.
 
-Why transcripts (vs toolguard's own logs)
------------------------------------------
-- toolguard's daily logs capture only GOVERNED tool calls plus the decision
-  toolguard made.
-- Transcripts additionally capture:
-  * permission REJECTIONS -- the user declined a tool-use prompt (the ASK->deny
-    resolution), the core signal for suggesting new rules;
-  * ungoverned / failed commands and richer surrounding context.
-- For a NEW toolguard user (cold start) or an auto-mode user there are NO
-  toolguard logs at all -- the transcript is the ONLY governance history, which
-  makes this harvester a prerequisite for onboarding/migration as well as
-  ongoing maintenance.
+Why transcripts as well as toolguard's own logs
+-----------------------------------------------
+- A transcript records what became of a tool-use prompt, including the user
+  declining it. toolguard's own log records the decision toolguard returned,
+  which for an ``ask`` is written before the user answers.
+- A transcript also covers ungoverned calls, and says whether a call that ran
+  actually succeeded.
+- A project that has not been running toolguard has no toolguard log at all,
+  so at cold start the transcript is the only history there is.
 
 Transcript layout
 -----------------
 Claude Code stores one JSONL file per session under
-``~/.claude/projects/<encoded-project-path>/<session-id>.jsonl``, where the
+``<claude_home>/projects/<encoded-project-path>/<session-id>.jsonl``, where the
 project path is encoded by replacing ``/`` with ``-``.  Each line is a JSON
-object; assistant messages carry ``message.content`` lists that may contain
-``tool_use`` items (``name``, ``id``, ``input``), and user messages carry
-``tool_result`` items (``tool_use_id``, ``is_error``, ``content``).  A top-level
-``timestamp`` (ISO-8601, UTC) and ``isSidechain`` flag accompany each entry.
-
-Reuse: :func:`toolguard.subagent.parse_jsonl_lines` for JSONL parsing.
+object.  ``message.content`` lists carry ``tool_use`` items (``name``, ``id``,
+``input``) and ``tool_result`` items (``tool_use_id``, ``is_error``,
+``content``); a top-level ``timestamp`` (ISO-8601, UTC) and ``isSidechain``
+flag accompany each entry.
 """
 
 from datetime import date, datetime, timedelta
@@ -50,8 +44,8 @@ from toolguard.tools.log_harvest import LogEntry
 # Constants
 # ---------------------------------------------------------------------------
 
-# Lowercased substrings that identify a USER permission rejection (an ASK->deny
-# resolution) in a tool_result error, as opposed to an ordinary tool error.
+#: Lowercased substrings that mark a ``tool_result`` error as the user having
+#: declined the prompt, rather than the tool itself having failed.
 _REJECTION_MARKERS = (
     "doesn't want to proceed",
     "tool use was rejected",
@@ -70,17 +64,14 @@ def transcript_dir_for_project(
     """
     Return the Claude Code transcript directory for a project.
 
-    Claude Code encodes the absolute project path by replacing ``/`` with ``-``
-    and stores session JSONL files under
-    ``<claude_home>/projects/<encoded>/``.
-
     Args:
-        project_dir: The project's directory (resolved to an absolute path).
-        claude_home: The Claude Code home directory (defaults to ``~/.claude``).
+        project_dir: The project's directory; resolved to an absolute path
+            before encoding.
+        claude_home: The Claude Code home directory (defaults to
+            ``~/.claude``).
 
     Returns:
-        The directory expected to contain the project's ``*.jsonl`` transcripts.
-        Existence is NOT checked.
+        ``<claude_home>/projects/<encoded>``. Existence is NOT checked.
     """
     home = claude_home or (Path.home() / ".claude")
     encoded = str(project_dir.resolve()).replace("/", "-")
@@ -96,16 +87,14 @@ def _parse_timestamp(raw: Optional[str]) -> Optional[datetime]:
     """
     Parse an ISO-8601 transcript timestamp into a naive LOCAL datetime.
 
-    Transcript timestamps are UTC (``...Z``).  toolguard works in local time
-    throughout (the daily-log harvester emits naive local datetimes), so a
-    tz-aware timestamp is converted to the local zone and stripped of tzinfo to
-    match.
+    Transcript timestamps are UTC (``...Z``) and toolguard works in naive
+    local time, so a tz-aware value is converted and its tzinfo dropped.
 
     Args:
         raw: The raw ``timestamp`` string, or ``None``.
 
     Returns:
-        A naive local :class:`datetime`, or ``None`` when ``raw`` is missing or
+        A naive local :class:`datetime`, or ``None`` when *raw* is missing or
         unparseable.
     """
     if not raw:
@@ -123,14 +112,16 @@ def _extract_text(content: Any) -> str:
     """
     Flatten a ``tool_result`` content value into a single string.
 
-    The content may be a plain string or a list of block dicts (each typically
-    ``{'type': 'text', 'text': ...}``).  Non-text blocks are stringified.
+    The content may be a plain string or a list of blocks, each typically
+    ``{'type': 'text', 'text': ...}``. A block that is not a dict is
+    stringified whole; a dict without a ``text`` key contributes nothing but
+    its separator.
 
     Args:
         content: The ``content`` value from a ``tool_result`` item.
 
     Returns:
-        A single concatenated string (possibly empty).
+        A single space-joined string, possibly empty.
     """
     if isinstance(content, str):
         return content
@@ -155,8 +146,8 @@ def _index_tool_results(entries: List[Dict[str, Any]]) -> Dict[str, Tuple[bool, 
         entries: Parsed transcript entries.
 
     Returns:
-        Dict from tool_use id to a ``(is_error, result_text)`` tuple.  Later
-        results win if an id somehow repeats.
+        Dict from tool_use id to ``(is_error, result_text)``. A repeated id
+        keeps the last result seen.
     """
     results: Dict[str, Tuple[bool, str]] = {}
     for entry in entries:
@@ -186,18 +177,20 @@ def _status_and_reason(
     Derive the observed status and an optional reason for a tool use.
 
     Classification:
-    - No matching result          -> ``UNKNOWN`` (interrupted / still open).
-    - Result with no error        -> ``EXECUTED``.
-    - Error matching a rejection  -> ``REFUSED`` (user declined the prompt).
-    - Any other error             -> ``ERROR`` (permitted but the tool failed).
+
+    - No matching result -> ``UNKNOWN`` (interrupted, or still open).
+    - Result with no error -> ``EXECUTED``.
+    - Error text carrying a :data:`_REJECTION_MARKERS` substring -> ``REFUSED``.
+    - Any other error -> ``ERROR`` (the call ran and the tool failed).
 
     Args:
-        tool_use_id: The id of the tool use (may be ``None``).
+        tool_use_id: The id of the tool use; ``None`` classifies as
+            ``UNKNOWN``.
         results: The index produced by :func:`_index_tool_results`.
 
     Returns:
-        ``(status, reason)`` where ``reason`` is a truncated result snippet for
-        REFUSED/ERROR entries and ``None`` otherwise.
+        ``(status, reason)``, where *reason* is the result text trimmed to its
+        first 200 characters for REFUSED and ERROR, and ``None`` otherwise.
     """
     found = results.get(tool_use_id) if tool_use_id else None
     if found is None:
@@ -213,14 +206,17 @@ def _status_and_reason(
 
 def _command_for_tool(tool: str, tool_input: Dict[str, Any]) -> Optional[str]:
     """
-    Extract the command (Bash) or file path (Read/Write/Edit) from a tool input.
+    Pull a tool call's subject -- its command line or file path -- from its input.
 
     Args:
-        tool: Known (builtin) tool name.
-        tool_input: The ``input`` dict of the tool_use item.
+        tool: A registered tool name, whose
+            :class:`~toolguard.tool_spec.ToolSpec` names the input key to
+            read.
+        tool_input: The ``input`` dict of the ``tool_use`` item.
 
     Returns:
-        The command string or file path, or ``None`` when it is missing/empty.
+        That key's value, or ``None`` when it is absent, not a string, or
+        blank.
     """
     spec = TOOLS_BY_NAME.get(tool)
     key = spec.payload_key if spec else "command"
@@ -239,16 +235,19 @@ def harvest_transcript_file(path: Path) -> List[LogEntry]:
     """
     Parse a single transcript JSONL file into :class:`LogEntry` records.
 
-    Walks the assistant ``tool_use`` items for known (builtin) tools, joins each
-    to its ``tool_result`` (for status), and emits one entry per known tool use
-    that has a parseable timestamp and a non-empty command/path.
+    One entry per ``tool_use`` item naming a tool in
+    :data:`~toolguard.constants.BUILTIN_TOOLS` -- the four tools governed by
+    default, a narrower set than the tools toolguard recognises. Each is
+    joined to its ``tool_result`` for a status; items with no parseable
+    timestamp or no command/path are dropped.
 
     Args:
         path: Path to a ``*.jsonl`` transcript file.
 
     Returns:
-        List of :class:`LogEntry` records (unsorted).  A file that cannot be read
-        yields an empty list.
+        The file's entries, unsorted. ``rule_text`` carries the result snippet
+        of a REFUSED or ERROR entry and is ``None`` otherwise. A file that
+        cannot be read yields an empty list.
     """
     try:
         lines = path.read_text(errors="replace").splitlines()
@@ -307,27 +306,18 @@ def harvest_transcripts(
     max_age_days: Optional[int] = None,
 ) -> List[LogEntry]:
     """
-    Harvest all transcripts in a directory into a time-bounded corpus.
-
-    Mirrors :func:`toolguard.tools.log_harvest.harvest`: every ``*.jsonl`` file in
-    ``transcripts_dir`` is parsed, entries are filtered by a floor date, and the
-    result is sorted by timestamp (oldest first).
-
-    Time window
-    -----------
-    ``since`` (a floor date) and ``max_age_days`` (a rolling window relative to
-    today's local date) both cap the corpus; when both are given the later floor
-    wins.  Unlike daily logs, transcript files are not per-day, so the floor is
-    applied per ENTRY (by its timestamp), not per file.
+    Harvest every ``*.jsonl`` transcript in a directory into one corpus.
 
     Args:
-        transcripts_dir: Directory of ``*.jsonl`` transcript files (e.g. from
-            :func:`transcript_dir_for_project`).
-        since: Only include entries on or after this date.
-        max_age_days: Only include entries from the last N calendar days.
+        transcripts_dir: Directory of transcript files, e.g. from
+            :func:`transcript_dir_for_project`.
+        since: Drop entries dated before this day.
+        max_age_days: Drop entries dated before ``today - max_age_days``,
+            against the local date. Given both, the later floor applies;
+            given neither, nothing is dropped.
 
     Returns:
-        List of :class:`LogEntry` records sorted by timestamp.  A missing or
+        The surviving entries, sorted by timestamp, oldest first. A missing or
         unreadable directory yields an empty list.
     """
     today = date.today()

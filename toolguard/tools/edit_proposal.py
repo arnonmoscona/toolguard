@@ -1,27 +1,17 @@
 """
 General rule-edit proposal model and in-memory application.
 
-This is the shared representation that lets the two maintenance/audit skills talk
-about the SAME thing: a proposed change to the permission configuration that may
-span several rules, several permission sections (allow / deny / ask), and several
-hierarchy layers.  Two directions build on it:
+An :class:`EditProposal` is one intent -- "narrow this allow", "move this rule" --
+expressed as a list of atomic :class:`RuleEdit` operations that may span several
+rules, several permission sections (allow / deny / ask) and several hierarchy
+layers.  It is the shared form the security audit and the maintenance tooling
+exchange proposals in, as data rather than prose.
 
-* The **security audit** emits its remediations as :class:`EditProposal` records
-  (typed ``remove | replace | narrow | move`` actions), so the maintenance skill
-  can ingest them as reviewable edits without parsing prose.
-* The **maintenance skill** hands proposed edits back to the audit, which applies
-  them to an in-memory :class:`~toolguard.config.Configuration` via
-  :func:`apply_edits` and risk-assesses the WHOLE resulting config
-  (all sections, all layers) as-if-enacted -- because replacing one rule with a
-  set of rules across sections can change interactions the individual edit cannot
-  reveal.
-
-The model is deliberately mechanical: an :class:`EditProposal` carries an intent
-label plus a list of atomic :class:`RuleEdit` operations; :func:`apply_edits`
-composes the section-generic
+The model is deliberately mechanical: :func:`apply_edits` composes the
+section-generic
 :func:`~toolguard.tools.config_access.with_layer_rules_replaced` primitive and
-performs NO judgement.  Deciding whether an edit is safe (decision-replay) or
-desirable (the audit's judgement layer) lives elsewhere.
+performs NO judgement.  Deciding whether an edit is safe or desirable lives
+elsewhere.
 """
 
 from dataclasses import dataclass
@@ -31,9 +21,9 @@ from typing import Any, Dict, List, Tuple
 from toolguard.config import Configuration, Provenance
 from toolguard.tools.config_access import with_layer_rules_replaced
 
-# The intent labels an EditProposal may carry.  These describe WHY the edit set
-# exists (for the human/agent reading it); the mechanics are always the atomic
-# RuleEdits, so the label is advisory, not enforced.
+# The intent labels an EditProposal may carry, describing WHY the edit set exists.
+# Advisory: this module never validates a proposal's action against the tuple, and
+# the mechanics are entirely in the atomic RuleEdits.
 ACTION_REMOVE = "remove"
 ACTION_REPLACE = "replace"
 ACTION_NARROW = "narrow"
@@ -50,7 +40,9 @@ class RuleEdit:
         tool: Tool the edited list belongs to (e.g. ``'Bash'``).
         list_type: Which permission list is edited: ``'allow'``, ``'deny'``, or
             ``'ask'``.
-        provenance: The layer whose list is edited.
+        provenance: The layer whose list is edited.  Matched by whole-``Provenance``
+            equality, so an edit differing in any one field -- ``specificity``, or an
+            unnormalized ``path`` -- matches no layer and is skipped.
         removed_patterns: Wrapper-free pattern bodies to remove from the list.
         added_patterns: Wrapper-free pattern bodies to append to the list.
     """
@@ -78,9 +70,8 @@ class EditProposal:
             other tools, but this is the headline).
         rationale: Human-readable reason for the change.
         edits: The atomic edits that make up the proposal, applied in order.
-        origin: Optional provenance of the proposal itself (e.g.
-            ``'consolidation'`` or ``'audit:<finding_id>'``) so a consumer can
-            trace where it came from.
+        origin: Optional free-form tag identifying the producer, so a consumer can
+            trace where the proposal came from.  Never interpreted here.
     """
 
     action: str
@@ -97,16 +88,21 @@ def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configu
     Every :class:`RuleEdit` of every proposal is applied, in order, by composing
     :func:`~toolguard.tools.config_access.with_layer_rules_replaced`.  Nothing is
     written to disk; the result is a synthetic :class:`~toolguard.config.Configuration`
-    suitable for as-if-enacted analysis (security audit, decision-replay).  Edits
-    whose ``provenance`` matches no layer are silently skipped (the primitive
-    falls through), so a stale proposal cannot corrupt the config.
+    suitable for as-if-enacted analysis.
+
+    An edit can miss silently.  An unmatched ``provenance`` leaves the config
+    untouched, and a ``removed_patterns`` entry that is no longer present is a no-op
+    while the same edit's ``added_patterns`` still apply -- so a proposal built
+    against an older config can be enacted in part, with nothing in the result
+    saying so.
 
     Args:
         config: The original configuration.
         proposals: The edit proposals to enact, applied in list order.
 
     Returns:
-        A new :class:`~toolguard.config.Configuration` with all edits applied.
+        A new :class:`~toolguard.config.Configuration`, or ``config`` itself when no
+        edit matched a layer.
     """
     result = config
     for proposal in proposals:
@@ -123,8 +119,7 @@ def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configu
 
 
 # ---------------------------------------------------------------------------
-# Serialization -- the JSON contract shared with toolguard-audit --edits and the
-# audit's structured remediation output.
+# Serialization -- the JSON form in which proposals are exchanged.
 # ---------------------------------------------------------------------------
 
 
@@ -173,19 +168,7 @@ def rule_edit_from_dict(data: Dict[str, Any]) -> RuleEdit:
 
 
 def edit_proposal_to_dict(proposal: EditProposal) -> Dict[str, Any]:
-    """
-    Serialize an :class:`EditProposal` to a JSON-safe dict.
-
-    This is the on-the-wire form the audit emits (structured remediation) and the
-    ``toolguard-audit --edits`` path ingests.
-
-    Args:
-        proposal: The proposal to serialize.
-
-    Returns:
-        A JSON-serializable dict capturing the action, tool, rationale, origin,
-        and atomic edits.
-    """
+    """Serialize an :class:`EditProposal` to a JSON-safe dict."""
     return {
         "action": proposal.action,
         "tool": proposal.tool,
@@ -199,11 +182,7 @@ def edit_proposal_from_dict(data: Dict[str, Any]) -> EditProposal:
     """
     Reconstruct an :class:`EditProposal` from :func:`edit_proposal_to_dict`.
 
-    Args:
-        data: A dict in the shape produced by :func:`edit_proposal_to_dict`.
-
-    Returns:
-        The reconstructed :class:`EditProposal`.
+    ``action`` and ``tool`` are required; the other three keys default to empty.
     """
     return EditProposal(
         action=data["action"],

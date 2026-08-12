@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-Toolguard Pre-Tool-Use Hook for Claude Code.
+Claude Code PreToolUse hook entry point: reads one hook event on stdin and
+writes a permission decision to stdout.
 
-This hook validates bash commands and file operations against allow/deny patterns.
+Command tools (Bash, MCP terminals) go through compound-command parsing;
+file-path tools (Read, Write, Edit) go through path matching (glob by
+default, with extended-syntax prefixes honoured).
 
-Supported tools:
-- Command tools (Bash, MCP terminals): Uses compound command parsing
-- File path tools (Read, Write, Edit): Uses GLOB pattern matching
-
-Input: JSON via stdin with tool information
-Output: JSON via stdout with permission decision
-
-Exit code: 0 in the normal case -- the decision, including for every internal
-error `main()` catches, is always a well-formed JSON object on stdout. Exit 2
-fires only if writing that JSON to stdout itself fails, as a last-resort hard
-block (Claude Code treats exit 2, and only exit 2, as blocking).
+Exit code 0 in the normal case: a well-formed JSON decision on stdout (see
+:func:`main` for the stray-invocation paths that emit none instead). Exit 2 is
+a last-resort hard block: it fires if writing that JSON to stdout itself
+fails, or from argparse's own usage-error path on a malformed CLI invocation
+(Claude Code treats exit 2, and only exit 2, as blocking).
 """
 
 import argparse
@@ -50,9 +47,9 @@ from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
 from toolguard.tool_spec import payload_key as _tool_payload_key
 
-# Tools that operate on file paths (use GLOB matching). Alias of the shared
-# foundation constant, kept because tests still import this name; prefer
-# toolguard.constants.FILE_TOOLS in new code.
+#: Tools that operate on file paths (glob-matched), as opposed to command
+#: tools (compound-parsed). Alias of ``toolguard.constants.FILE_TOOLS`` --
+#: prefer ``toolguard.constants.FILE_TOOLS`` in new code.
 FILE_PATH_TOOLS = FILE_TOOLS
 
 
@@ -60,15 +57,12 @@ def _run_startup_validation(
     env_config: Dict[str, Any], start_dir: str = None, config=None
 ) -> None:
     """
-    Run configuration validation once at startup.
+    Route this invocation's configuration issues to the log stream matching each one's severity.
 
     Obtains the resolved :class:`~toolguard.config.Configuration` and renders the
-    structured issues it reports. The hook performs NO file discovery, parsing,
-    or format branching here -- those concerns live entirely in the config
-    module. The hook only renders/logs the returned issues. Issues surfaced:
-    - Both TOML and JSON config files existing at the same level
-    - Unsupported tools in permissions
-    - Ungoverned tools in permissions
+    structured issues it reports (see :meth:`~toolguard.config.Configuration.validation_issues`
+    for what is detected). The hook performs no file discovery, parsing, or
+    format branching here -- that lives entirely in the config module.
 
     Args:
         env_config: Environment configuration dict with log_dir
@@ -80,7 +74,6 @@ def _run_startup_validation(
     if config is None:
         config = load_configuration(start_dir)
 
-    # Get log directory from env config
     log_dir = env_config.get("log_dir")
     if not log_dir:
         project_root = config.project_root
@@ -88,11 +81,9 @@ def _run_startup_validation(
             return  # Can't log without log dir
         log_dir = project_root / "logs"
 
-    # The config module detects content-level issues and returns them; the hook
-    # only decides where to log. No files are opened or parsed here. Route each
-    # issue to the stream matching its severity so the Phase 4 stream separation
-    # holds: 'error'-level issues to the error stream, everything else (today
-    # only 'warning') to the warning stream.
+    # Route each issue to the stream matching its severity: 'error'-level
+    # issues to the error stream, everything else (today only 'warning') to
+    # the warning stream.
     for issue in config.validation_issues():
         if issue.level == "error":
             log_error(issue.message, issue.corrective_steps, log_dir)
@@ -104,13 +95,13 @@ class EmptyStdinError(ValueError):
     """
     Raised when stdin was read but contained no data.
 
-    A DISTINCT subclass, not a bare ``ValueError``, so ``main()`` can treat it
-    like the TTY guard (a stray manual/probing invocation -- e.g. a `toolguard
+    A distinct subclass, not a bare ``ValueError``, so :func:`main` can treat it
+    like the TTY guard -- a stray manual/probing invocation (e.g. a `toolguard
     --version` an agent ran to check the installed version, an unrecognized
-    flag silently discarded by argparse, or any other non-hook invocation)
-    rather than an unexpected internal error worth a crash report. A real
-    install hit this twice: the crash report it produced was a red herring
-    that looked like a hook defect but was really just a manual probe.
+    flag silently discarded by argparse, or any other non-hook invocation),
+    not an unexpected internal error worth a crash report. A real install hit
+    this twice, and the crash report it produced looked like a hook defect
+    while being nothing but a manual probe.
     """
 
 
@@ -147,7 +138,6 @@ def parse_hook_input() -> Dict[str, Any]:
 
         data = json.loads(input_data)
 
-        # Validate required fields
         required_fields = ["tool_name", "tool_input", "hook_event_name"]
         for field in required_fields:
             if field not in data:
@@ -163,15 +153,14 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
     """
     Create hook output in the format expected by Claude Code.
 
-    TOO-45 R1d: takes the whole :class:`~toolguard.config_types.RuntimeVerdict`
-    instead of a bare ``(decision, reason, additional_context)`` triple, so
-    every call site (including the error/guard paths that build a synthetic
-    verdict inline, e.g. ``RuntimeVerdict(decision="deny", reason=...)``) goes
-    through the same, single construction shape. Only ``decision``,
-    ``reason``, and ``additional_context`` are consumed here -- the hook's
-    JSON response is a projection of the verdict, not the whole of it (see
-    the TOO-45 R1 scoping trace's Q2: this projection is faithful across the
-    entire verdict corpus, unlike the audit-log path).
+    Takes the whole :class:`~toolguard.config_types.RuntimeVerdict` -- including
+    the error/guard paths in this module that build a synthetic verdict inline
+    (e.g. ``RuntimeVerdict(decision="deny", reason=...)``) -- so every call site
+    goes through the same construction shape. Only ``decision``, ``reason``, and
+    ``additional_context`` are consumed here: the hook's JSON response is a
+    projection of the verdict, not the whole of it (the audit-log functions in
+    this module read ``provenance``, ``matched_rule``, ``sub_matches``,
+    ``overrides`` and ``fallback_warning`` as well).
 
     Args:
         verdict: The resolved permission verdict. ``verdict.decision`` becomes
@@ -186,9 +175,8 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
     Returns:
         Dictionary formatted for JSON output to Claude Code. The
         ``"additionalContext"`` key is present inside ``hookSpecificOutput``
-        ONLY when ``verdict.additional_context`` is a non-empty string --
-        omitted entirely (not set to ``null``) otherwise, so existing
-        consumers that don't know about the field see no change in shape.
+        only when ``verdict.additional_context`` is a non-empty string --
+        omitted entirely (not set to ``null``) otherwise.
     """
     output: Dict[str, Any] = {
         "hookSpecificOutput": {
@@ -205,10 +193,10 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
 def _finalize_output(verdict: RuntimeVerdict, reporter: Reporter) -> Dict[str, Any]:
     """
     Build the hook's JSON response for *verdict*, merging in any faults
-    *reporter* accumulated so far this invocation (TOO-45 punch-list #04) --
-    appended to ``additionalContext``, alongside the rule's own enrichment
-    rather than replacing it. Used on both the success path and inside
-    ``main()``'s ``except`` handlers, which drain the same *reporter*.
+    *reporter* accumulated so far this invocation -- appended to
+    ``additionalContext``, alongside the rule's own enrichment rather than
+    replacing it. Used on both the success path and inside :func:`main`'s
+    ``except`` handlers, which drain the same *reporter*.
     """
     output = create_hook_output(verdict)
     fault_context = reporter.drain_claude_context()
@@ -223,36 +211,38 @@ def _finalize_output(verdict: RuntimeVerdict, reporter: Reporter) -> Dict[str, A
 
 def _emit_decision(output: Dict[str, Any]) -> None:
     """
-    Print the hook's JSON decision to stdout -- the ONE place any code path
-    in ``main()`` delivers a decision, success or error alike (TOO-45
-    punch-list #04 hook.py fix: the three ``except`` handlers used to print
-    here to stderr and exit 0, which Claude Code reads as "no opinion" and
-    silently falls through to native permission handling -- the fail-open).
+    Print the hook's JSON decision to stdout -- the ONE place any code path in
+    :func:`main` delivers a decision, success or error alike. Every path must
+    go through here: an exit-0 hook with no usable decision on stdout is not
+    neutral -- Claude Code reads it as "no opinion" and silently falls through
+    to native permission handling, the exact fail-open this hook exists to
+    prevent.
 
     Args:
         output: The JSON-serializable decision dict, from
-            :func:`_finalize_output`.
+            :func:`_finalize_output` on the live-hook path, or
+            :func:`create_hook_output` directly on the ``--eval`` path (which
+            never drains a fault buffer -- see :func:`_run_eval_mode`).
 
     If serializing or writing *output* raises, there is no decision left to
     deliver: falls back to ``sys.exit(2)`` with the failure on stderr -- the
     one case where the host's own blocking signal (exit 2) is all that's left.
 
-    The flush is inside the ``try`` deliberately (TOO-45 punch-list #04 fix
-    pass M1): Claude Code's stdout is a pipe, which is block-buffered, so a
-    bare ``print()`` can return successfully with the bytes still sitting in
-    the buffer -- a broken reader then only surfaces at interpreter shutdown,
-    past this function, and the process exits non-zero-non-2 (fail-open, the
-    same class of bug this function exists to close). Flushing here is what
-    makes a real write failure raise where it can still be caught.
+    The flush is inside the ``try`` deliberately: Claude Code's stdout is a
+    pipe, which is block-buffered, so a bare ``print()`` can return
+    successfully with the bytes still sitting in the buffer -- a broken reader
+    then only surfaces at interpreter shutdown, past this function, and the
+    process exits non-zero-non-2 (the same fail-open this function exists to
+    close). Flushing here is what makes a real write failure raise where it
+    can still be caught.
 
     Swapping *sys.stdout* for a working stream before ``sys.exit(2)`` is also
-    deliberate, and was found only by re-measuring against a real subprocess:
-    CPython flushes stdout again during interpreter shutdown, and when that
-    second flush ALSO fails on the still-broken pipe, CPython silently
-    overrides ``sys.exit(2)``'s requested code with exit status 120 -- the
-    exact non-2 code this function exists to avoid. Leaving ``sys.exit`` (not
-    ``os._exit``) keeps this path testable and lets normal interpreter
-    cleanup still run.
+    deliberate: CPython flushes stdout again during interpreter shutdown, and
+    when that second flush ALSO fails on the still-broken pipe, CPython
+    silently overrides ``sys.exit(2)``'s requested code with exit status 120
+    -- the exact non-2 code this function exists to avoid. Leaving
+    ``sys.exit`` (not ``os._exit``) keeps this path testable and lets normal
+    interpreter cleanup still run.
     """
     try:
         print(json.dumps(output))
@@ -263,15 +253,14 @@ def _emit_decision(output: Dict[str, Any]) -> None:
         sys.exit(2)
 
 
-#: Corrective steps for a crash fault about main()'s own crash handlers --
-#: shared by all three (TOO-45 punch-list #04 hook.py fix).
+#: Corrective steps shared by all three of :func:`main`'s crash-handling ``except`` clauses.
 _CRASH_CORRECTIVE_STEPS = (
     "Check the crash report under ~/.toolguard/errors/ for the full traceback."
 )
 
 
 def _report_crash_fault(reporter: Reporter, error_reason: str) -> None:
-    """Report main()'s own crash as a fault, so it reaches Claude via `additionalContext`."""
+    """Report :func:`main`'s own crash as a fault, so it reaches Claude via ``additionalContext``."""
     reporter.fault(
         f"toolguard crashed while deciding: {error_reason}", _CRASH_CORRECTIVE_STEPS
     )
@@ -281,7 +270,7 @@ def _build_crash_context(local_vars: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract a small, readable snapshot of in-flight hook state for :func:`log_crash`.
 
-    ``main()``'s ``except`` clauses can fire before ``hook_data``/``tool_name``/
+    :func:`main`'s ``except`` clauses can fire before ``hook_data``/``tool_name``/
     ``tool_input``/``cwd`` are ever assigned (e.g. a parse failure on stdin
     itself), so this only includes whichever of those keys are actually present
     in *local_vars* -- passing ``locals()`` from the catch site -- rather than
@@ -333,9 +322,9 @@ def _format_conflict_message(target, override) -> str:
     """
     Compose a human/LLM-readable conflict-log message for an allow-over-deny override.
 
-    Cites BOTH sides' provenance and the command/path that triggered the override
-    (TOO-8 Phase 4). The decision still follows more-specific-wins (the allow
-    won); this message merely records that a less-specific deny was overridden.
+    Cites both sides' provenance and the command/path that triggered the
+    override. The decision still follows more-specific-wins (the allow won);
+    this message merely records that a less-specific deny was overridden.
 
     Args:
         target: The command or file-path target that triggered the override.
@@ -384,40 +373,17 @@ def _log_conflict_override(target, override, log_dir) -> None:
 
 def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) -> None:
     """
-    Route an ``allow_with_warning``-fallback 'allow' decision to the WARNING
-    log stream (TOO-19 code review m6; TOO-19 allow/allow_with_no_warnings
-    follow-up).
+    Route an ``allow_with_warning``-sourced 'allow' decision to the WARNING
+    log stream.
 
-    ``docs/configuration.md`` promises that ``allow_with_warning`` will
-    "allow the command but log a warning" for BOTH ``no_match_fallback`` and
-    ``undecidable_fallback``. Previously that promise was kept only in the
-    permission-decision ``reason`` string (visible in the resolution log and
-    the permission prompt) -- it never reached
-    :func:`toolguard.error_log.log_warning`'s dedicated WARNING stream.
-
-    *fallback_warning* is real data carried by the resolver result
-    (:attr:`~toolguard.config_types.RuntimeVerdict.fallback_warning`) -- this
-    function does not inspect *reason* itself to decide whether to log. For
-    the Bash path, that structured flag is computed per-sub-command inside
-    :func:`toolguard.resolve.resolve_bash_permission_detailed`'s own ``_decide``
-    closure (TOO-19 code review M1), STRUCTURALLY -- an 'allow' with
-    ``matched_rule`` left ``None`` can only have fallen through to
-    ``no_match_fallback``, so no marker-substring check on *reason* is
-    involved at all (TOO-45 compound/resolve cycle removal: this used to be
-    computed inside :func:`toolguard.compound.resolve_compound_permission_detailed`
-    via a text-based marker check immediately after ``resolve_one`` returned;
-    that legacy driver still exists for ~40 tests and
-    :func:`toolguard.compound.check_compound_permission`, which have no
-    ``UnitVerdict``-producing resolver of their own and so still go through
-    :func:`toolguard.compound.fallback_kind_for_reason`'s text heuristic --
-    but the production path this function serves does not). Either way the
-    hook layer -- the thing this project's own CLAUDE.md most wants kept
-    honest -- reads a plain boolean instead of parsing prose itself.
-    Critically, this means the new
-    ``no_match_fallback='allow'``/``'allow_with_no_warnings'`` values
-    (TOO-19) -- which allow with NO warning by design -- can never
-    accidentally trip this: their *fallback_warning* is always ``False``,
-    regardless of what their reason text says.
+    ``docs/configuration.md`` promises that ``allow_with_warning`` logs a
+    warning, for both ``no_match_fallback`` and ``undecidable_fallback`` --
+    this is what makes that reach :func:`toolguard.error_log.log_warning`'s
+    dedicated stream, beyond the reason text already visible in the
+    resolution log. *fallback_warning* is read as a plain boolean
+    (:attr:`~toolguard.config_types.RuntimeVerdict.fallback_warning`);
+    *reason* is never inspected to decide whether to log, only used as the
+    warning text once the caller says to log it.
 
     Args:
         fallback_warning: Whether *reason* should be routed to the WARNING
@@ -438,7 +404,7 @@ def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) ->
 
 def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     """
-    Record a cross-level ``takeover_mode.enabled`` disagreement (TOO-8 Phase 5).
+    Record a cross-level ``takeover_mode.enabled`` disagreement.
 
     Writes a conflict-log entry citing every disagreeing level's value and
     provenance and noting that fail-safe OFF was applied (so native Claude
@@ -469,25 +435,22 @@ def _reason_suffix_or_placeholder(
     """
     Return *matched_rule*, or *placeholder* when *reason* names a fallback escape hatch.
 
-    A fallback ESCAPE-HATCH reason (``undecidable_fallback``'s allow/deny
-    branches) ends in the same ``": <text>"`` shape as a genuine rule-match
-    reason, but the text is a truncated DISPLAY COMMAND, not a pattern --
+    A fallback escape-hatch reason ends in the same ``": <text>"`` shape as a
+    genuine rule-match reason, but the text is a truncated display command,
+    not a pattern --
     e.g. ``Denied by undecidable_fallback=deny (...): python -c``. Crediting
     that text to a rule would fabricate an attribution for a rule that does
-    not exist in the config (TOO-19 m5 allow-side / deny-side fix).
-    :func:`~toolguard.compound.fallback_kind_for_reason` is the ONE
-    mechanism that tells the two shapes apart. Used by
-    :func:`_log_non_allow_decision` (deny) -- the allow side no longer needs
-    this reason-text classification (TOO-45 R1e:
-    :class:`~toolguard.config_types.UnitVerdict.fallback_kind` now carries
-    the SAME classification structurally, computed once at the point each
-    unit's outcome is decided rather than re-derived from *reason* at log
-    time -- see :func:`_log_allowed_command`).
+    not exist in the config.
+    :func:`~toolguard.compound.fallback_kind_for_reason` is the mechanism
+    that tells the two shapes apart. Only the deny side of the audit log
+    still needs this reason-text classification; the allow side reads
+    :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` directly
+    instead (see :func:`_unit_matched_rule_for_log`).
 
     Args:
         decision: The decision *reason* accompanies (``'allow'`` or
             ``'deny'``).
-        reason: Consulted ONLY for the escape-hatch classification above --
+        reason: Consulted only for the escape-hatch classification above --
             never parsed for a value.
         placeholder: What to return when *reason* names a fallback escape
             hatch instead of a genuine rule match.
@@ -522,13 +485,11 @@ def _provenance_brief(provenance: Optional[Any]) -> Optional[str]:
 
 def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
     """
-    Derive the ``Matched Rule`` audit-log field for ONE sub-command's unit verdict.
+    Derive the ``Matched Rule`` audit-log field for one sub-command's unit verdict.
 
-    TOO-45 R1e: replaces the reason-text classification
-    (``fallback_kind_for_reason``) with a direct read of
-    :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`, computed once
-    where the unit's outcome is decided (see ``compound.py``/``resolve.py``)
-    rather than re-derived here from *reason* text.
+    Reads :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` directly
+    -- the structural counterpart to :func:`_reason_suffix_or_placeholder`'s
+    text-based classification.
 
     Args:
         unit: The sub-command's resolved :class:`~toolguard.config_types.UnitVerdict`.
@@ -554,53 +515,42 @@ def _log_allowed_command(
     """
     Log an allowed command, one entry per sub-command in ``verdict.sub_matches``.
 
-    TOO-45 R1e: reads ``verdict.sub_matches`` (one
-    :class:`~toolguard.config_types.UnitVerdict` per extracted sub-command,
-    ALREADY correct for every case the reason string can hold, including an
-    ask-floor leaf's escape-hatch outcome and an
-    :class:`~toolguard.parser.multiline.UndecidableSegment` -- see
-    :func:`~toolguard.compound.judge_unit` and
-    :func:`~toolguard.resolve.resolve_bash_permission_detailed`'s own driver
-    loop, which appends ``judge_unit``'s result directly for such a unit)
-    directly, instead of regex-parsing the ``"All N sub-commands allowed: [...]"``
-    reason string back apart. That regex-parse (the retired
-    ``_parse_compound_match_details``) kept only segments containing
-    ``" -> "``, silently DROPPING the audit-log entry for any sub-command
-    whose allow came from ``no_match_fallback`` (no ``" -> "`` in its raw
-    reason) -- measured at 813 of 975 compound-allow corpus cases
-    under-logging, 1,943 sub-commands with no audit entry at all. This also
-    unifies the single-leaf and compound cases into ONE loop: a simple
-    command has exactly one ``UnitVerdict`` in ``sub_matches``, so it was
-    never a genuinely different case, just the OLD mechanism's inability to
-    parse a non-compound reason.
-
-    TOO-45 R1d: takes the whole *verdict* instead of its fields threaded
-    through as separate parameters -- the caller (:func:`_handle_command_tool`)
-    already has the verdict in scope.
+    Reads ``verdict.sub_matches`` (one :class:`~toolguard.config_types.UnitVerdict`
+    per extracted sub-command, covering every case the combined reason string
+    can hold -- including an ask-floor leaf's escape-hatch outcome and an
+    undecidable segment) directly, rather than re-parsing the combined reason
+    string. A sub-command whose allow came from ``no_match_fallback`` carries
+    no ``" -> "`` marker in its raw reason, so a parser looking for that shape
+    silently drops it from the audit log instead -- measured at 83% of
+    compound-allow decisions under-logged this way before this function read
+    ``sub_matches`` structurally. A simple command has exactly one
+    ``UnitVerdict`` in ``sub_matches``, so the single-leaf and compound cases
+    share this one loop.
 
     Args:
         verdict: The resolved 'allow' verdict for *command*.
             ``additional_context`` is the accumulated ``additionalContext``
-            enrichment (TOO-19 Phase 1) for the WHOLE compound command; it is
-            not attributable to a single sub-command (it may combine several
-            sub-commands' contexts, see ``compound.py::_accumulate_contexts``),
-            so it is recorded on every logged sub-command entry the same way
-            the hook injects one accumulated block for the whole command.
-        command: The original command string -- used ONLY as a defensive
+            enrichment for the whole compound command; it is not attributable
+            to a single sub-command (it may combine several sub-commands'
+            contexts), so it is recorded on every logged sub-command entry the
+            same way the hook injects one accumulated block for the whole
+            command.
+        command: The original command string -- used only as a defensive
             fallback (see below) when ``sub_matches`` is empty, which should
             not happen for a real 'allow' verdict produced by
             :func:`~toolguard.resolve.resolve_bash_permission_detailed`
             (every 'allow' path populates at least one entry).
         agent_info: Agent identification string.
         env_config: Environment configuration dict.
-        permission_mode: Claude Code's own ``permission_mode`` from the hook input,
-            if present -- recorded for diagnosis only, see ``log_command``.
+        permission_mode: Claude Code's own ``permission_mode`` from the hook
+            input, if present -- recorded on the log entry for diagnosis only
+            (see :func:`main`).
     """
     if not verdict.sub_matches:
         # Defensive fallback for a synthetic/hand-built verdict with no
         # sub_matches (should not occur for a real resolver result) -- log
-        # what is in hand without the placeholder guard, since there is no
-        # per-unit fallback_kind to consult.
+        # what is in hand without the placeholder guard below, since there is
+        # no per-unit fallback_kind to consult.
         log_command(
             LogRecord(
                 command_str=command,
@@ -618,8 +568,8 @@ def _log_allowed_command(
     for unit in verdict.sub_matches:
         matched_rule = _unit_matched_rule_for_log(unit)
         # Never pair a real provenance with a rule that did not actually
-        # decide the verdict (TOO-19 m5) -- suppressed the same way the
-        # placeholder substitution above signals an escape hatch.
+        # decide the verdict -- suppressed the same way the placeholder
+        # substitution above signals an escape hatch.
         provenance = (
             _provenance_brief(unit.provenance)
             if matched_rule == unit.matched_rule
@@ -686,29 +636,25 @@ def _resolve_event(
 ) -> RuntimeVerdict:
     """
     Resolve a single hook event to a :class:`~toolguard.config_types.RuntimeVerdict`,
-    READ-ONLY.
+    read-only.
 
-    This adds only the parts :func:`main` owns on top of the shared decision
+    Adds only the parts :func:`main` owns on top of the shared decision
     primitive -- the governed-tool check and the empty-input guard -- and then
-    delegates the actual resolution to :func:`toolguard.api.decide`, the single
-    side-effect-free primitive that also backs the replay harness and other
-    tooling (TOO-45 R6-S2: ``decide`` moved into :mod:`toolguard.api`, the
-    layer both this module and the tooling layer are allowed to import from).
-    Delegating (rather than re-copying the file-vs-command
-    dispatch and the ``[hard_deny]`` handling) makes the ``--eval`` verdict
-    identical to the live hook's by construction.  No logging, divergence
-    checks, or auto-migration happen here.  ``no_match_fallback`` (including
-    the TOO-15 ``allow_with_warning`` auto-allow, whose deprecated legacy
-    alias is ``warn_deny``) is resolved entirely inside
-    :func:`~toolguard.api.decide` via the shared config layer -- there is no
-    separate reason-rewrite step here or in :func:`main` to keep in sync.
+    delegates the actual resolution to :func:`toolguard.api.decide`, the same
+    side-effect-free primitive that backs the replay harness and other
+    tooling. ``decide`` reaches the same underlying resolver functions
+    :func:`main`'s own handlers call directly, so delegating here rather than
+    re-copying that dispatch makes the ``--eval`` decision match the live
+    hook's by construction. No logging, divergence checks, or auto-migration
+    happen here, and ``no_match_fallback`` is resolved entirely inside
+    ``decide`` -- there is no separate reason-rewrite step here to keep in sync.
 
-    TOO-19 Phase 1: the returned verdict's ``additional_context`` carries the
-    winning rule's ``additionalContext`` enrichment, so ``--eval`` (whose whole
-    purpose is previewing what the live hook would do) doesn't silently omit a
-    real output field. The two synthetic guard verdicts below (ungoverned
-    tool, missing target) have no matched rule and leave every optional field
-    at :class:`~toolguard.config_types.RuntimeVerdict`'s defaults.
+    The returned verdict's ``additional_context`` carries the winning rule's
+    ``additionalContext`` enrichment, so ``--eval`` (whose whole purpose is
+    previewing what the live hook would do) doesn't silently omit a real
+    output field. The two synthetic guard verdicts below (ungoverned tool,
+    missing target) have no matched rule and leave every optional field at
+    :class:`~toolguard.config_types.RuntimeVerdict`'s defaults.
 
     Args:
         tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
@@ -741,26 +687,20 @@ def _resolve_event(
                 decision="deny", reason="No command provided in tool input"
             )
 
-    # TOO-45 R6-S3: decide() now returns a real RuntimeVerdict directly (the
-    # old Decision DTO it used to return, and the _verdict_from_decision
-    # adapter that re-rendered one into the other, are both gone), so no
-    # further conversion is needed here.
     return decide(config, tool_name, target, extended_syntax)
 
 
 def _run_eval_mode() -> None:
     """
     Handle ``toolguard --eval``: read one hook event on stdin, resolve it
-    READ-ONLY, and print the JSON permissionDecision to stdout -- on success
-    AND on an internal error alike, via :func:`_emit_decision` (TOO-45
-    punch-list #04 fix pass M2: the three error branches used to print their
-    deny decision to stderr with an empty stdout. The security-audit skill's
-    ``--eval`` probe -- its only production consumer -- reads
-    ``hookSpecificOutput.permissionDecision`` from stdout only (see
+    read-only, and print the JSON permissionDecision to stdout -- on success
+    and on an internal error alike, via :func:`_emit_decision`. The
+    security-audit skill's ``--eval`` probe (see
     ``.claude/skills/toolguard-security-audit/SKILL.md``'s "How the floor is
-    checked" section), so that was the same fail-open class as ``main()``'s,
-    just relocated: a config that makes the probe error out yielded no
-    verdict at all instead of the deny it was meant to prove).
+    checked" section) reads ``hookSpecificOutput.permissionDecision`` from
+    stdout only, so an error branch that produced no verdict at all would
+    yield no result instead of the deny it was meant to prove -- the same
+    fail-open class :func:`main` itself guards against.
 
     No logging, divergence checks, or auto-migration are performed, so probing
     a project's configuration never mutates the project or writes to its logs
@@ -821,11 +761,11 @@ def _warn_if_settings_path_override(reporter: Reporter) -> None:
     """
     Warn when ``CLAUDE_SETTINGS_PATH`` puts toolguard in single-file mode.
 
-    Single-file override footgun (TOO-15): CLAUDE_SETTINGS_PATH makes toolguard
-    read ONE settings file for EVERY directory, bypassing the whole hierarchy. As
-    a persistently-exported shell variable it silently lets one project's config
-    govern the entire machine (and, if that config is fail-closed takeover, can
-    lock it out), so the bypass must never be invisible.
+    ``CLAUDE_SETTINGS_PATH`` makes toolguard read one settings file for every
+    directory, bypassing the whole hierarchy. As a persistently-exported shell
+    variable it can silently let one project's config govern the entire
+    machine (and, if that config is fail-closed takeover, lock it out), so the
+    bypass must never be invisible.
     """
     settings_path_override = os.environ.get("CLAUDE_SETTINGS_PATH")
     if not settings_path_override:
@@ -842,12 +782,9 @@ def _log_config_discovery(config, env_config: Dict[str, Any]) -> None:
     """
     Emit a config-discovery diagnostic when the discovered levels changed.
 
-    Writes "discovered N config levels: <level: path>, ..." to the resolution
-    log when the set differs from the last recorded entry for this project root
-    (TOO-8 Phase 4, M2; TOO-19). toolguard is a fresh process on every tool
-    call, so there is no in-process "once per session" -- the change-detecting
-    JSONL log inside :func:`log_discovery` is the guard instead, and it is a
-    no-op (writes nothing) when nothing changed.
+    Writes "discovered N config levels: <level: path>, ..." via
+    :func:`log_discovery` (see its docstring for the change-detection
+    mechanism and why toolguard needs one at all).
 
     Args:
         config: The resolved configuration whose levels are described.
@@ -868,10 +805,10 @@ def _announce_takeover_state(takeover, log_dir) -> None:
     """
     Surface takeover-mode status: the enabled warning, or a cross-level conflict.
 
-    On a cross-level ``takeover_mode.enabled`` disagreement (TOO-8 Phase 5)
-    ``enabled`` is already fail-safe OFF; the conflict is recorded to the
-    conflict log and a takeover warning is surfaced. The downstream path is
-    already the safe one (native prompts active).
+    On a cross-level ``takeover_mode.enabled`` disagreement, ``enabled`` is
+    already fail-safe OFF; the conflict is recorded to the conflict log and a
+    takeover warning is surfaced. The downstream path is already the safe one
+    (native prompts active).
 
     Args:
         takeover: The resolved :class:`~toolguard.config.TakeoverConfig`.
@@ -920,12 +857,9 @@ def _run_divergence_check(
     """
     Check for config divergence, auto-migrating when configured.
 
-    :func:`check_and_warn_divergence` (``config``-layer) only DETECTS
-    divergence and prints an immediate stderr notice -- it deliberately does
-    not write to the structured error log itself (TOO-45 R5d: that would make
-    a config-layer module depend on error_log, a runtime-layer module). This
-    function, which already legitimately imports :mod:`toolguard.error_log`,
-    does that write on its behalf when a new warning is due.
+    :func:`check_and_warn_divergence` detects divergence and prints an immediate
+    stderr notice; this function writes the structured error-log entry when a new
+    warning is due.
 
     Args:
         config: The resolved configuration.
@@ -978,33 +912,22 @@ def _log_non_allow_decision(
     """
     Write the resolution-log entry for an 'ask' or 'deny' verdict.
 
-    TOO-45 R1d: takes the whole *verdict* instead of its ``decision``/
-    ``reason``/``additional_context``/``matched_rule``/``provenance`` fields
-    threaded through as five separate parameters (the change that let the
-    ``# noqa: PLR0913`` marker this replaced come off -- see ``log_command``'s
-    own R1d note).
-
     Identical for file-path tools and command tools, so both call this. An
-    'ask' is recorded under ``note`` (it is not a violation) with the FULL
+    'ask' is recorded under ``note`` (it is not a violation) with the full
     reason text -- never split, so it carries no fabrication risk regardless
     of the reason's shape. A deny records the violated rule from
-    ``verdict.matched_rule`` via :func:`_reason_suffix_or_placeholder` (the
-    SAME mechanism the allow side uses, via
-    :func:`_matched_rule_for_single_command`, so the two call sites cannot
-    diverge into two conventions -- see that function's docstring for the
-    fabrication risk this guards against). Unlike the allow side, when
-    ``verdict.matched_rule`` is ``None`` and ``verdict.reason`` is not a
-    recognised escape hatch, the FULL reason is used (not ``None``) -- this
-    preserves the pre-TOO-19 behaviour for reasons like ``"No commands to
-    evaluate"`` that never named a rule at all.
+    ``verdict.matched_rule`` via :func:`_reason_suffix_or_placeholder` (see its
+    docstring for the escape-hatch/placeholder mechanism). Unlike the allow
+    side, when ``verdict.matched_rule`` is ``None`` and ``verdict.reason`` is
+    not a recognised escape hatch, the full reason is used (not ``None``) --
+    this covers reasons like ``"No commands to evaluate"`` that never named a
+    rule at all.
 
     Args:
         verdict: The resolved 'ask' or deny verdict. ``reason`` is consulted
             only for :func:`_reason_suffix_or_placeholder`'s
             fallback-escape-hatch classification (the 'ask' branch also uses
-            it verbatim as the log note). ``matched_rule`` is ``None`` when
-            no rule matched (fail-closed default deny, hard deny, or a
-            fallback escape hatch). ``provenance`` is rendered via
+            it verbatim as the log note). ``provenance`` is rendered via
             :func:`_provenance_brief`, suppressed the same way as
             ``matched_rule`` when ``reason`` names a fallback escape hatch
             (never paired with a rule that did not actually decide the
@@ -1013,7 +936,8 @@ def _log_non_allow_decision(
         log_target: What is being logged -- a command, or ``Tool(path)``.
         agent_info: Agent identification string.
         env_config: Environment configuration dict.
-        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
+        permission_mode: Claude Code's own permission mode, recorded on the
+            log entry for diagnosis only (see :func:`main`).
     """
     if verdict.decision == "ask":
         log_command(
@@ -1070,13 +994,12 @@ def _handle_file_path_tool(
     """
     Resolve and log a file-path tool event (Read, Write, Edit).
 
-    Resolves the file path permission via the more-specific-wins level cascade.
-    No early "no allow configured" short-circuit here (TOO-15): an entirely
+    Resolves the file path permission via the more-specific-wins level
+    cascade. No early "no allow configured" short-circuit here: an entirely
     unconfigured tool resolves to 'ask' and a configured-but-non-matching tool
     resolves per ``no_match_fallback`` -- both are decided centrally inside
     ``resolve_file_path_permission_detailed`` /
-    ``permission_resolution.resolve_file_path_permission``, so the hook and
-    ``toolguard.api.decide()`` cannot drift apart.
+    ``permission_resolution.resolve_file_path_permission``.
 
     Args:
         tool_name: The file tool being invoked.
@@ -1084,13 +1007,11 @@ def _handle_file_path_tool(
         config: The resolved configuration.
         env_config: Environment configuration dict.
         agent_info: Agent identification string.
-        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
+        permission_mode: Claude Code's own permission mode, recorded on the
+            log entry for diagnosis only (see :func:`main`).
 
     Returns:
-        The resolved :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45
-        R1d -- previously a bare ``(decision, reason, additional_context)``
-        tuple that discarded ``provenance``/``matched_rule``/``overrides``/
-        ``fallback_warning``/``sub_matches``/``tool``/``target``).
+        The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
     """
     key = _tool_payload_key(tool_name)
     file_path = tool_input.get(key, "")
@@ -1117,12 +1038,8 @@ def _handle_file_path_tool(
 
     if result.decision == "allow":
         # Conflict: a more-specific allow overrode a less-specific deny. A
-        # file-path result carries 0 or 1 overrides (TOO-45 R1c;
-        # RuntimeVerdict.overrides is always a list -- see its docstring's
-        # "overrides" reconciliation) -- this loop runs 0 or 1 times, same
-        # behaviour as the old single `_log_conflict_override(log_target,
-        # result.override, ...)` call (which was already a no-op when
-        # `override` was None).
+        # file-path result carries 0 or 1 overrides in this always-a-list
+        # field, so this loop runs 0 or 1 times.
         for _, override in result.overrides:
             _log_conflict_override(log_target, override, env_config.get("log_dir"))
         _log_fallback_allow_warning(
@@ -1159,32 +1076,31 @@ def _handle_command_tool(
     Resolve and log a command tool event (Bash, MCP terminals).
 
     Command tools all resolve against the Bash permission patterns. No early
-    "no allow configured" short-circuit here (TOO-15): an entirely unconfigured
-    Bash resolves to 'ask' and a configured-but-non-matching Bash resolves per
+    "no allow configured" short-circuit here: an entirely unconfigured Bash
+    resolves to 'ask' and a configured-but-non-matching Bash resolves per
     ``no_match_fallback`` (default 'ask'; 'deny' fails closed;
     'allow_with_warning' -- or its deprecated 'warn_deny' alias -- auto-allows
-    with a warning; 'allow' -- or its 'allow_with_no_warnings' alias, TOO-19 --
-    auto-allows with NO warning) -- all decided centrally inside
-    ``resolve_bash_permission_detailed`` / ``permission_resolution.resolve_command_permission``
-    so the hook and ``toolguard.api.decide()`` cannot drift apart.
+    with a warning; 'allow' -- or its 'allow_with_no_warnings' alias --
+    auto-allows with no warning) -- all decided centrally inside
+    ``resolve_bash_permission_detailed`` / ``permission_resolution.resolve_command_permission``.
 
     Resolution is more-specific-wins: each sub-command of a compound command
-    cascades independently through the levels; the compound is allowed iff all
-    are. The unoverridable ``[hard_deny]`` pool is checked FIRST per
-    sub-command, so a compound is hard-denied if ANY sub-command is hard-denied.
+    cascades independently through the levels; the compound is allowed only if
+    all are (a governed config file that failed to parse can still clamp an
+    all-allow result to 'ask' afterward). The unoverridable ``[hard_deny]``
+    pool is checked first per sub-command, so a compound is hard-denied if any
+    sub-command is hard-denied.
 
     Args:
         tool_input: The tool input dict (read for ``command``).
         config: The resolved configuration.
         env_config: Environment configuration dict.
         agent_info: Agent identification string.
-        permission_mode: Claude Code's own permission mode, recorded for diagnosis.
+        permission_mode: Claude Code's own permission mode, recorded on the
+            log entry for diagnosis only (see :func:`main`).
 
     Returns:
-        The resolved :class:`~toolguard.config_types.RuntimeVerdict` (TOO-45
-        R1d -- previously a bare ``(decision, reason, additional_context)``
-        tuple that discarded ``provenance``/``matched_rule``/``overrides``/
-        ``fallback_warning``/``sub_matches``/``tool``/``target``).
+        The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
     """
     command = tool_input.get("command", "")
     if not command:
@@ -1243,69 +1159,64 @@ def _resolve_reporter_log_dir(env_config: Optional[Dict[str, Any]]) -> Optional[
 
 def main() -> None:
     """
-    Main hook entry point.
-
-    Algorithm:
-    1. Parse args (provides --help; does NOT consume stdin).
-    2. Guard against interactive (TTY) invocation: print an explanation and exit.
-    3. Load environment configuration.
-    4. Run startup validation - logs warnings for config issues.
-    5. Parse input from stdin.
-    6. Check if tool is governed (configurable list).
-    7. Determine tool type (file path or command).
-    8. For file tools: extract file_path, check against glob patterns.
-    9. For command tools: extract command, check against patterns.
-    10. Log decision.
-    11. Output decision as JSON to stdout.
+    Main hook entry point: parse the piped hook event, resolve a permission
+    decision against the configuration hierarchy, log it, and emit the JSON
+    decision Claude Code expects.
 
     Exit codes:
     - 0 in the normal case: a well-formed JSON decision is always printed to
-      stdout first, including from every internal error this function catches
-      -- --help (argparse exits 0) and a TTY stdin (exits 0 after the
-      informational message) are the only paths with no JSON decision at all.
-    - 2 only if writing that JSON to stdout itself raises (see
-      :func:`_emit_decision`) -- the one case with no decision left to
-      deliver, so the host's own blocking signal is what's left.
+      stdout first, including from every internal error this function catches.
+      The exceptions are the stray-invocation paths -- ``--help`` (argparse
+      exits 0), a TTY stdin, and, on the non-``--eval`` path,
+      :class:`EmptyStdinError` -- which print an explanation instead and exit
+      0 with no JSON decision at all, since none of these is a real hook call
+      from Claude Code. Under ``--eval``, an empty piped stdin still exits 0
+      but with a JSON deny decision, via ``_run_eval_mode``'s own ``except
+      ValueError`` (:class:`EmptyStdinError` is a ``ValueError`` subclass).
+    - 2 if writing that JSON to stdout itself raises (see :func:`_emit_decision`)
+      -- the one case with no decision left to deliver, so the host's own
+      blocking signal is what's left -- or from argparse's own usage-error
+      path on a malformed CLI invocation, at the ``parse_known_args`` call
+      below, before any other logic in this function runs.
     """
     parser = _build_hook_argparser()
-    # parse_known_args() is used instead of parse_args() so that the hook still
-    # works correctly when invoked via the test runner (which places test names
-    # in sys.argv). This hook accepts NO arguments -- it only reads stdin -- so
-    # unknown args are silently discarded. --help still exits 0 via argparse.
+    # parse_known_args() is used instead of parse_args() so the hook still
+    # works when invoked via the test runner, which places test names in
+    # sys.argv -- those unknown args are silently discarded rather than
+    # aborting. --help still exits 0 via argparse.
     args, _ = parser.parse_known_args()
 
-    # One Reporter for the whole invocation (TOO-45 punch-list #04 follow-up:
-    # replaces the module-global fault buffer and the two nested
-    # error_reporter "invocation" scopes -- see toolguard/error_reporter.py's
-    # module docstring). log_dir starts unresolved, matching the pre-refactor
-    # "no invocation active" default: the TTY guard below reports through it
-    # exactly like that safe default did.
+    # One Reporter for the whole invocation -- see toolguard/error_reporter.py's
+    # module docstring for why it owns both the resolved log directory and the
+    # Claude-facing fault buffer as instance state. log_dir starts unresolved;
+    # the TTY guard below reports through it with that unresolved default.
     reporter = Reporter()
 
     # Interactive guard: if a human runs 'toolguard' in a terminal without piping
     # a JSON event, do not block on stdin. Print a brief explanation and exit.
     # Claude always pipes JSON (not a TTY), so this guard never fires in real use.
-    # This is placed before the --eval branch so 'toolguard --eval' typed by hand
-    # (no piped stdin) shows the message instead of hanging on stdin.read().
-    # Exit code 0: informational, not an error (Arnon: change to non-zero if preferred).
+    # Placed before the --eval branch so 'toolguard --eval' typed by hand (no
+    # piped stdin) shows the message instead of hanging on stdin.read().
     if sys.stdin.isatty():
         _print_not_a_standalone_command_message(reporter)
         sys.exit(0)
 
     # Read-only evaluation mode (--eval): resolve one piped event and print the
-    # verdict WITHOUT logging, divergence checks, or auto-migration. Used by the
-    # cross-project security-audit skill to probe a project's safety floor without
-    # mutating it.
+    # verdict without logging, divergence checks, or auto-migration. Used by
+    # the cross-project security-audit skill to probe a project's safety floor
+    # without mutating it.
     if args.eval_mode:
         _run_eval_mode()
         return
 
     # error_reporter.active(reporter) registers *reporter* as the target the
-    # four config-layer modules' report_notice/report_warning calls resolve
-    # (see that module's docstring for why an ambient registry exists at
-    # all). It wraps the whole try/except below -- including the except
-    # handlers -- so a fault reported anywhere in this call still drains
-    # into the same reporter the response is built from.
+    # config-layer modules' report_notice/report_warning calls resolve --
+    # deep call chains make threading a Reporter through every signature
+    # impractical, so an ambient registry stands in instead (see that
+    # module's docstring for the full rationale). It wraps the whole
+    # try/except below -- including the except handlers -- so a fault
+    # reported anywhere in this call still drains into the same reporter the
+    # response is built from.
     with error_reporter.active(reporter):
         try:
             # Coarse log-dir fallback, resolved before env_config is known,
@@ -1314,7 +1225,6 @@ def main() -> None:
             # log to, not just stderr.
             reporter.log_dir = _resolve_reporter_log_dir(None)
 
-            # Load environment configuration
             env_config = get_env_config()
 
             # Refine the SAME reporter's log_dir now that env_config is
@@ -1343,12 +1253,9 @@ def main() -> None:
             takeover_dict = _resolve_takeover_mode(config, env_config)
             _run_divergence_check(config, env_config, takeover_dict)
 
-            # Resolve the list of governed tools via the config abstraction
             governed_tools = list(config.governed_tools())
 
-            # Only handle tools in the governed list
             if tool_name not in governed_tools:
-                # Not a governed tool - allow (other hooks handle other tools)
                 output = _finalize_output(
                     RuntimeVerdict(
                         decision="allow",
@@ -1359,18 +1266,16 @@ def main() -> None:
                 _emit_decision(output)
                 sys.exit(0)
 
-            # Identify current agent context (used for logging)
             agent_info = _agent_info_for(hook_data)
 
             # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
             # mode) is recorded alongside the decision, purely for diagnosis --
-            # it never affects the verdict itself. See log_command's docstring.
+            # it never affects the verdict itself.
             permission_mode = hook_data.get("permission_mode")
 
-            # Resolve and log the event: file path tools (Read, Write, Edit) and
-            # command tools (Bash, MCP terminals) differ only in how the target
-            # is extracted and resolved; both return the same RuntimeVerdict
-            # shape (TOO-45 R1d).
+            # File path tools (Read, Write, Edit) and command tools (Bash, MCP
+            # terminals) differ only in how the target is extracted and
+            # resolved; both return the same RuntimeVerdict shape.
             if tool_name in FILE_PATH_TOOLS:
                 verdict = _handle_file_path_tool(
                     tool_name,
@@ -1385,26 +1290,21 @@ def main() -> None:
                     tool_input, config, env_config, agent_info, permission_mode
                 )
 
-            # Create and output decision
             output = _finalize_output(verdict, reporter)
             _emit_decision(output)
             sys.exit(0)
 
         except EmptyStdinError:
-            # A stray manual/probing invocation (e.g. a bare `toolguard --version`
-            # an agent ran to check the installed version), not a real hook call
-            # from Claude Code (which always pipes real JSON) and not an
-            # unexpected internal error -- treat it exactly like the TTY guard:
-            # a friendly explanation, no crash report (TOO-15, recurred twice).
+            # A stray manual/probing invocation (see EmptyStdinError's own
+            # docstring) -- treat it exactly like the TTY guard: a friendly
+            # explanation, no crash report.
             _print_not_a_standalone_command_message(reporter)
             sys.exit(0)
 
         except json.JSONDecodeError as e:
-            # JSON parsing error - deny, and deliver that decision the SAME
-            # way the success path does: on stdout (TOO-45 punch-list #04
-            # hook.py fix -- this used to go to stderr with exit 0, which
-            # Claude Code reads as "no opinion" and silently falls through to
-            # native permission handling instead of the deny below).
+            # Deliver the deny decision the same way the success path does:
+            # on stdout (see :func:`_emit_decision` for why an exit-0 path
+            # with no usable decision is a fail-open, not a neutral no-op).
             error_reason = f"Failed to parse hook input: {str(e)}"
             crash_context = _build_crash_context(locals())
             crash_context["raw_stdin"] = e.doc
@@ -1428,9 +1328,9 @@ def main() -> None:
             sys.exit(0)
 
         except Exception as e:
-            # Unexpected error - the catch-all exists to fail CLOSED on
-            # anything unforeseen, so its deny must reach Claude the same way
-            # every other decision does: on stdout (see above).
+            # The catch-all exists to fail closed on anything unforeseen, so
+            # its deny must reach Claude the same way every other decision
+            # does: on stdout (see above).
             error_reason = f"Unexpected error in hook: {str(e)}"
             log_crash(
                 e, _build_crash_context(locals()), caught_as="unexpected Exception"

@@ -1,36 +1,13 @@
 """
 Unified security audit aggregator for toolguard.
 
-This module is a THIN DETERMINISTIC AGGREGATOR over four independently-tested
-analysers:
-
-* :mod:`~toolguard.tools.danger` -- flags dangerous allow-rule patterns in the
-  toolguard configuration (arbitrary-exec, destructive commands, secrets exposure,
-  unanchored regex, blanket allows).
-* :mod:`~toolguard.tools.takeover_audit` -- audits takeover-mode invariants (hook
-  registration, conflicts, uncovered blanket allows, loose fallback).
-* :mod:`~toolguard.tools.clarity` -- flags confusing same-file rule interactions
-  (a deny/ask that silently shadows part of an allow).
-* :mod:`~toolguard.tools.environment_audit` -- flags an environment (``PYTHONPATH``)
-  that would shadow the installed toolguard hook with an unreviewed source
-  checkout (TOO-19).
-
-This module contains NO detection logic of its own.  It calls each analyser's
-public function (:func:`~toolguard.tools.danger.danger`,
-:func:`~toolguard.tools.takeover_audit.audit_takeover`,
-:func:`~toolguard.tools.clarity.find_confusing_interactions`,
-:func:`~toolguard.tools.environment_audit.audit_environment`), normalises their
-outputs into a single :class:`RankedFinding` list, and returns a
-:class:`SecurityReport`. A :func:`render` helper produces human-readable text
-(ASCII only, no Unicode) and a :func:`main` entry point wires everything to a CLI.
-
-Public API summary
-------------------
-* :class:`RankedFinding` -- normalised finding from any source.
-* :class:`SecurityReport` -- aggregated report: findings tuple + summary fields.
-* :func:`security_audit` -- run every analyser and return a SecurityReport.
-* :func:`render` -- format a SecurityReport as markdown or plain text.
-* :func:`main` -- CLI entry point (``toolguard-audit`` console script).
+Runs four independent analysers -- rule danger, takeover-mode invariants,
+rule-interaction clarity, and environment shadowing -- normalises whatever they
+return into one :class:`RankedFinding` list, and reports it as a
+:class:`SecurityReport`. It detects nothing itself; what it contributes is the
+normalised shape, the ranking, and the clarity findings' severity and wording.
+:func:`render` formats a report for a human, and :func:`main` is the
+``toolguard-audit`` console script.
 """
 
 import argparse
@@ -61,7 +38,7 @@ from toolguard.tools.edit_proposal import (
 from toolguard.tools.environment_audit import audit_environment
 from toolguard.tools.takeover_audit import audit_takeover, effective_takeover_state
 
-# Marker prefix for an extended-syntax regex pattern body (``[regex]<body>``).
+#: Marker prefix of an extended-syntax regex pattern body (``[regex]<body>``).
 _REGEX_MARKER = "[regex]"
 
 
@@ -73,19 +50,14 @@ _REGEX_MARKER = "[regex]"
 @dataclass(frozen=True)
 class Remediation:
     """
-    A finding's suggested fix, in both human and machine-actionable forms.
+    A finding's suggested fix, in human and machine-actionable forms.
 
     Attributes:
-        text: The human-readable remediation guidance -- always present.  This may
-            describe a more surgical or judgement-based fix than ``proposal``
-            (e.g. "narrow this rule" where the mechanical proposal is a removal).
-        proposal: A structured, mechanically-appliable
-            :class:`~toolguard.tools.edit_proposal.EditProposal` when the fix can
-            be expressed deterministically (e.g. delete a dangerous allow, anchor
-            an unanchored regex), or ``None`` when the fix is a judgement call
-            carried only in ``text``.  The proposal is the CONSERVATIVE mechanical
-            fix a consumer (the maintenance skill) can ingest without parsing
-            prose; it is a proposal to review as-if-enacted, never auto-applied.
+        text: Human-readable guidance -- always present.  It may name a more
+            surgical or judgement-based fix than ``proposal`` does, e.g. "narrow
+            this rule" where the mechanical proposal deletes it outright.
+        proposal: The deterministic edit when the fix can be expressed as one,
+            else ``None`` -- the guidance then lives only in ``text``.
     """
 
     text: str
@@ -95,46 +67,35 @@ class Remediation:
 @dataclass(frozen=True)
 class RankedFinding:
     """
-    Normalised security finding from any of the four analysers.
-
-    :class:`~toolguard.tools.danger.DangerFinding`,
-    :class:`~toolguard.tools.takeover_audit.AuditFinding`,
-    :class:`~toolguard.tools.clarity.InteractionFinding`, and
-    :class:`~toolguard.tools.environment_audit.EnvironmentFinding` are all
-    converted into this shape so that consumers deal with a single uniform type.
+    One security finding, in the single shape every analyser is normalised into.
 
     Attributes:
-        source: ``"rule"`` for findings from
-            :func:`~toolguard.tools.danger.danger`; ``"takeover"`` for findings
-            from :func:`~toolguard.tools.takeover_audit.audit_takeover`;
-            ``"clarity"`` for findings from
-            :func:`~toolguard.tools.clarity.find_confusing_interactions`;
-            ``"environment"`` for findings from
-            :func:`~toolguard.tools.environment_audit.audit_environment`.
+        source: Which analyser produced it -- ``"rule"``, ``"takeover"``,
+            ``"clarity"``, or ``"environment"``.
         finding_id: Stable detector/finding identifier (e.g.
             ``"arbitrary-exec-allow"`` or ``"hook-not-registered"``).
-        severity_value: Integer severity (1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL).
-            Derived from the source finding's IntEnum ``.value``.
-        severity_label: Human-readable severity label (e.g. ``"CRITICAL"``).
-            Derived from the source finding's ``.label()`` method.
-        tool: Tool name the finding concerns (e.g. ``"Bash"``), or ``None`` for
-            configuration-wide findings.
-        locus: Compact origin label from ``provenance.describe_brief()`` when
-            provenance is available; ``None`` otherwise.
-        pattern: The flagged pattern body for rule findings; ``None`` for takeover
-            findings (they concern configuration structure, not a single pattern).
-        summary: Primary human-readable explanation.  For danger findings this is
-            the ``rationale``; for takeover findings it is the ``description``.
-        impact: Additional impact text.  Empty string for danger findings (danger
-            embeds impact in the rationale); takeover findings carry a separate
-            ``impact`` field.
-        remediation: Suggested fix or mitigation, as a :class:`Remediation`
-            (human ``text`` plus an optional structured, appliable ``proposal``).
+        severity_value: Integer severity: 1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL.
+        severity_label: The same severity as a label (e.g. ``"CRITICAL"``).
+        tool: Tool name the finding concerns (e.g. ``"Bash"``), or ``None`` for a
+            configuration-wide one.  Always ``None`` for environment findings.
+        locus: Compact origin label from ``provenance.describe_brief()`` when the
+            source finding has provenance; ``None`` otherwise.
+        pattern: For a rule finding the flagged pattern; for a clarity finding the
+            allow pattern of the overlapping pair.  ``None`` for takeover and
+            environment findings, which concern configuration structure and the
+            process environment rather than a single pattern.
+        summary: The primary human-readable explanation of the finding.
+        impact: Separate impact text.  Always ``""`` for a rule finding, which
+            folds impact into its rationale; takeover and environment findings
+            carry their own, and this module supplies the clarity text.
+        remediation: Suggested fix, as a :class:`Remediation`.
         takeover_active: Whether takeover mode was ON when this finding was produced.
         acknowledged: ``True`` when the flagged rule carries a ``#NOSECURITY``
-            comment.  The finding is still reported (never silently dropped), but
-            it is de-prioritized (sorted after every un-acknowledged finding) and
-            labeled as acknowledged -- toolguard acknowledges, it does not hide.
+            comment.  Only rule findings are looked up, so the other three sources
+            are always ``False``.  An acknowledged finding is still reported and
+            labelled -- toolguard acknowledges, it does not hide -- but it sorts
+            last within ``SecurityReport.findings``; the renderer groups by
+            severity first, so it still appears in its own severity section.
         acknowledgement: The ``#NOSECURITY`` reason text when ``acknowledged`` is
             ``True`` (``""`` for a bare tag with no reason); ``None`` otherwise.
     """
@@ -165,16 +126,18 @@ class SecurityReport:
     Aggregated security audit result.
 
     Attributes:
-        findings: Tuple of :class:`RankedFinding` sorted by severity descending,
-            then by source, then by tool (empty string when None), then by
-            finding_id.  Deterministic -- same config always yields the same order.
+        findings: Tuple of :class:`RankedFinding`.  Acknowledgement is the
+            PRIMARY sort key and puts acknowledged findings last, so an
+            acknowledged CRITICAL follows an un-acknowledged LOW; then severity
+            descending, source, tool (``None`` sorting as ``""``), finding_id.
+            Deterministic -- the same config always yields the same order.
         takeover_active: Whether takeover mode was ON when the audit ran.
         highest_severity: The highest ``severity_value`` across all findings, or
             ``0`` when there are no findings.
         counts: Mapping from severity label (``"LOW"``, ``"MEDIUM"``, ``"HIGH"``,
             ``"CRITICAL"``) to the count of findings at that severity.  Only labels
-            that actually occur in ``findings`` are included; labels with zero
-            findings are omitted.
+            that actually occur are keys; a severity with no findings is absent
+            rather than zero.
     """
 
     findings: Tuple[RankedFinding, ...]
@@ -190,27 +153,16 @@ class SecurityReport:
 
 def _danger_proposal(df: DangerFinding) -> Optional[EditProposal]:
     """
-    Build the structured, applicable edit for a danger finding, when one exists.
+    Build the structured edit for a danger finding, when one exists.
 
-    Uses the finding's ``remediation_kind`` hint to synthesise a conservative,
-    mechanically-safe :class:`~toolguard.tools.edit_proposal.EditProposal` that
-    targets the exact rule at its exact layer:
-
-    * ``'remove'`` -- delete the flagged rule (always a tightening; the safe
-      structured answer for a dangerous allow, even when the human text suggests
-      a more surgical narrowing).
-    * ``'anchor'`` -- replace an unanchored ``[regex]`` body with the same body
-      anchored at ``^``.
-
-    Returns ``None`` when there is no mechanical fix (no ``remediation_kind``, no
-    provenance to target, or an ``anchor`` hint on a non-``[regex]`` body) -- the
-    guidance then lives only in the human ``text``.
-
-    Args:
-        df: The danger finding to build a structured remediation for.
+    Follows the finding's own ``remediation_kind`` hint, targeting the exact rule
+    at its exact layer: ``'remove'`` deletes it, ``'anchor'`` re-writes an
+    unanchored ``[regex]`` body with a leading ``^``.
 
     Returns:
-        An :class:`EditProposal`, or ``None`` when no deterministic fix applies.
+        An :class:`EditProposal`, or ``None`` when nothing deterministic applies
+        -- no ``remediation_kind``, no provenance to target, or an ``'anchor'``
+        hint on a body that is not ``[regex]`` or is already anchored.
     """
     if df.remediation_kind is None or df.provenance is None:
         return None
@@ -239,7 +191,7 @@ def _danger_proposal(df: DangerFinding) -> Optional[EditProposal]:
             return None
         body = df.pattern[len(_REGEX_MARKER) :]
         if body.startswith("^"):
-            return None  # already anchored; nothing to change
+            return None
         anchored = f"{_REGEX_MARKER}^{body}"
         return EditProposal(
             action=ACTION_REPLACE,
@@ -273,35 +225,23 @@ def security_audit(
     """
     Run every security analyser and return a unified :class:`SecurityReport`.
 
-    This function is a pure aggregator: it calls
-    :func:`~toolguard.tools.danger.danger`,
-    :func:`~toolguard.tools.takeover_audit.audit_takeover`,
-    :func:`~toolguard.tools.clarity.find_confusing_interactions`, and
-    :func:`~toolguard.tools.environment_audit.audit_environment`, normalises
-    each finding into a :class:`RankedFinding`, sorts the combined list, and
-    computes summary statistics.  No detection logic lives here.
-
     Args:
         config: The resolved configuration hierarchy to audit.
-        takeover: Pre-resolved takeover configuration.  When ``None``, it is
-            resolved via :func:`~toolguard.tools.takeover_audit.effective_takeover_state`
-            so both analysers share the same resolved state.
-        env: Environment mapping passed through to
-            :func:`~toolguard.tools.environment_audit.audit_environment`
-            (defaults to ``os.environ`` there; exposed here purely for
-            testing without mutating the real environment).
+        takeover: Pre-resolved takeover configuration.  When ``None`` it is
+            resolved once, here, so every finding reports the same resolved
+            takeover state.
+        env: Environment mapping for the environment analyser, which falls back
+            to ``os.environ``.  Exposed so a test need not mutate the real
+            environment.
 
     Returns:
-        A :class:`SecurityReport` with all findings sorted severity-descending.
+        A :class:`SecurityReport`; see it for the finding order.
     """
     if takeover is None:
         takeover = effective_takeover_state(config)
 
     ranked: List[RankedFinding] = []
 
-    # --- danger findings (source = "rule") ----------------------------------
-    # A rule the user has annotated with #NOSECURITY is acknowledged, not hidden:
-    # still reported, but de-prioritized and labeled (see the sort key below).
     for df in danger(config, takeover):
         reason = (
             nosecurity_reason_for(df.provenance, df.list_type, df.tool, df.pattern)
@@ -328,7 +268,6 @@ def security_audit(
             )
         )
 
-    # --- takeover audit findings (source = "takeover") ----------------------
     for af in audit_takeover(config, takeover):
         ranked.append(
             RankedFinding(
@@ -346,10 +285,9 @@ def security_audit(
             )
         )
 
-    # --- clarity findings (source = "clarity") ------------------------------
-    # A confusing within-file interaction is a latent security risk: you cannot
-    # reason about what is actually permitted.  Reported at LOW severity and
-    # clearly labelled so it never dilutes a genuine vulnerability.
+    # Clarity is the one source carrying no severity of its own, so this module
+    # picks one: LOW, because a confusing-but-correct rule set is a latent risk
+    # rather than a vulnerability.
     for tool in sorted(BUILTIN_TOOLS):
         for cf in find_confusing_interactions(config, tool):
             ranked.append(
@@ -379,10 +317,6 @@ def security_audit(
                 )
             )
 
-    # --- environment findings (source = "environment") ----------------------
-    # TOO-19: PYTHONPATH shadowing the installed hook with an unreviewed
-    # source checkout. Silent in the normal case (no PYTHONPATH, or one with
-    # no toolguard/ shadow entry) -- see the module docstring.
     for ef in audit_environment(env):
         ranked.append(
             RankedFinding(
@@ -400,8 +334,6 @@ def security_audit(
             )
         )
 
-    # Sort: acknowledged LAST (#NOSECURITY findings are de-prioritized but never
-    # dropped), then severity DESC, source, tool (None -> ""), finding_id.
     ranked.sort(
         key=lambda f: (
             f.acknowledged,
@@ -430,31 +362,29 @@ def security_audit(
 
 
 # ---------------------------------------------------------------------------
-# Renderer (ASCII only -- hard project rule)
+# Renderer
 # ---------------------------------------------------------------------------
 
-# Ordered severity labels for display grouping (highest first)
+#: Severity labels in display order, highest first.
 _SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 
 
 def render(report: SecurityReport, fmt: str = "markdown") -> str:
     """
-    Format a :class:`SecurityReport` as human-readable ASCII text.
+    Format a :class:`SecurityReport` as human-readable text.
 
-    All output is strict ASCII (``ord(c) < 128`` for every character).  No
-    Unicode characters, no emoji -- this is a hard project requirement.
+    The result is strict ASCII: every character is passed through
+    ``encode("ascii", errors="replace")``.
 
     Args:
-        report: The security report to render.
-        fmt: Output format -- ``"markdown"`` (headings and bullets) or
-            ``"text"`` (plain indented lines suitable for terminal output).
-            Any other value raises :class:`ValueError`.
+        fmt: ``"markdown"`` (headings and bullets) or ``"text"`` (indented lines
+            for a terminal).
 
     Returns:
-        A formatted ASCII string representing the report.
+        The formatted report.
 
     Raises:
-        ValueError: When ``fmt`` is not ``"markdown"`` or ``"text"``.
+        ValueError: When ``fmt`` is neither ``"markdown"`` nor ``"text"``.
     """
     if fmt not in ("markdown", "text"):
         raise ValueError(f"fmt must be 'markdown' or 'text', got: {fmt!r}")
@@ -467,53 +397,31 @@ def render(report: SecurityReport, fmt: str = "markdown") -> str:
         _render_text(report, lines)
 
     result = "\n".join(lines)
-    # Defensive guard: ensure no non-ASCII bytes slipped in
+    # Not merely defensive: patterns, loci and #NOSECURITY reasons are copied
+    # verbatim out of the user's config files and need not be ASCII.
     result = result.encode("ascii", errors="replace").decode("ascii")
     return result
 
 
 def _counts_summary(report: SecurityReport) -> str:
     """
-    Build the counts summary line.
+    Build the one-line severity tally.
 
-    Always lists all four severity labels in order so the reader can see
-    zeros as well as non-zero counts.
-
-    Args:
-        report: The security report.
-
-    Returns:
-        A summary string like ``"CRITICAL: 2  HIGH: 1  MEDIUM: 0  LOW: 0"``.
+    Lists all four labels, supplying the zeros ``report.counts`` itself omits:
+    ``"CRITICAL: 2  HIGH: 1  MEDIUM: 0  LOW: 0"``.
     """
     parts = [f"{label}: {report.counts.get(label, 0)}" for label in _SEVERITY_ORDER]
     return "  ".join(parts)
 
 
 def _takeover_banner(report: SecurityReport) -> str:
-    """
-    Return a short takeover-mode status line.
-
-    Args:
-        report: The security report.
-
-    Returns:
-        ``"Takeover mode: ACTIVE"`` or ``"Takeover mode: INACTIVE"``.
-    """
+    """Return ``"Takeover mode: ACTIVE"`` or ``"Takeover mode: INACTIVE"``."""
     state = "ACTIVE" if report.takeover_active else "INACTIVE"
     return f"Takeover mode: {state}"
 
 
 def _render_markdown(report: SecurityReport, lines: List[str]) -> None:
-    """
-    Append markdown-formatted content to ``lines``.
-
-    Uses level-1 headings for the report title and level-2 headings for each
-    severity group.  Individual findings are bullet lists.
-
-    Args:
-        report: The report to render.
-        lines: Output list of strings to append to (mutated in place).
-    """
+    """Append the markdown report to *lines*, grouped by severity."""
     lines.append("# Toolguard Security Audit")
     lines.append("")
     lines.append(f"**{_takeover_banner(report)}**")
@@ -525,7 +433,6 @@ def _render_markdown(report: SecurityReport, lines: List[str]) -> None:
         lines.append("No security findings.")
         return
 
-    # Group by severity
     for sev_label in _SEVERITY_ORDER:
         group = [f for f in report.findings if f.severity_label == sev_label]
         if not group:
@@ -538,13 +445,7 @@ def _render_markdown(report: SecurityReport, lines: List[str]) -> None:
 
 
 def _render_finding_markdown(f: RankedFinding, lines: List[str]) -> None:
-    """
-    Append one finding as a markdown bullet block.
-
-    Args:
-        f: The finding to render.
-        lines: Output list to append to (mutated in place).
-    """
+    """Append one finding to *lines* as a markdown bullet block."""
     tool_label = f.tool if f.tool else "(global)"
     lines.append(f"- **[{f.finding_id}]** source={f.source}  tool={tool_label}")
     if f.pattern:
@@ -563,15 +464,7 @@ def _render_finding_markdown(f: RankedFinding, lines: List[str]) -> None:
 
 
 def _render_text(report: SecurityReport, lines: List[str]) -> None:
-    """
-    Append plain-text formatted content to ``lines``.
-
-    Uses underline-style section separators and indented key-value pairs.
-
-    Args:
-        report: The report to render.
-        lines: Output list of strings to append to (mutated in place).
-    """
+    """Append the plain-text report to *lines*, grouped by severity."""
     title = "Toolguard Security Audit"
     lines.append(title)
     lines.append("=" * len(title))
@@ -596,13 +489,7 @@ def _render_text(report: SecurityReport, lines: List[str]) -> None:
 
 
 def _render_finding_text(f: RankedFinding, lines: List[str]) -> None:
-    """
-    Append one finding as indented plain-text lines.
-
-    Args:
-        f: The finding to render.
-        lines: Output list to append to (mutated in place).
-    """
+    """Append one finding to *lines* as indented plain-text lines."""
     tool_label = f.tool if f.tool else "(global)"
     lines.append(f"  [{f.finding_id}]  source={f.source}  tool={tool_label}")
     if f.pattern:
@@ -621,11 +508,7 @@ def _render_finding_text(f: RankedFinding, lines: List[str]) -> None:
 
 
 def _acknowledgement_label(f: RankedFinding) -> str:
-    """
-    Render the ``#NOSECURITY`` acknowledgement marker for a finding.
-
-    ``#NOSECURITY: <reason>`` when a reason was given, else a bare ``#NOSECURITY``.
-    """
+    """``#NOSECURITY: <reason>`` when a reason was given, else bare ``#NOSECURITY``."""
     if f.acknowledgement:
         return f"#NOSECURITY: {f.acknowledgement}"
     return "#NOSECURITY"
@@ -637,7 +520,7 @@ def _acknowledgement_label(f: RankedFinding) -> str:
 
 
 def _finding_key(f: RankedFinding) -> tuple:
-    """Identity of a finding for delta comparison (id + tool + pattern + locus)."""
+    """Identity used to match a finding across a before/after audit."""
     return (f.finding_id, f.tool, f.pattern, f.locus)
 
 
@@ -661,9 +544,9 @@ def _finding_delta(base: SecurityReport, proposed: SecurityReport) -> Dict[str, 
         proposed: The audit of the as-if-enacted config.
 
     Returns:
-        A dict with ``introduced`` (findings present only after the edits) and
-        ``resolved`` (findings present only before), each a list of compact
-        finding summaries.
+        ``{"introduced": [...], "resolved": [...]}`` -- findings present only
+        after the edits, and only before them, as compact summaries.  Findings
+        that share a :func:`_finding_key` collapse to one entry.
     """
     base_map = {_finding_key(f): f for f in base.findings}
     proposed_map = {_finding_key(f): f for f in proposed.findings}
@@ -678,14 +561,10 @@ def _finding_delta(base: SecurityReport, proposed: SecurityReport) -> Dict[str, 
 
 def _render_edit_banner(proposals: List[EditProposal], delta: Dict[str, object]) -> str:
     """
-    Render a human banner for an as-if-enacted (--edits) audit.
-
-    Args:
-        proposals: The proposed edits that were applied.
-        delta: The finding delta from :func:`_finding_delta`.
+    Render the banner that precedes an as-if-enacted (``--edits``) audit.
 
     Returns:
-        A short ASCII banner summarising the review scope and the delta.
+        A short banner summarising the review scope and the delta.
     """
     introduced = delta["introduced"]  # type: ignore[index]
     resolved = delta["resolved"]  # type: ignore[index]
@@ -718,26 +597,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     CLI entry point for the ``toolguard-audit`` console script.
 
-    Loads the toolguard configuration from the specified directory, runs both
-    security analysers via :func:`security_audit`, and prints the results to
-    stdout.
-
-    This function is READ-ONLY: it never writes or modifies any file.
+    Loads the configuration hierarchy discovered from ``--dir``, audits it, and
+    prints the result to stdout.  READ-ONLY: it writes no file, and ``--edits``
+    applies its proposals to an in-memory configuration only.
 
     Args:
         argv: Argument list (defaults to ``sys.argv[1:]`` when ``None``).
 
     Returns:
-        Exit code.  Default: always ``0``.  With ``--strict``: ``0`` when there
-        are no findings; the ``highest_severity`` value (1-4) when there are
-        findings.
-
-    Exit codes (``--strict`` mode):
-        * ``0`` -- no findings
-        * ``1`` -- only LOW findings
-        * ``2`` -- highest finding is MEDIUM
-        * ``3`` -- highest finding is HIGH
-        * ``4`` -- at least one CRITICAL finding
+        ``0``, unless ``--strict`` was given: then ``0`` when there are no
+        findings, else the highest finding's severity value -- ``1`` LOW,
+        ``2`` MEDIUM, ``3`` HIGH, ``4`` CRITICAL.
     """
     parser = argparse.ArgumentParser(
         prog="toolguard-audit",
@@ -833,16 +703,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             parser.error(f"could not read --edits file {args.edits!r}: {exc}")
 
-    # Use the tooling facade loader (ignore_env_override=True) so the audit always
-    # reflects the project-rooted hierarchy, consistent with the rest of the tooling
-    # and not diverted by a stale CLAUDE_SETTINGS_PATH.
+    # The tooling loader, not load_configuration: it pins the walk to the project
+    # root, so a stale CLAUDE_SETTINGS_PATH cannot divert the audit to another
+    # project's config.
     config = load_config(Path(args.dir))
     report = security_audit(config)
 
-    # When proposed edits are supplied, audit the config AS IF they were enacted
-    # (whole hierarchy, all sections) and compute the finding delta, so the caller
-    # sees exactly which risks the edits introduce or resolve.  From here on
-    # ``config``/``report`` reflect the proposed state.
+    # From here on ``config`` and ``report`` describe the AS-IF-ENACTED state
+    # whenever edits were supplied -- including the context block built below.
     edit_delta: Optional[Dict[str, object]] = None
     if proposed_edits is not None:
         base_report = report

@@ -1,21 +1,4 @@
-"""
-Unit tests for TOO-17: multi-line Bash command handling (fail-open bypass fix).
-
-These are the LOCKED fixtures (F1-F24) from the TOO-17 design, written TDD-first: most
-"bypass" tests are expected to FAIL until the multi-line decomposition fix lands, while the
-"regression guard" tests already pass and exist to stop a naive fix from over-splitting
-(e.g. shredding heredoc bodies or quoted strings).
-
-All decisions are evaluated through the live path -- ``compound.resolve_compound_permission``
-with a ``resolve_one`` closure over ``permissions.check_permission`` -- exactly as the hook
-resolves a single level. ``check_permission`` is allow/deny + fail-closed, so any ``'ask'``
-outcome here is a NEW behavior the fix must introduce (undecidable segment, or an ASK floor),
-never producible by the current code.
-
-Governing principle under test: per-statement validation with strictest-wins (deny > ask >
-allow); anything that cannot be safely decomposed resolves to ASK -- never a silent allow of
-an undecomposed blob.
-"""
+"""Unit tests for TOO-17: multi-line Bash command handling (fail-open bypass fix)."""
 
 import unittest
 
@@ -25,11 +8,7 @@ from toolguard.permissions import check_permission
 
 
 def _leaf_texts(command: str) -> list[str]:
-    """Return the text of every LeafCommand produced by the multi-line extractor.
-
-    Used to pin the rule-authoring surface (e.g. the ``__HEREDOC_TO_<sink>__``
-    sentinel and substitution handling) at the structured-extraction contract level.
-    """
+    """Return the text of every LeafCommand produced by the multi-line extractor."""
     return [r.text for r in extract_structured(command) if isinstance(r, LeafCommand)]
 
 
@@ -47,11 +26,7 @@ def _leaf(command: str, needle: str) -> LeafCommand:
 
 
 def _resolve(command: str, allow: list[str], deny: list[str]) -> str:
-    """Resolve a (possibly compound/multi-line) command to a bare decision string.
-
-    Mirrors how the hook resolves one hierarchy level: each extracted sub-command is run
-    through ``check_permission`` and the compound result is combined strictest-wins.
-    """
+    """Resolve a (possibly compound/multi-line) command to a bare decision string."""
     _verdict = resolve_compound_permission(
         command, lambda c: (*check_permission(c, allow, deny), None)
     )
@@ -64,10 +39,7 @@ def _resolve(command: str, allow: list[str], deny: list[str]) -> str:
 
 
 class TestMultilineBypassFix(unittest.TestCase):
-    """The core fail-open: a dangerous statement on a later line must still be caught.
-
-    (Expected to FAIL until the TOO-17 decomposition fix is implemented.)
-    """
+    """The core fail-open: a dangerous statement on a later line must still be caught."""
 
     def test_newline_separated_dangerous_second_line_is_denied(self):
         """
@@ -129,7 +101,6 @@ class TestMultilineBypassFix(unittest.TestCase):
         Given allow `cd:*`,`ls:*` (and deny `rm -rf:*`)
         When backslash-continued lines `cd ~/p; \\` + `ls \\` + `-l \\` + `~/` are issued
         Then they join into `cd ~/p` and `ls -l ~/`, both allowed -> ALLOW
-        (Currently denies because the mangled continuation matches no allow and fails closed.)
         """
         self.assertEqual(
             _resolve("cd ~/p; \\\nls \\\n-l \\\n~/", ["cd:*", "ls:*"], ["rm -rf:*"]),
@@ -138,10 +109,7 @@ class TestMultilineBypassFix(unittest.TestCase):
 
 
 class TestMultilineHeredocAndInlineCode(unittest.TestCase):
-    """Heredocs and inline interpreter code: bash-family is decomposed; foreign is ASK-floored.
-
-    (Bypass/ask tests expected to FAIL until implemented; body-not-parsed tests are guards.)
-    """
+    """Heredocs and inline interpreter code: bash-family is decomposed; foreign is ASK-floored."""
 
     def test_heredoc_into_python_interpreter_asks(self):
         """
@@ -168,7 +136,6 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
         Given allow `cat:*`,`pbcopy:*` and deny `rm -rf:*`
         When a heredoc whose body literally contains `rm -rf /` is piped to `pbcopy`
         Then the body is DATA (not parsed); both leaves are allowed -> ALLOW
-        (Guard against a naive fix that splits the heredoc body into commands.)
         """
         cmd = "cat <<'EOF' | pbcopy\nrm -rf /\nEOF"
         self.assertEqual(_resolve(cmd, ["cat:*", "pbcopy:*"], ["rm -rf:*"]), "allow")
@@ -178,7 +145,6 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
         Given allow `bash -c:*`,`git status:*` and deny `rm -rf:*`
         When `bash -c "git status; rm -rf /"` is issued
         Then the inner string is decomposed as bash and the compound is DENIED
-        (Currently allowed because `bash -c:*` matches the whole opaque string.)
         """
         cmd = 'bash -c "git status; rm -rf /"'
         self.assertEqual(
@@ -205,10 +171,7 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
 
 
 class TestMultilineControlStructuresAndProcsub(unittest.TestCase):
-    """Simple constructs decompose; complex/un-decomposable constructs resolve to ASK.
-
-    (Expected to FAIL until implemented.)
-    """
+    """Simple constructs decompose; complex/un-decomposable constructs resolve to ASK."""
 
     def test_simple_for_loop_body_is_validated(self):
         """
@@ -262,14 +225,13 @@ class TestMultilineControlStructuresAndProcsub(unittest.TestCase):
         Given allow `diff:*` (and deny `rm -rf:*`)
         When a command uses process substitution `diff <(sort a) <(sort b)`
         Then the inner commands cannot be safely decomposed today and it resolves to ASK
-        (Currently allowed as one opaque `diff ...` command -- a latent fail-open.)
         """
         cmd = "diff <(sort a) <(sort b)"
         self.assertEqual(_resolve(cmd, ["diff:*"], ["rm -rf:*"]), "ask")
 
 
 class TestMultilineRegressionGuards(unittest.TestCase):
-    """Already-passing guards: ensure the fix does not over-split quotes/comments/banners."""
+    """Guards: the fix must not over-split quotes/comments/banners."""
 
     def test_linear_allowed_sequence_is_allowed(self):
         """
@@ -305,7 +267,6 @@ class TestMultilineRegressionGuards(unittest.TestCase):
         Given allow `git status:*` and deny `rm -rf:*`
         When a leading full-line comment `# rm -rf /` precedes `git status`
         Then the comment is dropped and the compound is ALLOWED
-        (Currently denied because the comment+command blob matches no allow.)
         """
         self.assertEqual(
             _resolve("# rm -rf /\ngit status", ["git status:*"], ["rm -rf:*"]), "allow"
@@ -321,11 +282,7 @@ class TestMultilineRegressionGuards(unittest.TestCase):
 
 
 class TestHeredocSentinelShape(unittest.TestCase):
-    """Pin the ``__HEREDOC_TO_<sink>__`` rule-authoring surface (was untested).
-
-    These assert the structured-extraction CONTRACT (leaf text + ask_floor), which is the
-    surface rule authors write against -- so it must survive the planned IR refactor.
-    """
+    """Pin the ``__HEREDOC_TO_<sink>__`` rule-authoring surface: leaf text and ask_floor."""
 
     def test_nonexec_sink_emits_sentinel_without_ask_floor(self):
         """

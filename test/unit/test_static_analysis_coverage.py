@@ -1,21 +1,10 @@
 """
 Guards that `pyscn` actually analyses the whole package.
 
-`pyscn analyze` reports a file it cannot parse as a WARNING on stderr and then
-carries on, excluding that file from every metric it computes. The exit code
-stays 0 and the summary looks complete. That is the failure this module exists
-to make loud.
-
-It was not hypothetical: a single ``except A, B, C:`` clause (Python 3.14's
-parenthesis-free multi-exception form, with three names) made pyscn drop
-``toolguard/install_provenance.py`` entirely, so a health score, a complexity
-average and a duplication percentage were all computed over 58 of 59 modules
-while presenting as a whole-package result. Nothing failed; one line of stderr
-was the only signal.
-
-The point is deliberately NOT "that syntax is banned". The next construct pyscn
-cannot parse will be a different one, and this test does not need to know what
-it is.
+`pyscn analyze` drops a file it cannot parse from every metric it computes,
+warns once on stderr, and still exits 0 with a summary that looks complete.
+That happened for real: one ``except A, B, C:`` clause silently reduced a
+whole-package health score to 58 of 59 modules.
 """
 
 import shutil
@@ -27,11 +16,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYSCN_CONFIG = REPO_ROOT / ".pyscn.toml"
 
-#: The one file the project deliberately keeps away from pyscn. It is the
-#: canopy-generated PEG parser: meaningless against the style/debt questions
-#: pyscn is used for here, and it has crashed the tool outright. The exclusion
-#: lives in `.pyscn.toml`; this test only pins that it is still there, so that
-#: removing it produces a failing test rather than a crashing analysis run.
+#: The one file deliberately kept away from pyscn (in `.pyscn.toml`): the
+#: canopy-generated PEG parser, which has crashed the tool outright.
 SANCTIONED_EXCLUSION = "**/bash_parser.py"
 
 
@@ -60,8 +46,6 @@ class TestPyscnAnalysesEveryModule(unittest.TestCase):
         )
         combined = result.stdout + result.stderr
 
-        # Match on the behaviour, not on a specific message: any line naming a
-        # file it could not read means that file left the analysis.
         offending = [
             line.strip()
             for line in combined.splitlines()
@@ -93,8 +77,7 @@ class TestSanctionedPyscnExclusion(unittest.TestCase):
         config = tomllib.loads(PYSCN_CONFIG.read_text(encoding="utf-8"))
         patterns = config.get("analysis", {}).get("exclude_patterns", [])
         if not patterns:
-            # The section name is pyscn's, not ours; find it wherever it lives
-            # rather than hard-coding a path that a pyscn upgrade could move.
+            # The section name is pyscn's; a pyscn upgrade could move it.
             for section in config.values():
                 if isinstance(section, dict) and "exclude_patterns" in section:
                     patterns = section["exclude_patterns"]

@@ -1,14 +1,6 @@
 """
-Unit tests for takeover mode functionality in toolguard.
-
-Tests the takeover mode feature that allows toolguard to act as sole gatekeeper
-while Claude's native permission system has blanket allows.
-
-These tests use the current hierarchical API (``Configuration.takeover_mode()``)
-rather than the removed ``load_takeover_mode_config`` legacy loader.  Scenarios
-already covered by ``test_configuration.py`` (pattern-list union across levels,
-no_match_fallback resolution, enabled conflict detection) were dropped to avoid
-duplication; see the implementation report for the full drop/port decision log.
+Unit tests for takeover mode: toolguard as sole gatekeeper while Claude's
+native permission system carries blanket allows.
 """
 
 import json
@@ -38,15 +30,12 @@ class TestTakeoverModeConfig(ConfigIsolationMixin, unittest.TestCase):
         When load_configuration(...).takeover_mode() resolves the configuration
         Then takeover is disabled, the default blanket ignored patterns are
             present in ignored_allow_patterns, and no_match_fallback is 'ask'
-            (the TOO-15 default, unrelated to takeover.enabled which is False
-            here regardless)
         """
         _home, project = self.isolate_config_environment()
         config = load_configuration(project, ignore_env_override=True)
 
         tc = config.takeover_mode()
         self.assertFalse(tc.enabled)
-        # Default ignored_allow_patterns includes standard blanket patterns.
         self.assertIn("Bash(*)", tc.ignored_allow_patterns)
         self.assertIn("Read(*)", tc.ignored_allow_patterns)
         self.assertIn("Write(*)", tc.ignored_allow_patterns)
@@ -65,7 +54,6 @@ class TestTakeoverModeConfig(ConfigIsolationMixin, unittest.TestCase):
         claude_dir = project / ".claude"
         claude_dir.mkdir()
 
-        # Put takeover_mode in settings.local.json -- should be ignored.
         settings_content = {
             "takeover_mode": {
                 "enabled": True,
@@ -78,7 +66,6 @@ class TestTakeoverModeConfig(ConfigIsolationMixin, unittest.TestCase):
         config = load_configuration(project, ignore_env_override=True)
 
         tc = config.takeover_mode()
-        # takeover_mode in settings.json is ignored; defaults should apply.
         self.assertFalse(tc.enabled)
 
 
@@ -104,13 +91,11 @@ allow = ["Read(~/projects/**)"]
 """
         (claude_dir / "toolguard_hook.toml").write_text(hook_toml)
 
-        # Native Claude settings with blanket Read(*)
         settings_json = {"permissions": {"allow": ["Read(*)", "Bash(*)"]}}
         (claude_dir / "settings.local.json").write_text(json.dumps(settings_json))
 
         allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
-        # Blanket * should be filtered; specific pattern from toolguard_hook remains
         self.assertNotIn("*", allow_patterns)
         self.assertIn("~/projects/**", allow_patterns)
 
@@ -165,7 +150,6 @@ allow = ["Read(~/projects/**)"]
 
         allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
-        # Both patterns should be present (no filtering)
         self.assertIn("*", allow_patterns)
         self.assertIn("~/projects/**", allow_patterns)
 
@@ -179,7 +163,6 @@ allow = ["Read(~/projects/**)"]
         claude_dir = project / ".claude"
         claude_dir.mkdir()
 
-        # toolguard_hook has Read(*) - should NOT be filtered even with takeover
         hook_toml = """
 [takeover_mode]
 enabled = true
@@ -191,7 +174,6 @@ allow = ["Read(*)"]
 
         allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
-        # * from toolguard_hook should remain (never filtered)
         self.assertIn("*", allow_patterns)
 
     def test_file_deny_patterns_not_filtered(self):
@@ -217,38 +199,16 @@ enabled = true
 
         allow_patterns, deny_patterns = load_file_path_patterns("Read")
 
-        # Deny pattern should remain
         self.assertIn("**/.env", deny_patterns)
-        # Allow * should be filtered
         self.assertNotIn("*", allow_patterns)
 
 
 class TestBashTakeoverFiltering(unittest.TestCase):
-    """
-    Test that takeover mode suppresses native Bash(*) allows in the live
-    resolve_command_permission path.
-
-    These tests exercise the full stack from Configuration.permission_layers
-    through resolve_command_permission, confirming that a native blanket
-    Bash(*) allow cannot bypass a toolguard deny when takeover is enabled,
-    while a toolguard_hook Bash(*) allow is never suppressed.
-    """
+    """Takeover filtering of native Bash allows, through the live resolve_command_permission path."""
 
     @staticmethod
     def _make_bash_config(native_allows, hook_allows, hook_denies, takeover_enabled):
-        """
-        Build a Configuration with a native layer and a hook layer for Bash.
-
-        Args:
-            native_allows: List of Bash allow patterns in wrapped form for the
-                native (settings.json) layer, e.g. ['Bash(*)'].
-            hook_allows: List of Bash allow patterns for the toolguard_hook layer.
-            hook_denies: List of Bash deny patterns for the toolguard_hook layer.
-            takeover_enabled: Whether takeover mode is enabled.
-
-        Returns:
-            A Configuration instance with the described layers and takeover config.
-        """
+        """Build (Configuration, TakeoverConfig) from a native layer and a hook layer for Bash."""
         native_layer = ConfigLayer(
             Provenance("project", "claude", "json", Path("/p/settings.local.json"), 0),
             MappingProxyType({"permissions": {"allow": native_allows, "deny": []}}),
@@ -266,7 +226,6 @@ class TestBashTakeoverFiltering(unittest.TestCase):
             ),
         )
         config = Configuration(layers=(hook_layer, native_layer))
-        # Patch takeover_mode to return the desired state without file I/O.
         takeover = TakeoverConfig(
             enabled=takeover_enabled,
             ignored_allow_patterns=(
@@ -280,12 +239,7 @@ class TestBashTakeoverFiltering(unittest.TestCase):
         return config, takeover
 
     def _resolve(self, config, command):
-        """
-        Drive a single Bash command through resolve_command_permission.
-
-        Returns:
-            Tuple of (decision, reason).
-        """
+        """Drive one Bash command through resolve_command_permission; return (decision, reason)."""
         resolved = resolve_command_permission(config, "Bash", command)
         return resolved.decision, resolved.reason
 
@@ -317,9 +271,6 @@ class TestBashTakeoverFiltering(unittest.TestCase):
             level) -- specifically the deny fires here because hook level is
             more specific and deny-first within level wins
         """
-        # NOTE: hook_layer is more specific (lower specificity index in layers),
-        # so hook deny fires first. This test confirms that disabling takeover
-        # does not change which level is consulted first.
         config, takeover = self._make_bash_config(
             native_allows=["Bash(*)"],
             hook_allows=[],
@@ -328,8 +279,6 @@ class TestBashTakeoverFiltering(unittest.TestCase):
         )
         with patch.object(Configuration, "takeover_mode", return_value=takeover):
             decision, _reason = self._resolve(config, "rm -rf /")
-        # Hook layer (most specific) fires first; it has no allow but has deny rm*.
-        # deny-first within a level means deny fires before considering native level.
         self.assertEqual(decision, "deny")
 
     def test_toolguard_hook_bash_allow_not_filtered_by_takeover(self):
@@ -339,7 +288,6 @@ class TestBashTakeoverFiltering(unittest.TestCase):
         When 'git status' is resolved through resolve_command_permission
         Then the hook's Bash(*) allow is never filtered and the command is allowed
         """
-        # Only a hook layer with Bash(*) allow -- no native layer.
         hook_layer = ConfigLayer(
             Provenance(
                 "project",

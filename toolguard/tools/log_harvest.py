@@ -1,9 +1,8 @@
 """
 Log harvester for toolguard daily log files.
 
-Parses ``logs/toolguard-YYYY-MM-DD.md`` files into a structured corpus of
-:class:`LogEntry` records.  Each entry captures the timestamp, tool, command or
-file path, observed status, matched/violated rule text, and agent identifier.
+Parses ``toolguard-YYYY-MM-DD.md`` resolution logs into :class:`LogEntry`
+records.
 
 Log file format (one Markdown section per event)::
 
@@ -12,7 +11,7 @@ Log file format (one Markdown section per event)::
     - **Status**: EXECUTED
     - **Command**: `ls -la`
     - **Matched Rule**: `ls:*`
-    - **Provenance**: explicit: /path/to/config
+    - **Provenance**: project: /p/.claude/toolguard_hook.toml
     - **Agent**: main
 
     ## 2026-06-23 10:27:35
@@ -22,34 +21,21 @@ Log file format (one Markdown section per event)::
     - **Violated Rules**: `Command does not match any allow patterns`
     - **Agent**: main
 
-**Provenance** is a separate field (TOO-45 R3 follow-up) for a SINGLE-leaf
-entry -- absent (no field at all) whenever there is no single rule to
-attribute (e.g. a hard-deny match, pooled across levels). For a COMPOUND
-command's per-sub-command entries, provenance (when available) is instead
-folded back into ``Matched Rule`` in the pre-R3 bracketed format (e.g.
-``git *  [project: /path]``) and there is no separate Provenance field at
-all -- per-sub-command provenance was never threaded through that logging
-path (see ``hook.py::_log_allowed_command``'s docstring). This module does
-not currently parse the field into :class:`LogEntry` either way.
+A file-tool entry carries a ``Tool(path)`` command field instead::
 
-File-tool entries use a ``Tool(path)`` command shape::
-
-    ## ...
-    - **Status**: EXECUTED
     - **Command**: `Read(/abs/path/to/file)`
     - **Matched Rule**: `~/projects/**`
-    - **Provenance**: project: /p/.claude/toolguard_hook.toml
-    - **Agent**: main
 
-Discovery and conflict entries are silently skipped (they have no ``Status``
-field in the same format).
+Only ``Status``, ``Command``, ``Matched Rule``, ``Violated Rules`` and
+``Agent`` are read; every other field, ``Provenance`` among them, is ignored,
+and a section with no ``Status`` field is skipped entirely.
 
 Robustness
 ----------
-Malformed sections (missing fields, bad dates, unknown status values, etc.) are
-silently skipped rather than raising exceptions so that a bad log day does not
-prevent harvesting the rest of the corpus.  The ``status`` field preserves the
-raw string value from the log so unknown statuses pass through as-is.
+A section that does not parse -- unreadable heading, no ``Status``, no
+``Command`` -- is skipped rather than raised on, so one bad log day still
+yields the rest of the corpus.  An unrecognised status is not a parse failure:
+``status`` keeps whatever string the log holds.
 """
 
 import re
@@ -65,41 +51,44 @@ from toolguard.constants import FILE_TOOLS
 # Data structures
 # ---------------------------------------------------------------------------
 
-# Pattern to detect and parse ``ToolName(...)`` command forms in the log.
+#: Splits a ``ToolName(target)`` command field into its name and target.
 _TOOL_WRAPPER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\((.+)\)$", re.DOTALL)
 
-# Header line format: ``## YYYY-MM-DD HH:MM:SS``
+#: A section heading: ``## YYYY-MM-DD HH:MM:SS``.
 _HEADER_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$")
 
-# Field extractors -- each matches a ``- **Key**: `value` `` bullet
 _STATUS_RE = re.compile(r"^\s*-\s+\*\*Status\*\*:\s+(.+)$")
 _COMMAND_RE = re.compile(r"^\s*-\s+\*\*Command\*\*:\s+`(.+)`$", re.DOTALL)
 _MATCHED_RULE_RE = re.compile(r"^\s*-\s+\*\*Matched Rule\*\*:\s+`(.+)`$", re.DOTALL)
 _VIOLATED_RULES_RE = re.compile(r"^\s*-\s+\*\*Violated Rules\*\*:\s+`(.+)`$", re.DOTALL)
 _AGENT_RE = re.compile(r"^\s*-\s+\*\*Agent\*\*:\s+(.+)$")
 
-# Log file name pattern: toolguard-YYYY-MM-DD.md
+#: Names a daily resolution log. Deliberately narrow -- the error, warning
+#: and conflict logs share the ``toolguard-`` prefix but not this shape.
 _LOG_NAME_RE = re.compile(r"^toolguard-(\d{4}-\d{2}-\d{2})\.md$")
 
 
 @dataclass(frozen=True)
 class LogEntry:
     """
-    A single parsed event from a toolguard daily log file.
+    One event in a harvested corpus.
+
+    The field notes describe a daily-log section, the source this module
+    parses.
 
     Attributes:
-        timestamp: The datetime of the event (parsed from the section header).
-        tool: Tool name (``'Bash'``, ``'Read'``, ``'Write'``, ``'Edit'``, or
-            the raw tool name if not recognised).
-        command: For Bash entries, the raw command string; for file-tool entries,
-            the absolute file path extracted from the ``ToolName(path)`` wrapper.
-        status: Observed status string from the log.  Common values are
-            ``'EXECUTED'`` and ``'REFUSED'``; other values are preserved as-is.
-        rule_text: Matched rule text (for EXECUTED entries) or violated-rules
-            text (for REFUSED entries), or ``None`` when the field is absent.
-        agent: Agent identifier string (e.g. ``'main'``, ``'feature-coder'``), or
-            ``None`` when the ``Agent`` field is absent.
-        log_file: The log file this entry was parsed from (for diagnostics).
+        timestamp: Event time, from the section header. Naive, local.
+        tool: ``'Read'``, ``'Write'`` or ``'Edit'`` for a ``ToolName(path)``
+            command field; ``'Bash'`` for anything else, including a wrapper
+            naming some other tool.
+        command: The command string, or the path for a file-tool entry.
+        status: The status string as the log holds it, unrecognised values
+            included.
+        rule_text: ``Matched Rule`` when the section has one, else
+            ``Violated Rules``, else ``None``.
+        agent: The ``Agent`` field -- ``'main'`` or a subagent's name -- or
+            ``None`` when absent.
+        log_file: The file this entry was parsed from.
     """
 
     timestamp: datetime
@@ -118,17 +107,17 @@ class LogEntry:
 
 def _parse_command_field(raw: str):
     """
-    Parse the raw command field into ``(tool, command_or_path)``.
+    Split the ``Command`` field into ``(tool, command_or_path)``.
 
-    File-tool entries look like ``Read(/abs/path)``; Bash entries are raw
-    command strings.
+    A ``Read(/abs/path)``-shaped field yields that file tool and its path.
+    Anything else -- including a wrapper naming a tool that is not a file
+    tool -- yields ``'Bash'`` and the whole field text as the command.
 
     Args:
-        raw: The raw content of the ``Command`` field (backtick-stripped).
+        raw: The ``Command`` field's content, backticks already stripped.
 
     Returns:
-        A ``(tool, target)`` tuple where ``tool`` is e.g. ``'Bash'`` or
-        ``'Read'`` and ``target`` is the command string or file path.
+        A ``(tool, target)`` tuple.
     """
     m = _TOOL_WRAPPER_RE.match(raw.strip())
     if m:
@@ -136,29 +125,25 @@ def _parse_command_field(raw: str):
         inner = m.group(2).strip()
         if tool_name in FILE_TOOLS:
             return tool_name, inner
-        # Unrecognised wrapper -- treat as Bash with the raw text as command
         return "Bash", raw.strip()
     return "Bash", raw.strip()
 
 
 def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEntry]:
     """
-    Parse a single Markdown section into a :class:`LogEntry`.
-
-    A section is a list of lines starting with the ``## timestamp`` header line.
-    Returns ``None`` for Discovery/conflict entries and malformed sections.
+    Parse one Markdown section into a :class:`LogEntry`.
 
     Args:
-        lines: The lines of one Markdown section (including the header).
-        log_file: Path to the log file (for the ``log_file`` attribute).
+        lines: The section's lines, its ``## timestamp`` header first.
+        log_file: Recorded on the entry as its origin.
 
     Returns:
-        A :class:`LogEntry` or ``None`` when the section should be skipped.
+        A :class:`LogEntry`, or ``None`` when the section has no parseable
+        header, no ``Status`` field, or no ``Command`` field.
     """
     if not lines:
         return None
 
-    # Parse header
     header_match = _HEADER_RE.match(lines[0].rstrip())
     if not header_match:
         return None
@@ -195,10 +180,8 @@ def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEn
         if m:
             agent = m.group(1).strip()
 
-    # Skip sections without a Status field (Discovery, conflict, etc.)
     if status is None:
         return None
-    # Skip sections without a Command field
     if command_raw is None:
         return None
 
@@ -218,16 +201,14 @@ def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEn
 
 def _iter_sections(text: str) -> Iterator[List[str]]:
     """
-    Iterate over Markdown sections (``## ...`` delimited) in ``text``.
-
-    Each section is a list of lines starting with the ``##`` header and
-    continuing until the next ``##`` header or end of text.
+    Split *text* into ``## ``-delimited sections.
 
     Args:
-        text: Full text content of a log file.
+        text: A log file's full text.
 
     Yields:
-        Lists of lines, one per section.
+        Lists of lines, one per section. Anything before the first ``## ``
+        heading is yielded as a leading, header-less list.
     """
     current: List[str] = []
     for line in text.splitlines():
@@ -248,19 +229,17 @@ def _iter_sections(text: str) -> Iterator[List[str]]:
 
 def parse_log_file(log_path: Path) -> List[LogEntry]:
     """
-    Parse a single daily log file into a list of :class:`LogEntry` records.
-
-    Silently skips Discovery/conflict sections and malformed entries.  The
-    returned list preserves the chronological order of the entries in the file.
+    Parse one daily log file into :class:`LogEntry` records.
 
     Args:
         log_path: Path to a ``toolguard-YYYY-MM-DD.md`` log file.
 
     Returns:
-        List of :class:`LogEntry` records (may be empty).
+        The file's parseable entries, in the order they appear; sections that
+        do not parse are skipped, so the list may be empty.
 
     Raises:
-        OSError: If the file cannot be opened/read.
+        OSError: The file cannot be opened or read.
     """
     entries: List[LogEntry] = []
     text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -273,13 +252,8 @@ def parse_log_file(log_path: Path) -> List[LogEntry]:
 
 def _log_date(log_path: Path) -> Optional[date]:
     """
-    Extract the date from a log file name (``toolguard-YYYY-MM-DD.md``).
-
-    Args:
-        log_path: Path to a log file.
-
-    Returns:
-        The date encoded in the file name, or ``None`` for non-matching names.
+    The date encoded in a ``toolguard-YYYY-MM-DD.md`` file name, or ``None``
+    for any other name.
     """
     m = _LOG_NAME_RE.match(log_path.name)
     if not m:
@@ -296,42 +270,32 @@ def harvest(
     max_age_days: Optional[int] = None,
 ) -> List[LogEntry]:
     """
-    Parse all applicable daily log files in ``logs_dir`` into a corpus.
+    Parse every daily log file in *logs_dir* into a corpus.
 
-    Only ``toolguard-YYYY-MM-DD.md`` files are processed; error logs, warning
-    logs, and other files are ignored.  Files are processed in chronological
-    order so that the returned corpus is sorted by timestamp.
-
-    Time window
-    -----------
-    The caller can cap the corpus size with ``since`` (a floor date) or
-    ``max_age_days`` (a rolling window relative to today).  When both are
-    given, the more restrictive floor wins (the later of the two).  When
-    neither is given, all available log files are harvested.
+    Only ``toolguard-YYYY-MM-DD.md`` names are read (see :data:`_LOG_NAME_RE`).
 
     Args:
-        logs_dir: Directory containing ``toolguard-YYYY-MM-DD.md`` files.
-        since: Only include entries on or after this date.
-        max_age_days: Only include entries from the last N calendar days
-            (relative to today's local date).
+        logs_dir: Directory holding the daily log files.
+        since: Drop entries dated before this day.
+        max_age_days: Drop entries dated before ``today - max_age_days``,
+            against the local date. Given both, the later floor applies;
+            given neither, nothing is dropped.
 
     Returns:
-        List of :class:`LogEntry` records sorted by timestamp (oldest first).
-        Malformed log files are skipped; malformed individual sections within
-        a file are also skipped.
+        The surviving entries, files in file-name date order and each file's
+        entries in the order they appear. An unreadable *logs_dir* yields an
+        empty list, and an individual file that cannot be read is skipped.
     """
-    # toolguard is a desktop tool and works in LOCAL time throughout (log
-    # timestamps are naive/local), so "today" is the local date.
+    # Log timestamps are naive local time, so the rolling window is measured
+    # against the local date.
     today = date.today()
 
-    # Resolve the effective floor date
     floor: Optional[date] = since
     if max_age_days is not None:
         age_floor = today - timedelta(days=max_age_days)
         if floor is None or age_floor > floor:
             floor = age_floor
 
-    # Discover and sort log files chronologically
     log_files: List[Path] = []
     try:
         for child in logs_dir.iterdir():
@@ -354,8 +318,6 @@ def harvest(
             file_entries = parse_log_file(log_path)
         except OSError:
             continue
-        # Apply per-entry timestamp filtering (the date filter above is file-level;
-        # the very first and last files may contain entries outside the window)
         if floor is not None:
             floor_dt = datetime(floor.year, floor.month, floor.day)
             file_entries = [e for e in file_entries if e.timestamp >= floor_dt]

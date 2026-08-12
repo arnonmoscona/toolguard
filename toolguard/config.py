@@ -2,9 +2,12 @@
 Configuration loading for toolguard.
 
 Loads and parses permissions from Claude Code settings files with support for:
-- Config file hierarchy (project -> user)
-- Extended pattern syntax in toolguard_hook.json files
-- Merging permissions from multiple sources
+- A directory hierarchy of config sources (project and every ancestor up to
+  ``~``, or to the filesystem root for a project outside ``~``, plus two
+  candidate rules directories), not just project and user.
+- Extended pattern syntax in ``toolguard_hook`` files (TOML preferred, JSON
+  supported).
+- Merging permissions from multiple sources.
 
 Public abstraction
 ------------------
@@ -17,9 +20,10 @@ file format/location. Clients ask the :class:`Configuration` semantic questions 
 The lower-level loaders are internal implementation behind this abstraction; new clients
 should always prefer :func:`load_configuration`. A few remain public only because
 not-yet-migrated non-test callers still use them -- ``find_project_root``,
-``discover_config_files``, and ``config_sync_settings_from_sources`` (used by
-``auto_migrate``). That is transitional and tracked as a TOO-8 follow-up; everything else
-internal is underscore-prefixed.
+``discover_config_files``, ``load_config_file``, and
+``config_sync_settings_from_sources`` (used by ``auto_migrate``). :func:`wrap_tool_pattern`
+is also public, but by design -- it is a standalone helper unrelated to loading. Everything
+else is underscore-prefixed.
 """
 
 import functools
@@ -51,51 +55,8 @@ from toolguard.rule_entry import normalize_entries_preserving
 from toolguard.tool_spec import DEFAULT_GOVERNED_TOOLS
 from toolguard.toml_scan import find_multiline_structured_entry_line
 
-# ``Issue`` moved to ``toolguard.issues`` (TOO-19 Phase 0a, increment 1) so
-# that leaf modules can depend on it without importing this module, and is
-# imported above and re-exported here so existing
-# ``from toolguard.config import Issue`` call sites keep working unchanged.
-#
-# ``is_tool_wrapper`` and ``_strip_tool_wrapper`` similarly moved to
-# ``toolguard.rule_entry`` (same increment), together with the
-# ``_TOOL_WRAPPER_RE`` regex they both wrap: ``rule_entry.normalize_entry``
-# needs the identical wrapper-shape check for structured entries, and
-# ``rule_entry`` must stay a leaf module that this module depends on -- not
-# the reverse -- so the regex and both predicates over it live there in
-# exactly one place. ``_TOOL_WRAPPER_RE`` itself is not re-imported here
-# since nothing in this module uses it directly any more (both former
-# call sites moved along with the functions); only ``is_tool_wrapper`` is
-# imported back and re-exported so the existing importer
-# (``toolguard.config_divergence``) keeps working unchanged. TOO-45 R2a:
-# this module's own code no longer calls ``_strip_tool_wrapper`` directly
-# either -- every internal use now goes through
-# :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` -- so the
-# ``is_tool_wrapper`` import here is a pure re-export as of that change
-# (``as`` alias added to say so explicitly). TOO-45 R6-S1: the
-# ``_strip_tool_wrapper`` re-export that used to sit alongside it was
-# deleted -- it existed only so ``toolguard.tools.takeover_audit`` could
-# reach a private name of a module it doesn't otherwise depend on; that
-# caller now imports the new public ``toolguard.rule_entry.strip_tool_wrapper``
-# directly instead, so nothing re-exports the private name any more.
-#
-# ``Provenance``, ``ConfigLayer``, ``ToolPatternLayer``,
-# ``TakeoverEnabledConflict``, ``TakeoverConfig``, and ``ConflictOverride``
-# similarly moved to ``toolguard.config_types`` (TOO-19 structural refactor):
-# these are thin data types with no discovery/parsing logic, so they now live
-# apart from ``Configuration`` and the machinery that builds and resolves
-# them. Imported back and re-exported here (same ``import x as x`` idiom as
-# above) so existing ``from toolguard.config import Provenance`` (etc.) call
-# sites keep working unchanged.
-#
-# ``ResolvedDecision`` (the type formerly here) was collapsed into
-# ``RuntimeVerdict`` by TOO-45 R1c, along with ``BashResolution``/
-# ``FileResolution`` (formerly in ``toolguard.resolve``) -- see
-# ``RuntimeVerdict``'s own docstring. Re-exported the same way.
-
-# Default blanket ignored-allow patterns for takeover mode. These seed the
-# union of ``ignored_allow_patterns`` so that, when takeover is enabled, the
-# usual native blanket allows are suppressed even if no level lists them
-# explicitly. Used by the ``Configuration.takeover_mode`` resolver.
+#: Blanket allow patterns suppressed under takeover mode even when no level
+#: lists them explicitly.
 _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "Bash(*)",
     "Read(*)",
@@ -104,59 +65,24 @@ _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "mcp__jetbrains__execute_terminal_command(*)",
 )
 _DEFAULT_NO_MATCH_FALLBACK = "ask"
-# The recognized ``no_match_fallback`` values (TOO-15; ``'allow'`` added
-# TOO-19). Any other (typo/bad config) value is normalized to the default
-# rather than propagated. Two spellings are ACCEPTED on input but never
-# appear in this set -- both are normalized away before reaching it (see
-# ``Configuration.resolved_no_match_fallback``'s ``alias_map``):
-# the deprecated legacy value ``warn_deny`` normalizes to
-# ``allow_with_warning``, and the deliberate long-form synonym
-# ``allow_with_no_warnings`` normalizes to ``allow``. Unlike ``warn_deny``,
-# ``allow_with_no_warnings`` is NOT deprecated -- it is a permanent alias that
-# exists purely as a human reminder (see that setting's own comment below and
-# ``resolved_no_match_fallback``'s docstring for why both spellings stay).
+#: Recognized values for ``no_match_fallback`` after alias normalization --
+#: ``warn_deny`` and ``allow_with_no_warnings`` are accepted spellings that
+#: never appear here (see technical-notes.md for the asymmetry with
+#: ``undecidable_fallback``).
 _VALID_NO_MATCH_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "allow"})
 
 _DEFAULT_UNDECIDABLE_FALLBACK = "ask"
-# The recognized `undecidable_fallback` values (TOO-19; `'allow'` added in the
-# same allow/allow_with_no_warnings follow-up). This is a DIFFERENT setting
-# from `no_match_fallback` above: `no_match_fallback` answers "I read this
-# command and no rule covered it"; `undecidable_fallback` answers "I could
-# not safely read this command at all" (foreign inline code / heredoc sinks,
-# complex control structures, process substitution -- see
-# `toolguard.compound`). It is a brand-new TOO-19 top-level key with NO
-# legacy `[takeover_mode]` alias and NO deprecated `'warn_deny'` spelling --
-# do not add either "for symmetry" with `no_match_fallback`; that history
-# does not apply here. The `allow_with_no_warnings` synonym for `'allow'` IS
-# honored here (see `resolved_undecidable_fallback`'s `alias_map`) -- that
-# alias is not part of the `warn_deny` history the asymmetry above is about,
-# it is a brand-new, deliberately symmetric spelling for both settings.
-# See `Configuration.resolved_undecidable_fallback`.
+#: Recognized values for ``undecidable_fallback`` after alias normalization.
 _VALID_UNDECIDABLE_FALLBACKS = frozenset({"ask", "deny", "allow_with_warning", "allow"})
 
-#: Canonical alias applied to BOTH ``no_match_fallback`` and
-#: ``undecidable_fallback`` (TOO-19 allow/allow_with_no_warnings work):
-#: ``'allow_with_no_warnings'`` is an exact synonym for ``'allow'`` -- allow
-#: the command, emit NO warning anywhere. The long spelling exists purely as
-#: a human reminder that this is a deliberate, reviewable choice; switching
-#: back to the warned variant is a 3-character edit
-#: (``allow_with_no_warnings`` -> ``allow_with_warning``). Unlike
-#: ``warn_deny`` (below), this is not a deprecated spelling being phased out
-#: -- both spellings are permanent and equally supported, so it is a plain
-#: module-level constant rather than something scoped to one setting's
-#: ``alias_map`` call.
+#: Permanent synonym for ``'allow'`` on both ``*_fallback`` settings -- a
+#: human reminder that silencing the warning was deliberate.
 _ALLOW_NO_WARNINGS_ALIAS = {"allow_with_no_warnings": "allow"}
 
-#: The spellings a HUMAN may write for each ``*_fallback`` setting, used only
-#: to build the "Accepted values:" part of the unrecognized-value warning
-#: (TOO-19 m5; see :meth:`Configuration.unrecognized_fallback_settings`).
-#: Deliberately NOT the same as ``_VALID_*_FALLBACKS``, which hold the
-#: post-normalization CANONICAL set: a user who typed ``allow_with_no_warning``
-#: needs to be shown ``allow_with_no_warnings``, and that spelling never
-#: appears in the canonical set because the alias map replaces it first.
-#: Equally deliberately EXCLUDES the deprecated ``warn_deny``: it still
-#: resolves, so it never triggers this warning, but printing it here would be
-#: advertising a spelling that is on its way out.
+#: Human-facing spellings for the unrecognized-value warning's "Accepted
+#: values:" text -- distinct from ``_VALID_*_FALLBACKS``, which hold the
+#: post-alias canonical set. Deliberately excludes the deprecated
+#: ``warn_deny``, which still resolves but should not be advertised.
 _ACCEPTED_FALLBACK_SPELLINGS = (
     "allow",
     "allow_with_no_warnings",
@@ -165,9 +91,8 @@ _ACCEPTED_FALLBACK_SPELLINGS = (
     "deny",
 )
 
-# Documented defaults for the ``config_sync`` section. Single source of truth
-# shared by the hierarchical ``Configuration.config_sync_settings`` resolver and
-# the legacy ``config_sync_settings_from_sources`` path so the two never drift.
+#: ``config_sync`` default values -- the more-specific-wins and
+#: last-occurrence-wins resolvers differ on a conflict, not on these.
 _CONFIG_SYNC_DEFAULTS: Dict[str, object] = {
     "auto_migrate": False,
     "backup_dir": "logs/config-backups",
@@ -205,16 +130,9 @@ def _parse_config_file_cached(
     """
     Parse a single config file, memoized on (path, format, mtime, size).
 
-    This is the cache layer behind :func:`load_config_file`. ``mtime_ns`` is part of
-    the cache key so that rewriting a file (which changes its modification time)
-    transparently invalidates the cached parse -- caching on path alone would return
-    stale content. ``size`` is ALSO part of the key: two rewrites landing within the
-    same mtime tick (fast successive writes, or a filesystem with coarse mtime
-    resolution) would otherwise collide on an unchanged ``mtime_ns`` and serve a
-    stale, wrong-sized parse -- a real risk for a read-modify-write caller (e.g. the
-    installer seeding self-permissions, or ``migrate_permissions`` merging patterns)
-    that could then silently drop rules that are genuinely on disk. ``path_str`` is a
-    string (not :class:`Path`) so the key is hashable and stable.
+    ``size`` is part of the key alongside ``mtime_ns`` because two rewrites
+    within the same mtime tick would otherwise collide and serve a stale,
+    wrong-sized parse.
 
     Args:
         path_str: Filesystem path to the config file, as a string.
@@ -232,27 +150,9 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
     """
     Load and parse a single config file, dispatching on format.
 
-    This is the single internal config-file loader: it replaces the per-site
-    ``if file_format == 'toml': tomllib.load(...) else: json.load(...)`` branches and
-    memoizes parsing keyed on ``(path, st_mtime_ns, st_size)`` so that the same file
-    discovered by multiple entry points in one invocation is parsed at most once,
-    while a rewrite of the file is still picked up. ``st_size`` is included alongside
-    ``st_mtime_ns`` because two rewrites landing within the same mtime tick would
-    otherwise collide on the key and serve a stale parse.
-
-    When the path cannot be ``stat``-ed (e.g. it does not exist), the cache is bypassed
-    and the parse is attempted directly so that ``open``'s own ``FileNotFoundError``
-    surfaces unchanged -- preserving the exact error boundary callers (and their tests)
-    relied on before this consolidation. Nonexistent files are never worth caching.
-
-    Tests that rewrite the SAME path within one process can reset the memo with
-    ``_parse_config_file_cached.cache_clear()`` if ever needed (no current caller needs
-    it because the mtime+size components of the key already invalidate rewritten
-    files in practice).
-
-    This loader RAISES on any failure (missing file, malformed content). Callers are
-    responsible for their own error-handling policy (strict vs. lenient) by wrapping the
-    call -- mirroring the differing semantics of the original call sites.
+    Memoized on ``(path, st_mtime_ns, st_size)``: repeat calls for the same
+    unchanged file are cheap, and a rewrite is still picked up. Raises on any
+    parse failure rather than returning an error value.
 
     Args:
         path: Path to the config file.
@@ -269,7 +169,6 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
     try:
         stat_result = path.stat()
     except OSError:
-        # Unstattable (typically missing): skip the cache and let open() raise.
         return _parse_config_file(str(path), file_format)
     return _parse_config_file_cached(
         str(path), file_format, stat_result.st_mtime_ns, stat_result.st_size
@@ -283,9 +182,7 @@ def find_project_root(start_dir: Path = None) -> Path:
     Climbs up from start_dir (or current directory) until finding the nearest
     marker (a strong project anchor -- ``.git``/``.hg``/``.jj``/``.claude``/
     ``CLAUDE.md`` -- or ``pyproject.toml``), stopping at the home directory or
-    filesystem root. This is a thin wrapper around the shared
-    :func:`toolguard.path_utils.resolve_project_root` primitive in its
-    ``strict=True`` ("nearest marker of any kind wins") shape (TOO-15).
+    filesystem root.
 
     Args:
         start_dir: Directory to start searching from. Defaults to current working directory.
@@ -296,11 +193,6 @@ def find_project_root(start_dir: Path = None) -> Path:
     Raises:
         RuntimeError: If project root cannot be found
     """
-    # Delegates rather than re-deriving. The identical body used to live here
-    # AND be imported by toolguard.log_writer, which is what pinned the logging
-    # module above the "config" layer -- see require_project_root's own note
-    # (TOO-45). Kept as a public name here because callers and the test sandbox
-    # both patch `toolguard.config.find_project_root` by that path.
     return require_project_root(start_dir)
 
 
@@ -308,7 +200,11 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
     """
     Discover all applicable config files in priority order.
 
-    TOML files take precedence over JSON when both exist at the same level.
+    Legacy, two-level (project + user) discovery, superseded by
+    :func:`_discover_levels`'s full ancestor-hierarchy walk; kept for callers
+    that still use the flat two-level shape. For the ``toolguard_hook``
+    sources, TOML takes precedence when both formats exist; native
+    ``settings``/``settings.local`` sources are JSON-only.
 
     Returns config files in this order (highest to lowest priority):
     1. Project .claude/toolguard_hook.local.toml (or .json if no .toml)
@@ -373,24 +269,18 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
         json_exists = json_path.exists()
 
         if prefer_toml and toml_exists:
-            # TOML file found - use it
             config_files.append((toml_path, source_type, "toml"))
-            # NOTE: the "both .toml and .json exist" warning is intentionally NOT
-            # emitted here. Detection/emission of the both-formats condition is
-            # the SOLE responsibility of Configuration.validation_issues(), which
-            # routes it to the warning log stream (TOO-8 Phase 4 single source of
-            # truth). Printing it here too would double-surface the warning.
+            # The "both .toml and .json exist" warning is deliberately not
+            # emitted here -- Configuration.validation_issues() is the single
+            # source of truth for it. Printing it here too would double it.
         elif json_exists:
-            # JSON file found (or only JSON exists)
             config_files.append((json_path, source_type, "json"))
 
     return config_files
 
 
-# Within-level candidates, highest-to-lowest priority. Each entry is
-# (base_name, source_type, prefer_toml). Mirrors the ordering used by the legacy
-# two-level discover_config_files so within-level behaviour (incl. TOML-over-JSON)
-# is identical at every level of the hierarchy.
+#: Within-level candidates, highest-to-lowest priority: ``(base_name,
+#: source_type, prefer_toml)``.
 _LEVEL_CANDIDATES: Tuple[Tuple[str, str, bool], ...] = (
     ("toolguard_hook.local", "toolguard_hook", True),
     ("settings.local", "claude", False),
@@ -398,10 +288,8 @@ _LEVEL_CANDIDATES: Tuple[Tuple[str, str, bool], ...] = (
     ("settings", "claude", False),
 )
 
-# Top-level sections a rules-directory file (see _rules_dirs()) is allowed to
-# contain. Scalars/singletons (governed_tools, no_match_fallback,
-# [takeover_mode], [config_sync], etc.) have no natural multi-file merge rule
-# and remain the sole responsibility of the primary toolguard_hook.toml (TOO-30).
+#: Top-level sections a rules-directory file may contain. Scalars/singletons
+#: have no multi-file merge rule and stay in the primary toolguard_hook.toml.
 _RULES_FILE_ALLOWED_SECTIONS = frozenset({"permissions", "hard_deny"})
 
 
@@ -409,30 +297,14 @@ def _rules_dirs() -> Tuple[Path, Path]:
     """
     Resolve the two candidate user-level rules directories, in precedence order.
 
-    Returns ``(xdg_dir, legacy_dir)``:
+    ``xdg_dir`` is ``$XDG_CONFIG_HOME/toolguard/rules`` (an empty
+    ``XDG_CONFIG_HOME`` counts as unset) or else ``~/.config/toolguard/rules``.
+    ``legacy_dir`` is ``~/.toolguard/rules``, which predates the XDG
+    convention. Both are scanned, XDG first -- see technical-notes.md for why
+    the legacy directory is still scanned and how a same-stem collision
+    between the two is resolved.
 
-    - ``xdg_dir``: ``$XDG_CONFIG_HOME/toolguard/rules`` when ``XDG_CONFIG_HOME``
-      is set in the environment to a non-empty string, per the XDG Base
-      Directory Specification (an empty string is treated as unset, not as a
-      literal empty-string base). Otherwise defaults to
-      ``~/.config/toolguard/rules`` (TOO-30).
-    - ``legacy_dir``: ``~/.toolguard/rules`` -- a separate, pre-existing
-      directory (also used for backups/traces/stage/install-journal.md) that
-      predates the XDG convention. A real, hand-authored ruleset placed here
-      was found to be silently unenforced because only ``xdg_dir`` was ever
-      scanned; both directories are now scanned (TOO-19).
-
-    Both directories are optional and may not exist on disk; callers that need
-    to scan them use :func:`_discover_rules_files` (single directory) or
-    :func:`_discover_rules_files_multi` (both, in precedence order), which
-    tolerate a missing or empty directory.
-
-    When the SAME filename stem is present in both directories, ``xdg_dir``
-    wins for the whole stem (both formats) -- mirroring the existing
-    TOML-over-JSON precedence used within a single directory. See
-    :func:`_merged_rules_by_stem` and :func:`_shadowed_rules_stems`. Both
-    directories are otherwise equivalent: files from either merge into the
-    same (least-specific, user) hierarchy level -- see :func:`_discover_levels`.
+    Neither directory need exist.
 
     Returns:
         ``(xdg_dir, legacy_dir)``, in precedence order (XDG first).
@@ -449,13 +321,6 @@ def _rules_dirs() -> Tuple[Path, Path]:
 def _group_rules_files_by_stem(rules_dir: Path) -> Dict[str, Dict[str, Path]]:
     """
     Flat scan of a rules directory, grouping ``*.toml``/``*.json`` files by stem.
-
-    Shared building block behind :func:`_discover_rules_files` (which resolves
-    each group down to a single TOML-over-JSON winner) and the duplicate-format
-    detection in ``load_configuration()`` (which needs to know, while the
-    directory still exists, whether a stem had BOTH formats present -- so that
-    fact can be recorded on the resulting layer rather than re-checked against
-    disk later, when the directory may no longer exist).
 
     Args:
         rules_dir: The directory to scan.
@@ -482,18 +347,12 @@ def _resolve_stem_formats(
     """
     Resolve a stem-to-formats mapping to one winning ``(path, format)`` per stem.
 
-    TOML wins over JSON when both are present for a stem, mirroring the
-    TOML-over-JSON precedence used elsewhere in the hierarchy. Results are
-    sorted lexicographically by stem so merge order and log provenance are
-    reproducible run-to-run. Shared by :func:`_discover_rules_files` (single
-    directory) and :func:`_discover_rules_files_multi` (TOO-19, across the
-    candidate directories from :func:`_rules_dirs`) so the winner-resolution
-    rule lives in exactly one place.
+    TOML wins over JSON when both are present for a stem. Results are sorted
+    lexicographically by stem so merge order and log provenance are
+    reproducible run-to-run.
 
     Args:
-        by_stem: Mapping of stem to ``{'.toml': path, '.json': path}``, as
-            returned by :func:`_group_rules_files_by_stem` or
-            :func:`_merged_rules_by_stem`.
+        by_stem: Mapping of stem to ``{'.toml': path, '.json': path}``.
 
     Returns:
         List of ``(path, format)`` pairs, ``format`` being ``'toml'`` or
@@ -515,13 +374,12 @@ def _discover_rules_files(rules_dir: Path) -> List[Tuple[Path, str]]:
 
     A missing or empty directory is a no-op (returns an empty list, never an
     error). Subdirectories and files with other extensions are ignored --
-    scanning is intentionally flat for v1 (TOO-30). When both ``<stem>.toml``
+    scanning is intentionally flat. When both ``<stem>.toml``
     and ``<stem>.json`` exist for the same stem, only the TOML entry is
     returned (see :func:`_resolve_stem_formats`).
 
     Args:
-        rules_dir: The directory to scan (typically one of the directories
-            returned by :func:`_rules_dirs`).
+        rules_dir: The directory to scan.
 
     Returns:
         List of ``(path, format)`` pairs, ``format`` being ``'toml'`` or
@@ -536,22 +394,15 @@ def _merged_rules_by_stem(
     """
     Merge rules-file stems across multiple directories, first-directory-wins.
 
-    For each filename stem, the FIRST directory in ``rules_dirs`` (in the
-    given precedence order) that contains that stem supplies its formats; the
-    same stem in any later directory is entirely ignored for content purposes
-    -- it is "shadowed" (see :func:`_shadowed_rules_stems`, which detects this
-    so it can be surfaced as a warning rather than silently dropped, TOO-19).
-    This mirrors :func:`_group_rules_files_by_stem`'s per-directory shape but
-    resolves precedence ACROSS directories rather than within one.
+    A later directory's same-stem entry is "shadowed" (see
+    :func:`_shadowed_rules_stems`).
 
     Args:
-        rules_dirs: Candidate rules directories, most-preferred first (see
-            :func:`_rules_dirs`).
+        rules_dirs: Candidate rules directories, most-preferred first.
 
     Returns:
         Mapping of stem to the winning directory's ``{'.toml': path, '.json':
-        path}`` sub-mapping (same per-stem shape as
-        :func:`_group_rules_files_by_stem`).
+        path}`` sub-mapping.
     """
     merged: Dict[str, Dict[str, Path]] = {}
     for rules_dir in rules_dirs:
@@ -563,16 +414,10 @@ def _merged_rules_by_stem(
 
 def _discover_rules_files_multi(rules_dirs: Tuple[Path, ...]) -> List[Tuple[Path, str]]:
     """
-    Flat, non-recursive scan across multiple rules directories (TOO-19).
-
-    Applies :func:`_merged_rules_by_stem` for cross-directory,
-    first-directory-wins stem precedence, then TOML-over-JSON WITHIN the
-    winning directory for each stem via :func:`_resolve_stem_formats` --
-    exactly as :func:`_discover_rules_files` does for a single directory.
+    Flat, non-recursive scan across multiple rules directories.
 
     Args:
-        rules_dirs: Candidate rules directories, most-preferred first (see
-            :func:`_rules_dirs`).
+        rules_dirs: Candidate rules directories, most-preferred first.
 
     Returns:
         List of ``(path, format)`` pairs, sorted ascending by filename stem.
@@ -584,38 +429,23 @@ def _shadowed_rules_stems(rules_dirs: Tuple[Path, Path]) -> Dict[str, Path]:
     """
     Find filename stems present in BOTH of the two candidate rules directories.
 
-    Intentionally two-directory-only (matching :func:`_rules_dirs`'s exact
-    ``(xdg_dir, legacy_dir)`` return shape), not generalised to an arbitrary
-    number of directories -- narrowing the contract here keeps "the second
-    directory's file is shadowed" explicit rather than silently truncating a
-    longer list if a third candidate directory were ever added (YAGNI; that
-    would need this function revisited anyway).
+    Intentionally two-directory-only, matching :func:`_rules_dirs`'s exact
+    ``(xdg_dir, legacy_dir)`` shape -- a same-stem collision here means the
+    ``legacy_dir`` entry is dropped entirely by :func:`_merged_rules_by_stem`
+    (see technical-notes.md for why this must be surfaced as a warning, and
+    the one exception: both paths resolving to the same real file).
 
-    When the same stem exists in both directories, the second (``legacy_dir``)
-    entry for that stem is entirely ignored for content purposes by
-    :func:`_merged_rules_by_stem` -- this must not be silent, since it is
-    exactly the "a real ruleset ends up in the wrong directory and is never
-    enforced" failure mode TOO-19 exists to fix. EXCEPT when both
-    directories' representative files resolve to the SAME real file (e.g. one
-    directory symlinked into the other -- a natural migration/compatibility
-    move, and in fact the exact stopgap workaround that motivated this
-    ticket): nothing is actually being ignored in that case, so reporting it
-    as shadowed would be a false positive that trains users to ignore the
-    warning that matters. That stem is excluded.
-
-    This identifies the remaining, genuinely-shadowed stems together with a
-    representative shadowed path (TOML preferred over JSON within the
-    shadowing directory, same rule as elsewhere) so :func:`load_configuration`
+    Returns the shadowed stems with a representative shadowed path (TOML
+    preferred over JSON, same rule as elsewhere) so :func:`load_configuration`
     can record it on the winning :class:`ConfigLayer` for
-    :meth:`Configuration.validation_issues` to report as a warning.
+    :meth:`Configuration.validation_issues` to report.
 
     Args:
         rules_dirs: The two candidate rules directories, ``(xdg_dir,
             legacy_dir)`` as returned by :func:`_rules_dirs`.
 
     Returns:
-        Mapping of stem to the shadowed (non-winning) representative path, for
-        stems present in both directories as genuinely distinct real files.
+        Mapping of stem to the shadowed (non-winning) representative path.
         Empty when no stem collides, or every collision is the same real file
         reached via two paths.
     """
@@ -637,11 +467,8 @@ def _shadowed_rules_stems(rules_dirs: Tuple[Path, Path]) -> Dict[str, Path]:
 
 def _discover_in_dir(claude_dir: Path) -> List[Tuple[Path, str, str]]:
     """
-    Discover config files within a single ``.claude`` directory.
-
-    Applies the within-level priority ordering (``.local`` first, toolguard_hook
-    before native settings) and TOML-over-JSON preference, exactly as the legacy
-    two-level discovery did per level.
+    Discover config files within a single ``.claude`` directory, in
+    :data:`_LEVEL_CANDIDATES` priority order.
 
     Args:
         claude_dir: A ``.claude`` directory to scan.
@@ -659,10 +486,9 @@ def _discover_in_dir(claude_dir: Path) -> List[Tuple[Path, str, str]]:
 
         if prefer_toml and toml_exists:
             found.append((toml_path, source_type, "toml"))
-            # NOTE: the "both .toml and .json exist" warning is intentionally NOT
-            # emitted here. It is detected and routed to the WARNING log stream by
-            # Configuration.validation_issues() (TOO-8 Phase 4, M1 -- single source
-            # of truth). Discovery stays side-effect-free.
+            # The "both .toml and .json exist" warning is deliberately not
+            # emitted here -- Configuration.validation_issues() is the single
+            # source of truth for it. Discovery stays side-effect-free.
         elif json_exists:
             found.append((json_path, source_type, "json"))
     return found
@@ -672,18 +498,13 @@ def _hierarchical_toggle(project_claude_dir: Optional[Path]) -> bool:
     """
     Read the ``hierarchical_configuration`` toggle from the project level only.
 
-    Per the fixed-bootstrap rule, the toggle is read ONLY from the most-specific
-    (project) ``toolguard_hook`` config so that ancestors cannot vote on whether
-    ancestors are traversed. Defaults to ``True`` when unset or unreadable.
+    Per the fixed-bootstrap rule, read ONLY from the most-specific (project)
+    ``toolguard_hook`` config, so ancestors cannot vote on whether ancestors
+    are traversed. Defaults to ``True`` when unset or unreadable.
 
-    This is a pre-pass over the SAME file(s) ``load_configuration()``'s main
-    discovery loop parses again afterwards (a pre-existing, unrelated
-    double-parse -- see the corrective-change history for this module). A
-    parse failure here therefore does not need its own
-    :attr:`Configuration.parse_failures` bookkeeping (TOO-19): if the
-    project-level file this reads is genuinely broken, the SAME file is
-    re-parsed and recorded by that later loop, so it still ends up on
-    :attr:`Configuration.parse_failures` -- just via that call, not this one.
+    A parse failure here needs no :attr:`Configuration.parse_failures`
+    bookkeeping: the same file is re-parsed and recorded by the real
+    discovery pass afterwards.
 
     Args:
         project_claude_dir: The project's ``.claude`` directory, or None when no
@@ -717,20 +538,22 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int, 
     including the user's home directory, collecting config files from every
     ancestor that has a ``.claude`` subdirectory. The user-level ``~/.claude`` is
     ALWAYS included as the least-specific level, even when the project is not
-    located under ``~`` (preserving "user config always applies"). The walk never
-    ascends above ``~``.
+    located under ``~`` (preserving "user config always applies"). The walk
+    stops at ``~`` for a project located under ``~``, or at the filesystem
+    root for a project that is not.
 
     Each level is assigned a ``specificity`` index: 0 = project (most specific),
     increasing with distance, and the user level last (least specific). When the
     ``hierarchical_configuration`` toggle (read from the project level only) is
-    False, only the project and user levels are collected -- today's behaviour.
+    False, only the project and user levels are collected.
 
     After the primary ``.claude`` candidates, any files discovered across the
-    two optional candidate rules directories (see :func:`_rules_dirs` /
-    :func:`_discover_rules_files_multi`, TOO-30/TOO-19) are appended with
+    two optional candidate rules directories are appended with
     ``source_type='toolguard_hook_rules'`` at the SAME (least-specific, user)
     specificity as ``~/.claude`` -- they merge into the user level rather than
-    introducing a new hierarchy tier. Both candidate directories share this
+    introducing a new hierarchy tier, and are ordered AFTER the primary
+    ``~/.claude`` candidates so those stay the highest-priority user-level
+    source on a duplicate pattern. Both candidate directories share this
     same specificity; when the same stem exists in both, the XDG directory's
     file wins and the other is dropped (see :func:`_merged_rules_by_stem`).
 
@@ -743,16 +566,6 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int, 
         rules-directory files appended last. ``level`` is ``'user'`` for the
         least-specific tier (``~/.claude`` plus the rules directories) and
         ``'project'`` otherwise.
-
-        The level is emitted HERE, by the pass that actually found the file,
-        rather than being re-derived downstream from the path's shape. An
-        earlier implementation re-derived it via ``path.resolve()`` and asked
-        whether the result lived under ``~/.claude``; that second derivation
-        disagreed with this one whenever a ``.claude`` directory (or a file
-        inside it) was a symlink into a store located under ``~/.claude``,
-        silently promoting every project rule to the user level and changing
-        precedence with no error (TOO-19, 2026-07-28). Deriving it once, from
-        the discovery structure, makes the two answers the same answer.
     """
     home = Path.home()
     user_claude_dir = home / ".claude"
@@ -789,31 +602,32 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int, 
             _add(project_root / ".claude")
 
     # User level always applies and is always least specific (appended last,
-    # unless it was already reached by the upward walk -- in which case it keeps
-    # its natural, least-specific position at the tail).
+    # unless the upward walk already reached it, in which case it keeps its
+    # natural tail position).
     _add(user_claude_dir)
 
-    # The user level is ALWAYS the last entry in level_dirs (appended last, and
-    # if the upward walk reached it first it keeps its tail position), so this
-    # index is the authoritative user tier. It is computed from level_dirs
-    # rather than from the discovered results because a level whose directory
-    # does not exist contributes no results at all -- taking the maximum over
-    # the results would then promote the deepest EXISTING level to 'user'.
+    # Computed from level_dirs, not from the discovered results below: a level
+    # whose directory does not exist contributes no results at all, so taking
+    # the maximum over the results would promote the deepest EXISTING level to
+    # 'user' instead of the true last entry.
     user_specificity = len(level_dirs) - 1
 
     results: List[Tuple[Path, str, str, int, str]] = []
     for specificity, claude_dir in enumerate(level_dirs):
         if not claude_dir.exists():
             continue
+        # Emitted HERE, by the pass that actually found the file -- do not
+        # re-derive it downstream from the path's shape (e.g. path.resolve()
+        # plus a containment check against ~/.claude). That check silently
+        # promotes a project rule to the user level, changing precedence with
+        # no error, whenever a .claude directory (or a file inside it) is a
+        # symlink into a store under ~/.claude.
         level = "user" if specificity == user_specificity else "project"
         for path, source_type, file_format in _discover_in_dir(claude_dir):
             results.append((path, source_type, file_format, specificity, level))
 
-    # Optional candidate rules directories (TOO-30/TOO-19): flat *.toml/*.json
-    # files that merge into the USER level (least-specific tier, index
-    # len(level_dirs) - 1, which is stable even when ~/.claude itself has no
-    # files). Appended after the primary ~/.claude candidates so those remain
-    # the highest-priority user-level source when duplicate patterns exist.
+    # Rules-directory files, merged into the user level -- see this
+    # function's docstring above.
     for path, file_format in _discover_rules_files_multi(_rules_dirs()):
         results.append(
             (path, "toolguard_hook_rules", file_format, user_specificity, "user")
@@ -823,13 +637,9 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int, 
 
 
 # ---------------------------------------------------------------------------
-# Public configuration abstraction
+# Public configuration abstraction -- see the module docstring's "Public
+# abstraction" section.
 # ---------------------------------------------------------------------------
-#
-# Everything below builds an immutable, file/format-agnostic view of the
-# toolguard configuration on top of the internal sourcing/parsing helpers above.
-# Clients should use load_configuration() and the Configuration methods rather
-# than touching files, formats, or discovery order directly.
 
 
 def wrap_tool_pattern(tool: str, body: str) -> str:
@@ -838,9 +648,7 @@ def wrap_tool_pattern(tool: str, body: str) -> str:
 
     The structural inverse of :func:`~toolguard.rule_entry._strip_tool_wrapper`: given a tool name and a
     wrapper-free body, produce the wrapped form as stored in config files (e.g.
-    ``wrap_tool_pattern('Bash', 'git diff:*') -> 'Bash(git diff:*)'``).  This is
-    the single source of truth for that construction so tooling never re-derives
-    the ``f"{tool}({body})"`` idiom site by site.
+    ``wrap_tool_pattern('Bash', 'git diff:*') -> 'Bash(git diff:*)'``).
 
     Args:
         tool: Tool name (e.g. ``'Bash'``).
@@ -860,36 +668,27 @@ class Configuration:
     Built by :func:`load_configuration`. Holds the discovered layers (most
     specific first) plus the start directory used for discovery. All semantic
     questions are answered by methods here; clients never touch files/formats.
-
-    Phase 1 is behaviour-preserving: resolution is still union + global
-    deny-first over two levels (project + user). The per-layer shape exists so
-    a future resolver (Phase 2) can apply more-specific-wins without changing
-    the public surface.
+    Permission resolution itself (more-specific-wins across levels) lives in
+    :mod:`toolguard.permission_resolution`, fed by
+    :meth:`permission_levels_with_provenance`; :meth:`allow_deny_for` remains
+    as a flattened-union view for callers that don't need per-level detail.
 
     Attributes:
         layers: Discovered config layers, most-specific first.
         start_dir: Directory discovery started from (for :attr:`project_root`).
         parse_failures: ``(path, message)`` pairs for every governed config
-            file that EXISTED but failed to parse (TOO-19 fail-open security
-            fix). Recorded at discovery time by :func:`load_configuration` --
-            see :func:`_parse_source_recording_failures` -- for the sources
-            that actually feed this Configuration (the main hierarchy-discovery
-            loop and the ``CLAUDE_SETTINGS_PATH`` explicit branch). A file that
-            simply does not exist is NOT recorded here (see that function's
-            docstring for the "broken" vs "absent" distinction); a file that
-            existed and either failed to parse or whose top level was not an
-            object/table (same silent-information-loss failure mode) both
-            count. Non-empty is a severe safety-floor condition: EVERY
-            governed decision is clamped to ``'ask'`` by
+            file that EXISTED but failed to parse -- a missing file is not
+            recorded, only one that was found and was broken (unreadable, or
+            its top level was not an object/table). Non-empty is a severe
+            safety-floor condition: every governed decision EXCEPT an
+            already-``'deny'`` one is clamped to ``'ask'`` by
             :func:`~toolguard.permission_resolution.resolve_permission_cascade`
             (see :func:`~toolguard.permission_resolution._apply_ask_floor`)
             until the file(s) are fixed, because a broken file may have
             silently dropped a deny/hard_deny rule with no other visible
-            trace.
-            :meth:`validation_issues` also reports one ``'error'`` Issue per
-            entry, and ``toolguard-session-start`` surfaces it at the start of
-            every session while it remains non-empty. Defaults to ``()`` so
-            existing direct-construction call sites are unaffected.
+            trace. :meth:`validation_issues` also reports one ``'error'``
+            Issue per entry, and ``toolguard-session-start`` surfaces it at
+            the start of every session while it remains non-empty.
     """
 
     layers: Tuple[ConfigLayer, ...]
@@ -905,8 +704,9 @@ class Configuration:
 
         The project root is the anchor for ALL relative paths declared anywhere
         in the configuration (see :meth:`resolve_config_path`). Resolved via
-        :func:`find_project_root` from :attr:`start_dir`. None is returned when
-        no project marker (``pyproject.toml``/``.git``) is found up to ``~``.
+        :func:`find_project_root` from :attr:`start_dir`; None is returned
+        when no project marker is found (see :func:`find_project_root` for
+        the marker list).
         """
         try:
             return find_project_root(self.start_dir)
@@ -951,7 +751,7 @@ class Configuration:
         """
         Return the resolved list of governed tools.
 
-        UNION across all toolguard_hook layers in the hierarchy (TOO-8 Phase 5):
+        UNION across all toolguard_hook layers in the hierarchy:
         every level's ``governed_tools`` list is pooled, de-duplicated, and kept
         in first-occurrence (most-specific-first) order. Native Claude settings
         layers are ignored (``governed_tools`` is a toolguard extension).
@@ -959,10 +759,9 @@ class Configuration:
         (``('Bash', 'Read', 'Write', 'Edit')``) when no level configures any
         governed tool.
 
-        Resolving over ``self.layers`` keeps governed-tools consistent with the
-        hierarchical, more-specific-aware resolution used for permissions and
-        takeover mode, and applies under ``CLAUDE_SETTINGS_PATH`` mode too (the
-        explicit source becomes the only layer).
+        Under ``CLAUDE_SETTINGS_PATH``, only an adjacent ``toolguard_hook``
+        file can contribute -- the explicit settings file itself is native
+        (``is_native`` True) and is skipped like any other native layer.
         """
         seen: Dict[str, None] = {}
         for layer in self.layers:
@@ -982,20 +781,15 @@ class Configuration:
 
     def takeover_mode(self) -> TakeoverConfig:
         """
-        Return the resolved takeover-mode configuration (TOO-8 Phase 5).
+        Return the resolved takeover-mode configuration.
 
         Resolved hierarchically over ``self.layers`` (most-specific first),
         reading only ``toolguard_hook`` layers:
 
-        - ``enabled`` is a SINGLE-OWNER policy with fail-safe-on-conflict. Only
-          layers that EXPLICITLY set ``takeover_mode.enabled`` (key present)
-          participate. If none set it, the result is ``False`` (default OFF). If
-          one or more set it and they all AGREE, that shared value is used. If
-          they DISAGREE (some true, some false), it is a misconfiguration: the
-          result is forced to ``False`` (fail-safe OFF -- native Claude prompts
-          stay active, nothing is silently bypassed) and a
-          :class:`TakeoverEnabledConflict` is attached describing each disagreeing
-          source with its provenance.
+        - ``enabled`` is a SINGLE-OWNER policy with fail-safe-on-conflict,
+          resolved by :meth:`_resolve_takeover_enabled` (see there for the
+          per-case outcome); a conflict fails safe to OFF (native Claude
+          prompts stay active, nothing is silently bypassed).
         - ``ignored_allow_patterns`` and ``additional_ignored_patterns`` are a
           UNION across all levels (de-duplicated, order-preserving most-specific
           first). The blanket defaults seed ``ignored_allow_patterns``.
@@ -1020,7 +814,7 @@ class Configuration:
             if not isinstance(section, dict) or not section:
                 continue
 
-            # Record an EXPLICIT enabled setting (key present) with provenance.
+            # Record an EXPLICIT enabled setting with provenance.
             # ``enabled`` is a fail-safe SECURITY toggle, so a non-bool value is
             # NOT coerced (``bool('false')`` would be True): such a level does not
             # vote, and validation_issues() reports the malformed value.
@@ -1058,12 +852,8 @@ class Configuration:
         """
         Resolve ``takeover_mode.enabled`` from the explicit per-level settings.
 
-        Implements the single-owner / fail-safe-on-conflict policy:
-
-        - No level set it => ``(False, None)`` (default OFF).
-        - One or more levels set it, all to the SAME value => ``(value, None)``.
-        - Levels disagree (both ``True`` and ``False`` present) => CONFLICT:
-          ``(False, TakeoverEnabledConflict(...))`` -- fail-safe OFF.
+        Single-owner / fail-safe-on-conflict: disagreement forces ``False``
+        with a :class:`TakeoverEnabledConflict` recording every source.
 
         Args:
             explicit: ``(value, provenance)`` pairs for every layer that
@@ -1088,46 +878,11 @@ class Configuration:
         """
         Pool wrapper-INTACT hard-deny (deny_entries, allow_entries) for a tool.
 
-        The single shared walk behind both :meth:`hard_deny` (wrapper-stripped
-        pattern tuples) and :meth:`hard_deny_entries` (the backing
-        :class:`~toolguard.rule_entry.RuleEntry` objects) -- both public
-        methods project from this one pooled result, so they cannot drift
-        relative to each other (TOO-19 Phase 0a, increment 3).
-
-        Reuses :meth:`_extract_tool_entries` (the same shape-normalization /
-        tool-scoping chokepoint :meth:`permission_layers` uses) for each raw
-        ``hard_deny.deny``/``allow`` list, so a structured (``{match=...,
-        ...}``) entry here is parsed identically to one under
-        ``[permissions]`` and is never silently dropped. Per-element issues
-        (e.g. a malformed entry) are discarded here, exactly as
-        :meth:`permission_layers` discards them -- this accessor has no
-        issue-reporting channel in this increment.
-
-        Native layers are skipped ENTIRELY before any entry is normalized:
-        ``hard_deny`` is a toolguard extension with no native-Claude concept,
-        mirroring the ``if layer.is_native: continue`` guard used elsewhere.
-        Because of that guard, ``is_native`` passed to ``normalize_entry``
-        (via ``_extract_tool_entries``) is always ``False`` here -- it is
-        still threaded through the call, rather than hardcoded, so this call
-        site reads consistently with every other ``_extract_tool_entries``
-        caller.
-
-        Pooling: entries are collected from ALL levels into one pool (union
-        across the whole hierarchy), de-duplicated, order-preserving
-        most-specific-first -- unlike the normal more-specific-wins cascade.
-        The de-duplication key is ``entry.pattern`` (the wrapper-INTACT
-        pattern string): the SAME rule from two layers is still one pooled
-        entry even when only one occurrence carries enrichment metadata
-        (e.g. ``additionalContext``). This mirrors :class:`RuleEntry`'s own
-        ``.pattern``-only "same rule" comparison (see
-        :meth:`~toolguard.rule_entry.RuleEntry.identity` for why that differs
-        from full ``identity()`` equality or a future merge). Because
-        ``entries_for_tool`` already scopes to one tool's wrapper prefix, two
-        distinct wrapped patterns can never collide after stripping, so this
-        is the identical de-dup behaviour as before, just keyed pre-strip.
-        Insertion order follows ``self.layers`` (already most-specific
-        first), so the FIRST (most-specific) occurrence of a pattern wins
-        when two levels share it but differ in metadata.
+        Unlike the cascade, entries pool from ALL levels into a union,
+        de-duplicated on ``entry.pattern``: the most-specific occurrence wins
+        outright, so metadata (e.g. ``additionalContext``) on a less-specific
+        duplicate is silently discarded. Wrapper-scoping means two distinct
+        wrapped patterns never collide once stripped.
 
         Args:
             tool_name: Tool to extract hard-deny entries for (e.g. 'Bash',
@@ -1169,10 +924,9 @@ class Configuration:
 
         ``[hard_deny]`` is a toolguard EXTENSION read ONLY from ``toolguard_hook``
         layers -- never from native Claude settings, which have no such concept.
-        Unlike the normal more-specific-wins cascade, hard_deny is COLLECTED FROM
-        ALL LEVELS INTO ONE POOL (union across the whole hierarchy, de-duplicated,
-        order-preserving most-specific first). It is evaluated FIRST, before the
-        cascade, and cannot be overridden by any level's normal allow.
+        It is evaluated FIRST, before the normal cascade, and cannot be
+        overridden by any level's normal allow. See :meth:`_pool_hard_deny_entries`
+        for the pooling/de-dup/native-skip mechanics.
 
         Semantics of the returned lists:
 
@@ -1187,13 +941,11 @@ class Configuration:
         ``tool_name``, and carry the same extended syntax (``[regex]``/``[glob]``/
         ``[native]``) the normal matchers understand. Relative file-path patterns
         are NOT anchored here; anchoring to the project root happens at match time
-        in the hook (reusing the Phase 2 anchoring), mirroring normal patterns.
+        in the hook, mirroring normal patterns.
 
         A structured (``{match = "...", ...}``) entry contributes its pattern
-        here exactly like a plain string does (TOO-19 Phase 0a, increment 3
-        fixed a prior bug where structured entries were silently dropped);
-        its enrichment metadata is not exposed by this method -- use
-        :meth:`hard_deny_entries` for that.
+        here exactly like a plain string does; its enrichment metadata is not
+        exposed by this method -- use :meth:`hard_deny_entries` for that.
 
         Args:
             tool_name: Tool to extract hard-deny patterns for (e.g. 'Bash',
@@ -1217,23 +969,11 @@ class Configuration:
         as wrapper-INTACT :class:`RuleEntry` objects carrying enrichment
         metadata.
 
-        Companion to :meth:`hard_deny`: same pooling/de-dup/order/native-skip
-        behaviour (see :meth:`_pool_hard_deny_entries`, the single shared walk
-        both methods project from), but returns the entries themselves rather
-        than stripped pattern strings, so a structured entry's metadata
-        (e.g. an ``additionalContext`` reinforcing why a command is hard-denied
-        and what to use instead) is reachable. ``hard_deny(tool_name)`` is a
-        pure projection of this same pool (each pattern is
-        ``entry.stripped_pattern`` for the corresponding entry here) -- TOO-45
-        R2c: no caller relies on positional alignment between the two methods'
-        *return values* any more (the one that used to,
-        ``resolve._hard_deny_additional_context``, now searches this method's
-        result directly), so there is nothing left to keep in sync by hand.
-
-        Not yet wired into any decision path -- this increment only makes the
-        metadata reachable. A later TOO-19 phase uses it to surface
-        enrichment (e.g. ``additionalContext``) at the moment a hard deny
-        fires.
+        Companion to :meth:`hard_deny`: same pooling/de-dup/native-skip
+        behaviour, but returns the entries themselves rather than stripped
+        pattern strings, so a structured entry's metadata (e.g. an
+        ``additionalContext`` explaining why a command is hard-denied and
+        what to use instead) is reachable.
 
         Args:
             tool_name: Tool to extract hard-deny entries for (e.g. 'Bash',
@@ -1253,37 +993,18 @@ class Configuration:
         """
         Normalize and scope one raw permissions list for a tool.
 
-        The shared per-list worker behind :meth:`permission_layers`: runs every
-        raw element through :func:`toolguard.rule_entry.normalize_entry` (shape
-        normalization -- plain string or structured ``{match = ..., ...}``
-        table), then keeps the ones that scope to ``tool_name`` via
-        :func:`toolguard.rule_entry.entries_for_tool`.
-
-        TOO-45 R2a: returns entries only -- callers that also want the
-        wrapper-stripped pattern form read it off each entry's
-        :attr:`~toolguard.rule_entry.RuleEntry.stripped_pattern` property
-        instead of this method separately materialising a parallel
-        ``patterns`` tuple, which used to be index-aligned with (and could
-        drift from) the entries it was derived from.
-
-        ``normalize_entry`` also returns issues (e.g. a malformed structured
-        entry, or an unknown enrichment key); they are INTENTIONALLY discarded
-        here -- ``permission_layers`` has no channel for them, and it is not
-        this method's job to report them. They ARE surfaced, from a separate
-        pass over the same entries, by
-        :meth:`Configuration.validation_issues` (via
-        :func:`toolguard.config_validation.validate_permissions`), which is
-        where every content-level diagnostic is collected.
-        Discarding the issue is not the same as discarding the entry: an
-        element that normalizes successfully is never dropped here, which is
-        the whole point of this increment -- a structured entry no longer
-        silently vanishes from allow/deny/ask the way it used to.
+        Runs each raw element through
+        :func:`toolguard.rule_entry.normalize_entry` (plain string or
+        structured ``{match = ..., ...}`` table), then keeps entries that
+        scope to ``tool_name``. An issue from a malformed entry (e.g. an
+        unknown enrichment key) is discarded here -- surfaced separately by
+        :meth:`Configuration.validation_issues` -- but a successfully
+        normalized entry is never dropped for that reason.
 
         Args:
-            raw_list: The raw ``permissions.allow``/``deny``/``ask`` value
-                from one config layer. Tolerated even when not a list (treated
-                as empty), matching the existing non-dict-``permissions``
-                tolerance in :meth:`permission_layers`.
+            raw_list: The raw ``permissions.allow``/``deny``/``ask`` or
+                ``hard_deny.deny``/``allow`` value from one config layer.
+                Tolerated even when not a list (treated as empty).
             tool_name: Tool to scope entries to (e.g. 'Bash', 'Read').
             is_native: True when this layer is a native Claude settings file --
                 gates structured-entry recognition (a structured entry is a
@@ -1310,17 +1031,17 @@ class Configuration:
 
         Each layer carries provenance and the entries extracted for
         ``tool_name`` from that source, including entries contributed by
-        structured (``{match = ..., ...}``) entries (TOO-19 Phase 0a, increment
-        2) -- ``ToolPatternLayer``'s wrapper-stripped ``allow``/``deny``/``ask``
-        pattern tuples are derived properties over these entries (TOO-45 R2),
-        not separately populated. Takeover filtering is already applied: when
+        structured (``{match = ..., ...}``) entries --
+        ``ToolPatternLayer``'s wrapper-stripped ``allow``/``deny``/``ask``
+        pattern tuples are derived properties over these entries, not
+        separately populated. Takeover filtering is already applied: when
         takeover mode is enabled, blanket ignored allow patterns are removed
-        from native ('claude') layers only, filtered directly on
-        ``allow_entries``. Deny and ask entries are never filtered.
+        from native ('claude') layers only. Deny and ask entries are never
+        filtered.
 
-        Phase 1 callers flatten+union these (see :meth:`allow_deny_for`),
-        preserving current behaviour. The per-layer shape supports a future
-        more-specific-wins resolver without changing this API.
+        See :class:`Configuration`'s own docstring for how this feeds the
+        more-specific-wins resolver vs. :meth:`allow_deny_for`'s flattened
+        view.
 
         Args:
             tool_name: Tool to extract patterns for (e.g. 'Bash', 'Read').
@@ -1386,12 +1107,10 @@ class Configuration:
         Layers sharing a specificity (e.g. a ``.local`` and a regular file in the
         same ``.claude`` directory) are collapsed into a single level, preserving
         within-level priority order. Levels are returned most-specific first --
-        the order the more-specific-wins resolver consumes.
-
-        Returns, per hierarchy level (most-specific first), the collapsed
-        ``(allow, deny)`` pattern tuples PLUS the contributing
-        :class:`ToolPatternLayer` objects so a matched pattern can be mapped back
-        to its exact source file/level via :attr:`ToolPatternLayer.provenance`.
+        the order the more-specific-wins resolver consumes. The contributing
+        :class:`ToolPatternLayer` objects are retained alongside the collapsed
+        patterns so a matched pattern can be mapped back to its exact source
+        file/level via :attr:`ToolPatternLayer.provenance`.
 
         Args:
             tool_name: Tool to resolve patterns for (e.g. 'Bash', 'Read').
@@ -1427,7 +1146,7 @@ class Configuration:
     def has_any_rules(self, tool_name: str) -> bool:
         """
         Return whether ANY permission rule (allow, deny, ask, or hard_deny on
-        either side) is configured for ``tool_name`` at any level (TOO-15).
+        either side) is configured for ``tool_name`` at any level.
 
         Distinguishes a genuinely UNCONFIGURED tool (which should resolve to
         ``'ask'`` so a fresh install is not bricked) from a CONFIGURED tool whose
@@ -1451,26 +1170,18 @@ class Configuration:
     def _first_toplevel_str_setting(self, key: str) -> Optional[str]:
         """
         Return the first non-native layer's raw string value for a top-level
-        ``toolguard_hook`` scalar setting key (TOO-19 code review m2).
+        ``toolguard_hook`` scalar setting key.
 
-        Shared layer-scan used by every "fallback"-shaped setting
-        (:meth:`resolved_no_match_fallback`, :meth:`resolved_undecidable_fallback`,
-        and the TOO-28 ``*_auto_mode`` settings that will reuse it): walks
-        ``self.layers`` MOST-SPECIFIC first, skips native ``settings.json``
-        layers (these settings are toolguard extensions, never native), and
-        returns the first layer's value for ``key`` when it is present AND a
-        ``str`` (a non-string value -- e.g. a stray table -- is treated as not
-        set, same as absence).
+        Most-specific layer wins; a non-string value (e.g. a stray table) is
+        treated as not set, same as absence.
 
         Args:
-            key: The top-level ``toolguard_hook`` key to look up (e.g.
-                ``'no_match_fallback'``, ``'undecidable_fallback'``).
+            key: The top-level ``toolguard_hook`` key to look up.
 
         Returns:
-            The first matching layer's raw string value, or ``None`` when no
-            non-native layer sets it. Callers are responsible for any
-            alias/legacy-spelling resolution and for validating against their
-            own recognized value set -- this helper does neither.
+            The first matching layer's raw string value, or ``None`` when
+            unset. Does not resolve aliases or validate against a recognized
+            set.
         """
         for layer in self.layers:
             if layer.is_native:
@@ -1490,31 +1201,7 @@ class Configuration:
         alias_map: Optional[Dict[str, str]] = None,
     ) -> str:
         """
-        Resolve one "fallback"-shaped ``toolguard_hook`` setting (TOO-19 code
-        review m2).
-
-        Extracted so :meth:`resolved_no_match_fallback` and
-        :meth:`resolved_undecidable_fallback` share ONE layer-scan +
-        validation body instead of duplicating it verbatim, and so the two
-        TOO-28 settings of the same shape (``no_match_fallback_auto_mode``,
-        ``undecidable_fallback_auto_mode``) can reuse this method rather than
-        requiring a THIRD/FOURTH copy or a re-done two-way de-duplication.
-        The two behavioural differences between the existing settings are
-        expressed as PARAMETERS, not special-cased in this shared body, so a
-        setting with neither difference (like ``undecidable_fallback``, and
-        presumably the TOO-28 settings) just omits them.
-
-        Resolution order:
-
-        1. :meth:`_first_toplevel_str_setting` -- most-specific non-native
-           layer that sets the top-level key wins.
-        2. If unset anywhere and *legacy_alias* is given, call it for a
-           fallback raw value (e.g. the ``[takeover_mode]`` alias).
-        3. If the resolved raw value is a key of *alias_map*, replace it with
-           the mapped canonical spelling.
-        4. Validate against *valid_values*; an unset OR unrecognized value
-           (typo/bad config) resolves to *default* rather than propagating or
-           raising.
+        Resolve one "fallback"-shaped ``toolguard_hook`` setting.
 
         Args:
             key: The top-level ``toolguard_hook`` key (see
@@ -1526,14 +1213,11 @@ class Configuration:
                 this setting has no legacy alias.
             alias_map: Optional ``{spelling: canonical}`` mapping applied
                 AFTER the legacy-alias fallback, regardless of which
-                mechanism supplied the raw value. Covers BOTH kinds of
-                alternate spelling this shared body needs to normalize: a
-                truly deprecated legacy value being phased out (e.g.
-                ``no_match_fallback``'s ``'warn_deny'`` -> ``'allow_with_warning'``)
-                and a deliberate, PERMANENT synonym that is not deprecated at
-                all (e.g. ``'allow_with_no_warnings'`` -> ``'allow'``, TOO-19
-                -- the long spelling is a human reminder, not a spelling on
-                its way out). ``None`` means this setting has no alternate
+                mechanism supplied the raw value -- covers both a deprecated
+                spelling being phased out (e.g. ``no_match_fallback``'s
+                ``'warn_deny'`` -> ``'allow_with_warning'``) and a permanent,
+                non-deprecated synonym (``'allow_with_no_warnings'`` ->
+                ``'allow'``). ``None`` means this setting has no alternate
                 spelling to normalize.
 
         Returns:
@@ -1548,41 +1232,23 @@ class Configuration:
 
     def resolved_no_match_fallback(self) -> str:
         """
-        Resolve the EFFECTIVE ``no_match_fallback`` setting (TOO-15).
+        Resolve the effective ``no_match_fallback`` setting -- the floor
+        applied when a command was read but no rule covered it, unlike
+        :meth:`resolved_undecidable_fallback`, which covers a command that
+        could not be read at all.
 
-        ``no_match_fallback`` is a top-level ``toolguard_hook`` key, checked
-        across ALL non-native layers (most-specific first; the first layer that
-        sets it wins). For backwards compatibility, the legacy alias nested
-        under ``[takeover_mode].no_match_fallback`` (see :meth:`takeover_mode`)
-        is honoured ONLY when NO layer sets the top-level key. When BOTH are set
-        anywhere, the top-level key wins outright -- regardless of the relative
-        specificity of the two settings. Applies in BOTH takeover and
-        non-takeover modes (no longer gated on ``takeover_mode.enabled``).
-
-        The deprecated legacy value ``'warn_deny'`` -- whether set via the
-        top-level key or the ``[takeover_mode]`` alias -- is always normalized
-        to the canonical ``'allow_with_warning'`` before being returned. The
-        deliberate (non-deprecated) long-form synonym
-        ``'allow_with_no_warnings'`` is likewise always normalized, to
-        ``'allow'`` (TOO-19) -- see the module-level
-        ``_ALLOW_NO_WARNINGS_ALIAS`` comment for why this spelling is kept
-        permanently rather than deprecated like ``warn_deny``.
-
-        Shares its layer-scan and validation with
-        :meth:`resolved_undecidable_fallback` via
-        :meth:`_resolve_fallback_setting` (TOO-19 code review m2); this
-        method supplies the ``[takeover_mode]`` legacy alias and the
-        ``warn_deny``/``allow_with_no_warnings`` alias map as parameters. Only
-        the ``[takeover_mode]`` legacy alias and the ``warn_deny`` spelling
-        are unique to this setting -- ``allow_with_no_warnings`` is honoured
-        by :meth:`resolved_undecidable_fallback` too (TOO-19), so it is NOT
-        part of the asymmetry the rest of this docstring describes.
+        Top-level ``toolguard_hook`` key, most-specific layer wins, in both
+        takeover and non-takeover modes. The legacy
+        ``[takeover_mode].no_match_fallback`` alias is honoured only when no
+        layer sets the top-level key; when both are set, the top-level key
+        wins outright regardless of specificity. See technical-notes.md for
+        why this setting carries the ``[takeover_mode]`` alias and the
+        deprecated ``warn_deny`` spelling that
+        :meth:`resolved_undecidable_fallback` does not.
 
         Returns:
             One of ``'ask'``, ``'deny'``, ``'allow_with_warning'``, or
-            ``'allow'``. The resolved value is validated against the
-            recognized set; an unset OR unrecognized value (typo/bad config)
-            resolves to the default ``'ask'`` and is never propagated as-is.
+            ``'allow'``; unset or unrecognized resolves to ``'ask'``.
         """
         return self._resolve_fallback_setting(
             "no_match_fallback",
@@ -1597,58 +1263,20 @@ class Configuration:
 
     def resolved_undecidable_fallback(self) -> str:
         """
-        Resolve the EFFECTIVE ``undecidable_fallback`` setting (TOO-19).
+        Resolve the effective ``undecidable_fallback`` -- the floor applied
+        when a command could not be read safely at all (foreign inline code,
+        heredoc sinks, complex control structures), unlike
+        :meth:`resolved_no_match_fallback`, which covers a command that *was*
+        read and matched nothing. Applied by
+        :func:`toolguard.compound._apply_undecidable_floor`.
 
-        ``undecidable_fallback`` answers a DIFFERENT question than
-        ``no_match_fallback``: "I could not safely read this command at all"
-        (foreign inline code / heredoc sinks, complex control structures,
-        process substitution -- see :mod:`toolguard.compound`) rather than "I
-        read the command and no rule matched it". It is resolved as a
-        strictest-wins FLOOR against whatever the leaf/segment itself
-        resolved to (or, for segments that were never checked against any
-        rule at all, taken directly) -- see
-        :func:`toolguard.compound.resolve_compound_permission` and
-        :func:`toolguard.compound._resolve_leaf`.
-
-        ``undecidable_fallback`` is a TOP-LEVEL ``toolguard_hook`` key ONLY,
-        checked across ALL non-native layers (most-specific first; the first
-        layer that sets it wins). Unlike :meth:`resolved_no_match_fallback`,
-        this setting has NO legacy ``[takeover_mode]`` alias -- it is a
-        brand-new TOO-19 setting with no prior spelling to stay
-        backwards-compatible with -- and no field for it exists on
-        :class:`~toolguard.config_types.TakeoverConfig`. Do NOT add either
-        "for symmetry" with ``no_match_fallback``; that symmetry does not
-        apply here, and there is deliberately no ``[takeover_mode]`` parsing
-        for this key. There is also no deprecated ``'warn_deny'`` spelling to
-        normalize (that alias exists only for ``no_match_fallback``'s
-        history) -- keep that ONE asymmetry. Applies in BOTH takeover and
-        non-takeover modes.
-
-        The deliberate (non-deprecated) long-form synonym
-        ``'allow_with_no_warnings'`` IS honoured here, normalized to
-        ``'allow'`` (TOO-19) -- unlike ``warn_deny``, this is a brand-new
-        spelling introduced for both settings at once, not part of
-        ``no_match_fallback``'s legacy history, so it does not fall under the
-        "no symmetry with no_match_fallback" rule above.
-
-        This setting is NOT consulted by, and has NO effect on, the
-        config-level parse-failure ASK floor
-        (:func:`~toolguard.permission_resolution._apply_ask_floor`): a broken
-        config file is never a policy question this (or any) setting can
-        relax -- see that function's docstring for the rationale.
-
-        Shares its layer-scan and validation with
-        :meth:`resolved_no_match_fallback` via
-        :meth:`_resolve_fallback_setting` (TOO-19 code review m2); unlike
-        that method, this call supplies NO ``legacy_alias`` and its
-        ``alias_map`` is JUST ``_ALLOW_NO_WARNINGS_ALIAS`` -- no
-        ``warn_deny`` entry, per the asymmetry above.
+        Top-level ``toolguard_hook`` key only, most-specific layer wins, in
+        both takeover and non-takeover modes. Deliberately has no
+        ``[takeover_mode]`` alias -- see technical-notes.md.
 
         Returns:
             One of ``'ask'``, ``'deny'``, ``'allow_with_warning'``, or
-            ``'allow'``. The resolved value is validated against the
-            recognized set; an unset OR unrecognized value (typo/bad config)
-            resolves to the default ``'ask'`` and is never propagated as-is.
+            ``'allow'``; unset or unrecognized resolves to ``'ask'``.
         """
         return self._resolve_fallback_setting(
             "undecidable_fallback",
@@ -1661,23 +1289,24 @@ class Configuration:
         self,
     ) -> Tuple[UnrecognizedFallbackSetting, ...]:
         """
-        Find every layer that sets a ``*_fallback`` key to an unusable value (TOO-19 m5).
+        Find every layer that sets a ``*_fallback`` key to an unusable value.
 
         Both :meth:`resolved_no_match_fallback` and
         :meth:`resolved_undecidable_fallback` fall back to ``'ask'`` when the
-        configured value is not recognized. That resolution is correct and is
-        NOT changed here -- ``'ask'`` is the safe direction. The problem this
-        method exists to fix is that it used to happen with no diagnostic
-        anywhere: ``no_match_fallback = "allow_with_no_warning"`` (singular)
-        silently produced maximum-friction ``ask`` behaviour, which reads as a
-        broken feature rather than a typo.
+        configured value is not recognized -- the safe direction, and not
+        changed here. Without this diagnostic that failure is silent:
+        ``no_match_fallback = "allow_with_no_warning"`` (singular) would
+        produce maximum-friction ``ask`` behaviour that reads as a broken
+        feature rather than a typo.
 
         Two kinds of unusable value are reported, because both are equally
         silent:
 
-        - a string that is not a recognized spelling (after the alias map --
-          ``warn_deny`` and ``allow_with_no_warnings`` are recognized and so
-          never reported);
+        - a string that is not a recognized spelling after the alias map for
+          THAT key -- ``allow_with_no_warnings`` is recognized for both keys,
+          but ``warn_deny`` is recognized (and so never reported) only for
+          ``no_match_fallback``; it IS reported for ``undecidable_fallback``,
+          which has no such alias (see technical-notes.md);
         - a non-string value (a bool, a number, a table). These are treated as
           "not set" by :meth:`_first_toplevel_str_setting`, which is the same
           silent outcome.
@@ -1736,10 +1365,10 @@ class Configuration:
         """
         Return flattened, de-duplicated (allow, deny) patterns for a tool.
 
-        This is the Phase 1 (behaviour-preserving) flattening of
-        :meth:`permission_layers`: union across layers in discovery order with
-        duplicates removed. Global deny-first matching is applied downstream by
-        the matching code, not here.
+        Flattens :meth:`permission_layers`: union across layers in discovery
+        order with duplicates removed, for callers that don't need per-level
+        (more-specific-wins) resolution. Global deny-first matching is applied
+        downstream by the matching code, not here.
 
         Args:
             tool_name: Tool to resolve patterns for.
@@ -1765,15 +1394,11 @@ class Configuration:
         Supports dotted names of the form ``'section.key'`` (e.g.
         ``'config_sync.backup_dir'``). Reads only from toolguard_hook layers.
 
-        Resolution is MORE-SPECIFIC-WINS (TOO-8 Phase 5, decision #4): the value
-        comes from the most-specific level that defines it -- project beats
-        ancestor beats user. Layers are already ordered most-specific first, so
-        the FIRST layer that defines the key wins and iteration stops. A bare
-        ``name`` resolves a top-level key directly.
-
-        This replaces the Phase-1 user-wins (last-occurrence) behaviour; it is a
-        conscious, test-visible flip (see
-        ``test/unit/test_configuration.py::...config_sync_conflict_is_project_wins``).
+        Resolution is MORE-SPECIFIC-WINS: the value comes from the
+        most-specific level that defines it -- project beats ancestor beats
+        user. Layers are already ordered most-specific first, so the FIRST
+        layer that defines the key wins and iteration stops. A bare ``name``
+        resolves a top-level key directly.
 
         Args:
             name: Scalar name, optionally ``'section.key'``.
@@ -1788,8 +1413,6 @@ class Configuration:
         else:
             section, key = None, name
 
-        # Iterate most-specific first; the FIRST layer that defines the key wins
-        # (more-specific-wins). Stop as soon as a defining layer is found.
         for layer in self.layers:
             if layer.is_native:
                 continue
@@ -1807,8 +1430,8 @@ class Configuration:
         """
         Return resolved config_sync settings as a read-only mapping.
 
-        Each value resolves more-specific-wins via :meth:`scalar` (TOO-8 Phase 5):
-        the most-specific level that defines a key wins (project beats ancestor
+        Each value resolves more-specific-wins via :meth:`scalar`: the
+        most-specific level that defines a key wins (project beats ancestor
         beats user). Missing keys fall back to the documented defaults.
 
         Returns:
@@ -1829,37 +1452,26 @@ class Configuration:
         Return raw (wrapper-intact) permissions from toolguard_hook layers.
 
         Aggregates allow/deny/ask entries (exact, with tool wrappers) across
-        all toolguard_hook layers, de-duplicated and order-preserving. Used by
-        divergence detection and migration tooling so those clients never open
-        or parse config files themselves.
+        all toolguard_hook layers, de-duplicated and order-preserving.
 
-        TOO-19 Phase 0a increment 8 (W1 fix): every raw element is routed
-        through :func:`toolguard.rule_entry.normalize_entries_preserving`
-        rather than the old ``isinstance(perm, str)`` filter, which silently
-        dropped any structured (``dict``) entry -- the root of the "structured
-        entry deleted by the next auto-migration" defect (a divergence/merge
-        client fed a config missing entries it never actually lost, causing
-        migration to overwrite the file without them). An element that fails
-        to normalize is still preserved (never dropped): this method's whole
-        purpose is describing what should be WRITTEN back, so an unparseable
-        element must round-trip too, not vanish.
+        Every raw element is routed through
+        :func:`toolguard.rule_entry.normalize_entries_preserving` rather than
+        a plain ``isinstance(perm, str)`` filter, which would silently drop
+        any structured (``dict``) entry -- and since this method's whole
+        purpose is describing what should be WRITTEN back, a dropped entry
+        here gets deleted by the next migration that overwrites the file. An
+        element that fails to normalize is still preserved (never dropped).
 
         Values are kept wrapper-INTACT (unlike :meth:`permission_layers`,
-        which strips): every consumer of this method (divergence, migration)
-        is tool-agnostic and needs the wrapped form.
+        which strips), so the result is usable without a ``tool_name``.
 
         Returns:
             Read-only mapping with keys 'allow', 'deny', 'ask', each a tuple of
             :class:`~toolguard.rule_entry.RuleEntry`.
         """
         result: Dict[str, List[RuleEntry]] = {"allow": [], "deny": [], "ask": []}
-        # Tracks patterns already added per perm_type, for the de-dup check
-        # below -- de-duplication keys on `.pattern` alone (comparison #1,
-        # "is this the same RULE" -- see RuleEntry.identity()'s docstring),
-        # matching the prior str-based de-dup exactly: an entry appearing
-        # with metadata in one layer and bare in another is still the same
-        # rule, and the FIRST occurrence across layers (most-specific first)
-        # wins.
+        # De-dup keys on `.pattern` alone; first (most-specific) occurrence
+        # wins -- see RuleEntry.identity().
         seen: Dict[str, Set[str]] = {"allow": set(), "deny": set(), "ask": set()}
         for layer in self.layers:
             if layer.is_native:
@@ -1885,17 +1497,18 @@ class Configuration:
         """
         Return structured content-level configuration issues.
 
-        Replaces the hand-rolled file walk in the hook's startup validation.
         Detects:
 
-        - A governed config file that failed to parse entirely (TOO-19
-          fail-open fix) -- reported FIRST, since it is the most severe class
-          of issue: every decision is clamped to 'ask' while it persists.
+        - A governed config file that failed to parse entirely -- reported
+          FIRST, since it is the most severe class of issue: every decision
+          is clamped to 'ask' while it persists.
         - Both a TOML and a JSON config file present at the same level/base.
         - A rules-directory filename stem shadowed across the two candidate
-          rules directories (TOO-19).
+          rules directories.
+        - A ``no_match_fallback``/``undecidable_fallback`` value toolguard
+          does not recognize.
         - A non-boolean ``takeover_mode.enabled``.
-        - A rules-directory file (TOO-30) defining a top-level key outside
+        - A rules-directory file defining a top-level key outside
           ``[permissions]``/``[hard_deny]``.
         - Unsupported tools referenced in toolguard_hook permissions.
         - Tools referenced in permissions but absent from governed_tools.
@@ -1903,17 +1516,17 @@ class Configuration:
         The config module only RETURNS issues; logging is the hook's job.
 
         Returns:
-            Tuple of :class:`Issue`, in detection order (parse-failure issues
-            first, then duplicate-file issues, then permission-validation
-            issues).
+            Tuple of :class:`Issue`, in the detection order shown above --
+            parse-failure issues first, permission-validation issues last.
         """
         issues: List[Issue] = []
 
-        # 0) A governed config file failed to parse entirely (TOO-19). This is
+        # 0) A governed config file failed to parse entirely. This is
         #    an 'error', not a 'warning': permission_resolution's ASK floor
-        #    clamps EVERY decision to 'ask' while any entry remains (see
-        #    Configuration.parse_failures's docstring), so a rule in this file
-        #    -- possibly a deny or hard_deny -- may be silently unenforced.
+        #    clamps every decision except an already-'deny' one to 'ask'
+        #    while any entry remains (see Configuration.parse_failures's
+        #    docstring), so a rule in this file -- possibly a deny or
+        #    hard_deny -- may be silently unenforced.
         for path, message in self.parse_failures:
             issues.append(
                 Issue(
@@ -1930,12 +1543,12 @@ class Configuration:
             )
 
         # 1) Both a TOML and a JSON config file present for the same base in the
-        #    same directory -> warn (the tool is using TOML). This is the SINGLE
-        #    source of truth for the warning (TOO-8 Phase 4, M1): discovery itself
-        #    is side-effect-free (it no longer prints) and the hook routes these
-        #    Issues to the WARNING stream. A duplicate is recognised either by two
-        #    discovered layers of differing format at the same base, OR -- since
-        #    real discovery keeps only the TOML -- by both files existing on disk.
+        #    same directory -> warn (the tool is using TOML). This is the single
+        #    source of truth for the warning: discovery itself is side-effect-free
+        #    and the hook routes these Issues to the WARNING stream. A duplicate
+        #    is recognised either by two discovered layers of differing format at
+        #    the same base, OR -- since real discovery keeps only the TOML -- by
+        #    both files existing on disk.
         seen_formats: Dict[Tuple[str, str], set] = {}
         order: List[Tuple[str, str]] = []
         for layer in self.layers:
@@ -1954,7 +1567,7 @@ class Configuration:
             if layer.duplicate_format:
                 # Recorded at discovery time (see load_configuration); does not
                 # depend on the source directory still existing on disk, unlike
-                # the on-disk check above (needed for rules-dir layers, TOO-30).
+                # the on-disk check above (needed for rules-dir layers).
                 seen_formats[key].add("toml")
                 seen_formats[key].add("json")
             seen_formats[key].add(layer.provenance.file_format)
@@ -1972,13 +1585,8 @@ class Configuration:
                 )
 
         # 1b) A rules-directory filename stem shadowed across the two candidate
-        #     rules directories (TOO-19): when the SAME stem exists in both the
-        #     XDG rules directory and the legacy ~/.toolguard/rules directory,
-        #     only the XDG entry becomes a layer (see _merged_rules_by_stem) --
-        #     the losing file is entirely ignored. This must not be silent,
-        #     since it is exactly the "a ruleset ends up in the wrong directory
-        #     and is never enforced" failure mode TOO-19 exists to fix.
-        #     Recorded on the winning layer at discovery time (see
+        #     rules directories -- see _shadowed_rules_stems for why this must
+        #     warn. Recorded on the winning layer at discovery time (see
         #     load_configuration), same pattern as duplicate_format above.
         for layer in self.layers:
             if layer.shadowed_path is None:
@@ -2003,7 +1611,7 @@ class Configuration:
             )
 
         # 1c) A *_fallback setting written with a value toolguard does not
-        #     recognize (TOO-19 m5). Resolution silently falls back to 'ask',
+        #     recognize. Resolution silently falls back to 'ask',
         #     which is the safe direction but is indistinguishable from a
         #     broken feature when nothing says so. A 'warning', not an 'error':
         #     the effective behaviour is the SAFE one, unlike the fail-open
@@ -2048,7 +1656,7 @@ class Configuration:
                     )
                 )
 
-        # 3) Rules-directory layers (TOO-30) may only define [permissions] and
+        # 3) Rules-directory layers may only define [permissions] and
         #    [hard_deny]. Any other top-level key found in the raw file was
         #    stripped before the layer's content was built (load_configuration)
         #    and recorded on unexpected_keys -- surface it here as an error so
@@ -2114,8 +1722,7 @@ class Configuration:
         """
         Return concise ``level: path`` descriptions, one per discovered source.
 
-        Used by the once-per-session discovery diagnostic in the resolution log
-        (TOO-8 Phase 4, M2). Ordered most-specific first, mirroring layer order.
+        Ordered most-specific first, mirroring layer order.
 
         Returns:
             Tuple of ``"<level>: <path>"`` strings.
@@ -2147,8 +1754,7 @@ def _multiline_structured_entry_diagnostic(
     failure has some other cause -- a typo, a missing quote, anything else),
     this falls back to ``tomllib``'s own message UNCHANGED: a wrong guess
     here (misattributing an unrelated syntax error to this cause) would be
-    worse than the generic message, so detection stays narrow and only
-    upgrades the message when the specific cause is actually found.
+    worse than the generic message.
 
     Args:
         path: The file that failed to parse.
@@ -2181,19 +1787,10 @@ def _try_parse_source(
     """
     Attempt to parse a single config source file, without printing anything.
 
-    This is the side-effect-free core behind :func:`_parse_source` (kept for
-    existing callers that only need the parsed dict, unchanged) and
-    :func:`_parse_source_recording_failures` (TOO-19, which additionally needs
-    the failure message to record on :attr:`Configuration.parse_failures`).
-    Both wrap this function rather than duplicating the parse/except logic.
-
     A syntactically valid file whose top level is not an object/table (e.g. a
-    bare JSON array) is treated the same as an unparseable file -- rather than
-    propagating a raw ``AttributeError``/``TypeError`` out of
-    ``load_configuration()`` and crashing the whole hook. This matters most
-    for TOO-30's rules-directory files, which are more numerous and
-    hand-authored than the single primary ``toolguard_hook.toml``, so a shape
-    mistake in any one of them must not take down every command.
+    bare JSON array) is treated the same as an unparseable file, rather than
+    raising a raw ``AttributeError``/``TypeError`` -- a shape mistake in one
+    rules-directory file must not crash discovery for every other file.
 
     A ``TOMLDecodeError`` gets an upgraded, actionable message when its cause
     is identifiable (currently: a multi-line structured entry -- see
@@ -2227,25 +1824,9 @@ def _parse_source(path: Path, file_format: str) -> Optional[dict]:
     Parse a single config source file, returning its dict or None on failure.
 
     Delegates to :func:`_parse_source_recording_failures` with a fresh,
-    throwaway accumulator (TOO-19 corrective change: this function is a
-    strict subset of that one -- pyscn flagged the pair at 0.80 similarity.
-    Both print the identical ``"Warning: Failed to load ..."`` diagnostic to
-    stderr on failure and return the identical content; the only difference
-    is that the other function ALSO records a genuine parse failure into a
-    persistent ``parse_failures`` list. Passing a fresh list here that is
-    immediately discarded reproduces "no recording" exactly, for BOTH the
-    file-missing case (never recorded, on either function, since
-    ``path.exists()`` is only checked before appending) and the file-broken
-    case (recorded into the throwaway list, then discarded) -- so this
-    delegation changes no observable behaviour). Does NOT change the
-    fail-open behaviour itself -- the file is still skipped, with only a
-    warning, same as before. (Whether fail-open is the right policy at all is
-    a separate concern: see :func:`_parse_source_recording_failures`, used by
-    :func:`load_configuration` for the sources that feed
-    :attr:`Configuration.parse_failures` and the resulting ASK-floor clamp,
-    TOO-19.) Callers that do not need the ASK-floor bookkeeping
-    (``_hierarchical_toggle``, the legacy ``config_sync_settings_from_sources``)
-    keep using this function unchanged.
+    throwaway accumulator: the failure is printed but never recorded onto
+    :attr:`Configuration.parse_failures`, so it cannot trigger the ASK-floor
+    clamp; the file is simply skipped, with only a warning.
 
     Args:
         path: Path to the config file.
@@ -2262,22 +1843,13 @@ def _parse_source_recording_failures(
     path: Path, file_format: str, parse_failures: List[Tuple[Path, str]]
 ) -> Optional[dict]:
     """
-    Parse *path*, printing the same warning :func:`_parse_source` would, and
-    additionally recording a genuine ("broken", not merely absent) parse
-    failure into *parse_failures* (TOO-19 fail-open security fix).
+    Parse *path*, printing a warning on failure, and additionally recording a
+    parse failure into *parse_failures* when the file existed but failed to
+    parse.
 
-    Used only by :func:`load_configuration`'s call sites, i.e. the sources
-    that actually feed the returned :class:`Configuration` (and therefore
-    :func:`~toolguard.permission_resolution.resolve_permission_cascade`'s
-    ASK-floor clamp): the main hierarchy-discovery loop and the
-    ``CLAUDE_SETTINGS_PATH`` explicit-override branch. A file that simply
-    does not exist on disk is NOT recorded -- it is not "broken"
-    configuration, just absent -- even though the warning is still printed
-    unchanged (the pre-existing
-    diagnostic for a missing/misconfigured path). This matters only for the
-    explicit branch: files reached via the hierarchy-discovery loop are
-    always known to exist (discovery only yields paths it already found on
-    disk), so ``path.exists()`` is trivially true there.
+    A missing file is never recorded here -- only one that was found and was
+    broken, which is what feeds the ASK-floor clamp (see
+    :attr:`Configuration.parse_failures`).
 
     Args:
         path: Path to parse.
@@ -2299,18 +1871,6 @@ def _parse_source_recording_failures(
     return content
 
 
-# NOTE (TOO-19, 2026-07-28): _level_for_path() lived here and re-derived a
-# source's hierarchy level from its path shape, by resolving symlinks and
-# testing containment under ~/.claude and the rules directories. It has been
-# REMOVED, not fixed: _discover_levels() already knows each file's level -- it
-# found the file by walking to that directory -- so the second derivation was
-# redundant, and it disagreed with the first whenever a .claude directory or a
-# file inside it was a symlink into a store under ~/.claude (project rules
-# silently became user rules, changing precedence with no error). Do not
-# reintroduce a path-shape-based level derivation; take the level from
-# _discover_levels(). See test/unit/test_symlink_hierarchy.py.
-
-
 def load_configuration(
     start_dir: Path = None, ignore_env_override: bool = False
 ) -> Configuration:
@@ -2321,32 +1881,26 @@ def load_configuration(
     parsing internally and returns a file/format-agnostic view. When
     ``CLAUDE_SETTINGS_PATH`` is set, a single explicit source (plus any adjacent
     ``toolguard_hook`` file) is used, bypassing the hierarchy -- matching the
-    legacy behaviour. The runtime hook relies on this single-file behaviour, so
-    it is the default.
+    legacy behaviour. The runtime hook relies on ``CLAUDE_SETTINGS_PATH``
+    being honoured, so ``ignore_env_override`` defaults to ``False``.
 
     Args:
         start_dir: Directory to start project-root discovery from. Defaults to
             the current working directory.
         ignore_env_override: When True, ignore ``CLAUDE_SETTINGS_PATH`` and
-            always discover the hierarchy rooted at the project. This exists for
-            the migration/divergence tooling, whose write-target selection is
-            already project-based; forcing the read path to be project-based too
-            keeps that tooling internally consistent and unaffected by a stale
-            ``CLAUDE_SETTINGS_PATH`` pointing at an unrelated project. The
-            runtime hook never sets this.
+            always discover the hierarchy rooted at the project, so a stale
+            ``CLAUDE_SETTINGS_PATH`` pointing at an unrelated project cannot
+            affect the result.
 
     Returns:
-        An immutable :class:`Configuration`. Note that command-permission
-        resolution (Bash) and governed-tools/takeover resolution intentionally
-        delegate to the legacy loaders so that ``CLAUDE_SETTINGS_PATH`` handling
-        and stderr diagnostics remain byte-for-byte identical in Phase 1.
+        An immutable :class:`Configuration`.
     """
     layers: List[ConfigLayer] = []
     # Accumulates (path, message) for every governed file that EXISTED but
-    # failed to parse, across whichever branch below runs (TOO-19). Passed to
-    # both Configuration(...) construction points so parse_failures is
-    # populated regardless of which mode (explicit CLAUDE_SETTINGS_PATH vs.
-    # hierarchy discovery) is active.
+    # failed to parse, across whichever branch below runs. Passed to both
+    # Configuration(...) construction points so parse_failures is populated
+    # regardless of which mode (explicit CLAUDE_SETTINGS_PATH vs. hierarchy
+    # discovery) is active.
     parse_failures: List[Tuple[Path, str]] = []
 
     settings_path = (
@@ -2397,22 +1951,9 @@ def load_configuration(
             parse_failures=tuple(parse_failures),
         )
 
-    # Lazily computed (at most once) if/when a rules-dir layer is encountered
-    # below, while the candidate rules directories are known to exist (this
-    # same discovery pass just scanned them) -- so the fields below can be
-    # recorded once here rather than re-checked against the filesystem later
-    # by validation_issues(), which must work even if the source directories
-    # no longer exist by the time it runs (e.g. an isolated test's tempdir):
-    #
-    # - rules_duplicate_stems: filename stems that have BOTH a .toml and .json
-    #   file WITHIN THE WINNING rules directory (TOO-19: computed via
-    #   _merged_rules_by_stem, so a same-stem file in the OTHER, losing
-    #   directory is never mistaken for a format duplicate -- that is
-    #   shadowing, tracked separately below, per a different stem in a
-    #   different format in each directory).
-    # - rules_shadowed_stems: filename stems present in MORE THAN ONE
-    #   candidate rules directory, mapping to a representative shadowed
-    #   (losing) path (TOO-19).
+    # Computed lazily (at most once), here during discovery, so
+    # validation_issues() never has to re-check a rules directory that may be
+    # gone by the time it runs (e.g. an isolated test's tempdir).
     rules_duplicate_stems: Optional[frozenset] = None
     rules_shadowed_stems: Optional[Dict[str, Path]] = None
 
@@ -2426,8 +1967,8 @@ def load_configuration(
         duplicate_format = False
         shadowed_path: Optional[Path] = None
         if source_type == "toolguard_hook_rules":
-            # Rules-directory files are restricted to [permissions]/[hard_deny]
-            # (TOO-30). Any other top-level key is recorded for
+            # Rules-directory files are restricted to [permissions]/[hard_deny].
+            # Any other top-level key is recorded for
             # Configuration.validation_issues() to report as an error, and
             # stripped from the content the rest of the module sees -- so
             # governed_tools()/scalar()/takeover_mode()/etc. never observe it.
@@ -2467,13 +2008,8 @@ def load_configuration(
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers shared with divergence/migration tooling
+# Legacy config_sync settings lookup
 # ---------------------------------------------------------------------------
-#
-# These keep all JSON/TOML parsing inside the config module while preserving the
-# legacy (config_files) signatures that divergence/migration code and their tests
-# rely on. Callers pass the discovered (path, source_type, format) triples; the
-# parsing/format-branching lives here, not in those clients.
 
 
 def config_sync_settings_from_sources(
@@ -2484,22 +2020,14 @@ def config_sync_settings_from_sources(
 
     Parses each toolguard_hook source and applies last-occurrence-wins
     resolution over discovery order, returning defaults for missing values.
-    All file/format handling is internal to the config module.
 
-    This is a legacy path used only by ``auto_migrate``'s own migration
-    settings lookup (config_sync.auto_migrate/backup_dir/auto_sort_on_migrate)
-    -- it does NOT build or feed a :class:`Configuration`, so a parse failure
-    here is not recorded to :attr:`Configuration.parse_failures` and cannot
-    trigger the TOO-19 ASK-floor clamp (which lives on ``Configuration``
-    itself). A broken toolguard_hook file simply falls back to this
-    function's own defaults, same as before this change; the file's actual
-    permission rules going unenforced is still caught via the normal
-    ``load_configuration()`` path that runs earlier in the same hook
-    invocation (see ``hook.py``'s ``main``).
+    Legacy path: never builds or feeds a :class:`Configuration`, so a parse
+    failure here cannot trigger the ASK-floor clamp -- it falls back to this
+    function's own defaults. Real enforcement is still governed by the
+    normal ``load_configuration()`` path.
 
     Args:
-        config_files: List of (path, source_type, format) triples as produced
-            by :func:`discover_config_files`.
+        config_files: List of (path, source_type, format) triples.
 
     Returns:
         Dict with keys 'auto_migrate', 'backup_dir', 'auto_sort_on_migrate'.

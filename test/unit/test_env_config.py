@@ -1,8 +1,4 @@
-"""
-Unit tests for toolguard environment configuration.
-
-Tests environment variable loading, .env file parsing, and configuration merging.
-"""
+"""Unit tests for toolguard environment configuration."""
 
 import io
 import os
@@ -37,7 +33,6 @@ class TestFindProjectRoot(unittest.TestCase):
             subdir = project_dir / "subdir"
             subdir.mkdir()
 
-            # Should find project_dir from subdir
             result = find_project_root(subdir)
             self.assertEqual(result, project_dir)
 
@@ -54,7 +49,6 @@ class TestFindProjectRoot(unittest.TestCase):
             subdir = project_dir / "subdir" / "deep"
             subdir.mkdir(parents=True)
 
-            # Should find project_dir from deep subdir
             result = find_project_root(subdir)
             self.assertEqual(result, project_dir)
 
@@ -68,7 +62,6 @@ class TestFindProjectRoot(unittest.TestCase):
             test_dir = Path(tmpdir) / "no_project"
             test_dir.mkdir()
 
-            # Should return None
             result = find_project_root(test_dir)
             self.assertIsNone(result)
 
@@ -84,7 +77,6 @@ class TestFindProjectRoot(unittest.TestCase):
             (project_dir / ".git").mkdir()
             (project_dir / "pyproject.toml").touch()
 
-            # Should find project_dir (with .git taking precedence)
             result = find_project_root(project_dir)
             self.assertEqual(result, project_dir)
 
@@ -94,16 +86,13 @@ class TestFindProjectRoot(unittest.TestCase):
         When find_project_root searches upward
         Then the search stops at home and returns None
         """
-        # Create a temp dir that's NOT under home
         with TemporaryDirectory() as tmpdir:
             test_dir = Path(tmpdir) / "test"
             test_dir.mkdir()
 
-            # Mock Path.home() to return a directory we control
             with patch("pathlib.Path.home") as mock_home:
                 mock_home.return_value = Path(tmpdir)
 
-                # Should return None (stopped at mock home)
                 result = find_project_root(test_dir)
                 self.assertIsNone(result)
 
@@ -448,7 +437,6 @@ class TestGetEnvConfig(unittest.TestCase):
                 self.assertTrue(config["logging_enabled"])
                 self.assertTrue(config["extended_syntax"])
                 self.assertFalse(config["create_log_dir"])
-                # Resolve both paths for comparison (handles macOS /private/var vs /var symlink)
                 self.assertEqual(config["log_dir"], (Path(tmpdir) / "logs").resolve())
                 self.assertEqual(config["project_root"], Path(tmpdir))
                 self.assertEqual(config["source_root"], "")
@@ -477,7 +465,6 @@ class TestGetEnvConfig(unittest.TestCase):
                 "TOOLGUARD_EXTENDED_SYNTAX=false\n", encoding="utf-8"
             )
             with patch.dict(os.environ, {}, clear=False):
-                # Remove any ambient override so the project's .env is what decides.
                 os.environ.pop("TOOLGUARD_EXTENDED_SYNTAX", None)
                 with patch(
                     "toolguard.env_config.find_project_root",
@@ -517,7 +504,6 @@ class TestGetEnvConfig(unittest.TestCase):
 
                     config = get_env_config()
 
-                    # Resolve both paths for comparison (handles macOS /private/var vs /var symlink)
                     self.assertEqual(config["log_dir"], log_dir.resolve())
 
     def test_explicit_log_dir_relative(self):

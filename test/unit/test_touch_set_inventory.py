@@ -1,11 +1,4 @@
-"""Tests for ``tools/touch_set_inventory.py`` (TOO-45 M2).
-
-Exercises the per-file analysis (:func:`tools.touch_set_inventory.build_module_entry`)
-directly against synthetic source snippets, plus the tree-level orchestration
-(:func:`tools.touch_set_inventory.run_inventory`) against small on-disk fixtures, since the
-"never reads a second tree or a diff" rule is a property of the ORCHESTRATION, not of the
-per-file parser.
-"""
+"""Tests for ``tools/touch_set_inventory.py`` (TOO-45 M2)."""
 
 import ast
 import inspect
@@ -167,9 +160,7 @@ class TestLineCountAndIsTest(unittest.TestCase):
 
 
 class TestRunInventoryNeverSeesADiff(unittest.TestCase):
-    """The hard rule: run_inventory takes exactly one tree and nothing else. This is a
-    structural/API test, not just a docstring claim -- run_inventory's signature accepts only a
-    single Path."""
+    """The hard rule: run_inventory takes exactly one tree and nothing else."""
 
     def test_run_inventory_signature_takes_a_single_tree_only(self):
         """
@@ -213,9 +204,7 @@ class TestRunInventoryNeverSeesADiff(unittest.TestCase):
 
 
 class TestBuildReportAndTextOutput(unittest.TestCase):
-    """The report dict feeds BOTH --json and the text printer -- exercised here at the dict
-    level so a future change to one presentation cannot silently diverge from the other
-    untested."""
+    """The report dict feeds both --json and the text printer; exercised at the dict level."""
 
     def test_report_json_shape_carries_every_field(self):
         """
@@ -241,9 +230,8 @@ class TestBuildReportAndTextOutput(unittest.TestCase):
 
 
 class TestCollectQualnames(unittest.TestCase):
-    """The broader (any-nesting, any-visibility) symbol collector used only by
-    --validate-predictions -- deliberately NOT the same restricted set the plain inventory
-    shows a blind predictor."""
+    """The broader (any-nesting, any-visibility) symbol collector used by
+    --validate-predictions, not the restricted set the plain inventory shows."""
 
     def test_private_and_method_and_nested_all_collected(self):
         """

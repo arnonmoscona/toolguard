@@ -1,37 +1,20 @@
 """
-THE KEYSTONE: decision-replay diff for toolguard config safety verification.
+Decision-replay diff for toolguard config safety verification.
 
-Given a harvested corpus of real commands (from :mod:`toolguard.tools.log_harvest`)
-and two configurations (A = current, B = proposed), this module recomputes each
-entry's permission decision under both configs via
-:func:`~toolguard.api.decide` and produces a structured
-:class:`ReplayDiff` classifying every change.
-
-Classification
---------------
-Each entry is classified by the *strictness order* ``deny > ask > allow``:
+Given a harvested corpus of real commands and two configurations (A = current,
+B = proposed), recompute each entry's permission decision under both and classify
+every change by the *strictness order* ``deny > ask > allow``:
 
 - ``unchanged``:  verdict_A == verdict_B.
-- ``tightened``:  B is STRICTER than A (allow -> ask, allow -> deny, ask -> deny).
-  Tightening is SAFE from a security perspective (fewer things are permitted).
-- ``broadened``:  B is LOOSER than A (deny -> ask, deny -> allow, ask -> allow).
-  Broadening is the direction to WATCH: it permits something previously blocked.
+- ``tightened``:  B is stricter (allow -> ask, allow -> deny, ask -> deny).
+- ``broadened``:  B is looser (deny -> ask, deny -> allow, ask -> allow).
 
-Safety note
------------
-The alembic landmine (mentioned in the design doc) is an example of an unexpected
-broadening: ``uv run alembic <sub>:*`` rules in ``allow`` coexist with
-``uv run alembic:*`` in ``ask``; a naive consolidation of the allow rules into
-``uv run alembic:*`` would silently turn the ``ask`` into ``allow`` for ALL
-alembic commands, including dangerous ones.  Replay catches this because the
-alembic commands recorded in the log would change from ``ask``->``allow`` in the
-diff and appear in the ``broadened`` bucket.
-
-Single-config mode
-------------------
-When only one configuration is provided, :func:`replay_single` returns per-entry
-decisions without a diff (useful for redundancy analysis and other single-config
-inspections).
+What a replay does and does not establish
+-----------------------------------------
+It evaluates the corpus and nothing else.  An empty ``broadened`` bucket means no
+command IN THE CORPUS is newly permitted; it is not evidence that B is no broader
+than A.  A widening that B introduces stays invisible here unless a command it
+newly admits happens to be in the corpus.
 """
 
 from dataclasses import dataclass, field
@@ -48,7 +31,7 @@ from toolguard.tools.log_harvest import LogEntry
 # Classification
 # ---------------------------------------------------------------------------
 
-# Strictness order: higher = stricter (fewer things allowed)
+#: Strictness order for verdict comparison: higher = stricter.
 _STRICTNESS: Dict[str, int] = {"allow": 0, "ask": 1, "deny": 2}
 
 
@@ -56,9 +39,9 @@ def classify_change(verdict_a: str, verdict_b: str) -> str:
     """
     Classify a verdict change from config A to config B.
 
-    Uses the strictness ordering ``allow (0) < ask (1) < deny (2)``.
-    Unknown verdict strings are treated as having strictness 0 (least strict)
-    so they do not silently mask a broadening.
+    A verdict string outside :data:`_STRICTNESS` ranks as ``allow`` (0).  Since
+    nothing ranks below 0, an unrecognised *verdict_a* can never yield
+    ``'broadened'``.
 
     Args:
         verdict_a: Verdict under config A (``'allow'``, ``'ask'``, or ``'deny'``).
@@ -104,9 +87,6 @@ class ReplayDiff:
     """
     Structured result of replaying a corpus against two configurations.
 
-    The ``diffs`` list contains one :class:`EntryDiff` per corpus entry.
-    The counts give a quick summary without iterating.
-
     Attributes:
         diffs: Per-entry diff results, in corpus order.
         unchanged_count: Number of entries where the verdict did not change.
@@ -125,15 +105,15 @@ class ReplayDiff:
         return len(self.diffs)
 
     def broadened(self) -> List[EntryDiff]:
-        """Return only the broadened entries (B is looser than A)."""
+        """Return only the broadened entries."""
         return [d for d in self.diffs if d.classification == "broadened"]
 
     def tightened(self) -> List[EntryDiff]:
-        """Return only the tightened entries (B is stricter than A)."""
+        """Return only the tightened entries."""
         return [d for d in self.diffs if d.classification == "tightened"]
 
     def unchanged(self) -> List[EntryDiff]:
-        """Return only the unchanged entries (verdict same under A and B)."""
+        """Return only the unchanged entries."""
         return [d for d in self.diffs if d.classification == "unchanged"]
 
 
@@ -145,10 +125,9 @@ class SingleDecision:
     Attributes:
         entry: The original :class:`~toolguard.tools.log_harvest.LogEntry`.
         decision: The verdict under the single config.
-        matches_observed: Whether the replayed verdict matches the status
-            recorded in the log (``True`` when the log says ``EXECUTED`` and
-            the replay yields ``allow``, or the log says ``REFUSED`` and replay
-            yields ``deny`` or ``ask``).
+        matches_observed: Whether the replayed verdict corroborates the status
+            recorded in the log -- see :func:`_verdict_matches_status`, which
+            decides it and lists what ``False`` does and does not mean.
     """
 
     entry: LogEntry
@@ -170,27 +149,17 @@ def replay(
     """
     Replay a corpus against two configurations and return the decision diff.
 
-    For each entry in ``corpus``, :func:`~toolguard.api.decide` is
-    called under both ``config_a`` and ``config_b``, the verdicts are compared,
-    and the entry is classified as ``unchanged``, ``tightened``, or
-    ``broadened``.
-
-    This is the core safety primitive: a proposed config change is safe (from a
-    security perspective) when the diff contains no ``broadened`` entries; or,
-    when broadening is intentional, the caller can inspect exactly which commands
-    are newly admitted.
-
     Args:
         corpus: List of :class:`~toolguard.tools.log_harvest.LogEntry` records
-            to evaluate.  Typically produced by
-            :func:`~toolguard.tools.log_harvest.harvest`.
+            to evaluate.
         config_a: The baseline configuration (e.g. current config).
         config_b: The proposed configuration (e.g. after a rule change).
         extended_syntax: Whether to honour ``[regex]``/``[glob]``/``[native]``
             prefixes.  Should match the setting used in production.
 
     Returns:
-        A :class:`ReplayDiff` with per-entry results and summary counts.
+        A :class:`ReplayDiff` with per-entry results and summary counts, covering
+        the corpus only -- see the module docstring for what that does not prove.
     """
     result = ReplayDiff()
 
@@ -225,10 +194,6 @@ def replay_single(
     """
     Replay a corpus against a single configuration.
 
-    Useful for single-config analysis such as redundancy checking (does removing
-    a rule change any corpus decision?) or log-consistency checking (does the
-    replay agree with what was actually observed?).
-
     Args:
         corpus: List of :class:`~toolguard.tools.log_harvest.LogEntry` records.
         config: The configuration to evaluate against.
@@ -254,10 +219,11 @@ def _verdict_matches_status(verdict: str, status: str) -> bool:
     """
     Check whether a replayed verdict is consistent with the observed log status.
 
-    ``EXECUTED`` corresponds to ``allow``; ``REFUSED`` corresponds to ``deny``
-    or ``ask`` (the hook returns ask to Claude as a permission request, but a
-    refusal in the log means the user declined or the hook denied it).  Unknown
-    status values return ``False``.
+    ``EXECUTED`` corroborates ``allow``; ``REFUSED`` corroborates ``deny`` or
+    ``ask``.  The comparison is case-insensitive, and EVERY other status --
+    ``ASK``, ``ERROR``, ``UNKNOWN``, anything unrecognised -- returns ``False``.
+    A ``False`` therefore reads as "not corroborated", never as "the config and
+    the log disagree".
 
     Args:
         verdict: Replayed verdict (``'allow'``, ``'ask'``, or ``'deny'``).

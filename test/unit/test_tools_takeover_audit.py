@@ -1,15 +1,4 @@
-"""
-Unit tests for toolguard.tools.takeover_audit -- takeover invariant checker.
-
-Tests verify:
-- Correct takeover config yields NO findings (required: featherhill-like setup)
-- Missing hook registration yields CRITICAL finding
-- Takeover conflict + blanket allows yields HIGH finding
-- Uncovered blanket allow when takeover ON yields HIGH finding
-- Loose no_match_fallback yields LOW finding
-- Loose undecidable_fallback yields HIGH finding (TOO-19)
-- effective_takeover_state() convenience wrapper
-"""
+"""Unit tests for toolguard.tools.takeover_audit -- takeover invariant checker."""
 
 import unittest
 from pathlib import Path
@@ -65,8 +54,8 @@ def _toolguard_layer(
 
     ``undecidable_fallback``, when given, is written as a TOP-LEVEL key
     (sibling of ``takeover_mode``/``governed_tools``), matching its real
-    schema (TOO-19): unlike ``no_match_fallback`` it has no
-    ``[takeover_mode]`` section and no legacy alias.
+    schema: unlike ``no_match_fallback`` it has no ``[takeover_mode]``
+    section and no legacy alias.
     """
     content: dict = {}
 
@@ -142,13 +131,7 @@ def _make_config(*layers: ConfigLayer) -> Configuration:
 
 
 class TestCorrectTakeoverSetup(unittest.TestCase):
-    """
-    Tests that a correctly-configured takeover setup produces NO audit findings.
-
-    This is a key requirement: audit_takeover() on a properly configured system
-    must return an empty list so users can distinguish "everything is fine" from
-    "something is wrong".
-    """
+    """Tests that a correctly-configured takeover setup produces NO audit findings."""
 
     def test_correct_setup_no_findings(self):
         """
@@ -243,7 +226,6 @@ class TestHookNotRegistered(unittest.TestCase):
             governed_tools=["Bash"],
             takeover_enabled=True,
         )
-        # Native layer with NO hooks section
         native_layer = _native_layer(allow=["Bash(*)"])
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
@@ -264,7 +246,7 @@ class TestHookNotRegistered(unittest.TestCase):
         )
         native_layer = _native_layer(
             allow=["Bash(*)", "Read(*)"],
-            hooks=_hooks_for("Bash"),  # Only Bash registered
+            hooks=_hooks_for("Bash"),
         )
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
@@ -287,7 +269,7 @@ class TestHookNotRegistered(unittest.TestCase):
         )
         native_layer = _native_layer(
             allow=["Bash(*)", "Read(*)"],
-            hooks=_hooks_for("Bash"),  # Read missing -> mixed state
+            hooks=_hooks_for("Bash"),
         )
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
@@ -307,7 +289,7 @@ class TestHookNotRegistered(unittest.TestCase):
             governed_tools=["Bash", "Read"],
             takeover_enabled=False,
         )
-        native_layer = _native_layer(hooks=_hooks_for("Bash"))  # Read missing
+        native_layer = _native_layer(hooks=_hooks_for("Bash"))
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
         partial = [f for f in findings if f.finding_id == "partial-hook-registration"]
@@ -397,13 +379,7 @@ class TestTakeoverConflictWithBlanketAllows(unittest.TestCase):
     """Tests for the takeover-conflict-with-blanket-allows HIGH invariant."""
 
     def _make_conflict_config(self) -> Configuration:
-        """
-        Build a configuration with a cross-level takeover conflict AND blanket allows.
-        Layer 0 (project): enabled=True
-        Layer 1 (user): enabled=False
-        => conflict detected, effective enabled=False
-        Native layer: Bash(*) blanket allow present
-        """
+        """Build a config with a cross-level takeover conflict (project=True, user=False) plus a Bash(*) blanket allow."""
         project_tg = _toolguard_layer(
             governed_tools=["Bash"],
             takeover_enabled=True,
@@ -438,8 +414,8 @@ class TestTakeoverConflictWithBlanketAllows(unittest.TestCase):
         """
         config = self._make_conflict_config()
         takeover = config.takeover_mode()
-        self.assertIsNotNone(takeover.conflict)  # confirm conflict exists
-        self.assertFalse(takeover.enabled)  # confirm fail-safe OFF
+        self.assertIsNotNone(takeover.conflict)
+        self.assertFalse(takeover.enabled)
 
         findings = audit_takeover(config)
         conflict_findings = [
@@ -449,7 +425,7 @@ class TestTakeoverConflictWithBlanketAllows(unittest.TestCase):
         ]
         self.assertEqual(len(conflict_findings), 1)
         self.assertEqual(conflict_findings[0].severity, AuditSeverity.HIGH)
-        self.assertIsNone(conflict_findings[0].tool)  # config-wide, not tool-specific
+        self.assertIsNone(conflict_findings[0].tool)
 
     def test_conflict_without_blanket_allows_not_flagged(self):
         """
@@ -474,9 +450,8 @@ class TestTakeoverConflictWithBlanketAllows(unittest.TestCase):
                 {"takeover_mode": {"enabled": False}, "governed_tools": ["Bash"]}
             ),
         )
-        # Native layer WITHOUT blanket allows (only specific rules)
         native_layer = _native_layer(
-            allow=["Bash(git status:*)"],  # specific, not a blanket
+            allow=["Bash(git status:*)"],
             hooks=_hooks_for("Bash"),
         )
         config = _make_config(project_tg, user_tg, native_layer)
@@ -503,27 +478,18 @@ class TestUncoveredBlanketAllow(unittest.TestCase):
         that is NOT in ignored_allow_patterns (not covered by the defaults either)
         When audit_takeover() is called
         Then a HIGH 'uncovered-blanket-allow' finding is returned
-
-        Note: The default ignored set always includes Bash(*), Read(*), Write(*), Edit(*).
-        To test uncovered allows, we use a custom tool blanket like
-        'mcp__custom__tool(*)' which is NOT in the default ignored set.
         """
-        # takeover ON with defaults only (no additional_ignored_patterns)
         tg_layer = _toolguard_layer(
             governed_tools=["Bash", "mcp__custom__tool"],
             takeover_enabled=True,
-            # No explicit ignored_allow_patterns -> defaults only apply
         )
-        # Native layer with a NON-DEFAULT blanket allow that is not in defaults
-        # 'mcp__custom__tool(*)' is not in the default ignored set
         native_layer = _native_layer(
-            allow=["mcp__custom__tool(*)"],  # blanket allow NOT in default ignored set
+            allow=["mcp__custom__tool(*)"],
             hooks=_hooks_for("Bash", "mcp__custom__tool"),
         )
         config = _make_config(tg_layer, native_layer)
         takeover = config.takeover_mode()
         self.assertTrue(takeover.enabled)
-        # Verify the custom tool blanket is NOT in the ignored set
         self.assertNotIn("mcp__custom__tool(*)", takeover.ignored_allow_patterns)
 
         findings = audit_takeover(config)
@@ -663,12 +629,12 @@ class TestLooseNoMatchFallback(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Loose-undecidable-fallback (HIGH) -- TOO-19
+# Loose-undecidable-fallback (HIGH)
 # ---------------------------------------------------------------------------
 
 
 class TestLooseUndecidableFallback(unittest.TestCase):
-    """Tests for the loose-undecidable-fallback HIGH invariant (TOO-19)."""
+    """Tests for the loose-undecidable-fallback HIGH invariant."""
 
     def test_allow_with_warning_flagged_high(self):
         """
@@ -840,13 +806,7 @@ class TestLooseUndecidableFallback(unittest.TestCase):
 
 
 class TestBrokenTakeoverConfig(unittest.TestCase):
-    """
-    Tests that a deliberately broken takeover config produces findings.
-
-    Required: audit_takeover yields findings when:
-    - blanket allow present + takeover OFF (or conflict)
-    - hook missing for a governed tool
-    """
+    """Tests that a deliberately broken takeover config produces findings."""
 
     def test_takeover_off_with_blanket_allows_and_missing_hook(self):
         """
@@ -855,20 +815,16 @@ class TestBrokenTakeoverConfig(unittest.TestCase):
         And the toolguard hook is NOT registered
         When audit_takeover() is called
         Then at least one finding is returned
-        (deliberate broken config - required test fixture)
         """
-        # Only a toolguard layer, no native settings at all
         tg_layer = _toolguard_layer(
             governed_tools=["Bash"],
             takeover_enabled=False,
         )
         native_layer = _native_layer(
             allow=["Bash(*)"],
-            # No hooks
         )
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
-        # Must have at least one finding (hook not registered)
         self.assertGreater(len(findings), 0)
         hook_findings = [f for f in findings if f.finding_id == "hook-not-registered"]
         self.assertGreater(len(hook_findings), 0)
@@ -879,22 +835,19 @@ class TestBrokenTakeoverConfig(unittest.TestCase):
         When audit_takeover() returns results
         Then findings are sorted CRITICAL first, then HIGH
         """
-        # This config: governed=["Bash", "Read"], hook only for Bash -> 2 CRITICAL
-        # Plus uncovered blanket allow for Read -> HIGH
         tg_layer = _toolguard_layer(
             governed_tools=["Bash", "Read"],
             takeover_enabled=True,
-            ignored_allow_patterns=[],  # uncovered blanket allows
+            ignored_allow_patterns=[],
         )
         native_layer = _native_layer(
             allow=["Bash(*)", "Read(*)"],
-            hooks=_hooks_for("Bash"),  # Read hook missing
+            hooks=_hooks_for("Bash"),
         )
         config = _make_config(tg_layer, native_layer)
         findings = audit_takeover(config)
         if len(findings) >= 2:
             severities = [f.severity.value for f in findings]
-            # Should be non-increasing (sorted descending)
             for i in range(len(severities) - 1):
                 self.assertGreaterEqual(severities[i], severities[i + 1])
 

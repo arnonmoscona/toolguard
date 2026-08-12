@@ -1,33 +1,31 @@
 """
 Maintenance aggregator: compose the rule-maintenance engines into one report.
 
-This is the deterministic backbone the maintenance skill/CLI sit on -- the
-counterpart of :mod:`toolguard.tools.security_audit` for the maintenance side.
-It does not apply anything and makes no judgement: it runs each tested engine
-over the resolved configuration and gathers their findings into a single
-structured :class:`MaintenanceReport`.
+The deterministic backbone under the ``toolguard-maintain`` console script and
+the maintenance skill. :func:`run_maintenance` runs each engine over a resolved
+configuration and gathers their findings into one :class:`MaintenanceReport`.
+Per governed tool it collects:
 
-For each governed tool it collects:
-
-* **redundancies** -- exact/normalised duplicates and corpus-backed subsumption
-  (:func:`toolguard.tools.redundancy.find_redundancy`).
-* **consolidations** -- strict, equivalence-preserving merges, families 1-2
-  (:func:`toolguard.tools.consolidate.propose_consolidations`).
-* **broadenings** -- agent-judged, deliberately-widening merges with evidence,
-  families 3-4 (:func:`toolguard.tools.consolidate.propose_broadening_consolidations`).
+* **redundancies** -- exact/normalised duplicate rules and, with a corpus,
+  allow rules whose removal changes no observed decision
+  (:mod:`toolguard.tools.redundancy`).
+* **consolidations** -- strict, probe-checked merges, families 1-2
+  (:mod:`toolguard.tools.consolidate`).
+* **broadenings** -- deliberately-widening merges carrying evidence, families
+  3-4, for an agent to judge (:mod:`toolguard.tools.consolidate` again).
 * **cross-layer redundancies** -- a specific rule already covered by a broader
-  layer (:func:`toolguard.tools.hierarchy.find_cross_layer_redundancies`).
+  layer (:mod:`toolguard.tools.hierarchy`).
+* **interactions** -- confusing allow/guard overlaps
+  (:mod:`toolguard.tools.clarity`).
 
 and, once for the whole config, the corpus **mining** report
-(:func:`toolguard.tools.mining.mine_rule_candidates`).
+(:mod:`toolguard.tools.mining`).
 
-Consolidations and cross-layer findings are replay-verified (decision-neutral
-over the corpus) and redundancies are exact/normalised duplicates -- but that
-verification is EVIDENCE, not consent: even a decision-neutral merge may belong
-at a different level, or be one the user wants left alone. Nothing here is
-auto-applied. Broadenings and mining candidates additionally need the
-security-audit lens. Every apply decision is the user's, made through the skill
-conversation; this module only gathers the evidence.
+Whatever verification an engine performed is EVIDENCE, not consent: a merge
+that changes no decision may still belong at a different level, or be one the
+user wants left alone. Aggregation itself applies nothing; the CLI's
+``--apply``, ``--annotate`` and ``--record-decision`` modes are the only ones
+here that write, and the first two are previews until ``--write``.
 """
 
 import argparse
@@ -98,16 +96,13 @@ class ToolMaintenance:
 
     Attributes:
         tool: The tool name (e.g. ``'Bash'``).
-        redundancies: Duplicate/subsumed rule findings (candidates to drop --
-            the user decides).
-        consolidations: Strict, equivalence-preserving merge proposals (families
-            1-2; replay-verified but never auto-applied -- the user decides).
-        broadenings: Agent-judged widening proposals with evidence (families 3-4;
-            must be judged, never auto-applied).
-        cross_layer_redundancies: Specific rules already covered by a broader
-            layer (candidate to drop the specific copy -- the user decides).
-        interactions: Confusing same-file rule interactions (clarity findings;
-            informational -- they explain non-obvious resolution, not a fix).
+        redundancies: Rules found redundant -- candidates to drop.
+        consolidations: Strict, probe-checked merge proposals (families 1-2).
+        broadenings: Widening proposals carrying evidence, for an agent to
+            judge (families 3-4).
+        cross_layer_redundancies: Rules a broader layer already covers --
+            candidates to drop the more specific copy.
+        interactions: Confusing allow/guard overlaps, within and across layers.
     """
 
     tool: str
@@ -172,9 +167,9 @@ def run_maintenance(
 
     Args:
         config: The resolved configuration to inspect.
-        tools: Tool names to inspect.  Defaults to every builtin tool
-            (:data:`toolguard.constants.BUILTIN_TOOLS`), in sorted order for
-            deterministic output.
+        tools: Tool names to inspect.  Defaults to
+            :data:`toolguard.constants.BUILTIN_TOOLS`, sorted -- that constant
+            is an unordered frozenset and report order is part of the output.
         corpus: Optional harvested command corpus.  When supplied it enables
             corpus-backed redundancy, broadening evidence, and mining; when
             ``None`` those fall back to static-only / empty results.
@@ -206,15 +201,7 @@ def run_maintenance(
 
 
 def _headline(report: MaintenanceReport) -> str:
-    """
-    Build the one-line headline summary of a maintenance report.
-
-    Args:
-        report: The report to summarise.
-
-    Returns:
-        A compact count summary across all categories.
-    """
+    """Build the one-line count summary across all finding categories."""
     redundancies = sum(len(t.redundancies) for t in report.tools)
     consolidations = sum(len(t.consolidations) for t in report.tools)
     broadenings = sum(len(t.broadenings) for t in report.tools)
@@ -231,9 +218,8 @@ def render(report: MaintenanceReport, fmt: str = "markdown") -> str:
     """
     Render a maintenance report as a human-readable summary.
 
-    This is the SUMMARY view (counts + per-category listing).  The verbose,
-    paste-ready per-file recommendation with application modes is produced by the
-    skill/CLI layer on top of this report, not here.
+    The summary view: a headline count line, then each tool's findings by
+    category.  Tools with no findings are omitted entirely.
 
     Args:
         report: The report to render.
@@ -294,12 +280,8 @@ def _provenance_to_dict(provenance: Optional[Provenance]) -> Optional[Dict[str, 
     """
     Serialize a :class:`~toolguard.config.Provenance` to a JSON-safe dict.
 
-    Args:
-        provenance: The provenance to serialize, or ``None``.
-
-    Returns:
-        A dict with the raw provenance fields plus a human-readable ``describe``
-        string, or ``None`` when ``provenance`` is ``None``.
+    Carries the raw fields plus ``provenance.describe()`` under ``describe``.
+    ``None`` passes through as ``None``.
     """
     if provenance is None:
         return None
@@ -314,16 +296,7 @@ def _provenance_to_dict(provenance: Optional[Provenance]) -> Optional[Dict[str, 
 
 
 def _tool_to_dict(tool_report: ToolMaintenance) -> Dict[str, Any]:
-    """
-    Serialize a :class:`ToolMaintenance` to a JSON-safe dict.
-
-    Args:
-        tool_report: The per-tool findings to serialize.
-
-    Returns:
-        A dict mirroring the dataclass, with provenances expanded and tuples
-        rendered as lists.
-    """
+    """Serialize a :class:`ToolMaintenance` to a JSON-safe dict."""
     return {
         "tool": tool_report.tool,
         "total": tool_report.total,
@@ -401,9 +374,9 @@ def report_to_dict(report: MaintenanceReport) -> Dict[str, Any]:
     """
     Serialize a :class:`MaintenanceReport` to a JSON-safe dict.
 
-    This is the structured contract the maintenance skill (and any AI-assisted
-    pass) consumes instead of re-parsing the rendered text.  Provenances are
-    expanded to dicts, tuples to lists, and corpus-mining groups are included.
+    The structured contract the maintenance skill consumes instead of
+    re-parsing the rendered text.  Provenances are expanded to dicts, tuples to
+    lists, and corpus-mining groups are included.
 
     Args:
         report: The maintenance report to serialize.
@@ -437,12 +410,10 @@ def collect_consolidations(report: MaintenanceReport) -> List[ConsolidationPropo
     Flatten every tool's strict consolidation proposals into one list.
 
     Only :class:`~toolguard.tools.consolidate.ConsolidationProposal` records are
-    returned -- the replay-verified (decision-neutral over the corpus) allow-list
-    merges that the apply path (:func:`~toolguard.tools.rule_apply.apply_proposals`)
-    can enact once the user has approved them.
-    Agent-judged broadenings and the informational findings (redundancies,
-    cross-layer, clarity interactions) are deliberately excluded: they are
-    reported for human action, not auto-applied.
+    returned -- the strict allow-list changes the apply path can enact once the
+    user has approved them.  Agent-judged broadenings and the informational
+    findings (redundancies, cross-layer, clarity interactions) are deliberately
+    excluded: they are reported for human action, not applied.
 
     Args:
         report: The maintenance report to harvest proposals from.
@@ -457,8 +428,11 @@ def consolidation_to_edit_proposal(prop: ConsolidationProposal) -> EditProposal:
     """
     Express a consolidation as a general :class:`~toolguard.tools.edit_proposal.EditProposal`.
 
-    A consolidation replaces a family of allow patterns with one merged pattern at
-    a single layer; that maps to a ``replace`` edit on the ``list_type`` list.
+    A consolidation removes a family of allow patterns from one layer and adds
+    the merged replacement -- a ``replace`` edit on that layer's ``list_type``
+    list.  A static-subsumption proposal has no replacement (``added_pattern`` is
+    ``None``) and becomes a pure removal.
+
     The shared model lets the maintenance skill hand its proposed changes to
     ``toolguard-audit --edits`` for an as-if-enacted security review before writing.
 
@@ -466,7 +440,7 @@ def consolidation_to_edit_proposal(prop: ConsolidationProposal) -> EditProposal:
         prop: The consolidation proposal to convert.
 
     Returns:
-        The equivalent :class:`EditProposal` (a single-edit ``replace``).
+        The equivalent :class:`EditProposal` (a single ``replace`` edit).
     """
     return EditProposal(
         action=ACTION_REPLACE,
@@ -489,9 +463,8 @@ def change_report_to_dict(change: ChangeReport) -> Dict[str, Any]:
     """
     Serialize a :class:`~toolguard.tools.rule_apply.ChangeReport` to a dict.
 
-    This is the structured contract for the apply path: it lets the maintenance
-    skill present each file's diff and applied/skipped proposals without
-    re-parsing the rendered text.
+    The structured contract for the apply path: each file's diff and its
+    applied/skipped proposals, without re-parsing the rendered text.
 
     Args:
         change: The change report (from a dry-run or real apply) to serialize.
@@ -534,15 +507,13 @@ def _render_apply(change: ChangeReport, fmt: str) -> str:
     """
     Render an apply outcome for a human, inlining each file's unified diff.
 
-    :func:`~toolguard.tools.rule_apply.render_change_report` summarises applied
-    and skipped proposals but does NOT inline diffs; for an apply preview the
+    The summary renderer deliberately leaves diffs out; for an apply preview the
     diff is the whole point, so this appends each changed file's diff under the
     summary.
 
     Args:
         change: The change report to render.
-        fmt: ``'text'`` or ``'markdown'`` (passed through to the summary
-            renderer).
+        fmt: ``'text'`` or ``'markdown'``.
 
     Returns:
         The summary followed by the per-file diffs.
@@ -562,17 +533,18 @@ def _nosecurity_block_reason(proposal: ConsolidationProposal) -> Optional[str]:
     """
     Return the ``#NOSECURITY`` reason when *proposal* would rewrite a blessed rule.
 
-    A consolidation replaces a family of rules with one merged rule.  If any rule
-    it would REMOVE carries a ``#NOSECURITY`` comment, that rule is intentionally
-    blessed HERE (project-local); moving or rewriting it would strip the user's
-    deliberate annotation, so the whole proposal is withheld from the apply path.
+    A rule the user tagged ``#NOSECURITY`` is deliberately insecure where it
+    sits; rewriting or merging it away would strip that annotation, so any
+    proposal that would REMOVE such a rule is withheld from the apply path
+    entirely.
 
     Args:
         proposal: The consolidation proposal to check.
 
     Returns:
-        The first blocking reason (``""`` for a bare tag), or ``None`` when no
-        removed rule is ``#NOSECURITY``-tagged.
+        The first blocking reason, which is ``""`` for a bare tag with no
+        reason -- falsy but still blocking -- or ``None`` when no removed rule
+        is tagged.
     """
     for pattern in proposal.removed_patterns:
         reason = nosecurity_reason_for(
@@ -605,9 +577,8 @@ def _partition_nosecurity(
     """
     Split consolidations into appliable vs withheld because they touch a blessed rule.
 
-    Returns ``(appliable, withheld)`` where *withheld* is a list of
-    ``(proposal, reason)``.  This is the ``#NOSECURITY`` migration/edit block: a
-    rule the user annotated intentionally-insecure is never auto-rewritten.
+    Returns ``(appliable, withheld)``, *withheld* being ``(proposal, reason)``
+    pairs -- see :func:`_nosecurity_block_reason` for what blocks and why.
     """
     appliable: List[ConsolidationProposal] = []
     withheld: List[Tuple[ConsolidationProposal, str]] = []
@@ -640,12 +611,10 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
     """
     Execute the ``--apply`` path: preview by default, write only with ``--write``.
 
-    Collects the strict consolidation proposals from ``report`` and runs
-    :func:`~toolguard.tools.rule_apply.apply_proposals`.  Without ``--write`` it
-    is a dry run (nothing is touched on disk).  With ``--write`` it first runs
-    the migration/working-tree pre-flight and REFUSES (leaving the config
-    untouched) if there are any blockers, so a real edit is always reviewable and
-    revertible.
+    Applies only the strict consolidations.  Without ``--write`` nothing is
+    touched on disk.  With ``--write`` the migration/working-tree pre-flight
+    runs first and any blocker REFUSES the whole run, leaving the config
+    untouched, so a real edit is always reviewable and revertible.
 
     Args:
         args: Parsed CLI namespace (uses ``write``, ``dir``, ``format``).
@@ -655,8 +624,6 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
         Exit code: ``0`` on success (preview or write), ``2`` when ``--write``
         is refused by the safety pre-flight.
     """
-    # Withhold any consolidation that would rewrite a #NOSECURITY-blessed rule:
-    # such a rule is intentionally insecure HERE and is never auto-migrated/rewritten.
     proposals, withheld = _partition_nosecurity(collect_consolidations(report))
 
     if args.write:
@@ -676,8 +643,7 @@ def _run_apply(args: argparse.Namespace, report: MaintenanceReport) -> int:
     if args.format == "json":
         payload = change_report_to_dict(change)
         payload["dry_run"] = not args.write
-        # The equivalent EditProposals, so the maintenance skill can hand these to
-        # `toolguard-audit --edits` for an as-if-enacted security review before writing.
+        # The same changes in EditProposal form, for `toolguard-audit --edits`.
         payload["edit_proposals"] = [
             edit_proposal_to_dict(consolidation_to_edit_proposal(p)) for p in proposals
         ]
@@ -707,11 +673,12 @@ def _collect_annotations(
 
     Args:
         config: The resolved configuration to analyze.
-        tools: Tools to annotate, or ``None`` for every builtin tool.
+        tools: Tools to annotate, or ``None`` for ``BUILTIN_TOOLS``, sorted.
 
     Returns:
-        ``{ path -> { full_pattern -> [note, ...] } }`` with notes merged and
-        sorted across tools (patterns are tool-qualified, so they never collide).
+        ``{ path -> { full_pattern -> [note, ...] } }`` with notes de-duplicated
+        and sorted across tools.  Keys are the full ``Tool(body)`` form, so two
+        tools' rules never collide in one file's map.
     """
     target_tools = list(tools) if tools is not None else sorted(BUILTIN_TOOLS)
     merged: Dict[Path, Dict[str, List[str]]] = {}
@@ -745,28 +712,22 @@ def _permission_patterns_in_text(text: str) -> List[str]:
     """
     Extract every ``[permissions]`` rule pattern present in *text*.
 
-    Used to build the ``expected_patterns`` content-loss guard argument for
-    :func:`~toolguard.config_write_guard.verified_write_config` (TOO-19
-    corrective change) when annotating a config file: annotation only ever
-    INSERTS ``# toolguard:`` comment lines and must never remove a rule, so
-    every pattern present in the file BEFORE annotating must still be present
-    in the text actually written.
+    Builds the ``expected_patterns`` content-loss guard argument for
+    :func:`~toolguard.config_write_guard.verified_write_config`: annotation
+    touches only ``# toolguard:`` comment lines, so every rule present before
+    annotating must still be present in the text actually written.
 
-    Excludes any :func:`~toolguard.rule_sort.is_synthetic_pattern` value
-    (TOO-19 review fix): a malformed rule entry (e.g. a structured entry
-    missing its ``match`` key) parses to a SYNTHESIZED, non-matchable
-    stand-in pattern (see :func:`~toolguard.rule_sort._rule_pattern_of_value`)
-    that can never appear in the annotated text this function's caller is
-    about to write, so including it here previously made the content-loss
-    guard wrongly refuse annotation on any file holding one such malformed
-    entry.
+    Synthesized stand-in patterns are excluded.  A malformed rule entry (e.g. a
+    structured entry with no ``match`` key) parses to one, and it can never
+    appear in the annotated text -- feeding it to the guard would refuse
+    annotation of any file holding such an entry.
 
     Args:
         text: Full TOML file content (before or after annotation).
 
     Returns:
-        List of every REAL rule pattern found in the file's ``[permissions]``
-        section (empty if the file has none), excluding synthesized patterns.
+        Every real rule pattern in the file's ``[permissions]`` section, empty
+        if it has none.
     """
     start, end = find_section_boundaries(text, "permissions")
     if start == -1:
@@ -784,15 +745,13 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
     """
     Execute the ``--annotate`` path: preview by default, write only with ``--write``.
 
-    Computes the ``# toolguard:`` clarity comments for every confusing rule and,
-    per file, produces the before/after text.  Without ``--write`` it is a dry run
-    (nothing is touched).  With ``--write`` it runs the same safety pre-flight as
-    ``--apply`` and REFUSES on blockers (dirty tree / unresolved root), leaving the
-    files untouched.  Each actual write goes through
-    :func:`~toolguard.config_write_guard.verified_write_config` (TOO-19 corrective
-    change), which additionally refuses -- also leaving the file untouched -- if
-    the annotated text would fail to parse or would drop any rule pattern that was
-    present in the file before annotating (see :func:`_permission_patterns_in_text`).
+    Computes the ``# toolguard:`` clarity comments and, per file, produces the
+    before/after text.  Without ``--write`` nothing is touched.  With ``--write``
+    it runs the same safety pre-flight as ``--apply`` and REFUSES on blockers,
+    leaving the files untouched.  Each write then goes through
+    :func:`~toolguard.config_write_guard.verified_write_config`, which refuses --
+    again leaving the file untouched -- if the annotated text would fail to parse
+    or would drop a rule that was there before.
 
     Args:
         args: Parsed CLI namespace (uses ``write``, ``dir``, ``format``, ``tool``).
@@ -813,15 +772,9 @@ def _run_annotate(args: argparse.Namespace, config: Configuration) -> int:
         try:
             old, new = annotate_config_file(path, merged[path])
         except OSError, tomllib.TOMLDecodeError:
-            # A malformed file (e.g. a multi-line structured entry -- not
-            # valid TOML 1.0, see toolguard.rule_sort's top-of-file
-            # docstring) is skipped here the same as an unreadable one: one
-            # bad file must not abort the whole annotate batch. In practice
-            # `config` (and therefore `merged`, which is keyed off its
-            # findings) never contains such a file's rules to begin with --
-            # toolguard.config's loader already fail-open-skips it -- but a
-            # file edited on disk between that load and this re-read is a
-            # real, if narrow, race this guards against.
+            # Annotation re-reads each file from disk, so a file that parsed
+            # when `config` was loaded can still fail here -- and a malformed
+            # or unreadable one must not abort the rest of the batch.
             continue
         results.append((path, old, new))
     changed = [(p, o, n) for (p, o, n) in results if o != n]
@@ -894,13 +847,13 @@ def replay_diff_to_dict(diff: ReplayDiff, corpus_size: int) -> Dict[str, Any]:
 
     Args:
         diff: The two-config replay result (current config vs candidate).
-        corpus_size: Number of corpus observations replayed (0 means the replay
-            is vacuous -- necessary evidence is simply absent).
+        corpus_size: Number of corpus observations replayed.  Zero means the
+            replay proves nothing; the caller must not read it as a clean pass.
 
     Returns:
         A dict under the ``replay_candidate`` key with summary counts and the
         broadened/tightened command lists.  Broadened commands are the risk
-        signal (the candidate would newly admit them); tightened are usually fine.
+        signal -- the candidate would newly admit them.
     """
     return {
         "replay_candidate": {
@@ -918,9 +871,9 @@ def _render_replay(diff: ReplayDiff, corpus_size: int, fmt: str = "markdown") ->
     """
     Render a candidate-replay result as human-readable text.
 
-    Leads with the necessary-not-sufficient caveat, then lists broadened commands
-    (the risk) and tightened commands (informational).  An empty corpus is called
-    out explicitly as vacuous rather than reported as a clean pass.
+    Lists broadened commands (the risk) and tightened ones (informational).  An
+    empty corpus short-circuits to a statement that the replay proved nothing,
+    rather than printing a zero-difference summary that reads as a clean pass.
     """
     title = "Corpus replay: current config vs candidate"
     lines = [f"# {title}" if fmt == "markdown" else title, ""]
@@ -968,14 +921,12 @@ def _run_replay_candidate(args: argparse.Namespace) -> int:
 
     Replays the observed command corpus of ``--dir`` against BOTH the current
     config and the candidate config discovered from the ``--replay-candidate``
-    directory (a staged project root the maintenance skill assembled), then reports
-    which observed commands the candidate would newly BROADEN (admit) or TIGHTEN
-    (restrict).
+    directory (a staged project root), then reports which observed commands the
+    candidate would newly BROADEN (admit) or TIGHTEN (restrict).
 
-    This is the corpus-validation step of the skill's certification. It is
-    read-only and NEVER a gate on its own: a broadening is a red flag to surface,
-    an empty corpus is vacuous, and a clean replay only covers observed commands.
-    Exit code is ``0`` unless the candidate directory does not exist.
+    Read-only, and necessary rather than sufficient: replay sees only commands
+    that were actually observed, so a clean result is evidence and never a gate
+    on its own.
 
     Args:
         args: Parsed CLI arguments (uses ``dir``, ``replay_candidate``,
@@ -1003,14 +954,16 @@ def _run_replay_candidate(args: argparse.Namespace) -> int:
 
 def _render_ledger(decisions: Sequence[Any], fmt: str = "text") -> str:
     """
-    Render the merged prior-decision ledger as human-readable text.
+    Render the prior-decision ledger as human-readable text.
 
     Args:
-        decisions: The merged :class:`LedgerDecision` list (project then user).
-        fmt: ``markdown`` or ``text`` (both currently identical plain output).
+        decisions: The :class:`LedgerDecision` records to render, in order.
+        fmt: Accepted and ignored -- the output is the same plain text either
+            way.
 
     Returns:
-        A short, readable summary of every settled decision, grouped by level.
+        A count header followed by one line per decision, each labelled with
+        its level; a plain "none recorded" message when *decisions* is empty.
     """
     if not decisions:
         return "No prior maintenance decisions recorded (project or user ledger)."
@@ -1028,15 +981,15 @@ def _run_ledger_show(args: argparse.Namespace) -> int:
     """
     Execute ``--ledger-show``: print the merged prior-decision ledger (read-only).
 
-    Loads the project ledger (``<root>/.claude/toolguard_decisions.json``) and the
-    user ledger (``~/.toolguard/decisions.json``) for ``--dir`` and prints them so
-    the maintenance skill can filter already-settled suggestions on a periodic run.
+    Merges the project ledger for ``--dir`` with the user ledger, so a periodic
+    maintenance run can filter out already-settled suggestions.
 
     Args:
         args: Parsed CLI arguments (uses ``dir`` and ``format``).
 
     Returns:
-        Process exit code (``0`` on success, ``2`` if a ledger file is malformed).
+        Process exit code (``0`` on success, ``2`` if a ledger file is present
+        but unreadable or malformed).
     """
     try:
         decisions = load_merged(Path(args.dir))
@@ -1056,18 +1009,15 @@ def _run_record_decision(args: argparse.Namespace) -> int:
     """
     Execute ``--record-decision``: append settled decision(s) to a level's ledger.
 
-    Reads a JSON file (or ``-`` for stdin) describing one decision object or a list
-    of them, stamps each with the local time and toolguard version, and records it in
-    the ledger for ``--ledger-level`` (idempotent by decision id). This persists the
-    meta-decisions the maintenance skill's discussion pass gathers -- the "do not
-    re-suggest this" outcomes that have no surviving rule to annotate.
+    Reads a JSON file (or ``-`` for stdin) holding one decision object or a list
+    of them, and records each in the ledger for ``--ledger-level``, idempotent by
+    decision id.  These are the "do not re-suggest this" outcomes that have no
+    surviving rule to annotate.
 
-    ``kind``, ``family_id`` and ``target`` are required per entry (a missing one is a
-    validation error, exit 2). ``decision`` is optional and defaults to ``"reject"`` --
-    the common case, since this mode records rejections; pass ``accept``/``defer``
-    explicitly for the others. The whole batch is validated BEFORE anything is written,
-    so a malformed entry partway through a list aborts without persisting the earlier
-    ones.
+    ``kind``, ``family_id`` and ``target`` are required per entry; a missing one
+    is a validation error.  ``decision`` is optional and defaults to
+    ``"reject"``, the common case here -- pass ``accept``/``defer`` explicitly
+    for the others.
 
     Args:
         args: Parsed CLI arguments (uses ``dir``, ``record_decision``,
@@ -1093,10 +1043,9 @@ def _run_record_decision(args: argparse.Namespace) -> int:
         return 2
 
     entries = payload if isinstance(payload, list) else [payload]
-    # Validate/construct EVERY entry before writing ANY of them. Recording is a durable
-    # write, so a malformed entry midway through a batch must not leave the earlier
-    # entries persisted behind a failure exit code (they would silence suggestions the
-    # caller never confirmed). Build all decisions first; only then commit.
+    # Validate/construct EVERY entry before writing ANY of them: a malformed entry
+    # midway through a batch must not leave the earlier ones persisted behind a
+    # failure exit code, where they would silence suggestions nobody confirmed.
     decisions: List[LedgerDecision] = []
     try:
         for entry in entries:
@@ -1126,24 +1075,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     CLI entry point for the ``toolguard-maintain`` console script.
 
-    Loads the toolguard configuration from the given directory, runs the
-    maintenance aggregator (:func:`run_maintenance`), and prints the summary.
-    This function is READ-ONLY: it never writes or modifies any file -- applying
-    a change is a separate, explicitly-approved step.
+    The default mode -- load the configuration for ``--dir``, aggregate the
+    findings, print them -- is read-only.  The mutually-exclusive modes are not:
+    ``--apply`` and ``--annotate`` write once ``--write`` is added, and
+    ``--record-decision`` writes a ledger file whenever its input validates.
 
     Args:
         argv: Argument list (defaults to ``sys.argv[1:]`` when ``None``).
 
     Returns:
-        Exit code ``0``.
+        ``0`` on success; ``2`` when a mode refuses -- write pre-flight
+        blockers, a missing candidate directory, an unreadable ledger under
+        ``--ledger-show``, or an unreadable/invalid decision file.  An argparse
+        rejection exits the process instead of returning.
 
     Note:
-        Static analysis runs by default and is fast.  Pass ``--corpus`` to also
-        harvest an evidence corpus (daily logs + transcripts) and populate
-        replay-backed and mining findings; that pass parses every observed
+        Static analysis runs by default.  Pass ``--corpus`` to also harvest an
+        evidence corpus (daily logs + transcripts) and populate the
+        corpus-backed and mining findings; that pass parses every observed
         command and can take a while on a large history, so bound it with
-        ``--max-age-days``.  Use ``--format json`` for the structured contract
-        the maintenance skill consumes.
+        ``--max-age-days``.
     """
     parser = argparse.ArgumentParser(
         prog="toolguard-maintain",

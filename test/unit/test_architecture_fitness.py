@@ -1,13 +1,12 @@
 """
-Unit tests for ``tools/architecture_fitness.py`` (TOO-45's per-iteration fitness
-instrument).
+Unit tests for ``tools/architecture_fitness.py``.
 
-Per the tool's own testing brief: graph and layer logic are tested against small
-SYNTHETIC fixture trees (temp directories built in each test), not against the
-live ``toolguard/`` tree -- assertions pinned to today's real module set would
-break on every refactor step, which is exactly what this tool exists to survive.
-A handful of smoke tests at the bottom exercise the real tree/repo and assert
-only that each mode runs without crashing and returns a sane shape.
+Graph and layer logic are tested against small SYNTHETIC fixture trees (temp
+directories built per test), not the live ``toolguard/`` tree -- assertions pinned
+to today's real module set would break on every refactor step, which is what this
+tool exists to survive. A handful of smoke tests at the bottom exercise the real
+tree/repo and assert only that each mode runs without crashing and returns a sane
+shape.
 """
 
 import ast
@@ -63,18 +62,7 @@ def _commit_all(root: Path, message: str) -> str:
 
 
 def _write_stub_hook_binary(path: Path, body: str) -> Path:
-    """
-    Write a small, self-contained Python script to *path* that mimics
-    ``toolguard --eval``'s I/O contract (read one JSON event on stdin, print a
-    ``{"hookSpecificOutput": {"permissionDecision": ...}}`` JSON object to
-    stdout) and make it executable. *body* is a Python expression string
-    evaluated with ``event`` (the parsed input dict) bound, that must produce
-    the verdict string to report.
-
-    Exists so canary-logic tests never depend on the real installed toolguard
-    binary or this machine's real permission config -- the whole point of a
-    stub.
-    """
+    """Write an executable stub at *path* mimicking the hook's PreToolUse I/O contract; *body* is a Python expression bound to ``event`` that yields the verdict string."""
     script = (
         f"#!{sys.executable}\n"
         "import json, sys\n"
@@ -86,11 +74,6 @@ def _write_stub_hook_binary(path: Path, body: str) -> Path:
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return path
-
-
-# =============================================================================
-# Module-path helpers
-# =============================================================================
 
 
 class TestModulePathHelpers(unittest.TestCase):
@@ -181,7 +164,6 @@ class TestModulePathHelpers(unittest.TestCase):
         When resolve_toolguard_import is called
         Then it resolves relative to the importer's own package
         """
-        # tools/decision.py doing "from . import sorters" -> tools.sorters
         self.assertEqual(
             af.resolve_toolguard_import("sorters", 1, "tools.decision"), "tools.sorters"
         )
@@ -192,7 +174,6 @@ class TestModulePathHelpers(unittest.TestCase):
         When resolve_toolguard_import is called
         Then it climbs one more package level than level=1
         """
-        # tools/decision.py doing "from .. import hook" -> hook
         self.assertEqual(
             af.resolve_toolguard_import("hook", 2, "tools.decision"), "hook"
         )
@@ -240,11 +221,6 @@ class TestModulePathHelpers(unittest.TestCase):
             af.production_files(files, frozenset({"toolguard/parser/bash_parser.py"})),
             ["toolguard/hook.py"],
         )
-
-
-# =============================================================================
-# Generated-file detection (excluded from --predicates and --metrics)
-# =============================================================================
 
 
 class TestGeneratedFileDetection(unittest.TestCase):
@@ -322,11 +298,6 @@ class TestGeneratedFileDetection(unittest.TestCase):
             self.assertEqual(paths, {"toolguard/parser/gen.py"})
 
 
-# =============================================================================
-# Import graph extraction
-# =============================================================================
-
-
 class TestImportGraphExtraction(unittest.TestCase):
     """Tests for extract_toolguard_imports and build_import_graph on synthetic trees."""
 
@@ -387,10 +358,6 @@ class TestImportGraphExtraction(unittest.TestCase):
             self.assertEqual(graph["a"], {"b"})
 
 
-# =============================================================================
-# .pyscn.toml architecture parsing
-# =============================================================================
-
 SYNTHETIC_ARCH_TOML = """
 [architecture]
 enabled = true
@@ -431,11 +398,6 @@ class TestArchitectureConfigParsing(unittest.TestCase):
             self.assertEqual(arch.allow_for("base"), ("base",))
             self.assertEqual(arch.allow_for("top"), ("top", "base"))
             self.assertEqual(arch.allow_for("nonexistent"), ())
-
-
-# =============================================================================
-# --layers: completeness and direction
-# =============================================================================
 
 
 class TestCheckLayers(unittest.TestCase):
@@ -528,11 +490,6 @@ class TestCheckLayers(unittest.TestCase):
             self.assertIn("a", text)
 
 
-# =============================================================================
-# Graph algorithms: Tarjan SCC, fan-in, longest chain
-# =============================================================================
-
-
 class TestGraphAlgorithms(unittest.TestCase):
     """Tests for tarjan_scc, fan_in, and longest_dependency_chain on synthetic graphs."""
 
@@ -573,9 +530,7 @@ class TestGraphAlgorithms(unittest.TestCase):
     def test_find_import_cycles_drops_an_out_of_scope_cycle_entirely(self):
         """
         Given a graph with a cycle entirely inside an out-of-scope package
-            AND a genuine in-scope cycle (TOO-45 R5a-0: reproduces the real
-            defect -- parser.command_extractor <-> parser.multiline vs.
-            hook <-> tools.decision)
+            and a genuine in-scope cycle
         When find_import_cycles is called with out_of_scope_packages naming
             the first cycle's package
         Then only the in-scope cycle is reported
@@ -635,11 +590,6 @@ class TestGraphAlgorithms(unittest.TestCase):
         self.assertIn("x=y", chain)
 
 
-# =============================================================================
-# --predicates: component detectors
-# =============================================================================
-
-
 class TestFindVerdictTypes(unittest.TestCase):
     """Tests for find_verdict_types."""
 
@@ -651,19 +601,6 @@ class TestFindVerdictTypes(unittest.TestCase):
             name-substring rule) but declares no fields at all
         When find_verdict_types is called
         Then only the structurally-verdict-ish class is returned
-
-        TOO-45 R1b: this replaces a test that pinned the OLD name-substring
-        rule (`class FileResolution: pass` / `class Decision: pass` used to
-        be reported purely because of their names). That rule was
-        demonstrated wrong in both directions on the real tree (R1 scoping
-        trace runtime census): it reported `ProjectRootResolution`,
-        `LedgerDecision`, `SingleDecision` -- never constructed on any
-        decision path -- and missed `SubMatch` (8,314 constructions on the
-        hook decision path) entirely, because "SubMatch" contains none of
-        the three magic name words. This scenario is the minimal
-        reproduction of exactly that failure mode: a fieldless class whose
-        NAME alone used to be sufficient, and a class whose fields alone are
-        now sufficient regardless of name.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -701,31 +638,10 @@ class TestFindVerdictTypes(unittest.TestCase):
 
     def test_unitverdict_included_and_false_positives_excluded_on_real_tree(self):
         """
-        Given the REAL toolguard/ tree, AFTER TOO-45 R1c collapsed
-            ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict
-            and renamed SubMatch to UnitVerdict, and AFTER TOO-45 R6-S3
-            unified tools.decision.Decision into RuntimeVerdict
+        Given the real toolguard/ tree
         When find_verdict_types is called
-        Then UnitVerdict (missed by the old name-substring rule, under its
-            old name SubMatch) is present, the genuine structurally-verdict
-            classes (RuntimeVerdict, UnitVerdict) are present, and the three
-            demonstrated-never-constructed-on-a-decision-path false
-            positives the old rule reported (ProjectRootResolution,
-            LedgerDecision, SingleDecision -- TOO-45 R1 scoping trace runtime
-            census) are absent
-
-        This is the regression pin for the fix: it FAILS against the old
-        name-substring implementation (which finds all three false
-        positives and misses UnitVerdict) and PASSES against the structural
-        one. Renamed and reduced from three genuine hits
-        (ResolvedDecision/BashResolution/FileResolution) to one
-        (RuntimeVerdict) by the R1c collapse, then from two structural hits
-        (RuntimeVerdict, Decision) to one (RuntimeVerdict) by the R6-S3
-        unification -- find_verdict_types is STRUCTURAL, so it correctly
-        reports fewer classes now that fewer classes exist; see
-        TestClassifyVerdictAltitudes below for the altitude split this
-        predicate's R1 gate actually uses, and for the regression pin that
-        the TOOLING altitude rule itself still fires on a synthetic class.
+        Then RuntimeVerdict and UnitVerdict are reported, and
+            ProjectRootResolution, LedgerDecision, and SingleDecision are not
         """
         found = {t["class"] for t in af.find_verdict_types()}
         self.assertIn("UnitVerdict", found)
@@ -754,7 +670,7 @@ class TestFindVerdictTypes(unittest.TestCase):
 
     def test_excludes_r1_out_of_scope_packages(self):
         """
-        Given a verdict-ish class defined under toolguard/parser/ (out of scope for TOO-45)
+        Given a verdict-ish class defined under toolguard/parser/ (out of scope)
         When find_verdict_types is called
         Then it is not reported
         """
@@ -768,11 +684,7 @@ class TestFindVerdictTypes(unittest.TestCase):
 
 
 class TestClassifyVerdictAltitudes(unittest.TestCase):
-    """
-    Tests for classify_verdict_altitudes (TOO-45 R1c) -- the altitude split
-    the R1 gate uses to require exactly one RUNTIME verdict type without
-    hand-listing class names.
-    """
+    """Tests for classify_verdict_altitudes -- the altitude split the R1 gate uses to require exactly one RUNTIME verdict type without hand-listing class names."""
 
     def test_nested_list_field_class_is_unit_not_runtime(self):
         """
@@ -781,10 +693,6 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
         When classify_verdict_altitudes is called
         Then Leaf is reported as UNIT (nested inside Container.sub_matches),
             Container is reported as RUNTIME, and neither is reported TOOLING
-
-        This is the structural rule that replaces hand-listing "UnitVerdict"
-        by name: nesting is DERIVED from re-parsing each verdict-ish class's
-        own field type annotations, not asserted.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -815,9 +723,6 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
         When classify_verdict_altitudes is called
         Then it is reported as TOOLING, with its package recorded, and NOT
             reported as RUNTIME
-
-        Package-derived, mirroring R1_OUT_OF_SCOPE_PACKAGES's shape: one
-        hand-declared PACKAGE name with a printed reason, not a per-class list.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -855,27 +760,11 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
 
     def test_real_tree_has_exactly_one_runtime_verdict_type(self):
         """
-        Given the REAL toolguard/ tree, AFTER TOO-45 R1c collapsed
-            ResolvedDecision/BashResolution/FileResolution into RuntimeVerdict,
-            and AFTER TOO-45 R6-S3 unified tools.decision.Decision into
-            RuntimeVerdict (deleting Decision entirely)
+        Given the real toolguard/ tree
         When classify_verdict_altitudes is called
-        Then RuntimeVerdict is the ONLY runtime-altitude type, UnitVerdict is
-            unit-altitude (nested inside RuntimeVerdict.sub_matches only --
-            Decision no longer exists to nest it a second way), and the
-            TOOLING altitude bucket is empty (no verdict-ish class remains
-            under a tooling package)
-
-        This is the R1 gate's real-tree acceptance: exactly one RUNTIME
-        verdict type, with the other altitudes DERIVED and justified, not
-        hand-listed. The TOOLING bucket being empty is the R6-S3 predicate
-        (P3 in the R6 reassessment's replacement predicate: "exactly one
-        verdict type at the runtime altitude, with no tooling-altitude
-        alias") -- an empty bucket here means the RULE never fires on this
-        tree today, not that the rule is incapable of firing; see
-        test_class_under_tooling_package_is_tooling_not_runtime above for the
-        synthetic regression pin proving the classifier still detects a
-        tooling-altitude verdict class if one is ever reintroduced.
+        Then RuntimeVerdict is the only runtime-altitude type, UnitVerdict is
+            unit-altitude (nested inside RuntimeVerdict.sub_matches), and the
+            TOOLING altitude bucket is empty
         """
         alt = af.classify_verdict_altitudes()
         self.assertEqual([t["class"] for t in alt["runtime"]], ["RuntimeVerdict"])
@@ -889,21 +778,12 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
 
     def test_real_tree_reports_levelmatch_as_a_visible_level_altitude(self):
         """
-        Given the REAL toolguard/ tree, where LevelMatch (config_types.py)
-            carries (decision, reason, matched_pattern) -- only 1 aux field
-            under find_verdict_types' own 2-field threshold, so it never
-            appeared in find_verdict_types' output at all
+        Given the real toolguard/ tree, where LevelMatch (config_types.py)
+            carries only 1 aux field -- below find_verdict_types' own 2-field
+            threshold, so it never appears in find_verdict_types' output
         When classify_verdict_altitudes is called
-        Then LevelMatch is present, classified LEVEL (not silently absent,
-            and not miscounted as RUNTIME), and RuntimeVerdict remains the
-            only RUNTIME-altitude type
-
-        TOO-45 R1g regression pin: before this fix, LevelMatch was invisible
-        to this whole predicate -- not merely excluded with a reason, simply
-        never discovered, because it slipped under find_verdict_types' own
-        aux-field-count floor. This is what makes R1's "RUNTIME verdict
-        types (1)" PASS honest rather than a technicality: a real fourth
-        altitude now shows up somewhere in the report.
+        Then LevelMatch is present, classified LEVEL, and RuntimeVerdict
+            remains the only RUNTIME-altitude type
         """
         alt = af.classify_verdict_altitudes()
         level_by_class = {t["class"]: t for t in alt["level"]}
@@ -944,13 +824,7 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
         Given a synthetic RUNTIME-shaped class carrying a genuine
             provenance-typed field (decision, matched_rule, provenance)
         When classify_verdict_altitudes is called
-        Then it is classified RUNTIME and NEVER appears in the LEVEL bucket
-
-        Companion to test_class_with_no_provenance_field_is_level_not_runtime:
-        together they pin BOTH directions of the LEVEL/RUNTIME boundary this
-        predicate must get right -- a provenance-capable class must never be
-        swept into LEVEL just because it happens to also carry a
-        winning-pattern-shaped field.
+        Then it is classified RUNTIME and never appears in the LEVEL bucket
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -973,25 +847,12 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
         """
         Given two otherwise-identical synthetic classes shaped like
             LevelMatch, one spelling its winning-pattern field
-            "matched_pattern" (today's real spelling, 1 aux field under
-            find_verdict_types' own threshold) and the other spelling it
-            "matched_rule" (the ONE OTHER real aux-field name -- 2 aux
-            fields, which WOULD clear find_verdict_types' own threshold)
+            "matched_pattern" (today's real spelling) and the other
+            "matched_rule" (the one other real aux-field name, which would
+            clear find_verdict_types' own threshold)
         When classify_verdict_altitudes is called on each tree separately
-        Then BOTH are classified LEVEL, and NEITHER is classified RUNTIME --
-            proving the detector does not depend on which of the two
-            spellings was chosen
-
-        This is the TOO-45 R1g hard requirement: the whole point of this
-        predicate was gamed once already by a field-name choice
-        (matched_pattern was picked specifically so the OLD detector
-        wouldn't count it -- see LevelMatch's own docstring). A detector
-        that still depends on that same field's spelling would just move the
-        gaming surface, not close it. This test fails loudly if it ever
-        does: renaming to matched_rule pushes the class over
-        find_verdict_types' own 2-aux-field bar, so if LEVEL classification
-        were still keyed off that field, the renamed variant would flip to
-        RUNTIME here instead of staying LEVEL.
+        Then both are classified LEVEL, and neither is classified RUNTIME --
+            the detector does not depend on which spelling was chosen
         """
         with tempfile.TemporaryDirectory() as tmp_a:
             root_a = Path(tmp_a)
@@ -1032,13 +893,7 @@ class TestClassifyVerdictAltitudes(unittest.TestCase):
 
 
 class TestFindBareVerdictTuples(unittest.TestCase):
-    """
-    Tests for find_bare_verdict_tuples (TOO-45 R1b2): the half of R1's "one
-    verdict type end-to-end" problem find_verdict_types cannot see at all,
-    since that detector only ever inspects class definitions -- a verdict
-    that was never a class (a bare ``(decision, reason, ...)`` tuple
-    literal) is structurally invisible to it.
-    """
+    """Tests for find_bare_verdict_tuples: catches decision literals returned as bare tuples, invisible to find_verdict_types since that detector only inspects class definitions."""
 
     def test_flags_a_literal_decision_tuple_return(self):
         """
@@ -1068,8 +923,6 @@ class TestFindBareVerdictTuples(unittest.TestCase):
         Given a function returning a strict ("decision", reason) PAIR (arity 2)
         When find_bare_verdict_tuples is called
         Then it is NOT reported -- a strict pair must never be flagged
-            (Arnon's standing preference, quoted in the TOO-45 R1b2 brief:
-            "A strict pair is fine and must NOT be flagged")
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1090,13 +943,6 @@ class TestFindBareVerdictTuples(unittest.TestCase):
             real toolguard.log_writer._parse_discovery_line
         When find_bare_verdict_tuples is called
         Then it is NOT reported
-
-        This is the real false-positive risk the shape-only signal
-        (_is_verdict_shaped_annotation) cannot rule out by itself --
-        demonstrated against the actual function this scenario mirrors in
-        test_does_not_flag_parse_discovery_line_on_real_tree below. Nothing
-        here is a decision literal and nothing delegates to a known verdict
-        function, so neither of find_bare_verdict_tuples' two signals fires.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1125,13 +971,6 @@ class TestFindBareVerdictTuples(unittest.TestCase):
         Then all three are reported: _detailed with basis "literal
             decision-tuple return", _wrapper and _outer with basis
             "delegates to a known verdict function"
-
-        This is the regression pin for the propagation mechanism
-        toolguard.compound.check_compound_permission /
-        resolve_compound_permission / resolve_compound_permission_detailed
-        need on the real tree (TOO-45 R1b2) -- a single-pass "does this
-        function itself construct a decision literal" scan would only catch
-        the middle function of a two-hop wrapper chain, never the outer one.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1203,7 +1042,7 @@ class TestFindBareVerdictTuples(unittest.TestCase):
     def test_excludes_r1_out_of_scope_packages(self):
         """
         Given a bare verdict-tuple-returning function defined under
-            toolguard/parser/ (out of scope for TOO-45)
+            toolguard/parser/ (out of scope)
         When find_bare_verdict_tuples is called
         Then it is not reported
         """
@@ -1219,24 +1058,9 @@ class TestFindBareVerdictTuples(unittest.TestCase):
 
     def test_real_tree_no_longer_flags_any_compound_function_after_r1e(self):
         """
-        Given the REAL toolguard/ tree, AFTER TOO-45 R1e converted all 6
-            compound.py functions the R1 scoping trace named
-            (_resolve_leaf_detailed, _resolve_leaf, _combine_strictest,
-            check_compound_permission, resolve_compound_permission_detailed,
-            resolve_compound_permission) to return
-            UnitVerdict/RuntimeVerdict instead of a bare tuple
+        Given the real toolguard/ tree
         When find_bare_verdict_tuples is called
-        Then compound.py contributes ZERO hits
-
-        This test previously pinned the opposite (all 6 flagged, TOO-45
-        R1b2's acceptance criterion for the detector itself seeing them at
-        all) -- the same shape as
-        test_real_tree_no_longer_flags_the_three_hook_functions_after_r1d
-        above, one stage later: the detector correctly stops matching once
-        the literal tuple returns/delegation chain it was built to catch are
-        gone. The remaining 4 real-tree bare tuples (permissions.py's 2,
-        resolve.py's 2) are out of scope for this step -- see
-        TestComputePredicates.test_r1_gate_fails_on_the_real_tree_because_of_bare_verdict_tuples.
+        Then compound.py contributes zero hits
         """
         found = {
             h["function"]
@@ -1247,18 +1071,9 @@ class TestFindBareVerdictTuples(unittest.TestCase):
 
     def test_real_tree_no_longer_flags_the_three_hook_functions_after_r1d(self):
         """
-        Given the REAL toolguard/ tree, AFTER TOO-45 R1d made
-            _resolve_event/_handle_file_path_tool/_handle_command_tool return
-            a RuntimeVerdict object instead of a bare (decision, reason, ...)
-            tuple
+        Given the real toolguard/ tree
         When find_bare_verdict_tuples is called
-        Then hook.py contributes ZERO hits -- this test previously pinned the
-            opposite (all 3 flagged, TOO-45 R1b2), which was the defect R1d
-            was scoped to fix; the detector correctly stops matching once the
-            literal tuple returns/delegation are gone, which is the acceptance
-            signal for the bare-tuple count dropping 13 -> 10 (compound.py's
-            6, out of scope until R1e, plus permissions.py's 2 and resolve.py's
-            2, out of scope for a later stage, still remain)
+        Then hook.py contributes zero hits
         """
         found = {
             h["function"]
@@ -1269,14 +1084,12 @@ class TestFindBareVerdictTuples(unittest.TestCase):
 
     def test_does_not_flag_parse_discovery_line_on_real_tree(self):
         """
-        Given the REAL toolguard/ tree, which includes
+        Given the real toolguard/ tree, which includes
             toolguard.log_writer._parse_discovery_line (annotated
-            Optional[Tuple[str, str, List[str]]] -- verdict-SHAPED, but a
+            Optional[Tuple[str, str, List[str]]] -- verdict-shaped, but a
             (timestamp, project_root, levels) parse result, not a decision)
         When find_bare_verdict_tuples is called
-        Then it is NOT reported -- the real-tree pin for
-            test_does_not_flag_a_non_verdict_three_tuple's synthetic
-            scenario above
+        Then it is not reported
         """
         found = {h["function"] for h in af.find_bare_verdict_tuples()}
         self.assertNotIn("_parse_discovery_line", found)
@@ -1386,7 +1199,7 @@ class TestFindIterShims(unittest.TestCase):
     def test_excludes_r1_out_of_scope_packages(self):
         """
         Given a hand-written class defining __iter__ under toolguard/parser/
-            (out of scope for TOO-45, e.g. LeafCommand/UndecidableSegment)
+            (out of scope, e.g. LeafCommand/UndecidableSegment)
         When find_iter_shims is called
         Then it is not reported
         """
@@ -1418,10 +1231,6 @@ class TestFindIterShims(unittest.TestCase):
         When find_iter_shims is called
         Then behaviour is unchanged from before extra_caller_dirs existed --
             one caller found, tagged with area "production"
-
-        Pins backward compatibility: every pre-existing call site of this
-        function (and every other test in this class) must keep working
-        unmodified after TOO-45 R1b widened the caller scan.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1449,15 +1258,6 @@ class TestFindIterShims(unittest.TestCase):
         When find_iter_shims is called with that extra_caller_dirs entry
         Then the outside caller is found and tagged with the given area
             label, distinct from the "production" area
-
-        This is the regression pin for the fix: :func:`find_iter_shims`'s
-        ORIGINAL implementation only ever scanned toolguard_dir, so it
-        reported 0 callers for a shim whose only caller lives elsewhere --
-        demonstrated on the real tree by TOO-45 R1 scoping trace (deleting
-        both shims broke 10 tests the old instrument said had 0 callers).
-        This test fails against that original implementation (which has no
-        extra_caller_dirs parameter at all, and would raise a TypeError) and
-        passes against the widened one.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1503,25 +1303,11 @@ class TestFindIterShims(unittest.TestCase):
 
     def test_no_iter_shims_remain_on_real_tree_after_r1a(self):
         """
-        Given the REAL toolguard/ tree PLUS test/ passed as an extra
-            "test"-area caller directory, AFTER TOO-45 R1a deleted the
-            __iter__ tuple-compatibility shims on BashResolution and
-            FileResolution and converted their 8 test call sites to
-            attribute access
+        Given the real toolguard/ tree, with test/ passed as an extra
+            "test"-area caller directory
         When find_iter_shims is called
         Then neither BashResolution nor FileResolution is reported as an
-            __iter__ shim any more
-
-        Before R1a this test (then named
-        test_shims_with_callers_only_in_test_area_on_real_tree) asserted the
-        OPPOSITE on purpose: it demonstrated the real-tree finding the old
-        instrument (scan confined to toolguard_dir, no extra_caller_dirs at
-        all) could not see -- "0 callers" for both shims, when in fact
-        deleting them broke 10 tests (TOO-45 R1 scoping trace, demonstrated
-        by execution). Now that R1a has actually deleted both shims and their
-        callers, this is the regression guard: R1's shim list must stay
-        empty, per the R1a acceptance criterion for
-        `tools/architecture_fitness.py --predicates`.
+            __iter__ shim
         """
         shims = {
             s["class"]: s
@@ -1589,19 +1375,7 @@ class TestFindParallelArrays(unittest.TestCase):
 
 
 class TestFindIndexParallelAccess(unittest.TestCase):
-    """
-    Tests for find_index_parallel_access -- the TOO-45 R2-0 structural,
-    class/field-name-agnostic replacement gate for R2.
-
-    The nine fixtures below reproduce the nine synthetic gaming variants from
-    the TOO-45 R2 scoping trace (section 1's acceptance table), each pairing
-    a declaration-shape gaming move with a companion function that performs
-    the SAME index-parallel lookup the real code
-    (Configuration.entry_for_pattern / _hard_deny_additional_context) does,
-    adapted to that variant's shape. Variants 0-7 must all be DETECTED
-    (the old find_parallel_arrays caught only variant 0); variant 8, the
-    real fix, must NOT be.
-    """
+    """Tests for find_index_parallel_access: structural, class/field-name-agnostic detection of index-parallel-array lookups. Variants 0-7 are gaming moves that must still be detected; variant 8 is the real fix and must not be."""
 
     def test_variant_0_control_todays_shape_is_detected(self):
         """
@@ -1918,9 +1692,7 @@ class TestFindIndexParallelAccess(unittest.TestCase):
             with an unrelated field-name suffix
         When find_index_parallel_access is called on each
         Then both report exactly one, structurally equivalent, hit -- proving
-            a rename-only gaming move (TOO-45 R2's `sed`-only exploit) cannot
-            change the verdict, the TOO-45 R2-0 acceptance criterion
-            equivalent to R5a-0's .pyscn.toml-relabelling regression guard
+            a rename-only gaming move cannot change the verdict
         """
         with (
             tempfile.TemporaryDirectory() as tmp_a,
@@ -1954,13 +1726,7 @@ class TestFindIndexParallelAccess(unittest.TestCase):
 
     def test_real_tree_finds_no_instances_after_r2(self):
         """
-        Given the real toolguard/ tree AFTER TOO-45 R2 (the three instances
-            this test used to pin -- config.py's entry_for_pattern lookup,
-            resolve.py's _hard_deny_additional_context lookup, and config.py's
-            permission_layers takeover-filter zip -- were all fixed by making
-            the stripped-pattern tuples derived properties over RuleEntry
-            and searching entries directly instead of indexing a second,
-            parallel collection)
+        Given the real toolguard/ tree
         When find_index_parallel_access is called with no directory override
         Then it reports nothing -- there is no longer a second, independently
             populated sequence anywhere on this tree for an index or a zip to
@@ -2039,20 +1805,12 @@ class TestFindDriftGuards(unittest.TestCase):
 
     def test_real_tree_finds_no_drift_guards_after_r2(self):
         """
-        Given the real toolguard/ tree AFTER TOO-45 R2 (config.py's
-            entry_for_pattern and resolve.py's _hard_deny_additional_context
-            no longer index-parallel-lookup at all, so the length guards that
-            used to defend against their drift were deleted along with the
-            hazard they protected against -- misaligned state is now
-            unconstructible instead of merely guarded)
+        Given the real toolguard/ tree
         When find_drift_guards is called with no directory override
-        Then it reports nothing -- in particular NOT tools/consolidate.py's
-            duplicate-check shape or parser/command_extractor.py's unrelated
-            boundary check, both confirmed real-tree false positives an
-            unscoped scan would catch (see
-            test_guard_not_co_located_with_any_index_access_is_not_detected /
-            test_duplicate_check_shape_is_not_a_drift_guard above for the
-            synthetic reproductions of each)
+        Then it reports nothing -- in particular not
+            toolguard/tools/consolidate.py's duplicate-check shape or
+            parser/command_extractor.py's unrelated boundary check, both
+            confirmed real-tree false positives an unscoped scan would catch
         """
         self.assertEqual(af.find_drift_guards(), [])
 
@@ -2243,21 +2001,7 @@ class TestFindReasonParsingSites(unittest.TestCase):
 
 
 class TestFindPrivateImports(unittest.TestCase):
-    """
-    Tests for find_private_imports/scan_private_reaches (R6, TOO-45 R6-S0).
-
-    R6-S0 replaced a hand-maintained guarded-module set and a
-    ``tools/``/``scripts/``-only scan with one derived from ``.pyscn.toml``'s
-    real layer map (config+engine guarded, tooling+runtime checked), added
-    two more reach routes (module-attribute access, ``getattr`` with a
-    string literal) alongside the original ``from ... import``, and added
-    re-export following so a private name reached through a pass-through
-    module is still caught. See the TOO-45 R6 reassessment for the defects
-    this closes (Defect A: the post-D1a ``permission_resolution`` engine
-    module; Defect B: the runtime-layer exclusion pinned by the old version
-    of `test_ignores_private_import_outside_tools_and_scripts`, inverted
-    below; Defect C: the `takeover_audit`/`rule_entry` re-export artefact).
-    """
+    """Tests for find_private_imports/scan_private_reaches (R6): private-name reaches into config/engine-layer modules, derived from .pyscn.toml's layer map, via from-import, module-attribute access, getattr, and re-export following."""
 
     def test_flags_private_import_from_guarded_module(self):
         """
@@ -2308,13 +2052,8 @@ class TestFindPrivateImports(unittest.TestCase):
         """
         Given hook.py (runtime layer) importing a private name from toolguard.config
         When find_private_imports is called
-        Then the site IS reported -- INVERTED from the pre-S0 test of the same
-            shape (`test_ignores_private_import_outside_tools_and_scripts`),
-            which used hook.py as its own worked example of what NOT to catch.
-            R6's own stated extension requires runtime to consume the same
-            interface as tooling (TOO-45 R6 reassessment, Defect B); a
-            detector that still excludes hook.py contradicts the ticket it
-            claims to check.
+        Then the site is reported -- runtime modules are checked the same as
+            tooling modules
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2356,9 +2095,9 @@ class TestFindPrivateImports(unittest.TestCase):
         Given tools/x.py importing a private name from toolguard.parser
         When find_private_imports is called
         Then it is NOT reported -- toolguard/parser/ is explicitly out of
-            scope for the whole TOO-45 ticket (the same exclusion R1/R5
-            already apply), even though `parser` is listed under the engine
-            layer's packages in .pyscn.toml and would otherwise be guarded
+            scope (the same exclusion R1/R5 apply), even though `parser` is
+            listed under the engine layer's packages in .pyscn.toml and
+            would otherwise be guarded
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2448,11 +2187,9 @@ class TestFindPrivateImports(unittest.TestCase):
     def test_flags_private_import_from_permission_resolution(self):
         """
         Given tools/x.py importing a private name from
-            toolguard.permission_resolution (the engine module D1a created)
+            toolguard.permission_resolution
         When find_private_imports is called
-        Then the site IS reported -- this module was NOT in the pre-S0
-            hardcoded guarded set (it postdates D1a, which created it after
-            the set was written), so this is the regression test for Defect A
+        Then the site is reported
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2472,10 +2209,7 @@ class TestFindPrivateImports(unittest.TestCase):
             FOUNDATION module rather than the guarded one directly
         When find_private_imports is called
         Then the reach is still reported, attributed to the TRUE defining
-            module -- proves re-export following works generally, not only
-            for the one artefact named in the ticket (see
-            test_repointing_import_at_reexport_origin_does_not_clear_violation
-            below for that specific regression)
+            module -- proves re-export following works generally
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2497,19 +2231,13 @@ class TestFindPrivateImports(unittest.TestCase):
 
     def test_repointing_import_at_reexport_origin_does_not_clear_violation(self):
         """
-        Given the exact shape of the TOO-45 R6 reassessment's Defect C: a
-            config-layer module (config) that re-exports a private name
-            (_strip_tool_wrapper) actually defined in another guarded
-            config-layer module (rule_entry), plus a tooling module
-            (takeover_audit) importing the name from EITHER the re-exporting
-            module OR the true origin directly
+        Given a config-layer module (config) that re-exports a private name
+            (_strip_tool_wrapper) defined in another guarded config-layer
+            module (rule_entry), and a tooling module importing the name from
+            either the re-exporting module or the true origin directly
         When find_private_imports is called against each variant
-        Then BOTH variants report the violation -- on the pre-S0 detector,
-            re-pointing the import from `config` straight at `rule_entry`
-            (which was outside the hardcoded guarded set) took the count from
-            1 to 0 and R6 from FAIL to PASS with nothing about what tooling
-            could reach having changed at all (DEMONSTRATED in the
-            reassessment); that gaming move must no longer work
+        Then both variants report the violation, attributed to the true
+            defining module (rule_entry)
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2549,8 +2277,7 @@ class TestFindPrivateImports(unittest.TestCase):
             variable, not a string literal
         When scan_private_reaches is called
         Then it is NOT reported as a violation (cannot be verified
-            statically) but IS reported in `unresolvable`, per the ticket's
-            "report what it cannot check" requirement
+            statically) but IS reported in `unresolvable`
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2584,19 +2311,13 @@ class TestFindPrivateImports(unittest.TestCase):
 
 
 class TestR6GuardedAndCheckedModules(unittest.TestCase):
-    """
-    Tests for _r6_guarded_modules/_r6_checked_modules (TOO-45 R6-S0) against
-    the REAL .pyscn.toml -- these are the two derivations that replaced the
-    hand-maintained R6_GUARDED_MODULES set and the hardcoded tools/scripts
-    directory check.
-    """
+    """Tests for _r6_guarded_modules/_r6_checked_modules against the real .pyscn.toml layer map."""
 
     def test_guarded_modules_includes_post_d1a_engine_module(self):
         """
         Given the real .pyscn.toml architecture config
         When _r6_guarded_modules is called
-        Then permission_resolution (the engine module D1a created) is
-            included -- it was invisible to the old hardcoded set (Defect A)
+        Then permission_resolution, resolve, and rule_entry are included
         """
         arch = af.parse_architecture_config()
         guarded = af._r6_guarded_modules(arch)
@@ -2609,8 +2330,7 @@ class TestR6GuardedAndCheckedModules(unittest.TestCase):
         Given the real .pyscn.toml architecture config, where `parser` is
             listed under the engine layer's packages
         When _r6_guarded_modules is called
-        Then parser is explicitly excluded (out of scope for the whole
-            TOO-45 ticket, same as R1/R5's R1_OUT_OF_SCOPE_PACKAGES)
+        Then parser is excluded, per R1_OUT_OF_SCOPE_PACKAGES
         """
         arch = af.parse_architecture_config()
         guarded = af._r6_guarded_modules(arch)
@@ -2621,7 +2341,7 @@ class TestR6GuardedAndCheckedModules(unittest.TestCase):
         Given the real .pyscn.toml architecture config
         When _r6_checked_modules is called
         Then it includes both tooling (tools, scripts) and runtime (hook,
-            among others) modules -- the fix for Defect B
+            among others) modules
         """
         arch = af.parse_architecture_config()
         checked = af._r6_checked_modules(arch)
@@ -2643,11 +2363,7 @@ class TestR6GuardedAndCheckedModules(unittest.TestCase):
 
 
 class TestParseEntryPointModules(unittest.TestCase):
-    """
-    Tests for parse_entry_point_modules (TOO-45 R5a-0): derives R5's notion of
-    "entry point" from pyproject.toml's [project.scripts] block, replacing the
-    editable .pyscn.toml layer label.
-    """
+    """Tests for parse_entry_point_modules: derives an "entry point" from pyproject.toml's [project.scripts] block."""
 
     def test_strips_toolguard_prefix_and_function_suffix(self):
         """
@@ -2693,10 +2409,7 @@ class TestParseEntryPointModules(unittest.TestCase):
         """
         Given this repo's real pyproject.toml
         When parse_entry_point_modules is called
-        Then it returns exactly the 7 declared console-script modules (TOO-45
-            R5 scoping trace I-2's table), including the 3 tooling entry
-            points the old layer-based predicate missed entirely
-            (tools.installer, tools.maintenance, tools.security_audit)
+        Then it returns exactly the 7 declared console-script modules
         """
         modules = af.parse_entry_point_modules()
         self.assertEqual(
@@ -2716,7 +2429,7 @@ class TestParseEntryPointModules(unittest.TestCase):
 
 
 class TestFindNonLeafEntryPoints(unittest.TestCase):
-    """Tests for find_non_leaf_entry_points (R5, TOO-45 R5a-0)."""
+    """Tests for find_non_leaf_entry_points (R5)."""
 
     def test_flags_declared_entry_point_module_imported_by_another(self):
         """
@@ -2779,13 +2492,11 @@ class TestFindNonLeafEntryPoints(unittest.TestCase):
         """
         Given hook.py (a declared entry point) importing log_writer.py (a
             plain service module, NOT itself a declared entry point and NOT
-            under scripts/) -- the ideal picture's "runtime = ingest, record,
-            externalise" shape (TOO-45 R5 scoping trace defect I-3)
+            under scripts/)
         When find_non_leaf_entry_points is called
-        Then log_writer is NOT reported as a non-leaf -- only a module that is
-            ITSELF an entry point (or a scripts/ package member) is judged;
-            an entry point importing a plain service module is not a
-            violation of anything
+        Then log_writer is NOT reported as a non-leaf -- only a module that
+            is itself an entry point (or a scripts/ package member) is
+            judged
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2799,17 +2510,15 @@ class TestFindNonLeafEntryPoints(unittest.TestCase):
 
     def test_relabeling_the_pyscn_toml_layer_map_has_no_effect(self):
         """
-        Given the exact gaming move the TOO-45 R5 scoping trace demonstrated
-            against the OLD predicate -- moving a module's .pyscn.toml layer
-            label around -- reproduced here as two DIFFERENT
-            ArchitectureConfig objects (one with hook in "runtime", one with
-            hook relabeled into a different layer entirely)
-        When find_non_leaf_entry_points is called with the SAME graph and
-            entry_point_modules against both configs (in fact: it is never
-            even given the ArchitectureConfig at all)
+        Given a module's .pyscn.toml layer label moved from "runtime" into a
+            different layer entirely, reproduced here as two DIFFERENT
+            ArchitectureConfig objects
+        When find_non_leaf_entry_points is called with the same graph and
+            entry_point_modules against both configs (it is never even given
+            the ArchitectureConfig at all)
         Then the result is byte-identical either way -- .pyscn.toml content
-            cannot influence this predicate any more, because the function no
-            longer accepts an ArchitectureConfig parameter at all
+            cannot influence this predicate, because the function does not
+            accept an ArchitectureConfig parameter
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2821,29 +2530,19 @@ class TestFindNonLeafEntryPoints(unittest.TestCase):
                 inspect.signature(af.find_non_leaf_entry_points).parameters,
             )
             before = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
-            # The "relabeling" -- had this function still accepted an
-            # ArchitectureConfig, this is the shape of the gaming edit
-            # (moving hook out of the runtime layer). Parsed here purely to
-            # show it exists and could be built; it is never passed below.
             gamed_toml = root / "gamed.pyscn.toml"
             gamed_toml.write_text(
                 "[architecture]\nenabled = true\n\n"
                 '[[architecture.layers]]\nname = "foundation"\npackages = ["hook"]\n',
                 encoding="utf-8",
             )
-            af.parse_architecture_config(gamed_toml)  # must not raise; unused below
+            af.parse_architecture_config(gamed_toml)
             after = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
             self.assertEqual(before, after)
 
 
 class TestFindEnrichmentFootprint(unittest.TestCase):
-    """
-    Tests for find_enrichment_footprint (TOO-45 D1a review debt item J: the
-    old raw-substring scan counted a docstring mention exactly like a real
-    call, over-reporting; this now tokenizes and separates NAME-token
-    references -- real code coupling -- from STRING/COMMENT-token mentions
-    -- prose only).
-    """
+    """Tests for find_enrichment_footprint: separates NAME-token references (real code coupling) from STRING/COMMENT-token mentions (prose only)."""
 
     def test_finds_files_with_a_real_identifier_reference_as_coupled(self):
         """
@@ -2867,14 +2566,7 @@ class TestFindEnrichmentFootprint(unittest.TestCase):
             there is no Python NAME token spelled 'additionalContext'
             anywhere in real production code, only the string form)
         When find_enrichment_footprint is called
-        Then that file is reported in the prose_only bucket, not coupled --
-            this is the over-reporting case item J exists to fix: the old
-            raw-substring scan would have counted this file as coupled
-
-        Regression note: this file used to be asserted as COUPLED, matching
-        the OLD (over-reporting) implementation. This assertion changed
-        deliberately as part of item J's authorized fix -- the ticket's own
-        text: "Fix it to count identifier-level references only".
+        Then that file is reported in the prose_only bucket, not coupled
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2890,7 +2582,7 @@ class TestFindEnrichmentFootprint(unittest.TestCase):
             reference anywhere)
         When find_enrichment_footprint is called
         Then it is reported in the prose_only bucket and NOT in the coupled
-            bucket -- the exact synthetic case item J's brief calls for
+            bucket
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2923,13 +2615,7 @@ class TestFindEnrichmentFootprint(unittest.TestCase):
             another with ONE
         When find_enrichment_footprint is called
         Then occurrences_by_file reports the exact per-file count and
-            total_occurrences reports their sum -- TOO-45 R1b item C: the
-            coupled-file COUNT alone cannot show a step that removes most
-            threading references but not the last file-level mention (R1 is
-            predicted to move the file count from 9 to 8 at best, while
-            removing ~44 of 59 identifier-level references), so this adds an
-            occurrence count alongside the existing file-level buckets
-            without changing what "coupled"/"prose_only" mean.
+            total_occurrences reports their sum
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2959,11 +2645,6 @@ class TestFindEnrichmentFootprint(unittest.TestCase):
             footprint = af.find_enrichment_footprint(root)
             self.assertNotIn("b", footprint.occurrences_by_file)
             self.assertEqual(footprint.total_occurrences, 0)
-
-
-# =============================================================================
-# --guard: pure helpers
-# =============================================================================
 
 
 class TestGuardPureHelpers(unittest.TestCase):
@@ -3044,16 +2725,8 @@ class TestGuardPureHelpers(unittest.TestCase):
         self.assertFalse(af.GuardReport(failures=["x"]).ok)
 
 
-# =============================================================================
-# --guard: integration against a tiny synthetic git repo
-# =============================================================================
-
-
 class TestGuardIntegration(unittest.TestCase):
-    """
-    Integration tests for run_guard against a real (tiny, synthetic) git repo,
-    since the guard's job is fundamentally "what changed since a git ref".
-    """
+    """Integration tests for run_guard against a real, tiny synthetic git repo."""
 
     def _make_repo(self, tmp: Path) -> str:
         """Build a minimal repo with one test file and a bare pyproject.toml; return the base SHA."""
@@ -3180,13 +2853,7 @@ class TestGuardIntegration(unittest.TestCase):
 
 
 class TestGuardCanaries(unittest.TestCase):
-    """
-    Tests for the guard's canary check (are the loop's own permission rules
-    still loaded?), using a small STUBBED hook binary throughout -- never the
-    real installed toolguard binary or this machine's real permission config,
-    so these tests stay correct on any machine and after the TOO-45
-    <TEMPORARY> fences are eventually removed.
-    """
+    """Tests for the guard's canary check, using a stubbed hook binary so results don't depend on this machine's real permission config."""
 
     def test_all_canaries_pass_against_a_matching_stub(self):
         """
@@ -3385,11 +3052,6 @@ class TestGuardCanaries(unittest.TestCase):
             self.assertIn("canary mismatch", report.failures[0])
 
 
-# =============================================================================
-# --metrics: pure helpers and a tiny synthetic-repo integration
-# =============================================================================
-
-
 class TestMetricsPureHelpers(unittest.TestCase):
     """Tests for the pure helper functions behind --metrics."""
 
@@ -3418,7 +3080,6 @@ class TestMetricsPureHelpers(unittest.TestCase):
         Then it returns a value present in the list, at the expected rank
         """
         values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        # nearest-rank via round(pct/100 * (n-1)): round(0.9*9) = index 8 -> value 9.
         self.assertEqual(af._percentile(values, 90), 9.0)
         self.assertEqual(af._percentile([], 90), 0.0)
 
@@ -3503,27 +3164,15 @@ class TestMetricsIntegration(unittest.TestCase):
             self.assertIsNone(mc)
 
 
-# =============================================================================
-# --predicates assembly
-# =============================================================================
-
-
 class TestComputePredicates(unittest.TestCase):
-    """Tests for compute_predicates' assembly against a small synthetic tree."""
+    """Tests for compute_predicates' assembly against the real tree."""
 
     def test_assembles_all_predicate_keys(self):
         """
         Given the real tree
-        When compute_predicates is called against it (its detectors read the
-            real toolguard/, pyproject.toml and, for R1 only via
-            classify_verdict_altitudes, no layer map at all -- R5 as of
-            TOO-45 R5a-0 no longer reads .pyscn.toml either)
+        When compute_predicates is called
         Then every documented predicate key and the enrichment footprint are present
         """
-        # compute_predicates() takes no toolguard_dir override for R1/R2/R3/R6's
-        # scans, so exercise it against the real tree here rather than trying
-        # to fabricate a matching synthetic pair -- this is one of the "couple
-        # of smoke tests" the brief allows.
         predicates = af.compute_predicates()
         for key in (
             "R1",
@@ -3540,9 +3189,6 @@ class TestComputePredicates(unittest.TestCase):
         self.assertIn("bare_verdict_tuples", predicates["R1"])
         self.assertIn("out_of_scope_excluded", predicates["R5"])
         self.assertIn("entry_point_modules", predicates["R5"])
-        # TOO-45 R6-S0: the derived scope and "cannot check" fields must be
-        # present and populated -- an exclusion the operator cannot see is
-        # indistinguishable from a bug (module docstring).
         r6 = predicates["R6"]
         for key in (
             "sites",
@@ -3580,8 +3226,7 @@ class TestComputePredicates(unittest.TestCase):
     def test_r5_out_of_scope_excludes_the_parser_package(self):
         """
         Given the real tree, which has a genuine import cycle entirely inside
-            toolguard/parser/ (parser.command_extractor <-> parser.multiline,
-            out of scope for TOO-45 per the execution plan)
+            toolguard/parser/ (parser.command_extractor <-> parser.multiline)
         When compute_predicates is called
         Then R5's out_of_scope_excluded names the parser modules explicitly
             (mirroring R1's own out_of_scope_excluded), and R5's reported
@@ -3610,18 +3255,17 @@ class TestComputePredicates(unittest.TestCase):
 
     def test_relabeling_pyscn_toml_layer_map_does_not_change_r5_verdict(self):
         """
-        Given the real tree's R5 result under the REAL .pyscn.toml
+        Given the real tree's R5 result under the real .pyscn.toml
         When .pyscn.toml is replaced (via PYSCN_TOML, never touching the real
-            file on disk) with the EXACT gaming move the TOO-45 R5 scoping
-            trace demonstrated against the OLD predicate -- moving
+            file on disk) with a version moving
             error_log/session_warnings/subagent/update_check out of the
-            "runtime" layer into "foundation", and log_writer into "config" --
+            "runtime" layer into "foundation", and log_writer into "config",
             and compute_predicates is called again
-        Then R5's non_leaf_entry_points, cycles, and pass verdict are BYTE-
-            IDENTICAL to the un-gamed run: relabeling .pyscn.toml can no
-            longer move R5's verdict at all, because compute_predicates no
-            longer reads .pyscn.toml for R5 in the first place (entry-point
-            status now comes from pyproject.toml, not from any layer label)
+        Then R5's non_leaf_entry_points, cycles, and pass verdict are
+            byte-identical to the un-gamed run -- relabeling .pyscn.toml
+            cannot move R5's verdict, because compute_predicates does not
+            read .pyscn.toml for R5 (entry-point status comes from
+            pyproject.toml, not from any layer label)
         """
         baseline = af.compute_predicates()["R5"]
         real_toml_text = af.PYSCN_TOML.read_text(encoding="utf-8")
@@ -3651,8 +3295,6 @@ class TestComputePredicates(unittest.TestCase):
                 '"permission_migration", "log_writer"]',
             )
         )
-        # Sanity: the replacements above must actually have matched something,
-        # or this test would silently pass by comparing the baseline to itself.
         self.assertNotEqual(gamed_text, real_toml_text)
         with tempfile.TemporaryDirectory() as tmp:
             gamed_path = Path(tmp) / "gamed.pyscn.toml"
@@ -3670,27 +3312,15 @@ class TestComputePredicates(unittest.TestCase):
         Given the module-level constants
         When compared
         Then R5_OUT_OF_SCOPE_PACKAGES is the same tuple as
-            R1_OUT_OF_SCOPE_PACKAGES -- both express "packages out of scope
-            for the whole TOO-45 ticket", not a predicate-specific list
+            R1_OUT_OF_SCOPE_PACKAGES, not a predicate-specific list
         """
         self.assertEqual(af.R5_OUT_OF_SCOPE_PACKAGES, af.R1_OUT_OF_SCOPE_PACKAGES)
 
     def test_r1_shims_list_is_empty_after_r1a(self):
         """
-        Given the real tree, AFTER TOO-45 R1a deleted the __iter__
-            tuple-compatibility shims on BashResolution and FileResolution
+        Given the real tree
         When compute_predicates is called
         Then R1's iter_shims list is empty
-
-        Before R1a this test (then named
-        test_r1_shims_are_scanned_for_test_and_tools_callers) asserted that
-        at least one shim was present with a nonzero "test" caller count --
-        TOO-45 R1b item B, demonstrating compute_predicates correctly wires
-        test/ and tools/ into the caller scan. That demonstration's premise
-        (a shim existing on the real tree) is now gone by design: R1a is the
-        step whose whole point is to make this list empty, and this is the
-        acceptance criterion for `tools/architecture_fitness.py --predicates`
-        from the R1a brief.
         """
         predicates = af.compute_predicates()
         shims = predicates["R1"]["iter_shims"]
@@ -3713,41 +3343,20 @@ class TestComputePredicates(unittest.TestCase):
 
     def test_r1_gate_passes_on_the_real_tree_after_r1f_closes_the_last_four(self):
         """
-        Given the real tree, AFTER TOO-45 R1f converted the last 4 bare
-            verdict-tuple returns -- permissions.py's check_hard_deny and
-            decide_command_at_level_detailed, resolve.py's
-            _check_file_path_hard_deny and _decide_file_path_at_level_detailed
-            -- to LevelMatch (a frozen dataclass, not a class the R1 verdict-
-            type detector counts -- see LevelMatch's own docstring for why)
+        Given the real tree, where the former bare verdict-tuple returns in
+            permissions.py and resolve.py now return LevelMatch (a frozen
+            dataclass the R1 verdict-type detector does not count -- see
+            LevelMatch's own docstring for why)
         When compute_predicates is called
-        Then R1's "bare_verdict_tuples" key is EMPTY and R1's own "pass" is
-            True
-
-        This test previously pinned the opposite (4 remaining hits in
-        permissions.py/resolve.py, "pass" False) -- the R1e acceptance
-        criterion for the gate not collapsing into a false PASS while real
-        bare tuples stood elsewhere. R1e closed compound.py's 6; this is the
-        R1f acceptance criterion for the gate finally, honestly, passing:
-        exactly one RUNTIME verdict type (RuntimeVerdict), zero __iter__
-        shims, and zero bare verdict tuples anywhere on the real tree.
+        Then R1's "bare_verdict_tuples" key is empty and R1's "pass" is True
         """
         predicates = af.compute_predicates()
         self.assertEqual(predicates["R1"]["bare_verdict_tuples"], [])
         self.assertTrue(predicates["R1"]["pass"])
 
 
-# =============================================================================
-# Smoke tests against the real repo/tree
-# =============================================================================
-
-
 class TestShippedCodeDoesNotImportDevTools(unittest.TestCase):
-    """
-    Guards the naming hazard the TOO-45 plan calls out explicitly (P2): repo-root
-    ``tools/`` (dev-only, not shipped) and ``toolguard/tools/`` (operator tooling,
-    shipped) share a name but not a shipping status. No module under the shipped
-    ``toolguard/`` package may import the bare ``tools`` package.
-    """
+    """Guards a naming hazard: repo-root ``tools/`` (dev-only) and ``toolguard/tools/`` (shipped) share a name but not a shipping status, and no shipped module may import the bare ``tools`` package."""
 
     def test_no_toolguard_module_imports_repo_root_tools(self):
         """
@@ -3775,35 +3384,15 @@ class TestShippedCodeDoesNotImportDevTools(unittest.TestCase):
 
 
 class TestSmokeAgainstRealTree(unittest.TestCase):
-    """
-    A handful of smoke tests against the real toolguard tree and this repo's own
-    git history. These assert only that each mode runs without crashing and
-    produces the documented shape -- NOT specific counts, which would break on
-    every refactor step (the whole reason this tool exists).
-    """
+    """Smoke tests against the real toolguard tree and this repo's own git history: each mode must run without crashing and produce the documented shape, not specific counts."""
 
     def test_check_layers_runs_on_real_tree(self):
         """
         Given the real toolguard/ tree and the real .pyscn.toml
         When check_layers is called
-        Then it returns a LayerReport without raising, completeness holds
-             (report.unmapped == []), AND direction holds (report.ok is True
-             -- ratcheted here, TOO-45 R6-S2) -- completeness was ratcheted
-             from a smoke-only assertion earlier (TOO-45 D1a review debt item
-             C) after removing `permission_resolution` from .pyscn.toml's
-             engine-layer packages list left the 2,321-test suite green; only
-             a manual --layers run reported UNMAPPED (1). Direction could not
-             be ratcheted until now because of 1 pre-existing DIRECTION
-             violation (hook -> tools.decision, an upward runtime->tooling
-             import) -- TOO-45 R6-S2 cleared it by moving decide() into the
-             new `api` layer both `hook` (runtime) and `tools.decision`
-             (tooling) are allowed to import from downward, so report.ok is
-             genuinely True now, not merely un-asserted. (TOO-45 R5b removed
-             auto_migrate -> scripts.migrate_permissions by moving the
-             migration logic both modules needed into
-             toolguard.permission_migration; TOO-45 R5d removed
-             config_divergence -> error_log by having config_divergence
-             return the warning text instead of logging it directly.)
+        Then it returns a LayerReport without raising; module_layer is
+            populated, unmapped is empty (layer-map completeness holds), and
+            ok is True (no completeness or direction violations)
         """
         report = af.check_layers()
         self.assertIsInstance(report.module_layer, dict)
@@ -3814,21 +3403,11 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
     def test_api_layer_is_seen_and_populated_in_real_tree_layer_map(self):
         """
         Given the real toolguard/ tree and the real .pyscn.toml, which
-            declares a dedicated "api" layer (TOO-45 R6-S2) directly above
-            "engine"
+            declares a dedicated "api" layer directly above "engine"
         When check_layers is called
         Then toolguard/api.py maps to the "api" layer specifically -- not
              unmapped, not multiply-mapped, and not silently absorbed into a
              neighbouring layer
-
-        This is the completeness caveat the R6-S2 task spec calls out
-        explicitly: pyscn's own compliance score stays plausible even when a
-        module maps to no layer at all, so a module that is declared but
-        never actually reached by the completeness scan would be invisible
-        exactly the way the docstring at the top of this file (`--layers`
-        section) warns about. Pinning the concrete module -> layer mapping,
-        not just report.unmapped == [], is what makes that failure mode
-        detectable here.
         """
         report = af.check_layers()
         self.assertEqual(report.module_layer.get("api"), "api")
@@ -3840,18 +3419,7 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         Given the real .pyscn.toml's declared architecture rules
         When the "api" layer's allow-list is read
         Then it permits "api", "engine", "config", "observability" and
-             "foundation" only -- NOT "runtime", "tooling", or "support"
-
-        Pins the direction of the new layer concretely (not just "today's
-        real tree happens to have zero violations"): if a future change
-        pointed `toolguard/api.py` at, say, `toolguard.hook`, this test fails
-        even before `--layers` would notice a real edge, because the RULE
-        itself would have to be loosened first to permit it.
-
-        "observability" joined the allow-list in TOO-45 when logging, error
-        reporting and session warnings moved BELOW "config" -- see the layer's
-        own note in .pyscn.toml. The negative assertions below carry this
-        test's real intent and are unchanged; only the downward set grew.
+             "foundation" only -- not "runtime", "tooling", or "support"
         """
         arch = af.parse_architecture_config()
         allowed = set(arch.allow_for("api"))
@@ -3876,7 +3444,9 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         """
         Given this repo's real git history
         When compute_metrics is called
-        Then it returns a dict with every documented metric key, no crash
+        Then it returns a dict with every documented metric key, no crash,
+            and the real bash_parser.py (generated) is named in
+            generated_files_excluded
         """
         metrics = af.compute_metrics()
         for key in (
@@ -3893,10 +3463,6 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
             "fan_in_caveat",
         ):
             self.assertIn(key, metrics)
-        # The real bash_parser.py must be named, not silently dropped -- a
-        # tool that could exclude generated code without saying so would
-        # reproduce exactly the silent-degradation failure mode this feature
-        # exists to prevent.
         self.assertIn(
             "toolguard/parser/bash_parser.py", metrics["generated_files_excluded"]
         )
@@ -3913,11 +3479,10 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
     def test_guard_canaries_only_runs_on_real_repo(self):
         """
         Given this machine's real installed toolguard binary (if any) and real
-            permission config -- the one thing the canary check is FOR
+            permission config
         When run_guard is called with only_canaries=True and no stub binary
         Then it returns a GuardReport without raising, and either evaluated
-            every real canary case or skipped cleanly with a stated reason --
-            NOT specific verdicts, which change if the TEMPORARY fences do
+            every real canary case or skipped cleanly with a stated reason
         """
         report = af.run_guard(only_canaries=True)
         if report.canary_results:

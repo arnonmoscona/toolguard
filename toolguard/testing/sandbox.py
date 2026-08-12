@@ -1,41 +1,31 @@
 """
 An isolated, throwaway toolguard project for behavioural experiments.
 
-Why this exists
----------------
-Answering "what would toolguard decide for this command under this config?" used
-to be done by editing live configuration and watching what happened. That is
-privilege escalation (toolguard governs the agent, so the agent editing
-toolguard's config is the agent editing its own permissions), and because these
-files are typically not under version control, a mistake is unrecoverable. It
-happened twice in TOO-19; see the task memory
-``Safe Experimentation Mechanism - Design Proposal``.
-
-This module makes the safe path the easy path::
+Answering "what would toolguard decide for this command under this config?" by
+editing live configuration is privilege escalation -- toolguard governs the
+agent, so the agent editing toolguard's config is the agent editing its own
+permissions -- and those files are typically not under version control, so a
+mistake is unrecoverable. This module makes the safe path the easy path::
 
     with experiment(project_config='[permissions]\\nallow = ["Bash(ls *)"]') as s:
         print(s.evaluate("Bash", "ls -la").decision)      # 'allow'
-        print(s.evaluate("Bash", "rm -rf /").decision)    # 'deny' or 'ask'
+        print(s.evaluate("Bash", "rm -rf /").decision)    # 'ask'
 
 Isolation is STRUCTURAL, not by discipline
 ------------------------------------------
-Four anchors decide what configuration toolguard sees, and all four are
-redirected inward for the lifetime of the context:
+Three config-discovery anchors are redirected inward for the lifetime of the
+context, and a tripwire catches whatever gets past them:
 
 - ``Path.home()`` is patched to the sandbox's fake home. Both candidate rules
-  directories (``~/.toolguard/rules`` and ``~/.config/toolguard/rules``) derive
-  from it, so both are isolated by this single patch -- but see
-  ``XDG_CONFIG_HOME`` below, which can redirect the second one back out.
+  directories derive from it -- but ``~/.config/toolguard/rules`` follows
+  ``XDG_CONFIG_HOME`` whenever that is set, so that variable is pointed INSIDE
+  the sandbox rather than merely unset.
 - ``toolguard.config.find_project_root`` is patched to the sandbox project.
-- The environment is CLEARED and rebuilt. ``CLAUDE_SETTINGS_PATH``,
-  ``TOOLGUARD_PROJECT_ROOT`` and ``CLAUDE_PROJECT_DIR`` are removed (an exported
-  ``CLAUDE_SETTINGS_PATH`` already caused a phantom "descendant config governs
-  parent" bug in TOO-15), and ``XDG_CONFIG_HOME`` is pointed INSIDE the sandbox
-  rather than merely unset.
-- A **tripwire** raises :class:`SandboxEscapeError` on any filesystem write whose
-  resolved path falls outside the sandbox root. An experiment that *would* touch
-  live configuration fails loudly instead of succeeding quietly. This is what
-  makes the sandbox safe by construction rather than safe by inspection.
+- The environment is CLEARED and rebuilt, so anything not rebuilt is absent
+  rather than overridden (see :data:`SCRUBBED_ENV_VARS`).
+- The tripwire raises :class:`SandboxEscapeError` on any in-process write
+  resolving outside the sandbox root, so an experiment that *would* touch live
+  configuration fails loudly instead of succeeding quietly.
 
 Promotion rule
 --------------
@@ -72,14 +62,14 @@ class SandboxEscapeError(AssertionError):
     """
     Raised when sandboxed code attempts a filesystem write outside the sandbox.
 
-    Deliberately an :class:`AssertionError` subclass: an escape is a failed
-    safety invariant, not an ordinary runtime error, and it should never be
-    swallowed by a broad ``except Exception`` in code under test.
+    An :class:`AssertionError` subclass, so a broad ``except Exception`` in the
+    code under test will swallow it.
     """
 
 
-#: Environment variables that must never leak INTO a sandbox. Each one can
-#: redirect toolguard's config discovery back out at the real filesystem.
+#: Environment variables a sandbox must not inherit. Declarative only: the
+#: scrubbing is the wholesale environment clear in :func:`experiment`, which
+#: does not read this tuple.
 SCRUBBED_ENV_VARS = (
     "CLAUDE_SETTINGS_PATH",
     "TOOLGUARD_PROJECT_ROOT",
@@ -87,8 +77,7 @@ SCRUBBED_ENV_VARS = (
     "XDG_CONFIG_HOME",
 )
 
-#: Variables preserved from the real environment because clearing them breaks
-#: subprocess execution itself rather than affecting config discovery.
+#: The only real-environment variables carried into a sandbox.
 _PRESERVED_ENV_VARS = ("PATH", "LANG", "LC_ALL", "TZ", "SYSTEMROOT")
 
 _WRITE_MODE_CHARS = frozenset("wxa+")
@@ -98,9 +87,9 @@ def _is_benign_write(path_str: str) -> bool:
     """
     Return True for writes the tripwire deliberately ignores.
 
-    Only bytecode caching qualifies: importing a module inside the context can
-    write ``__pycache__`` entries next to the source, which is unrelated to
-    configuration and would otherwise make the tripwire unusable.
+    Only bytecode caching: importing a module inside the context can write
+    ``__pycache__`` entries next to the source, which would otherwise make the
+    tripwire unusable.
 
     Args:
         path_str: The write target, as a string.
@@ -118,12 +107,11 @@ class _Tripwire:
     The guarded surface is deliberately broad -- ``pathlib``, ``os``, ``shutil``
     and the two ``open`` bindings -- because a tripwire that covers only the
     obvious call is a tripwire that quietly fails on the one call that mattered.
-    ``pathlib.Path.write_text`` reaches ``io.open`` rather than
-    ``builtins.open``, so both names are patched.
+    ``pathlib`` reaches ``io.open`` rather than ``builtins.open``, so both names
+    are patched. Reads are never checked.
 
-    In-process only. Writes performed by a SUBPROCESS cannot be observed this
-    way; :meth:`Sandbox.run_hook` isolates those by environment instead (see its
-    docstring).
+    In-process only: a SUBPROCESS's writes cannot be observed this way, which is
+    why :meth:`Sandbox.run_hook` isolates by environment instead.
     """
 
     def __init__(self, root: Path):
@@ -168,15 +156,7 @@ class _Tripwire:
         )
 
     def _guarded_open(self, real_open):
-        """
-        Wrap an ``open``-like callable so write modes are location-checked.
-
-        Args:
-            real_open: The original callable (``builtins.open`` or ``io.open``).
-
-        Returns:
-            A callable with the same signature that checks write-mode calls.
-        """
+        """Wrap an ``open``-like callable so write modes are location-checked."""
 
         def guarded(file, mode="r", *args, **kwargs):
             if _WRITE_MODE_CHARS & set(mode):
@@ -186,16 +166,7 @@ class _Tripwire:
         return guarded
 
     def _guarded_unary(self, real_func, name: str):
-        """
-        Wrap a function whose FIRST positional argument is the write target.
-
-        Args:
-            real_func: The original callable.
-            name: Operation name used in the escape message.
-
-        Returns:
-            A callable that checks its first argument, then delegates.
-        """
+        """Wrap a function whose FIRST positional argument is the write target."""
 
         def guarded(target, *args, **kwargs):
             self._check(target, name)
@@ -207,16 +178,8 @@ class _Tripwire:
         """
         Wrap a function whose SECOND positional argument is the destination.
 
-        Covers ``os.replace``/``os.rename`` and the ``shutil`` copy/move family,
-        where the source may legitimately be outside the sandbox (reading is
-        always allowed) but the destination must not be.
-
-        Args:
-            real_func: The original callable.
-            name: Operation name used in the escape message.
-
-        Returns:
-            A callable that checks its destination argument, then delegates.
+        For the copy/move/rename family, where the source may legitimately be
+        outside the sandbox but the destination must not be.
         """
 
         def guarded(src, dst, *args, **kwargs):
@@ -296,22 +259,22 @@ class _Tripwire:
 
 class Sandbox:
     """
-    A fully isolated fake project for evaluating toolguard configuration.
+    An isolated fake project for evaluating toolguard configuration.
 
-    Do not construct directly -- use :func:`experiment`, which manages setup and
-    teardown.
+    Do not construct directly -- use :func:`experiment`, which manages setup,
+    teardown and the tripwire.
 
     Attributes:
         root: The sandbox root directory (a temporary directory).
         home: The fake ``$HOME``; ``Path.home()`` resolves here.
         project: The fake project root, carrying a ``.git`` marker.
-        log_dir: Where toolguard writes decision logs inside the sandbox.
+        log_dir: Where toolguard's logs land inside the sandbox.
     """
 
     def __init__(self, root: Path):
         """
         Args:
-            root: An existing empty directory to build the sandbox inside.
+            root: A directory to build the sandbox layout inside.
         """
         self.root = root
         self.home = root / "home"
@@ -406,14 +369,8 @@ class Sandbox:
         """
         Map a level name to its config path.
 
-        Args:
-            level: ``'project'`` or ``'user'``.
-
-        Returns:
-            The corresponding path.
-
         Raises:
-            ValueError: If the level is unknown.
+            ValueError: If *level* is not ``'project'`` or ``'user'``.
         """
         if level == "project":
             return self.project_config_path
@@ -426,11 +383,10 @@ class Sandbox:
         """
         Drop toolguard's parsed-config cache.
 
-        ``toolguard.config._parse_config_file_cached`` is an unbounded
-        ``lru_cache`` keyed by path and mtime. Sandbox files are written and
-        rewritten rapidly inside one process, so a stale entry would silently
-        make an experiment evaluate the PREVIOUS config -- the single most
-        misleading failure this module could have.
+        That cache is keyed on the file's mtime and size. Sandbox configs are
+        rewritten rapidly within one process, so a rewrite landing in the same
+        mtime tick at the same size would hit a stale entry and silently make
+        an experiment evaluate the PREVIOUS config.
         """
         toolguard_config._parse_config_file_cached.cache_clear()
 
@@ -448,15 +404,16 @@ class Sandbox:
 
     def evaluate(self, tool: str, target: str, *, extended_syntax: bool = True):
         """
-        Resolve one permission decision through the REAL decision path.
+        Resolve one permission decision through :func:`toolguard.api.decide`.
 
-        Delegates to :func:`toolguard.api.decide`, the same
-        side-effect-free primitive that backs the live hook and ``--eval``, so a
-        verdict here matches the hook's by construction rather than by
-        re-implementation.
+        ``decide`` is the resolver the live hook and ``--eval`` also use, but it
+        sits BELOW the hook's own gates: it does not consult ``governed_tools``
+        and does not pull the target out of a tool-input payload. Evaluating an
+        ungoverned tool here therefore returns the rules' verdict, where the
+        hook would allow the call untouched. Use :meth:`run_hook` when that
+        difference matters.
 
-        Because ``decide`` is side-effect-free it writes no log; use
-        :meth:`run_hook` when the log output itself is what you need.
+        ``decide`` is side-effect-free and writes no log.
 
         Args:
             tool: ``'Bash'``, ``'Read'``, ``'Write'``, or ``'Edit'``.
@@ -470,27 +427,26 @@ class Sandbox:
 
     def run_hook(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         """
-        Run the real hook binary end-to-end in a subprocess.
+        Run the real hook end-to-end in a subprocess.
 
-        Higher fidelity than :meth:`evaluate` (it exercises argument parsing,
-        stdin handling, logging and JSON output), at the cost of process startup.
+        Higher fidelity than :meth:`evaluate` -- it exercises stdin handling,
+        the ``governed_tools`` gate, logging and JSON output -- at the cost of
+        process startup.
 
-        **Tripwire caveat, stated plainly:** the tripwire patches this process
-        only, so it cannot observe a subprocess's writes. Isolation here is by
-        ENVIRONMENT instead -- the child receives the sandbox's ``HOME``,
-        ``XDG_CONFIG_HOME`` and log directory, and the scrubbed variables are
-        absent -- which is sound but a genuinely weaker guarantee. Prefer
-        :meth:`evaluate` unless you specifically need end-to-end behaviour.
+        **Tripwire caveat:** the tripwire patches this process only, so it
+        cannot observe the child's writes. Isolation here is by ENVIRONMENT
+        alone: the child gets the sandbox's ``HOME``, ``XDG_CONFIG_HOME`` and
+        log directory, and inherits nothing else. That is sound but a weaker
+        guarantee, so prefer :meth:`evaluate` unless you need the full path.
 
         Args:
-            payload: The hook event dict. ``cwd`` defaults to the sandbox
-                project and ``hook_event_name`` to ``'PreToolUse'`` when not
-                supplied, so callers can pass just ``tool_name`` and
-                ``tool_input`` for the common case.
+            payload: The hook event dict. ``cwd``, ``hook_event_name`` and
+                ``session_id`` are defaulted when absent, so the common case is
+                just ``tool_name`` and ``tool_input``.
 
         Returns:
-            The hook's parsed JSON output, plus ``_stderr`` and ``_returncode``
-            keys for diagnosis.
+            The hook's parsed JSON output -- or ``{'_raw_stdout': ...}`` when
+            stdout was not JSON -- plus ``_stderr`` and ``_returncode``.
         """
         event = dict(payload)
         event.setdefault("cwd", str(self.project))
@@ -517,7 +473,9 @@ class Sandbox:
         Build the environment for :meth:`run_hook`'s child process.
 
         Returns:
-            A minimal environment pointing every discovery anchor inward.
+            A minimal environment with every config-discovery anchor pointed
+            inward, plus a ``PYTHONPATH`` that makes the child import the same
+            toolguard package this module was loaded from.
         """
         env = {key: os.environ[key] for key in _PRESERVED_ENV_VARS if key in os.environ}
         env["HOME"] = str(self.home)
@@ -529,13 +487,14 @@ class Sandbox:
 
     def trace(self) -> list:
         """
-        Return the toolguard decision-log lines produced inside the sandbox.
+        Return the sandbox's markdown log lines -- decision log and warning log.
 
         Only :meth:`run_hook` produces log output; :meth:`evaluate` is
         side-effect-free by design and contributes nothing here.
 
         Returns:
-            All log lines from the sandbox log directory, in file order.
+            Lines from every ``*.md`` file in the sandbox log directory, ordered
+            by filename. The non-markdown discovery log is not included.
         """
         lines: list = []
         for log_file in sorted(self.log_dir.glob("*.md")):
@@ -554,14 +513,13 @@ def experiment(
     xdg_rules_files: Optional[Mapping[str, str]] = None,
 ) -> Iterator[Sandbox]:
     """
-    Create a fully isolated toolguard project for the duration of the block.
+    Create an isolated toolguard project for the duration of the block.
 
     Args:
         project_config: TOML text for the project ``toolguard_hook.toml``.
         user_config: TOML text for the user-level ``toolguard_hook.toml``.
         hard_deny: Patterns for a ``[hard_deny]`` section appended to the
-            USER-level config, matching how hard denies are normally declared
-            (at the user level, so no project can weaken them).
+            USER-level config.
         settings_json: Native Claude settings for the project. A mapping is
             serialised; a string is written verbatim (so malformed JSON can be
             exercised deliberately).
@@ -619,12 +577,7 @@ def experiment(
 
 
 def _build_argparser() -> argparse.ArgumentParser:
-    """
-    Build the command-line parser for ad-hoc experiments.
-
-    Returns:
-        The configured parser.
-    """
+    """Build the command-line parser for ad-hoc experiments."""
     parser = argparse.ArgumentParser(
         prog="python -m toolguard.testing.sandbox",
         description=(
@@ -692,11 +645,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ) as sandbox:
         decision = sandbox.evaluate(args.tool, args.command)
 
-    # additionalContext (TOO-19 Phase 1) is a real hook output field, so it is
-    # reported here for the same reason `--eval` reports it: a preview tool
-    # that silently omits part of what the live hook emits is worse than no
-    # preview. Omitted entirely when there is none, mirroring the hook's own
-    # absent-key-not-null behaviour (see hook.py::create_hook_output).
+    # additionalContext is a real hook output field: a preview tool that
+    # silently omitted part of what the live hook emits is worse than no
+    # preview. Omitted rather than null when there is none, matching the hook's
+    # own output shape.
     if args.json:
         payload = {
             "tool": decision.tool,

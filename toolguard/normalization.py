@@ -1,7 +1,12 @@
-"""Path normalization utilities for consistent pattern matching.
+"""Path normalization for consistent pattern matching.
 
-This module provides functions to normalize paths in both patterns and commands
-to a canonical form, enabling consistent matching across different path representations.
+Collapses a path -- or the path-like tokens inside a command string -- to one canonical
+form, so the same location written differently (an absolute path under the home directory
+vs. its '~' form, doubled leading slashes, a symlink vs. its target) normalizes to one
+spelling.
+
+Reads live filesystem state: :func:`normalize_path` checks whether a path exists and
+follows symlinks via :meth:`pathlib.Path.resolve`.
 """
 
 from pathlib import Path
@@ -12,36 +17,28 @@ from typing import Optional
 def normalize_path(path: str, project_root: Optional[Path] = None) -> str:
     """Normalize a path to canonical form for pattern matching.
 
-    Normalization steps:
-    1. Convert /Users/<username>/... to ~/...
-    2. Resolve symlinks (max 3 iterations to prevent infinite loops)
-    3. Normalize multiple leading slashes to single /
-    4. Expand relative paths to ./ (relative to project_root if provided)
+    In order: collapses repeated leading slashes, resolves symlinks, collapses a path
+    under the user's home directory to a '~/...' prefix, then -- for a bare relative
+    path with no leading '/', '~', or '.' -- adds a './' prefix. That last step is
+    unconditional when no project_root is given, but only fires when project_root is
+    given AND the path exists under it.
 
     Args:
-        path: The path to normalize
-        project_root: Optional project root for relative path expansion
+        path: The path to normalize.
+        project_root: Optional root a bare relative path's existence is checked against
+            before it is given a './' prefix.
 
     Returns:
-        Normalized path string
-
-    Examples:
-        >>> normalize_path('/Users/arnon/projects/file.txt')
-        '~/projects/file.txt'
-        >>> normalize_path('//tmp/file')
-        '/tmp/file'
-        >>> normalize_path('file.txt', Path('/Users/arnon/projects'))
-        './file.txt'
+        The normalized path. Empty input is returned unchanged.
     """
     if not path:
         return path
 
-    # Step 1: Normalize multiple leading slashes
-    # Replace multiple leading slashes with single slash
     path = re.sub(r"^/+", "/", path)
 
-    # Step 2: Resolve symlinks (max 3 iterations)
-    # Only resolve if the path actually is a symlink, not its parent directories
+    # Resolve symlinks -- but only a path that IS a symlink (not one whose parent
+    # directory is), and only when it exists: exists() follows the link, so a dangling
+    # symlink fails this check and is left as-is.
     try:
         path_obj = Path(path)
         if path_obj.exists() and path_obj.is_symlink():
@@ -52,30 +49,23 @@ def normalize_path(path: str, project_root: Optional[Path] = None) -> str:
                     break
             path = str(path_obj)
     except OSError, RuntimeError:
-        # If resolution fails, continue with original path
         pass
 
-    # Step 3: Convert /Users/<username>/... to ~/...
+    # Collapse an absolute path under the user's home directory to '~/...'.
     home = Path.home()
     try:
         path_obj = Path(path)
-        # Check if path is under home directory
         if path_obj.is_absolute():
             try:
                 relative_to_home = path_obj.relative_to(home)
                 path = f"~/{relative_to_home}"
             except ValueError:
-                # Path is not under home directory
                 pass
     except OSError, ValueError:
         pass
 
-    # Step 4: Expand relative paths to ./
-    # Don't add ./ if it already starts with . (like ./ or ../)
     if not path.startswith(("/", "~", ".")):
-        # This is a relative path without ./ or ../ prefix
         if project_root:
-            # Check if the path exists relative to project_root
             try:
                 full_path = project_root / path
                 if full_path.exists():
@@ -83,27 +73,22 @@ def normalize_path(path: str, project_root: Optional[Path] = None) -> str:
             except OSError, ValueError:
                 pass
         else:
-            # No project root, just add ./ prefix
             path = f"./{path}"
 
     return path
 
 
 def expand_tilde(path: str) -> str:
-    """Expand ~ to actual home path for GLOB pattern matching.
+    """Expand a leading '~' to the user's home directory path.
 
-    This is specifically for GLOB patterns where we need to expand ~ to
-    the actual home directory path for glob matching to work correctly.
+    Only '~' alone and '~/...' are expanded. A '~username' form is returned unchanged,
+    as is any path with no leading '~'.
 
     Args:
-        path: Path potentially containing ~ prefix
+        path: A path or pattern, possibly '~'-prefixed.
 
     Returns:
-        Path with ~ expanded to home directory
-
-    Examples:
-        >>> expand_tilde('~/projects/*.py')
-        '/Users/arnon/projects/*.py'
+        path with a leading '~' expanded; otherwise path unchanged.
     """
     if not path or not path.startswith("~"):
         return path
@@ -116,55 +101,41 @@ def expand_tilde(path: str) -> str:
     if path.startswith("~/"):
         return home + path[1:]
 
-    # Handle ~username format (though we don't use this currently)
     return path
 
 
 def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
-    """Normalize paths within a command string.
+    """Normalize each path-like token in a command string via :func:`normalize_path`.
 
-    This function identifies path-like tokens in a command string and normalizes them.
-    It handles both absolute and relative paths, preserving the command structure.
-
-    Only normalizes tokens that clearly look like paths:
-    - Start with /, ~, or .
-    - Contain / (path separator)
-    - Have a file extension (e.g., file.txt)
-
-    Plain words without path indicators are left unchanged to avoid false positives.
+    A token is treated as a path if it starts with '/', '~', or '.'; contains '/'; or has
+    a short alphanumeric extension like '.txt'. A leading '-' flag is never treated as a
+    path, and the first token is normalized only when it contains '/'.
 
     Args:
-        command: The command string to normalize
-        project_root: Optional project root for relative path expansion
+        command: The command string to normalize.
+        project_root: Optional project root, forwarded to :func:`normalize_path` for
+            each path-like token.
 
     Returns:
-        Command with normalized paths
-
-    Examples:
-        >>> normalize_command('cat /Users/arnon/file.txt')
-        'cat ~/file.txt'
-        >>> normalize_command('ls //tmp')
-        'ls /tmp'
-        >>> normalize_command('echo hello world')
-        'echo hello world'  # Plain words unchanged
+        command with its path-like tokens normalized; other tokens (including flags and
+        the bare command name) are left unchanged. Whitespace between tokens is not
+        preserved: runs of whitespace, including newlines, collapse to a single space.
+        Empty input is returned unchanged.
     """
     if not command:
         return command
 
-    # Split command into tokens
     tokens = command.split()
     normalized_tokens = []
 
     for i, token in enumerate(tokens):
-        # Skip flags (they never look like paths)
         if token.startswith("-"):
             normalized_tokens.append(token)
             continue
 
-        # The first token is usually a bare command name (ls, git, python) and
-        # should be left alone. But if it clearly looks like a path (contains /),
-        # normalize it so e.g. `bin/script.sh` becomes `./bin/script.sh` — matching
-        # the canonical form a user would write in a rule.
+        # A bare first word is normally the command name itself, not a path, even when
+        # it contains a dot -- but one with a slash is a path ('bin/script.sh' ->
+        # './bin/script.sh').
         if i == 0:
             if "/" in token:
                 normalized_tokens.append(normalize_path(token, project_root))
@@ -172,26 +143,17 @@ def normalize_command(command: str, project_root: Optional[Path] = None) -> str:
                 normalized_tokens.append(token)
             continue
 
-        # Check if token looks like a path
-        # Paths typically start with /, ~, ./ or contain / somewhere
         is_path = "/" in token or token.startswith("~") or token.startswith(".")
 
-        # Additional heuristic: if it contains a dot (likely a file extension)
-        # but check it's not just any word with a dot
         if not is_path and "." in token:
-            # Check if it looks like a filename (has extension)
-            # Example: file.txt, script.py, etc.
             parts = token.rsplit(".", 1)
             if len(parts) == 2 and len(parts[1]) <= 4 and parts[1].isalnum():
-                # Likely a file extension
                 is_path = True
 
         if is_path:
-            # Try to normalize it as a path
             normalized = normalize_path(token, project_root)
             normalized_tokens.append(normalized)
         else:
-            # Not a path, keep as-is
             normalized_tokens.append(token)
 
     return " ".join(normalized_tokens)

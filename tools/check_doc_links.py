@@ -1,41 +1,29 @@
 """
 Verify every internal ``[text](file#anchor)`` link in the documentation resolves.
 
-Why this exists
----------------
-Anchor links in this project are written by hand (or by an agent computing GitHub's
-slug algorithm from memory), and the same bug class has now been found twice by
-documentation review:
+Anchors here are written by hand, or by an agent recalling GitHub's slug algorithm,
+and have twice been produced with the wrong rule -- once dropping underscores, once
+collapsing runs of hyphens. Neither is visible in review: the link renders normally
+and lands at the top of the page instead of the section.
 
-- 2026-07-23: anchors were generated with underscores STRIPPED. GitHub keeps them.
-- 2026-07-29: anchors were generated with consecutive hyphens COLLAPSED to one.
-  GitHub keeps every one of them.
-
-Both produce links that look right, render as normal links, and silently land at the
-top of the page instead of the section. Neither is visible in review. This script
-replaces the guesswork with a mechanical check.
-
-The two traps, concretely
--------------------------
+The rule
+--------
 GitHub lowercases the heading, deletes punctuation, and turns each remaining space
 into a hyphen. It does NOT collapse runs of hyphens, and it does NOT drop
-underscores. So punctuation sitting between words leaves consecutive hyphens::
+underscores, so punctuation sitting between words leaves consecutive hyphens::
 
     "Phase 0 -- Preflight"                  -> #phase-0----preflight    (four)
     "Inline interpreter code (`-c` / `-e`)" -> #inline-interpreter-code--c---e
     '`no_match_fallback = "ask"` (default)' -> #no_match_fallback--ask-default
 
-Note that softening ``--`` to a single ``-`` does NOT help: the spaces around it
-still become hyphens (``"Phase 0 - Preflight"`` -> ``#phase-0---preflight``). A
-heading only yields a clean slug when it has no separator punctuation at all
-(``"Phase 0: Preflight"`` -> ``#phase-0-preflight``).
+Softening ``--`` to a single ``-`` does NOT help -- the spaces around it still become
+hyphens (``"Phase 0 - Preflight"`` -> ``#phase-0---preflight``). Replacing it with a
+colon does: ``"Phase 0: Preflight"`` -> ``#phase-0-preflight``.
 
 Usage::
 
     uv run python tools/check_doc_links.py          # report, exit 1 if broken
     uv run python tools/check_doc_links.py --list   # also list every anchor found
-
-Standard library only, consistent with the rest of the project.
 """
 
 import argparse
@@ -49,8 +37,8 @@ DOC_GLOBS = ("README.md", "AGENTS.md", "llms.txt", "technical-notes.md", "CLAUDE
 DOC_DIRS = ("docs", "skills")
 
 #: A markdown link whose target carries an anchor. The anchor character class MUST
-#: include underscores -- omitting them was the 2026-07-23 bug, and it makes the
-#: checker silently skip exactly the links most likely to be wrong.
+#: include underscores: without them a link like ``(#no_match_fallback--ask-default)``
+#: fails to match at all and is skipped in silence.
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([A-Za-z0-9_./-]*)#([A-Za-z0-9_-]+)\)")
 
 HEADING_RE = re.compile(r"^(#{2,6})\s+(.*)")
@@ -58,12 +46,8 @@ HEADING_RE = re.compile(r"^(#{2,6})\s+(.*)")
 
 def github_slug(heading: str) -> str:
     """
-    Compute GitHub's anchor slug for a heading, matching its real algorithm.
-
-    Lowercases, removes every character that is not a word character, whitespace,
-    or a hyphen, then replaces spaces with hyphens. Underscores and runs of
-    hyphens are PRESERVED -- both are load-bearing, and getting either wrong is
-    the bug this module exists to prevent.
+    Compute GitHub's anchor slug for a heading -- see the module docstring for the
+    rule and its traps.
 
     Args:
         heading: The heading text, without its leading ``#`` markers.
@@ -79,6 +63,9 @@ def github_slug(heading: str) -> str:
 def headings_of(path: pathlib.Path) -> list:
     """
     Extract heading texts from a markdown file, skipping fenced code blocks.
+
+    Matches ``##`` through ``######`` only, so a top-level ``#`` heading contributes
+    no anchor and a link aimed at one is reported as a bad anchor.
 
     Args:
         path: The file to scan.
@@ -104,7 +91,7 @@ def anchors_of(path: pathlib.Path) -> set:
     Compute every anchor a file defines, with GitHub's duplicate disambiguation.
 
     A slug that occurs more than once gets ``-1``, ``-2``, ... appended for the
-    second and later occurrences, exactly as GitHub does.
+    second and later occurrences.
 
     Args:
         path: The file to scan.

@@ -1,12 +1,7 @@
 """
-Unit tests for toolguard.tools.sorters -- canonical rule-array sorting.
-
-Sorting order (canonical, defined in toolguard.rule_sort):
-1. Tool priority: Bash (0), Read (1), Write (2), Edit (3), others (4).
-2. Within each bucket: case-insensitive alphabetical on the FULL pattern string.
-
-Tests verify the deterministic sort key ordering, stability, and that
-sort_layer_rules handles all three lists (allow/deny/ask) correctly.
+Unit tests for toolguard.tools.sorters -- canonical rule-array sorting: tool
+priority (Bash, Read, Write, Edit, then anything else), and within a bucket
+case-insensitive alphabetical on the full pattern string.
 """
 
 import unittest
@@ -100,10 +95,8 @@ class TestSortPatterns(unittest.TestCase):
         When sort_patterns() is called
         Then they retain their relative order (stable sort)
         """
-        # Two patterns with different case that map to the same lowercase key
         patterns = ["Bash(Git Status:*)", "Bash(git status:*)", "Read(/tmp/*)"]
         result = sort_patterns(patterns)
-        # Both Bash patterns come before Read, and their relative order is stable
         bash_in_result = [p for p in result if p.startswith("Bash(")]
         self.assertEqual(len(bash_in_result), 2)
         idx_upper = result.index("Bash(Git Status:*)")
@@ -129,7 +122,6 @@ class TestSortPatterns(unittest.TestCase):
         """
         patterns = ["Bash(git:*)", "UnknownTool(some:*)", "Edit(file.py)"]
         result = sort_patterns(patterns)
-        # Bash first, Edit second, Unknown last
         self.assertTrue(result[0].startswith("Bash("))
         self.assertTrue(result[-1].startswith("UnknownTool("))
 
@@ -146,25 +138,19 @@ class TestSortPatterns(unittest.TestCase):
             "Bash([glob]git/**)",
         ]
         result = sort_patterns(patterns)
-        # All are in Bash bucket; sorted by full lowercase pattern string
         self.assertTrue(all(p.startswith("Bash(") for p in result))
         lowered = [p.lower() for p in result]
         self.assertEqual(lowered, sorted(lowered))
 
 
 class TestSortPatternsWithRuleEntry(unittest.TestCase):
-    """
-    toolguard.tools.sorters.sort_patterns re-exports toolguard.rule_sort's
-    canonical implementation unchanged (TOO-19 Phase 0a increment 8); these
-    confirm that re-export tolerates RuleEntry the same as the source module.
-    """
+    """sort_patterns, as re-exported by sorters, tolerates structured RuleEntry."""
 
     def test_does_not_raise_on_structured_entry(self):
         """
         Given a list mixing plain string patterns and a structured RuleEntry
         When sort_patterns() (as exported by toolguard.tools.sorters) sorts it
-        Then no exception is raised (regression guard for the confirmed
-             "TypeError: unhashable type: 'dict'" defect)
+        Then it does not raise and the RuleEntry is present in the result
         """
         structured = RuleEntry(
             pattern="Bash(git *)",
@@ -203,7 +189,6 @@ class TestSortLayerRules(unittest.TestCase):
         deny = ["Write(y.txt)", "Bash(b:*)"]
         ask = ["Edit(x.py)", "Bash(c:*)"]
         sa, sd, sask = sort_layer_rules(allow, deny, ask)
-        # Bash comes before Read/Write/Edit in each list
         self.assertTrue(sa[0].startswith("Bash("))
         self.assertTrue(sd[0].startswith("Bash("))
         self.assertTrue(sask[0].startswith("Bash("))

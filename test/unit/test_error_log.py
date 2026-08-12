@@ -1,12 +1,9 @@
 """
-Unit tests for toolguard.error_log.log_crash (TOO-15 crash-capture).
+Unit tests for toolguard.error_log.log_crash.
 
-log_crash is the durable "black box" for unhandled exceptions in the hook's
-main() entry point: unlike log_error/log_warning/log_conflict (which need a
-resolved project log_dir and only take a short message), log_crash writes to
-the fixed, user-level ~/.toolguard/errors/ location -- so it works even when
-the exception happened before/during config resolution -- and captures the
-full exception type, message, traceback, and caller-supplied context.
+Unlike its siblings, log_crash needs no resolved project log_dir: it writes
+full exception detail to the fixed ~/.toolguard/errors/ location, so it still
+works when the exception happened before config resolution.
 """
 
 import unittest
@@ -87,9 +84,7 @@ class TestLogCrash(unittest.TestCase):
         crashes landing in the same wall-clock second)
         When log_crash is called twice
         Then two distinct files are written and the first crash report's
-        content is left completely untouched by the second call (the same
-        "prove no data loss" shape as create_backup's collision fix in
-        toolguard/permission_migration.py)
+        content is left untouched by the second call
         """
         fixed_now = datetime(2026, 7, 9, 10, 15, 0)
         with TemporaryDirectory() as tmpdir:
@@ -118,8 +113,6 @@ class TestLogCrash(unittest.TestCase):
 
             self.assertIn("first crash", first.read_text())
             self.assertIn("second crash", second.read_text())
-            # No clobbering: the first file must not have been overwritten by
-            # the second call's content.
             self.assertNotIn("second crash", first.read_text())
 
     def test_log_crash_write_failure_returns_none_without_raising(self):

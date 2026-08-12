@@ -1,19 +1,7 @@
 """
-Anti-drift contract test: api.decide() must produce the same verdict
-as calling toolguard.resolve.resolve_*() directly.
-
-These tests document (and guard) the property that toolguard.api.decide()
-delegates to toolguard.resolve.* -- rather than maintaining a separate copy of the
-orchestration logic. Because both sides share the same code, this test is essentially
-"same code, same results"; if someone were to accidentally reintroduce a divergence
-(e.g. re-copy orchestration into api.py), these tests would catch it.
-
-Coverage:
-  - Simple Bash allow
-  - Compound Bash (multi-sub-command) allow
-  - Bash hard-deny
-  - Read allow (file path)
-  - Read deny (file path, no match)
+Anti-drift contract test: api.decide() must produce the same verdict as
+calling toolguard.resolve.resolve_*() directly, proving decide() delegates
+rather than duplicating the orchestration logic.
 """
 
 import unittest
@@ -37,15 +25,7 @@ from toolguard.resolve import (
 
 
 def _make_config(layers_content):
-    """
-    Build a minimal Configuration from a list of (level, source_type, content_dict).
-
-    Args:
-        layers_content: List of (level, source_type, content_dict) tuples.
-
-    Returns:
-        A Configuration with those layers (specificity increases with index).
-    """
+    """Build a minimal Configuration from (level, source_type, content_dict) tuples, specificity increasing with index."""
     layers = []
     for i, (level, source_type, content) in enumerate(layers_content):
         prov = Provenance(
@@ -60,13 +40,7 @@ def _make_config(layers_content):
 
 
 class TestNoDrift(unittest.TestCase):
-    """
-    Anti-drift: decide() must match resolve_*() verdict for a representative battery.
-
-    These tests do NOT test behaviour (that is covered elsewhere in test/unit/); they
-    test DELEGATION -- that the shared resolver and the decide() wrapper agree on the
-    verdict for the same inputs, proving no separate logic path exists.
-    """
+    """Anti-drift: decide() must match resolve_*()'s verdict for a representative battery of inputs."""
 
     def _bash_config(self):
         """Return a config with allow=git/ls and hard-deny rm -rf."""
@@ -221,7 +195,7 @@ class TestNoDrift(unittest.TestCase):
         Given a config that allows Read under /tmp/** only
         When decide() and resolve_file_path_permission_detailed() are called with
         '/etc/passwd' (outside allowed path, matches no rule)
-        Then both produce the same verdict ('ask', the TOO-15 default
+        Then both produce the same verdict ('ask', the default
             no_match_fallback)
         """
         config = self._read_config()
@@ -246,17 +220,7 @@ class TestNoDrift(unittest.TestCase):
 
 
 class TestNoMatchSemanticsNoDrift(unittest.TestCase):
-    """
-    TOO-15: anti-drift coverage for the no-match resolution semantics.
-
-    Same "same code, same results" property as :class:`TestNoDrift`, but for
-    the no-match behaviour: a fully-unconfigured tool resolves to 'ask' (never
-    affected by no_match_fallback); a tool with rules that simply do not match
-    resolves per no_match_fallback -- 'ask' (the default), 'deny', or
-    'allow_with_warning' (allow, with a warning reason). The deprecated legacy
-    value 'warn_deny' is still accepted as an alias for 'allow_with_warning',
-    including under the legacy [takeover_mode].no_match_fallback section.
-    """
+    """Anti-drift coverage for the no-match resolution semantics, including the legacy warn_deny alias."""
 
     def _empty_config(self):
         """Return a config with NO permissions/hard_deny sections at all."""
@@ -353,9 +317,9 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             no_match_fallback override
         When decide() and resolve_bash_permission_detailed() evaluate 'ls -la'
             (does not match any rule)
-        Then both agree the verdict is 'ask' (TOO-15: the new default
-            no_match_fallback -- a config with rules that simply don't cover a
-            command must prompt, not silently deny or bricking installs)
+        Then both agree the verdict is 'ask' (the default no_match_fallback --
+            a config with rules that simply don't cover a command must
+            prompt, not silently deny or brick installs)
         """
         config = self._bash_configured_no_match_config()
         command = "ls -la"
@@ -383,8 +347,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             no_match_fallback override
         When decide() and resolve_file_path_permission_detailed() evaluate
             '/etc/passwd' (does not match any rule)
-        Then both agree the verdict is 'ask' (TOO-15: the new default
-            no_match_fallback)
+        Then both agree the verdict is 'ask' (the default no_match_fallback)
         """
         config = self._read_configured_no_match_config()
         file_path = "/etc/passwd"
@@ -775,8 +738,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
             (relying on the default), and Bash allowing only 'git:*'
         When decide() and resolve_bash_permission_detailed() evaluate 'ls -la'
             (does not match any rule)
-        Then both agree the verdict is 'ask' (TOO-15: the default change to
-            'ask' applies in takeover mode too, not just non-takeover mode)
+        Then both agree the verdict is 'ask' (the 'ask' default applies in
+            takeover mode too, not just non-takeover mode)
         """
         config = _make_config(
             [
@@ -853,13 +816,7 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
 
 class TestUndecidableFallbackThreading(unittest.TestCase):
-    """
-    TOO-19: resolve_bash_permission_detailed() sources undecidable_fallback
-    from config.resolved_undecidable_fallback() and threads it through
-    resolve_compound_permission(), end to end, for both kinds of undecidable
-    result: foreign inline code / heredoc sinks (ask_floor leaves) and
-    UndecidableSegment (control structures, process substitution).
-    """
+    """resolve_bash_permission_detailed() threads undecidable_fallback through both ask-floor leaves and UndecidableSegments."""
 
     def _config_with_fallback(self, undecidable_fallback, allow=()):
         """Return a config with the given top-level undecidable_fallback set."""
@@ -884,8 +841,7 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         Given a foreign inline-code command (`python3 -c "..."`) with the
             outer command allowed
         When resolve_bash_permission_detailed() resolves it under each of the
-            five undecidable_fallback settings (TOO-19: including the newer
-            'allow'/'allow_with_no_warnings' allow-with-no-warning values)
+            five undecidable_fallback settings
         Then the decision matches that setting's floor exactly (ask/deny/allow)
             -- 'allow_with_warning', 'allow', and 'allow_with_no_warnings' are
             all the SAME strictness level (float to 'allow')
@@ -908,8 +864,7 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         """
         Given a process-substitution command (`diff <(sort a) <(sort b)`)
         When resolve_bash_permission_detailed() resolves it under each of the
-            five undecidable_fallback settings (TOO-19: including the newer
-            'allow'/'allow_with_no_warnings' allow-with-no-warning values)
+            five undecidable_fallback settings
         Then the decision matches that setting's floor exactly (ask/deny/allow)
             -- 'allow_with_warning', 'allow', and 'allow_with_no_warnings' are
             all the SAME strictness level (float to 'allow')
@@ -930,8 +885,7 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
 
     def test_default_config_preserves_pre_too19_ask_behaviour(self):
         """
-        Given a config with NO undecidable_fallback key set (the pre-TOO-19
-            shape)
+        Given a config with NO undecidable_fallback key set
         When resolve_bash_permission_detailed() resolves a process-substitution
             command
         Then the decision is still 'ask' -- config.resolved_undecidable_fallback()
@@ -988,14 +942,6 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
         self,
     ):
         """
-        HARD INVARIANT (TOO-19) end to end: an ask_floor leaf (foreign inline
-        code) whose OUTER command resolution goes through
-        permission_resolution.resolve_command_permission -- and therefore
-        through the parse-failure ASK floor -- cannot be downgraded below
-        'ask' by
-        undecidable_fallback, even when set to the most permissive
-        'allow_with_warning'.
-
         Given a config with undecidable_fallback='allow_with_warning' AND a
             recorded parse failure for a broken file, and an allow pattern
             that would otherwise permit the outer command
@@ -1022,9 +968,6 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
                 )
             ]
         )
-        # Configuration is frozen/dataclass-like; parse_failures is a
-        # constructor field, so rebuild with it set (mirrors
-        # TestParseFailureAskFloor's direct-construction style).
         config = Configuration(
             layers=config.layers,
             start_dir=config.start_dir,
@@ -1036,23 +979,10 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
 
 
 class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
-    """
-    TOO-19 code review 2026-08-02, Major finding M1: ``allow_with_warning``
-    silently lost its warning -- and misattributed the allow to a fabricated
-    rule name -- on a multi-leaf all-allow compound.
-
-    Given the exact repro config/commands from that review: ``Bash(ls)`` +
-    ``Bash(python *)`` allow, undecidable_fallback set to each of
-    ``'allow_with_warning'`` and ``'allow'``.
-
-    A single-leaf ask-floor command and a two-leaf compound wrapping the same
-    ask-floor command must agree on fallback_warning -- before this fix the
-    multi-leaf case silently reported False (defect 1) and fabricated a
-    'python -c' rule match in the reason (defect 2).
-    """
+    """A single-leaf ask-floor command and a multi-leaf compound wrapping the same leaf must agree on fallback_warning and never fabricate a matched rule."""
 
     def _repro_config(self, undecidable_fallback):
-        """Build the exact M1 repro config: Bash(ls) + Bash(python *) allow only."""
+        """Build a config allowing only Bash(ls) and Bash(python *)."""
         return _make_config(
             [
                 (
@@ -1073,8 +1003,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         """
         Given undecidable_fallback='allow_with_warning'
         When resolving the single-leaf command 'python -c "print(1)"'
-        Then the decision is allow and fallback_warning is True (baseline,
-            unaffected by this fix -- confirms the repro table's row 1)
+        Then the decision is allow and fallback_warning is True
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1088,9 +1017,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         """
         Given undecidable_fallback='allow_with_warning'
         When resolving the two-leaf compound 'ls && python -c "print(1)"'
-        Then the decision is allow and fallback_warning is True -- BEFORE
-            the fix this was False (M1 defect 1: the marker was destroyed by
-            the multi-leaf 'cmd -> pattern' summary)
+        Then the decision is allow and fallback_warning is True
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1109,8 +1036,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             'python -c' anywhere in the config
         When resolving 'ls && python -c "print(1)"'
         Then the reason does NOT claim 'python -c' (or any other pattern) was
-            a matched rule for that leaf -- M1 defect 2. An absent record is
-            required in place of the fabricated one.
+            a matched rule for that leaf
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1126,7 +1052,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
 
     def test_single_vs_multi_leaf_parity_for_silent_allow(self):
         """
-        Given undecidable_fallback='allow' (TOO-19 no-warning value)
+        Given undecidable_fallback='allow' (the no-warning value)
         When resolving both the single-leaf and two-leaf compound forms
         Then BOTH report fallback_warning False (no warning was ever
             promised for this value) and neither reason fabricates a
@@ -1147,17 +1073,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         """
         Given the same multi-leaf compound with an ask-floor escape-hatch leaf
         When resolving 'ls && python -c "print(1)"'
-        Then result.sub_matches records the leaf's REAL, full text (NOT the
+        Then result.sub_matches records the leaf's real, full text (not the
             truncated outer-command stub 'python -c') with matched_rule=None
-            and fallback_kind='warned' -- TOO-45 R1e closed the exact gap the
-            retired hook.py::_parse_compound_match_details (and this test,
-            previously) worked around: before the fix, this same UnitVerdict
-            held the truncated stub 'python -c' with a matched_rule of
-            'python *' (config.py(Bash(python *)) genuinely matches the STUB,
-            even though the leaf's real payload was never verified and
-            compound.py deliberately floors it to the escape hatch
-            regardless) -- the reason a reason-string round trip was needed
-            at all. sub_matches is now the complete, correct record.
+            and fallback_kind='warned'
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1182,19 +1100,7 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             leaf ('ls') a genuine rule match, the other an escape-hatch allow
         When resolving it
         Then result.matched_rule is 'ls' (the sole genuine match) and
-            result.provenance is non-None and identifies the project layer --
-            NOT None for either field
-
-        TOO-45 R1e finishing pass regression guard: ``_deciding_sub_match``'s
-        old "exactly one entry in sub_matches" test for "there is a single
-        decider" broke the moment ``sub_matches`` correctly grew a SECOND
-        entry for the escape-hatch leaf (closing a separate audit-loss gap
-        this same step fixed) -- a genuinely two-entry ``sub_matches`` list
-        does not mean there is no single decider any more, because ONE of
-        those two entries is an ambient escape hatch that never competed for
-        attribution before the audit-loss fix made it visible at all. The
-        right test is "exactly one entry with a real matched_rule", not
-        "exactly one entry, full stop".
+            result.provenance is non-None and identifies the project layer
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1226,25 +1132,10 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
 
 
 class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
-    """
-    TOO-19 m5: the audit log must never name a rule that does not exist.
-
-    ``hook.py::_log_allowed_command`` derived its ``Matched Rule`` field by
-    splitting the reason on the first ``": "``. For a fallback ESCAPE-HATCH
-    allow the text after that colon is the truncated DISPLAY COMMAND, not a
-    pattern, so a config whose only rules were ``Bash(ls)`` and
-    ``Bash(python *)`` recorded ``**Matched Rule**: `python -c``` -- a rule
-    that exists nowhere.
-
-    The MULTI-leaf path had already been fixed to record
-    ``[fallback allow -- no rule matched]``. These tests pin single-leaf and
-    compound to that ONE convention together, so they cannot diverge into two
-    conventions again, and drive the REAL reason strings through the REAL
-    logging entry point rather than asserting against hand-written text.
-    """
+    """The audit log must never name a rule that does not exist for an escape-hatch allow; single-leaf and compound must share one convention."""
 
     def _repro_config(self, undecidable_fallback):
-        """Build the m5 repro config: Bash(ls) + Bash(python *) allow only."""
+        """Build a config allowing only Bash(ls) and Bash(python *)."""
         return _make_config(
             [
                 (
@@ -1269,11 +1160,6 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
             command, config, True, hd_deny, hd_allow
         )
         self.assertEqual(result.decision, "allow")
-        # TOO-45 R1e: `_log_allowed_command` is now driven entirely by
-        # `result.sub_matches` (both single-leaf and compound), so the REAL
-        # `result` -- not a hand-trimmed copy carrying only reason/
-        # matched_rule -- must be passed through. TOO-45 R1d: it takes the
-        # whole verdict object instead of loose matched_rule/reason args.
         with patch("toolguard.hook.log_command") as mock_log:
             _log_allowed_command(result, command, "main", {"logging_enabled": True})
         return [
@@ -1304,17 +1190,8 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
     ):
         """
         Given the same undecidable_fallback='allow_with_warning' escape hatch
-        When 'python -c "print(1)"' is resolved (BEFORE logging)
-        Then RuntimeVerdict.matched_rule is ALREADY None -- TOO-45 R1e fixed
-            this at the source: before the fix this was the REAL, misleading
-            'python *' stub match, and the placeholder substitution in the
-            previous test happened only at LOG time via a reason-text
-            re-classification. Now compound.py corrects the leaf's own
-            UnitVerdict (sub_command/decision/matched_rule) to its TRUE final
-            outcome at the point the undecidable_fallback floor is applied,
-            so `_deciding_sub_match` (see resolve.py) never sees the
-            misleading stub match in the first place -- this pins the fix at
-            its source, not merely its downstream symptom.
+        When 'python -c "print(1)"' is resolved (before logging)
+        Then RuntimeVerdict.matched_rule is already None
         """
         config = self._repro_config("allow_with_warning")
         hd_deny, hd_allow = config.hard_deny("Bash")
@@ -1375,9 +1252,7 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
             covers at all (the OTHER fallback escape hatch, whose reason text
             is built by config.py rather than compound.py)
         When it is allowed and logged
-        Then the placeholder is recorded -- previously this reason had no
-            ': ' at all so the field was simply absent, which was not wrong
-            but was a second, inconsistent convention for the same situation
+        Then the placeholder is recorded
         """
         config = _make_config(
             [
@@ -1407,24 +1282,10 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
 
 
 class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
-    """
-    TOO-19 deny-side rule fabrication fix: the audit log must never name a
-    rule that does not exist, on the deny side either.
-
-    ``hook.py::_log_non_allow_decision`` derived its ``Violated Rules`` field
-    for a deny by splitting the reason on the first ``": "``. For a deny
-    produced by the ``undecidable_fallback=deny`` escape hatch, the text
-    after that colon is the truncated DISPLAY COMMAND, not a rule, so a
-    config whose only rules were ``Bash(ls)`` and ``Bash(python *)`` recorded
-    ``**Violated Rules**: `python -c``` -- a rule that exists nowhere. This is
-    the deny-side counterpart of the allow-side m5 fix pinned by
-    :class:`TestAuditLogMatchedRuleNeverFabricated` above; both now share the
-    SAME mechanism (``fallback_kind_for_reason`` +
-    ``FALLBACK_ALLOW_PLACEHOLDER``/``FALLBACK_DENY_PLACEHOLDER``).
-    """
+    """Deny-side counterpart of :class:`TestAuditLogMatchedRuleNeverFabricated`: the audit log must never name a rule that does not exist."""
 
     def _repro_config(self, undecidable_fallback):
-        """Build the m5-style repro config: Bash(ls) + Bash(python *) allow only."""
+        """Build a config allowing only Bash(ls) and Bash(python *)."""
         return _make_config(
             [
                 (
@@ -1447,9 +1308,6 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         result = resolve_bash_permission_detailed(
             command, config, True, hd_deny, hd_allow
         )
-        # TOO-45 R3: matched_rule is now structured data already on `result`
-        # -- _log_non_allow_decision no longer re-parses it out of
-        # `result.reason`. TOO-45 R1d: it now takes the whole verdict object.
         verdict = RuntimeVerdict(
             decision=result.decision,
             reason=result.reason,
@@ -1475,11 +1333,6 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         config = self._repro_config("deny")
         result, call = self._log_and_capture(config, 'python -c "print(1)"')
         self.assertEqual(result.decision, "deny")
-        # Unlike the allow-side escape hatch (whose raw matched_rule is the
-        # real, misleading 'python *' stub match), the deny floor's own
-        # sub_match here never agrees with the final 'deny' decision, so
-        # RuntimeVerdict.matched_rule is None on the raw field itself -- not
-        # just at log time.
         self.assertIsNone(result.matched_rule)
         violated_rules = call.args[0].violated_rules
         self.assertNotEqual(
@@ -1496,20 +1349,6 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         Then the recorded violated rule is still the placeholder, not the
             escape-hatch leaf's truncated display command -- one convention,
             not two, matching the single-leaf case
-
-        This is also the exact scenario ``resolve._deciding_sub_match``'s
-        docstring used to cite for a genuine sub_matches/final-decision
-        divergence: before TOO-45 R1e, BOTH sub-commands' recorded
-        UnitVerdict.decision were 'allow' ('ls' genuinely, 'python -c' via
-        its misleading pre-floor stub match), while the floor made the
-        compound 'deny' -- nothing agreed, and RuntimeVerdict.matched_rule
-        was None only because ``_deciding_sub_match`` found no matching
-        decision to attribute to. R1e closes that divergence: the
-        escape-hatch leaf's recorded UnitVerdict now correctly says 'deny'
-        (its TRUE final outcome), so ``_deciding_sub_match`` attributes the
-        compound's 'deny' to THAT leaf -- matched_rule is still None, but
-        now because it is a genuine escape-hatch attribution to the correct
-        leaf, not an attribution failure.
         """
         config = self._repro_config("deny")
         result, call = self._log_and_capture(config, 'ls && python -c "print(1)"')
@@ -1611,8 +1450,6 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "curl:*")
         self.assertEqual(call.args[0].violated_rules, ["curl:*"])
-        # Hard-deny is pooled across levels -- there is no single provenance
-        # to attribute (see RuntimeVerdict.provenance's docstring).
         self.assertIsNone(result.provenance)
 
     def test_no_match_fallback_deny_has_no_colon_and_is_unaffected(self):
@@ -1621,18 +1458,8 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             undecidable_fallback) and a file path no Read rule covers at all
         When it is denied and logged
         Then the full reason (which never had a ': ' to begin with) is
-            recorded as before -- this path was never at risk of fabrication,
-            since :func:`~toolguard.compound.fallback_kind_for_reason` has no
-            marker for it and the reason has no colon to mis-split, and stays
-            untouched by the fix
-
-        Uses the FILE-PATH resolver rather than Bash: unlike
-        ``resolve_bash_permission_detailed``, ``resolve_file_path_permission_detailed``
-        never wraps its reason in the "Compound command contains denied
-        sub-command: ..." formatting (there is no compound-command concept
-        for file paths), so this is the one real caller of
-        ``_log_non_allow_decision`` that reaches it with the truly unwrapped,
-        colon-free ``no_match_fallback`` reason from ``config.py``.
+            recorded as-is -- unlike Bash, the file-path resolver never wraps
+            its reason in "Compound command contains denied sub-command: ..."
         """
         config = _make_config(
             [
@@ -1693,23 +1520,13 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         self.assertEqual(len(mock_log.call_args_list), 1)
         call = mock_log.call_args_list[0]
         self.assertEqual(call.args[0].note, result.reason)
-        # 'ask' never populates violated_rules on the logged record --
-        # there is no violation to name a rule for.
         self.assertEqual(
             call.args[0].violated_rules, [], "ask must not pass violated_rules"
         )
 
 
 class TestAuditLogProvenanceThreading(unittest.TestCase):
-    """
-    TOO-45 R3 review follow-up: provenance was silently LOST from the audit
-    log once matched_rule/violated_rules stopped carrying it as a bracketed
-    text suffix (see RuntimeVerdict.provenance's docstring). These tests
-    drive the REAL resolve.py -> hook.py -> log_command pipeline end to end
-    and pin that the log's Provenance field gets the right value for allow,
-    deny, and hard-deny -- rendering itself is covered separately by
-    test_log_writer.TestProvenanceLogging.
-    """
+    """Drives resolve.py -> hook.py -> log_command end to end and pins the logged Provenance field for allow, deny, and hard-deny."""
 
     def _config(self, content):
         return _make_config([("project", "toolguard_hook", content)])
@@ -1800,16 +1617,7 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
 
 
 class TestFallbackWarningField(unittest.TestCase):
-    """
-    TOO-19 allow/allow_with_no_warnings work: RuntimeVerdict.fallback_warning
-    correctly distinguishes an 'allow' produced by ``allow_with_warning``
-    (True -- route to the WARNING log stream) from one produced by
-    ``allow``/``allow_with_no_warnings`` (False -- no warning anywhere), for
-    both settings and both the file-path and
-    Bash resolution paths. Also guards the marker-safety property
-    hook.py/resolve.py rely on: the newer no-warning reason text must never
-    accidentally contain the ``allow_with_warning`` marker substring.
-    """
+    """RuntimeVerdict.fallback_warning distinguishes an allow_with_warning allow from an allow/allow_with_no_warnings allow, for both resolution paths."""
 
     def test_no_match_fallback_allow_with_warning_sets_bash_fallback_warning_true(
         self,
@@ -1840,7 +1648,7 @@ class TestFallbackWarningField(unittest.TestCase):
 
     def test_no_match_fallback_allow_sets_bash_fallback_warning_false(self):
         """
-        Given Bash allows only 'git:*' and no_match_fallback='allow' (TOO-19)
+        Given Bash allows only 'git:*' and no_match_fallback='allow'
         When resolve_bash_permission_detailed() resolves an unmatched command
         Then the decision is 'allow' and fallback_warning is False -- no
             warning is ever emitted for the plain 'allow' value
@@ -1925,7 +1733,7 @@ class TestFallbackWarningField(unittest.TestCase):
 
     def test_no_match_fallback_allow_sets_file_fallback_warning_false(self):
         """
-        Given Read allows only '/tmp/**' and no_match_fallback='allow' (TOO-19)
+        Given Read allows only '/tmp/**' and no_match_fallback='allow'
         When resolve_file_path_permission_detailed() resolves an unmatched path
         Then the decision is 'allow' and fallback_warning is False, and the
             reason text does not claim a warning was emitted
@@ -2063,25 +1871,7 @@ class TestFallbackWarningField(unittest.TestCase):
 
 
 class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
-    """
-    TOO-19 fail-open fix: a grammar-level UndecidableSegment (process
-    substitution, an unparseable control structure) has NO leaves and so
-    never calls permission_resolution.resolve_command_permission -- unlike
-    an ask_floor LEAF (foreign inline code / heredoc), which does. Before this
-    fix, that meant the parse-failure ASK floor never ran for it, and a
-    broken config combined with undecidable_fallback='allow_with_warning'
-    resolved such commands to 'allow'. See
-    TestUndecidableFallbackThreading.test_broken_config_still_asks_despite_allow_with_warning_undecidable_fallback
-    above for the LEAF case this class is deliberately NOT duplicating --
-    that test predates this fix and is a false-confidence test for this bug:
-    it exercises the already-covered leaf path, not the true
-    UndecidableSegment gap this class targets.
-
-    Configurations are hand-built via ``_config_with_fallback`` (zero file
-    I/O) per the existing pattern in ``TestUndecidableFallbackThreading``, so
-    no ConfigIsolationMixin is needed (test-config-isolation.md: only
-    required when a test reaches toolguard.config's discovery path).
-    """
+    """A grammar-level UndecidableSegment has no leaves and bypasses the per-leaf parse-failure floor -- unlike the ask-floor leaf case TestUndecidableFallbackThreading already covers."""
 
     def _config_with_fallback(self, undecidable_fallback, allow=(), parse_failures=()):
         """Return a config with the given undecidable_fallback and parse_failures set."""
@@ -2180,9 +1970,9 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
         Given NO recorded parse failure AND undecidable_fallback='allow_with_warning'
         When resolve_bash_permission_detailed() resolves a process
             -substitution command
-        Then the decision is 'allow' -- proving the fix does not disable the
-            allow_with_warning escape hatch outright, only closes the hole
-            that let a BROKEN config bypass the floor
+        Then the decision is 'allow' -- the parse-failure floor only applies
+            when the config is actually broken, not to every
+            allow_with_warning escape hatch
         """
         config = self._config_with_fallback("allow_with_warning", allow=["diff:*"])
 
@@ -2197,11 +1987,8 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
         Given a broken config file AND a normal, fully-decomposable command
             that matches an allow pattern
         When resolve_bash_permission_detailed() resolves it
-        Then the decision is 'ask' with the single broken-config-file ASK
-            -floor reason -- exactly the pre-existing per-leaf-floor
-            behaviour, proving the new compound-boundary re-application is a
-            no-op (idempotent) for the already-covered leaf case and does not
-            double up or corrupt the reason
+        Then the decision is 'ask' with a single broken-config-file ASK-floor
+            reason, not doubled or corrupted
         """
         broken = Path("/fake/project/toolguard_hook.local.toml")
         config = self._config_with_fallback(
@@ -2216,12 +2003,7 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
 
 
 class TestFilePathMatchedRuleExact(unittest.TestCase):
-    """
-    TOO-45 R3 review follow-up: pin RuntimeVerdict.matched_rule (for a
-    file-path resolution) to the exact
-    pattern text, not merely non-None/substring, so a mutation that swaps in
-    a wrong-but-plausible value (e.g. the reason string) fails these tests.
-    """
+    """Pins RuntimeVerdict.matched_rule for a file-path resolution to the exact pattern text, not merely non-None."""
 
     def test_allow_matched_rule_is_exactly_the_configured_pattern(self):
         """
@@ -2293,17 +2075,7 @@ class TestFilePathMatchedRuleExact(unittest.TestCase):
 
 
 class TestFilePathAdditionalContext(unittest.TestCase):
-    """
-    TOO-19 Phase 1, increment 2: RuntimeVerdict.additional_context is threaded
-    through from the winning RuleEntry's additional_context property (or, for
-    a hard-deny match, from the matched hard_deny entry) for Read/Write/Edit.
-
-    Configurations are built directly from :func:`_make_config` (hand-built
-    ConfigLayer/Provenance, zero file I/O), so no ConfigIsolationMixin is
-    needed (per test/unit/CLAUDE.md's checklist). Absolute patterns are used
-    throughout to avoid project-root anchoring concerns, which are out of
-    scope here.
-    """
+    """RuntimeVerdict.additional_context is threaded from the winning RuleEntry (or hard-deny entry) for Read/Write/Edit; configs are hand-built, so no ConfigIsolationMixin is needed (.claude/rules/test-config-isolation.md)."""
 
     def test_read_allow_structured_entry_surfaces_additional_context(self):
         """
@@ -2468,13 +2240,7 @@ class TestFilePathAdditionalContext(unittest.TestCase):
 
 
 class TestBashAdditionalContext(unittest.TestCase):
-    """
-    TOO-19 Phase 1, increments 3 and 5: RuntimeVerdict.additional_context is
-    threaded through resolve_bash_permission_detailed -> resolve_compound_permission,
-    sourcing the per-sub-command context from the internal per-level
-    RuntimeVerdict.additional_context (already populated by increment 2's
-    permission_resolution._resolve_unclamped).
-    """
+    """RuntimeVerdict.additional_context is threaded through resolve_bash_permission_detailed -> resolve_compound_permission."""
 
     def _resolve(self, config, command, extended_syntax=True):
         """Resolve a Bash command through resolve_bash_permission_detailed."""
@@ -2611,11 +2377,7 @@ class TestBashAdditionalContext(unittest.TestCase):
             additionalContext = 'ask a human first'
         When resolve_bash_permission_detailed resolves a matching command
         Then the decision is 'deny' and additional_context is
-            'ask a human first' -- the Bash hard-deny pool surfaces enrichment
-            exactly like the file-path pool does, via the shared
-            _hard_deny_additional_context lookup. An asymmetry between the two
-            would make any documentation of the feature wrong for one tool
-            family.
+            'ask a human first'
         """
         config = _make_config(
             [
@@ -2662,17 +2424,7 @@ class TestBashAdditionalContext(unittest.TestCase):
 
 
 class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
-    """
-    TOO-19 code review M2: the 500-word additionalContext budget is now
-    enforced once, uniformly, at the two true injection-boundary functions in
-    this module -- resolve_bash_permission_detailed and
-    resolve_file_path_permission_detailed -- rather than only inside
-    compound._accumulate_contexts's Bash all-allow branch. These tests prove
-    (a) a LONE over-budget entry is truncated with a marker rather than
-    silently vanishing to None, for both a Bash rule and a Read/Write/Edit
-    rule, and (b) deny and hard-deny contexts -- previously uncapped
-    entirely -- are now capped too.
-    """
+    """The 500-word additionalContext budget is enforced uniformly for allow, deny, and hard-deny, on both Bash and file-path resolution."""
 
     _OVER_BUDGET = " ".join(f"w{i}" for i in range(600))
 
@@ -2689,7 +2441,7 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
             600 words (over the 500-word budget)
         When resolve_bash_permission_detailed resolves a matching command
         Then additional_context is NOT None -- it is truncated to 500 words
-            plus a marker, fixing the M2 silent-drop bug
+            plus a marker
         """
         config = _make_config(
             [
@@ -2722,8 +2474,7 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
             600 words (over the 500-word budget)
         When resolve_file_path_permission_detailed resolves a matching path
         Then additional_context is NOT None -- it is truncated to 500 words
-            plus a marker. Before M2, a Read rule's context was injected
-            UNCAPPED regardless of length; this proves it is now bounded.
+            plus a marker
         """
         config = _make_config(
             [
@@ -2755,8 +2506,7 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
     def test_bash_deny_context_is_now_capped(self):
         """
         Given a Bash deny structured entry whose additionalContext alone is
-            600 words -- the deny branch never called _accumulate_contexts
-            pre-M2, so this was injected fully uncapped
+            600 words
         When resolve_bash_permission_detailed resolves a matching command
         Then additional_context is capped to 500 words plus a marker
         """
@@ -2787,8 +2537,7 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
     def test_bash_hard_deny_context_is_now_capped(self):
         """
         Given a Bash hard_deny structured entry whose additionalContext alone
-            is 600 words -- the hard-deny lookup was never routed through the
-            budget pre-M2
+            is 600 words
         When resolve_bash_permission_detailed resolves a matching command
         Then additional_context is capped to 500 words plus a marker
         """

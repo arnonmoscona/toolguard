@@ -1,41 +1,31 @@
 """
-Config consolidation proposals for toolguard permission rules.
+Consolidation proposals for toolguard permission rules.
 
-Two complementary consolidation families are provided:
+Two families, each scoped to one tool's allow list within a single config layer:
 
-1. **Family 1 -- Literal-alternation consolidation.**
-   Within a tool's allow list and a single config layer, groups of >= 2
-   DEFAULT ``:*``/``**`` (prefix) patterns that are token-identical except
-   exactly ONE token slot (which varies over literal, wildcard-free values) are
-   collapsed into a single ``[regex]`` rule.  The regex is anchored with ``^``
-   and mirrors DEFAULT ``cmd:*`` PREFIX semantics exactly (no trailing word
-   boundary), so it is EQUIVALENCE-PRESERVING rather than silently tightening.
-   Strict acceptance requires that the consolidation changes NO decision: every
-   probe -- and, when a corpus is supplied, every corpus entry -- must have an
-   identical verdict before and after.
+1. **Literal-alternation.** A group of >= 2 DEFAULT ``cmd:*``/``cmd:**``
+   patterns that are token-identical except one slot -- which varies over
+   literal, wildcard-free values -- is collapsed into one ``[regex]`` rule.
+   No-colon (exact) patterns are excluded.
 
-2. **Family 2 -- Static subsumption elimination.**
-   Within a tool's allow list and a single config layer, a DEFAULT pattern
-   whose static match-set is a provable SUBSET of another pattern in the same
-   list is proposed for removal.  Only DEFAULT ``:*`` patterns are considered
-   and the proof is purely structural (word/path-boundary prefix analysis),
-   making this corpus-independent.  When a corpus is supplied, replay provides
-   a secondary guard.
+2. **Static subsumption.** A DEFAULT pattern whose command part extends
+   another's at a word or path boundary -- so the other should already cover
+   it -- is proposed for removal.
 
-Accepted proposals carry probe-verified, replay-confirmed evidence; any
-candidate that cannot be proven safe is SILENTLY excluded from the returned
-list (not flagged as a soft finding -- that is deferred to a later slice).
+A family-1 candidate is emitted only when every probe -- and every corpus
+entry, when a corpus is supplied -- yields the identical verdict before and
+after.  Family 2 asks less: its two probes must be ``allow`` before and after,
+and a corpus may only forbid broadening.  Either way a failing candidate is
+dropped silently.
 
-Safety note (equivalence + the alembic landmine)
-------------------------------------------------
-Strict family-1 is accepted only when it changes NO decision -- neither
-broadening NOR tightening.  This is what prevents the alembic landmine: a
-consolidation that silently widened an ``ask``/``deny`` command to ``allow`` (or
-quietly narrowed a previously-allowed command) would change at least one probe
-or corpus decision and is rejected before emission.  By construction the
-generated regex is a subset-or-equal of the union of the original DEFAULT prefix
-patterns, so it can never broaden; the no-changed-decision gate additionally
-guarantees it never tightens.  See :func:`_check_family1_safe`.
+Neither gate proves match-set equality; each checks only the commands it runs.
+Family 2's structural argument is not sound in every shape either.
+:func:`_check_family1_safe` and :func:`_static_prefix_of` name the specific
+gaps.
+
+The module's other half, :func:`propose_broadening_consolidations`, is not part
+of that scheme: it enumerates rewrites that DELIBERATELY admit more, gates
+nothing, and attaches evidence for a human to judge.
 """
 
 import re
@@ -68,28 +58,21 @@ from toolguard.tools.replay import replay
 @dataclass(frozen=True)
 class ConsolidationProposal:
     """
-    A verified proposal to consolidate or remove one or more permission rules.
-
-    Each instance represents a single, probe-verified, replay-confirmed change
-    to a tool's allow list within one config layer.  The proposal is GENERAL
-    enough to represent a future remediation EDIT (remove + replace), not only
-    consolidation.
+    One proposed change to a tool's allow list within one config layer.
 
     Attributes:
         kind: ``'literal-alternation'`` or ``'static-subsumption'``.
         tool: Tool name the proposal applies to (e.g. ``'Bash'``).
-        list_type: Which permission list is being modified.  Always ``'allow'``
-            in this slice.
-        layer_provenance: The :class:`~toolguard.config.Provenance` identifying
-            the config layer that contains the patterns being changed.
+        list_type: Which permission list is modified.  Always ``'allow'``.
+        layer_provenance: The :class:`~toolguard.config.Provenance` of the
+            config layer holding the patterns being changed.
         removed_patterns: Wrapper-free pattern bodies being removed.
         added_pattern: Wrapper-free body of the replacement rule, or ``None``
-            for pure-drop proposals (static-subsumption where the larger rule
-            already covers everything).
-        rationale: Human-readable explanation of WHY the consolidation is
-            valid (e.g. which token varies, which rule subsumes which).
+            for a pure drop (every static-subsumption proposal).
+        rationale: Human-readable explanation of why the change is claimed
+            valid (which token varies, which rule subsumes which).
         replay_summary: Short evidence string summarising the probe/replay
-            outcome (e.g. "N positive probes pass; corpus replay: 0 broadened").
+            outcome (e.g. ``"10 probes unchanged; no corpus"``).
     """
 
     kind: str
@@ -107,12 +90,10 @@ class BroadeningProposal:
     """
     An *agent-judged* proposal to broaden a set of allow rules into one wider rule.
 
-    Unlike :class:`ConsolidationProposal` (which is strict and
-    equivalence-preserving), a broadening DELIBERATELY admits more commands than
-    the union of the rules it replaces.  It is therefore never auto-applied: the
-    deterministic layer only ENUMERATES the candidate and attaches concrete replay
-    evidence so the maintenance skill (and the developer) can judge it with the
-    security-audit lens.  The strict-vs-judged seam lives exactly here.
+    A broadening DELIBERATELY admits more commands than the union of the rules
+    it replaces, so it is never auto-applied: this layer only enumerates the
+    candidate and attaches evidence for a human (or the maintenance skill) to
+    judge.
 
     Attributes:
         kind: The broadening shape.  ``'prefix-broadening'`` collapses several
@@ -125,23 +106,21 @@ class BroadeningProposal:
         removed_patterns: Wrapper-free bodies of the narrow rules being replaced.
         added_pattern: Wrapper-free body of the single broadened replacement rule.
         rationale: Human-readable explanation of what the broadening admits.
-        newly_admitted_commands: Corpus commands whose verdict flips TOWARD allow
-            under the broadened config (the real blast radius, from replay's
-            ``broadened()`` entries).  Empty when no corpus was supplied.
+        newly_admitted_commands: Corpus commands for this tool whose verdict
+            moves toward allow under the broadened config, from replay's
+            ``broadened()`` entries.  Empty when no corpus was supplied.
         overlaps_guard_rules: Same-layer ask/deny rule bodies whose command-space
-            TEXTUALLY overlaps the broadened pattern (tested in isolation, ignoring
-            resolution precedence), each labelled ``"ask '<body>'"`` or
-            ``"deny '<body>'"``.  toolguard's resolution PROTECTS these in-context
-            (deny always wins; a more-specific ask wins over the broadened allow),
-            so this is NOT a punch-through -- it is a FRAGILITY signal: the
-            broadening's safety now leans on that guard, and the protection
-            evaporates if the allow is later migrated up the hierarchy (the
-            featherhill ``.env``-deny-left-behind class).  Verdict-based
-            punch-through is unreachable here, which is why this is a textual
-            overlap rather than a decided collision.
+            overlaps the broadened pattern, each labelled ``"ask '<body>'"`` or
+            ``"deny '<body>'"``.  The test is textual and ignores resolution
+            precedence, so an entry is not by itself a punch-through: a same-layer
+            deny still wins.  An ask guard may not -- allow-vs-ask ties break on
+            literal-prefix length, so an ask BROADER than the broadened allow
+            loses to it.  ``ask 'uv run:*'`` against a broadened
+            ``uv run alembic :*`` is that case, and the ``uv run alembic``
+            commands the ask used to gate become ``allow``.
         probe_admitted_surface: Synthetic near-miss commands the broadened rule
-            admits but the originals did not -- demonstrates that the rule now
-            admits arbitrary commands under the prefix, even with no corpus.
+            admits and the originals did not -- breadth evidence that needs no
+            corpus.
     """
 
     kind: str
@@ -162,19 +141,7 @@ class BroadeningProposal:
 
 
 def _is_literal_token(token: str) -> bool:
-    """
-    Return True when ``token`` contains no fnmatch wildcard characters.
-
-    Wildcard characters (``*``, ``?``, ``[``, ``]``) make a token non-literal
-    and unsuitable for direct inclusion in a regex alternation group.  All
-    other characters are considered safe for literal matching.
-
-    Args:
-        token: A single whitespace-free token from a DEFAULT pattern body.
-
-    Returns:
-        True when the token is free of ``*``, ``?``, ``[``, and ``]``.
-    """
+    """Return True when *token* holds no fnmatch metacharacter (``*``, ``?``, ``[``, ``]``)."""
     return not any(c in token for c in ("*", "?", "[", "]"))
 
 
@@ -189,25 +156,22 @@ def _build_alternation_regex(
     suffix_tokens: List[str],
 ) -> str:
     """
-    Build a ``[regex]``-prefixed consolidated pattern for a literal-alternation group.
+    Build the ``[regex]`` body for a literal-alternation group.
 
-    The resulting pattern is anchored with ``^`` and has NO trailing word
-    boundary, so it mirrors DEFAULT ``cmd:*`` PREFIX semantics exactly (e.g.
-    ``^git (diff|status)`` matches ``git diff``, ``git diff --stat`` AND
-    ``git difftool`` -- the same set as the original ``git diff:*``).  Adding a
-    ``\\b`` here would silently TIGHTEN (drop ``git difftool``), which strict
-    family-1 must not do.  All tokens are escaped with :func:`re.escape` before
-    insertion.
+    Anchored with ``^`` and deliberately WITHOUT a trailing ``\\b``: DEFAULT
+    ``cmd:*`` is a prefix match with no word boundary past the first token --
+    ``git diff:*`` matches ``git difftool`` -- so a boundary here would silently
+    drop such commands.
 
     Args:
         prefix_tokens: Cmd tokens before the varying position (may be empty).
-        varying_tokens: The distinct literal tokens at the varying position,
-            sorted for determinism.
+        varying_tokens: The distinct literal tokens at the varying position;
+            sorted here, so the output does not depend on member order.
         suffix_tokens: Cmd tokens after the varying position (may be empty).
 
     Returns:
-        A ``[regex]``-prefixed pattern body ready for insertion into the allow
-        list (e.g. ``'[regex]^git (diff|flake8|status)'``).
+        A ``[regex]``-prefixed pattern body, e.g.
+        ``'[regex]^git (diff|flake8|status)'``.
     """
     escaped_prefix = " ".join(re.escape(t) for t in prefix_tokens)
     escaped_suffix = " ".join(re.escape(t) for t in suffix_tokens)
@@ -231,37 +195,35 @@ def _build_alternation_regex(
 
 def _static_prefix_of(large_cmd: str, small_cmd: str) -> bool:
     """
-    Return True when ``large_cmd`` is a provable structural prefix of ``small_cmd``.
+    Return True when ``large_cmd`` is a structural prefix of ``small_cmd``.
 
-    The check is conservative: we only claim subsumption when ``large_cmd`` is
-    a word-level or path-level prefix of ``small_cmd``.  Specifically:
+    Accepted forms: equality; ``small_cmd`` extending ``large_cmd`` at a space
+    or ``/`` boundary; and ``large_cmd`` already ending in a separator, which is
+    how ``mkdir -p /tmp/`` covers ``mkdir -p /tmp/claude-code``.
 
-    - Equality: ``small_cmd == large_cmd``.
-    - Space-separated word prefix: ``small_cmd.startswith(large_cmd + " ")``.
-    - Path-separator prefix: ``small_cmd.startswith(large_cmd + "/")``.
-    - Trailing-separator in large: when ``large_cmd`` already ends with ``/``
-      or `` ``, a character-level prefix check is used.
+    Meant to establish that ``small_cmd:*``'s match-set is a subset of
+    ``large_cmd:*``'s.  Two shapes break that, leaving the caller's probe check
+    as the only guard:
 
-    The trailing-separator case handles patterns like ``mkdir -p /tmp/:*`` (large)
-    vs ``mkdir -p /tmp/claude-code:*`` (small): ``large_cmd = "mkdir -p /tmp/"``
-    ends with ``/``, so ``small_cmd.startswith("mkdir -p /tmp/")`` is enough
-    proof.
+    - A ``/`` boundary inside the BASE (first) token.  ``/usr/bin:*`` does not
+      match ``/usr/bin/env python``, even though ``/usr/bin`` is a path prefix
+      of ``/usr/bin/env``.
+    - The args part is never looked at.  The caller also passes no-colon (exact)
+      bodies, and an exact ``uv run`` matches nothing but ``uv run`` -- so it
+      subsumes ``uv run python:*`` in this function's terms and not in fact.
 
     Args:
         large_cmd: The command portion (before ``:``) of the larger pattern.
         small_cmd: The command portion of the potentially-subsumed pattern.
 
     Returns:
-        True when ``small_cmd:*`` match-set is structurally proven to be
-        a subset of ``large_cmd:*``'s match-set.
+        True when ``large_cmd`` is a structural prefix of ``small_cmd``.
     """
     if small_cmd == large_cmd:
         return True
-    # Word-level or path-level boundary
     for sep in (" ", "/"):
         if small_cmd.startswith(large_cmd + sep):
             return True
-    # large_cmd already ends with a separator (e.g. "mkdir -p /tmp/")
     if large_cmd.endswith(("/", " ")) and small_cmd.startswith(large_cmd):
         return True
     return False
@@ -271,7 +233,8 @@ def _static_prefix_of(large_cmd: str, small_cmd: str) -> bool:
 # Internal helpers -- probe generation and safety check
 # ---------------------------------------------------------------------------
 
-# Synthetic probe token that is unlikely to appear in any real pattern.
+#: Stand-in token for "a value no rule mentions", used to build near-miss
+#: probes.
 _PROBE_NEGATIVE_TOKEN = "__toolguard_probe_absent__"
 
 
@@ -281,16 +244,12 @@ def _generate_positive_probes(
     """
     Generate positive probe commands for a family-1 alternation group.
 
-    For each member of the group, synthesises two probe commands:
-    - The bare command (cmd tokens joined, without args).
-    - The command with a generic trailing argument ``--x``.
-
-    These probes must be ``allow`` under both the original and consolidated
-    configs to confirm the consolidation does not tighten anything.
+    Two per member: the bare command (cmd tokens joined, no args), and the same
+    with a generic trailing ``--x``.
 
     Args:
-        parsed_group: List of ``(cmd_tokens, args, pos, prefix_tokens, suffix_tokens)``
-            tuples for each group member.
+        parsed_group: One ``(cmd_tokens, args, pos, prefix_tokens,
+            suffix_tokens)`` tuple per group member.
 
     Returns:
         List of probe command strings.
@@ -311,18 +270,17 @@ def _generate_negative_probes(
     """
     Generate negative probe commands for a family-1 alternation group.
 
-    Uses a synthetic token guaranteed not to be in ``varying_tokens`` to
-    construct a near-miss command.  A near-miss should NOT be allowed by
-    either the original patterns or the consolidated regex; if the consolidated
-    regex matches it (but the originals did not), broadening is detected.
+    Puts :data:`_PROBE_NEGATIVE_TOKEN` in the varying slot, so neither the
+    original patterns nor a faithful consolidated regex should match: a
+    consolidated rule that matches anyway has widened the alternation.
 
     Args:
         prefix_tokens: Common prefix tokens before the alternation.
-        varying_tokens: The actual varying tokens in the group.
+        varying_tokens: Unused; the probe deliberately avoids all of them.
         suffix_tokens: Common suffix tokens after the alternation.
 
     Returns:
-        List of probe command strings (near-miss commands).
+        List of probe command strings.
     """
     token = _PROBE_NEGATIVE_TOKEN
     cmd_parts = prefix_tokens + [token] + suffix_tokens
@@ -336,17 +294,20 @@ def _generate_extension_probes(
     """
     Generate prefix-extension near-miss probes for a family-1 group.
 
-    For each group member, appends literal characters to the bare command with
-    NO separating space (e.g. ``git diff`` -> ``git diffx`` and
-    ``git difftool``).  Under DEFAULT ``cmd:*`` PREFIX semantics these share the
-    member's verdict, so an equivalence-preserving consolidated rule must agree
-    on them.  They are the probes that expose BOTH silent tightening (a too-strict
-    word boundary that would drop ``git difftool``) and exact-vs-prefix widening
-    (a no-colon exact pattern consolidated into an over-broad prefix regex).
+    For each member, appends characters to the bare command with NO separating
+    space (``git diff`` -> ``git diffx``, ``git difftool``).  These are the
+    probes that catch a consolidated rule disagreeing with DEFAULT prefix
+    semantics in either direction:
+
+    - A multi-token member shares its verdict with them, so a too-strict word
+      boundary in the regex shows up as a tightening.
+    - A single-token member does NOT -- ``ls:*`` matches neither ``lsx`` nor
+      ``lstool`` -- so a single-token group collapsing into a boundary-free
+      ``^(cat|ls)`` shows up as a widening.
 
     Args:
-        parsed_group: List of ``(cmd_tokens, args, pos, prefix_tokens, suffix_tokens)``
-            tuples for each group member.
+        parsed_group: One ``(cmd_tokens, args, pos, prefix_tokens,
+            suffix_tokens)`` tuple per group member.
 
     Returns:
         List of probe command strings.
@@ -359,7 +320,7 @@ def _generate_extension_probes(
     return probes
 
 
-def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45 scope
+def _check_family1_safe(  # noqa: PLR0913 -- 9 args
     config: Configuration,
     tool: str,
     provenance: Provenance,
@@ -371,21 +332,28 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45
     corpus: Optional[List[LogEntry]],
 ) -> Tuple[bool, str]:
     """
-    Verify that replacing ``original_patterns`` with ``consolidated_body`` is
-    EQUIVALENCE-PRESERVING (changes no decision).
+    Check whether replacing ``original_patterns`` with ``consolidated_body``
+    changes any decision.  Both conditions are required:
 
-    Strict family-1 acceptance requires that the consolidation neither broadens
-    NOR tightens any decision:
-
-    1. Every probe command has an IDENTICAL verdict under the original config and
-       the consolidated config.  The probe set is: the literal member commands
-       (with and without a generic trailing arg), prefix-extension near-misses
-       (member command plus trailing characters with no separating space, e.g.
-       ``git diff`` -> ``git difftool``), and a synthetic absent-token near-miss.
-       The extension probes are what expose a too-strict boundary (silent
-       tightening) or an exact-vs-prefix widening.
+    1. Every probe command has an IDENTICAL verdict under the original config
+       and the consolidated config.  The probe set is the literal member
+       commands (with and without a generic trailing arg), the prefix-extension
+       near-misses of :func:`_generate_extension_probes`, and the absent-token
+       near-misses of :func:`_generate_negative_probes`.
     2. When ``corpus`` is supplied, ``replay`` reports ZERO broadened AND ZERO
        tightened entries.
+
+    Passing is evidence about the commands that were run, not a proof of
+    match-set equality.  Two shapes are known to pass and still TIGHTEN:
+
+    - **A wildcard in a NON-varying token.** Only the varying token is required
+      to be wildcard-free, and :func:`_build_alternation_regex` escapes the
+      rest, so ``git d*ff a:*`` + ``git d*ff b:*`` are accepted and
+      ``git diff a`` stops being allowed.
+    - **Path normalization.** DEFAULT matching tries a path-normalized form of
+      the command as well as the raw one; a ``[regex]`` pattern only ever sees
+      the raw one.  So ``cat ./x:*`` + ``cat ./y:*`` are accepted and ``cat x``
+      stops being allowed.
 
     Args:
         config: Original configuration.
@@ -399,16 +367,14 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45
         corpus: Optional harvested command corpus for historical replay check.
 
     Returns:
-        Tuple of ``(passed, evidence_string)``.  ``passed`` is True ONLY when no
+        Tuple of ``(passed, evidence_string)``.  ``passed`` is True only when no
         probe and no corpus entry changes verdict; ``evidence_string`` summarises
         what was checked.
     """
-    # Build config B: remove originals, add consolidated rule.
     config_b = with_layer_allow_replaced(
         config, tool, provenance, set(original_patterns), [consolidated_body]
     )
 
-    # Parse parsed_group from original_patterns for probe generation.
     parsed_group: List[Tuple[List[str], str, int, List[str], List[str]]] = []
     pos = len(prefix_tokens)
     for pat in original_patterns:
@@ -418,9 +384,6 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45
         cmd_tokens, args = split_default_body(body)
         parsed_group.append((cmd_tokens, args, pos, prefix_tokens, suffix_tokens))
 
-    # Full probe set: positive members, prefix-extension near-misses, and the
-    # synthetic absent-token negative probe.  Strict family-1 requires that the
-    # verdict is UNCHANGED for every one of them.
     probes = (
         _generate_positive_probes(parsed_group)
         + _generate_extension_probes(parsed_group)
@@ -437,7 +400,6 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args; pre-existing, not in TOO-45
             f"probe decision changes: {changed}/{len(probes)} (not equivalence-preserving)",
         )
 
-    # --- Corpus replay: require zero changed decisions (no broaden, no tighten) ---
     if corpus:
         diff = replay(corpus, config, config_b)
         if diff.broadened_count or diff.tightened_count:
@@ -470,23 +432,21 @@ def _find_literal_alternations(
     """
     Find literal-alternation consolidation opportunities in ``allow_patterns``.
 
-    Groups DEFAULT ``:*`` patterns that are token-identical except exactly ONE
-    token slot (varying over literal, wildcard-free values).  Each group of
-    >= 2 such patterns is a candidate; the candidate is emitted as a proposal
-    only when the strict probe-equivalence and optional corpus-replay checks
-    pass.
+    Groups DEFAULT ``cmd:*``/``cmd:**`` patterns that are token-identical except
+    exactly ONE token slot, varying over literal, wildcard-free values.  Each
+    group of >= 2 is a candidate, emitted only when :func:`_check_family1_safe`
+    passes.
 
     Args:
         config: The full configuration (for probe decisions).
         tool: Tool name.
         allow_patterns: Wrapper-free allow patterns from the target layer.
-        provenance: Layer provenance (used to build config_b via Step-0 primitive).
-        corpus: Optional harvested corpus for secondary replay check.
+        provenance: Layer provenance; identifies the layer to rewrite.
+        corpus: Optional harvested corpus for the replay check.
 
     Returns:
         List of accepted :class:`ConsolidationProposal` records.
     """
-    # --- Parse all DEFAULT :* patterns ---
     # Each entry: (raw_body, cmd_tokens, args_part)
     default_entries: List[Tuple[str, List[str], str]] = []
     for raw in allow_patterns:
@@ -496,9 +456,8 @@ def _find_literal_alternations(
         cmd_tokens, args_part = split_default_body(body)
         if not cmd_tokens:
             continue
-        # Only consolidate DEFAULT prefix forms (cmd:* / cmd:**).  No-colon EXACT
-        # patterns are excluded: a plain prefix regex cannot preserve their exact
-        # match semantics without end-anchoring (deferred to a later slice).
+        # Prefix forms only.  A no-colon EXACT pattern cannot be folded into a
+        # prefix regex without end-anchoring it, which the alternation does not do.
         if args_part not in ("*", "**"):
             continue
         default_entries.append((raw, cmd_tokens, args_part))
@@ -506,26 +465,24 @@ def _find_literal_alternations(
     if len(default_entries) < 2:
         return []
 
-    # --- Group by template: (args, n_tokens, pos, other_tokens_tuple) ---
-    # For each pattern and each token position, create a template key where
-    # that position is the "varying slot" and all others are fixed.
+    # One key per (pattern, token position): that position is the varying slot
+    # and every other position is fixed, so patterns sharing a key differ at
+    # most in that slot.  A pattern therefore lands in as many groups as it has
+    # literal tokens.
     groups: Dict[Tuple, List[Tuple[str, List[str], str, int]]] = defaultdict(list)
 
     for raw, cmd_tokens, args_part in default_entries:
         n = len(cmd_tokens)
         for pos in range(n):
-            # Include only if this token is literal (no fnmatch wildcards)
             if not _is_literal_token(cmd_tokens[pos]):
                 continue
-            # Template key: all positions except ``pos`` are fixed.
             others = tuple((j, cmd_tokens[j]) for j in range(n) if j != pos)
             key = (args_part, n, pos, others)
             groups[key].append((raw, cmd_tokens, args_part, pos))
 
-    # --- Evaluate each group ---
     proposals: List[ConsolidationProposal] = []
-    # Track which frozensets of raw patterns we've already emitted to avoid
-    # duplicate proposals from multiple valid positions in the same pattern set.
+    # One proposal per set of patterns, even when that set could be read as
+    # varying at more than one position.
     emitted_sets: Set[frozenset] = set()
 
     for (args_part, n, pos, others), members in groups.items():
@@ -537,26 +494,25 @@ def _find_literal_alternations(
         if group_set in emitted_sets:
             continue
 
-        # All varying tokens must be literal (already guaranteed by group-key
-        # construction, but double-check for robustness).
+        # Redundant -- the group key is only built for a literal token.
         varying_tokens = [m[1][pos] for m in members]
         if not all(_is_literal_token(t) for t in varying_tokens):
             continue
         if len(set(varying_tokens)) != len(varying_tokens):
-            # Duplicate varying tokens -> exact duplicates, handled by redundancy.
+            # Equal varying tokens mean equal bodies: duplicates, not an
+            # alternation.
             continue
 
-        # Reconstruct prefix/suffix from the first member's cmd_tokens.
+        # Every member agrees outside the varying slot, so any member's tokens
+        # give the shared prefix and suffix.
         first_cmd_tokens = members[0][1]
         prefix_tokens = first_cmd_tokens[:pos]
         suffix_tokens = first_cmd_tokens[pos + 1 :]
 
-        # Build the consolidated [regex] pattern.
         consolidated = _build_alternation_regex(
             prefix_tokens, varying_tokens, suffix_tokens
         )
 
-        # Safety check: probes + optional corpus replay.
         safe, evidence = _check_family1_safe(
             config,
             tool,
@@ -605,27 +561,25 @@ def _check_family2_safe(
     corpus: Optional[List[LogEntry]],
 ) -> Tuple[bool, str]:
     """
-    Verify that removing the subsumed pattern ``small_body`` is safe.
+    Check whether removing ``small_body`` leaves its own commands allowed.
 
-    Checks that positive probe commands (derived from ``small_cmd``) remain
-    ``allow`` after removal, and runs an optional corpus replay.
+    Two probes derived from ``small_cmd`` must be ``allow`` both before AND
+    after removal.  With a corpus, replay must also report no broadening.
 
     Args:
         config: The full original configuration.
         tool: Tool name.
         provenance: Layer provenance of the pattern being removed.
-        small_body: Wrapper-free body of the pattern being proposed for removal.
-        small_cmd: Command portion of ``small_body`` (before the ``:``) for
-            generating positive probes.
-        corpus: Optional corpus for secondary replay check.
+        small_body: Wrapper-free body of the pattern proposed for removal.
+        small_cmd: Command portion of ``small_body`` (before the ``:``), used to
+            build the probes.
+        corpus: Optional corpus for the replay check.
 
     Returns:
         Tuple of ``(passed, evidence_string)``.
     """
     config_b = with_layer_allow_replaced(config, tool, provenance, {small_body}, [])
 
-    # Positive probes: commands that match the small pattern and should
-    # remain allowed after removal (by virtue of the larger pattern covering them).
     probes = [small_cmd, small_cmd + " --x"]
     pos_fail = 0
     for cmd in probes:
@@ -661,24 +615,23 @@ def _find_static_subsumptions(
     """
     Find static subsumption elimination opportunities in ``allow_patterns``.
 
-    For each pair of DEFAULT ``:*`` patterns in the list, checks whether one
-    pattern's match-set is a STRICT structural subset of the other (using
-    :func:`_static_prefix_of`).  Only conservative prefix-based proofs are
-    claimed; ambiguous cases are silently skipped.
-
-    Identical patterns (handled by redundancy detection) are excluded.
+    Considers every ordered pair of DEFAULT patterns whose args part is ``*``,
+    ``**`` or absent, and proposes dropping the second when
+    :func:`_static_prefix_of` holds and :func:`_check_family2_safe` passes.
+    Pairs whose command parts are equal are skipped, so an exact duplicate is
+    never reported as a subsumption.
 
     Args:
         config: The full configuration (for probe decisions).
         tool: Tool name.
         allow_patterns: Wrapper-free allow patterns from the target layer.
         provenance: Layer provenance.
-        corpus: Optional corpus for secondary replay guard.
+        corpus: Optional corpus for the replay guard.
 
     Returns:
         List of accepted :class:`ConsolidationProposal` records.
     """
-    # Parse all DEFAULT :* patterns into (body, cmd_tokens, args_part)
+    # Each entry: (raw_body, cmd_str, cmd_tokens, args_part)
     default_entries: List[Tuple[str, str, List[str], str]] = []
     for raw in allow_patterns:
         ptype, body = parse_pattern(raw, extended_syntax=True)
@@ -702,17 +655,14 @@ def _find_static_subsumptions(
             if i == j:
                 continue
             raw_small, small_cmd, _, _ = default_entries[j]
-            # Skip equal patterns (handled by redundancy.py).
             if large_cmd == small_cmd:
                 continue
-            # Skip already-proposed removals to avoid duplicate proposals.
+            # One removal proposal per pattern, however many rules cover it.
             if raw_small in proposed_removals:
                 continue
-            # Structural proof: small_cmd is a proper prefix-subset of large_cmd.
             if not _static_prefix_of(large_cmd, small_cmd):
                 continue
 
-            # Safety check: removing small_body must not change any decision.
             safe, evidence = _check_family2_safe(
                 config, tool, provenance, raw_small, small_cmd, corpus
             )
@@ -750,66 +700,41 @@ def propose_consolidations(
     corpus: Optional[List[LogEntry]] = None,
 ) -> List[ConsolidationProposal]:
     """
-    Return probe-verified consolidation proposals for ``tool``'s allow list.
+    Return probe-checked consolidation proposals for ``tool``'s allow list.
 
-    Scans each config layer's allow list for Family 1 (literal-alternation) and
-    Family 2 (static-subsumption) opportunities.  Only STRICTLY accepted
-    proposals are returned -- any candidate that fails the self-contained probe
-    check or the optional corpus replay is silently excluded.
+    Scans every config layer's allow list for both families; a candidate that
+    fails its probe check or the corpus replay is dropped without a trace.  What
+    those checks do and do not establish is in :func:`_check_family1_safe` and
+    :func:`_static_prefix_of`.
 
-    The returned list is in a deterministic, stable order (sorted by
-    ``kind``, ``layer_provenance``, and ``removed_patterns``).
-
-    Safety properties
-    -----------------
-    - Family-1 proposals are EQUIVALENCE-PRESERVING: accepted only when no probe
-      and no corpus decision changes (neither broadened nor tightened).  The
-      generated regex is anchored with ``^`` and mirrors DEFAULT ``cmd:*`` prefix
-      semantics (no trailing boundary), so by construction it is a
-      subset-or-equal of the original union and the gate proves it never tightens.
-    - Family-2 proposals are structurally proven safe before the probe is run.
-    - The replay guard (when ``corpus`` is supplied) provides an additional
-      catch for any edge-case decision change on real traffic.
-
-    Alembic landmine avoidance
-    --------------------------
-    The landmine is a consolidation that silently widens an ``ask``/``deny``
-    command to ``allow`` (e.g. collapsing several ``uv run alembic <sub>:*``
-    allows into a bare ``uv run alembic:*`` that bypasses an ``ask`` guard).
-    Strict family-1 cannot produce it: the no-changed-decision gate
-    (:func:`_check_family1_safe`) rejects any candidate whose probe or corpus
-    decisions differ before and after.  (Separately, patterns with different
-    token counts never form a group at all, since grouping fixes all but one
-    token slot -- but that is incidental structure, not the safety mechanism.)
+    Each proposal is evaluated against the ORIGINAL config on its own.  Two can
+    name the same pattern -- a family-1 group and a family-2 drop covering the
+    same rule -- and nothing here checks that applying more than one together
+    still changes no decision.
 
     Args:
         config: The resolved :class:`~toolguard.config.Configuration`.
         tool: Tool name to inspect (e.g. ``'Bash'``).
         corpus: Optional harvested command corpus
-            (:class:`~toolguard.tools.log_harvest.LogEntry` list) used as a
-            secondary replay safety gate.  When ``None`` or empty, only the
-            self-contained probe check is applied.
+            (:class:`~toolguard.tools.log_harvest.LogEntry` list) replayed as a
+            second gate.  When ``None`` or empty, only the probes are applied.
 
     Returns:
-        Deterministically ordered list of :class:`ConsolidationProposal`
-        records, all of which have passed probe-equivalence and (when a corpus
-        is given) corpus-replay verification.
+        List of :class:`ConsolidationProposal` records, ordered by ``kind``,
+        layer provenance, then removed patterns.
     """
     proposals: List[ConsolidationProposal] = []
 
     for layer in per_layer_rules(config, tool):
         allow = layer.allow  # wrapper-free tuple
 
-        # Family 1: literal alternation
         proposals.extend(
             _find_literal_alternations(config, tool, allow, layer.provenance, corpus)
         )
-        # Family 2: static subsumption
         proposals.extend(
             _find_static_subsumptions(config, tool, allow, layer.provenance, corpus)
         )
 
-    # Stable, deterministic sort.
     proposals.sort(
         key=lambda p: (
             p.kind,
@@ -835,10 +760,11 @@ def _overlapping_guard_rules(
     """
     Find same-layer ask/deny rules whose command-space overlaps a broadening.
 
-    This is a TEXTUAL overlap (precedence-ignorant): it reports guards the
-    broadened allow now also spans, regardless of which rule wins at decision
-    time.  Only DEFAULT guard patterns are analysed; ``[regex]``/``[glob]`` guards
-    are skipped (their command-space is not prefix-comparable here).
+    A TEXTUAL, precedence-ignorant overlap: it reports guards the broadened
+    allow now also spans, whichever rule would win at decision time.  Only a
+    DEFAULT ``cmd:*``/``cmd:**`` guard is comparable, so an ask/deny written as
+    an extended-syntax pattern, with a real args part, or as an exact no-colon
+    body is silently skipped.
 
     Args:
         broadened_prefix: Command-prefix tokens of the broadened allow rule.
@@ -867,12 +793,10 @@ def _broadening_probe_surface(
     """
     Synthesize near-miss probes the broadened rule admits but the originals do not.
 
-    Uses an absent sentinel token so the probe cannot collide with any original
-    narrow rule: under the broadened config the prefix matches it (``allow``),
-    while under the original config nothing does.  A probe is kept only when it is
-    genuinely newly admitted -- ``allow`` under ``config_b`` and NOT ``allow``
-    under ``config_a`` -- so a pre-existing broad allow does not produce a false
-    surface entry.
+    The probes put :data:`_PROBE_NEGATIVE_TOKEN` after the prefix, so no
+    original narrow rule can name them.  A probe is kept only when it is
+    ``allow`` under ``config_b`` and NOT ``allow`` under ``config_a``, so an
+    unrelated broad allow already covering it does not create a false entry.
 
     Args:
         config_a: The baseline configuration.
@@ -906,12 +830,12 @@ def _find_prefix_broadenings(
     Enumerate prefix-broadening candidates within one config layer.
 
     Groups DEFAULT ``<prefix> <sub>:*`` allow patterns that share an identical
-    leading command prefix (all tokens but the last) and a literal, varying final
+    leading command prefix (all tokens but the last) and have a literal final
     token, and proposes collapsing each group of >= 2 distinct finals into a
     single ``<prefix> :*`` rule that admits ANY command under the prefix.  Each
-    candidate is replay-measured against the corpus (when supplied) to record
-    exactly which commands it newly admits, and checked against the same layer's
-    ask/deny rules for textual overlap (the fragility signal).
+    candidate carries the corpus commands it newly admits (when a corpus is
+    supplied), the same layer's overlapping ask/deny guards, and a synthetic
+    admitted surface.
 
     Args:
         config: The resolved configuration.
@@ -922,15 +846,13 @@ def _find_prefix_broadenings(
         corpus: Optional command corpus for replay evidence.
 
     Returns:
-        List of :class:`BroadeningProposal` records (unsorted; the public entry
-        point sorts).
+        List of :class:`BroadeningProposal` records, in no particular order.
     """
     provenance = layer.provenance
 
-    # Group eligible DEFAULT prefix patterns by (prefix-tuple, args) with a
-    # literal varying final token.  A non-empty prefix is required so we never
-    # collapse single-token commands (e.g. ``ls:*`` + ``cat:*``) into a bare
-    # `` :*`` that would allow everything.
+    # The >= 2 token requirement leaves a non-empty prefix, so single-token
+    # commands (`ls:*` + `cat:*`) can never collapse into a bare ` :*` that
+    # would allow everything.
     groups: Dict[Tuple[Tuple[str, ...], str], List[Tuple[str, str]]] = defaultdict(list)
     for raw in layer.allow:
         ptype, body = parse_pattern(raw, extended_syntax=True)
@@ -1007,27 +929,22 @@ def propose_broadening_consolidations(
     """
     Enumerate AGENT-JUDGED broadening proposals for ``tool``'s allow list.
 
-    Unlike :func:`propose_consolidations` (strict, equivalence-preserving), this
-    deliberately surfaces consolidations that ADMIT MORE than the union of the
-    rules they replace.  Nothing here is safe to auto-apply: each proposal is
-    enumerated with concrete replay evidence (the real commands it newly admits,
-    the subset that reaches past an explicit guard, and a synthetic admitted
-    surface) so the maintenance skill and the developer can judge it with the
-    security-audit lens.  This is the deterministic half of the deterministic-core
-    / agent-judgment seam.
+    Where :func:`propose_consolidations` only emits what its probes found
+    unchanged, this deliberately surfaces consolidations that ADMIT MORE than
+    the union of the rules they replace.  Nothing here is safe to auto-apply --
+    each proposal carries the evidence a human or the maintenance skill needs to
+    judge it; see :class:`BroadeningProposal`.
 
     Args:
         config: The resolved :class:`~toolguard.config.Configuration`.
         tool: Tool name to inspect (e.g. ``'Bash'``).
-        corpus: Optional harvested command corpus.  When supplied, replay records
-            the real ``newly_admitted_commands`` and ``collides_with_guard``
-            evidence; when ``None`` or empty, only the synthetic
-            ``probe_admitted_surface`` is populated.
+        corpus: Optional harvested command corpus.  It populates
+            ``newly_admitted_commands`` and nothing else -- the guard overlaps
+            and the synthetic admitted surface are computed either way.
 
     Returns:
-        Deterministically ordered list of :class:`BroadeningProposal` records.
-        Order is sorted by ``kind``, ``layer_provenance``, then
-        ``removed_patterns``.
+        List of :class:`BroadeningProposal` records, ordered by ``kind``, layer
+        provenance, then removed patterns.
     """
     proposals: List[BroadeningProposal] = []
     for layer in per_layer_rules(config, tool):

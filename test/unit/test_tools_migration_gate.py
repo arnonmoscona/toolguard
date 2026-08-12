@@ -1,9 +1,4 @@
-"""
-Unit tests for the migration safety pre-flight (toolguard.tools.migration_gate).
-
-The two composed primitives (resolve_project_root, working_tree_status) are
-patched so the combination logic is exercised in isolation.
-"""
+"""Unit tests for the migration safety pre-flight (toolguard.tools.migration_gate)."""
 
 import unittest
 from pathlib import Path

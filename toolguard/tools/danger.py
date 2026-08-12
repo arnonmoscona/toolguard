@@ -1,63 +1,26 @@
 """
 Ranked static risk findings over toolguard allow rules.
 
-This module audits the REAL toolguard rules (from ``toolguard_hook`` layers and
-native ``settings.*`` layers, after takeover filtering) and flags patterns that
-are inherently dangerous -- regardless of whether they were intentionally placed
-there.
+Detection is at the level of a single allow PATTERN, never of a command that
+ran: each :class:`DangerDetector` pairs a predicate over one pattern body with a
+severity, a stable ID, a rationale template and a remediation hint. The
+predicates approximate what a pattern would permit -- none of them invokes the
+runtime matcher -- so a clean result is not evidence that a pattern is safe.
+The substring tests over-match on purpose; the literal tables miss anything
+they do not enumerate, including several bodies that permit everything.
+
+:data:`_DETECTORS` holds four of the five; do not restate the table in prose
+here. The fifth, ``blanket-allow-outside-takeover``, is applied by
+:func:`_audit_tool` directly, because it needs the takeover state a predicate
+signature cannot carry.
 
 Scope
 -----
-``danger`` audits toolguard rules only.  Native blanket allows (``Bash(*)``,
-``Read(*)``, etc.) are NOT flagged when takeover mode is ON and those patterns
-are in the ignored-allow set AND the hook is registered for the relevant tool.
-The appropriate module for that is :mod:`~toolguard.tools.takeover_audit`.
-
-Detector table
---------------
-The detector set is SIMPLE and DATA-DRIVEN: a list of :class:`DangerDetector`
-entries, each with a predicate (pattern-level check), severity, a stable string
-ID, a rationale template, and a remediation hint.  The agent layer (skill) handles
-subtle judgement; this module handles mechanical pattern matching.
-
-Detectors (in severity order, highest first):
-
-1. **CRITICAL / arbitrary-exec-allow**: ``allow`` rule that permits unrestricted
-   arbitrary code execution: ``uv run python``, bare ``python`` / ``python3``,
-   ``node``, ``ruby``, ``perl``, ``sh -c``, ``bash -c``, ``exec``.
-   Severity: CRITICAL (unfiltered code exec defeats the point of toolguard).
-
-2. **HIGH / destructive-cmd-allow**: ``allow`` rule permitting ``rm -rf``-class
-   destructive commands: ``rm -rf``, ``rm -r``, ``shred``, ``dd if=``,
-   ``mkfs``, ``wipefs``.  A wildcard that would match these is also flagged.
-   Severity: HIGH.
-
-3. **HIGH / secrets-exposure-allow**: ``allow`` rule that could expose secrets
-   via Bash execution or file-path tools: patterns matching ``.env``, ``.env.*``,
-   ``~/.ssh``, ``id_rsa``, ``id_ed25519``, ``id_ecdsa``, ``*.pem``, ``*.key``.
-   Severity: HIGH.
-
-4. **MEDIUM / unanchored-regex-allow**: A ``[regex]`` allow rule that does NOT
-   start with ``^``.  Because :func:`~toolguard.patterns.match_pattern` uses
-   ``re.search`` (not ``re.fullmatch``), an unanchored regex matches anywhere
-   in the command string -- a pattern like ``rm`` would match ``echo "no rm"``
-   too.  This is not necessarily a bug (toolguard documents it), but it IS a
-   precision risk and every such rule deserves a human eye.
-   Severity: MEDIUM.
-
-5. **CRITICAL / blanket-allow-outside-takeover**: A wildcard allow (``*`` or
-   matching every input, e.g. pattern body is just ``*``) that is NOT covered by
-   the takeover ignored set.  Such a rule bypasses ALL toolguard checks for that
-   tool -- a complete governance bypass -- so it is flagged CRITICAL even though it
-   may be the user's explicit intent.
-
-Takeover-mode awareness
------------------------
-The :func:`danger` function accepts a pre-resolved
-:class:`~toolguard.config.TakeoverConfig` so it can adjust phrasing and severity.
-For example: a ``Bash(*)`` allow in a NATIVE layer is NOT a finding when takeover
-is ON and ``Bash(*)`` is in the ignored set (it is a deliberate setup artefact).
-
+Every discovered layer is scanned, toolguard and native alike, but only its
+``allow`` list. Native blanket allows that takeover mode intentionally
+suppresses are filtered out before this module sees them, so they are never
+findings. Whether the hook is in fact registered for a tool is a different
+question, answered by :mod:`~toolguard.tools.takeover_audit`.
 """
 
 from dataclasses import dataclass
@@ -80,12 +43,7 @@ from toolguard.tools.config_access import (
 
 
 class Severity(IntEnum):
-    """
-    Ranked severity for danger findings.
-
-    Higher values are more severe.  The integer mapping allows natural sorting
-    (most severe first).
-    """
+    """Ranked severity for danger findings. Higher is more severe, so findings sort."""
 
     LOW = 1
     MEDIUM = 2
@@ -94,7 +52,7 @@ class Severity(IntEnum):
 
     def label(self) -> str:
         """Return the human-readable severity label."""
-        return self.name  # 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'
+        return self.name
 
 
 # ---------------------------------------------------------------------------
@@ -109,25 +67,24 @@ class DangerFinding:
 
     Attributes:
         detector_id: Stable string identifier for the detector that produced
-            this finding (e.g. ``'arbitrary-exec-allow'``).  Safe to use as
-            a dict key or for filtering.
+            this finding (e.g. ``'arbitrary-exec-allow'``) -- safe as a dict key.
         severity: :class:`Severity` rank.
         tool: Tool name the flagged rule belongs to (e.g. ``'Bash'``).
-        pattern: The raw flagged pattern (inner form, tool wrapper stripped).
+        pattern: The flagged pattern with its ``Tool(...)`` wrapper stripped but
+            any ``[regex]``/``[glob]``/``[native]`` prefix left intact -- the
+            ``'anchor'`` remediation below needs that prefix.
         provenance: Origin of the rule in the configuration hierarchy.
         rationale: Human-readable explanation of the risk.
         remediation: Suggested fix or mitigation (human-readable text).
         takeover_active: Whether takeover mode was ON when this finding was
             produced (for display/context).
         list_type: Which permission list the flagged rule lives in
-            (``'allow'``/``'deny'``/``'ask'``); needed to build a structured
-            remediation edit that targets the right section.
-        remediation_kind: Mechanical remediation kind the audit layer can turn
-            into a structured :class:`~toolguard.tools.edit_proposal.EditProposal`:
-            ``'remove'`` (delete the dangerous rule -- always a safe tightening),
-            ``'anchor'`` (prepend ``^`` to an unanchored ``[regex]`` body), or
-            ``None`` when the fix is a judgement call carried only in
-            ``remediation`` text.
+            (``'allow'``/``'deny'``/``'ask'``), so a structured remediation edit
+            can target the right section.
+        remediation_kind: ``'remove'`` (delete the rule -- always a safe
+            tightening), ``'anchor'`` (prepend ``^`` to an unanchored
+            ``[regex]`` body), or ``None`` when the fix is a judgement call
+            carried only in ``remediation``.
     """
 
     detector_id: str
@@ -146,7 +103,6 @@ class DangerFinding:
 # Detector infrastructure
 # ---------------------------------------------------------------------------
 
-# Predicate type: given (tool, pattern_body, pattern_type) -> bool
 _DetectorPredicate = Callable[[str, str, PatternType], bool]
 
 
@@ -158,8 +114,8 @@ class DangerDetector:
     Attributes:
         detector_id: Stable string ID (used in :class:`DangerFinding`).
         severity: Severity rank.
-        list_type: Which list to scan (``'allow'``, ``'deny'``, or ``'ask'``).
-            Almost all detectors target ``'allow'``.
+        list_type: Which list to scan.  :func:`_audit_tool` walks allow lists
+            only, so a detector set to anything but ``'allow'`` is never run.
         applies_to_tools: Set of tool names this detector fires for, or ``None``
             to match ALL tools.
         predicate: Callable ``(tool, body, ptype) -> bool`` that returns ``True``
@@ -167,10 +123,8 @@ class DangerDetector:
         rationale_template: Template for the rationale string (may reference
             ``{tool}`` and ``{pattern}``).
         remediation: Suggested remediation text.
-        remediation_kind: Mechanical remediation kind for a structured fix
-            (``'remove'``, ``'anchor'``, or ``None`` -- see
-            :class:`DangerFinding.remediation_kind`).  Carried onto every finding
-            this detector produces.
+        remediation_kind: See :class:`DangerFinding.remediation_kind`; carried
+            onto every finding this detector produces.
     """
 
     detector_id: str
@@ -190,16 +144,19 @@ class DangerDetector:
 
 def _body_fnmatch_matches_any(body: str, literal_prefixes: Tuple[str, ...]) -> bool:
     """
-    Return True when the DEFAULT/GLOB pattern body starts with any of the given
-    literal prefixes, ignoring extended-syntax bodies.
+    Return True when *body* is one of *literal_prefixes*, or continues one after
+    a ``' '`` or ``':'`` -- the two separators between a command and its
+    arguments in a pattern (``rm -rf /tmp``, ``rm -rf:*``).
 
-    This is a conservative first-pass check: if the body literally starts with
-    the dangerous prefix (possibly followed by whitespace and a wildcard like
-    ``:*``), the rule might allow the dangerous command.
+    So the match is on whole leading tokens, not on characters: ``rm -rf`` does
+    not match a body of ``rm -rfoo``. The separator is appended to the prefix, so
+    an entry that already ends in one is reached only by the equality test or by
+    a doubled separator: ``'python:'`` matches a body of exactly ``'python:'``,
+    but not ``'python:*'``. Both prefix tables below contain such entries.
 
     Args:
-        body: The stripped pattern body (without type prefix).
-        literal_prefixes: Tuple of dangerous literal command prefixes to check.
+        body: The pattern body (type prefix already removed).
+        literal_prefixes: Dangerous literal command prefixes, lower-case.
 
     Returns:
         True when the body matches one of the prefixes.
@@ -217,19 +174,11 @@ def _body_fnmatch_matches_any(body: str, literal_prefixes: Tuple[str, ...]) -> b
 
 def _regex_body_matches_any(body: str, patterns: Tuple[str, ...]) -> bool:
     """
-    Return True when a regex body could match any of the dangerous literal strings.
+    Return True when any of *patterns* occurs literally inside a regex body.
 
-    Uses a simple substring check: if any dangerous literal appears as a
-    sub-pattern in the regex body it might allow the dangerous command.
-    This is a conservative heuristic (false positives are acceptable; false
-    negatives are not).
-
-    Args:
-        body: The regex body string.
-        patterns: Dangerous literal strings to look for inside the regex.
-
-    Returns:
-        True when a dangerous literal is found in the regex body.
+    The regex is not parsed, so this over-matches on purpose -- a literal inside
+    an alternation, a character class, or a negative lookahead that *forbids* the
+    dangerous command reads the same as one that permits it.
     """
     body_lower = body.lower()
     for pat in patterns:
@@ -243,19 +192,16 @@ def _regex_body_matches_any(body: str, patterns: Tuple[str, ...]) -> bool:
 # ---------------------------------------------------------------------------
 
 # 1. Arbitrary code execution
-#
-# Single source of truth for the INTERPRETER NAMES that, when permitted, allow
-# arbitrary code execution.  Both matching branches of ``_is_arbitrary_exec`` build
-# on this so the regex and default/glob checks cannot silently drift apart -- add a
-# new interpreter HERE and both branches pick it up.
-#
-# This is a heuristic curation of the common scripting interpreters, NOT derived
-# from usage evidence; known omissions (php, deno, bun, pwsh/powershell, python2,
-# Rscript, other shells, ...) are deliberately out for now.  The shell-eval forms
-# (``sh -c``/``bash -c``/``uv run python``) and ``exec`` are matched slightly
-# differently per branch (see below), so they are added alongside this set rather
-# than folded into it: ``exec`` is checked only in the default/glob branch, and the
-# multi-token eval forms are prefixes in that branch but substrings in the regex one.
+
+#: Interpreter names shared by both branches of :func:`_is_arbitrary_exec` -- add
+#: one here and both pick it up. A hand-picked list of common scripting
+#: interpreters, not derived from usage evidence: php, deno, bun, pwsh, python2,
+#: Rscript and the other shells are knowingly absent.
+#:
+#: ``exec`` and the multi-token eval forms are NOT folded in, because the two
+#: branches treat them differently: ``exec`` is checked in the default/glob branch
+#: only, and ``uv run python``/``sh -c``/``bash -c`` are leading prefixes there but
+#: bare substrings in the regex branch.
 _ARBITRARY_EXEC_INTERPRETERS: Tuple[str, ...] = (
     "python",
     "python3",
@@ -264,15 +210,13 @@ _ARBITRARY_EXEC_INTERPRETERS: Tuple[str, ...] = (
     "perl",
 )
 
+#: Command prefixes checked in the default/glob branch of :func:`_is_arbitrary_exec`.
 _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
     "uv run python",
     "python3",
-    # NOTE: bare-name forms ("python <args>", "node <args>", ...) are covered by
-    # _ARBITRARY_EXEC_BARE below. Trailing-space entries were removed here because
-    # _body_fnmatch_matches_any strips the body, so "node " could never match.
     "sh -c",
     "bash -c",
-    "python:",  # handle toolguard pattern form python:*
+    "python:",
     "python3:",
     "node:",
     "ruby:",
@@ -280,29 +224,15 @@ _ARBITRARY_EXEC_PREFIXES: Tuple[str, ...] = (
     "sh -c:",
     "bash -c:",
 )
-# Bare command names that, with a wildcard, allow arbitrary execution (covers
-# "python:*"/"exec *" style patterns). The bare check matches an exact body, a
-# "<name> ..." prefix, or a "<name>:..." prefix, so these also cover the "exec"
-# case that a trailing-space/colon prefix entry cannot (the prefix helper appends
-# its own separator, which would require a double space to match).
-# Default/glob branch: the shared interpreter names plus ``exec`` (checked here
-# only -- see the note on _ARBITRARY_EXEC_INTERPRETERS).
+
+#: Single-word command names for the default/glob branch: the shared interpreters
+#: plus ``exec``, which is checked here and nowhere else.
 _ARBITRARY_EXEC_BARE: Tuple[str, ...] = _ARBITRARY_EXEC_INTERPRETERS + ("exec",)
 
 
 def _is_arbitrary_exec(tool: str, body: str, ptype: PatternType) -> bool:
-    """
-    Return True when the allow pattern permits arbitrary code execution.
-
-    Args:
-        tool: Tool name (checked to avoid false positives on file-path tools).
-        body: Pattern body (tool wrapper stripped, type prefix stripped).
-        ptype: Detected pattern type.
-
-    Returns:
-        True when the pattern is an arbitrary-execution allow.
-    """
-    # Only flag command tools (Bash and variants); file-path tools can't exec
+    """Return True when the allow pattern permits arbitrary code execution."""
+    # A file-path tool cannot execute anything.
     if tool in FILE_TOOLS:
         return False
 
@@ -310,23 +240,17 @@ def _is_arbitrary_exec(tool: str, body: str, ptype: PatternType) -> bool:
     body_lower = body_stripped.lower()
 
     if ptype == PatternType.REGEX:
-        # Conservative substring heuristic: if a dangerous interpreter/eval token
-        # appears anywhere in the regex body, treat the rule as arbitrary-exec.
-        # Uses the shared interpreter names (bare, so an anchored body like
-        # "^node:.*" is caught the same way "^python:.*" is) plus the eval forms.
-        # "python" subsumes "python3"; "exec" is deliberately NOT a substring token
-        # because it appears in negative lookaheads that forbid exec (e.g.
-        # "(?!.*exec)") -- the DEFAULT branch checks it precisely. False positives
-        # are acceptable here; false negatives are not.
+        # ``exec`` is deliberately excluded from the regex tokens: it turns up in
+        # negative lookaheads that FORBID exec (``(?!.*exec)``), and a substring
+        # test cannot tell those from a rule that permits it. The default/glob
+        # branch below checks ``exec`` precisely.
         return _regex_body_matches_any(
             body_lower,
             _ARBITRARY_EXEC_INTERPRETERS + ("uv run python", "sh -c", "bash -c"),
         )
     else:
-        # DEFAULT or GLOB: check for literal prefix
         if _body_fnmatch_matches_any(body_lower, _ARBITRARY_EXEC_PREFIXES):
             return True
-        # Also catch bare "python:*" / "python3:*" style (body is "python" exactly)
         for bare in _ARBITRARY_EXEC_BARE:
             if (
                 body_lower == bare
@@ -353,17 +277,7 @@ _DESTRUCTIVE_PREFIXES: Tuple[str, ...] = (
 
 
 def _is_destructive(tool: str, body: str, ptype: PatternType) -> bool:
-    """
-    Return True when the allow pattern could permit a destructive command.
-
-    Args:
-        tool: Tool name.
-        body: Pattern body.
-        ptype: Pattern type.
-
-    Returns:
-        True when the pattern matches a destructive command category.
-    """
+    """Return True when the allow pattern could permit a destructive command."""
     if tool in FILE_TOOLS:
         return False
     body_lower = body.strip().lower()
@@ -377,12 +291,11 @@ def _is_destructive(tool: str, body: str, ptype: PatternType) -> bool:
 
 
 # 3. Secrets exposure
-# This table is intentionally limited to specific file-path indicators for
-# well-known secret files.  Generic substrings like "secret", "password", or
-# "credentials" are omitted because they are too noise-prone (they would flag
-# any rule whose pattern merely contains those words in a comment or path
-# segment).  Specific additional indicators -- e.g. AWS credential paths --
-# can be added deliberately here when the false-positive risk is acceptable.
+
+#: File-path indicators for well-known secret files. Every entry is substring-
+#: tested against the whole pattern body, which is why generic words -- "secret",
+#: "password", "credentials" -- are deliberately absent: they would fire on any
+#: rule whose command or path happened to contain the word.
 _SECRET_PATTERNS: Tuple[str, ...] = (
     ".env",
     ".ssh",
@@ -400,20 +313,14 @@ def _is_secrets_exposure(tool: str, body: str, ptype: PatternType) -> bool:
     """
     Return True when the allow pattern could expose secrets.
 
-    Args:
-        tool: Tool name.
-        body: Pattern body.
-        ptype: Pattern type.
-
-    Returns:
-        True when the pattern could expose credentials or secret files.
+    Unlike the exec and destructive predicates this does not exempt file-path
+    tools: reading a private key is the risk, not only executing something.
     """
     body_lower = body.strip().lower()
 
     if ptype == PatternType.REGEX:
         return _regex_body_matches_any(body_lower, _SECRET_PATTERNS)
 
-    # For DEFAULT/GLOB: check if body contains any secret indicator
     for indicator in _SECRET_PATTERNS:
         if indicator in body_lower:
             return True
@@ -425,36 +332,26 @@ def _is_unanchored_regex(tool: str, body: str, ptype: PatternType) -> bool:
     """
     Return True when the pattern is a ``[regex]`` allow without a ``^`` anchor.
 
-    ``re.search`` is unanchored -- it matches anywhere in the string.  A regex
-    allow like ``rm`` would match a command that merely contains the string ``rm``
-    anywhere (including ``echo "nope no rm here"``).  Without ``^`` the rule is
-    broader than it may look.
-
-    Args:
-        tool: Tool name (not used by this predicate, present for signature compat).
-        body: Pattern body.
-        ptype: Pattern type.
-
-    Returns:
-        True when the pattern type is REGEX and the body does not start with ``^``.
+    :func:`~toolguard.patterns.match_pattern` uses ``re.search``, so an
+    unanchored body matches anywhere in the command: an allow of ``rm`` also
+    allows ``echo "nope no rm here"``. Broader than it looks, hence a finding --
+    but ``re.search`` is documented behaviour, not a defect, so the finding is
+    about precision, hence MEDIUM.
     """
     if ptype != PatternType.REGEX:
         return False
     return not body.strip().startswith("^")
 
 
-# 5. Blanket allow outside takeover (checked separately in danger() due to takeover state)
+# 5. Blanket allow outside takeover
 def _is_blanket_allow(tool: str, body: str, ptype: PatternType) -> bool:
     """
-    Return True when the pattern body is effectively a blanket allow (matches everything).
+    Return True for a body that matches everything: DEFAULT ``*``, GLOB ``*``/``**``,
+    or a catch-all/empty REGEX.
 
-    Args:
-        tool: Tool name.
-        body: Pattern body.
-        ptype: Pattern type.
-
-    Returns:
-        True when body is ``*`` (default wildcard) or the regex ``.*``/``.+``/empty anchor.
+    A recognition test against those exact forms, not a completeness test. A body
+    outside them is not reported however broad it really is -- ``[native]*`` and a
+    DEFAULT ``**`` both permit everything and both return False here.
     """
     body_stripped = body.strip()
     if ptype == PatternType.DEFAULT and body_stripped == "*":
@@ -543,8 +440,7 @@ _DETECTORS: List[DangerDetector] = [
         ),
         remediation_kind="anchor",
     ),
-    # Blanket-allow-outside-takeover is handled separately in danger() because
-    # it needs the effective takeover state to decide whether to fire.
+    # blanket-allow-outside-takeover is not a table entry -- see _is_blanket_allow.
 ]
 
 
@@ -558,46 +454,31 @@ def danger(
     takeover: Optional[TakeoverConfig] = None,
 ) -> List[DangerFinding]:
     """
-    Audit ``config`` for static risk findings and return ranked results.
+    Audit ``config``'s allow rules and return ranked findings.
 
-    Scans all toolguard allow rules across all layers and tools, applying
-    each detector in :data:`_DETECTORS`.  Results are sorted by severity
-    descending (CRITICAL first) then by tool name and pattern for stable output.
-
-    Takeover-mode awareness
-    -----------------------
-    When ``takeover`` is provided and ``takeover.enabled`` is ``True``:
-
-    - Blanket allows (``Bash(*)``, ``Read(*)``, etc.) in NATIVE layers that
-      appear in the effective ignored set are NOT flagged (they are intentional
-      setup artefacts for takeover mode).
-    - The blanket-allow-outside-takeover detector fires for native blanket
-      allows NOT in the ignored set.
-
-    When ``takeover`` is ``None``, the effective state is read from ``config``.
+    A pattern takeover mode has neutralized -- a native allow in the effective
+    ignored set -- is skipped by every detector. Everything else is a candidate,
+    whichever layer it came from.
 
     Args:
         config: The resolved configuration.
-        takeover: Pre-resolved takeover configuration (optional; read from
-            ``config`` when not provided).
+        takeover: Pre-resolved takeover configuration; read from ``config``
+            when not provided.
 
     Returns:
-        Sorted list of :class:`DangerFinding` records, highest severity first.
-        Empty when no dangerous patterns are detected.
+        :class:`DangerFinding` records sorted by descending severity, then tool,
+        then pattern.  Empty when nothing is detected.
     """
     if takeover is None:
         takeover = config.takeover_mode()
 
     findings: List[DangerFinding] = []
 
-    # Pre-compute the ignored-allow set (extracted form) for blanket-allow check
     ignored_extracted = takeover.normalized_ignored_patterns()
 
-    # Iterate over all tools mentioned in any layer (via shared helper)
     for tool in discover_tools(config):
         findings.extend(_audit_tool(config, tool, takeover, ignored_extracted))
 
-    # Sort: severity descending, then tool, then pattern
     findings.sort(key=lambda f: (-f.severity.value, f.tool, f.pattern))
     return findings
 
@@ -609,13 +490,14 @@ def _audit_tool(
     ignored_extracted: frozenset,
 ) -> List[DangerFinding]:
     """
-    Run all detectors over the allow rules for a single tool.
+    Run all detectors over the allow rules for a single tool, layer by layer.
 
     Args:
         config: The resolved configuration.
         tool: Tool name to audit.
         takeover: Resolved takeover config.
-        ignored_extracted: Pre-computed ignored-allow patterns in extracted form.
+        ignored_extracted: Unused -- :func:`neutralized_by_takeover` derives the
+            same set from *takeover* itself.
 
     Returns:
         Findings for this tool.
@@ -629,15 +511,15 @@ def _audit_tool(
         for pattern in lr.allow:
             ptype, body = parse_pattern(pattern, extended_syntax=True)
 
-            # Skip native blanket allows that are intentionally in the ignored set
-            # when takeover is ON (they are setup artefacts, not real risks)
+            # Dead on every path in this repo: config.permission_layers already
+            # drops ignored allows from native layers, so nothing reaching here
+            # is neutralized. The same call in the second loop below is dead too.
             if neutralized_by_takeover(pattern, is_native, takeover):
                 continue
 
-            # Blanket allows are reported by the dedicated blanket-allow detector
-            # in the second loop below. Skip them here so a blanket pattern (e.g.
-            # [regex].*) does not ALSO match a content detector and double-report
-            # the same pattern (review finding M1).
+            # Blanket allows belong to the second loop. Skipping them here stops
+            # one pattern (say [regex].*) being reported twice -- once as a
+            # blanket allow and again by whichever content detector it trips.
             if _is_blanket_allow(tool, body, ptype):
                 continue
 
@@ -668,18 +550,17 @@ def _audit_tool(
                             remediation_kind=detector.remediation_kind,
                         )
                     )
-                    break  # Only one finding per pattern per detector pass; don't stack
+                    # One content finding per pattern: the first matching
+                    # detector wins, and _DETECTORS is ordered most-severe-first
+                    # so that is the worst one.
+                    break
 
-        # Blanket-allow-outside-takeover: fire only for native layers when
-        # takeover is OFF, or for any layer that has a true blanket allow outside
-        # the effective ignored set
+        # Blanket allows, in any layer -- native or toolguard's own.
         for pattern in lr.allow:
             ptype, body = parse_pattern(pattern, extended_syntax=True)
             if _is_blanket_allow(tool, body, ptype):
-                # If takeover is ON and this is in the ignored set, it's fine
                 if neutralized_by_takeover(pattern, is_native, takeover):
                     continue
-                # Flag: blanket allow that is live (not suppressed by takeover)
                 findings.append(
                     DangerFinding(
                         detector_id="blanket-allow-outside-takeover",

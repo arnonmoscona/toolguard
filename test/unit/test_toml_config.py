@@ -1,9 +1,4 @@
-"""
-Unit tests for TOML configuration support in toolguard.
-
-Tests TOML loading, config file discovery with TOML precedence,
-and permission validation.
-"""
+"""Unit tests for TOML configuration support in toolguard."""
 
 import io
 import os
@@ -134,11 +129,7 @@ invalid toml [
 
 
 class TestParseSourceTomlDiagnostics(unittest.TestCase):
-    """
-    _parse_source()'s TOML-failure warning message: an upgraded, actionable
-    message when the cause is a multi-line structured entry (TOO-19
-    corrective change), unchanged for any other TOML error.
-    """
+    """Test _parse_source()'s TOML-failure warning message."""
 
     def test_multiline_structured_entry_gets_actionable_message(self):
         """
@@ -165,7 +156,7 @@ class TestParseSourceTomlDiagnostics(unittest.TestCase):
         self.assertIsNone(result)
         message = captured.getvalue()
         self.assertIn(str(path), message)
-        self.assertIn("line 3", message)  # the entry's own opening "{"
+        self.assertIn("line 3", message)
         self.assertIn("single", message)
         self.assertNotIn("Invalid initial character", message)
 
@@ -192,14 +183,7 @@ class TestParseSourceTomlDiagnostics(unittest.TestCase):
 
 
 class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
-    """
-    load_config_file() memoizes parses keyed on the file's stat info. A rewrite that
-    lands within the same mtime tick (a real risk: fast successive writes, or a
-    coarse filesystem mtime resolution) must still invalidate the cache -- otherwise
-    a caller that reads-modifies-writes a config in quick succession (e.g. the
-    installer's seed-self-perms, or migrate_permissions merging patterns) can merge
-    against a stale, smaller parse and silently drop rules that are actually on disk.
-    """
+    """Test load_config_file()'s stat-keyed parse cache against a same-mtime rewrite."""
 
     def test_rewrite_within_same_mtime_tick_is_not_served_stale(self):
         """
@@ -220,9 +204,6 @@ class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
                 'governed_tools = ["Bash"]\n\n[permissions]\nallow = ["Bash(ls:*)"]\n'
             )
             path.write_text(new_content)
-            # Force the mtime to collide with the first read's, reproducing a
-            # same-tick rewrite regardless of this filesystem's real clock
-            # resolution -- this is the exact condition that must not go stale.
             os.utime(path, ns=(original_mtime_ns, original_mtime_ns))
             self.assertEqual(path.stat().st_mtime_ns, original_mtime_ns)
 
@@ -244,22 +225,18 @@ class TestConfigDiscoveryTomlPrecedence(ConfigIsolationMixin, unittest.TestCase)
         claude_dir = project_dir / ".claude"
         claude_dir.mkdir()
 
-        # Create both TOML and JSON files
         (claude_dir / "toolguard_hook.toml").write_text('governed_tools = ["Bash"]')
         (claude_dir / "toolguard_hook.json").write_text('{"governed_tools": ["Read"]}')
 
         configs = discover_config_files()
 
-        # Find toolguard_hook config entries
         hook_configs = [
             (p, t, f)
             for p, t, f in configs
             if t == "toolguard_hook" and "local" not in p.name
         ]
 
-        # Should have TOML, not JSON
         self.assertTrue(any(f == "toml" for _, _, f in hook_configs))
-        # The JSON should not be in the list (TOML takes precedence)
         hook_paths = [str(p) for p, _, _ in hook_configs]
         self.assertIn(str(claude_dir / "toolguard_hook.toml"), hook_paths)
         self.assertNotIn(str(claude_dir / "toolguard_hook.json"), hook_paths)
@@ -274,19 +251,16 @@ class TestConfigDiscoveryTomlPrecedence(ConfigIsolationMixin, unittest.TestCase)
         claude_dir = project_dir / ".claude"
         claude_dir.mkdir()
 
-        # Create only JSON file
         (claude_dir / "toolguard_hook.json").write_text('{"governed_tools": ["Bash"]}')
 
         configs = discover_config_files()
 
-        # Find toolguard_hook config entries
         hook_configs = [
             (p, t, f)
             for p, t, f in configs
             if t == "toolguard_hook" and "local" not in p.name
         ]
 
-        # Should have JSON
         self.assertTrue(any(f == "json" for _, _, f in hook_configs))
 
 
@@ -343,15 +317,7 @@ class TestExtractToolName(unittest.TestCase):
 
 
 class TestValidatePermissions(unittest.TestCase):
-    """Test permission validation.
-
-    TOO-19 Phase 0a, increment 4: validate_permissions now returns a
-    ``Tuple[Issue, ...]`` (not ``List[Dict[str, str]]``), and routes every
-    permission entry through ``normalize_entry`` -- including structured
-    ``{match = "...", ...}`` table entries, which used to be silently
-    skipped by an ``isinstance(perm, str)`` filter (the 4th silent-drop
-    site this ticket phase exists to eliminate).
-    """
+    """Test permission validation."""
 
     def test_validate_no_warnings_for_valid_config(self):
         """
@@ -383,7 +349,6 @@ class TestValidatePermissions(unittest.TestCase):
         }
         issues = validate_permissions(config)
 
-        # Should have issues for WebSearch and WebFetch
         messages = [issue.message for issue in issues]
         self.assertTrue(any("WebSearch" in msg for msg in messages))
         self.assertTrue(any("WebFetch" in msg for msg in messages))
@@ -395,14 +360,13 @@ class TestValidatePermissions(unittest.TestCase):
         Then an Issue notes that Read is not in governed_tools
         """
         config = {
-            "governed_tools": ["Bash"],  # Read is not governed
+            "governed_tools": ["Bash"],
             "permissions": {
                 "allow": ["Bash(ls:*)", "Read(/tmp/**)"],
             },
         }
         issues = validate_permissions(config)
 
-        # Should have an issue for Read being ungoverned
         messages = [issue.message for issue in issues]
         self.assertTrue(
             any("Read" in msg and "governed_tools" in msg for msg in messages)
@@ -423,7 +387,6 @@ class TestValidatePermissions(unittest.TestCase):
         }
         issues = validate_permissions(config)
 
-        # Should have no issues - custom tool is declared as supported
         self.assertEqual(issues, ())
 
     def test_warnings_include_corrective_steps(self):
@@ -481,7 +444,7 @@ class TestValidatePermissions(unittest.TestCase):
         Then it flags the tool as supported-but-ungoverned, same as a plain string
         """
         config = {
-            "governed_tools": ["Bash"],  # Read is not governed
+            "governed_tools": ["Bash"],
             "permissions": {
                 "allow": [{"match": "Read(/tmp/**)"}],
             },
@@ -607,17 +570,10 @@ class TestValidatePermissions(unittest.TestCase):
         self.assertIn("Write", KNOWN_SUPPORTED_TOOLS)
         self.assertIn("Edit", KNOWN_SUPPORTED_TOOLS)
         self.assertIn("mcp__jetbrains__execute_terminal_command", KNOWN_SUPPORTED_TOOLS)
-        # Note: mcp__local-tools__checked_bash is user-specific and configured via
-        # additional_supported_tools in TOML, not hardcoded here
 
 
 class TestErrorLog(unittest.TestCase):
-    """Test error/warning logging functionality.
-
-    TOO-8 Phase 4: warnings and errors are now routed to SEPARATE per-concern
-    streams (``toolguard-warning-*.md`` vs ``toolguard-error-*.md``) instead of a
-    single shared error file.
-    """
+    """Test error/warning logging functionality."""
 
     def test_warning_log_file_created(self):
         """
@@ -628,16 +584,13 @@ class TestErrorLog(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
 
-            # Log a warning
             log_warning("Test warning", "Fix by doing X", log_dir)
 
-            # Warning goes to its own stream.
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)
             self.assertTrue(warning_files[0].name.startswith("toolguard-warning-"))
             self.assertTrue(warning_files[0].name.endswith(".md"))
 
-            # The error stream must NOT receive the warning.
             self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
 
     def test_warning_log_format(self):
@@ -654,7 +607,6 @@ class TestErrorLog(unittest.TestCase):
             log_files = list(log_dir.glob("toolguard-warning-*.md"))
             content = log_files[0].read_text()
 
-            # Check format
             self.assertIn("WARNING", content)
             self.assertIn("Test warning message", content)
             self.assertIn("Do this to fix", content)
@@ -676,7 +628,6 @@ class TestErrorLog(unittest.TestCase):
             self.assertEqual(len(log_files), 1)
             content = log_files[0].read_text()
 
-            # Timestamp format: YYYY-MM-DD HH:MM:SS
             import re
 
             timestamp_pattern = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
@@ -703,12 +654,10 @@ class TestErrorLog(unittest.TestCase):
             warning_content = warning_files[0].read_text()
             error_content = error_files[0].read_text()
 
-            # Warning stream has only the warning.
             self.assertIn("First warning", warning_content)
             self.assertIn("WARNING", warning_content)
             self.assertNotIn("Second error", warning_content)
 
-            # Error stream has only the error.
             self.assertIn("Second error", error_content)
             self.assertIn("ERROR", error_content)
             self.assertNotIn("First warning", error_content)

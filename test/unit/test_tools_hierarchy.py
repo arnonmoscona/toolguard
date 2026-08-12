@@ -1,14 +1,6 @@
 """
-Unit tests for toolguard.tools.hierarchy -- promoting/moving rules between config
-layers (replay-gated) and detecting cross-layer redundancy.
-
-Tests cover:
-- migrate_config relocates the rule (gone from source layer, present in target).
-- evaluate_migration: a safe promotion is decision-neutral; a promotion past an
-  intermediate deny is caught as non-neutral (tightened).
-- scope_note direction (promotion vs demotion vs same-level).
-- find_cross_layer_redundancies: a specific rule duplicated in a broader layer is
-  flagged; a rule unique to one layer is not; direction is respected.
+Unit tests for toolguard.tools.hierarchy -- moving rules between config layers
+(replay-gated) and reporting cross-layer duplication.
 """
 
 import json
@@ -175,7 +167,11 @@ class TestEvaluateMigration(unittest.TestCase):
 
 
 class TestCrossLayerRedundancy(unittest.TestCase):
-    """A specific rule already present in a broader layer is redundant."""
+    """
+    Which allow rules find_cross_layer_redundancies reports. A finding means a
+    broader layer repeats the body, not that dropping the specific copy is safe
+    -- an intermediate deny between the two can flip the verdict.
+    """
 
     def test_duplicated_rule_flagged_against_broader_layer(self):
         """

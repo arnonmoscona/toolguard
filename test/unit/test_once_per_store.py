@@ -1,19 +1,4 @@
-"""
-Unit tests for toolguard.once_per_store.
-
-Covers the atomic claim/release/reap primitives, keyed on
-(project, kind, scope), that replace the four duplicated date-stamped
-marker-file mechanisms (TOO-45 punch-list #01) and live at the shared
-~/.toolguard/once_per.db (TOO-45 R2; renamed from suppression.db by TOO-45
-punch-list #01's second pass).
-
-Every test isolates once_per_store._STORE_PATH to a tmp file via
-patch.object -- the same technique toolguard.tools.decision_ledger's own
-tests use for its ~/.toolguard-anchored USER_LEDGER_PATH constant. A
-process-wide backstop (test/unit/_real_once_per_home_guard.py) also
-intercepts any call that reaches the real store, so a missed isolation
-fails loud rather than silently touching the developer's real file.
-"""
+"""Unit tests for toolguard.once_per_store, the shared claim/release/reap store."""
 
 import sqlite3
 import unittest
@@ -190,7 +175,7 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
 
-            once_per_store.release(project, "never-claimed", "s")  # must not raise
+            once_per_store.release(project, "never-claimed", "s")
 
     def test_none_project_claim_is_unguaranteed_and_stores_nothing(self):
         """
@@ -251,9 +236,7 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
             blocked_store.mkdir()
             with patch.object(once_per_store, "_STORE_PATH", blocked_store):
                 with TemporaryDirectory() as project_dir:
-                    once_per_store.release(
-                        Path(project_dir), "k", "s"
-                    )  # must not raise
+                    once_per_store.release(Path(project_dir), "k", "s")
 
     def test_reap_fails_soft_on_unwritable_logs_dir(self):
         """
@@ -265,7 +248,7 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
             blocked_path = Path(tmpdir) / "not_a_directory"
             blocked_path.write_text("occupied")
 
-            once_per_store.reap(blocked_path)  # must not raise
+            once_per_store.reap(blocked_path)
 
     def test_concurrent_claim_from_two_processes_only_one_wins(self):
         """
@@ -322,7 +305,7 @@ class TestClaim(_IsolatedStoreMixin, unittest.TestCase):
 
 
 class TestIsClaimed(_IsolatedStoreMixin, unittest.TestCase):
-    """Test the read-only is_claimed pre-check (TOO-45 follow-up)."""
+    """Test the read-only is_claimed pre-check."""
 
     def test_missing_store_returns_false_and_creates_nothing(self):
         """
@@ -422,15 +405,7 @@ class TestIsClaimed(_IsolatedStoreMixin, unittest.TestCase):
 
 
 class TestSqlite3Unavailable(_IsolatedStoreMixin, unittest.TestCase):
-    """
-    Regression guard (TOO-45 follow-up, extended R2): an interpreter without
-    the optional _sqlite3 extension must not make this module -- and
-    therefore the hook that imports it transitively -- unimportable, and
-    every function must degrade safely rather than raise. Every claim()
-    caller sees this as ClaimStatus.UNGUARANTEED (never silently as a claim
-    won or held) -- see each dependent module's own warning
-    (test_once_per.py, test_auto_migrate.py, test_config_divergence.py).
-    """
+    """Regression guard: without _sqlite3, this module (and its importers) must stay importable and degrade safely rather than raise."""
 
     def test_claim_reports_unguaranteed_and_touches_nothing(self):
         """
@@ -469,8 +444,8 @@ class TestSqlite3Unavailable(_IsolatedStoreMixin, unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
             with patch.object(once_per_store, "sqlite3", None):
-                once_per_store.release(project, "k", "s")  # must not raise
-                once_per_store.reap(project)  # must not raise
+                once_per_store.release(project, "k", "s")
+                once_per_store.reap(project)
 
     def test_claim_never_actually_throttles_without_sqlite(self):
         """
@@ -641,11 +616,11 @@ class TestReap(_IsolatedStoreMixin, unittest.TestCase):
         """
         logs_dir = Path("/nonexistent/toolguard-test-dir")
 
-        once_per_store.reap(logs_dir)  # must not raise
+        once_per_store.reap(logs_dir)
 
 
 class TestResolveStorePath(unittest.TestCase):
-    """TOO-45 D1: the store path is resolved lazily, per call, never at import."""
+    """The store path is resolved lazily, per call, never at import."""
 
     def test_override_takes_precedence_and_never_calls_home(self):
         """
@@ -678,14 +653,7 @@ class TestResolveStorePath(unittest.TestCase):
 
 
 class TestHomeUnresolvable(unittest.TestCase):
-    """
-    TOO-45 D1: an interpreter with no resolvable $HOME must not make the
-    hook unimportable, and every store-touching function must still degrade
-    fail-soft rather than raise. once_per_store._STORE_PATH is deliberately
-    left at its real default (None, no override) here -- the whole point is
-    to exercise the module-default resolution path with Path.home() itself
-    forced to fail, not to isolate around it.
-    """
+    """An interpreter with no resolvable $HOME must not make the hook unimportable, and every store-touching function must still degrade fail-soft."""
 
     def test_claim_fails_soft_when_home_is_unresolvable(self):
         """
@@ -728,7 +696,7 @@ class TestHomeUnresolvable(unittest.TestCase):
 
 
 class TestIsClaimedMalformedTimestamp(_IsolatedStoreMixin, unittest.TestCase):
-    """TOO-45 D2: a malformed stored timestamp must never raise into the caller."""
+    """A malformed stored timestamp must never raise into the caller."""
 
     def test_non_iso_expires_at_is_treated_as_expired(self):
         """
@@ -755,7 +723,7 @@ class TestIsClaimedMalformedTimestamp(_IsolatedStoreMixin, unittest.TestCase):
             finally:
                 conn.close()
 
-            result = once_per_store.is_claimed(project, "k", "s")  # must not raise
+            result = once_per_store.is_claimed(project, "k", "s")
 
             self.assertFalse(result)
 
@@ -783,17 +751,13 @@ class TestIsClaimedMalformedTimestamp(_IsolatedStoreMixin, unittest.TestCase):
             finally:
                 conn.close()
 
-            result = once_per_store.is_claimed(project, "k", "s")  # must not raise
+            result = once_per_store.is_claimed(project, "k", "s")
 
             self.assertFalse(result)
 
 
 class TestSchemaVersioning(unittest.TestCase):
-    """
-    TOO-45 D3: a claims table left over from a different schema shape must
-    self-heal via PRAGMA user_version, not silently and permanently disable
-    throttling.
-    """
+    """A claims table left over from a different schema shape must self-heal via PRAGMA user_version, not silently disable throttling."""
 
     def test_stale_schema_is_recreated_and_throttling_still_works(self):
         """
@@ -827,11 +791,7 @@ class TestSchemaVersioning(unittest.TestCase):
 
 
 class TestSchemaVersionNewerThanOurs(unittest.TestCase):
-    """
-    A store's PRAGMA user_version may be HIGHER than this build's
-    _SCHEMA_VERSION (an older build reads a newer build's store) -- that
-    must never be treated as a mismatch to repair by dropping the table.
-    """
+    """A store's PRAGMA user_version may be HIGHER than this build's _SCHEMA_VERSION -- that must never be treated as a mismatch to repair by dropping the table."""
 
     def test_higher_version_store_is_not_destroyed(self):
         """
@@ -878,11 +838,7 @@ class TestSchemaVersionNewerThanOurs(unittest.TestCase):
 
 
 class TestSchemaVersionMatchesButTableMissing(unittest.TestCase):
-    """
-    A store's version header can match ours while the claims table itself
-    is gone (e.g. an external DROP TABLE) -- the version check alone must
-    not skip past that without confirming the table actually exists.
-    """
+    """A store's version header can match ours while the claims table itself is gone -- the version check alone must not skip past that without confirming the table exists."""
 
     def test_missing_table_at_matching_version_is_recreated_and_throttles(self):
         """
@@ -914,16 +870,7 @@ class TestSchemaVersionMatchesButTableMissing(unittest.TestCase):
 
 
 class TestConnectionNotLeakedOnSchemaFailure(unittest.TestCase):
-    """
-    TOO-45 D5: a schema-repair failure inside claim()'s transaction must not
-    leak the connection. _connect() itself only opens the connection and
-    assigns it to the CALLER's variable before anything that can raise --
-    claim() manages the transaction (BEGIN IMMEDIATE / commit) itself, so
-    this exercises the whole claim() call rather than calling _connect() in
-    isolation. sqlite3.Connection is an immutable C type and can't be
-    patched directly, so sqlite3.connect() itself is mocked to hand back a
-    plain double whose .close() call is what's being verified.
-    """
+    """A schema-repair failure inside claim()'s transaction must not leak the connection -- sqlite3.Connection can't be patched directly, so sqlite3.connect() is mocked instead."""
 
     def test_claim_closes_connection_when_ensure_schema_raises(self):
         """
@@ -955,7 +902,7 @@ class TestConnectionNotLeakedOnSchemaFailure(unittest.TestCase):
 
 
 class TestConnectExistingDoesNotCreateOnRace(unittest.TestCase):
-    """TOO-45 D6: _connect_existing() must never create the store file it just checked for."""
+    """_connect_existing() must never create the store file it just checked for."""
 
     def test_file_removed_between_exists_check_and_connect_creates_nothing(self):
         """

@@ -1,9 +1,4 @@
-"""
-Unit tests for toolguard hook functionality.
-
-Tests hook behavior with different tool names and governed tools configuration.
-Includes tests for file path tools (Read, Write, Edit) with GLOB pattern matching.
-"""
+"""Unit tests for toolguard.hook: the PreToolUse entry point for Bash and file-path tools."""
 
 import json
 import os
@@ -44,22 +39,22 @@ from test.unit._config_isolation import isolate_log_dir_for_module
 
 _NO_TAKEOVER = TakeoverConfig(False, (), (), "deny")
 
-# TOO-19: every class in this module mocks toolguard.hook.load_configuration()
-# directly, so none of them reach toolguard.config's discovery path -- but
-# every class here also drives toolguard.hook.main() end-to-end, which DOES
-# reach toolguard.env_config.get_env_config() unconditionally (before
-# load_configuration() is even called) to resolve TOOLGUARD_LOG_DIR for the
-# config-discovery diagnostic log. Without this, that resolution falls back
-# to the real process cwd (the repo root under `unittest discover`) and
-# writes real entries into the developer's live logs/ directory. See
+# Most classes here mock toolguard.hook.load_configuration() directly and
+# drive toolguard.hook.main() end-to-end (a few call hook functions
+# directly and never reach main()). main() calls
+# toolguard.env_config.get_env_config() unconditionally, before
+# load_configuration() runs, to resolve TOOLGUARD_LOG_DIR for the
+# config-discovery diagnostic log -- unpatched, that resolves the real
+# process cwd (the repo root under `unittest discover`) and writes into
+# the developer's live logs/ directory. See
 # test/unit/_config_isolation.py's module docstring and
-# .claude/rules/test-config-isolation.md for the full history.
+# .claude/rules/test-config-isolation.md.
 _log_tmp_dir = None
 _log_patcher = None
 
 
 def setUpModule():
-    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module (TOO-19)."""
+    """Redirect TOOLGUARD_LOG_DIR to an isolated temp dir for this whole module."""
     global _log_tmp_dir, _log_patcher
     _log_tmp_dir, _log_patcher, _ = isolate_log_dir_for_module()
 
@@ -73,17 +68,7 @@ def tearDownModule():
 def check_file_path_permission(
     file_path, allow_patterns, deny_patterns, extended_syntax=True
 ):
-    """
-    Evaluate a file path against flat allow/deny pattern lists, returning (decision, reason).
-
-    Thin test adapter over the live single-level resolver
-    :func:`toolguard.file_matching.decide_file_path_at_level_detailed`. It preserves the
-    decision semantics the removed ``check_file_path_permission`` had (deny-first,
-    glob/regex/native prefixes, tilde expansion, default-deny when nothing matches)
-    so the existing file-path test intents carry over unchanged. An empty
-    ``Configuration`` is supplied because every pattern these tests use is absolute
-    or ``~``-anchored, so project-root anchoring is a no-op.
-    """
+    """Evaluate a file path against flat allow/deny pattern lists, returning (decision, reason)."""
     config = Configuration(layers=())
     result = decide_file_path_at_level_detailed(
         file_path, allow_patterns, deny_patterns, config, extended_syntax
@@ -99,24 +84,7 @@ def _fake_config(
     file_patterns=None,
     takeover=_NO_TAKEOVER,
 ):
-    """
-    Build a stand-in Configuration for hook tests.
-
-    Patching ``toolguard.hook.load_configuration`` with this lets the tests
-    assert hook OUTCOMES (allow/deny decisions, governed-tool gating, file-path
-    gating) without touching files -- the same intents the old white-box tests
-    pinned, re-expressed against the public Configuration surface.
-
-    Args:
-        governed: Governed tool names the config reports.
-        bash: (allow, deny) tuple returned by ``bash_permissions()``.
-        file_patterns: Optional mapping of tool name -> (allow, deny) returned by
-            ``allow_deny_for()``. Missing tools resolve to empty patterns.
-        takeover: TakeoverConfig returned by ``takeover_mode()``.
-
-    Returns:
-        An object exposing the Configuration accessors that ``main`` consumes.
-    """
+    """Build a stand-in Configuration for hook tests, patched in via load_configuration."""
     file_patterns = file_patterns or {}
 
     def _patterns_for(tool_name):
@@ -137,25 +105,15 @@ def _fake_config(
             return _patterns_for(tool_name)
 
         def hard_deny(self_inner, tool_name):
-            # The fake configures no [hard_deny] pool, so hard-deny never fires
-            # here; this keeps the double in sync with the Configuration surface
-            # the hook now consumes (TOO-8 Phase 3).
             return (), ()
 
         def resolve_config_path(self_inner, raw_path):
-            # No project root in the fake: relative paths returned unchanged.
             return raw_path
 
         def permission_levels_with_provenance(self_inner, tool_name):
-            # API-sync with the real Configuration's engine query surface
-            # (TOO-45 D1a): the engine (toolguard.permission_resolution) now
-            # drives the cascade itself and calls this instead of a
-            # fake-owned equivalent. The fake models a
-            # single hierarchy level per tool with no provenance layers, so
-            # config_types.provenance_for_pattern/entry_for_pattern (called
-            # by the engine directly, TOO-45 R2d -- no longer reached
-            # through this fake at all) resolve to None against the empty
-            # layer tuple below.
+            # toolguard.permission_resolution reads this directly. The fake
+            # models one hierarchy level with no provenance layers, so
+            # provenance lookups against it resolve to None.
             allow, deny = _patterns_for(tool_name)
             if not (allow or deny):
                 return ()
@@ -166,22 +124,14 @@ def _fake_config(
             return bool(allow or deny)
 
         def resolved_no_match_fallback(self_inner):
-            # The fake does not model a configurable deny/allow_with_warning
-            # fallback -- tests that need those exercise a real Configuration
-            # (see TestNoMatchFallbackThroughMain).
             return "ask"
 
         parse_failures = ()
 
         def describe_levels(self_inner):
-            # API-sync: the fake exposes no real sources.
             return ()
 
         def resolved_undecidable_fallback(self_inner):
-            # API-sync with Configuration.resolved_undecidable_fallback
-            # (TOO-19). The fake does not model a configurable
-            # undecidable_fallback -- always 'ask' (the default); tests that
-            # need other values exercise a real Configuration.
             return "ask"
 
         def takeover_mode(self_inner):
@@ -228,7 +178,6 @@ class TestHookToolGovernance(unittest.TestCase):
                             pass
 
                         output = json.loads(mock_stdout.getvalue())
-                        # Should be allowed because 'git status' matches 'git *'
                         self.assertEqual(
                             output["hookSpecificOutput"]["permissionDecision"], "allow"
                         )
@@ -259,7 +208,6 @@ class TestHookToolGovernance(unittest.TestCase):
                             pass
 
                         output = json.loads(mock_stdout.getvalue())
-                        # Should be allowed because tool is governed and command matches
                         self.assertEqual(
                             output["hookSpecificOutput"]["permissionDecision"], "allow"
                         )
@@ -286,11 +234,9 @@ class TestHookToolGovernance(unittest.TestCase):
                         pass
 
                     output = json.loads(mock_stdout.getvalue())
-                    # Should be allowed because tool is not governed
                     self.assertEqual(
                         output["hookSpecificOutput"]["permissionDecision"], "allow"
                     )
-                    # Reason should mention it's not governed
                     self.assertIn(
                         "Not a governed tool",
                         output["hookSpecificOutput"]["permissionDecisionReason"],
@@ -298,22 +244,7 @@ class TestHookToolGovernance(unittest.TestCase):
 
 
 class TestPermissionDecisionSurvivesSqlite3Unavailable(unittest.TestCase):
-    """
-    TOO-45 R2: sqlite3 being unavailable must only disable once-per-day
-    throttling -- it must never reduce permission enforcement. This drives a
-    real permission decision through main() with the module-level
-    toolguard.once_per_store.sqlite3 patched to None.
-
-    TOO-45 punch-list #01 removed issue_takeover_warning's once_per_store
-    interaction entirely (see toolguard.session_warnings), so this fake's
-    project_root=None means no code path in THIS test reaches once_per_store
-    at all -- that degraded-path behaviour is now covered directly, at the
-    module level, by test_config_divergence.py's
-    test_warns_when_sqlite_unavailable and test_auto_migrate.py's
-    test_skips_migration_when_sqlite_unavailable. What remains here is a
-    general smoke test: the whole hook.main() flow must not crash or degrade
-    the permission decision regardless of sqlite3's availability.
-    """
+    """Smoke test: hook.main() must not crash or degrade the permission decision when sqlite3 (toolguard.once_per_store) is unavailable."""
 
     def test_takeover_enabled_decision_still_resolves_with_sqlite3_unavailable(self):
         """
@@ -353,7 +284,7 @@ class TestPermissionDecisionSurvivesSqlite3Unavailable(unittest.TestCase):
 
 
 class TestTakeoverEnabledConflictWiring(unittest.TestCase):
-    """End-to-end hook wiring for a cross-level takeover_mode.enabled conflict (TOO-8 Phase 5)."""
+    """End-to-end hook wiring for a cross-level takeover_mode.enabled conflict."""
 
     def test_enabled_conflict_logs_and_warns_failsafe_off(self):
         """
@@ -414,14 +345,11 @@ class TestTakeoverEnabledConflictWiring(unittest.TestCase):
                                     except SystemExit:
                                         pass
 
-        # A conflict-log entry was written citing the disagreement and fail-safe OFF.
         mock_conflict.assert_called_once()
         conflict_message = mock_conflict.call_args[0][0]
         self.assertIn("conflicting values", conflict_message)
         self.assertIn("DISABLED", conflict_message)
-        # A takeover warning was issued.
         mock_warn.assert_called_once()
-        # Fail-safe path: the command is still evaluated normally (allowed by 'git *').
         output = json.loads(mock_stdout.getvalue())
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
 
@@ -477,7 +405,6 @@ class TestHookInputParsing(unittest.TestCase):
         """
         hook_input = {
             "tool_name": "Bash",
-            # Missing tool_input
             "hook_event_name": "PreToolUse",
         }
 
@@ -636,7 +563,6 @@ class TestCheckFilePathPermission(unittest.TestCase):
         allow_patterns = ["/tmp/**"]
         deny_patterns = []
 
-        # Should match nested path
         decision, reason = check_file_path_permission(
             "/tmp/subdir/deep/file.txt", allow_patterns, deny_patterns
         )
@@ -651,7 +577,6 @@ class TestCheckFilePathPermission(unittest.TestCase):
         allow_patterns = ["/tmp/*"]
         deny_patterns = []
 
-        # Single * should NOT match nested path
         decision, reason = check_file_path_permission(
             "/tmp/subdir/file.txt", allow_patterns, deny_patterns
         )
@@ -666,7 +591,6 @@ class TestCheckFilePathPermission(unittest.TestCase):
         allow_patterns = ["/tmp/**"]
         deny_patterns = ["/tmp/secret/**"]
 
-        # Should be denied even though allow pattern matches
         decision, reason = check_file_path_permission(
             "/tmp/secret/password.txt", allow_patterns, deny_patterns
         )
@@ -699,7 +623,6 @@ class TestCheckFilePathPermission(unittest.TestCase):
         allow_patterns = ["~/projects/**"]
         deny_patterns = []
 
-        # Test with expanded path matching tilde pattern
         decision, reason = check_file_path_permission(
             f"{home}/projects/test.py", allow_patterns, deny_patterns
         )
@@ -714,13 +637,11 @@ class TestCheckFilePathPermission(unittest.TestCase):
         allow_patterns = ["/tmp/**/*.txt"]
         deny_patterns = []
 
-        # Should match .txt files
         decision, reason = check_file_path_permission(
             "/tmp/docs/readme.txt", allow_patterns, deny_patterns
         )
         self.assertEqual(decision, "allow")
 
-        # Should not match .py files
         decision, reason = check_file_path_permission(
             "/tmp/src/main.py", allow_patterns, deny_patterns
         )
@@ -728,12 +649,7 @@ class TestCheckFilePathPermission(unittest.TestCase):
 
 
 class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
-    """Test that extended syntax prefixes work inside tool wrappers for file path tools.
-
-    These patterns arrive here already stripped of the Write(...)/Read(...)/Edit(...)
-    wrapper by load_file_path_patterns, so they look like "[regex]..." or "[glob]..."
-    or "[native]...".
-    """
+    """Test [regex]/[glob]/[native] extended-syntax prefixes on already-unwrapped file path patterns."""
 
     def test_regex_prefix_matches_file_path(self):
         """
@@ -792,13 +708,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         allow_patterns = ["[glob]/tmp/*"]
         deny_patterns = []
 
-        # Single * should NOT match nested path
         decision, _ = check_file_path_permission(
             "/tmp/sub/file.txt", allow_patterns, deny_patterns
         )
         self.assertEqual(decision, "deny")
 
-        # Same path with ** should match
         decision, _ = check_file_path_permission(
             "/tmp/sub/file.txt", ["[glob]/tmp/**"], deny_patterns
         )
@@ -842,13 +756,11 @@ class TestCheckFilePathPermissionExtendedSyntax(unittest.TestCase):
         allow_patterns = ["[regex]^/tmp/.*"]
         deny_patterns = []
 
-        # With extended syntax: regex matches
         decision, _ = check_file_path_permission(
             "/tmp/file.txt", allow_patterns, deny_patterns, extended_syntax=True
         )
         self.assertEqual(decision, "allow")
 
-        # Without extended syntax: [regex]... treated as glob literal, won't match
         decision, _ = check_file_path_permission(
             "/tmp/file.txt", allow_patterns, deny_patterns, extended_syntax=False
         )
@@ -901,16 +813,12 @@ class TestLoadFilePathPatterns(unittest.TestCase):
             }
         )
 
-        # Pass the config in directly so the adapter routes through the public
-        # Configuration surface rather than opening files.
         allow, deny = load_file_path_patterns("Read", config=config)
 
-        # Should only get Read patterns, not Write or Bash
         self.assertEqual(len(allow), 2)
         self.assertIn("/tmp/**", allow)
         self.assertIn("/home/**", allow)
 
-        # Should get deny patterns for Read
         self.assertEqual(len(deny), 1)
         self.assertIn("/tmp/secret/**", deny)
 
@@ -929,7 +837,6 @@ class TestLoadFilePathPatterns(unittest.TestCase):
 
         allow, deny = load_file_path_patterns("Write", config=config)
 
-        # Should only get Write patterns
         self.assertEqual(len(allow), 2)
         self.assertIn("/tmp/*", allow)
         self.assertIn("~/projects/**", allow)
@@ -978,9 +885,9 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Given Write is governed and patterns only allow '/tmp/**' (rules ARE
             configured, but none matches the target path)
         When main() processes a Write to '/etc/passwd'
-        Then the decision is 'ask' (TOO-15: the new default no_match_fallback
-            -- a rule set that simply does not cover this path prompts rather
-            than silently denying)
+        Then the decision is 'ask' (the default no_match_fallback -- a rule
+            set that simply does not cover this path prompts rather than
+            silently denying)
         """
         hook_input = {
             "tool_name": "Write",
@@ -1060,7 +967,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
         """
         hook_input = {
             "tool_name": "Read",
-            "tool_input": {},  # Missing file_path
+            "tool_input": {},
             "hook_event_name": "PreToolUse",
         }
 
@@ -1095,8 +1002,8 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Given Read is governed but NO permission rules are configured at all
             (no allow, deny, ask, or hard_deny anywhere)
         When main() processes a Read of '/tmp/test.txt'
-        Then the decision is 'ask' (TOO-15: an entirely unconfigured tool must
-             not brick a fresh install by denying everything) and the reason
+        Then the decision is 'ask' (an entirely unconfigured tool must not
+             brick a fresh install by denying everything) and the reason
              notes no Read permission rules are configured
         """
         hook_input = {
@@ -1111,7 +1018,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
                 with patch("toolguard.hook.load_configuration", return_value=config):
                     with patch(
                         "toolguard.hook.load_file_path_patterns", return_value=([], [])
-                    ):  # No patterns
+                    ):
                         with patch("toolguard.hook.log_command"):
                             with patch(
                                 "toolguard.hook.identify_current_agent",
@@ -1139,8 +1046,8 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Given Bash is governed but NO permission rules are configured at all
             (no allow, deny, ask, or hard_deny anywhere)
         When main() processes a 'git status' Bash invocation
-        Then the decision is 'ask' (TOO-15: an entirely unconfigured tool must
-             not brick a fresh install by denying everything)
+        Then the decision is 'ask' (an entirely unconfigured tool must not
+             brick a fresh install by denying everything)
         """
         hook_input = {
             "tool_name": "Bash",
@@ -1148,7 +1055,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
             "hook_event_name": "PreToolUse",
         }
 
-        config = _fake_config(governed=["Bash"])  # bash defaults to ((), ())
+        config = _fake_config(governed=["Bash"])
         with patch("sys.stdin", StringIO(json.dumps(hook_input))):
             with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
                 with patch("toolguard.hook.load_configuration", return_value=config):
@@ -1176,15 +1083,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
 
 
 class TestNoMatchFallbackThroughMain(unittest.TestCase):
-    """
-    TOO-15 end-to-end: main() driven with a REAL Configuration (not the hand
-    rolled _FakeConfig double), so the actual centralized no_match_fallback
-    resolution in toolguard.config/toolguard.resolve is exercised exactly as
-    it runs in production. Covers: the default no_match_fallback is 'ask' (in
-    both non-takeover and takeover mode); 'allow_with_warning' actually
-    ALLOWS, with the deprecated 'warn_deny' alias behaving identically; and
-    takeover mode with an explicit 'deny' fallback stays fail-closed.
-    """
+    """End-to-end main() coverage of no_match_fallback resolution against a real Configuration (not the fake double)."""
 
     @staticmethod
     def _hook_layer(content):
@@ -1201,7 +1100,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
         Given a real Configuration governing Bash, allowing only 'git *', with
             NO no_match_fallback set at all (relying on the default)
         When main() processes a 'whoami' Bash invocation (matches no rule)
-        Then the decision is 'ask' (TOO-15: the new default no_match_fallback)
+        Then the decision is 'ask' (the default no_match_fallback)
         """
         config = Configuration(
             layers=(
@@ -1338,8 +1237,8 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
             no_match_fallback set at all (relying on the default), allowing
             only 'git *' for Bash
         When main() processes a 'whoami' Bash invocation (matches no rule)
-        Then the decision is 'ask' (TOO-15: the default change to 'ask'
-            applies in takeover mode too, not just non-takeover mode)
+        Then the decision is 'ask' (the default applies in takeover mode
+            too, not just non-takeover mode)
         """
         config = Configuration(
             layers=(
@@ -1439,9 +1338,9 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
             test_bash_allow_with_warning_fallback_allows_via_main
         When main() processes the unmatched command
         Then error_log.log_warning is called once with the same reason text
-            (TOO-19 code review m6: allow_with_warning must actually reach
-            the WARNING log stream the docs promise, not just say "warning"
-            inside the reason string)
+            (allow_with_warning must actually reach the WARNING log stream
+            the docs promise, not just say "warning" inside the reason
+            string)
         """
         config = Configuration(
             layers=(
@@ -1530,8 +1429,8 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
             foreign inline code into an otherwise-allowed interpreter
         When main() processes the compound command
         Then the decision is 'allow' AND error_log.log_warning is called with
-            a reason naming undecidable_fallback=allow_with_warning (TOO-19
-            code review m6, the undecidable_fallback half of the same gap)
+            a reason naming undecidable_fallback=allow_with_warning (the
+            undecidable_fallback half of the same no_match_fallback gap)
         """
         config = Configuration(
             layers=(
@@ -1579,7 +1478,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
 
     def test_bash_no_match_allow_does_not_reach_warning_log_stream(self):
         """
-        Given no_match_fallback='allow' (TOO-19: allow with NO warning)
+        Given no_match_fallback='allow' (allow with NO warning)
         When main() processes an unmatched command
         Then the decision is 'allow' but error_log.log_warning is NEVER
             called -- 'allow' must not trip the same warning-stream logic
@@ -1633,7 +1532,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
 
     def test_bash_no_match_allow_with_no_warnings_alias_via_main(self):
         """
-        Given no_match_fallback='allow_with_no_warnings' (TOO-19's long-form
+        Given no_match_fallback='allow_with_no_warnings' (the long-form
             alias for 'allow')
         When main() processes an unmatched command
         Then the decision is 'allow', error_log.log_warning is NEVER called
@@ -1687,8 +1586,8 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
 
     def test_bash_undecidable_allow_does_not_reach_warning_log_stream(self):
         """
-        Given undecidable_fallback='allow' (TOO-19: allow with NO warning)
-            and a heredoc feeding foreign inline code into an otherwise-allowed
+        Given undecidable_fallback='allow' (allow with NO warning) and a
+            heredoc feeding foreign inline code into an otherwise-allowed
             interpreter
         When main() processes the compound command
         Then the decision is 'allow' but error_log.log_warning is NEVER
@@ -1838,13 +1737,7 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
 
 
 class TestAdditionalContextThroughMain(unittest.TestCase):
-    """
-    TOO-19 Phase 1, increments 6+7 end-to-end: main() driven with a REAL
-    Configuration carrying a structured rule entry with additionalContext, so
-    the JSON output and the log entry (mocked here) are exercised exactly as
-    they run in production -- both for a Bash command and a file-path tool,
-    and confirming an error/guard path emits none.
-    """
+    """End-to-end main() coverage of additionalContext propagation into the JSON output and log entry, against a real Configuration."""
 
     @staticmethod
     def _hook_layer(content):
@@ -2035,11 +1928,7 @@ class TestAdditionalContextThroughMain(unittest.TestCase):
 
 
 class TestSettingsPathOverrideWarning(unittest.TestCase):
-    """
-    TOO-15: when CLAUDE_SETTINGS_PATH is set, toolguard runs in single-file mode
-    with the whole configuration hierarchy bypassed. The hook must surface this
-    footgun on stderr on every invocation so the bypass is never invisible.
-    """
+    """CLAUDE_SETTINGS_PATH bypasses the whole config hierarchy (single-file mode); the hook must surface this on stderr every invocation."""
 
     @staticmethod
     def _allow_whoami_config():
@@ -2121,11 +2010,10 @@ class TestSettingsPathOverrideWarning(unittest.TestCase):
 
 class TestDoubleSlashNormalization(unittest.TestCase):
     """
-    Redundant leading/embedded slashes in file-path patterns (e.g. `//Users/...`,
-    common in patterns copied from Claude's settings.local.json) must match the
-    corresponding real single-slash path. Normalization is applied consistently to
-    both the pattern and the path, so allow AND deny keep working (issue: the `//`
-    double-slash bug that made a migrated allow rule silently deny).
+    Redundant slashes in file-path patterns (e.g. `//Users/...`, common after
+    migrating settings.local.json patterns) must normalize and match like a
+    single slash, for both allow and deny -- a prior bug here made a
+    migrated allow rule silently deny.
     """
 
     def test_double_slash_allow_matches_real_path(self):
@@ -2177,10 +2065,6 @@ class TestStartupValidation(unittest.TestCase):
         Given a native settings.local.json listing unsupported tools alongside a valid toolguard_hook config
         When _run_startup_validation runs and delegates to Configuration.validation_issues()
         Then no error log warns about the native-only tools (WebSearch, WebFetch, mcp__unknown__tool)
-
-        Only toolguard_hook.toml/json files should be validated; settings.local.json
-        holds Claude's native permission format which toolguard does not understand,
-        so its tools must never appear in the logged warnings.
         """
         import tempfile
 
@@ -2195,7 +2079,6 @@ class TestStartupValidation(unittest.TestCase):
             logs_dir = project_dir / "logs"
             logs_dir.mkdir()
 
-            # Native settings.local.json with unsupported tools (should be IGNORED)
             native_layer = ConfigLayer(
                 Provenance(
                     "project", "claude", "json", claude_dir / "settings.local.json"
@@ -2208,7 +2091,6 @@ class TestStartupValidation(unittest.TestCase):
                     }
                 ),
             )
-            # toolguard_hook with valid config (should be validated, no issues)
             hook_layer = ConfigLayer(
                 Provenance(
                     "project",
@@ -2231,17 +2113,13 @@ class TestStartupValidation(unittest.TestCase):
 
             _run_startup_validation(env_config, str(project_dir), config)
 
-            # Check log file - should NOT have warnings for WebSearch, WebFetch
-            # because those are in settings.local.json which is ignored
             log_files = list(logs_dir.glob("toolguard-error-*.md"))
 
             if log_files:
                 content = log_files[0].read_text()
-                # These tools are in settings.local.json which should be ignored
                 self.assertNotIn("WebSearch", content)
                 self.assertNotIn("WebFetch", content)
                 self.assertNotIn("mcp__unknown__tool", content)
-            # If no log file exists, that's also correct (no warnings generated)
 
     def test_validation_logs_issues_from_config(self):
         """
@@ -2311,17 +2189,12 @@ class TestLoadFilePathPatternsAdapter(unittest.TestCase):
 
 class TestLogAllowedCommand(unittest.TestCase):
     """
-    Test the _log_allowed_command helper function.
-
-    TOO-45 R1e: reads ``verdict.sub_matches`` directly instead of regex-
-    parsing ``verdict.reason``'s ``"All N sub-commands allowed: [...]"``
-    text (the retired ``_parse_compound_match_details``, which silently
+    Test the _log_allowed_command helper function, driving the REAL
+    resolve_bash_permission_detailed pipeline (not a hand-constructed
+    verdict) so ``sub_matches`` is populated the way production populates
+    it -- the retired reason-string regex parser this replaced silently
     dropped the audit-log entry for any sub-command whose allow came from
-    ``no_match_fallback`` -- see the module docstring / TOO-45 R1e
-    implementation report for the measured 813-of-975 under-logging this
-    fixed). Every test below drives the REAL ``resolve_bash_permission_detailed``
-    pipeline so ``sub_matches`` is populated the way production populates it,
-    rather than hand-constructing a verdict.
+    ``no_match_fallback``, measured at 813 of 975 under-logged.
     """
 
     @staticmethod
@@ -2493,7 +2366,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             exactly the case the retired prose-parser dropped: the fallback
             leaf's raw reason has no ' -> ' in it, so the old regex kept only
             the FIRST entry. This is the regression test for the measured
-            813-of-975 under-logging defect (TOO-45 R1e).
+            813-of-975 under-logging defect.
         """
         config = self._config(
             {
@@ -2540,9 +2413,9 @@ class TestLogAllowedCommand(unittest.TestCase):
             the placeholder's own closing bracket -- the retired regex's
             greedy capture used to append one, e.g.
             '[fallback allow -- no rule matched]]' (measured on 79 corpus
-            cases, TOO-45 R1e). The placeholder's own single trailing ']' is
-            expected and correct; this pins the DOUBLE bracket is gone, not
-            that brackets vanished entirely.
+            cases). The placeholder's own single trailing ']' is expected
+            and correct; this pins the DOUBLE bracket is gone, not that
+            brackets vanished entirely.
         """
         config = self._config(
             {
@@ -2578,7 +2451,6 @@ class TestLogAllowedCommand(unittest.TestCase):
         When _log_allowed_command logs the REAL resolution
         Then each logged entry carries its OWN sub-command's provenance --
             previously the compound branch never logged provenance at all
-            (the docstring said so explicitly); TOO-45 R1e makes it available
         """
         config = Configuration(
             layers=(
@@ -2623,15 +2495,10 @@ class TestLogAllowedCommand(unittest.TestCase):
 
 class TestHandleCommandToolAuditWiring(unittest.TestCase):
     """
-    TOO-45 R3 second review (blinded mutation battery): drive
-    _handle_command_tool ITSELF, not just the _log_allowed_command /
-    _log_non_allow_decision helpers it calls. Every prior test called those
-    helpers directly with hand-passed matched_rule/provenance values, so 6
-    mutations in the wiring between them (including swapping the
-    matched_rule/provenance arguments at the _log_allowed_command call site)
-    survived the full suite. These tests mock only log_command, so the whole
-    resolve -> _handle_command_tool -> _log_*_decision -> log_command chain
-    is exercised for real.
+    Drives _handle_command_tool itself (mocking only log_command), not just
+    the _log_allowed_command / _log_non_allow_decision helpers it calls --
+    testing those helpers alone let 6 wiring mutations, including a swapped
+    matched_rule/provenance argument pair, survive the full suite.
     """
 
     @staticmethod
@@ -2711,14 +2578,13 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
         When _handle_command_tool resolves and logs 'python -c "print(1)"'
         Then the logged LogRecord's matched_rule is the fallback placeholder
             (never the misleading real 'python *' stub match) AND provenance
-            is None -- TOO-45 R1e fixed this at the SOURCE: the leaf's
-            recorded UnitVerdict (and therefore RuntimeVerdict.matched_rule/
-            provenance) is already None here, not the real 'python *' stub
-            match hook.py used to have to re-classify away at log time (see
-            resolve.py::_deciding_sub_match's docstring for the before/after).
-            This still pins hook.py::_log_allowed_command logging the
-            placeholder via UnitVerdict.fallback_kind, not merely forwarding
-            an already-None value from a differently-broken source.
+            is None -- the leaf's recorded UnitVerdict (and therefore
+            RuntimeVerdict.matched_rule/provenance) is already None at the
+            source (see resolve.py::_deciding_sub_match), not a real 'python
+            *' stub match hook.py re-classifies away at log time. This pins
+            hook.py::_log_allowed_command logging the placeholder via
+            UnitVerdict.fallback_kind, not merely forwarding an already-None
+            value from elsewhere.
         """
         config = self._config(
             {
@@ -2750,19 +2616,14 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             'python -c "print(1)" && rm foo'
         Then the compound denies via the escape-hatch leaf (strictest-wins
             picks the first denied leaf), and RuntimeVerdict.matched_rule/
-            provenance are BOTH None -- TOO-45 R1e fixed a misattribution
-            here: before the fix, the escape-hatch leaf's stale sub_match
-            still said 'allow' (its pre-floor stub decision), so
-            _deciding_sub_match skipped past it and mis-credited the deny to
-            the OTHER leaf's genuine 'rm *' match/provenance instead. Now the
-            escape-hatch leaf's own UnitVerdict correctly says 'deny', so
-            _deciding_sub_match attributes the deny to THAT leaf (matched_rule
-            None, provenance None) -- the correct leaf, not merely a
-            correct-looking value from the wrong one. The logged
-            LogRecord's violated_rules must still be the placeholder and
-            provenance must still be None either way, proving the
-            deny-branch suppression guard in hook.py::_log_non_allow_decision
-            is reason-driven, not merely forwarding an already-None value.
+            provenance are BOTH None -- the escape-hatch leaf's own
+            UnitVerdict correctly says 'deny', so _deciding_sub_match
+            attributes the deny to THAT leaf rather than mis-crediting the
+            OTHER leaf's genuine 'rm *' match/provenance. The logged
+            LogRecord's violated_rules is the placeholder and provenance is
+            None either way, proving the deny-branch suppression guard in
+            hook.py::_log_non_allow_decision is reason-driven, not merely
+            forwarding an already-None value.
         """
         config = self._config(
             {
@@ -2786,11 +2647,9 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
 
 class TestHandleFilePathToolAuditWiring(unittest.TestCase):
     """
-    TOO-45 R3 second review (blinded mutation battery): drive
-    _handle_file_path_tool ITSELF. Its allow branch calls log_command
-    directly (not through _log_allowed_command), so it was equally
-    unpinned -- a mutation removing its provenance argument survived the
-    full suite.
+    Drives _handle_file_path_tool itself -- its allow branch calls
+    log_command directly (not through _log_allowed_command), and a
+    mutation removing its provenance argument survived the full suite.
     """
 
     @staticmethod
@@ -2879,10 +2738,6 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
     )
     def test_target_is_read_from_the_registered_key(self, mock_log):
         """
-        TOO-45 punch-list #10 fix pass (M2/m4): _handle_file_path_tool must
-        read the payload key from the tool_spec registry, not a hardcoded
-        'file_path' literal.
-
         Given a Read registry entry whose payload key is 'target_path'
         When a tool_input carrying only 'target_path' is resolved
         Then the target is found and resolved (not the fail-closed deny)
@@ -2928,10 +2783,7 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
 
 
 class TestHookArgparseAndIsatty(unittest.TestCase):
-    """
-    Tests for the argparse --help flag and the interactive (TTY) guard added to
-    hook.main (TOO-16 Change 2+3).
-    """
+    """Tests for the argparse --help flag and the interactive (TTY) guard in hook.main."""
 
     def test_help_flag_exits_zero(self):
         """
@@ -2954,7 +2806,7 @@ class TestHookArgparseAndIsatty(unittest.TestCase):
         Then it prints an explanation to stderr, exits 0, and does not block on stdin
         """
         err = StringIO()
-        stdin_mock = StringIO("")  # empty -- would cause a parse error if read
+        stdin_mock = StringIO("")
 
         with (
             patch("sys.stdin", stdin_mock),
@@ -2965,7 +2817,6 @@ class TestHookArgparseAndIsatty(unittest.TestCase):
                 main()
 
         self.assertEqual(ctx.exception.code, 0)
-        # A meaningful explanation should appear in stderr
         self.assertIn("Claude Code", err.getvalue())
 
     def test_isatty_false_processes_piped_event_normally(self):
@@ -2999,11 +2850,10 @@ class TestHookArgparseAndIsatty(unittest.TestCase):
 
 class TestHookCrashCapture(unittest.TestCase):
     """
-    TOO-15: an unhandled exception hitting any of main()'s three except clauses
-    (json.JSONDecodeError, ValueError, generic Exception) must -- in addition to
-    the existing deny-and-continue stdout/stderr behavior -- write a full crash
-    report (exception type, message, traceback, in-flight context) to
-    ~/.toolguard/errors/ via toolguard.error_log.log_crash.
+    An unhandled exception hitting any of main()'s three except clauses
+    must deny-and-continue AND write a full crash report (exception type,
+    message, traceback, in-flight context) to ~/.toolguard/errors/ via
+    toolguard.error_log.log_crash.
     """
 
     def test_unexpected_exception_writes_crash_report(self):
@@ -3087,11 +2937,11 @@ class TestHookCrashCapture(unittest.TestCase):
         When main() runs and parse_hook_input's json.JSONDecodeError falls
         through to the `except json.JSONDecodeError` clause
         Then main() still denies and exits 0, the decision lands on STDOUT
-        and is non-empty (TOO-45 punch-list #04 hook.py fix -- this used to
-        go to stderr with exit 0, silently falling through to native
-        permission handling instead of denying), the fault reaches
-        additionalContext, AND a crash report file appears under
-        ~/.toolguard/errors/ describing the parse failure
+        and is non-empty (previously this went to stderr with exit 0,
+        silently falling through to native permission handling instead of
+        denying), the fault reaches additionalContext, AND a crash report
+        file appears under ~/.toolguard/errors/ describing the parse
+        failure
         """
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -3138,16 +2988,15 @@ class TestHookCrashCapture(unittest.TestCase):
         When main() runs and parse_hook_input's ValueError falls through to the
         `except ValueError` clause
         Then main() still denies and exits 0, the decision lands on STDOUT
-        and is non-empty (TOO-45 punch-list #04 hook.py fix -- this used to
-        go to stderr with exit 0, silently falling through to native
-        permission handling instead of denying), the fault reaches
-        additionalContext, AND a crash report file appears under
-        ~/.toolguard/errors/ describing the missing field
+        and is non-empty (previously this went to stderr with exit 0,
+        silently falling through to native permission handling instead of
+        denying), the fault reaches additionalContext, AND a crash report
+        file appears under ~/.toolguard/errors/ describing the missing
+        field
         """
         hook_input = {
             "tool_name": "Bash",
             "tool_input": {"command": "git status"},
-            # hook_event_name intentionally omitted
         }
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -3193,9 +3042,9 @@ class TestHookCrashCapture(unittest.TestCase):
         Given stdin is non-interactive (not a TTY) but was read and found
         completely empty -- e.g. a stray `toolguard --version` an agent ran
         to probe the installed version, which argparse silently discards as
-        an unrecognized flag, leaving nothing on stdin to read (TOO-15,
-        observed twice on real installs: this produced a misleading crash
-        report that looked like a hook defect but was just a manual probe)
+        an unrecognized flag, leaving nothing on stdin to read (observed
+        twice on real installs, producing a misleading crash report that
+        looked like a hook defect but was just a manual probe)
         When main() runs
         Then it exits 0 with the friendly "not a standalone command" message
         on stderr, and NO crash report is written -- this is treated as a
@@ -3220,13 +3069,10 @@ class TestHookCrashCapture(unittest.TestCase):
 
     def test_crash_context_carries_tool_name_tool_input_cwd(self):
         """
-        TOO-19 m5 review recommended follow-up: pin the invariant
-        `_build_crash_context` depends on -- that `tool_name`, `tool_input`,
-        and `cwd` are all still in scope (and thus captured via `locals()`)
-        at the point an unexpected exception reaches main()'s generic
-        `except Exception` clause, since they are assigned early in the
-        try-body and never reassigned before an exception from permission
-        resolution could occur.
+        Pins the invariant `_build_crash_context` depends on -- that
+        `tool_name`, `tool_input`, and `cwd` are still in scope (and thus
+        captured via `locals()`) at the point an unexpected exception
+        reaches main()'s generic `except Exception` clause.
 
         Given a governed Bash event with a known tool_name, tool_input, and
         cwd, and resolve_bash_permission_detailed forced to raise an
@@ -3274,11 +3120,10 @@ class TestHookCrashCapture(unittest.TestCase):
 
 class TestEmitDecisionStdoutFailureFallsBackToExit2(unittest.TestCase):
     """
-    TOO-45 punch-list #04 hook.py fix, belt-and-braces: _emit_decision is the
-    ONE place every decision (success or error) is written to stdout. If
-    that write itself fails there is no decision left to deliver, so this is
-    the one case that falls back to sys.exit(2) -- the host's own blocking
-    signal -- with the failure reason on stderr.
+    _emit_decision is the one place every decision reaches stdout; if that
+    write itself fails there is nothing left to deliver, so this falls back
+    to sys.exit(2) -- the host's own blocking signal -- with the failure
+    reason on stderr.
     """
 
     def test_stdout_write_failure_exits_2_with_reason_on_stderr(self):
@@ -3309,10 +3154,10 @@ class TestEmitDecisionStdoutFailureFallsBackToExit2(unittest.TestCase):
         """
         Given sys.stdout accepts the write but raises on flush() -- the shape
             a real, block-buffered pipe takes when its reader has closed
-            (TOO-45 punch-list #04 fix pass M1: measured on a real subprocess
-            with a closed stdout read-end, `print()` returned successfully
-            and the process exited 120 -- outside the try/except -- because
-            nothing had flushed the buffered write yet)
+            (measured on a real subprocess with a closed stdout read-end:
+            `print()` returned successfully and the process exited 120,
+            outside the try/except, because nothing had flushed the
+            buffered write yet)
         When _emit_decision tries to print the JSON decision
         Then it exits 2 (not left to fail open at interpreter shutdown) and
              the failure reason lands on stderr
@@ -3320,7 +3165,7 @@ class TestEmitDecisionStdoutFailureFallsBackToExit2(unittest.TestCase):
 
         class _BufferedBrokenPipeStdout:
             def write(self, _data):
-                pass  # Accepted into the (simulated) buffer, not yet flushed.
+                pass
 
             def flush(self):
                 raise BrokenPipeError("pipe closed")

@@ -1,15 +1,8 @@
 """
-Static description of a tool toolguard knows how to govern.
+Static registry of the tools toolguard knows how to govern.
 
-``foundation`` layer -- consumed by config (``config_validation``,
-``config.governed_tools``), api, runtime (``hook``), and tooling
-(``installer``, ``transcript_harvest``). The registry is static: it
-describes structural facts (kind, payload key, whether the tool is built
-into toolguard's own knowledge) about each tool. ``additional_supported_tools``
-stays configurable and is not derived from here.
-``config_validation.KNOWN_SUPPORTED_TOOLS`` consumes this registry
-(TOO-45 punch-list #10); ``Configuration.governed_tools()`` consumes
-``DEFAULT_GOVERNED_TOOLS`` for its no-configuration fallback.
+A user's ``additional_supported_tools`` config setting extends the
+recognized-tool set without changing anything here.
 """
 
 from dataclasses import dataclass
@@ -25,20 +18,18 @@ class ToolKind(Enum):
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """One governable tool: its name, kind, payload key, and built-in status."""
+    """A statically registered governable tool."""
 
     name: str
     kind: ToolKind
     payload_key: str
-    #: True for tools toolguard ships built-in knowledge of. This IS the
-    #: default governed set (see :data:`DEFAULT_GOVERNED_TOOLS`) --
-    #: ``Configuration.governed_tools()`` falls back to it only when no
-    #: level in the hierarchy configures ``governed_tools`` explicitly.
+    #: True for the first-party tools toolguard governs by default. Whether
+    #: toolguard recognizes a tool at all is registry membership
+    #: (:data:`KNOWN_TOOL_NAMES`), not this flag.
     is_builtin: bool
 
 
-# The registry. Adding a tool is one entry here; every derived view below
-# picks it up automatically.
+# The registry. Adding a tool is one entry here.
 _REGISTRY: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="Bash",
@@ -95,16 +86,13 @@ TOOLS_BY_NAME: dict[str, ToolSpec] = _index_by_name(_REGISTRY)
 #: Every tool name with a registered :class:`ToolSpec`.
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset(TOOLS_BY_NAME)
 
-#: Tool names toolguard ships built-in knowledge of -- see
-#: :attr:`ToolSpec.is_builtin`. Unordered; for the ordered default governed
-#: set, use :data:`DEFAULT_GOVERNED_TOOLS`.
+#: Built-in tool names, unordered; :data:`DEFAULT_GOVERNED_TOOLS` is the
+#: same names in registry order.
 BUILTIN_TOOLS: frozenset[str] = frozenset(
     tool.name for tool in _REGISTRY if tool.is_builtin
 )
 
-#: Built-in tool names in registry order -- the default
-#: ``Configuration.governed_tools()`` resolves to when no level in the
-#: hierarchy configures ``governed_tools`` explicitly.
+#: Built-in tool names, in registry order.
 DEFAULT_GOVERNED_TOOLS: tuple[str, ...] = tuple(
     tool.name for tool in _REGISTRY if tool.is_builtin
 )
