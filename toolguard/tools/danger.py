@@ -483,6 +483,49 @@ def danger(
     return findings
 
 
+#: detector_id :func:`assess_pattern_risk` uses for its own, takeover-independent
+#: blanket-allow flag -- distinct from ``blanket-allow-outside-takeover``, which
+#: only applies inside :func:`danger`'s takeover-aware audit of a layer already
+#: in the config.
+_PROPOSED_BLANKET_ALLOW_ID = "blanket-allow"
+
+
+def assess_pattern_risk(tool: str, pattern: str) -> Tuple[str, ...]:
+    """
+    Statically flag one proposed allow pattern, independent of any config
+    layer, corpus, or takeover state.
+
+    Runs the same content detectors :func:`danger` applies to a rule already in
+    a layer, plus a takeover-independent blanket-allow check, against a pattern
+    that has not been added anywhere yet -- so a tool-wide ``'*'`` proposal is
+    distinguishable from a narrow one even before any corpus exercises it.
+
+    Args:
+        tool: Tool the pattern would apply to.
+        pattern: Wrapper-free allow pattern body (e.g. ``'git push:*'``, ``'*'``).
+
+    Returns:
+        The ``detector_id`` of every check the pattern trips, in table order.
+        Empty when nothing is detected -- not evidence of safety, only that
+        this module's tables do not happen to catch it.
+    """
+    ptype, body = parse_pattern(pattern, extended_syntax=True)
+    ids: List[str] = []
+    if _is_blanket_allow(tool, body, ptype):
+        ids.append(_PROPOSED_BLANKET_ALLOW_ID)
+    for detector in _DETECTORS:
+        if detector.list_type != "allow":
+            continue
+        if (
+            detector.applies_to_tools is not None
+            and tool not in detector.applies_to_tools
+        ):
+            continue
+        if detector.predicate(tool, body, ptype):
+            ids.append(detector.detector_id)
+    return tuple(ids)
+
+
 def _audit_tool(
     config: Configuration,
     tool: str,

@@ -154,8 +154,8 @@ follow from this:
 - **Foreign-interpreter payloads get an ASK floor.** `python -c`, `node -e`, a heredoc piped to
   `python`, etc. always prompt by default -- and a broad `allow` (even `uv run*`) **cannot**
   downgrade that to a silent allow. An explicit `deny` still applies. Versioned interpreters
-  (`python3.13`, `pypy3.11`, ...) are recognized automatically -- the list is not pinned to
-  specific releases. This floor also drops any `additionalContext` the clamped rule would
+  (`python3.13`, `pypy3.11`, ...) are recognized automatically for the python, pypy, node,
+  nodejs, perl, ruby and php families only -- a versioned `Rscript` or `awk` is not. This floor also drops any `additionalContext` the clamped rule would
   otherwise have injected, since the floor -- not the rule match -- decided the prompt; see
   [Configuration: additionalContext](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision).
   This ASK floor's strictness is the `undecidable_fallback` setting's default; see
@@ -290,16 +290,18 @@ This floor also clears any `additionalContext` a matched rule would otherwise ha
 ## How toolguard protects its own writes
 
 Permission config is frequently not under version control, so a corrupting write is permanent,
-unrecoverable loss. Every write toolguard performs to a config file -- from the maintenance
-skill, the migration command, and the installer alike -- goes through a single guarded path
-that makes three promises:
+unrecoverable loss. Config writes from the maintenance skill, the migration command and the
+installer all go through a single guarded path that makes three promises. It is a convention,
+not a barrier: nothing stops a future writer from bypassing it.
 
 1. **It never writes a file that does not parse.** The final text is parsed before anything
    touches the disk. If it would not load, the write is refused and the original is left
    byte-for-byte unchanged.
-2. **It never silently drops a rule.** Valid output can still be wrong output, so the guard
-   also checks that every pattern present before the write is still present after it. A write
-   that would lose a rule is refused, even though the result would have parsed cleanly.
+2. **It refuses a write that would drop a rule** -- when the caller hands it the pre-write
+   pattern set. Valid output can still be wrong output, so the guard re-parses the final text
+   and refuses if a pattern has gone missing, even though the result would have parsed
+   cleanly. The check is opt-in; `toolguard-install write-config` is the caller that skips it,
+   because it writes a fresh file with no rules of its own.
 3. **It cannot leave a half-written file.** Writes go to a sibling temporary file which is
    flushed, `fsync`ed, and then atomically renamed over the target, so a crash or a full disk
    mid-write leaves either the old file or the new one, never a truncated one.
@@ -365,7 +367,7 @@ diff .claude/toolguard_hook.toml logs/config-backups/toolguard_hook-*.toml
    tail -20 logs/toolguard-$(date +%Y-%m-%d).md
    ```
 
-   You should see entries for every command Claude executes.
+   You should see entries for every *governed* tool call, provided logging is enabled.
 
 2. **Monitor error and warning logs**:
 
@@ -459,8 +461,8 @@ not replace your judgment.
 
 | Review (suggested cadence) | What to look for | Where / supporting facility |
 |----------------------------|------------------|-----------------------------|
-| **Resolution log** -- after busy sessions / daily | Unexpected allows or refusals; which level and file authorized each command (the matched rule is logged with its `[level: path]` provenance) | `logs/toolguard-YYYY-MM-DD.md` -- see [logging](architecture.md#logging) |
-| **Error & warning logs** -- regularly | Config errors (e.g. a non-boolean `takeover_mode.enabled`), ungoverned or unsupported tools, both-format (`.toml`+`.json`) conflicts | `logs/toolguard-error-*.md`, `logs/toolguard-warning-*.md`; also surfaced once per session on stderr via [session warnings](config-sync.md#session-warnings); the [security-audit skill](skills.md#security-audit) flags config errors too |
+| **Resolution log** -- after busy sessions / daily | Unexpected allows or refusals; which level and file authorized each command (the matched rule is logged with its `[level: path]` provenance) | `logs/toolguard-YYYY-MM-DD.md` -- see [logging](architecture-as-built.md#12-logging) |
+| **Error & warning logs** -- regularly | Config errors (e.g. a non-boolean `takeover_mode.enabled`), ungoverned or unsupported tools, both-format (`.toml`+`.json`) conflicts | `logs/toolguard-error-*.md`, `logs/toolguard-warning-*.md`; also printed to stderr on every invocation until fixed (see [warning throttling](config-sync.md#warning-throttling)); the [security-audit skill](skills.md#security-audit) flags config errors too |
 | **Conflicts & divergence** -- every session / periodically | Cross-level allow-over-deny overrides, `takeover_mode.enabled` disagreements, and rules that have drifted into native `settings.local.json` | `logs/toolguard-conflict-*.md` + the **SessionStart conflict-alert hook** (re-reports until resolved); drift via `toolguard-migrate --dry-run` -- see [Config Sync](config-sync.md) |
 | **The rules themselves** -- periodically (e.g. monthly) | Over-broad or blanket allows, stale / duplicate / superseded rules, gaps in `[hard_deny]` coverage | The **[security-audit](skills.md#security-audit)** skill for risk findings; the **[maintenance](skills.md#maintenance)** skill for duplicate/consolidation/promotion proposals (family-grouped, certified before you approve anything); `toolguard-migrate --dry-run` for a lighter-weight duplicate/superset/similarity check; promote critical denies to [`[hard_deny]`](configuration.md#configuration-reference) |
 
@@ -535,7 +537,8 @@ read are rules you cannot confidently audit.
   pass on top, so you get mechanical findings and AI judgement clearly separated instead of one
   undifferentiated opinion. Treat its output as informed advice, not an automatic fix: you make
   the final call, because the rules are **your** security policy. A finding you've deliberately
-  accepted can be marked `#NOSECURITY: <reason>` so the audit stops re-flagging it (see
+  accepted can be marked `#NOSECURITY: <reason>`, which labels the finding as accepted and sorts
+  it last -- it is still listed and still counted, by design (see
   [Maintenance & Audit Skills](skills.md)).
 - **Watch for stray rules from hasty permission answers.** A quick "Yes, and don't ask again"
   during a flow can add an allow that is broader than you intended (or that you would not have
@@ -586,9 +589,13 @@ deny = [
     "Read(**/.aws/**)",
     "Read(**/.ssh/**)",
     "Write(**/.env)",
+    "Write(**/.env.*)",
     "Write(**/.aws/**)",
     "Write(**/.ssh/**)",
     "Edit(**/.env)",
+    "Edit(**/.env.*)",
+    "Edit(**/.aws/**)",
+    "Edit(**/.ssh/**)",
 
     # The same sensitive files, home-anchored -- protects them regardless of which
     # project is active (see the anchoring note below)
@@ -597,9 +604,13 @@ deny = [
     "Read(~/.aws/**)",
     "Read(~/.ssh/**)",
     "Write(~/.env)",
+    "Write(~/.env.*)",
     "Write(~/.aws/**)",
     "Write(~/.ssh/**)",
     "Edit(~/.env)",
+    "Edit(~/.env.*)",
+    "Edit(~/.aws/**)",
+    "Edit(~/.ssh/**)",
 
     # System directories
     "Write(/etc/**)",
@@ -620,6 +631,8 @@ whatever repo you're in -- include both forms, especially at the user level wher
 project is active" varies session to session. (This was found the hard way: an install once
 added only the relative patterns at user scope and `~/.ssh/id_rsa` was not denied until the
 home-anchored patterns were added by hand.)
+
+**Why `Write` and `Edit` are both listed for every family.** `Edit` modifies a file in place, so a `Write`-only deny still leaves `~/.ssh/authorized_keys` appendable and `~/.env.local` plantable. Covering both verbs across all four families does mean `.env.example` and its siblings are write-denied as well as read-denied; if you need one, add it to the narrow `hard_deny.allow` carve-out rather than trimming the deny list.
 
 For the strongest protection, mirror the most critical of these into
 [`[hard_deny]`](configuration.md#configuration-reference) at the user level so no project can

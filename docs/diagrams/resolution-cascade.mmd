@@ -1,0 +1,23 @@
+---
+title: Resolution cascade - two tool shapes, one verdict type
+---
+flowchart TD
+    S{"file-path tool<br/>or command tool?"}
+
+    S -->|"Read / Write / Edit"| F1["check_file_path_hard_deny<br/>pooled across all levels"]
+    F1 -->|"hard match - a deny,<br/>which the floor exempts"| RV["RuntimeVerdict"]
+    F1 -->|"no match"| F2["resolve_file_path_permission<br/>most-specific-level-wins"]
+    F2 --> FL
+
+    S -->|"Bash / MCP terminal"| B1["compound.decompose<br/>PEG grammar"]
+    B1 --> B2["per sub-command:<br/>hard-deny, then<br/>resolve_command_permission"]
+    B2 --> B3["_combine_strictest<br/>deny > ask > allow"]
+    B3 --> FL
+
+    FL["parse-failure ASK floor<br/>applied last, both cascades<br/>an existing deny is never weakened"]
+    FL --> RV
+
+    classDef verdict fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef floor fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    class RV verdict
+    class FL,F1 floor

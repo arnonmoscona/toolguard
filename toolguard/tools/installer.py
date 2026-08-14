@@ -784,13 +784,23 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
         ``0`` on success (including the no-op case).
 
     Raises:
-        InstallerError: If no ``toolguard_hook.toml`` exists yet at this scope.
+        InstallerError: If no ``toolguard_hook.toml`` exists yet at this
+            scope, or if ``required_self_integrity_hard_deny_patterns()``
+            returns no patterns -- seeding zero self-integrity protections
+            must not be reported as a completed install.
     """
     _ensure_state()
     config_path = _config_path(args.scope, args.project_dir)
     if not config_path.exists():
         raise InstallerError(
             f"{config_path} does not exist -- run 'write-config' first."
+        )
+
+    self_integrity_patterns = required_self_integrity_hard_deny_patterns()
+    if not self_integrity_patterns:
+        raise InstallerError(
+            "required_self_integrity_hard_deny_patterns() returned no patterns "
+            "-- refusing to report a completed install that protects nothing."
         )
 
     # normalize_entries_preserving, not the raw tomllib values: a structured entry
@@ -870,7 +880,7 @@ def cmd_seed_self_perms(args: argparse.Namespace) -> int:
     existing_hard_deny_patterns = {
         _entry_pattern(entry) for entry in hard_deny_patterns
     }
-    for protection in required_self_integrity_hard_deny_patterns():
+    for protection in self_integrity_patterns:
         if protection.pattern in existing_hard_deny_patterns:
             hard_deny_already_present.append(protection.pattern)
         else:
@@ -1574,7 +1584,8 @@ toolguard_hook.toml (docs/install.md Phase 10.1).
 Adds, to the [hard_deny] section's deny list, exactly the patterns from
 toolguard.tools.recommended_protections.required_hard_deny_patterns() -- the single
 source of truth for this fixed, curated set (mirrors docs/security.md "Recommended
-deny patterns" -> "Sensitive files": .env/.env.*/.aws/**/.ssh/** reads and writes).
+deny patterns" -> "Sensitive files": .env/.env.*/.aws/**/.ssh/** reads, writes and
+edits).
 This subcommand does NOT compose [hard_deny] TOML freehand and does not invent or
 extend the set -- change recommended_protections.py (and docs/security.md) instead.
 

@@ -1,0 +1,13 @@
+---
+title: Four constraints, and the structure each one forces
+---
+flowchart LR
+    C1["a PreToolUse hook,<br/>on every governed<br/>tool call"] --> S1["one process per call<br/>no daemon<br/>no cache between calls"]
+    C2["standard library only<br/>dependencies = []"] --> S2["config parsing, matching,<br/>locking and logging<br/>all written in-tree"]
+    C3["no hand-rolled<br/>bash parsing"] --> S3["one PEG grammar,<br/>the only structural parser<br/>413 lines of .peg,<br/>6,536 generated"]
+    C4["never leave Claude Code<br/>without a decision"] --> S4["every governed path emits<br/>JSON on stdout; an unforeseen<br/>error denies, not silence"]
+
+    classDef constraint fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef result fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    class C1,C2,C3,C4 constraint
+    class S1,S2,S3,S4 result

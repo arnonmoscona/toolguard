@@ -44,10 +44,9 @@ class LayerRules:
         allow: Allow patterns from this layer. On a native layer under takeover
             mode, the ignored blanket allows have already been removed.
         deny: Deny patterns from this layer.
-        ask: Ask patterns from this layer. Always empty for a NATIVE layer --
-            :func:`per_layer_rules` drops those, though
-            :meth:`~toolguard.config.Configuration.permission_layers` returns
-            them.
+        ask: Ask patterns from this layer, native and toolguard alike -- a
+            native ``settings.json`` has its own ask list, and the resolver
+            decides on it just as it does a toolguard one.
     """
 
     provenance: Provenance
@@ -107,7 +106,6 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
     already applied takeover filtering and normalized structured
     (``{match = ..., ...}``) entries. EVERY discovered layer gets a
     :class:`LayerRules`, including one that contributes no rule for this tool.
-    Ask is dropped for native layers -- see :attr:`LayerRules.ask`.
 
     Args:
         config: The resolved configuration.
@@ -115,25 +113,15 @@ def per_layer_rules(config: Configuration, tool_name: str) -> List[LayerRules]:
     """
     tool_layers: Tuple[ToolPatternLayer, ...] = config.permission_layers(tool_name)
 
-    prov_to_tool_layer = {tl.provenance: tl for tl in tool_layers}
-
-    result: List[LayerRules] = []
-    for layer in config.layers:
-        tl = prov_to_tool_layer.get(layer.provenance)
-        allow = tl.allow if tl is not None else ()
-        deny = tl.deny if tl is not None else ()
-        ask = tl.ask if (tl is not None and not layer.is_native) else ()
-
-        result.append(
-            LayerRules(
-                provenance=layer.provenance,
-                allow=allow,
-                deny=deny,
-                ask=ask,
-            )
-        )
-
-    return result
+    # Each ToolPatternLayer already carries its own layer's Provenance
+    # (permission_layers() sets it from the same layer), so this reads ONE
+    # sequence, never two correlated by Provenance or by position -- two
+    # distinct layers can carry an equal Provenance, which made a
+    # Provenance-keyed lookup collapse them into one.
+    return [
+        LayerRules(provenance=tl.provenance, allow=tl.allow, deny=tl.deny, ask=tl.ask)
+        for tl in tool_layers
+    ]
 
 
 def effective_takeover(config: Configuration) -> TakeoverConfig:
@@ -295,7 +283,11 @@ def with_layer_rules_replaced(
     if not modified:
         return config
 
-    return Configuration(layers=tuple(new_layers), start_dir=config.start_dir)
+    return Configuration(
+        layers=tuple(new_layers),
+        start_dir=config.start_dir,
+        parse_failures=config.parse_failures,
+    )
 
 
 def with_layer_allow_replaced(

@@ -1,0 +1,25 @@
+---
+title: Why the api layer exists - one downward seam in place of an upward import
+---
+flowchart TD
+    HOOK["hook.py<br/><b>runtime</b>"]
+    TOOLS["tools/replay.py, mining.py, consolidate.py,<br/>self_permission.py, uninstall_readiness.py<br/><b>tooling</b> - all five importers"]
+    API["api.decide()<br/><b>api</b> - one function"]
+    ENGINE["resolve.py's two resolvers<br/><b>engine</b>"]
+    GONE["removed by item 05: hook.py imported tools.decision,<br/>an upward runtime -&gt; tooling import.<br/>That shim is deleted; api.decide() replaced it."]
+
+    HOOK -->|"imports down, --eval path"| API
+    TOOLS -->|"imports down"| API
+    API -->|"imports down"| ENGINE
+    HOOK -->|"imports down, live path"| ENGINE
+    HOOK -. "forbidden: runtime may not import tooling" .-x TOOLS
+
+    classDef core fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef tool fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    classDef seam fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class HOOK,ENGINE core
+    class TOOLS tool
+    class API seam
+    class GONE note
+    linkStyle 4 stroke:#c0392b,stroke-width:2px,color:#c0392b

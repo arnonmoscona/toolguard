@@ -1,0 +1,28 @@
+---
+title: The one function every config write is meant to go through, and its three gates
+---
+flowchart TB
+    M["tools/maintenance.py"] --> V
+    I["tools/installer.py"] --> V
+    A["tools/rule_apply.py"] --> V
+    G["permission_migration.py<br/>core, not tooling"] --> V
+
+    V["verified_write_config()"] --> C1{"1. does the new text<br/>parse as TOML / JSON?"}
+    C1 -->|"no"| X["refused - the file on disk<br/>is never touched"]
+    C1 -->|"yes"| C2{"2. are all expected_patterns<br/>still present after parsing?"}
+    C2 -->|"no - a rule would vanish"| X
+    C2 -->|"yes, or the caller passed None"| C3["3. atomic write:<br/>sibling temp file, fsync,<br/>os.replace"]
+    C3 --> DISK["config file on disk"]
+
+    C2 -.- NN["gate 2 is opt-in. a caller that passes<br/>expected_patterns=None skips the<br/>rule-loss check entirely - which is<br/>right for a brand-new file and is<br/>the gap to watch everywhere else"]
+
+    classDef caller fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    classDef gate fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef good fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef bad fill:#fde8e8,stroke:#b54a4a,color:#3a1212
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class M,I,A,G caller
+    class V,C1,C2 gate
+    class C3,DISK good
+    class X bad
+    class NN note

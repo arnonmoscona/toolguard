@@ -27,6 +27,7 @@ else is underscore-prefixed.
 """
 
 import functools
+import hashlib
 import json
 import os
 import tomllib
@@ -125,20 +126,24 @@ def _parse_config_file(path_str: str, file_format: str) -> dict:
 
 @functools.lru_cache(maxsize=None)
 def _parse_config_file_cached(
-    path_str: str, file_format: str, mtime_ns: int, size: int
+    path_str: str, file_format: str, mtime_ns: int, size: int, content_hash: str
 ) -> dict:
     """
-    Parse a single config file, memoized on (path, format, mtime, size).
+    Parse a single config file, memoized on (path, format, mtime, size, content_hash).
 
     ``size`` is part of the key alongside ``mtime_ns`` because two rewrites
     within the same mtime tick would otherwise collide and serve a stale,
-    wrong-sized parse.
+    wrong-sized parse. ``content_hash`` is needed on top of both: a
+    same-length rewrite with its mtime restored (the shape a
+    read-modify-write tool produces) changes neither, and coarse filesystem
+    mtime resolution can leave even a genuine rewrite's mtime unchanged.
 
     Args:
         path_str: Filesystem path to the config file, as a string.
         file_format: Either ``'toml'`` or ``'json'``.
         mtime_ns: The file's ``st_mtime_ns`` at the time of the call (cache key only).
         size: The file's ``st_size`` at the time of the call (cache key only).
+        content_hash: Digest of the file's bytes at the time of the call (cache key only).
 
     Returns:
         The parsed config dictionary.
@@ -150,9 +155,10 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
     """
     Load and parse a single config file, dispatching on format.
 
-    Memoized on ``(path, st_mtime_ns, st_size)``: repeat calls for the same
-    unchanged file are cheap, and a rewrite is still picked up. Raises on any
-    parse failure rather than returning an error value.
+    Memoized on ``(path, st_mtime_ns, st_size, content_hash)``: repeat calls
+    for the same unchanged file are cheap, and a rewrite is still picked up
+    even when it lands on the same size and mtime. Raises on any parse
+    failure rather than returning an error value.
 
     Args:
         path: Path to the config file.
@@ -168,10 +174,15 @@ def load_config_file(path: Path, file_format: str = "json") -> dict:
     """
     try:
         stat_result = path.stat()
+        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return _parse_config_file(str(path), file_format)
     return _parse_config_file_cached(
-        str(path), file_format, stat_result.st_mtime_ns, stat_result.st_size
+        str(path),
+        file_format,
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+        content_hash,
     )
 
 
@@ -249,16 +260,22 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
             ]
         )
 
-    # User level
+    # User level -- skipped when it is the same directory as the project
+    # level already added above (the project root is home), which would
+    # otherwise duplicate every file found there.
     user_claude_dir = Path.home() / ".claude"
-    candidates.extend(
-        [
-            (user_claude_dir, "toolguard_hook.local", "toolguard_hook", True),
-            (user_claude_dir, "settings.local", "claude", False),
-            (user_claude_dir, "toolguard_hook", "toolguard_hook", True),
-            (user_claude_dir, "settings", "claude", False),
-        ]
-    )
+    if (
+        project_claude_dir is None
+        or user_claude_dir.resolve() != project_claude_dir.resolve()
+    ):
+        candidates.extend(
+            [
+                (user_claude_dir, "toolguard_hook.local", "toolguard_hook", True),
+                (user_claude_dir, "settings.local", "claude", False),
+                (user_claude_dir, "toolguard_hook", "toolguard_hook", True),
+                (user_claude_dir, "settings", "claude", False),
+            ]
+        )
 
     # Check for both TOML and JSON, with TOML taking precedence
     for directory, base_name, source_type, prefer_toml in candidates:
@@ -1151,7 +1168,11 @@ class Configuration:
         Distinguishes a genuinely UNCONFIGURED tool (which should resolve to
         ``'ask'`` so a fresh install is not bricked) from a CONFIGURED tool whose
         rules simply do not match the current command/path (which is governed by
-        :meth:`resolved_no_match_fallback`).
+        :meth:`resolved_no_match_fallback`). Reads the RAW, un-takeover-filtered
+        rules -- unlike :meth:`permission_layers`, a native allow that takeover
+        mode suppresses still counts as "configured" here, so a suppressed-away
+        tool falls through to ``resolved_no_match_fallback`` instead of being
+        misread as never configured at all.
 
         Args:
             tool_name: Tool to check (e.g. ``'Bash'``, ``'Read'``, ``'Write'``,
@@ -1161,9 +1182,15 @@ class Configuration:
             ``True`` when at least one allow/deny/ask/hard_deny pattern exists
             for ``tool_name`` anywhere in the hierarchy.
         """
-        for layer in self.permission_layers(tool_name):
-            if layer.allow or layer.deny or layer.ask:
-                return True
+        for layer in self.layers:
+            permissions = layer.content.get("permissions", {})
+            if not isinstance(permissions, dict):
+                continue
+            for perm_type in ("allow", "deny", "ask"):
+                if self._extract_tool_entries(
+                    permissions.get(perm_type, []), tool_name, layer.is_native
+                ):
+                    return True
         hd_deny, hd_allow = self.hard_deny(tool_name)
         return bool(hd_deny or hd_allow)
 
@@ -1707,6 +1734,26 @@ class Configuration:
                     for perm in permissions.get(perm_type, []):
                         if perm not in merged_config["permissions"][perm_type]:
                             merged_config["permissions"][perm_type].append(perm)
+            elif permissions:
+                # e.g. [[permissions]] (array of tables) instead of
+                # [permissions]: parses cleanly but every rule in the layer
+                # is unmergeable, so record the loss instead of silently
+                # dropping the layer's whole permissions section.
+                issues.append(
+                    Issue(
+                        level="error",
+                        message=(
+                            f"{layer.provenance.describe_brief()} permissions "
+                            f"section is not a table (found "
+                            f"{type(permissions).__name__}); every rule in it "
+                            f"was discarded"
+                        ),
+                        corrective_steps=(
+                            'Write it as "[permissions]" with allow/deny/ask '
+                            'arrays, not "[[permissions]]".'
+                        ),
+                    )
+                )
 
         issues.extend(validate_permissions(merged_config))
 

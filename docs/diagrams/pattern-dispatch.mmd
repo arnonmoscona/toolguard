@@ -1,0 +1,19 @@
+---
+title: Which matcher runs - the pattern prefix decides
+---
+flowchart TB
+    P["a pattern from a rule"] --> Q{"leading<br/>[type] prefix?"}
+
+    Q -->|"none"| D["DEFAULT - and it means two<br/>different things:<br/>for a Bash command, fnmatch against<br/>the raw command AND its normalised form<br/>for a file path, promoted to GLOB"]
+    Q -->|"[regex]"| R["REGEX<br/>re.search, unanchored<br/>no normalisation<br/>an invalid regex never matches"]
+    Q -->|"[glob]"| G["GLOB<br/>PurePath.full_match, whole string<br/>* stops at /, ** crosses it<br/>tilde expanded on both sides"]
+    Q -->|"[native]"| N["NATIVE<br/>literal segments found in order<br/>Claude Code's own wildcard syntax"]
+
+    N -.- NN["the segment search never backtracks,<br/>so a pattern not ending in * can miss:<br/>*id_rsa does not match<br/>cat id_rsa.pub id_rsa.<br/>on a deny rule that is a bypass"]
+
+    classDef mode fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef def fill:#f3e8fb,stroke:#7a4ab5,color:#26123a
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class R,G,N mode
+    class D def
+    class NN note

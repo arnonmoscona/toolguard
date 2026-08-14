@@ -54,6 +54,9 @@ SWEPT_TREES = {
 
 _TICKET_RE = re.compile(r"\bTOO-\d+\b")
 
+#: Raised by an unreadable or unparseable source file, treated as "skip it".
+_UNREADABLE_SOURCE_ERRORS = (OSError, SyntaxError, UnicodeDecodeError)
+
 
 def _iter_python_files(root: Path):
     yield from sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
@@ -103,7 +106,7 @@ def docstring_ticket_refs(root: Path) -> list[TicketRefSite]:
         try:
             source = py_file.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(py_file))
-        except OSError, SyntaxError, UnicodeDecodeError:
+        except _UNREADABLE_SOURCE_ERRORS:
             continue
         rel = _repo_relative(py_file)
         for node, owner in _iter_docstring_owners(tree):
@@ -348,7 +351,7 @@ def _all_docstrings(root: Path):
         try:
             source = py_file.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(py_file))
-        except OSError, SyntaxError, UnicodeDecodeError:
+        except _UNREADABLE_SOURCE_ERRORS:
             continue
         rel = _repo_relative(py_file)
         for node, _owner in _iter_docstring_owners(tree):
@@ -424,7 +427,7 @@ def _defines_symbol(module_file: Path, symbol: str) -> bool:
     try:
         source = module_file.read_text(encoding="utf-8")
         tree = ast.parse(source)
-    except OSError, SyntaxError, UnicodeDecodeError:
+    except _UNREADABLE_SOURCE_ERRORS:
         return False
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

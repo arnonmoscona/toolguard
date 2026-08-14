@@ -64,15 +64,16 @@ class RedundancyFinding:
 # ---------------------------------------------------------------------------
 
 
-def _normalised_body(pattern: str) -> Tuple[str, str]:
+def _normalised_body(pattern: str, *, fold_case: bool = True) -> Tuple[str, str]:
     """
     Reduce a pattern to its duplicate-detection key.
 
     The key pairs the :class:`~toolguard.patterns.PatternType` value
     (``'default'``, ``'regex'``, ``'glob'``, ``'native'``) with the body,
-    stripped and lowercased.  A DEFAULT body is normalised further: runs of two
-    or more spaces become one, and whitespace around every ``:`` is removed, so
-    ``uv run pytest :*`` and ``uv run pytest:*`` land on one key.
+    stripped and, by default, lowercased.  A DEFAULT body is normalised
+    further: runs of two or more spaces become one, and whitespace around
+    every ``:`` is removed, so ``uv run pytest :*`` and ``uv run pytest:*``
+    land on one key.
 
     Coarser than matching -- two patterns can share a key and still match
     different commands.  Measured: ``Git *`` and ``git *`` share a key and
@@ -82,12 +83,19 @@ def _normalised_body(pattern: str) -> Tuple[str, str]:
 
     Args:
         pattern: A raw permission pattern, tool wrapper already stripped.
+        fold_case: Whether to lowercase the body.  True (default) for the
+            within-layer static-duplicate scan, where over-matching is an
+            accepted false-positive rate; a cross-layer caller reporting a
+            command set as truly covered needs ``False``, since the real
+            matcher is case-sensitive.
 
     Returns:
         ``(type_key, normalised_body)``.
     """
     ptype, body = parse_pattern(pattern, extended_syntax=True)
-    norm = body.strip().lower()
+    norm = body.strip()
+    if fold_case:
+        norm = norm.lower()
     if ptype.value == "default":
         norm = re.sub(r"  +", " ", norm)
         norm = re.sub(r"\s*:\s*", ":", norm)

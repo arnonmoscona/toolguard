@@ -1,0 +1,21 @@
+---
+title: Four daily log files, one per concern
+---
+flowchart LR
+    LW["log_writer.py"] --> F1["toolguard-YYYY-MM-DD.md<br/>every decision - the audit trail,<br/>and the high-volume one"]
+    EL["error_log.py"] --> F2["toolguard-error-YYYY-MM-DD.md<br/>configuration and runtime errors"]
+    EL --> F3["toolguard-warning-YYYY-MM-DD.md<br/>non-fatal configuration warnings"]
+    EL --> F4["toolguard-conflict-YYYY-MM-DD.md<br/>cross-level conflicts"]
+
+    F4 --> SS["session_start.py<br/>re-reads this one and nags<br/>every session until it is fixed"]
+
+    EL -.- NN["a crash also gets its own file,<br/>toolguard-error-YYYY-MM-DD-HHMMSS.md,<br/>one per crash so none overwrites another.<br/>errors and warnings also go to stderr"]
+
+    classDef src fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef file fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef alert fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class LW,EL src
+    class F1,F2,F3,F4 file
+    class SS alert
+    class NN note

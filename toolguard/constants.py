@@ -26,6 +26,9 @@ STATUS_EXECUTED = "EXECUTED"
 #: The call did not run: toolguard denied it, or transcript harvesting
 #: inferred the user declined it.
 STATUS_REFUSED = "REFUSED"
+#: Toolguard's own hook prompted for the command (an 'ask' verdict), status
+#: written by :mod:`toolguard.log_writer`.
+STATUS_ASK = "ASK"
 #: Permitted but the tool itself errored.
 STATUS_ERROR = "ERROR"
 #: No matching tool_result was found.
@@ -39,3 +42,10 @@ GIT_TIMEOUT_SECONDS = 10
 #: The distribution/import/project name toolguard is published and installed
 #: under.
 DIST_NAME = "toolguard"
+
+#: Fallback ``tool_input`` key for a command tool with no registered
+#: :class:`~toolguard.tool_spec.ToolSpec` (e.g. an unrecognized MCP tool
+#: added via ``additional_supported_tools``) -- every registered command
+#: tool's own ``payload_key`` is ``"command"`` too, so this only matters for
+#: names outside the registry.
+DEFAULT_COMMAND_PAYLOAD_KEY = "command"

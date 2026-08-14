@@ -68,6 +68,19 @@ def validate_permissions(config: dict) -> Tuple[Issue, ...]:
 
     permissions = config.get("permissions", {})
     if not isinstance(permissions, dict):
+        add_issue(
+            Issue(
+                level="error",
+                message=(
+                    f"permissions section is not a table (found "
+                    f"{type(permissions).__name__}); every rule in it was discarded"
+                ),
+                corrective_steps=(
+                    'Write it as "[permissions]" with allow/deny/ask arrays, not '
+                    '"[[permissions]]".'
+                ),
+            )
+        )
         return tuple(issues)
 
     tools_in_permissions = set()
@@ -76,13 +89,27 @@ def validate_permissions(config: dict) -> Tuple[Issue, ...]:
     # layers before merging.
     for permission_list in ["allow", "deny", "ask"]:
         perms = permissions.get(permission_list, [])
-        if isinstance(perms, list):
-            for perm in perms:
-                entry, entry_issues = normalize_entry(perm, is_native=False)
-                for issue in entry_issues:
-                    add_issue(issue)
-                if entry is not None:
-                    tools_in_permissions.add(extract_tool_name(entry.pattern))
+        if not isinstance(perms, list):
+            add_issue(
+                Issue(
+                    level="error",
+                    message=(
+                        f'"{permission_list}" is not a list (found '
+                        f"{type(perms).__name__}); every rule in it was discarded"
+                    ),
+                    corrective_steps=(
+                        f'Write "{permission_list}" as an array of strings, e.g. '
+                        f'{permission_list} = ["Bash(ls:*)"].'
+                    ),
+                )
+            )
+            continue
+        for perm in perms:
+            entry, entry_issues = normalize_entry(perm, is_native=False)
+            for issue in entry_issues:
+                add_issue(issue)
+            if entry is not None:
+                tools_in_permissions.add(extract_tool_name(entry.pattern))
 
     for tool in tools_in_permissions:
         if tool not in all_supported_tools:

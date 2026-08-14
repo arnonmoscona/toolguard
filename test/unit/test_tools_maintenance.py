@@ -542,7 +542,7 @@ class TestMaintenanceCLI(unittest.TestCase):
         self.assertEqual([t["tool"] for t in payload["tools"]], ["Bash"])
         self.assertEqual(
             [c["added_pattern"] for c in payload["tools"][0]["consolidations"]],
-            ["[regex]^git (diff|log|status)"],
+            ["[regex]^git (diff|log|status)(?=\\s|$)"],
         )
 
     def test_a_misspelled_tool_name_is_distinguishable_from_a_clean_run(self):
@@ -742,7 +742,9 @@ class TestApplyMode(unittest.TestCase):
             set(edits[0]["removed_patterns"]),
             {"git diff:*", "git log:*", "git status:*"},
         )
-        self.assertEqual(edits[0]["added_patterns"], ["[regex]^git (diff|log|status)"])
+        self.assertEqual(
+            edits[0]["added_patterns"], ["[regex]^git (diff|log|status)(?=\\s|$)"]
+        )
         # The same fixture also yields a 'git :*' broadening; it is agent-judged
         # and must not be handed to the audit-and-apply path.
         self.assertNotIn(

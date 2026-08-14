@@ -1,0 +1,14 @@
+---
+title: Parse-failure ASK floor - and the one decision it never weakens
+---
+flowchart TD
+    A["a (decision, reason) pair<br/>from the cascade"] --> B{"any config file<br/>failed to parse?"}
+    B -->|"no"| C["unchanged"]
+    B -->|"yes"| D{"is the decision<br/>already 'deny'?"}
+    D -->|"yes"| E["unchanged - stays denied<br/>a parse failure must never turn<br/>a genuine deny into something laxer"]
+    D -->|"no"| F["clamped to 'ask'<br/>reason replaced with the<br/>unparseable-file report"]
+
+    classDef keep fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef clamp fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    class C,E keep
+    class F clamp

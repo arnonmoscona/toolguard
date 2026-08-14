@@ -42,9 +42,10 @@ from toolguard.resolve import (
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
-from toolguard.constants import FILE_TOOLS
+from toolguard.constants import DEFAULT_COMMAND_PAYLOAD_KEY, FILE_TOOLS
 from toolguard.session_warnings import issue_takeover_warning
 from toolguard.subagent import identify_current_agent
+from toolguard.tool_spec import KNOWN_TOOL_NAMES
 from toolguard.tool_spec import payload_key as _tool_payload_key
 
 #: Tools that operate on file paths (glob-matched), as opposed to command
@@ -402,6 +403,33 @@ def _log_fallback_allow_warning(fallback_warning: bool, reason: str, log_dir) ->
     )
 
 
+def describe_takeover_conflict(conflict) -> Tuple[str, str]:
+    """
+    Compose the fail-safe conflict message and its corrective steps.
+
+    Shared by the conflict log entry and the stderr notice, so both describe
+    the same fail-safe -- native prompts stay active, nothing is bypassed --
+    without duplicating the wording.
+
+    Args:
+        conflict: The :class:`~toolguard.config.TakeoverEnabledConflict`.
+
+    Returns:
+        ``(message, corrective_steps)``.
+    """
+    message = (
+        f"{conflict.describe()}. Fail-safe applied: takeover mode is treated as "
+        "DISABLED (OFF), so Claude native permission prompts stay active and "
+        "nothing is silently bypassed."
+    )
+    corrective = (
+        "takeover_mode is a single-owner policy. Set takeover_mode.enabled at "
+        "exactly ONE level (typically the user level) and remove or align the "
+        "conflicting settings at the other levels so they no longer disagree."
+    )
+    return message, corrective
+
+
 def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     """
     Record a cross-level ``takeover_mode.enabled`` disagreement.
@@ -416,16 +444,7 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
     """
     if conflict is None or not log_dir:
         return
-    message = (
-        f"{conflict.describe()}. Fail-safe applied: takeover mode is treated as "
-        "DISABLED (OFF), so Claude native permission prompts stay active and "
-        "nothing is silently bypassed."
-    )
-    corrective = (
-        "takeover_mode is a single-owner policy. Set takeover_mode.enabled at "
-        "exactly ONE level (typically the user level) and remove or align the "
-        "conflicting settings at the other levels so they no longer disagree."
-    )
+    message, corrective = describe_takeover_conflict(conflict)
     log_conflict(message, corrective, log_dir)
 
 
@@ -681,10 +700,15 @@ def _resolve_event(
                 decision="deny", reason=f"No {key} provided in tool input"
             )
     else:
-        target = tool_input.get("command", "")
+        key = (
+            _tool_payload_key(tool_name)
+            if tool_name in KNOWN_TOOL_NAMES
+            else DEFAULT_COMMAND_PAYLOAD_KEY
+        )
+        target = tool_input.get(key, "")
         if not target:
             return RuntimeVerdict(
-                decision="deny", reason="No command provided in tool input"
+                decision="deny", reason=f"No {key} provided in tool input"
             )
 
     return decide(config, tool_name, target, extended_syntax)
@@ -823,7 +847,8 @@ def _announce_takeover_state(takeover, log_dir) -> None:
     if takeover.conflict is None:
         return
     _log_takeover_enabled_conflict(takeover.conflict, log_dir)
-    issue_takeover_warning(to_stdout=True)
+    message, _corrective = describe_takeover_conflict(takeover.conflict)
+    issue_takeover_warning(to_stdout=True, conflict_message=message)
 
 
 def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,0 +1,17 @@
+---
+title: One process per tool call - and what that forbids
+---
+flowchart TB
+    A["Claude Code is about to run<br/>a governed tool"] --> B["spawns a fresh toolguard process"]
+    B --> C["reads ONE hook event<br/>from stdin"]
+    C --> D["re-reads the whole config<br/>hierarchy from disk"]
+    D --> E["resolves one decision"]
+    E --> F["writes ONE JSON decision<br/>to stdout"]
+    F --> G["process exits<br/>every byte of memory is gone"]
+
+    G -.- N["so there is nowhere to put:<br/>a warm cache of parsed config<br/>a module global that means 'already warned'<br/>an amortised start-up cost<br/><br/>state that must outlive the call<br/>goes to disk, keyed by session id"]
+
+    classDef step fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class A,B,C,D,E,F,G step
+    class N note

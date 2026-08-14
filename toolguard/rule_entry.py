@@ -305,7 +305,13 @@ def normalize_entry(
       unwrapped plain string would newly report configs that load without
       complaint today, while structured entries are new syntax with no
       already-written configs to protect.
-    - An empty string is the one exception, normalizing to
+    - A plain ``str`` containing a newline or carriage return normalizes to
+      ``(None, issues)`` with an ``error``-level :class:`Issue`: the break
+      defeats the ``Tool(...)`` wrapper strip (:data:`_TOOL_WRAPPER_RE` is
+      not ``re.DOTALL``), so the entry can be accepted, scoped to a tool, and
+      displayed as configured while matching no command -- silently inert,
+      which is worse than a load error for a ``deny``.
+    - An empty string is the other exception, normalizing to
       ``(None, issues)`` with a ``warning``-level :class:`Issue`:
       unambiguously a mistake (there is no pattern it could ever be), but
       ``warning`` rather than ``error`` because the point is to stop the
@@ -348,6 +354,16 @@ def normalize_entry(
                 message="Permission entry is an empty string.",
                 corrective_steps="Remove the empty entry or provide a "
                 "valid 'Tool(pattern)' permission string.",
+            )
+        if "\n" in raw or "\r" in raw:
+            return _reject(
+                level="error",
+                message=(
+                    "Permission entry contains a newline, which defeats the "
+                    f"'Tool(...)' wrapper strip and can never match a command: {raw!r}"
+                ),
+                corrective_steps="Remove the embedded newline; write one "
+                "'Tool(pattern)' entry per list element.",
             )
         return RuleEntry(pattern=raw, metadata=MappingProxyType({}), raw=raw), ()
 

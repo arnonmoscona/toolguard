@@ -1,0 +1,9 @@
+{
+  "flowchart": {
+    "useMaxWidth": false,
+    "curve": "basis"
+  },
+  "themeVariables": {
+    "fontFamily": "ui-sans-serif, system-ui, sans-serif"
+  }
+}

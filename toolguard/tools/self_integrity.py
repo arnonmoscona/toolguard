@@ -14,8 +14,11 @@ paths: matching happens on the RAW, pre-expansion command text, so
 different literal strings. Deliberately broad, too: nothing in toolguard removes
 files through a shell ``rm``, so a false positive here costs nothing.
 
-Defense in depth, not a guarantee -- e.g. ``sudo rm -rf ~/.toolguard`` and
-``/bin/rm -rf ~/.toolguard`` match neither pattern.
+The leading boundary is ``[\\s/]`` and not ``\\b`` on purpose: ``\\b`` holds
+after a ``-``, so it would drag in ``docker run --rm``.
+
+Defense in depth, not a guarantee: only ``rm`` and ``find ... -delete`` are
+covered, so any other way to remove a directory gets through.
 """
 
 from dataclasses import dataclass
@@ -40,16 +43,18 @@ class SelfIntegrityProtection:
 
 _SELF_INTEGRITY_HARD_DENY_PATTERNS: Tuple[SelfIntegrityProtection, ...] = (
     SelfIntegrityProtection(
-        pattern=r"Bash([regex]^rm\b.*\.toolguard)",
+        pattern=r"Bash([regex](^|[\s/])rm\b.*\.toolguard)",
         rationale=(
             "Blocks any rm command (rm, rm -rf, rm -r, etc.) whose arguments "
             "reference .toolguard, regardless of whether it is spelled as "
             "~/.toolguard, $HOME/.toolguard, or a resolved absolute path -- "
-            "the exact command that deleted a real install's state directory."
+            "the exact command that deleted a real install's state directory. "
+            "Reached through a leading token or an absolute path too, so "
+            "'sudo rm' and '/bin/rm' do not escape it."
         ),
     ),
     SelfIntegrityProtection(
-        pattern=r"Bash([regex]^find\b.*\.toolguard.*-delete)",
+        pattern=r"Bash([regex](^|[\s/])find\b.*\.toolguard.*-delete)",
         rationale=(
             "Blocks the find ... -delete form of the same deletion, which rm "
             "alone does not catch."

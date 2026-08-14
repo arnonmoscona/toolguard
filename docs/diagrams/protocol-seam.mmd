@@ -1,0 +1,18 @@
+---
+title: The coupling no import graph shows
+---
+flowchart LR
+    Config["config.Configuration<br/>config layer"]
+    RC["ResolutionConfig / ResolveConfig<br/>Protocol classes in config_types<br/>engine layer"]
+    PR["permission_resolution.py<br/>imports only config_types,<br/>permissions, file_matching"]
+
+    Config -.->|"structurally satisfies<br/>no import edge"| RC
+    RC -->|"typed parameter"| PR
+    Config ==>|"runtime calls through the config parameter:<br/>parse_failures, permission_levels_with_provenance,<br/>has_any_rules, resolved_no_match_fallback"| PR
+
+    classDef cfg fill:#f3e8fb,stroke:#7a4ab5,color:#2a1240
+    classDef proto fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef eng fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    class Config cfg
+    class RC proto
+    class PR eng

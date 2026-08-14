@@ -61,9 +61,10 @@ def audit_environment(
             severity=Severity.HIGH,
             description=(
                 f"PYTHONPATH contains {listed}, which holds its own "
-                "toolguard/ package. Any toolguard console-script or "
-                "'-m toolguard...' invocation launched with this environment "
-                "imports THAT package instead of the installed distribution."
+                "toolguard/ package or toolguard.py module. Any toolguard "
+                "console-script or '-m toolguard...' invocation launched "
+                "with this environment imports THAT one instead of the "
+                "installed distribution."
             ),
             impact=(
                 "The PreToolUse permission hook is the process making every "

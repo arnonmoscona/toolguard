@@ -1906,7 +1906,11 @@ def _decode_python_bytes(data: bytes) -> str | None:
     try:
         encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
         return data.decode(encoding, errors="surrogateescape")
-    except SyntaxError, UnicodeError, LookupError:
+    except (
+        SyntaxError,
+        UnicodeError,
+        LookupError,
+    ):
         return None
 
 
@@ -2460,6 +2464,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
     if args.tree is not None:
+        if not args.tree.is_dir():
+            print(f"{args.tree} is not a directory", file=sys.stderr)
+            return 2
         result = run_single_tree(args.tree, args.subjects, args.closure_hops)
     elif args.old is not None:
         if args.new is None:

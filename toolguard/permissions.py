@@ -20,7 +20,9 @@ from .patterns import parse_pattern, match_pattern, PatternType
 from .normalization import normalize_command, normalize_path
 
 
-def normalize_path_in_command(command_str: str) -> str:
+def normalize_path_in_command(
+    command_str: str, *, resolve_symlinks: bool = True
+) -> str:
     """
     Normalize a command's path arguments to canonical form.
 
@@ -31,11 +33,13 @@ def normalize_path_in_command(command_str: str) -> str:
 
     Args:
         command_str: The command string to normalize.
+        resolve_symlinks: Forwarded to
+            :func:`~toolguard.normalization.normalize_command`.
 
     Returns:
         The normalized command string.
     """
-    result = normalize_command(command_str)
+    result = normalize_command(command_str, resolve_symlinks=resolve_symlinks)
 
     parts = result.split(None, 1)
     if len(parts) == 2:
@@ -74,6 +78,41 @@ def contains_path_component(command_str: str, component: str) -> bool:
     return False
 
 
+def _matches_on_token_boundary(command_str: str, cmd_pattern: str) -> bool:
+    """
+    Match *command_str* against a DEFAULT ``cmd:args`` pattern's command part when its
+    args part is a bare wildcard: the command must equal *cmd_pattern* or continue after
+    it with a space, so the prefix ends on a token boundary.
+
+    This is Claude Code's own ``Bash(x:*)`` == ``Bash(x *)`` semantics, where a trailing
+    wildcard with a space before it requires a space or end-of-string -- ``git log:*``
+    matches ``git log --oneline`` but not ``git logfoo``.
+    """
+    return fnmatch.fnmatch(command_str, cmd_pattern) or fnmatch.fnmatch(
+        command_str, cmd_pattern + " *"
+    )
+
+
+def _command_variants(command_str: str) -> List[str]:
+    """
+    The spellings of *command_str* a DEFAULT pattern is matched against: raw,
+    path-normalized, and path-normalized with symlinks resolved, deduplicated.
+
+    The last two diverge only under a symlink, and then they name different places --
+    ``~/.claude/x`` through a symlinked ``.claude`` resolves under the link's target.
+    Each is a spelling a rule author plausibly wrote, so all are kept: dropping one
+    silently narrows every deny rule written in it (TOO-45).
+    """
+    variants = [command_str]
+    for variant in (
+        normalize_path_in_command(command_str, resolve_symlinks=False),
+        normalize_path_in_command(command_str),
+    ):
+        if variant not in variants:
+            variants.append(variant)
+    return variants
+
+
 def match_command(
     command_str: str, patterns: List[str], extended_syntax: bool = True
 ) -> Tuple[bool, Optional[str]]:
@@ -84,10 +123,10 @@ def match_command(
     for a ``**/<component>/**`` shape -- before ``**`` is normalized down to ``*`` --
     matching when the raw *command_str* contains that literal path component anywhere
     (via :func:`contains_path_component`). Otherwise it is matched via ``fnmatch``
-    against both the raw command and its :func:`normalize_path_in_command`-normalized
-    form -- as a ``cmd:args`` prefix-and-args split when the pattern contains a ``:``,
-    or as a whole-string match otherwise. ``[regex]``/``[glob]``/``[native]`` patterns
-    bypass all DEFAULT handling and match directly against the raw command via
+    against every spelling :func:`_command_variants` produces -- as a ``cmd:args``
+    prefix-and-args split when the pattern contains a ``:``, or as a whole-string match
+    otherwise. ``[regex]``/``[glob]``/``[native]`` patterns bypass all DEFAULT handling
+    and match directly against the raw command via
     :func:`~toolguard.patterns.match_pattern`.
 
     A leaf command that still contains a newline (should not normally happen after the
@@ -109,7 +148,7 @@ def match_command(
         returning a normalized/wrapper-stripped pattern here would silently break it.
     """
     command_has_newline = "\n" in command_str or "\r" in command_str
-    command_variants = [command_str, normalize_path_in_command(command_str)]
+    command_variants = _command_variants(command_str)
 
     for pattern in patterns:
         pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
@@ -160,8 +199,8 @@ def match_command(
                     )
                     if matched_base:
                         for bc in base_cmd_variants:
-                            full_cmd_pattern = bc + cmd_pattern[len(base_cmd) :] + "*"
-                            if fnmatch.fnmatch(cmd_var, full_cmd_pattern):
+                            full_cmd_pattern = bc + cmd_pattern[len(base_cmd) :]
+                            if _matches_on_token_boundary(cmd_var, full_cmd_pattern):
                                 return True, pattern
                 else:
                     full_pattern = cmd_pattern + " " + args_pattern

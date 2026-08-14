@@ -1,0 +1,17 @@
+---
+title: Hook lifecycle - one process, stdin to stdout
+---
+flowchart TD
+    A["Claude Code PreToolUse event<br/>JSON on stdin"] --> B["hook.main()"]
+    B --> C{"is tool_name in<br/>governed_tools?"}
+    C -->|"no"| D["allow - not governed"]
+    C -->|"yes"| E["resolve<br/>see the resolution cascade"]
+    E --> F["RuntimeVerdict"]
+    F --> G["audit-log write<br/>conflict-log write"]
+    G --> H["JSON permissionDecision<br/>on stdout"]
+    D --> H
+
+    classDef io fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef verdict fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    class A,H io
+    class F,D verdict

@@ -12,10 +12,12 @@ project-level) and resolve most-specific-wins.
    OTHER context the destination layer governs -- lies outside any corpus, so it
    is described in prose in ``MigrationEffect.scope_note`` for a human to weigh.
 
-2. **Cross-layer redundancy** -- :func:`find_cross_layer_redundancies` reports a
-   more-specific allow rule whose normalised body also appears in a broader
-   layer.  Purely static: it reads allow lists and replays nothing.  Its findings
-   are candidates for review, NOT verified-safe deletions -- see that function.
+2. **Cross-layer redundancy** -- :func:`find_cross_layer_redundancies` reports an
+   allow rule whose normalised body also appears in a layer that would decide in
+   its place once dropped -- a broader layer, or the earlier occurrence of a
+   same-specificity duplicate.  Purely static: it reads allow, deny and ask
+   lists and replays nothing.  Its findings are candidates for review, NOT
+   verified-safe deletions -- see that function.
 """
 
 from collections import defaultdict
@@ -71,12 +73,16 @@ class MigrationEffect:
         changed_count: Corpus entries whose verdict changed (broadened + tightened).
         broadened_count: Entries that became looser.
         tightened_count: Entries that became stricter.
-        decision_neutral: ``True`` when no corpus entry's verdict changed.  Not a
-            safety verdict, even for the current context: a command the corpus
-            never recorded can still flip.  Measured -- with a project ``git:*``
-            allow and an intermediate ``git push:*`` deny, promoting ``git:*`` to
-            an empty user layer over a corpus holding only ``git status`` is
-            reported neutral while ``git push`` goes from ``allow`` to ``deny``.
+        decision_neutral: ``True`` when no corpus entry's verdict changed,
+            ``None`` when the corpus was empty -- neutrality is not a
+            meaningful claim about zero examined entries, so an empty corpus
+            must not read the same as a replayed-and-unchanged one.  Not a
+            safety verdict even when ``True``, and even for the current
+            context: a command the corpus never recorded can still flip.
+            Measured -- with a project ``git:*`` allow and an intermediate
+            ``git push:*`` deny, promoting ``git:*`` to an empty user layer
+            over a corpus holding only ``git status`` is reported neutral
+            while ``git push`` goes from ``allow`` to ``deny``.
         scope_note: Human-readable note about how the move changes the rule's
             scope beyond what the corpus can show (e.g. promotion to a broader
             layer applies the rule to other projects too).
@@ -86,20 +92,22 @@ class MigrationEffect:
     changed_count: int
     broadened_count: int
     tightened_count: int
-    decision_neutral: bool
+    decision_neutral: Optional[bool]
     scope_note: str
 
 
 @dataclass(frozen=True)
 class CrossLayerRedundancy:
     """
-    A more-specific allow rule whose normalised body also appears in a broader layer.
+    An allow rule whose normalised body also appears in a layer that would
+    decide in its place once this copy is dropped.
 
     Attributes:
         tool: Tool the rule applies to.
-        pattern: The more-specific pattern body.
-        redundant_provenance: The more-specific layer holding it.
-        covered_by_provenance: The nearest broader layer holding the same body.
+        pattern: The redundant copy's pattern body.
+        redundant_provenance: The layer holding the redundant copy.
+        covered_by_provenance: The layer that would take over: a broader one,
+            or the earlier occurrence of a same-specificity duplicate.
         note: Human-readable explanation.
     """
 
@@ -130,7 +138,30 @@ def migrate_config(
 
     Returns:
         A new :class:`Configuration` with the rule relocated.
+
+    Raises:
+        ValueError: When ``migration.list_type`` is not ``'allow'`` -- this
+            module moves allow-list rules only, and silently editing the
+            allow list for a migration that CLAIMS to move a different list
+            would misdescribe the change.  Also raised when
+            ``migration.to_provenance`` matches no layer in ``config``:
+            without this check the removal from ``from_provenance`` still
+            lands while the addition silently no-ops, losing the rule.
     """
+    if migration.list_type != "allow":
+        raise ValueError(
+            f"migrate_config only moves allow-list rules, got "
+            f"list_type={migration.list_type!r}"
+        )
+    target_present = any(
+        lr.provenance == migration.to_provenance
+        for lr in per_layer_rules(config, migration.tool)
+    )
+    if not target_present:
+        raise ValueError(
+            f"migration target {migration.to_provenance.describe()!r} "
+            f"matches no layer in the config"
+        )
     removed = with_layer_allow_replaced(
         config, migration.tool, migration.from_provenance, {migration.pattern}, []
     )
@@ -224,7 +255,7 @@ def evaluate_migration(
         changed_count=changed,
         broadened_count=diff.broadened_count,
         tightened_count=diff.tightened_count,
-        decision_neutral=(changed == 0),
+        decision_neutral=(changed == 0) if corpus else None,
         scope_note=_scope_note(migration),
     )
 
@@ -234,50 +265,89 @@ def evaluate_migration(
 # ---------------------------------------------------------------------------
 
 
-def _nearest_broader_cover(
-    coverage: Dict[Tuple[str, str], List[Tuple[int, Provenance]]],
-    key: Tuple[str, str],
-    specificity: int,
-) -> Optional[Provenance]:
-    """
-    Return the nearest strictly-broader layer that also holds ``key``, or None.
+#: A layer's position in the ordered layer list, used to break ties between
+#: two layers sharing a specificity -- discovery lists same-tier layers in
+#: resolution order, so an earlier position wins and a later duplicate is dead.
+_Order = Tuple[int, int]
 
-    "Broader" means a higher ``specificity`` value (further from the project);
-    "nearest" is the smallest such value.  The comparison is strict, so two
-    layers sharing a specificity never cover each other.
+
+def _nearest_broader_cover(
+    coverage: Dict[Tuple[str, str], List[Tuple[_Order, Provenance]]],
+    key: Tuple[str, str],
+    order: _Order,
+) -> Optional[Tuple[_Order, Provenance]]:
+    """
+    Return the nearest layer that would decide instead of ``order`` if its own
+    copy were dropped, or None.
+
+    A layer covers when it resolves LATER than ``order``: a strictly broader
+    specificity, or the same specificity at a later position (same-tier layers
+    are checked in list order, so an earlier occurrence decides and a later
+    one is dead weight -- "covers" here means "the earlier one covers the
+    later, dead, duplicate"). "Nearest" is the smallest such order.
 
     Args:
-        coverage: Map of normalised key -> list of ``(specificity, provenance)``.
+        coverage: Map of normalised key -> list of ``(order, provenance)``.
         key: The normalised pattern key to look up.
-        specificity: The specificity of the more-specific occurrence.
+        order: The ``(specificity, position)`` of the occurrence being checked.
 
     Returns:
-        The covering :class:`Provenance`, or ``None`` when nothing broader holds it.
+        The covering ``(order, Provenance)``, or ``None`` when nothing covers it.
     """
-    broader = [
-        (spec, prov) for spec, prov in coverage.get(key, ()) if spec > specificity
-    ]
-    if not broader:
+    later = [item for item in coverage.get(key, ()) if item[0] > order]
+    if not later:
         return None
-    return min(broader, key=lambda item: item[0])[1]
+    return min(later, key=lambda item: item[0])
+
+
+def _intervening_deny_or_ask(
+    blocking: Dict[Tuple[str, str], List[int]],
+    key: Tuple[str, str],
+    redundant_specificity: int,
+    cover_specificity: int,
+) -> bool:
+    """
+    True when a deny or ask rule sharing ``key``'s normalised body sits at a
+    specificity strictly between the redundant occurrence and its cover.
+
+    Only meaningful across specificities: a same-specificity tie (see
+    :func:`_nearest_broader_cover`) has nothing "between" it.  When true,
+    dropping the redundant copy would hand the decision to that deny/ask
+    layer instead of to the reported cover, changing the outcome.
+
+    Args:
+        blocking: Map of normalised key -> specificities holding a deny/ask
+            rule with that body.
+        key: The normalised pattern key to check.
+        redundant_specificity: Specificity of the occurrence considered redundant.
+        cover_specificity: Specificity of its reported cover.
+    """
+    if cover_specificity <= redundant_specificity:
+        return False
+    return any(
+        redundant_specificity < spec < cover_specificity
+        for spec in blocking.get(key, ())
+    )
 
 
 def find_cross_layer_redundancies(
     config: Configuration, tool: str
 ) -> List[CrossLayerRedundancy]:
     """
-    Find more-specific allow rules whose normalised body a broader layer repeats.
+    Find allow rules whose normalised body a layer that would decide in their
+    place also holds.
 
-    Only normalised-EQUAL bodies are matched; cross-layer subsumption via globs
-    is not attempted.
+    Two shapes are reported: a more-specific allow rule a broader layer
+    repeats, and a same-specificity duplicate's later occurrence (discovery
+    places same-tier layers in resolution order; the earlier one decides).
+    Only normalised-EQUAL bodies are matched; cross-layer subsumption via
+    globs is not attempted.
 
-    A finding is a candidate for review, not a verified-safe deletion.  The scan
-    reads allow lists and nothing else, so it cannot see that dropping the
-    specific copy hands the decision to a layer that denies or asks the same
-    command.  Measured -- with a project ``git push:*`` allow, an intermediate
-    ``git push:*`` deny and a user ``git push:*`` allow, this reports the project
-    rule as covered by the user rule, and removing it turns ``git push`` from
-    ``allow`` into ``deny``.
+    A finding is a candidate for review, not a verified-safe deletion. The
+    body match is exact-normalised, not the real matcher, and only a deny/ask
+    of the SAME normalised body is checked for interference -- an intervening
+    rule that matches the same real commands through a different pattern
+    shape is invisible here.
 
     Args:
         config: The resolved configuration.
@@ -285,34 +355,50 @@ def find_cross_layer_redundancies(
 
     Returns:
         A list of :class:`CrossLayerRedundancy` findings.
+
+    Raises:
+        ValueError: When ``config`` has no layers at all -- there is nothing
+            to scan, which must not read the same as a genuine clean scan.
     """
     layers = per_layer_rules(config, tool)
+    if not layers:
+        raise ValueError(f"cannot scan {tool!r}: config has no layers")
 
-    coverage: Dict[Tuple[str, str], List[Tuple[int, Provenance]]] = defaultdict(list)
-    for lr in layers:
+    coverage: Dict[Tuple[str, str], List[Tuple[_Order, Provenance]]] = defaultdict(list)
+    blocking: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+    for position, lr in enumerate(layers):
         for pattern in lr.allow:
-            coverage[_normalised_body(pattern)].append(
-                (lr.provenance.specificity, lr.provenance)
-            )
+            key = _normalised_body(pattern, fold_case=False)
+            coverage[key].append(((lr.provenance.specificity, position), lr.provenance))
+        for pattern in (*lr.deny, *lr.ask):
+            key = _normalised_body(pattern, fold_case=False)
+            blocking[key].append(lr.provenance.specificity)
 
     findings: List[CrossLayerRedundancy] = []
-    for lr in layers:
+    for position, lr in enumerate(layers):
         for pattern in lr.allow:
+            key = _normalised_body(pattern, fold_case=False)
             cover = _nearest_broader_cover(
-                coverage, _normalised_body(pattern), lr.provenance.specificity
+                coverage, key, (lr.provenance.specificity, position)
             )
-            if cover is not None:
-                findings.append(
-                    CrossLayerRedundancy(
-                        tool=tool,
-                        pattern=pattern,
-                        redundant_provenance=lr.provenance,
-                        covered_by_provenance=cover,
-                        note=(
-                            f"'{pattern}' at {lr.provenance.describe()} is also present "
-                            f"at the broader {cover.describe()}; the more-specific copy "
-                            f"is redundant and can be dropped."
-                        ),
-                    )
+            if cover is None:
+                continue
+            (cover_specificity, _cover_position), cover_prov = cover
+            if _intervening_deny_or_ask(
+                blocking, key, lr.provenance.specificity, cover_specificity
+            ):
+                continue
+            findings.append(
+                CrossLayerRedundancy(
+                    tool=tool,
+                    pattern=pattern,
+                    redundant_provenance=lr.provenance,
+                    covered_by_provenance=cover_prov,
+                    note=(
+                        f"'{pattern}' at {lr.provenance.describe()} is also present "
+                        f"at {cover_prov.describe()}, which decides in its place; "
+                        f"this copy is redundant and can be dropped."
+                    ),
                 )
+            )
     return findings

@@ -65,12 +65,10 @@ def prefixes_overlap(a: List[str], b: List[str]) -> bool:
     Return whether one command-prefix token sequence is a prefix of the other.
 
     Prefix containment is SUFFICIENT for the patterns those tokens came from to
-    match a command in common, but not necessary -- so ``False`` here is not
-    evidence that they are disjoint.
-    :func:`toolguard.permissions.match_command` glues the trailing ``*`` onto
-    the last token with no separator, so ``git commit:*`` and
-    ``git commit-tree:*`` both match ``git commit-tree abc`` while their token
-    lists diverge at the second token.
+    match a command in common. It is necessary only for wildcard-free tokens: a
+    token carrying an fnmatch wildcard can still match across diverging lists
+    (``git c*:*`` and ``git commit:*`` share ``git commit``), so ``False`` is
+    not by itself evidence that two patterns are disjoint.
 
     Args:
         a: First command-prefix token list.

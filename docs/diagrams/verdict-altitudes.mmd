@@ -1,0 +1,17 @@
+---
+title: Three verdict altitudes - three amounts of information, not three names
+---
+flowchart TD
+    LM["LevelMatch  (LEVEL)<br/>one hierarchy level's own answer<br/>for one pattern set<br/>no provenance, no enrichment"]
+    UV["UnitVerdict  (UNIT)<br/>one sub-command inside a<br/>compound Bash command<br/>own reason, enrichment, fallback_kind"]
+    RV["RuntimeVerdict  (RUNTIME)<br/>the whole governed-tool call<br/>exactly one per invocation;<br/>carries sub_matches: List[UnitVerdict]"]
+
+    LM -->|"folded most-specific-first<br/>by resolve_permission_cascade"| RV
+    UV -->|"combined strictest-wins<br/>by compound._combine_strictest"| RV
+
+    classDef lvl fill:#f3e8fb,stroke:#7a4ab5,color:#2a1240
+    classDef unit fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef rt fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    class LM lvl
+    class UV unit
+    class RV rt

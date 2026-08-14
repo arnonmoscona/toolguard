@@ -200,6 +200,52 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
             _resolve(cmd, ["bash -c:*", "git status:*"], ["rm -rf:*"]), "deny"
         )
 
+    def test_bash_dash_c_behind_an_env_assignment_decomposes_identically(self):
+        """
+        Given the same `bash -c "git status; rm -rf /"` with and without a leading
+            `TG_INTENT=1` assignment
+        When both forms are extracted and resolved
+        Then the prefixed form yields exactly the bare form's leaves and is DENIED --
+            an env prefix cannot buy the inner string opacity
+        """
+        bare = 'bash -c "git status; rm -rf /"'
+        prefixed = f"TG_INTENT=1 {bare}"
+        self.assertEqual(_extracted(prefixed), _extracted(bare))
+        self.assertEqual(
+            _extracted(prefixed),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
+        self.assertEqual(
+            _resolve(prefixed, ["bash -c:*", "git status:*"], ["rm -rf:*"]), "deny"
+        )
+
+    def test_bash_dash_c_behind_several_env_assignments_still_decomposes(self):
+        """
+        Given `bash -c "git status; rm -rf /"` behind three leading assignments
+        When it is extracted and resolved
+        Then every assignment is stepped over, the inner string is decomposed, and the
+            compound is DENIED -- the prefix is a run, not a single token
+        """
+        cmd = 'A=1 B=2 TG_ATTEST_READONLY=1 bash -c "git status; rm -rf /"'
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
+        self.assertEqual(
+            _resolve(cmd, ["bash -c:*", "git status:*"], ["rm -rf:*"]), "deny"
+        )
+
+    def test_an_assignment_after_the_command_word_does_not_reach_bash_dash_c(self):
+        """
+        Given `X=1 echo Y=2 bash -c "..."`, where `bash` is an argument of `echo` and
+            only reachable by skipping the non-leading `Y=2`
+        When it is extracted
+        Then the leading `X=1` is stepped over, `echo` ends the prefix, and the whole
+            line stays ONE leaf -- skipping consumes a prefix, never a later token
+        """
+        cmd = 'X=1 echo Y=2 bash -c "git status; rm -rf /"'
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, False)])
+
     def test_uv_python_dash_c_inline_code_asks(self):
         """
         Given allow `uv run*` and deny `rm -rf:*`

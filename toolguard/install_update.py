@@ -97,7 +97,8 @@ def _read_direct_url_json() -> Optional[dict]:
     Read and parse this package's PEP 610 ``direct_url.json``.
 
     Returns:
-        Parsed JSON, or None when the file is absent, empty or unparseable.
+        Parsed JSON, or None when the file is absent, empty, unparseable, or
+        its top level is not an object.
     """
     try:
         raw = importlib.metadata.distribution(_DEFAULT_DIST_NAME).read_text(
@@ -108,9 +109,10 @@ def _read_direct_url_json() -> Optional[dict]:
     if not raw:
         return None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except ValueError, TypeError:
         return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _file_url_to_path(file_url: str) -> Optional[Path]:
@@ -358,7 +360,7 @@ def _check_local(info: InstallInfo, quiet: bool, do_upgrade: bool) -> int:
         print(
             f"Manual update steps (local uv tool install -- pull then reinstall):\n"
             f"  {pull_cmd}\n"
-            f"  uv tool install --force {repo}"
+            f"  uv tool install --force {repo}\n"
             f"  # or: uv tool upgrade {dist_name} --reinstall"
         )
 

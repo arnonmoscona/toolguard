@@ -160,6 +160,12 @@ def _git_subtree_is_clean(checkout_root: Path, subtree: str) -> Optional[bool]:
     reason -- callers MUST treat ``None`` the same as ``False`` (stay silent),
     never as "assume clean": never nag on uncertainty.
 
+    An empty status is believed only once ``rev-parse --show-toplevel``
+    confirms *checkout_root* is that work tree's own root: run from an
+    untracked directory nested in an unrelated repository, git reports the
+    ANCESTOR repository's cleanliness, which is not this checkout's. Only
+    the ``True`` answer is gated, since a reported change is dirt either way.
+
     Args:
         checkout_root: The git work tree root to check.
         subtree: A path (relative to *checkout_root*) to scope the status
@@ -173,7 +179,36 @@ def _git_subtree_is_clean(checkout_root: Path, subtree: str) -> Optional[bool]:
     )
     if result is None or result.returncode != 0:
         return None
-    return result.stdout.strip() == ""
+    if result.stdout.strip() != "":
+        return False
+    if _git_toplevel(checkout_root) != checkout_root.resolve():
+        return None
+    return True
+
+
+def _git_toplevel(directory: Path) -> Optional[Path]:
+    """
+    Return the root of the git work tree containing *directory*.
+
+    Returns ``None`` when git is unavailable, the query fails, or *directory*
+    is not inside a work tree. The path is resolved, so callers comparing it
+    against their own path must resolve that too.
+
+    Args:
+        directory: The directory to locate the enclosing work tree for.
+
+    Returns:
+        The work tree root, or ``None`` when undetermined.
+    """
+    result: Optional[subprocess.CompletedProcess[str]] = run_git(
+        ["-C", str(directory), "rev-parse", "--show-toplevel"]
+    )
+    if result is None or result.returncode != 0:
+        return None
+    toplevel = result.stdout.strip()
+    if not toplevel:
+        return None
+    return Path(toplevel).resolve()
 
 
 def _hash_py_files(root: Path) -> Optional[str]:
@@ -185,17 +220,19 @@ def _hash_py_files(root: Path) -> Optional[str]:
     of a comparison) so the digest is deterministic and comparable across two
     different root directories with the same internal layout. Only byte
     content and relative path feed the digest -- mtimes/permissions never do.
-    A file that raises ``OSError`` on read is silently SKIPPED rather than
-    failing the whole digest -- one side of a comparison losing a file this
-    way, and not the other, can flip the verdict with no error raised.
+    A file that raises ``OSError`` on read makes the WHOLE digest ``None``
+    (undetermined) rather than being skipped -- an unreadable file is
+    uncertainty about that file's content, and uncertainty must never be
+    turned into a difference (or a match) against the other side.
 
     Args:
         root: Directory to scan recursively for ``.py`` files to hash.
 
     Returns:
-        The hex digest, or ``None`` when *root* does not exist or contains no
+        The hex digest, or ``None`` when *root* does not exist, contains no
         ``.py`` files (an empty/degenerate root must never look like a
-        "match" against a real package).
+        "match" against a real package), or any ``.py`` file could not be
+        read.
     """
     if not root.is_dir():
         return None
@@ -207,7 +244,7 @@ def _hash_py_files(root: Path) -> Optional[str]:
         try:
             content = path.read_bytes()
         except OSError:
-            continue
+            return None
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(content)
     return digest.hexdigest()
@@ -288,8 +325,10 @@ def pythonpath_shadow_entries(
     Return ``PYTHONPATH`` entries that would shadow an installed toolguard package.
 
     An entry shadows the install when ``<entry>/toolguard/__init__.py``
-    exists -- the ``PYTHONPATH=.`` footgun generalised to any directory. This
-    is a PREDICTIVE check over the environment (would a fresh toolguard
+    exists -- the ``PYTHONPATH=.`` footgun generalised to any directory --
+    or when ``<entry>/toolguard.py`` exists: a plain module file wins the
+    same import-resolution race a package directory does. This is a
+    PREDICTIVE check over the environment (would a fresh toolguard
     invocation be shadowed), independent of whether THIS process itself
     happens to be shadowed right now.
 
@@ -300,8 +339,8 @@ def pythonpath_shadow_entries(
 
     Returns:
         The subset of ``PYTHONPATH`` entries (original order, de-duplicated)
-        that contain a ``toolguard/`` package -- empty when ``PYTHONPATH`` is
-        unset, empty, or contains no such entry.
+        that contain a ``toolguard/`` package or a ``toolguard.py`` module --
+        empty when ``PYTHONPATH`` is unset, empty, or contains no such entry.
     """
     if env is None:
         env = os.environ
@@ -312,6 +351,8 @@ def pythonpath_shadow_entries(
     for entry in raw.split(os.pathsep):
         if not entry or entry in found:
             continue
-        if (Path(entry) / "toolguard" / "__init__.py").is_file():
+        if (Path(entry) / "toolguard" / "__init__.py").is_file() or (
+            Path(entry) / "toolguard.py"
+        ).is_file():
             found.append(entry)
     return tuple(found)

@@ -231,12 +231,17 @@ def _apply_to_file(
 
     A proposal is skipped, with its reason recorded, when it names a list
     other than ``allow``, when any of its ``removed_patterns`` is absent from
-    the file (config drift), or when :func:`_resolve_added_entry` refuses its
-    ``added_pattern``.  The rest are applied in order to one in-memory copy of
-    the allow list, so each sees its predecessors' effect.
+    the file (config drift), when :func:`_resolve_added_entry` refuses its
+    ``added_pattern``, or when this file's post-change text cannot even be
+    RENDERED (e.g. its pre-existing content was never valid TOML/JSON) -- the
+    last case skips every proposal for this file, since none of them actually
+    took effect.  The rest are applied in order to one in-memory copy of the
+    allow list, so each sees its predecessors' effect.
 
     The file is written only when at least one proposal applied, ``dry_run``
-    is False, and the rendered text differs from the file's current text.
+    is False, and the rendered text differs from the file's current text.  A
+    failure in that REAL write (as opposed to the throwaway-copy render
+    above) propagates rather than being caught -- see the write call below.
 
     Args:
         path: Target config file (``None`` is reported as a skip for all proposals).
@@ -321,7 +326,27 @@ def _apply_to_file(
     }
 
     old_text = path.read_text() if path.exists() else ""
-    new_text = _render_via_writer(path, file_format, new_permissions)
+    try:
+        # A throwaway-copy render (see _render_via_writer) has no side
+        # effects on the real file, so a failure here -- e.g. this file's
+        # OWN pre-existing content was never valid TOML/JSON to begin with
+        # -- is reported as a skip rather than aborting the whole batch and
+        # losing whatever earlier files already accomplished. A failure in
+        # the REAL write below is a different matter and is NOT caught here:
+        # see this function's docstring.
+        new_text = _render_via_writer(path, file_format, new_permissions)
+    except Exception as exc:  # noqa: BLE001 -- render-only, no side effects to protect
+        reason = f"could not render this file: {exc}"
+        return FileChange(
+            path=path,
+            file_format=file_format,
+            applied=(),
+            skipped=tuple((p, reason) for p in proposals),
+            patterns_removed=(),
+            patterns_added=(),
+            diff="",
+            written=False,
+        )
 
     diff = ""
     if old_text != new_text:
@@ -377,6 +402,12 @@ def apply_proposals(
     Proposals are grouped by target file (from each proposal's
     ``layer_provenance``) and applied per file.  ``dry_run=True`` still
     produces the diffs and the full report; only the writes are withheld.
+
+    A file whose post-change text cannot even be rendered does not abort the
+    batch -- see :func:`_apply_to_file`. A failure in an actual write DOES
+    propagate out of this function unswallowed, so a caller can tell "this
+    file's own content was never valid" apart from "a write that should have
+    succeeded did not."
 
     Args:
         proposals: Accepted proposals to apply.

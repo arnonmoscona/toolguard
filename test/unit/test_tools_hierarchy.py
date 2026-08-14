@@ -279,7 +279,11 @@ class TestMigrateConfig(unittest.TestCase):
                 config,
                 HierarchyMigration(TOOL, ALLOW, "git status:*", proj, absent, PROMOTE),
             )
-        except ValueError, KeyError, LookupError:
+        except (
+            ValueError,
+            KeyError,
+            LookupError,
+        ):
             return
 
         surviving = [body for _, _, bodies in _levels(migrated) for body in bodies]

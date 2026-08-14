@@ -87,6 +87,7 @@ from toolguard.tools.mining import (
 )
 from toolguard.tools.redundancy import RedundancyFinding, find_redundancy
 from toolguard.tools.replay import EntryDiff, ReplayDiff, replay
+from toolguard.tool_spec import KNOWN_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,24 @@ class MaintenanceReport:
     def tools_with_findings(self) -> List[ToolMaintenance]:
         """Return only the per-tool reports that produced at least one finding."""
         return [t for t in self.tools if t.has_findings]
+
+
+def _recognized_tool_names(config: Configuration) -> frozenset:
+    """
+    Return every tool name ``--tool`` may legitimately name for ``config``.
+
+    :data:`~toolguard.tool_spec.KNOWN_TOOL_NAMES` plus each toolguard layer's
+    ``additional_supported_tools`` -- the same set
+    :meth:`~toolguard.config.Configuration.validation_issues` uses to flag an
+    unsupported tool in the permissions lists themselves.
+    """
+    additional: set = set()
+    for layer in config.layers:
+        if layer.is_native:
+            continue
+        for tool in layer.content.get("additional_supported_tools", []):
+            additional.add(tool)
+    return KNOWN_TOOL_NAMES | additional
 
 
 def run_maintenance(
@@ -1274,6 +1293,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_replay_candidate(args)
 
     config = load_config(Path(args.dir))
+
+    if args.tool:
+        recognized = _recognized_tool_names(config)
+        unrecognized = [t for t in args.tool if t not in recognized]
+        if unrecognized:
+            parser.error(
+                f"unrecognized --tool value(s): {', '.join(unrecognized)} "
+                f"(not in the known tool registry or additional_supported_tools)"
+            )
 
     if args.annotate:
         return _run_annotate(args, config)

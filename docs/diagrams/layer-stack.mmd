@@ -1,0 +1,17 @@
+---
+title: Layer stack - a layer may import itself and anything below it
+---
+flowchart BT
+    foundation["foundation<br/>constants, patterns, normalization,<br/>path_utils, toml_scan, tool_spec, file_lock, ..."]
+    observability["observability<br/>log_writer, error_log, error_reporter,<br/>session_warnings, update_check, once_per*"]
+    config["config<br/>config, config_types, rule_entry,<br/>config_validation, config_write_guard, ..."]
+    engine["engine<br/>permissions, compound, resolve,<br/>permission_resolution, file_matching, parser"]
+    api["api<br/>api.decide()"]
+    runtime["runtime<br/>hook, session_start, subagent"]
+    tooling["tooling<br/>tools/, scripts/"]
+    support["support<br/>testing/"]
+
+    foundation --> observability --> config --> engine --> api --> runtime --> tooling --> support
+
+    classDef layer fill:#eef4fb,stroke:#4a7ab5,color:#12263a
+    class foundation,observability,config,engine,api,runtime,tooling,support layer

@@ -35,7 +35,12 @@ Robustness
 A section that does not parse -- unreadable heading, no ``Status``, no
 ``Command`` -- is skipped rather than raised on, so one bad log day still
 yields the rest of the corpus.  An unrecognised status is not a parse failure:
-``status`` keeps whatever string the log holds.
+``status`` keeps whatever string the log holds. A section that has a
+``Status`` field but still can't be turned into an entry is reported via
+:func:`toolguard.error_reporter.report_warning` before being dropped, so the
+loss is never silent; a header-less or ``Status``-less fragment (a Discovery
+section, or a tail left by an embedded ``## `` line splitting a section) is
+not reported, since it never was a lost entry.
 """
 
 import re
@@ -44,7 +49,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator, List, Optional
 
+from toolguard import error_reporter
 from toolguard.constants import FILE_TOOLS
+from toolguard.log_writer import unescape_command_field
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +67,12 @@ _HEADER_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$")
 _STATUS_RE = re.compile(r"^\s*-\s+\*\*Status\*\*:\s+(.+)$")
 _COMMAND_RE = re.compile(r"^\s*-\s+\*\*Command\*\*:\s+`(.+)`$", re.DOTALL)
 _MATCHED_RULE_RE = re.compile(r"^\s*-\s+\*\*Matched Rule\*\*:\s+`(.+)`$", re.DOTALL)
-_VIOLATED_RULES_RE = re.compile(r"^\s*-\s+\*\*Violated Rules\*\*:\s+`(.+)`$", re.DOTALL)
+#: The Violated Rules field's line, captured whole -- see
+#: :func:`_parse_violated_rules` for why the individual rules are extracted
+#: separately rather than by one greedy backtick-to-backtick capture.
+_VIOLATED_RULES_RE = re.compile(r"^\s*-\s+\*\*Violated Rules\*\*:\s+(.+)$")
+#: One backtick-fenced rule within a Violated Rules line.
+_BACKTICKED_ITEM_RE = re.compile(r"`([^`]*)`")
 _AGENT_RE = re.compile(r"^\s*-\s+\*\*Agent\*\*:\s+(.+)$")
 
 #: Names a daily resolution log. Deliberately narrow -- the error, warning
@@ -129,6 +141,22 @@ def _parse_command_field(raw: str):
     return "Bash", raw.strip()
 
 
+def _parse_violated_rules(raw: str) -> str:
+    """
+    Extract a Violated Rules line's rule bodies, dropping the backtick fences
+    and ``, `` separator log_writer renders between multiple rules.
+
+    Args:
+        raw: The line's text after the ``**Violated Rules**:`` label.
+
+    Returns:
+        The rule bodies joined by ``", "``, or *raw* stripped if it holds no
+        backtick-fenced item.
+    """
+    items = _BACKTICKED_ITEM_RE.findall(raw)
+    return ", ".join(items) if items else raw.strip()
+
+
 def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEntry]:
     """
     Parse one Markdown section into a :class:`LogEntry`.
@@ -139,7 +167,13 @@ def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEn
 
     Returns:
         A :class:`LogEntry`, or ``None`` when the section has no parseable
-        header, no ``Status`` field, or no ``Command`` field.
+        header, no ``Status`` field, or no ``Command`` field. A section that
+        has a ``Status`` field but still can't yield an entry is reported via
+        :func:`toolguard.error_reporter.report_warning` before returning
+        ``None`` -- see the module docstring's Robustness section. A section
+        with no ``Status`` (e.g. a Discovery section, or a header-less
+        fragment produced when an embedded ``## `` line inside a command
+        splits the section) is not a loss and is not reported.
     """
     if not lines:
         return None
@@ -174,7 +208,7 @@ def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEn
             continue
         m = _VIOLATED_RULES_RE.match(stripped)
         if m:
-            violated_rules = m.group(1)
+            violated_rules = _parse_violated_rules(m.group(1))
             continue
         m = _AGENT_RE.match(stripped)
         if m:
@@ -183,9 +217,19 @@ def _parse_section(lines: List[str], log_file: Optional[Path]) -> Optional[LogEn
     if status is None:
         return None
     if command_raw is None:
+        # A Status field with no readable Command -- e.g. a multi-line or
+        # heading-split command (see log_writer.escape_command_field) written
+        # before escaping existed. The entry is unrecoverable here; make the
+        # loss visible instead of dropping it silently.
+        error_reporter.report_warning(
+            "log harvester could not recover the Command field of the section"
+            f" at {header_match.group(1)} in {log_file}",
+            "Check the raw log file near this timestamp -- a Markdown heading"
+            " or raw newline inside a multi-line command can split the section.",
+        )
         return None
 
-    tool, command = _parse_command_field(command_raw)
+    tool, command = _parse_command_field(unescape_command_field(command_raw))
     rule_text = matched_rule if matched_rule is not None else violated_rules
 
     return LogEntry(

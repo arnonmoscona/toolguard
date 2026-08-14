@@ -29,11 +29,14 @@ class RecommendedProtection:
 
 
 #: The canonical "Sensitive files" set, copied verbatim from docs/security.md's
-#: "Recommended deny patterns" section: 8 relative (project-anchored) patterns followed
-#: by their 8 home-anchored (``~/...``) siblings -- see that doc's "Why both forms of the
-#: sensitive-file patterns are needed" for why both are here. Composing this list
-#: freehand at install time is what the module exists to avoid, so extending or trimming
-#: it is a reviewed change made here and in docs/security.md together.
+#: "Recommended deny patterns" section: 12 relative (project-anchored) patterns followed
+#: by their 12 home-anchored (``~/...``) siblings -- see that doc's "Why both forms of the
+#: sensitive-file patterns are needed" for why both are here. Each of the four sensitive
+#: families is covered for all three file tools: Write and Edit both modify a file, so
+#: covering one and not the other leaves the protection a user was offered incomplete.
+#: Composing this list freehand at install time is what the module exists to avoid, so
+#: extending or trimming it is a reviewed change made here and in docs/security.md
+#: together.
 _RECOMMENDED_HARD_DENY_PATTERNS: Tuple[RecommendedProtection, ...] = (
     RecommendedProtection(
         pattern="Read(**/.env)",
@@ -59,6 +62,13 @@ _RECOMMENDED_HARD_DENY_PATTERNS: Tuple[RecommendedProtection, ...] = (
         rationale="Prevents a command from silently planting or altering secrets.",
     ),
     RecommendedProtection(
+        pattern="Write(**/.env.*)",
+        rationale=(
+            "Prevents a command from silently planting or altering secrets under a "
+            "variant name (e.g. .env.local) the exact-.env deny does not cover."
+        ),
+    ),
+    RecommendedProtection(
         pattern="Write(**/.aws/**)",
         rationale="Prevents a command from silently altering AWS credentials.",
     ),
@@ -69,6 +79,27 @@ _RECOMMENDED_HARD_DENY_PATTERNS: Tuple[RecommendedProtection, ...] = (
     RecommendedProtection(
         pattern="Edit(**/.env)",
         rationale="Prevents a command from silently editing secrets in place.",
+    ),
+    RecommendedProtection(
+        pattern="Edit(**/.env.*)",
+        rationale=(
+            "Edit sibling of the .env variant write-deny: Edit modifies the file too, "
+            "so leaving it uncovered reopens what that deny closes."
+        ),
+    ),
+    RecommendedProtection(
+        pattern="Edit(**/.aws/**)",
+        rationale=(
+            "Edit sibling of the AWS credentials write-deny: appending to a credentials "
+            "file in place is a modification the write-deny alone does not stop."
+        ),
+    ),
+    RecommendedProtection(
+        pattern="Edit(**/.ssh/**)",
+        rationale=(
+            "Edit sibling of the SSH key write-deny: appending a key to authorized_keys "
+            "in place is a modification the write-deny alone does not stop."
+        ),
     ),
     RecommendedProtection(
         pattern="Read(~/.env)",
@@ -110,6 +141,14 @@ _RECOMMENDED_HARD_DENY_PATTERNS: Tuple[RecommendedProtection, ...] = (
         ),
     ),
     RecommendedProtection(
+        pattern="Write(~/.env.*)",
+        rationale=(
+            "Home-anchored form of the .env variant write-deny above: prevents a "
+            "command from planting ~/.env.local, ~/.env.production, etc. regardless "
+            "of which project is active."
+        ),
+    ),
+    RecommendedProtection(
         pattern="Write(~/.aws/**)",
         rationale=(
             "Home-anchored form of the AWS credentials write-deny above: prevents "
@@ -131,6 +170,29 @@ _RECOMMENDED_HARD_DENY_PATTERNS: Tuple[RecommendedProtection, ...] = (
             "Home-anchored form of the .env edit-deny above: prevents a command "
             "from silently editing ~/.env in place regardless of which project is "
             "active."
+        ),
+    ),
+    RecommendedProtection(
+        pattern="Edit(~/.env.*)",
+        rationale=(
+            "Home-anchored form of the .env variant edit-deny above: protects "
+            "~/.env.local, ~/.env.production, etc. from in-place edits regardless "
+            "of which project is active."
+        ),
+    ),
+    RecommendedProtection(
+        pattern="Edit(~/.aws/**)",
+        rationale=(
+            "Home-anchored form of the AWS credentials edit-deny above: protects "
+            "~/.aws/** from in-place edits regardless of which project is active."
+        ),
+    ),
+    RecommendedProtection(
+        pattern="Edit(~/.ssh/**)",
+        rationale=(
+            "Home-anchored form of the SSH key edit-deny above: protects "
+            "~/.ssh/** -- ~/.ssh/authorized_keys above all -- from in-place edits "
+            "regardless of which project is active."
         ),
     ),
 )

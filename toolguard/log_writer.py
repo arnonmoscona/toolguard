@@ -244,6 +244,61 @@ def _build_jsonlines_entry(record: LogRecord) -> dict:
     return entry
 
 
+#: Escapes a real newline in a rendered Command field. Applied AFTER
+#: :data:`_BACKSLASH_ESCAPE`, so an already-escaped backslash is never
+#: mistaken for one of these on decode -- see :func:`unescape_command_field`.
+_NEWLINE_ESCAPE = "\\n"
+
+#: Escapes a literal backslash in a rendered Command field, applied first so
+#: :func:`escape_command_field`'s two passes can't collide.
+_BACKSLASH_ESCAPE = "\\\\"
+
+
+def escape_command_field(command_str: str) -> str:
+    """
+    Escape *command_str* for the Command field's single rendered line.
+
+    A raw newline would split the command across physical lines, and a
+    resulting line starting with ``## `` would be read back as a new
+    section heading by the harvester -- both silently drop the entry (see
+    ``toolguard/tools/log_harvest.py``'s module docstring). Reversed by
+    :func:`unescape_command_field`.
+
+    Args:
+        command_str: The raw command text.
+
+    Returns:
+        *command_str* with backslashes and newlines escaped.
+    """
+    return command_str.replace("\\", _BACKSLASH_ESCAPE).replace("\n", _NEWLINE_ESCAPE)
+
+
+def unescape_command_field(text: str) -> str:
+    """
+    Reverse :func:`escape_command_field`.
+
+    A backslash not followed by ``n`` or ``\\`` is left as-is, so text from
+    an older, unescaped log entry round-trips unchanged.
+
+    Args:
+        text: A Command field's raw (still-escaped) text.
+
+    Returns:
+        The original command text.
+    """
+    result: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\" and i + 1 < n and text[i + 1] in ("n", "\\"):
+            result.append("\n" if text[i + 1] == "n" else "\\")
+            i += 2
+        else:
+            result.append(text[i])
+            i += 1
+    return "".join(result)
+
+
 def _render_markdown_entry(record: LogRecord, timestamp: str) -> str:
     """
     Render one log entry in the default Markdown format. Pure: returns the
@@ -260,7 +315,7 @@ def _render_markdown_entry(record: LogRecord, timestamp: str) -> str:
     lines = [
         f"## {timestamp}\n\n",
         f"- **Status**: {record.status.upper()}\n",
-        f"- **Command**: `{record.command_str}`\n",
+        f"- **Command**: `{escape_command_field(record.command_str)}`\n",
     ]
     if record.matched_rule:
         lines.append(f"- **Matched Rule**: `{record.matched_rule}`\n")

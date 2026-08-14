@@ -94,10 +94,11 @@ def verify_config_text(
     text: str, file_format: str, path: Optional[Union[str, Path]] = None
 ) -> None:
     """
-    Parse *text* and raise if it does not parse as valid TOML/JSON.
+    Parse *text* and raise if it does not parse as a TOML/JSON top-level
+    object/table.
 
-    Pure syntax check -- no I/O, and it does not look at what the parsed
-    content contains (:func:`verified_write_config` adds the separate
+    Pure syntax and shape check -- no I/O, and it does not look at what the
+    parsed content contains (:func:`verified_write_config` adds the separate
     content-loss check on top of this).
 
     Args:
@@ -108,17 +109,25 @@ def verify_config_text(
 
     Raises:
         ConfigWriteVerificationError: ``text`` fails to parse as
-            ``file_format``.
+            ``file_format``, or parses to something other than a top-level
+            object/table (e.g. a bare JSON array, string or number -- TOML
+            has no such shape).
         ValueError: ``file_format`` is neither ``'toml'`` nor ``'json'``.
     """
     try:
-        _parse(text, file_format)
+        parsed = _parse(text, file_format)
     except (tomllib.TOMLDecodeError, json.JSONDecodeError) as e:
         raise ConfigWriteVerificationError(
             path=path,
             reason=f"invalid {file_format.upper()}",
             message=str(e),
         ) from e
+    if not isinstance(parsed, dict):
+        raise ConfigWriteVerificationError(
+            path=path,
+            reason="not a top-level object/table",
+            message=f"parsed to {type(parsed).__name__}, expected an object/table",
+        )
 
 
 def _entry_pattern(entry: object) -> Optional[str]:
@@ -171,6 +180,26 @@ def _patterns_in_parsed(parsed: object) -> set:
                 pattern = _entry_pattern(entry)
                 if pattern is not None:
                     patterns.add(pattern)
+
+    return patterns | _hard_deny_patterns(parsed)
+
+
+def _hard_deny_patterns(parsed: object) -> set:
+    """
+    Collect every rule pattern present under a parsed config's ``hard_deny``
+    table, in isolation from ``permissions`` (see :func:`_patterns_in_parsed`
+    for the combined set).
+
+    Args:
+        parsed: The parsed config structure (normally a ``dict``; any other
+            top-level shape simply yields an empty set).
+
+    Returns:
+        Set of every pattern string found under ``hard_deny``.
+    """
+    patterns: set = set()
+    if not isinstance(parsed, dict):
+        return patterns
 
     hard_deny = parsed.get("hard_deny")
     if isinstance(hard_deny, dict):
@@ -260,15 +289,19 @@ def verified_write_config(
     """
     Verify *text*, then atomically write it to *path*. Refuses on any failure.
 
-    Three steps, in order, leaving *path* untouched on disk if any of them
-    fails:
+    Steps, in order, leaving *path* untouched on disk if any of them fails:
 
     1. :func:`verify_config_text` -- *text* must parse as *file_format*.
     2. If *expected_patterns* is not ``None``: every pattern in it must still
        be present in *text*'s parsed ``permissions``/``hard_deny`` structure
        (see :func:`_patterns_in_parsed`). A missing pattern means this write
        would silently DELETE a rule -- refused.
-    3. Atomic write via :func:`_atomic_write`.
+    3. Same gate: any pattern *path*'s CURRENT on-disk ``hard_deny`` holds
+       must still be under ``hard_deny`` in *text* -- moving a pattern into
+       ``permissions.allow`` passes step 2 (the pattern string is still
+       present somewhere) but is refused here, since a hard deny turned into
+       an allow is a loss even though nothing looks missing.
+    4. Atomic write via :func:`_atomic_write`.
 
     Args:
         path: Destination config file path.
@@ -299,5 +332,25 @@ def verified_write_config(
                 reason="write would drop existing rule pattern(s)",
                 message=f"missing pattern(s): {', '.join(missing)}",
             )
+
+        if path.exists():
+            try:
+                original_parsed = _parse(path.read_text(encoding="utf-8"), file_format)
+            except (
+                tomllib.TOMLDecodeError,
+                json.JSONDecodeError,
+                OSError,
+            ):
+                original_parsed = None
+            if original_parsed is not None:
+                moved = sorted(
+                    _hard_deny_patterns(original_parsed) - _hard_deny_patterns(parsed)
+                )
+                if moved:
+                    raise ConfigWriteVerificationError(
+                        path=path,
+                        reason="write would move pattern(s) out of hard_deny",
+                        message=f"no longer in hard_deny: {', '.join(moved)}",
+                    )
 
     _atomic_write(path, text)

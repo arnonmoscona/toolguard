@@ -23,7 +23,7 @@ from typing import Dict, List
 from toolguard.api import decide
 from toolguard.config import Configuration
 from toolguard.config_types import RuntimeVerdict
-from toolguard.constants import STATUS_EXECUTED, STATUS_REFUSED
+from toolguard.constants import STATUS_ASK, STATUS_EXECUTED, STATUS_REFUSED
 from toolguard.tools.log_harvest import LogEntry
 
 
@@ -220,8 +220,9 @@ def _verdict_matches_status(verdict: str, status: str) -> bool:
     Check whether a replayed verdict is consistent with the observed log status.
 
     ``EXECUTED`` corroborates ``allow``; ``REFUSED`` corroborates ``deny`` or
+    ``ask``; ``ASK`` -- toolguard's own hook prompting -- corroborates
     ``ask``.  The comparison is case-insensitive, and EVERY other status --
-    ``ASK``, ``ERROR``, ``UNKNOWN``, anything unrecognised -- returns ``False``.
+    ``ERROR``, ``UNKNOWN``, anything unrecognised -- returns ``False``.
     A ``False`` therefore reads as "not corroborated", never as "the config and
     the log disagree".
 
@@ -237,4 +238,6 @@ def _verdict_matches_status(verdict: str, status: str) -> bool:
         return verdict == "allow"
     if status_upper == STATUS_REFUSED:
         return verdict in ("deny", "ask")
+    if status_upper == STATUS_ASK:
+        return verdict == "ask"
     return False

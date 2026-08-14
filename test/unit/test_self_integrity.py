@@ -261,12 +261,6 @@ class TestSelfIntegrityHardDenyBehavior(unittest.TestCase):
         Then each is denied by a self-integrity hard_deny pattern, exactly as
         its bare form is: the command still deletes ~/.toolguard, and the
         module's own design note says a false positive here costs nothing
-
-        RED until the ^ anchor in both patterns is relaxed to allow a leading
-        token or path (recorded under proposed ticket 37's "Related, found
-        alongside"; it needs a ticket of its own). All three resolve to 'ask'
-        today, which is the agent's judgement in the moment -- the thing
-        hard_deny exists so the protection does not depend on.
         """
         for command in (
             "sudo rm -rf ~/.toolguard",

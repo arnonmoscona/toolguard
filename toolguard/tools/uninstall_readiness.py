@@ -18,17 +18,12 @@ What is easy to get wrong here:
   ``ask`` verdict was observed not reaching an interactive prompt during a
   real install (TOO-15; root cause unconfirmed), so seeding ``ask`` can
   reproduce the very hard-block this table exists to prevent.
-- **Every ``rm``/``uv tool uninstall`` pattern grants more than it names.**
-  Each is a multi-token DEFAULT prefix, and
-  :func:`~toolguard.permissions.match_command` glues the trailing ``*``
-  directly onto the pattern's last token, which therefore matches as a bare
-  string prefix -- and ``fnmatch``'s ``*`` crosses spaces. Measured against
-  the matcher: ``rm -rf <skill dir>:*`` also matches
-  ``rm -rf <skill dir> <any other path>`` and ``rm -rf <skill dir>-BACKUP``;
-  ``uv tool uninstall toolguard:*`` also matches
-  ``uv tool uninstall toolguard-other``. The single-token ``cd:*`` and the two
-  literal ``Write``/``Edit`` paths are unaffected. The cause is in
-  ``match_command``, not in these strings.
+- **The multi-token ``rm``/``uv tool uninstall`` patterns carry no ``:*``, and
+  that is deliberate.** With it, the args wildcard crosses spaces, so
+  ``rm -rf <skill dir>:*`` also admits ``rm -rf <skill dir> <any other path>``
+  -- a rule naming one fixed path that grants deletion of a second, unrelated
+  one. Written exactly, each admits only the command it names, at the price of
+  sending a variant such as ``rm -rf <skill dir> -f`` to ``ask``.
 - **``cd`` is here for ordinary navigation, and is safe to allow on its own
   merits.** ``cd`` itself runs no program, and the PEG parser extracts a
   ``$(...)``/backtick substitution in its argument as a separate sub-command
@@ -142,7 +137,7 @@ def required_uninstall_readiness_permissions(
         UninstallReadinessPermission(
             description="uninstall the package",
             tool="Bash",
-            pattern="uv tool uninstall toolguard:*",
+            pattern="uv tool uninstall toolguard",
             list_type="allow",
             probe="uv tool uninstall toolguard",
             rationale=(
@@ -153,7 +148,7 @@ def required_uninstall_readiness_permissions(
         UninstallReadinessPermission(
             description="remove toolguard_hook.toml",
             tool="Bash",
-            pattern=f"rm {hook_toml}:*",
+            pattern=f"rm {hook_toml}",
             list_type="allow",
             probe=f"rm {hook_toml}",
             rationale="Deletes the config file the install wrote, at a known, fixed path.",
@@ -161,7 +156,7 @@ def required_uninstall_readiness_permissions(
         UninstallReadinessPermission(
             description="remove toolguard_hook.local.toml",
             tool="Bash",
-            pattern=f"rm {hook_local_toml}:*",
+            pattern=f"rm {hook_local_toml}",
             list_type="allow",
             probe=f"rm {hook_local_toml}",
             rationale="Same as the toolguard_hook.toml entry, for the .local variant.",
@@ -169,7 +164,7 @@ def required_uninstall_readiness_permissions(
         UninstallReadinessPermission(
             description="remove the security-audit skill",
             tool="Bash",
-            pattern=f"rm -rf {audit_skill_dir}:*",
+            pattern=f"rm -rf {audit_skill_dir}",
             list_type="allow",
             probe=f"rm -rf {audit_skill_dir}",
             rationale=(
@@ -180,7 +175,7 @@ def required_uninstall_readiness_permissions(
         UninstallReadinessPermission(
             description="remove the maintenance skill",
             tool="Bash",
-            pattern=f"rm -rf {maintenance_skill_dir}:*",
+            pattern=f"rm -rf {maintenance_skill_dir}",
             list_type="allow",
             probe=f"rm -rf {maintenance_skill_dir}",
             rationale="Same as the security-audit skill entry, for the maintenance skill.",

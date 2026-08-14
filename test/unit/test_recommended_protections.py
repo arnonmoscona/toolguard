@@ -35,17 +35,25 @@ _EXPECTED_PATTERNS = (
     "Read(**/.aws/**)",
     "Read(**/.ssh/**)",
     "Write(**/.env)",
+    "Write(**/.env.*)",
     "Write(**/.aws/**)",
     "Write(**/.ssh/**)",
     "Edit(**/.env)",
+    "Edit(**/.env.*)",
+    "Edit(**/.aws/**)",
+    "Edit(**/.ssh/**)",
     "Read(~/.env)",
     "Read(~/.env.*)",
     "Read(~/.aws/**)",
     "Read(~/.ssh/**)",
     "Write(~/.env)",
+    "Write(~/.env.*)",
     "Write(~/.aws/**)",
     "Write(~/.ssh/**)",
     "Edit(~/.env)",
+    "Edit(~/.env.*)",
+    "Edit(~/.aws/**)",
+    "Edit(~/.ssh/**)",
 )
 
 #: parents[0]=test/unit, parents[1]=test, parents[2]=repo root.
@@ -407,7 +415,7 @@ class TestRecommendedProtectionsBehavior(ConfigIsolationMixin, unittest.TestCase
         anchoring rule
         """
         relative_only = [p for p in self.patterns if "(**/" in p]
-        self.assertEqual(len(relative_only), 8)
+        self.assertEqual(len(relative_only), 12)
         self.config = _hard_deny_config(relative_only)
         self.assert_hard_denied("Read", self.project / ".ssh" / "id_rsa", "**/.ssh/**")
         self.assert_allowed("Read", self.home / ".ssh" / "id_rsa", "~/**")

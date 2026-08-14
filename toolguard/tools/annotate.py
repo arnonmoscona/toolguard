@@ -21,10 +21,21 @@ from toolguard.config import Configuration
 from toolguard.rule_sort import (
     find_section_boundaries,
     parse_permissions_section_with_comments,
+    subsection_line_range,
 )
 from toolguard.tools.clarity import InteractionFinding, find_confusing_interactions
 
 TOOLGUARD_MARKER = "# toolguard:"
+
+
+def _one_line_note(note: str) -> str:
+    """
+    Collapse any line break in *note* to a single space.
+
+    A note is rendered as one ``# toolguard:`` comment line; an embedded
+    break would end the comment mid-array and leave the section unparseable.
+    """
+    return note.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
 
 
 def _annotation_text(finding: InteractionFinding) -> str:
@@ -91,19 +102,20 @@ def clarity_annotations(
 
 def _rule_first_line_patterns(section_text: str) -> Dict[str, str]:
     """
-    Map each rule's own FIRST physical line of source text to its full pattern.
+    Map each ALLOW rule's own FIRST physical line of source text to its full pattern.
 
-    One dict across allow, deny and ask, keyed by line text alone -- a pattern
-    written identically in two of them yields a single entry.  A rule's ``content``
-    is one physical line today, so the split is a no-op.
+    ``allow`` only -- :func:`clarity_annotations` documents that a note's key
+    is always the finding's allow pattern, never a deny/ask one.  Scanning
+    all three lists let an allow note also land above an identically
+    spelled deny/ask line, misread as a claim about that rule instead.  A
+    rule's ``content`` is one physical line today, so the split is a no-op.
     """
     parsed = parse_permissions_section_with_comments(section_text)
     line_to_pattern: Dict[str, str] = {}
-    for perm_type in ("allow", "deny", "ask"):
-        for item_type, content, value in parsed.get(perm_type, []):
-            if item_type == "rule":
-                first_line = content.split("\n", 1)[0]
-                line_to_pattern[first_line] = value
+    for item_type, content, value in parsed.get("allow", []):
+        if item_type == "rule":
+            first_line = content.split("\n", 1)[0]
+            line_to_pattern[first_line] = value
     return line_to_pattern
 
 
@@ -123,15 +135,20 @@ def annotate_section_text(section_text: str, annotations: Dict[str, List[str]]) 
         The rewritten section text.
     """
     line_to_pattern = _rule_first_line_patterns(section_text)
+    allow_range = subsection_line_range(section_text, "allow")
     out: List[str] = []
-    for line in section_text.split("\n"):
+    for index, line in enumerate(section_text.split("\n")):
         if line.strip().startswith(TOOLGUARD_MARKER):
             continue  # re-inserted below if still current
-        pattern = line_to_pattern.get(line)
+        # allow_range scopes the lookup to the allow array's own lines, so an
+        # identically spelled deny/ask line is never mistaken for its match
+        # (see _rule_first_line_patterns).
+        in_allow = allow_range is not None and allow_range[0] <= index < allow_range[1]
+        pattern = line_to_pattern.get(line) if in_allow else None
         if pattern is not None and pattern in annotations:
             indent = line[: len(line) - len(line.lstrip())]
             for note in annotations[pattern]:
-                out.append(f"{indent}{TOOLGUARD_MARKER} {note}")
+                out.append(f"{indent}{TOOLGUARD_MARKER} {_one_line_note(note)}")
         out.append(line)
     return "\n".join(out)
 

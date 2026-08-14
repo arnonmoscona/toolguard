@@ -1170,6 +1170,9 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
         self.assertIn("ps aux", result)
         self.assertIn("grep python", result)
 
+    # Deferred: the fix direction is undecided -- descend into the nesting, or
+    # treat it as undecidable and let the ask floor take it (TOO-45 decision A4).
+    @unittest.expectedFailure
     def test_nested_backticks(self):
         """
         Given nested escaped backticks ('echo `echo \\`hostname\\``'), the

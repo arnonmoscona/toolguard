@@ -329,11 +329,23 @@ class LayerReport:
     multiply_mapped: Dict[str, List[str]] = field(default_factory=dict)
     module_layer: Dict[str, str] = field(default_factory=dict)
     violations: List[Dict[str, object]] = field(default_factory=list)
+    #: Declared layer packages matching no module in the tree examined -- the
+    #: residue a rename or a deletion leaves in the map.
+    dead_packages: List[str] = field(default_factory=list)
+    #: Modules actually mapped or unmapped; zero means the tree was never
+    #: examined, which must not read as a clean pass.
+    examined_modules: int = 0
 
     @property
     def ok(self) -> bool:
-        """True when there is no completeness or direction problem."""
-        return not self.unmapped and not self.multiply_mapped and not self.violations
+        """True when something was examined and there is no completeness, dead-package, or direction problem."""
+        return (
+            self.examined_modules > 0
+            and not self.unmapped
+            and not self.multiply_mapped
+            and not self.violations
+            and not self.dead_packages
+        )
 
 
 def check_layers(
@@ -364,6 +376,12 @@ def check_layers(
         else:
             report.module_layer[rel] = matches[0]
 
+    report.examined_modules = len(rel_paths)
+    seen_packages = {first_segment(rel) for rel in rel_paths.values()}
+    report.dead_packages = sorted(
+        pkg for pkg in package_map if pkg not in seen_packages
+    )
+
     for py_file in py_files:
         rel = rel_paths.get(py_file)
         if rel is None or rel not in report.module_layer:
@@ -392,7 +410,11 @@ def check_layers(
 
 def render_layers_text(report: LayerReport) -> str:
     """Render *report* as human-readable text."""
-    lines = ["=== --layers: completeness ==="]
+    lines = [
+        f"=== --layers: completeness ({report.examined_modules} modules examined) ==="
+    ]
+    if report.examined_modules == 0:
+        lines.append("EXAMINED ZERO MODULES -- not a pass.")
     if report.unmapped:
         lines.append(f"UNMAPPED ({len(report.unmapped)}) -- matches zero layers:")
         for mod in report.unmapped:
@@ -405,6 +427,12 @@ def render_layers_text(report: LayerReport) -> str:
         )
         for mod, layers in report.multiply_mapped.items():
             lines.append(f"  - {mod}: {', '.join(layers)}")
+    if report.dead_packages:
+        lines.append(
+            f"DEAD PACKAGES ({len(report.dead_packages)}) -- declared but match no module:"
+        )
+        for pkg in report.dead_packages:
+            lines.append(f"  - {pkg}")
 
     lines.append("")
     lines.append("=== --layers: direction ===")
@@ -2358,6 +2386,11 @@ def compute_predicates(
     if entry_point_modules is None:
         entry_point_modules = parse_entry_point_modules()
 
+    #: An empty tree makes every "zero findings" predicate trivially true. It
+    #: must read as "nothing was examined", never as a clean pass.
+    examined_modules = len(iter_source_files(toolguard_dir))
+    tree_examined = examined_modules > 0
+
     r3_sites = find_reason_parsing_sites(toolguard_dir)
     r1_types = find_verdict_types(toolguard_dir)
     r1_altitudes = classify_verdict_altitudes(toolguard_dir)
@@ -2379,6 +2412,7 @@ def compute_predicates(
     generated = list_generated_files(toolguard_dir)
 
     return {
+        "examined_modules": examined_modules,
         "generated_files_excluded": {
             "count": len(generated),
             "files": generated,
@@ -2389,7 +2423,7 @@ def compute_predicates(
             ),
         },
         "R3": {
-            "pass": len(r3_sites) == 0,
+            "pass": len(r3_sites) == 0 and tree_examined,
             "sites": r3_sites,
             "sanctioned_exclusions": sorted(
                 f"{f}::{fn}" for f, fn in R3_SANCTIONED_SITES
@@ -2408,7 +2442,8 @@ def compute_predicates(
             # counting bare verdict TUPLES, because a class-definition scan
             # cannot see a verdict that was never a class.
             "pass": (
-                len(r1_altitudes["runtime"]) == 1
+                tree_examined
+                and len(r1_altitudes["runtime"]) == 1
                 and len(r1_shims) == 0
                 and len(r1_bare_tuples) == 0
             ),
@@ -2425,7 +2460,7 @@ def compute_predicates(
             },
         },
         "R5": {
-            "pass": len(r5_non_leaves) == 0 and len(r5_cycles) == 0,
+            "pass": len(r5_non_leaves) == 0 and len(r5_cycles) == 0 and tree_examined,
             "non_leaf_entry_points": r5_non_leaves,
             "cycles": r5_cycles,
             "entry_point_modules": sorted(entry_point_modules),
@@ -2442,7 +2477,7 @@ def compute_predicates(
         "R6": {
             # `unresolvable` is reported alongside `sites` but does NOT gate
             # `pass`: an ambiguous case is not evidence of a violation.
-            "pass": len(r6_report.sites) == 0,
+            "pass": len(r6_report.sites) == 0 and tree_examined,
             "sites": r6_report.sites,
             "unresolvable": r6_report.unresolvable,
             "guarded_layers": list(R6_GUARDED_LAYERS),
@@ -2464,7 +2499,9 @@ def compute_predicates(
             # `r2_groups` is reported but does NOT gate `pass` -- it is the old
             # class/field-name scan, kept only for comparison with past runs.
             # See find_parallel_arrays for why it cannot be trusted alone.
-            "pass": len(r2_index_sites) == 0 and len(r2_drift_guards) == 0,
+            "pass": len(r2_index_sites) == 0
+            and len(r2_drift_guards) == 0
+            and tree_examined,
             "index_parallel_access_sites": r2_index_sites,
             "drift_guards": r2_drift_guards,
             "parallel_array_groups": r2_groups,
@@ -3172,7 +3209,11 @@ def _run_canary_case(
     try:
         payload = json.loads(stream)
         verdict = payload["hookSpecificOutput"]["permissionDecision"]
-    except json.JSONDecodeError, KeyError, TypeError:
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+    ):
         return None, f"unparseable output (exit {result.returncode}): {stream[:200]!r}"
     return verdict, None
 
@@ -3205,6 +3246,16 @@ def run_guard_canaries(
                 "(tried ~/.local/bin/toolguard and PATH)"
             ),
             "mismatches": [],
+            "results": [],
+        }
+    if not GUARD_CANARIES:
+        # An empty case set is a configuration error (a rename/relocation that
+        # left nothing to check), never a clean pass -- report it as a
+        # mismatch, not a skip, so it fails the guard rather than warning.
+        return {
+            "skipped": False,
+            "skip_reason": None,
+            "mismatches": ["canary case set is empty: zero cases were evaluated"],
             "results": [],
         }
 

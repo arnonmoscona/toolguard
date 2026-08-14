@@ -1,6 +1,9 @@
 """Unit tests for toolguard permission checking logic."""
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from toolguard.permissions import (
     normalize_path_in_command,
@@ -258,6 +261,71 @@ class TestMatchCommand(unittest.TestCase):
 
         matched, _ = match_command("bin/other_script.sh", patterns)
         self.assertFalse(matched)
+
+
+class TestMatchCommandTokenBoundary(unittest.TestCase):
+    """
+    ``Bash(x:*)`` == ``Bash(x *)``: a trailing wildcard after ``:`` requires the
+    prefix to be followed by a space or end-of-string, not merely a shared substring.
+    """
+
+    def test_colon_star_matches_the_bare_command_and_its_arguments(self):
+        """
+        Given the pattern 'ls:*'
+        When match_command checks 'ls' and 'ls -la'
+        Then both match
+        """
+        patterns = ["ls:*"]
+        self.assertTrue(match_command("ls", patterns)[0])
+        self.assertTrue(match_command("ls -la", patterns)[0])
+
+    def test_colon_star_does_not_match_a_longer_command_name(self):
+        """
+        Given the pattern 'ls:*'
+        When match_command checks 'lsof'
+        Then it does not match -- 'lsof' shares a prefix with 'ls' but is a
+        different program, and the boundary fix exists precisely for this case
+        """
+        matched, pattern = match_command("lsof", ["ls:*"])
+        self.assertFalse(matched)
+        self.assertIsNone(pattern)
+
+    def test_colon_star_boundary_excludes_a_path_separator(self):
+        """
+        Given the pattern 'rm -rf /tmp:*'
+        When match_command checks 'rm -rf /tmp', 'rm -rf /tmp -f', and 'rm -rf /tmp/foo'
+        Then the bare and flagged forms match but the path-suffixed form does not --
+        '/' is not a space or end-of-string, so it does not close the boundary
+        """
+        patterns = ["rm -rf /tmp:*"]
+        self.assertTrue(match_command("rm -rf /tmp", patterns)[0])
+        self.assertTrue(match_command("rm -rf /tmp -f", patterns)[0])
+        matched, pattern = match_command("rm -rf /tmp/foo", patterns)
+        self.assertFalse(matched)
+        self.assertIsNone(pattern)
+
+    def test_colon_star_boundary_applies_to_a_multi_token_prefix(self):
+        """
+        Given the pattern 'git log:*'
+        When match_command checks 'git log --oneline' and 'git logfoo'
+        Then the first matches and the second does not
+        """
+        patterns = ["git log:*"]
+        self.assertTrue(match_command("git log --oneline", patterns)[0])
+        matched, pattern = match_command("git logfoo", patterns)
+        self.assertFalse(matched)
+        self.assertIsNone(pattern)
+
+    def test_a_bare_trailing_star_with_no_colon_is_a_plain_prefix(self):
+        """
+        Given the pattern 'ls*', written with no space or colon before the '*'
+        When match_command checks 'lsof'
+        Then it matches -- unlike the ':*' form, a bare trailing '*' enforces
+        no word boundary
+        """
+        matched, pattern = match_command("lsof", ["ls*"])
+        self.assertTrue(matched)
+        self.assertEqual(pattern, "ls*")
 
 
 class TestCheckPermission(unittest.TestCase):
@@ -660,6 +728,72 @@ class TestExtendedPatterns(unittest.TestCase):
 
         matched, _ = match_command("git anything", ["git *"], extended_syntax=False)
         self.assertTrue(matched)
+
+
+class TestMatchCommandUnderASymlinkedHomeDirectory(unittest.TestCase):
+    """
+    A rule keeps matching whichever spelling of a symlinked location it was written in.
+
+    Isolation exception (`.claude/rules/test-config-isolation.md`): match_command never
+    reaches toolguard.config's discovery path, so ConfigIsolationMixin does not apply;
+    the only anchor here is Path.home(), read by normalization.
+    """
+
+    def setUp(self):
+        """Build home/.claude as a symlink into home/store/claude, holding one file."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "home"
+        self.store = self.home / "store" / "claude"
+        self.store.mkdir(parents=True)
+        (self.store / "settings.json").write_text("{}", encoding="utf-8")
+        (self.home / ".claude").symlink_to(self.store)
+        patcher = patch.object(Path, "home", staticmethod(lambda: self.home))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_rule_naming_the_link_matches_the_absolute_command(self):
+        """
+        Given a deny rule written as '~/.claude/settings.json', where '.claude' is a
+        symlink, and a command naming the same file by absolute path
+        When match_command evaluates it
+        Then it matches -- resolving the symlink must not discard the spelling the
+        rule author wrote, or every deny rule in that spelling silently fails open
+        """
+        matched, pattern = match_command(
+            f"cat {self.home}/.claude/settings.json",
+            ["cat ~/.claude/settings.json"],
+        )
+        self.assertTrue(matched)
+        self.assertEqual(pattern, "cat ~/.claude/settings.json")
+
+    def test_a_rule_naming_the_symlink_target_matches_the_command_too(self):
+        """
+        Given a deny rule written against the link's TARGET, '~/store/claude/...'
+        When the same command -- which names the link, not the target -- is evaluated
+        Then it still matches: the resolved spelling is carried alongside the others,
+        so a symlink is not a way around a rule written against what it points at
+        """
+        matched, pattern = match_command(
+            f"cat {self.home}/.claude/settings.json",
+            ["cat ~/store/claude/settings.json"],
+        )
+        self.assertTrue(matched)
+        self.assertEqual(pattern, "cat ~/store/claude/settings.json")
+
+    def test_an_unrelated_file_under_the_link_is_not_matched(self):
+        """
+        Given the same two rules
+        When a command names a DIFFERENT file in the symlinked directory
+        Then neither matches -- carrying extra spellings widens the set of names for
+        one location, not the set of locations
+        """
+        for rule in ("cat ~/.claude/settings.json", "cat ~/store/claude/settings.json"):
+            with self.subTest(rule=rule):
+                matched, _ = match_command(
+                    f"cat {self.home}/.claude/other.json", [rule]
+                )
+                self.assertFalse(matched)
 
 
 if __name__ == "__main__":

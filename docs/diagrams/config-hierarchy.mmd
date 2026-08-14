@@ -1,0 +1,24 @@
+---
+title: Config levels - most specific wins
+---
+flowchart TB
+    L0["level 0 - the project root's .claude/<br/>most specific"]
+    L1["level 1 - its parent's .claude/"]
+    L2["level 2 ... - each further ancestor<br/>walking up to ~ or to /"]
+    LU["last level - ~/.claude/<br/>least specific, ALWAYS present<br/>even when the project is not under ~"]
+
+    L0 --> L1 --> L2 --> LU
+
+    L0 -.- N1["within one level, a .local file and a<br/>regular file collapse into ONE level,<br/>keeping their relative order"]
+    LU -.- N2["rules-directory files join THIS level -<br/>same specificity as ~/.claude, ordered after it,<br/>so they never outrank it on a duplicate pattern"]
+
+    LU --> W["the first level with a match decides.<br/>less specific levels are matched anyway -<br/>a deny among them is logged as a conflict override"]
+
+    W -.- N3["hierarchical_configuration = false,<br/>read from the project level only,<br/>collects level 0 and the user level and<br/>nothing in between"]
+
+    classDef lvl fill:#f3e8fb,stroke:#7a4ab5,color:#26123a
+    classDef win fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class L0,L1,L2,LU lvl
+    class W win
+    class N1,N2,N3 note

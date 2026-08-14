@@ -269,8 +269,11 @@ def ledger_path_for_level(level: str, project_dir: Path) -> Path:
 def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
     """Load decisions from a single ledger file.
 
-    Each decision's ``level`` comes from the file's own ``level`` field (``project``
-    when absent), not from which path was read.
+    Each decision's ``level`` comes from WHICH FILE was read (``path`` matching
+    :data:`USER_LEDGER_PATH` means ``user``, anything else means ``project``),
+    never from the file's own ``level`` field -- that field is untrusted
+    content and is ignored, so a project ledger cannot claim ``user`` and
+    redirect a later write there.
 
     Args:
         path: The ledger file to read.
@@ -289,7 +292,7 @@ def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
         raise LedgerError(f"cannot read decision ledger {path}: {exc}") from exc
     if not isinstance(data, dict) or "decisions" not in data:
         raise LedgerError(f"decision ledger {path} is missing a 'decisions' array")
-    level = data.get("level", "project")
+    level = "user" if Path(path) == Path(USER_LEDGER_PATH) else "project"
     entries = data["decisions"]
     if not isinstance(entries, list):
         raise LedgerError(f"decision ledger {path}: 'decisions' must be an array")

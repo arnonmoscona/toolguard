@@ -22,8 +22,9 @@ What each finding reads:
     takeover ON, and a native blanket allow absent from the raw
     ``ignored_allow_patterns``/``additional_ignored_patterns`` lists.
 ``loose-no-match-fallback`` (LOW)
-    the raw ``[takeover_mode].no_match_fallback`` value, which is ``'ask'`` when
-    unset, whenever it is anything other than ``'deny'``.
+    :meth:`~toolguard.config.Configuration.resolved_no_match_fallback`, the
+    setting that actually governs, whenever it is anything other than
+    ``'deny'``.
 ``loose-undecidable-fallback`` (HIGH)
     :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`, when
     it is ``'allow_with_warning'`` or ``'allow'``. ``'deny'`` is deliberately
@@ -382,10 +383,16 @@ def audit_takeover(
 
     # Invariant 4: Loose no_match_fallback (LOW).
     #
+    # Read off ``config.resolved_no_match_fallback()``, not the raw
+    # ``[takeover_mode]`` value: the top-level key wins outright over the
+    # legacy alias (see Configuration.resolved_no_match_fallback), so the raw
+    # alias can disagree with the setting that actually governs.
+    #
     # A blanket "!= 'deny'" test rather than an enumeration of the loose values,
     # so an added or renamed loose spelling needs no change here.
     expected_fallback = "deny"
-    if takeover.no_match_fallback != expected_fallback:
+    resolved_fallback = config.resolved_no_match_fallback()
+    if resolved_fallback != expected_fallback:
         findings.append(
             AuditFinding(
                 finding_id="loose-no-match-fallback",
@@ -393,7 +400,7 @@ def audit_takeover(
                 tool=None,
                 provenance=None,
                 description=(
-                    f"no_match_fallback is '{takeover.no_match_fallback}', not 'deny'. "
+                    f"no_match_fallback is '{resolved_fallback}', not 'deny'. "
                     f"Commands that match no allow rule will not be hard-blocked."
                 ),
                 impact=(

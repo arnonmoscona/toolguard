@@ -781,8 +781,10 @@ def print_text_report(report: dict) -> None:
         print(f"                      judge 2 file: {a['judge_2_file']}")
     print()
     print(
-        "NO SCORE, RATE, OR RATIO IS COMPUTED HERE. See KNOWN LIMITATIONS #1 for why. Every "
-        "number below is either a plain input count or the length of the list printed with it."
+        "NO PER-LOCATION SCORE OR RATE IS COMPUTED HERE. See KNOWN LIMITATIONS #1 for why. "
+        "The one exception is the predicted/actual ratio in LOCATION COUNTS below, printed "
+        "only so prediction volume is visible (KNOWN LIMITATIONS #2). Every other number is "
+        "a plain input count or the length of the list printed with it."
     )
     print()
 
@@ -1061,13 +1063,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"  - {err}", file=sys.stderr)
         return 2
 
+    j1_ambiguous: dict[str, list[LocationEntry]] = {}
+    j2_ambiguous: dict[str, list[LocationEntry]] = {}
     if two_judge:
-        # Discarding each judge's ambiguous map here means a location duplicated within one
-        # judge's file is never reported: reconcile_two_judges emits unique locations, so
-        # build_evidence's own _dedupe finds nothing left to flag and ambiguous_actuals comes
-        # out empty in two-judge mode. Single-judge mode does report it.
-        j1_unique, _ = _dedupe(j1_entries)
-        j2_unique, _ = _dedupe(j2_entries)
+        j1_unique, j1_ambiguous = _dedupe(j1_entries)
+        j2_unique, j2_ambiguous = _dedupe(j2_entries)
         actuals, location_set_disagreements = reconcile_two_judges(j1_unique, j2_unique)
         raw_actual_count = len(j1_entries) + len(j2_entries)
     else:
@@ -1075,6 +1075,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_actual_count = len(actuals)
 
     evidence = build_evidence(predictions, actuals, location_set_disagreements)
+    # reconcile_two_judges emits one entry per location, so build_evidence's own _dedupe
+    # finds nothing left to flag on the reconciled list -- fold each judge's own
+    # within-file duplicates back in so they are still named (KNOWN LIMITATIONS #6).
+    for ambiguous in (j1_ambiguous, j2_ambiguous):
+        for loc, entries in ambiguous.items():
+            evidence.ambiguous_actuals.setdefault(loc, []).extend(entries)
     report = build_report(
         args.predictions,
         actuals_description,

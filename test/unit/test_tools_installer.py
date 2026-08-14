@@ -1157,8 +1157,8 @@ class TestRegisterHooks(InstallerTestCase):
 # `for protection in required_self_integrity_hard_deny_patterns()` loop into a
 # vacuous pass. Mirrors _EXPECTED_HARD_DENY_PATTERNS below.
 _EXPECTED_SELF_INTEGRITY_PATTERNS = (
-    r"Bash([regex]^rm\b.*\.toolguard)",
-    r"Bash([regex]^find\b.*\.toolguard.*-delete)",
+    r"Bash([regex](^|[\s/])rm\b.*\.toolguard)",
+    r"Bash([regex](^|[\s/])find\b.*\.toolguard.*-delete)",
 )
 
 
@@ -1265,7 +1265,7 @@ class TestSeedSelfPerms(InstallerTestCase):
         project_settings_path = project_claude_dir / "settings.local.json"
         self.assertIn(f"Write({project_settings_path})", text)
         self.assertIn(f"Edit({project_settings_path})", text)
-        self.assertIn(f"rm {project_claude_dir / 'toolguard_hook.toml'}:*", text)
+        self.assertIn(f"rm {project_claude_dir / 'toolguard_hook.toml'}", text)
         self.assertNotIn(f"Write({self.home / '.claude' / 'settings.json'})", text)
 
     def test_missing_base_config_is_rejected(self):
@@ -1360,7 +1360,7 @@ class TestSeedSelfPerms(InstallerTestCase):
         # matched_rule is None on a fail-closed deny (empty extraction), so
         # naming the rule is what separates "the seeded pattern matched" from
         # "the command could not be parsed at all".
-        self.assertEqual(decision.matched_rule, r"[regex]^rm\b.*\.toolguard")
+        self.assertEqual(decision.matched_rule, r"[regex](^|[\s/])rm\b.*\.toolguard")
 
     def test_running_twice_does_not_duplicate_hard_deny_patterns(self):
         """

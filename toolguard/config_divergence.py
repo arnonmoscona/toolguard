@@ -32,8 +32,9 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
 
     Returns:
         ``{'allow': [...], 'deny': [...], 'ask': [...]}``, wrappers intact.
-        A missing file yields three empty lists silently; an unreadable or
-        unparseable one yields the same after reporting a warning.
+        A missing file yields three empty lists silently; an unreadable,
+        unparseable, or non-object-top-level one yields the same after
+        reporting a warning.
     """
     if not settings_path.exists():
         return {"allow": [], "deny": [], "ask": []}
@@ -41,6 +42,8 @@ def get_native_permissions(settings_path: Path) -> Dict[str, List[str]]:
     try:
         with open(settings_path, "r") as f:
             config = json.load(f)
+        if not isinstance(config, dict):
+            raise TypeError(f"expected a top-level object, got {type(config).__name__}")
     except (json.JSONDecodeError, IOError, Exception) as e:
         report_warning(
             f"Failed to load {settings_path}: {e}",

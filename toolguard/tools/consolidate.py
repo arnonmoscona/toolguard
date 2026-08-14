@@ -9,8 +9,9 @@ Two families, each scoped to one tool's allow list within a single config layer:
    No-colon (exact) patterns are excluded.
 
 2. **Static subsumption.** A DEFAULT pattern whose command part extends
-   another's at a word or path boundary -- so the other should already cover
-   it -- is proposed for removal.
+   another's at a word or path boundary is proposed for removal. Only the word
+   boundary actually makes the wider pattern cover the narrower one; the path
+   boundary is a candidate the probe gate is expected to reject.
 
 A family-1 candidate is emitted only when every probe -- and every corpus
 entry, when a corpus is supplied -- yields the identical verdict before and
@@ -150,6 +151,11 @@ def _is_literal_token(token: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: Closes a consolidated regex on a token boundary: the next character must be
+#: whitespace or end-of-string, matching DEFAULT ``cmd:*`` prefix semantics.
+_TOKEN_BOUNDARY_LOOKAHEAD = r"(?=\s|$)"
+
+
 def _build_alternation_regex(
     prefix_tokens: List[str],
     varying_tokens: List[str],
@@ -158,10 +164,11 @@ def _build_alternation_regex(
     """
     Build the ``[regex]`` body for a literal-alternation group.
 
-    Anchored with ``^`` and deliberately WITHOUT a trailing ``\\b``: DEFAULT
-    ``cmd:*`` is a prefix match with no word boundary past the first token --
-    ``git diff:*`` matches ``git difftool`` -- so a boundary here would silently
-    drop such commands.
+    Anchored with ``^`` and closed with a ``(?=\\s|$)`` lookahead, so the
+    consolidated rule ends on a token boundary exactly as the DEFAULT ``cmd:*``
+    patterns it replaces do -- ``git diff:*`` matches ``git diff --stat`` but
+    not ``git difftool``. A trailing ``\\b`` would be too loose here: it holds
+    before a ``-``, and so would admit ``git diff-index``.
 
     Args:
         prefix_tokens: Cmd tokens before the varying position (may be empty).
@@ -171,7 +178,7 @@ def _build_alternation_regex(
 
     Returns:
         A ``[regex]``-prefixed pattern body, e.g.
-        ``'[regex]^git (diff|flake8|status)'``.
+        ``'[regex]^git (diff|flake8|status)(?=\\s|$)'``.
     """
     escaped_prefix = " ".join(re.escape(t) for t in prefix_tokens)
     escaped_suffix = " ".join(re.escape(t) for t in suffix_tokens)
@@ -185,7 +192,7 @@ def _build_alternation_regex(
         parts.append(escaped_suffix)
 
     cmd_regex = " ".join(parts)
-    return f"[regex]^{cmd_regex}"
+    return f"[regex]^{cmd_regex}{_TOKEN_BOUNDARY_LOOKAHEAD}"
 
 
 # ---------------------------------------------------------------------------
@@ -198,16 +205,15 @@ def _static_prefix_of(large_cmd: str, small_cmd: str) -> bool:
     Return True when ``large_cmd`` is a structural prefix of ``small_cmd``.
 
     Accepted forms: equality; ``small_cmd`` extending ``large_cmd`` at a space
-    or ``/`` boundary; and ``large_cmd`` already ending in a separator, which is
-    how ``mkdir -p /tmp/`` covers ``mkdir -p /tmp/claude-code``.
+    or ``/`` boundary; and ``large_cmd`` already ending in a separator.
 
     Meant to establish that ``small_cmd:*``'s match-set is a subset of
-    ``large_cmd:*``'s.  Two shapes break that, leaving the caller's probe check
-    as the only guard:
+    ``large_cmd:*``'s.  Only the space boundary establishes it.  Two shapes
+    break it, leaving the caller's probe check as the only guard:
 
-    - A ``/`` boundary inside the BASE (first) token.  ``/usr/bin:*`` does not
-      match ``/usr/bin/env python``, even though ``/usr/bin`` is a path prefix
-      of ``/usr/bin/env``.
+    - Any ``/`` boundary.  A DEFAULT prefix must end on a token boundary, and
+      ``/`` is not one: ``/usr/bin:*`` does not match ``/usr/bin/env python``,
+      and ``mkdir -p /tmp/:*`` does not match ``mkdir -p /tmp/claude-code``.
     - The args part is never looked at.  The caller also passes no-colon (exact)
       bodies, and an exact ``uv run`` matches nothing but ``uv run`` -- so it
       subsumes ``uv run python:*`` in this function's terms and not in fact.
@@ -295,15 +301,10 @@ def _generate_extension_probes(
     Generate prefix-extension near-miss probes for a family-1 group.
 
     For each member, appends characters to the bare command with NO separating
-    space (``git diff`` -> ``git diffx``, ``git difftool``).  These are the
-    probes that catch a consolidated rule disagreeing with DEFAULT prefix
-    semantics in either direction:
-
-    - A multi-token member shares its verdict with them, so a too-strict word
-      boundary in the regex shows up as a tightening.
-    - A single-token member does NOT -- ``ls:*`` matches neither ``lsx`` nor
-      ``lstool`` -- so a single-token group collapsing into a boundary-free
-      ``^(cat|ls)`` shows up as a widening.
+    space (``git diff`` -> ``git diffx``, ``git difftool``).  A DEFAULT
+    ``cmd:*`` pattern matches none of these -- its prefix must end on a token
+    boundary -- so a consolidated regex without an equivalent boundary shows up
+    here as a widening.
 
     Args:
         parsed_group: One ``(cmd_tokens, args, pos, prefix_tokens,

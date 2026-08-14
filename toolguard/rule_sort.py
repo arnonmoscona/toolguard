@@ -98,12 +98,36 @@ def _pattern_of(entry: RuleEntryOrStr) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Named single-character TOML basic-string escapes. Every other character
+#: needing escaping (a control character outside this table) falls back to
+#: a ``\\uXXXX`` escape in :func:`_escape_toml_string`.
+_TOML_NAMED_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
 def _escape_toml_string(value: str) -> str:
     """
-    Escape a string for a double-quoted TOML basic string: backslashes and
-    double quotes only -- control characters, newline included, are left as-is.
+    Escape a string for a double-quoted TOML basic string.
+
+    Covers the full basic-string escaping surface, not just backslash and
+    double quote: a literal control character (newline included) is illegal
+    unescaped in a TOML basic string and would otherwise split the rendered
+    value across physical lines, corrupting the file.
     """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return "".join(
+        _TOML_NAMED_ESCAPES.get(
+            char,
+            f"\\u{ord(char):04x}" if ord(char) < 0x20 or ord(char) == 0x7F else char,
+        )
+        for char in value
+    )
 
 
 def _render_toml_key(key: str) -> str:
@@ -147,10 +171,9 @@ def _render_toml_inline_table(table: Dict[str, object]) -> str:
     Render a dict as a TOML inline table.
 
     ``{"match": "Bash(*)", "additionalContext": "x"}`` renders as
-    ``{ match = "Bash(*)", additionalContext = "x" }``. No newline is added,
-    and none is removed: a value containing a literal newline produces the
-    multi-line inline table the module docstring forbids, because
-    :func:`_escape_toml_string` leaves control characters alone.
+    ``{ match = "Bash(*)", additionalContext = "x" }``. A value containing a
+    literal newline is escaped, not split -- the rendered inline table stays
+    on one physical line, as the module docstring requires.
 
     Args:
         table: The dict to render.
@@ -434,6 +457,34 @@ def _trailing_comment_source_lines(source: str) -> List[str]:
     return lines
 
 
+def subsection_line_range(
+    section_text: str, perm_type: str
+) -> Optional[Tuple[int, int]]:
+    """
+    0-indexed, end-exclusive line-number range spanned by one
+    ``<perm_type> = [ ... ]`` array's interior, within
+    ``section_text.split("\\n")``.
+
+    Lets a caller tell which physical line a given piece of ``section_text``
+    belongs to WITHOUT re-parsing it -- e.g. distinguishing an ``allow``
+    line from a ``deny`` line that happens to share the exact same text.
+
+    Args:
+        section_text: The full ``[permissions]`` section text.
+        perm_type: ``'allow'``, ``'deny'``, or ``'ask'``.
+
+    Returns:
+        ``(start_line, end_line)``, or ``None`` when the subsection is absent.
+    """
+    location = _locate_subsection(section_text, perm_type)
+    if location is None:
+        return None
+    _, open_pos, close_pos = location
+    start_line = section_text.count("\n", 0, open_pos)
+    end_line = section_text.count("\n", 0, close_pos) + 1
+    return start_line, end_line
+
+
 def parse_permissions_section_with_comments(section_text: str) -> Dict:
     """
     Parse a ``[permissions]`` section, preserving comments and their associations.
@@ -450,19 +501,21 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
       line, since this function raises rather than returning a multi-line
       structured entry (see "Raises" below and the module docstring).
 
-    A *comment_block* that immediately precedes a *rule* belongs to that rule
-    and travels with it when rules are re-sorted -- EXCEPT a block preceding
-    the FIRST rule, which is anchored to the top of the sub-list and stays
-    there, so it re-attaches to whichever rule sorts first. A blank line does
-    not end a block, so a top anchor and the first rule's own comment merge
-    into one. A block after the last rule is anchored to the bottom.
+    A *comment_block* that immediately precedes a *rule*, INSIDE the
+    subsection's own array brackets, belongs to that rule and travels with
+    it when rules are re-sorted, including a block preceding the very first
+    rule. A block after the last rule -- or one with no rule following it at
+    all -- is anchored to the bottom.
 
     A comment sitting OUTSIDE a subsection's own array brackets -- between the
     ``[permissions]`` header and the first ``allow``/``deny``/``ask =`` line,
     or between one subsection's closing ``]`` and the next subsection's own
-    ``=`` line -- is attached as a leading ``comment_block`` to whichever
-    subsection FOLLOWS it, never to the one before. Subsections are processed
-    in the order they actually appear in ``section_text``, not in fixed
+    ``=`` line -- describes that subsection as a whole, not any one rule
+    inside it. It is kept out of that subsection's item list, in
+    ``'leading_comments'``, and reassembly always emits it right after the
+    ``<perm_type> = [`` line regardless of how rules are re-sorted.
+    Subsections are matched to whichever gap precedes them in the order they
+    actually appear in ``section_text``, not in fixed
     ``allow``/``deny``/``ask`` order, so that attribution is right whatever
     order a file uses.
 
@@ -471,15 +524,18 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
             its ``[permissions]`` header line.
 
     Returns:
-        ``Dict`` with keys ``'allow'``, ``'deny'``, ``'ask'``, and
-        ``'trailing_comment'``.  Each of the first three values is a list of
+        ``Dict`` with keys ``'allow'``, ``'deny'``, ``'ask'``, always
+        ``'trailing_comment'``, and ``'leading_comments'`` when at least one
+        subsection had one. Each of the first three values is a list of
         ``(item_type, content, parsed_value)`` tuples, where *parsed_value*
         is the extracted pattern string for ``'rule'`` items and ``None``
-        for ``'comment_block'`` items. ``'trailing_comment'`` is the comment
-        text that follows the subsections -- e.g. one introducing a following
-        ``[hard_deny]`` section -- with leading blank lines dropped, or
-        ``None`` when there is none. It is kept out of the three lists so it
-        can neither be mistaken for a rule's own comment nor be dropped on
+        for ``'comment_block'`` items. ``'leading_comments'``, when present,
+        maps a subsection name to the comment text that preceded its own
+        array brackets. ``'trailing_comment'`` is the comment text that follows the
+        subsections -- e.g. one introducing a following ``[hard_deny]``
+        section -- with leading blank lines dropped, or ``None`` when there
+        is none. Both are kept out of the three per-subsection lists so
+        neither can be mistaken for a rule's own comment or be dropped on
         write-back.
 
     Raises:
@@ -499,18 +555,19 @@ def parse_permissions_section_with_comments(section_text: str) -> Dict:
     located.sort(key=lambda entry: entry[0])
 
     result = {"allow": [], "deny": [], "ask": []}
+    leading_comments: Dict[str, str] = {}
     prev_end = 0
     for match_start, perm_type, open_pos, close_pos in located:
         gap_text = section_text[prev_end:match_start]
         gap_comment = _flush_comment_lines(_trailing_comment_source_lines(gap_text))
-
-        items: List[Tuple[str, str, Optional[str]]] = []
         if gap_comment is not None:
-            items.append(("comment_block", gap_comment, None))
-        items.extend(_parse_array_body(section_text, open_pos, close_pos))
+            leading_comments[perm_type] = gap_comment
 
-        result[perm_type] = items
+        result[perm_type] = _parse_array_body(section_text, open_pos, close_pos)
         prev_end = close_pos + 1
+
+    if leading_comments:
+        result["leading_comments"] = leading_comments
 
     # Text after the LAST subsection's ']'. Deliberately NOT going through
     # _trailing_comment_source_lines: nothing follows this span to supply the
@@ -585,26 +642,20 @@ def reassemble_permissions_section(
 
         parsed_items = parsed_structure.get(perm_type, [])
 
-        # Classify parsed items into top/bottom comment anchors and per-rule
+        # Classify parsed items into bottom comment anchors and per-rule
         # comment associations, keyed by (pattern, occurrence_index) counted
         # in PARSE order -- see "Duplicate-pattern keying" above.
-        top_comments = []
         bottom_comments = []
         rule_comments: Dict[Tuple[str, int], str] = {}
         rule_lines: Dict[Tuple[str, int], str] = {}
 
         current_comment_block = None
-        seen_first_rule = False
         parsed_occurrence_count: Dict[str, int] = {}
 
         for item_type, content, value in parsed_items:
             if item_type == "comment_block":
-                if not seen_first_rule:
-                    top_comments.append(content)
-                else:
-                    current_comment_block = content
+                current_comment_block = content
             elif item_type == "rule":
-                seen_first_rule = True
                 occurrence = parsed_occurrence_count.get(value, 0)
                 parsed_occurrence_count[value] = occurrence + 1
                 key = (value, occurrence)
@@ -613,7 +664,8 @@ def reassemble_permissions_section(
                     rule_comments[key] = current_comment_block
                     current_comment_block = None
 
-        # A comment block with no rule after it belongs to the bottom.
+        # A comment block with no rule after it (including one preceding an
+        # otherwise rule-free list) belongs to the bottom.
         if current_comment_block:
             bottom_comments.append(current_comment_block)
 
@@ -635,8 +687,9 @@ def reassemble_permissions_section(
 
         lines.append(f"{perm_type} = [")
 
-        for comment_block in top_comments:
-            lines.append(comment_block)
+        leading_comment = parsed_structure.get("leading_comments", {}).get(perm_type)
+        if leading_comment:
+            lines.append(leading_comment)
 
         for entry, key in keyed_entries:
             if key in rule_comments:

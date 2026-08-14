@@ -16,6 +16,7 @@ Read-only; nothing is written.
 from pathlib import Path
 from typing import List, Optional
 
+from toolguard import error_reporter
 from toolguard.tools.log_harvest import LogEntry, harvest
 from toolguard.tools.project_root import resolve_project_root
 from toolguard.tools.transcript_harvest import (
@@ -66,7 +67,11 @@ def harvest_corpus(
     the two interleave meaningfully.  Entries are NOT de-duplicated -- a command
     recorded in both sources appears twice.  A missing or unreadable source
     directory contributes nothing rather than raising, so a project with no logs
-    yet still yields whatever transcripts exist, and vice versa.
+    yet still yields whatever transcripts exist, and vice versa -- but a
+    directory that does not exist at all is reported via
+    :func:`~toolguard.error_reporter.report_warning`, so an empty corpus
+    caused by a wrong path is not silently indistinguishable from a clean
+    harvest.
 
     Args:
         project_dir: Project directory whose corpus to harvest (defaults to the
@@ -84,7 +89,15 @@ def harvest_corpus(
     Returns:
         A timestamp-sorted list of :class:`LogEntry` records drawn from both
         sources (may be empty).
+
+    Raises:
+        ValueError: If ``max_age_days`` is negative -- a floor set in the
+            future would silently discard every entry, indistinguishable
+            from a clean harvest.
     """
+    if max_age_days is not None and max_age_days < 0:
+        raise ValueError(f"max_age_days must not be negative, got {max_age_days}")
+
     resolution = resolve_project_root(project_dir)
     root = (
         resolution.root if resolution.root is not None else (project_dir or Path("."))
@@ -96,6 +109,13 @@ def harvest_corpus(
         if transcripts_dir is not None
         else transcript_dir_for_project(root, claude_home)
     )
+
+    for source, label in ((logs, "daily-log"), (transcripts, "transcript")):
+        if not source.exists():
+            error_reporter.report_warning(
+                f"corpus harvesting found no {label} directory at {source}",
+                "Confirm the path and that toolguard has run for this project.",
+            )
 
     entries: List[LogEntry] = []
     entries.extend(harvest(logs, max_age_days=max_age_days))

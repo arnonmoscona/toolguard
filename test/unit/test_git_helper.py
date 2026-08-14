@@ -254,18 +254,19 @@ class TestRunGitSharedHelper(unittest.TestCase):
     def test_install_provenance_status_call_is_bounded_by_the_shared_timeout(self):
         """
         Given _git_subtree_is_clean() runs with only subprocess.run stubbed
-        When its git subprocess is launched
+        When its FIRST git subprocess -- the status query -- is launched
         Then it carries the shared timeout, which it gets only via run_git
         """
         with patch.object(
             _git.subprocess, "run", return_value=_completed(0, "")
         ) as run:
             install_provenance._git_subtree_is_clean(Path("/repo"), "toolguard")
+        status_call = run.call_args_list[0]
         self.assertEqual(
-            run.call_args.args[0],
+            status_call.args[0],
             ["git", "-C", "/repo", "status", "--porcelain", "--", "toolguard"],
         )
-        self.assertEqual(run.call_args.kwargs["timeout"], constants.GIT_TIMEOUT_SECONDS)
+        self.assertEqual(status_call.kwargs["timeout"], constants.GIT_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":

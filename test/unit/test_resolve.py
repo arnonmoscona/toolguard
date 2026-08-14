@@ -2050,14 +2050,13 @@ class TestFilePathMatchedRuleExact(unittest.TestCase):
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "/secrets/**")
 
-    def test_hard_deny_matched_rule_is_none_and_unattributed(self):
+    def test_hard_deny_names_its_deciding_pattern(self):
         """
-        Given a Read hard_deny for '/etc/**' (no normal-cascade pattern
-            available to attribute -- see resolve_file_path_permission_detailed's
-            hard-deny branch)
+        Given a Read hard_deny for '/etc/**'
         When a path under that tree is resolved
-        Then RuntimeVerdict.matched_rule and .provenance are both None --
-            deliberately, not by omission
+        Then matched_rule names the hard-deny pattern that decided it, matching
+            the Bash branch; .provenance stays None, since a hard-deny entry
+            carries no config layer
         """
         config = _make_config(
             [
@@ -2070,7 +2069,7 @@ class TestFilePathMatchedRuleExact(unittest.TestCase):
         )
         result = resolve_file_path_permission_detailed("Read", "/etc/passwd", config)
         self.assertEqual(result.decision, "deny")
-        self.assertIsNone(result.matched_rule)
+        self.assertEqual(result.matched_rule, "/etc/**")
         self.assertIsNone(result.provenance)
 
 

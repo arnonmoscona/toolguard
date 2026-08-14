@@ -1,0 +1,27 @@
+---
+title: The hard_deny pool - what it outranks, and the one thing that exempts it
+---
+flowchart TD
+    SUB["one sub-command<br/>(every leaf of a compound, separately)"]
+    POOL["<b>[hard_deny]</b> pooled from EVERY level into one set,<br/>de-duplicated on pattern - not most-specific-wins"]
+    Q1{"matches a pooled<br/>deny pattern?"}
+    Q2{"matches a pooled<br/>allow carve-out?"}
+    CASCADE["the normal most-specific-wins cascade decides<br/>(it may still allow, ask or deny)"]
+    DENY["<b>deny</b><br/>no level's normal allow can override it<br/>provenance is absent: the pool has no single level"]
+    NOTE["Pooled from toolguard_hook files only: a hard_deny<br/>section in native Claude settings is ignored.<br/>A carve-out at ANY level exempts a deny from ANY level.<br/>Exempt means 'not hard-denied', not 'allowed'.<br/>One hard-denied leaf denies the whole compound.<br/>On the hook path, only tools listed in governed_tools<br/>reach this check - api.decide does not consult that list."]
+
+    SUB -->|"checked first, before the cascade"| POOL
+    POOL --> Q1
+    Q1 -->|"no"| CASCADE
+    Q1 -->|"yes"| Q2
+    Q2 -->|"yes"| CASCADE
+    Q2 -->|"no"| DENY
+
+    classDef safe fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef clamp fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    classDef pool fill:#f3e8fb,stroke:#7a4ab5,color:#26123a
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    class CASCADE safe
+    class DENY clamp
+    class POOL pool
+    class NOTE note

@@ -398,8 +398,10 @@ class TestFamily1GitHappyPath(unittest.TestCase):
         Given the six git sub-command allow patterns
         When the family-1 consolidation is applied (originals removed, regex added)
         Then prefix-extension commands such as 'git difftool' and
-             'git diffstat HEAD' keep verdict 'allow' -- the consolidation does
-             NOT silently tighten what the DEFAULT cmd:* prefix already allowed.
+             'git diff-index HEAD' -- which glue a suffix onto a pattern's final
+             token -- decide the SAME either way. Consolidation must be verdict
+             preserving; which verdict that is belongs to the DEFAULT cmd:*
+             prefix semantics, not to this test.
         """
         config, prov = self._make_git_config()
         proposals = propose_consolidations(config, "Bash")
@@ -410,11 +412,12 @@ class TestFamily1GitHappyPath(unittest.TestCase):
             config, "Bash", prov, set(p.removed_patterns), [p.added_pattern]
         )
         for cmd in ("git difftool", "git diffstat HEAD", "git diff-index HEAD"):
-            self.assertEqual(
-                decide(config_b, "Bash", cmd).decision,
-                "allow",
-                f"{cmd!r} should remain allowed after consolidation",
-            )
+            with self.subTest(command=cmd):
+                self.assertEqual(
+                    decide(config_b, "Bash", cmd).decision,
+                    decide(config, "Bash", cmd).decision,
+                    f"consolidation changed the verdict for {cmd!r}",
+                )
 
     def test_proposal_kind_and_list_type(self):
         """
@@ -515,9 +518,10 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
               'uv run alembic db downgrade:*'
         When the accepted family-1 proposal is applied
         Then exactly one proposal is accepted, its added pattern is the anchored
-             alternation over the two varying tokens, and every probed command
-             keeps its verdict: the deny guard stays 'deny', both consolidated
-             commands stay 'allow', and an unnamed sibling stays 'ask'.
+             alternation over the two varying tokens closed on a token boundary,
+             and every probed command keeps its verdict: the deny guard stays
+             'deny', both consolidated commands stay 'allow', and neither an
+             unnamed sibling nor a suffixed one is allowed by either config.
         """
         prov = _make_provenance()
         layer = _make_layer(
@@ -537,7 +541,9 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
         ]
         self.assertEqual(len(family1), 1, f"Expected 1, got: {family1}")
         p = family1[0]
-        self.assertEqual(p.added_pattern, "[regex]^uv run alembic (downgrade|upgrade)")
+        self.assertEqual(
+            p.added_pattern, r"[regex]^uv run alembic (downgrade|upgrade)(?=\s|$)"
+        )
 
         config_b = with_layer_allow_replaced(
             config, "Bash", prov, set(p.removed_patterns), [p.added_pattern]
@@ -545,7 +551,7 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
         expected = {
             "uv run alembic upgrade head": "allow",
             "uv run alembic downgrade base": "allow",
-            "uv run alembic downgradex": "allow",
+            "uv run alembic downgradex": "ask",
             "uv run alembic db downgrade": "deny",
             "uv run alembic destroy": "ask",
         }
@@ -610,12 +616,18 @@ class TestFamily2MkdirSubsumption(unittest.TestCase):
     """Family-2 consolidation: structurally subsumed mkdir pattern dropped."""
 
     def _make_mkdir_config(self) -> tuple:
-        """Build a config where 'mkdir -p /tmp/claude-code:*' is subsumed by 'mkdir -p /tmp/:*'; return (config, provenance)."""
+        """Build a config where 'mkdir -p /tmp/claude-code:*' is subsumed by 'mkdir -p:*'; return (config, provenance).
+
+        The wider pattern ends a whole token short of the narrower one, which
+        is what makes the containment real. A '/' boundary would not: a DEFAULT
+        prefix must end on a token boundary, so 'mkdir -p /tmp/:*' does not
+        match 'mkdir -p /tmp/claude-code' at all.
+        """
         prov = _make_provenance()
         layer = _make_layer(
             "Bash",
             allow=[
-                "mkdir -p /tmp/:*",
+                "mkdir -p:*",
                 "mkdir -p /tmp/claude-code:*",
             ],
             provenance=prov,
@@ -624,7 +636,7 @@ class TestFamily2MkdirSubsumption(unittest.TestCase):
 
     def test_subsumption_proposal_returned(self):
         """
-        Given 'mkdir -p /tmp/:*' and 'mkdir -p /tmp/claude-code:*' in allow list
+        Given 'mkdir -p:*' and 'mkdir -p /tmp/claude-code:*' in allow list
         When propose_consolidations is called for Bash
         Then exactly one static-subsumption proposal is returned.
         """

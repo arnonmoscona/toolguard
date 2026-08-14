@@ -1,0 +1,15 @@
+---
+title: How one compound command becomes rule-matchable leaves
+---
+flowchart TB
+    A["raw command text<br/>cd /tmp &amp;&amp; git status | tee log"] --> B["multiline.py<br/>LEXICAL pre-pass only<br/>CRLF, backslash-join, heredoc bodies,<br/># comments, whitespace"]
+    B --> C["bash_parser.py<br/>generated from bash_parser.peg by canopy<br/>ALL structural parsing happens here"]
+    C --> D["command_model.py<br/>typed IR - the only code that<br/>touches a raw parse-tree node"]
+    D --> E["command_extractor.py<br/>walks the IR, never the raw tree"]
+    E --> F["leaf commands<br/>matched one by one,<br/>strictest verdict wins"]
+    E --> G["undecidable segments<br/>nesting, case, process substitution<br/>floored to ASK, never guessed"]
+
+    classDef step fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef clamp fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    class A,B,C,D,E,F step
+    class G clamp

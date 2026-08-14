@@ -145,20 +145,43 @@ def _load_gitignore_patterns(tree_root: Path) -> list[str]:
     return patterns
 
 
+def _anchored_pattern_matches(
+    pattern_segments: list[str], path_segments: list[str]
+) -> bool:
+    """Match an anchored gitignore pattern, already split on ``/``, against a path also
+    split on ``/`` -- or against that path as a directory prefix (running out of pattern
+    segments before path segments means the pattern named an ancestor directory, and git
+    excludes everything below one). ``*``/``?`` are matched per segment via :func:`fnmatch.
+    fnmatch`, so they never cross a ``/``; a ``**`` segment matches zero or more whole path
+    segments, including at the pattern's start.
+    """
+    if not pattern_segments:
+        return True
+    head, rest = pattern_segments[0], pattern_segments[1:]
+    if head == "**":
+        return any(
+            _anchored_pattern_matches(rest, path_segments[k:])
+            for k in range(len(path_segments) + 1)
+        )
+    if not path_segments:
+        return False
+    return fnmatch.fnmatch(path_segments[0], head) and _anchored_pattern_matches(
+        rest, path_segments[1:]
+    )
+
+
 def _is_gitignored(relpath: Path, patterns: list[str]) -> bool:
     """Best-effort match of *relpath* (relative to the tree root) against *patterns*. A
     trailing ``/`` is stripped before either rule below is applied.
 
     A pattern that then still contains a ``/`` is treated as anchored to the tree root and
-    compared LITERALLY against the relative POSIX path -- equality, or that path as a
-    directory prefix. ``fnmatch`` is not reached on this branch, so a wildcard in an anchored
-    pattern is compared as an ordinary character: ``docs/*.py`` does not exclude
-    ``docs/a.py``.
+    matched segment-by-segment via :func:`_anchored_pattern_matches` -- wildcards included,
+    plus the path as a directory prefix (``docs/*.py`` excludes ``docs/a.py``; ``zz/*``
+    excludes everything under ``zz/``).
 
     A pattern with no ``/`` left is ``fnmatch``ed against each path component separately, at
     any depth, so ``tmp/`` does exclude ``tmp/anything/deep/file.py``.
     """
-    posix = relpath.as_posix()
     parts = relpath.parts
     for pattern in patterns:
         pat = pattern[:-1] if pattern.endswith("/") else pattern
@@ -167,7 +190,7 @@ def _is_gitignored(relpath: Path, patterns: list[str]) -> bool:
         if not pat:
             continue
         if anchored:
-            if posix == pat or posix.startswith(pat + "/"):
+            if _anchored_pattern_matches(pat.split("/"), list(parts)):
                 return True
         elif any(fnmatch.fnmatch(part, pat) for part in parts):
             return True

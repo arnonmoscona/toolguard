@@ -672,9 +672,8 @@ class TestSandboxEvaluation(unittest.TestCase):
         """
         Given a hard_deny on Read of /etc/**
         When that path is read
-        Then the verdict is deny; RuntimeVerdict.matched_rule is None on this
-            branch by design, so the deciding pattern is asserted through
-            check_file_path_hard_deny instead
+        Then the verdict is deny and matched_rule names the hard-deny pattern
+            that decided it, agreeing with check_file_path_hard_deny
         """
         with experiment(
             project_config=ALLOW_LS, hard_deny=["Read(/etc/**)"]
@@ -682,7 +681,7 @@ class TestSandboxEvaluation(unittest.TestCase):
             config = sandbox.load_configuration()
             verdict = sandbox.evaluate("Read", "/etc/passwd")
             self.assertEqual(verdict.decision, "deny")
-            self.assertIsNone(verdict.matched_rule)
+            self.assertEqual(verdict.matched_rule, "/etc/**")
             hard = check_file_path_hard_deny("Read", "/etc/passwd", config, True)
             self.assertIsNotNone(hard)
             self.assertEqual(hard.matched_pattern, "/etc/**")
@@ -815,10 +814,10 @@ class TestSandboxEvaluation(unittest.TestCase):
         Given a config already evaluated once, then rewritten to the same byte
             length and forced back to the same mtime, so it collides with the
             parsed-config cache key
-        When it is re-evaluated through the sandbox
-        Then the new verdict is returned, while a load that skips the sandbox's
-            invalidation still serves the STALE parse -- so the collision is real
-            and the invalidation is what defeats it
+        When it is re-evaluated
+        Then the new verdict is returned, through the sandbox and through a
+            plain load alike -- the cache key hashes content, so a same-length
+            same-mtime rewrite is not served stale
         """
         with experiment(project_config=ALLOW_LS) as sandbox:
             self.assertEqual(sandbox.evaluate("Bash", "ls -la").decision, "allow")
@@ -835,8 +834,8 @@ class TestSandboxEvaluation(unittest.TestCase):
             self.assertEqual(after.st_size, before.st_size)
             self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
 
-            stale = toolguard_config.load_configuration(str(sandbox.project))
-            self.assertEqual(decide(stale, "Bash", "ls -la").decision, "allow")
+            reloaded = toolguard_config.load_configuration(str(sandbox.project))
+            self.assertEqual(decide(reloaded, "Bash", "ls -la").decision, "deny")
 
             self.assertEqual(sandbox.evaluate("Bash", "ls -la").decision, "deny")
 

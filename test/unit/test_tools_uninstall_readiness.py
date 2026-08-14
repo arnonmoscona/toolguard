@@ -312,11 +312,9 @@ class TestUninstallReadinessOverGrant(unittest.TestCase):
     """
     How much more than its own action each generated rule admits.
 
-    The multi-token Bash entries are DEFAULT prefixes and ``match_command``
-    glues the trailing ``*`` onto the last token, so they swallow an extra
-    argument and match a suffix on the final path.  Proposed ticket 18 is the
-    fix; these tests assert the intended behaviour and are expected RED until
-    it lands.
+    ``match_command`` requires a multi-token Bash entry's DEFAULT prefix to
+    end on a token boundary, so these rules do not swallow an extra argument
+    or match a suffix on the final path.
     """
 
     def _multi_token_bash_entries(self):

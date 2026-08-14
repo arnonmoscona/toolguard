@@ -18,6 +18,7 @@ floor -- lives here rather than in the grammar or the IR.
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import List, Optional, Set, Union
 
 from toolguard.parser import bash_parser
@@ -124,7 +125,7 @@ ExtractionResult = Union[LeafCommand, UndecidableSegment]
 BASH_FAMILY: frozenset = frozenset({"bash", "sh", "dash", "ksh", "zsh"})
 
 #: Interpreters and non-bash shells whose inline code this pipeline cannot
-#: read. A flag from :data:`_FOREIGN_INLINE_FLAGS`, or a heredoc whose sink is
+#: read. Inline code per :data:`_EXECUTOR_FLAGS`, or a heredoc whose sink is
 #: one of these, sets ``ask_floor`` on the leaf.
 #:
 #: A versioned name needs its own entry unless it belongs to one of the seven
@@ -155,35 +156,123 @@ FOREIGN_EXECUTORS: frozenset = frozenset(
     }
 )
 
-#: Flags that make :func:`_detect_foreign_inline_code` treat a leaf as foreign
-#: inline code, keyed by executor basename. An executor absent from this table
-#: falls back to ``-c``/``-e``/``-r``, which is what makes ``csh``/``tcsh``/
-#: ``fish`` work without their own entry.
-_FOREIGN_INLINE_FLAGS = {
-    "python": ["-c"],
-    "python3": ["-c"],
-    "node": ["-e"],
-    "nodejs": ["-e"],
-    "perl": ["-e"],
-    "ruby": ["-e"],
-    "php": ["-r"],
-    "Rscript": ["-e"],
-    "awk": ["-f"],
+
+@dataclass(frozen=True)
+class _ExecutorFlags:
+    """How one foreign executor spells "the program is on the command line".
+
+    Attributes:
+        inline_letters: Short-flag letters introducing inline code. Recognised
+            bundled and with the code attached (``-uc``, ``-cimport os``).
+        inline_long: Long flags introducing inline code, matched with or
+            without an ``=value`` payload (``--eval``, ``--eval=code``).
+        value_letters: Short flags whose value may be a SEPARATE token, so the
+            scan must step over that token rather than stop at it. A letter
+            listed here wrongly hides any inline flag behind it, so add one
+            only when the separate-token form is real.
+        program_file_letters: Short flags naming a program FILE -- the opposite
+            of inline code. Seeing one settles the question for
+            *bare_program* executors.
+        bare_program: The first non-flag argument is the program itself, as in
+            ``awk '{print $1}' file``.
+    """
+
+    inline_letters: frozenset = frozenset()
+    inline_long: frozenset = frozenset()
+    value_letters: frozenset = frozenset()
+    program_file_letters: frozenset = frozenset()
+    bare_program: bool = False
+
+
+_PYTHON_FLAGS = _ExecutorFlags(
+    inline_letters=frozenset("c"), value_letters=frozenset("XW")
+)
+_NODE_FLAGS = _ExecutorFlags(
+    inline_letters=frozenset("ep"),
+    inline_long=frozenset({"--eval", "--print"}),
+    value_letters=frozenset("r"),
+)
+_PERL_FLAGS = _ExecutorFlags(
+    inline_letters=frozenset("eE"), value_letters=frozenset("I")
+)
+_RUBY_FLAGS = _ExecutorFlags(
+    inline_letters=frozenset("e"), value_letters=frozenset("IEC")
+)
+_PHP_FLAGS = _ExecutorFlags(
+    inline_letters=frozenset("rRBE"),
+    value_letters=frozenset("d"),
+    program_file_letters=frozenset("F"),
+)
+_RSCRIPT_FLAGS = _ExecutorFlags(inline_letters=frozenset("e"))
+_AWK_FLAGS = _ExecutorFlags(
+    value_letters=frozenset("vF"),
+    program_file_letters=frozenset("f"),
+    bare_program=True,
+)
+
+#: Fallback for a foreign executor with no entry of its own -- ``csh``,
+#: ``tcsh``, ``fish`` and anything added to :data:`FOREIGN_EXECUTORS` without a
+#: spec. Deliberately broad: a missing letter is a missing ASK floor.
+_DEFAULT_EXECUTOR_FLAGS = _ExecutorFlags(inline_letters=frozenset("cer"))
+
+#: Per-executor flag specs, keyed by basename. Looked up by exact basename
+#: first, then by the interpreter family :func:`_is_foreign_executor`
+#: prefix-matches, so ``python3.13`` and ``pypy3`` reach the python spec.
+_EXECUTOR_FLAGS = {
+    "python": _PYTHON_FLAGS,
+    "pypy": _PYTHON_FLAGS,
+    "node": _NODE_FLAGS,
+    "nodejs": _NODE_FLAGS,
+    "perl": _PERL_FLAGS,
+    "ruby": _RUBY_FLAGS,
+    "php": _PHP_FLAGS,
+    "Rscript": _RSCRIPT_FLAGS,
+    "awk": _AWK_FLAGS,
+    "gawk": _AWK_FLAGS,
 }
 
+#: Commands that run another command given as their arguments, so a foreign
+#: executor after one of these is still executed. Without this list every token
+#: would have to be tried as an executor, which flags ``grep python -c file``.
+#:
+#: KNOWN LIMITATION: a wrapper missing from the list hides the executor behind
+#: it, and one leaf's inline code then gets no ASK floor.
+COMMAND_WRAPPERS: frozenset = frozenset(
+    {
+        "command",
+        "doas",
+        "env",
+        "exec",
+        "nice",
+        "nohup",
+        "npx",
+        "pipenv",
+        "poetry",
+        "stdbuf",
+        "sudo",
+        "time",
+        "timeout",
+        "uv",
+        "uvx",
+        "watch",
+        "xargs",
+    }
+)
+
+#: Matches a ``NAME=value`` assignment prefix, which precedes the command word
+#: rather than being it (``TG_ATTEST_READONLY=1 python -c ...``).
+_ASSIGNMENT_TOKEN_RE: re.Pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
 #: Matches a short-option token that carries, or is, an inline-code flag: an
-#: optional bundle of up to two other short flags, one of the letters
-#: ``c``/``e``/``r``, and an optional payload attached with no separating
-#: space (``-uc``, ``-cimport``, ``-c'code'``).
+#: optional bundle of other short flags, one of the letters ``c``/``e``/``r``,
+#: and an optional payload attached with no separating space (``-uc``,
+#: ``-cimport``, ``-c'code'``). The bundle is lazy so the first matching
+#: letter wins, which is what keeps ``-cimport`` split as ``-c`` + ``import``.
 #:
-#: It is not specific to real inline-code flags: it rejects ``-name`` but
-#: matches ``-recurse`` on an incidental ``r``. :func:`_scan_for_inline_flag`
-#: narrows a match by also requiring the matched letter to be one the executor
-#: in hand actually uses.
-#:
-#: Deliberately shared rather than re-derived: ASK-floor detection and
-#: outer-command extraction must recognise the same flag forms.
-INLINE_FLAG_TOKEN_RE: re.Pattern = re.compile(r"^-([a-zA-Z]{0,2})([cer])(.*)$")
+#: It is not specific to real inline-code flags: it matches ``-name`` on the
+#: trailing ``e``. Used only to find where the flag ends so the payload can be
+#: dropped from the outer-command stub, never to decide the ASK floor.
+INLINE_FLAG_TOKEN_RE: re.Pattern = re.compile(r"^-([a-zA-Z]*?)([cer])(.*)$")
 
 
 def _basename(name: str) -> str:
@@ -219,83 +308,124 @@ def _is_foreign_executor(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _scan_for_inline_flag(remaining: List[str], inline_flags: List[str]) -> bool:
-    """Scan the tokens after a foreign executor for an inline-code flag.
+def _flags_for(name: str) -> _ExecutorFlags:
+    """Return the :class:`_ExecutorFlags` for executor *name*.
 
-    Matches an exact flag (``-c``) or one of the bundled/attached forms
-    :data:`INLINE_FLAG_TOKEN_RE` recognises (``-uc``, ``-cimport``), and
-    stops at the first token that does not start with ``-``: everything past
+    Tries the exact basename, then the interpreter family it belongs to, then
+    :data:`_DEFAULT_EXECUTOR_FLAGS`.
+    """
+    bn = _basename(name)
+    spec = _EXECUTOR_FLAGS.get(bn)
+    if spec is not None:
+        return spec
+    for family, family_spec in _EXECUTOR_FLAGS.items():
+        if bn.startswith(family) and not bn[len(family) :][:1].isalpha():
+            return family_spec
+    return _DEFAULT_EXECUTOR_FLAGS
+
+
+def _executor_index(tokens: List[str]) -> Optional[int]:
+    """Return the index of the foreign executor *tokens* actually runs, or None.
+
+    Only the command word counts, plus a command word reached through
+    ``NAME=value`` assignments and :data:`COMMAND_WRAPPERS` -- so
+    ``timeout 5 python -c`` and ``env X=1 python -c`` are found while
+    ``grep python -c file``, where the interpreter is merely an argument, is
+    not. Everything after a wrapper is searched, since a wrapper's own
+    arguments cannot be told from the command it wraps.
+    """
+    after_wrapper = False
+    for idx, tok in enumerate(tokens):
+        bn = _basename(tok)
+        if _is_foreign_executor(bn):
+            return idx
+        if after_wrapper:
+            continue
+        if bn in COMMAND_WRAPPERS:
+            after_wrapper = True
+            continue
+        if not _ASSIGNMENT_TOKEN_RE.match(tok):
+            return None
+    return None
+
+
+def _scan_for_inline_code(remaining: List[str], spec: _ExecutorFlags) -> bool:
+    """Scan the tokens after a foreign executor for inline code.
+
+    Walks the option list, stepping over a flag whose value is a separate
+    token, and stops at the first token that is neither -- everything past
     that belongs to the script or module being run, not to the interpreter.
     That is what keeps ``python script.py -c foo`` and ``python -m mymod -c
     foo`` at False.
 
-    KNOWN LIMITATION: a flag whose value is a separate token is
-    indistinguishable from a script argument under that rule, so
-    ``python -X dev -c "..."`` also scans as False. Closing it needs a
-    per-executor table of which flags consume the following token.
-
     Args:
         remaining: Tokens following the foreign executor token.
-        inline_flags: The flag strings that denote inline code for this
-            executor, e.g. ``["-c"]``.
+        spec: The executor's flag spec.
 
     Returns:
-        True if an inline-code flag was found before the first non-flag
-        token (or end of input).
+        True if the executor was given inline code.
     """
-    # Bundled/attached forms exist only for single-letter flags, and the
-    # regex knows only c/e/r.
-    inline_letters = {f[1:] for f in inline_flags if len(f) == 2 and f[0] == "-"}
-    for tok in remaining:
-        if tok in inline_flags:
-            return True
-        if not tok.startswith("-"):
-            return False
-        match = INLINE_FLAG_TOKEN_RE.match(tok)
-        if match and match.group(2) in inline_letters:
-            return True
-        # Any other flag (-u, -B, --long) does not end the option list.
+    program_from_file = False
+    idx = 0
+    while idx < len(remaining):
+        tok = remaining[idx]
+        if not tok.startswith("-") or tok == "-":
+            return spec.bare_program and not program_from_file
+        if tok.startswith("--"):
+            if tok.split("=", 1)[0] in spec.inline_long:
+                return True
+            idx += 1
+            continue
+        consumed_next = False
+        for pos, letter in enumerate(tok[1:], start=1):
+            if letter in spec.inline_letters:
+                return True
+            takes_value = letter in spec.value_letters
+            if letter in spec.program_file_letters:
+                program_from_file = True
+                takes_value = True
+            if takes_value:
+                # The value ends the bundle: it is the rest of this token, or
+                # the whole of the next one.
+                consumed_next = pos + 1 == len(tok)
+                break
+        idx += 2 if consumed_next else 1
     return False
 
 
 def _detect_foreign_inline_code(cmd_text: str) -> bool:
-    """Return True if *cmd_text* runs a foreign executor with an inline-code flag.
+    """Return True if *cmd_text* hands a foreign executor a program to run.
 
-    Covers ``python3 -c "..."``, ``node -e "..."``, a wrapped executor
-    (``uv run python -c "..."``), an intervening flag (``python -u -c "..."``)
-    and bundled/attached flags (``python -uc "..."``, ``python -cimport os``).
+    Covers an inline-code flag in every spelling the executor accepts --
+    short, bundled, attached, long and long-with-``=`` -- plus awk's bare
+    program argument, a wrapped executor (``uv run python -c "..."``) and an
+    assignment prefix (``X=1 python -c "..."``).
 
-    Does NOT cover code that reaches an interpreter without a flag: stdin
-    (``cat prog | python``) and awk's bare program argument
-    (``awk '{...}' f``) both return False.
+    Does NOT cover code reaching an interpreter on stdin (``cat prog |
+    python``), or an interpreter behind a wrapper not in
+    :data:`COMMAND_WRAPPERS`.
 
     Args:
         cmd_text: The command text to check.
 
     Returns:
-        True if a foreign executor appears with one of the inline-code flags
-        :data:`_FOREIGN_INLINE_FLAGS` gives it.
+        True if a foreign executor is run with inline code.
     """
     tokens = cmd_text.split()
-    if not tokens:
+    idx = _executor_index(tokens)
+    if idx is None:
         return False
-    for idx, tok in enumerate(tokens):
-        bn = _basename(tok)
-        if not _is_foreign_executor(bn):
-            continue
-        inline_flags = _FOREIGN_INLINE_FLAGS.get(bn, ["-c", "-e", "-r"])
-        if _scan_for_inline_flag(tokens[idx + 1 :], inline_flags):
-            return True
-    return False
+    return _scan_for_inline_code(tokens[idx + 1 :], _flags_for(tokens[idx]))
 
 
 def _detect_bash_dash_c(cmd_text: str) -> Optional[str]:
     """Return the inner bash code if *cmd_text* is ``<bash-family> -c "<bash>"``.
 
-    Only that exact shape is recognised: ``-c`` must be the second token, and
-    the code must be single- or double-quoted. ``bash -x -c '...'`` and
-    ``bash -c $'...'`` both return None, and the leaf then stays undecomposed
-    -- matched whole, with no ASK floor, since bash is not a foreign executor.
+    Only that exact shape is recognised, optionally behind ``NAME=value``
+    assignments: ``-c`` must directly follow the shell, and the code must be
+    single- or double-quoted. ``bash -x -c '...'`` and ``bash -c $'...'`` both
+    return None, and the leaf then stays undecomposed -- matched whole, with
+    no ASK floor, since bash is not a foreign executor.
 
     Args:
         cmd_text: The command text to check.
@@ -303,15 +433,19 @@ def _detect_bash_dash_c(cmd_text: str) -> Optional[str]:
     Returns:
         The unquoted inner bash code, or None if this is not a bash -c pattern.
     """
-    tokens = cmd_text.split(None, 2)
-    if len(tokens) < 3:
+    lead = 0
+    for tok in cmd_text.split():
+        if not _ASSIGNMENT_TOKEN_RE.match(tok):
+            break
+        lead += 1
+    tokens = cmd_text.split(None, lead + 2)
+    if len(tokens) < lead + 3:
         return None
-    bn = _basename(tokens[0])
-    if bn not in BASH_FAMILY:
+    if _basename(tokens[lead]) not in BASH_FAMILY:
         return None
-    if tokens[1] != "-c":
+    if tokens[lead + 1] != "-c":
         return None
-    return _extract_quoted_string(tokens[2])
+    return _extract_quoted_string(tokens[lead + 2])
 
 
 def _extract_quoted_string(text: str) -> Optional[str]:
@@ -376,6 +510,22 @@ def _is_posix_test(text: str) -> bool:
     return t.startswith("[") and t.endswith("]") and not t.startswith("[[")
 
 
+def _condition_results(ctrl: IRControlStructure) -> List[ExtractionResult]:
+    """Extract structured results from a control structure's condition.
+
+    The condition of an if/while/until is a command bash runs, so it goes
+    through the same leaf policy as any other command and can carry the ASK
+    floor. A POSIX ``[ ... ]`` condition is dropped instead -- it is a test,
+    not a command. Empty for a for loop, which has no condition.
+    """
+    cond_text = ctrl.ctrl_condition_text
+    if not cond_text or _is_posix_test(cond_text):
+        return []
+    # Own dedup scope, so a command appearing in both the condition and the
+    # body is emitted for each -- bash runs it in both places.
+    return _apply_leaf_policy(cond_text, set())
+
+
 def _extract_from_body_ir(
     body_stmts_ir: List[IRCompound],
 ) -> List[ExtractionResult]:
@@ -394,19 +544,14 @@ def _extract_from_body_ir(
 def _extract_from_do_loop_ir(ctrl: IRControlStructure) -> List[ExtractionResult]:
     """Extract structured results from a for/while/until :class:`IRControlStructure`.
 
-    Emits the commands of the loop BODY only, and only when the body has no
-    nested control structure and (for while/until) the condition avoids
-    ``[[ ]]``/``(( ))``.
-
-    The loop's own condition contributes NOTHING, even when it is an ordinary
-    command that bash will run -- unlike an if condition, which
-    :func:`_extract_from_if_stmt_ir` does emit. So
-    ``while rm -rf /tmp/x; do :; done`` decomposes to the single leaf ``:``
-    and the ``rm`` is never matched against any rule.
+    Emits a while/until loop's condition command, then the commands of the
+    loop BODY, and only when the body has no nested control structure and the
+    condition avoids ``[[ ]]``/``(( ))``. A for loop's header names a variable
+    and a word list, not a command, so it contributes nothing.
 
     Returns:
-        The body's results, or a single :class:`UndecidableSegment` naming
-        which guard fired.
+        The condition and body results, or a single
+        :class:`UndecidableSegment` naming which guard fired.
     """
     if not ctrl.body_stmts_ir and ctrl.do_clause is None:
         return [
@@ -435,7 +580,7 @@ def _extract_from_do_loop_ir(ctrl: IRControlStructure) -> List[ExtractionResult]
             )
         ]
 
-    return _extract_from_body_ir(ctrl.body_stmts_ir)
+    return _condition_results(ctrl) + _extract_from_body_ir(ctrl.body_stmts_ir)
 
 
 def _extract_from_if_stmt_ir(ctrl: IRControlStructure) -> List[ExtractionResult]:
@@ -475,15 +620,7 @@ def _extract_from_if_stmt_ir(ctrl: IRControlStructure) -> List[ExtractionResult]
             )
         ]
 
-    results: List[ExtractionResult] = []
-
-    cond_text = ctrl.ctrl_condition_text
-    if cond_text and not _is_posix_test(cond_text):
-        results.append(LeafCommand(text=cond_text, ask_floor=False))
-
-    results.extend(_extract_from_body_ir(ctrl.body_stmts_ir))
-
-    return results
+    return _condition_results(ctrl) + _extract_from_body_ir(ctrl.body_stmts_ir)
 
 
 # ---------------------------------------------------------------------------

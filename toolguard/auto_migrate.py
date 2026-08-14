@@ -129,8 +129,30 @@ def run_auto_migration(
                 "Check the migration's backup and settings.local.json, then retry.",
             )
             return False
+        # MigrationOutcome carries no count, and migrate() resolves takeover
+        # mode from the PROJECT'S OWN config, which can disagree with this
+        # call's caller-supplied takeover_config -- so total_divergent (the
+        # pre-analysis above) is not always what migrate() actually wrote.
+        # Re-derive the count against the same source of truth migrate()
+        # itself used, from the pre-migration snapshot already in hand,
+        # rather than claim a number migrate() never confirmed.
+        real_takeover = config.takeover_mode()
+        real_ignored_patterns = []
+        if real_takeover.enabled:
+            real_ignored_patterns = list(real_takeover.ignored_allow_patterns) + list(
+                real_takeover.additional_ignored_patterns
+            )
+        migrated_count = sum(
+            len(patterns)
+            for patterns in find_divergent_patterns(
+                native_perms,
+                toolguard_perms,
+                real_ignored_patterns,
+                governed_tools=set(config.governed_tools()),
+            ).values()
+        )
         report_notice(
-            f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {total_divergent} pattern(s)"
+            f"[TOOLGUARD AUTO-MIGRATION] Successfully migrated {migrated_count} pattern(s)"
         )
         return True
 

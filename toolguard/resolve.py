@@ -102,11 +102,7 @@ def resolve_file_path_permission_detailed(
             additional_context=cap_context_words(
                 _hard_deny_additional_context(config, tool_name, hard.matched_pattern)
             ),
-            # Deliberately left None, unlike the Bash hard-deny path, which
-            # does attribute matched_rule -- populating it would change a
-            # value the golden verdict corpus tracks under "no verdict may
-            # change".
-            matched_rule=None,
+            matched_rule=hard.matched_pattern,
             tool=tool_name,
             target=file_path,
         )

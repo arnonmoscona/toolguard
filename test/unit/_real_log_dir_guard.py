@@ -111,7 +111,11 @@ def _is_real_logs_path(candidate) -> bool:
         return False
     try:
         resolved = Path(candidate).resolve()
-    except TypeError, ValueError, OSError:
+    except (
+        TypeError,
+        ValueError,
+        OSError,
+    ):
         return False
     return resolved == REAL_LOGS_DIR or REAL_LOGS_DIR in resolved.parents
 

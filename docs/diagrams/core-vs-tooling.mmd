@@ -1,0 +1,32 @@
+---
+title: Core runtime vs operator tooling - two halves with different rules
+---
+flowchart TB
+    subgraph TOOL["OPERATOR TOOLING - off the hot path"]
+        direction TB
+        T["toolguard/tools/<br/>maintenance, audit, installer,<br/>analyzers, replay<br/>30 files, 11,752 lines"]
+        NT["ships in the wheel, so bound<br/>by the standard-library rule too<br/>run by a human or a skill,<br/>never by the hook"]
+    end
+
+    subgraph CORE["CORE RUNTIME - on the hot path"]
+        direction TB
+        H["hook.py<br/>one process per tool call"]
+        E["engine + config<br/>43 modules, 23,729 lines<br/>resolution reads, never writes"]
+        NC["standard library only<br/>zero runtime dependencies<br/>every governed path emits a<br/>decision; an unforeseen error denies"]
+        H -->|"imports"| E
+    end
+
+    API["api.decide()<br/>the one decision seam<br/>both halves share"]
+
+    H -->|"imports (--eval)"| API
+    T -->|"imports"| API
+    API -->|"imports the resolvers"| E
+
+    classDef core fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef tool fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    classDef note fill:#ffffff,stroke:#999,stroke-dasharray:4 3,color:#333
+    classDef seam fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    class H,E core
+    class T tool
+    class NC,NT note
+    class API seam

@@ -119,9 +119,11 @@ def log_crash(
     granularity, with a ``-2``, ``-3``, ... suffix on a same-second collision so
     an earlier report is never silently overwritten.
 
-    A failure while writing the report (permissions, disk full, ...) is caught:
-    a short warning goes to stderr and ``None`` is returned, so a caller already
-    handling a failure is not handed a second one.
+    A failure anywhere in that (permissions, disk full, no resolvable home, ...)
+    is caught: a short warning goes to stderr and ``None`` is returned, so a
+    caller already handling a failure is not handed a second one. Every call site
+    is an ``except`` clause that still owes someone an answer, so this function
+    must have no failure mode of its own.
 
     Args:
         exc: The exception instance that was caught. ``type(exc).__name__`` and
@@ -139,9 +141,11 @@ def log_crash(
         The ``Path`` of the crash report written, or ``None`` if writing failed.
     """
     now = datetime.now()
-    errors_dir = Path.home() / ".toolguard" / "errors"
 
     try:
+        # Inside the try: Path.home() raises where no home resolves, and this
+        # runs in callers that must still emit a decision afterwards.
+        errors_dir = Path.home() / ".toolguard" / "errors"
         errors_dir.mkdir(parents=True, exist_ok=True)
 
         base_name = f"toolguard-error-{now.strftime('%Y-%m-%d-%H%M%S')}"

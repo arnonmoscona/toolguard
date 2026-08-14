@@ -42,9 +42,9 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from toolguard import install_provenance
+from toolguard import env_config, install_provenance
 from toolguard.config import Configuration, load_configuration
 
 
@@ -59,9 +59,10 @@ def _parse_session_start_input() -> dict:
         raw = sys.stdin.read()
         if not raw.strip():
             return {}
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:
         return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _recent_conflict_logs(log_dir: Path) -> list:
@@ -275,12 +276,21 @@ def _detect_conflicts(config: Configuration):
     """
     Detect both static and dynamic configuration conflicts.
 
+    The dynamic-conflict scan reads the same log directory the PreToolUse
+    hook writes to (:func:`~toolguard.env_config.get_env_config`, honouring
+    ``TOOLGUARD_LOG_DIR``) rather than assuming ``project_root/logs`` --
+    otherwise setting that variable silently disables the nag.
+
     Returns:
         ``(static_conflict, dynamic_conflict)``; either may be None when no
         conflict of that type exists.
     """
     project_root = config.project_root
-    log_dir = project_root / "logs" if project_root is not None else None
+    log_dir = (
+        env_config.get_env_config(project_root)["log_dir"]
+        if project_root is not None
+        else None
+    )
 
     takeover = config.takeover_mode()
     static_conflict = takeover.conflict  # TakeoverEnabledConflict or None
@@ -379,13 +389,34 @@ def _build_session_start_argparser() -> argparse.ArgumentParser:
     )
 
 
+def _run_checker(label: str, check: Callable[[], object], default: object) -> object:
+    """
+    Run one SessionStart detector, isolating its failure from the others.
+
+    Args:
+        label: Short name for the check, used in the stderr failure message.
+        check: Zero-argument callable to run.
+        default: Value to return if *check* raises.
+
+    Returns:
+        ``check()``'s result, or *default* on any exception (also reported
+        to stderr, naming *label*).
+    """
+    try:
+        return check()
+    except Exception as exc:  # noqa: BLE001 - one checker must not block the rest
+        print(f"toolguard session-start: {label} check failed ({exc})", file=sys.stderr)
+        return default
+
+
 def main() -> None:
     """
     Main entry point for the SessionStart hook.
 
     Reads the SessionStart JSON payload from stdin, runs the checks described
     in this module's docstring, and prints a summary to stdout when any of
-    them fire.
+    them fire. Each check is isolated: one raising does not withhold the
+    others' findings.
     """
     parser = _build_session_start_argparser()
     # parse_known_args(), not parse_args(): this hook takes no arguments, and
@@ -412,10 +443,18 @@ def main() -> None:
         # Loaded once and shared by every _detect_* check below, so they see
         # a consistent snapshot.
         config = load_configuration(cwd)
-        static_conflict, dynamic_conflict = _detect_conflicts(config)
-        broken_files = _detect_broken_config_files(config)
-        shadow_status = _detect_shadow_status(config)
-        unrecognized_fallbacks = _detect_unrecognized_fallbacks(config)
+        static_conflict, dynamic_conflict = _run_checker(
+            "conflict", lambda: _detect_conflicts(config), (None, None)
+        )
+        broken_files = _run_checker(
+            "broken-config", lambda: _detect_broken_config_files(config), ()
+        )
+        shadow_status = _run_checker(
+            "shadow-status", lambda: _detect_shadow_status(config), _EMPTY_SHADOW_STATUS
+        )
+        unrecognized_fallbacks = _run_checker(
+            "fallback", lambda: _detect_unrecognized_fallbacks(config), ()
+        )
 
         if (
             static_conflict is not None
