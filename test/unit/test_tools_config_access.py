@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Optional as _Optional
 from unittest.mock import patch
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config import (
     ConfigLayer,
     Configuration,
@@ -35,40 +36,30 @@ def _write_toml(claude_dir: Path, filename: str, content: str) -> None:
     (claude_dir / filename).write_text(content, encoding="utf-8")
 
 
-class _IsolatedEnvTestCase(unittest.TestCase):
-    """Base: removes CLAUDE_SETTINGS_PATH so hierarchy discovery is not diverted."""
-
-    def setUp(self):
-        """Remove CLAUDE_SETTINGS_PATH for each test."""
-        self._env_patch = patch.dict(os.environ, {}, clear=False)
-        self._env_patch.start()
-        os.environ.pop("CLAUDE_SETTINGS_PATH", None)
-        self.addCleanup(self._env_patch.stop)
-
-
-class TestLoadConfig(_IsolatedEnvTestCase):
+class TestLoadConfig(ConfigIsolationMixin, unittest.TestCase):
     """Tests for config_access.load_config()."""
 
     def test_load_config_returns_configuration(self):
         """
-        Given a minimal project with a toolguard_hook.toml
+        Given an isolated hierarchy whose only config file is the project's
+            toolguard_hook.toml
         When load_config is called with the project directory
-        Then a Configuration object is returned with at least one layer
+        Then the returned Configuration's layers are exactly that one file --
+            not merely non-empty, which the developer's own ~/.claude satisfies
+            on its own
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(ls:*)"]',
-            )
-            config = load_config(proj)
-            self.assertIsNotNone(config)
-            self.assertGreater(len(config.layers), 0)
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(ls:*)"]',
+        )
+        config = load_config(proj)
+        self.assertEqual(
+            [lr.provenance.path for lr in config.layers],
+            [proj / ".claude" / "toolguard_hook.toml"],
+        )
 
     def test_load_config_ignores_env_override(self):
         """
@@ -77,26 +68,22 @@ class TestLoadConfig(_IsolatedEnvTestCase):
         Then the project hierarchy is used, not the env override
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(git:*)"]',
-            )
-            with patch.dict(
-                os.environ,
-                {"CLAUDE_SETTINGS_PATH": "/nonexistent/settings.json"},
-            ):
-                config = load_config(proj)
-            allow, _ = config.allow_deny_for("Bash")
-            self.assertIn("git:*", allow)
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(git:*)"]',
+        )
+        with patch.dict(
+            os.environ,
+            {"CLAUDE_SETTINGS_PATH": "/nonexistent/settings.json"},
+        ):
+            config = load_config(proj)
+        allow, _ = config.allow_deny_for("Bash")
+        self.assertIn("git:*", allow)
 
 
-class TestPerLayerRules(_IsolatedEnvTestCase):
+class TestPerLayerRules(ConfigIsolationMixin, unittest.TestCase):
     """Tests for config_access.per_layer_rules()."""
 
     def test_per_layer_rules_returns_allow_deny_ask(self):
@@ -106,30 +93,25 @@ class TestPerLayerRules(_IsolatedEnvTestCase):
         Then the returned LayerRules carries the correct allow, deny, and ask patterns
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                """
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            """
 [permissions]
 allow = ["Bash(git:*)"]
 deny = ["Bash(rm -rf:*)"]
 ask = ["Bash(sudo:*)"]
 """,
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                layers = per_layer_rules(config, "Bash")
+        )
+        config = load_config(proj)
+        layers = per_layer_rules(config, "Bash")
 
-            self.assertGreater(len(layers), 0)
-            project_layer = layers[0]
-            self.assertIn("git:*", project_layer.allow)
-            self.assertIn("rm -rf:*", project_layer.deny)
-            self.assertIn("sudo:*", project_layer.ask)
+        self.assertGreater(len(layers), 0)
+        project_layer = layers[0]
+        self.assertIn("git:*", project_layer.allow)
+        self.assertIn("rm -rf:*", project_layer.deny)
+        self.assertIn("sudo:*", project_layer.ask)
 
     def test_per_layer_rules_surfaces_structured_ask_entry(self):
         """
@@ -144,87 +126,152 @@ ask = ["Bash(sudo:*)"]
             maintenance/security-audit tooling
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                """
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            """
 [permissions]
 allow = []
 deny = []
 ask = [{ match = "Bash(sudo:*)", additionalContext = "needs review" }]
 """,
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                layers = per_layer_rules(config, "Bash")
+        )
+        config = load_config(proj)
+        layers = per_layer_rules(config, "Bash")
 
-            project_layer = layers[0]
-            self.assertIn("sudo:*", project_layer.ask)
+        project_layer = layers[0]
+        self.assertIn("sudo:*", project_layer.ask)
 
-    def test_per_layer_rules_native_layer_has_no_ask(self):
+    def test_per_layer_rules_surfaces_a_native_ask_rule(self):
         """
-        Given a native Claude settings.json file with allow rules
+        Given a native Claude settings.json holding an ask rule for Bash, which
+            Configuration.permission_layers extracts and the resolver decides on
         When per_layer_rules is called
-        Then the native layer has empty ask list (native settings have no ask concept)
+        Then the native layer's ask tuple carries that rule -- a live rule the
+            tooling view must not hide (proposed ticket CA1: the
+            `not layer.is_native` guard drops it, so the security audit and the
+            maintenance skill cannot see or reconcile it)
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            claude.mkdir(parents=True, exist_ok=True)
-            (claude / "settings.json").write_text(
-                json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}),
-                encoding="utf-8",
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                layers = per_layer_rules(config, "Bash")
+        _home, proj = self.isolate_config_environment()
+        claude = proj / ".claude"
+        claude.mkdir(parents=True, exist_ok=True)
+        (claude / "settings.json").write_text(
+            json.dumps(
+                {
+                    "permissions": {
+                        "allow": ["Bash(ls:*)"],
+                        "ask": ["Bash(git push:*)"],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = load_config(proj)
+        layers = per_layer_rules(config, "Bash")
 
-            native_layers = [
-                lr for lr in layers if lr.provenance.source_type == "claude"
-            ]
-            for lr in native_layers:
-                self.assertEqual((), lr.ask)
+        native_layers = [lr for lr in layers if lr.provenance.source_type == "claude"]
+        self.assertEqual(
+            len(native_layers), 1, "fixture must produce exactly one native layer"
+        )
+        self.assertEqual(
+            ("git push:*",),
+            tuple(tl.ask for tl in config.permission_layers("Bash") if tl.ask)[0],
+            "precondition: Configuration itself extracts the native ask rule",
+        )
+        self.assertIn("git push:*", native_layers[0].ask)
 
     def test_per_layer_rules_multiple_levels_most_specific_first(self):
         """
         Given project-level and user-level configs with different allow patterns
         When per_layer_rules is called
-        Then the first returned layer corresponds to the project level (most specific)
+        Then the project layer comes first and the user layer last
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            proj_claude = proj / ".claude"
-            _write_toml(
-                proj_claude,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(git:*)"]',
-            )
-            user_claude = Path(tmpdir) / ".claude"
-            _write_toml(
-                user_claude,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(ls:*)"]',
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                layers = per_layer_rules(config, "Bash")
+        home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(git:*)"]',
+        )
+        _write_toml(
+            home / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(ls:*)"]',
+        )
+        config = load_config(proj)
+        layers = per_layer_rules(config, "Bash")
 
-            self.assertGreater(len(layers), 1)
-            self.assertIn("git:*", layers[0].allow)
+        self.assertGreater(len(layers), 1)
+        self.assertIn("git:*", layers[0].allow)
+        self.assertIn("ls:*", layers[-1].allow)
+
+    def test_every_discovered_layer_gets_a_layer_rules_entry(self):
+        """
+        Given a two-layer config in which only the user layer names the tool
+        When per_layer_rules is called for that tool
+        Then one LayerRules is returned per discovered layer, in layer order --
+            the project layer present with empty tuples rather than omitted, so
+            a caller can tell "this layer contributes nothing" from "this layer
+            was not examined"
+        """
+
+        home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Read(*.py)"]',
+        )
+        _write_toml(
+            home / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(ls:*)"]',
+        )
+        config = load_config(proj)
+        layers = per_layer_rules(config, "Bash")
+
+        self.assertEqual(
+            [lr.provenance for lr in layers], [lyr.provenance for lyr in config.layers]
+        )
+        self.assertEqual(((), (), ()), (layers[0].allow, layers[0].deny, layers[0].ask))
+        self.assertIn("ls:*", layers[-1].allow)
 
 
-class TestEffectiveTakeover(_IsolatedEnvTestCase):
+class TestPerLayerRulesEqualProvenance(unittest.TestCase):
+    """per_layer_rules' layer lookup when two layers carry an EQUAL Provenance."""
+
+    def test_each_layer_keeps_its_own_rules_under_an_equal_provenance(self):
+        """
+        Given two ConfigLayers whose Provenance objects are equal (a frozen
+            dataclass, so equal field values are one dict key) and which hold
+            different Bash allow rules
+        When per_layer_rules is called
+        Then each returned LayerRules carries its OWN layer's rules -- the
+            defect (proposed ticket CL3) keys the lookup by Provenance, so the
+            second layer overwrites the first and its rules are then reported
+            for BOTH layers: the first layer's rules vanish and the second's are
+            counted twice, which is how one dangerous rule became two CRITICAL
+            findings in the security audit's own fixture (ticket 56)
+        """
+
+        shared = _prov()
+        config = _make_config(
+            _layer_with(shared, allow=["Bash(first:*)"]),
+            _layer_with(shared, allow=["Bash(second:*)"]),
+        )
+        self.assertEqual(
+            [("first:*",), ("second:*",)],
+            [tl.allow for tl in config.permission_layers("Bash")],
+            "precondition: Configuration itself keeps the two layers apart",
+        )
+
+        layers = per_layer_rules(config, "Bash")
+
+        self.assertEqual([("first:*",), ("second:*",)], [lr.allow for lr in layers])
+
+
+class TestEffectiveTakeover(ConfigIsolationMixin, unittest.TestCase):
     """Tests for config_access.effective_takeover()."""
 
     def test_effective_takeover_enabled(self):
@@ -234,21 +281,14 @@ class TestEffectiveTakeover(_IsolatedEnvTestCase):
         Then the returned TakeoverConfig has enabled=True
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                "[takeover_mode]\nenabled = true\n",
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                takeover = effective_takeover(config)
-
-            self.assertTrue(takeover.enabled)
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            "[takeover_mode]\nenabled = true\n",
+        )
+        config = load_config(proj)
+        self.assertTrue(effective_takeover(config).enabled)
 
     def test_effective_takeover_disabled_by_default(self):
         """
@@ -257,24 +297,17 @@ class TestEffectiveTakeover(_IsolatedEnvTestCase):
         Then the returned TakeoverConfig has enabled=False (default off)
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                '[permissions]\nallow = ["Bash(ls:*)"]',
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                takeover = effective_takeover(config)
-
-            self.assertFalse(takeover.enabled)
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            '[permissions]\nallow = ["Bash(ls:*)"]',
+        )
+        config = load_config(proj)
+        self.assertFalse(effective_takeover(config).enabled)
 
 
-class TestConfigSummary(_IsolatedEnvTestCase):
+class TestConfigSummary(ConfigIsolationMixin, unittest.TestCase):
     """Tests for config_access.config_summary()."""
 
     def test_config_summary_reports_sources_and_tools(self):
@@ -284,24 +317,35 @@ class TestConfigSummary(_IsolatedEnvTestCase):
         Then the summary reports the correct governed tools and non-zero source count
         """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            proj = Path(tmpdir) / "proj"
-            proj.mkdir()
-            (proj / ".git").mkdir()
-            claude = proj / ".claude"
-            _write_toml(
-                claude,
-                "toolguard_hook.toml",
-                'governed_tools = ["Bash", "Read"]\n[permissions]\nallow = ["Bash(ls:*)"]',
-            )
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                config = load_config(proj)
-                summary = config_summary(config)
+        _home, proj = self.isolate_config_environment()
+        _write_toml(
+            proj / ".claude",
+            "toolguard_hook.toml",
+            'governed_tools = ["Bash", "Read"]\n[permissions]\nallow = ["Bash(ls:*)"]',
+        )
+        config = load_config(proj)
+        summary = config_summary(config)
 
-            self.assertIn("Bash", summary.governed_tools)
-            self.assertIn("Read", summary.governed_tools)
-            self.assertGreater(summary.layer_count, 0)
-            self.assertGreater(len(summary.sources), 0)
+        self.assertIn("Bash", summary.governed_tools)
+        self.assertIn("Read", summary.governed_tools)
+        self.assertGreater(summary.layer_count, 0)
+        self.assertGreater(len(summary.sources), 0)
+
+    def test_summary_of_an_empty_hierarchy_still_names_the_default_tools(self):
+        """
+        Given a Configuration with no layers at all
+        When config_summary is called
+        Then it reports zero layers and no sources, while governed_tools still
+            names the four built-in defaults -- so the tool list in a summary is
+            not evidence that any config was read (proposed ticket 29's family:
+            a report whose "examined nothing" case looks like its normal one)
+        """
+
+        summary = config_summary(_make_config())
+
+        self.assertEqual(0, summary.layer_count)
+        self.assertEqual((), summary.sources)
+        self.assertEqual(("Bash", "Read", "Write", "Edit"), summary.governed_tools)
 
 
 # ---------------------------------------------------------------------------
@@ -317,12 +361,13 @@ def _prov(
     source_type: str = "toolguard_hook",
     path: str = "/fake/.claude/toolguard_hook.toml",
     specificity: int = 0,
+    file_format: str = "toml",
 ) -> Provenance:
     """Build a Provenance for test use."""
     return Provenance(
         level=level,
         source_type=source_type,
-        file_format="toml",
+        file_format=file_format,
         path=Path(path),
         specificity=specificity,
     )
@@ -335,8 +380,15 @@ def _toolguard_layer(
     specificity: int = 0,
     takeover_enabled: _Optional[bool] = None,
     ignored_allow_patterns: _Optional[list] = None,
+    path: str = "/fake/.claude/toolguard_hook.toml",
 ) -> ConfigLayer:
-    """Build a toolguard_hook ConfigLayer."""
+    """
+    Build a toolguard_hook ConfigLayer.
+
+    Pass a distinct ``path`` for every layer in a multi-layer fixture:
+    ``Provenance`` is a frozen dataclass, so two layers built from the same
+    arguments compare equal and collapse into one key in per_layer_rules.
+    """
     content: dict = {}
     perms: dict = {}
     if allow is not None:
@@ -355,14 +407,32 @@ def _toolguard_layer(
     if takeover_section:
         content["takeover_mode"] = takeover_section
     return ConfigLayer(
-        provenance=_prov(specificity=specificity),
+        provenance=_prov(specificity=specificity, path=path),
         content=MappingProxyType(content),
+    )
+
+
+def _layer_with(
+    provenance: Provenance,
+    allow: _Optional[list] = None,
+    deny: _Optional[list] = None,
+    ask: _Optional[list] = None,
+) -> ConfigLayer:
+    """Build a ConfigLayer with a caller-supplied Provenance."""
+    perms: dict = {}
+    for name, value in (("allow", allow), ("deny", deny), ("ask", ask)):
+        if value is not None:
+            perms[name] = value
+    return ConfigLayer(
+        provenance=provenance,
+        content=MappingProxyType({"permissions": perms} if perms else {}),
     )
 
 
 def _native_layer(
     allow: _Optional[list] = None,
     specificity: int = 1,
+    path: str = "/fake/.claude/settings.local.json",
 ) -> ConfigLayer:
     """Build a native Claude settings ConfigLayer."""
     content: dict = {}
@@ -372,8 +442,9 @@ def _native_layer(
         provenance=_prov(
             level="project",
             source_type="claude",
-            path="/fake/.claude/settings.local.json",
+            path=path,
             specificity=specificity,
+            file_format="json",
         ),
         content=MappingProxyType(content),
     )
@@ -435,8 +506,10 @@ class TestDiscoverTools(unittest.TestCase):
         Then both tools appear exactly once (de-duplication)
         """
 
-        layer1 = _toolguard_layer(allow=["Bash(ls:*)", "Read(*.py)"])
-        layer2 = _toolguard_layer(allow=["Bash(git:*)"])
+        layer1 = _toolguard_layer(
+            allow=["Bash(ls:*)", "Read(*.py)"], path="/fake/a.toml"
+        )
+        layer2 = _toolguard_layer(allow=["Bash(git:*)"], path="/fake/b.toml")
         config = _make_config(layer1, layer2)
         tools = discover_tools(config)
         self.assertIn("Bash", tools)
@@ -496,6 +569,35 @@ class TestDiscoverTools(unittest.TestCase):
         tools = discover_tools(config)
         self.assertIn("Bash", tools)
 
+    def test_unclosed_tool_wrapper_names_no_tool(self):
+        """
+        Given an allow rule whose tool wrapper is unclosed ('Bash(ls:*') --
+            accepted verbatim by normalize_entry, which does not validate the
+            wrapper -- alongside a well-formed Read rule
+        When discover_tools is called
+        Then only 'Read' is returned: without the closing-paren check the
+            malformed rule would name a tool for a pattern body that was never
+            written ('ls:' -- the slice drops the last character)
+        """
+
+        layer = _toolguard_layer(allow=["Bash(ls:*", "Read(*.py)"])
+        tools = discover_tools(_make_config(layer))
+        self.assertEqual(("Read",), tools)
+
+    def test_non_dict_permissions_section_yields_no_tools(self):
+        """
+        Given a layer whose [permissions] value is a list rather than a table
+        When discover_tools is called
+        Then it returns an empty tuple instead of raising -- one mistyped
+            section must not abort a whole tooling run
+        """
+
+        layer = ConfigLayer(
+            provenance=_prov(),
+            content=MappingProxyType({"permissions": ["Bash(ls:*)"]}),
+        )
+        self.assertEqual((), discover_tools(_make_config(layer)))
+
 
 # ---------------------------------------------------------------------------
 # Tests for neutralized_by_takeover
@@ -514,11 +616,16 @@ class TestNeutralizedByTakeover(unittest.TestCase):
             no_match_fallback="deny",
         )
 
-    def _takeover_off(self) -> TakeoverConfig:
-        """Build a TakeoverConfig with takeover disabled."""
+    def _takeover_off(self, ignored: list) -> TakeoverConfig:
+        """
+        Build a disabled TakeoverConfig that still CARRIES ignored patterns.
+
+        An empty ignored tuple would make ``enabled`` unobservable: the pattern
+        would fail the membership test either way.
+        """
         return TakeoverConfig(
             enabled=False,
-            ignored_allow_patterns=(),
+            ignored_allow_patterns=tuple(ignored),
             additional_ignored_patterns=(),
             no_match_fallback="deny",
         )
@@ -536,12 +643,19 @@ class TestNeutralizedByTakeover(unittest.TestCase):
 
     def test_false_when_takeover_disabled(self):
         """
-        Given takeover disabled (enabled=False), native pattern in what would be ignored
+        Given takeover disabled (enabled=False) and a native pattern that IS in
+            the config's ignored set, so only the enabled flag separates this
+            from the neutralized case
         When neutralized_by_takeover is called
         Then False is returned (takeover is OFF)
         """
 
-        takeover = self._takeover_off()
+        takeover = self._takeover_off(["Bash(*)"])
+        self.assertIn(
+            "*",
+            takeover.normalized_ignored_patterns(),
+            "fixture must carry the pattern, or `enabled` is unobservable",
+        )
         result = neutralized_by_takeover("*", is_native=True, takeover=takeover)
         self.assertFalse(result)
 
@@ -718,23 +832,120 @@ class TestAuditContext(unittest.TestCase):
 
     def test_neutralized_allow_patterns_is_sorted_and_deduped(self):
         """
-        Given a config with multiple tools having the same native blanket allow under takeover
+        Given two native layers under takeover whose ignored allow rules yield
+            three DISTINCT pattern bodies, one of them written in both layers
+            and one sorting before the others
         When audit_context is called
-        Then neutralized_allow_patterns is sorted and contains no duplicates
+        Then neutralized_allow_patterns is exactly the sorted, de-duplicated
+            tuple of bodies -- 'Bash(*)' and 'Read(*)' collapsing to a single
+            '*' is documented behaviour and cannot on its own show either
+            property
+        """
+
+        ignored = [
+            "Bash(*)",
+            "Read(*)",
+            "Write(/tmp/**)",
+            "Bash(cd:*)",
+            "Bash(zzz:*)",
+            "Bash(aaa:*)",
+        ]
+        tg_layer = _toolguard_layer(
+            allow=["Bash(ls:*)"],
+            takeover_enabled=True,
+            ignored_allow_patterns=ignored,
+        )
+        native_a = _native_layer(
+            allow=["Bash(*)", "Write(/tmp/**)", "Bash(zzz:*)"], path="/fake/a.json"
+        )
+        native_b = _native_layer(
+            allow=["Read(*)", "Bash(cd:*)", "Bash(aaa:*)"],
+            path="/fake/b.json",
+            specificity=2,
+        )
+        config = _make_config(tg_layer, native_a, native_b)
+        ctx = audit_context(config)
+        self.assertEqual(
+            ("*", "/tmp/**", "aaa:*", "cd:*", "zzz:*"), ctx.neutralized_allow_patterns
+        )
+
+    def test_only_native_allow_patterns_are_reported_neutralized(self):
+        """
+        Given takeover mode whose ignored set names both a native allow body and
+            a body written ONLY in the toolguard_hook layer
+        When audit_context is called
+        Then only the native body is reported: takeover strips native layers,
+            and a toolguard rule is never silently dropped, so reporting it as
+            neutralized would tell the user a live rule is dead
         """
 
         tg_layer = _toolguard_layer(
-            allow=["Bash(ls:*)", "Read(*.txt)"],
+            allow=["Bash(hook-only:*)"],
             takeover_enabled=True,
-            ignored_allow_patterns=["Bash(*)", "Read(*)"],
+            ignored_allow_patterns=["Bash(*)", "Bash(hook-only:*)"],
         )
-        native = _native_layer(allow=["Bash(*)", "Read(*)"])
-        config = _make_config(tg_layer, native)
-        ctx = audit_context(config)
-        pats = list(ctx.neutralized_allow_patterns)
-        self.assertEqual(
-            pats, sorted(set(pats)), "Patterns should be sorted and unique"
+        native = _native_layer(allow=["Bash(*)"])
+        ctx = audit_context(_make_config(tg_layer, native))
+        self.assertEqual(("*",), ctx.neutralized_allow_patterns)
+
+    def test_layer_context_carries_the_layer_s_rule_comments(self):
+        """
+        Given a layer whose provenance points at a real TOML file carrying a
+            '# NOSECURITY: audited' comment on its Bash allow rule
+        When audit_context is called
+        Then the Bash LayerContext for that layer carries the RuleComment, with
+            the reason recovered -- the audit's whole acknowledge-not-hide path
+            runs through this field
+        """
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(
+                "[permissions]\nallow = [\n    'Bash(node:*)',  # NOSECURITY: audited\n]\n",
+                encoding="utf-8",
+            )
+            layer = _layer_with(_prov(path=str(path)), allow=["Bash(node:*)"])
+            ctx = audit_context(_make_config(layer))
+
+            bash_tool = next(tc for tc in ctx.tools if tc.tool == "Bash")
+            comments = bash_tool.layers[0].comments
+            self.assertEqual(
+                ["node:*"], [c.pattern for c in comments], "expected one RuleComment"
+            )
+            self.assertEqual("audited", comments[0].nosecurity_reason())
+
+
+class TestTakeoverFilteredView(unittest.TestCase):
+    """The filtered per-layer view vs. the raw layer content, under takeover mode."""
+
+    def test_a_neutralized_native_allow_leaves_the_hook_copy_as_the_only_live_one(self):
+        """
+        Given takeover mode ignoring 'Bash(*)', a native layer allowing 'Bash(*)'
+            and a toolguard_hook layer allowing both 'Bash(*)' and 'Bash(ls:*)'
+        When per_layer_rules is called
+        Then the native layer's allow tuple is empty while the hook layer keeps
+            '*', even though the native file's raw content still holds it --
+            the live blanket allow belongs to the hook layer alone. Proposed
+            ticket 22 (RD2) is what happens when a consumer re-finds the owning
+            layer by searching raw content instead: it strips the dead native
+            copy and reports the finding against the hook layer.
+        """
+
+        native = _native_layer(allow=["Bash(*)"])
+        hook = _toolguard_layer(
+            allow=["Bash(*)", "Bash(ls:*)"],
+            takeover_enabled=True,
+            ignored_allow_patterns=["Bash(*)"],
         )
+        config = _make_config(hook, native)
+
+        by_source = {
+            lr.provenance.source_type: lr for lr in per_layer_rules(config, "Bash")
+        }
+        self.assertEqual((), by_source["claude"].allow)
+        self.assertEqual(("*", "ls:*"), by_source["toolguard_hook"].allow)
+        self.assertEqual(["Bash(*)"], list(native.content["permissions"]["allow"]))
+        self.assertEqual(("*",), audit_context(config).neutralized_allow_patterns)
 
 
 class TestRuleCommentExposure(unittest.TestCase):
@@ -748,6 +959,8 @@ class TestRuleCommentExposure(unittest.TestCase):
         "    'Bash(ruby:*)',\n"
         "    'Bash(git:*)',\n"
         "    'Bash([regex]^ls#notacomment)',\n"
+        "    'Read(/etc/**)',  # NOSECURITY: another tool entirely\n"
+        "    'Bash(cat:*',  # NOSECURITY: unclosed wrapper\n"
         "]\n"
         "deny = []\n"
         "ask = []\n"
@@ -810,31 +1023,80 @@ class TestRuleCommentExposure(unittest.TestCase):
         """
         Given an allow rule whose regex body contains a '#'
         ('Bash([regex]^ls#notacomment)') but no trailing comment
-        When nosecurity_reason_for is called for that rule
-        Then it returns None (the '#' inside the quoted pattern is not a comment)
+        When the layer's comments are recovered
+        Then no comment is recorded for that rule at all: the '#' inside the
+        quoted pattern is not a comment start, so the rule is as uncommented as
+        'Bash(git:*)' beside it
         """
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "toolguard_hook.toml"
             path.write_text(self._TOML, encoding="utf-8")
+            patterns = {
+                c.pattern for c in rule_comments_for_tool(self._prov(path), "Bash")
+            }
+            self.assertNotIn("[regex]^ls#notacomment", patterns)
             self.assertIsNone(
                 nosecurity_reason_for(
                     self._prov(path), "allow", "Bash", "[regex]^ls#notacomment"
                 )
             )
 
-    def test_native_json_layer_has_no_comments(self):
+    def test_unclosed_tool_wrapper_is_not_split_into_a_tool(self):
         """
-        Given a layer whose provenance file_format is 'json' (native settings)
-        When nosecurity_reason_for is called
-        Then it returns None without reading any file (JSON carries no comments)
+        Given a commented allow rule whose tool wrapper is unclosed
+        ("Bash(cat:*")
+        When the layer's comments are recovered
+        Then the comment is keyed under the whole unsplit pattern with an empty
+        tool -- splitting on the '(' alone would file it under 'Bash' with the
+        body 'cat:', a pattern nobody wrote
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            self.assertNotIn(
+                "cat:",
+                {c.pattern for c in rule_comments_for_tool(self._prov(path), "Bash")},
+            )
+            self.assertEqual(
+                "unclosed wrapper",
+                nosecurity_reason_for(self._prov(path), "allow", "", "Bash(cat:*"),
+            )
+
+    def test_comments_are_recovered_only_for_the_requested_tool(self):
+        """
+        Given a TOML layer with commented rules for both Bash and Read
+        When rule_comments_for_tool is called for 'Bash'
+        Then the Read rule's comment is absent from the result
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(self._TOML, encoding="utf-8")
+            bash = {c.pattern for c in rule_comments_for_tool(self._prov(path), "Bash")}
+            read = {c.pattern for c in rule_comments_for_tool(self._prov(path), "Read")}
+            self.assertNotIn("/etc/**", bash)
+            self.assertEqual({"/etc/**"}, read)
+
+    def test_a_json_layer_is_not_comment_parsed_even_when_its_bytes_are_toml(self):
+        """
+        Given a layer declared file_format='json' whose file nevertheless holds
+        a TOML [permissions] section with a '# NOSECURITY: bait' comment
+        When nosecurity_reason_for is called for that rule
+        Then it returns None: the declared format decides, so a native settings
+        file is never comment-parsed on the strength of its content
         """
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "settings.local.json"
-            path.write_text("{}", encoding="utf-8")
+            path.write_text(
+                "[permissions]\nallow = [\n    'Bash(node:*)',  # NOSECURITY: bait\n]\n",
+                encoding="utf-8",
+            )
             self.assertIsNone(
                 nosecurity_reason_for(
                     self._prov(path, file_format="json"), "allow", "Bash", "node:*"
                 )
+            )
+            self.assertEqual(
+                (), rule_comments_for_tool(self._prov(path, file_format="json"), "Bash")
             )
 
     def test_missing_file_degrades_to_no_reason(self):
@@ -870,17 +1132,25 @@ class TestRuleCommentExposure(unittest.TestCase):
 
     def test_rule_comment_nosecurity_reason_variants(self):
         """
-        Given RuleComment instances with an inline reason, a bare inline tag, and
-        no tag
+        Given RuleComment instances with an inline reason, a bare inline tag, no
+        tag, and one tagged in BOTH the leading block and the inline comment
         When nosecurity_reason is called on each
-        Then it returns the reason, '', and None respectively (inline preferred)
+        Then it returns the reason, '', and None respectively, and for the last
+        the INLINE reason -- the more specific of the two
         """
         with_reason = RuleComment("allow", "node:*", "", "# NOSECURITY: because dev")
         bare = RuleComment("allow", "ruby:*", "# NOSECURITY", "")
         untagged = RuleComment("allow", "git:*", "# just a note", "# trailing note")
+        both = RuleComment(
+            "allow",
+            "gh:*",
+            "# NOSECURITY: from the block",
+            "# NOSECURITY: from the line",
+        )
         self.assertEqual(with_reason.nosecurity_reason(), "because dev")
         self.assertEqual(bare.nosecurity_reason(), "")
         self.assertIsNone(untagged.nosecurity_reason())
+        self.assertEqual(both.nosecurity_reason(), "from the line")
 
 
 class TestRuleCommentExposureStructuredEntries(unittest.TestCase):
@@ -980,13 +1250,15 @@ class TestRuleCommentExposureStructuredEntries(unittest.TestCase):
         """
         Given a single-line structured entry whose 'additionalContext' value itself
         contains a '#' ('see issue #42') and no real trailing comment
-        When nosecurity_reason_for is called for that rule's pattern
-        Then it returns None -- the '#' inside the quoted value is never mistaken
-        for a comment start
+        When the layer's comments are recovered
+        Then no comment is recorded for the entry at all, and its
+        nosecurity_reason_for is None -- the '#' inside the quoted value is
+        never mistaken for a comment start
         """
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "toolguard_hook.toml"
             path.write_text(self._SINGLE_LINE_HASH_IN_VALUE, encoding="utf-8")
+            self.assertEqual((), rule_comments_for_tool(self._prov(path), "Bash"))
             self.assertIsNone(
                 nosecurity_reason_for(self._prov(path), "allow", "Bash", "git status")
             )

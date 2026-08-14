@@ -1,16 +1,23 @@
 """Unit tests for toolguard.tools.replay."""
 
+import contextlib
+import io
 import unittest
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
+from toolguard.api import decide
 from toolguard.config import (
     ConfigLayer,
     Configuration,
     Provenance,
 )
+from toolguard.config_types import RuntimeVerdict
+from toolguard.tools import replay as replay_module
 from toolguard.tools.log_harvest import LogEntry
+from toolguard.tools.replay import classify_change, replay, replay_single
 
 
 def _make_config(layers_content):
@@ -69,7 +76,7 @@ class TestClassifyChange(unittest.TestCase):
         self.assertEqual("unchanged", classify_change("deny", "deny"))
         self.assertEqual("unchanged", classify_change("ask", "ask"))
 
-    def test_broadened_allow_to_deny_is_wrong_direction(self):
+    def test_broadened_deny_to_allow(self):
         """
         Given verdict_a='deny' and verdict_b='allow' (B is looser)
         When classify_change is called
@@ -109,7 +116,7 @@ class TestClassifyChange(unittest.TestCase):
 
         self.assertEqual("tightened", classify_change("allow", "ask"))
 
-    def test_tightened_deny_to_ask(self):
+    def test_tightened_ask_to_deny(self):
         """
         Given verdict_a='ask' and verdict_b='deny' (B is stricter)
         When classify_change is called
@@ -670,3 +677,494 @@ class TestReplaySingleConfig(unittest.TestCase):
         )
         results = replay_single([], config)
         self.assertEqual([], results)
+
+
+_SIMPLE_ALLOW = _make_config(
+    [
+        (
+            "project",
+            "toolguard_hook",
+            {"permissions": {"allow": ["Bash(git:*)"], "deny": []}},
+        )
+    ]
+)
+
+
+class TestReplayOverAnEmptyCorpus(unittest.TestCase):
+    """What a replay reports when it evaluated nothing at all."""
+
+    def test_a_replay_that_evaluated_nothing_reports_zero_entries(self):
+        """
+        Given an empty corpus
+        When replay is called
+        Then every bucket is empty and total_count is 0 -- the run is reported
+            as having covered nothing, not as a clean run
+        """
+        diff = replay([], config_a=_SIMPLE_ALLOW, config_b=_SIMPLE_ALLOW)
+
+        self.assertEqual(0, diff.total_count)
+        self.assertEqual([], diff.diffs)
+        self.assertEqual([], diff.broadened())
+        self.assertEqual([], diff.tightened())
+        self.assertEqual([], diff.unchanged())
+        self.assertEqual(0, diff.broadened_count)
+        self.assertEqual(0, diff.tightened_count)
+        self.assertEqual(0, diff.unchanged_count)
+
+    def test_only_the_entry_count_separates_nothing_replayed_from_nothing_changed(self):
+        """
+        Given an empty corpus and a corpus whose decisions all stay the same
+        When both are replayed against the same pair of configs
+        Then the two runs agree on every 'did anything change' signal, and
+            total_count is the only field that tells them apart -- so a caller
+            reading broadened_count alone cannot tell that nothing was evaluated
+        """
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": ["Bash(curl:*)"],
+                        }
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)"],
+                            "deny": ["Bash(curl:*)"],
+                        }
+                    },
+                )
+            ]
+        )
+        corpus = [_make_bash_entry("git status"), _make_bash_entry("git log")]
+
+        empty = replay([], config_a=config_a, config_b=config_b)
+        populated = replay(corpus, config_a=config_a, config_b=config_b)
+
+        for name in ("broadened_count", "tightened_count"):
+            self.assertEqual(getattr(empty, name), getattr(populated, name))
+        self.assertEqual(empty.broadened(), populated.broadened())
+        self.assertEqual(empty.tightened(), populated.tightened())
+
+        self.assertEqual(0, empty.total_count)
+        self.assertEqual(len(corpus), populated.total_count)
+
+
+class TestReplayCoversTheWholeCorpus(unittest.TestCase):
+    """Every entry handed in is evaluated, and the counts say so."""
+
+    def test_every_entry_is_replayed_including_ones_that_do_not_parse(self):
+        """
+        Given a corpus mixing ordinary commands with a multiline heredoc, an
+            empty command, and a command the bash grammar cannot parse
+        When replay is called
+        Then one diff is produced per corpus entry, in corpus order, each
+            carrying the very LogEntry object it was built from -- nothing is
+            silently dropped for being unparseable
+        """
+        corpus = [
+            _make_bash_entry("git status"),
+            _make_bash_entry("python <<'PY'\nprint(1)\nPY"),
+            _make_bash_entry(""),
+            _make_bash_entry("git status |"),
+            _make_file_entry("Read", "/tmp/tg-replay-test/a.py"),
+        ]
+
+        # The grammar reports its parse failures through the error reporter,
+        # which falls back to stderr when no Reporter is installed.
+        with contextlib.redirect_stderr(io.StringIO()):
+            diff = replay(corpus, config_a=_SIMPLE_ALLOW, config_b=_SIMPLE_ALLOW)
+
+        self.assertEqual(len(corpus), diff.total_count)
+        self.assertEqual(len(corpus), len(diff.diffs))
+        for expected_entry, actual in zip(corpus, diff.diffs):
+            self.assertIs(expected_entry, actual.entry)
+            self.assertIn(actual.decision_a.decision, ("allow", "ask", "deny"))
+
+    def test_the_summary_counts_account_for_exactly_the_entries_replayed(self):
+        """
+        Given a corpus with repeated commands that broaden, tighten and stay put
+        When replay is called
+        Then each summary count equals the length of its own bucket, and the
+            three sum to total_count -- the counts cannot drift from what the
+            loop actually classified
+        """
+        config_a = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": ["Bash(curl:*)"],
+                        }
+                    },
+                )
+            ]
+        )
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(curl:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        corpus = [
+            _make_bash_entry("git status"),
+            _make_bash_entry("git status"),
+            _make_bash_entry("ls -la"),
+            _make_bash_entry("curl http://x.com"),
+            _make_bash_entry("curl http://y.com"),
+        ]
+        diff = replay(corpus, config_a=config_a, config_b=config_b)
+
+        self.assertEqual(len(corpus), diff.total_count)
+        self.assertEqual(len(diff.unchanged()), diff.unchanged_count)
+        self.assertEqual(len(diff.tightened()), diff.tightened_count)
+        self.assertEqual(len(diff.broadened()), diff.broadened_count)
+        self.assertEqual(
+            diff.total_count,
+            diff.unchanged_count + diff.tightened_count + diff.broadened_count,
+        )
+        self.assertEqual(2, diff.unchanged_count)
+        self.assertEqual(1, diff.tightened_count)
+        self.assertEqual(2, diff.broadened_count)
+
+    def test_the_total_counts_recorded_entries_not_the_summary_counters(self):
+        """
+        Given a ReplayDiff holding one entry but counters claiming ninety-nine
+        When total_count is read
+        Then it reports 1 -- the total comes from the entries actually recorded,
+            so an inflated counter cannot inflate the reported coverage
+        """
+        one = replay(
+            [_make_bash_entry("git status")],
+            config_a=_SIMPLE_ALLOW,
+            config_b=_SIMPLE_ALLOW,
+        ).diffs[0]
+        inflated = replay_module.ReplayDiff(
+            diffs=[one], unchanged_count=99, tightened_count=99, broadened_count=99
+        )
+
+        self.assertEqual(1, inflated.total_count)
+
+
+class TestReplayUsesTheDecisionEngine(unittest.TestCase):
+    """The replayed verdicts come from toolguard.api.decide, not a re-derivation."""
+
+    def _spy(self, decision_for_config):
+        """Return a (spy, calls, returned) triple standing in for the decision engine."""
+        calls = []
+        returned = []
+
+        def spy(config, tool, target, extended_syntax=True):
+            calls.append((config, tool, target, extended_syntax))
+            verdict = RuntimeVerdict(
+                decision=decision_for_config(config),
+                reason="stub verdict",
+                matched_rule="stub rule",
+                tool=tool,
+                target=target,
+            )
+            returned.append(verdict)
+            return verdict
+
+        return spy, calls, returned
+
+    def test_each_diff_carries_the_verdict_object_the_engine_returned(self):
+        """
+        Given a decision engine replaced by a stub returning identifiable verdicts
+        When replay is called
+        Then each EntryDiff holds the exact objects the stub returned for that
+            entry under config A and config B, and the classification follows
+            from those verdicts
+        """
+        config_a = _SIMPLE_ALLOW
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {"permissions": {"allow": [], "deny": ["Bash(git:*)"]}},
+                )
+            ]
+        )
+        corpus = [_make_bash_entry("git status"), _make_file_entry("Read", "/tmp/a.py")]
+        spy, calls, returned = self._spy(
+            lambda cfg: "allow" if cfg is config_a else "deny"
+        )
+
+        with patch.object(replay_module, "decide", spy):
+            diff = replay(corpus, config_a=config_a, config_b=config_b)
+
+        self.assertEqual(2 * len(corpus), len(calls))
+        self.assertEqual(2 * len(corpus), len(returned))
+        self.assertIs(returned[0], diff.diffs[0].decision_a)
+        self.assertIs(returned[1], diff.diffs[0].decision_b)
+        self.assertIs(returned[2], diff.diffs[1].decision_a)
+        self.assertIs(returned[3], diff.diffs[1].decision_b)
+        self.assertEqual(
+            ["tightened", "tightened"], [d.classification for d in diff.diffs]
+        )
+
+    def test_the_engine_is_asked_about_each_entry_under_both_configs(self):
+        """
+        Given a stubbed decision engine and extended_syntax turned off
+        When replay is called
+        Then the engine is called once per entry per config, with that entry's
+            own tool and command and the caller's extended_syntax value
+        """
+        config_a = _SIMPLE_ALLOW
+        config_b = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(git:*)", "Bash(ls:*)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        corpus = [
+            _make_bash_entry("git status"),
+            _make_file_entry("Write", "/tmp/a.py"),
+        ]
+        spy, calls, _returned = self._spy(lambda cfg: "allow")
+
+        with patch.object(replay_module, "decide", spy):
+            replay(corpus, config_a=config_a, config_b=config_b, extended_syntax=False)
+
+        expected = [
+            (config_a, corpus[0]),
+            (config_b, corpus[0]),
+            (config_a, corpus[1]),
+            (config_b, corpus[1]),
+        ]
+        self.assertEqual(len(expected), len(calls))
+        for (want_config, want_entry), (got_config, tool, target, ext) in zip(
+            expected, calls
+        ):
+            self.assertIs(want_config, got_config)
+            self.assertEqual(want_entry.tool, tool)
+            self.assertEqual(want_entry.command, target)
+            self.assertFalse(ext)
+
+    def test_a_replayed_verdict_carries_the_engine_attribution(self):
+        """
+        Given a config whose allow rule decides the corpus command
+        When replay is called against the real decision engine
+        Then the verdict is the one a direct decide() call produces, carrying
+            the deciding rule, its provenance, and the tool/target evaluated --
+            not a bare decision string re-derived by the replay itself
+        """
+        corpus = [_make_bash_entry("git status")]
+        diff = replay(corpus, config_a=_SIMPLE_ALLOW, config_b=_SIMPLE_ALLOW)
+        verdict = diff.diffs[0].decision_a
+
+        self.assertEqual(decide(_SIMPLE_ALLOW, "Bash", "git status", True), verdict)
+        self.assertEqual("git:*", verdict.matched_rule)
+        self.assertIsNotNone(verdict.provenance)
+        self.assertEqual("Bash", verdict.tool)
+        self.assertEqual("git status", verdict.target)
+
+    def test_entries_are_routed_by_their_own_tool(self):
+        """
+        Given a config that allows a path under a Read rule only
+        When a Read entry and a Bash entry for the same target text are replayed
+        Then the Read entry is allowed by the file-path rule and the Bash entry
+            is not, and each verdict names the tool it was evaluated as
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read([glob]/tmp/tg-replay-test/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        target = "/tmp/tg-replay-test/a.py"
+        corpus = [
+            _make_file_entry("Read", target),
+            _make_bash_entry(target),
+        ]
+        diff = replay(corpus, config_a=config, config_b=config)
+
+        self.assertEqual("allow", diff.diffs[0].decision_a.decision)
+        self.assertEqual("Read", diff.diffs[0].decision_a.tool)
+        self.assertNotEqual("allow", diff.diffs[1].decision_a.decision)
+        self.assertEqual("Bash", diff.diffs[1].decision_a.tool)
+
+    def test_extended_syntax_is_honoured_only_when_asked_for(self):
+        """
+        Given a config whose only allow rule uses the [regex] prefix
+        When the same corpus is replayed with extended_syntax on and then off
+        Then the command is allowed with it on and unmatched with it off
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {"permissions": {"allow": ["Bash([regex]^git .*$)"], "deny": []}},
+                )
+            ]
+        )
+        corpus = [_make_bash_entry("git status")]
+
+        on = replay(corpus, config_a=config, config_b=config, extended_syntax=True)
+        off = replay(corpus, config_a=config, config_b=config, extended_syntax=False)
+
+        self.assertEqual("allow", on.diffs[0].decision_a.decision)
+        self.assertNotEqual("allow", off.diffs[0].decision_a.decision)
+        self.assertNotEqual("allow", off.diffs[0].decision_b.decision)
+
+
+class TestReplaySingleCorrespondence(unittest.TestCase):
+    """replay_single's results line up with the corpus it was given."""
+
+    def test_results_correspond_to_the_corpus_entries_in_order(self):
+        """
+        Given a corpus of three distinct commands
+        When replay_single is called
+        Then result i carries corpus entry i itself, and its verdict names that
+            entry's own command as the target
+        """
+        corpus = [
+            _make_bash_entry("git status"),
+            _make_bash_entry("whoami", status="REFUSED"),
+            _make_file_entry("Read", "/tmp/tg-replay-test/b.py"),
+        ]
+        results = replay_single(corpus, _SIMPLE_ALLOW)
+
+        self.assertEqual(len(corpus), len(results))
+        for entry, result in zip(corpus, results):
+            self.assertIs(entry, result.entry)
+            self.assertEqual(entry.command, result.decision.target)
+
+    def test_extended_syntax_is_honoured_only_when_asked_for(self):
+        """
+        Given a config whose only allow rule uses the [regex] prefix
+        When the same entry is replayed with extended_syntax on and then off
+        Then the command is allowed with it on and unmatched with it off
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {"permissions": {"allow": ["Bash([regex]^git .*$)"], "deny": []}},
+                )
+            ]
+        )
+        corpus = [_make_bash_entry("git status")]
+
+        on = replay_single(corpus, config, extended_syntax=True)
+        off = replay_single(corpus, config, extended_syntax=False)
+
+        self.assertEqual("allow", on[0].decision.decision)
+        self.assertNotEqual("allow", off[0].decision.decision)
+
+
+class TestVerdictCorroboration(unittest.TestCase):
+    """What replay_single's matches_observed does and does not claim."""
+
+    def _matches(self, command, status):
+        """Replay one entry against a git-only allow config and report corroboration."""
+        entry = _make_bash_entry(command, status=status)
+        result = replay_single([entry], _SIMPLE_ALLOW)[0]
+        return result.decision.decision, result.matches_observed
+
+    def test_an_allow_verdict_does_not_corroborate_a_refused_log_line(self):
+        """
+        Given a command the log records as REFUSED that the config now allows
+        When replay_single is called
+        Then the verdict is 'allow' and matches_observed is False
+        """
+        self.assertEqual(("allow", False), self._matches("git status", "REFUSED"))
+
+    def test_an_ask_verdict_does_not_corroborate_an_executed_log_line(self):
+        """
+        Given a command the log records as EXECUTED that the config no longer allows
+        When replay_single is called
+        Then the verdict is 'ask' and matches_observed is False
+        """
+        self.assertEqual(("ask", False), self._matches("whoami", "EXECUTED"))
+
+    def test_an_unrecognised_status_is_not_corroborated(self):
+        """
+        Given log entries whose status is ERROR, UNKNOWN, or absent
+        When replay_single is called
+        Then matches_observed is False for each, whatever the verdict is
+        """
+        for status in ("ERROR", "UNKNOWN", ""):
+            with self.subTest(status=status):
+                self.assertEqual(("allow", False), self._matches("git status", status))
+
+    def test_status_matching_ignores_case(self):
+        """
+        Given a log status written in lower case
+        When replay_single is called with a config that allows the command
+        Then it corroborates exactly as the upper-case form does
+        """
+        self.assertEqual(("allow", True), self._matches("git status", "executed"))
+        self.assertEqual(("ask", True), self._matches("whoami", "refused"))
+
+    def test_an_ask_verdict_corroborates_an_ask_log_line(self):
+        """
+        Given a command the log records as ASK -- the status toolguard's own hook
+            writes for an ask decision -- and a config that still decides 'ask'
+        When replay_single is called
+        Then matches_observed is True: the replay agrees with the log exactly
+        """
+        self.assertEqual(("ask", True), self._matches("whoami", "ASK"))
+
+
+class TestClassifyChangeIsAntisymmetric(unittest.TestCase):
+    """Swapping the two configs must invert every classification."""
+
+    def test_swapping_the_configs_inverts_each_classification(self):
+        """
+        Given every ordered pair of the three real verdicts
+        When classify_change is called both ways round
+        Then 'tightened' one way is 'broadened' the other, and 'unchanged' stays
+        """
+        inverse = {
+            "unchanged": "unchanged",
+            "tightened": "broadened",
+            "broadened": "tightened",
+        }
+        for a in ("allow", "ask", "deny"):
+            for b in ("allow", "ask", "deny"):
+                with self.subTest(a=a, b=b):
+                    forward = classify_change(a, b)
+                    self.assertEqual(inverse[forward], classify_change(b, a))
+                    self.assertEqual(a == b, forward == "unchanged")

@@ -13,7 +13,9 @@ from toolguard.log_writer import (
     LOG_FORMAT_JSONLINES,
     LogRecord,
     log_command,
+    log_discovery,
 )
+from toolguard.tools.log_harvest import parse_log_file
 
 
 class TestLogging(unittest.TestCase):
@@ -98,7 +100,16 @@ class TestLogging(unittest.TestCase):
         """
         Given logging is enabled
         When three commands are logged in sequence
-        Then all three appear in the same daily file as three separate markdown entries
+        Then each gets its OWN entry, in call order, carrying its own Status
+            and Command -- not three commands sharing one entry, and not
+            three entries whose fields have been mixed between them
+
+        Counting entries and counting mentions are both blind to a record
+        whose fields belong to a different call: this walks the entries and
+        checks each one's Status/Command pairing. That is the single-writer
+        analogue of the per-sub-command audit records in hook.py, where a
+        merged record is exactly how 1,943 sub-commands lost their audit
+        trail.
         """
         import tempfile
 
@@ -124,14 +135,26 @@ class TestLogging(unittest.TestCase):
             log_file = log_dir / expected_filename
             content = log_file.read_text()
 
-            self.assertIn("git status", content, "First command not found")
-            self.assertIn("ls -la", content, "Second command not found")
-            self.assertIn("rm file.txt", content, "Third command not found")
-
-            header_count = content.count("## ")
+            entries = [e for e in content.split("## ") if e.strip()]
             self.assertEqual(
-                header_count, 3, f"Expected 3 entries, found {header_count}"
+                len(entries), 3, f"Expected 3 entries, found {len(entries)}"
             )
+
+            expected = [
+                ("EXECUTED", "git status", False),
+                ("EXECUTED", "ls -la", False),
+                ("REFUSED", "rm file.txt", True),
+            ]
+            for entry, (status, command, has_violation) in zip(entries, expected):
+                self.assertEqual(entry.count("- **Status**: "), 1)
+                self.assertEqual(entry.count("- **Command**: "), 1)
+                self.assertIn(f"- **Status**: {status}\n", entry)
+                self.assertIn(f"- **Command**: `{command}`\n", entry)
+                self.assertEqual(
+                    "**Violated Rules**" in entry,
+                    has_violation,
+                    f"violated-rules field landed on the wrong entry: {entry!r}",
+                )
 
     def test_logging_respects_disabled_flag(self):
         """
@@ -226,7 +249,7 @@ class TestLogging(unittest.TestCase):
 
     def test_jsonlines_format(self):
         """
-        Given CHECKED_BASH_LOGGING_FORMAT is set to jsonlines
+        Given log_format=LOG_FORMAT_JSONLINES is passed to log_command
         When a command is logged
         Then a .jsonlines file is created whose first line parses to a JSON entry with timestamp, status, command, and violated_rules matching the logged values
         """
@@ -311,16 +334,17 @@ class TestLogging(unittest.TestCase):
 
     def test_missing_log_directory_warns_but_does_not_exit(self):
         """
-        Given a log directory path that does not exist
+        Given an explicit log directory path that does not exist
         When a command is logged
-        Then the call returns normally and reports the missing directory on
-             stderr, rather than terminating the process
+        Then the call returns None normally, writes no file anywhere under the
+             parent, and reports the MISSING DIRECTORY on stderr -- not the
+             generic write-failure warning, which would mean the miss was
+             noticed only by a swallowed exception from open()
 
         Losing an audit record is bad; losing enforcement as well is worse.
         The hook writes its verdict AFTER logging, so a SystemExit here would
         suppress the verdict entirely -- and Claude Code treats only exit
         code 2 as blocking, so the tool call would then proceed unjudged.
-        This asserts the failure direction, not the message.
         """
         import tempfile
 
@@ -329,18 +353,38 @@ class TestLogging(unittest.TestCase):
 
             stderr_capture = io.StringIO()
             with contextlib.redirect_stderr(stderr_capture):
-                log_command(
+                returned = log_command(
                     LogRecord(command_str="git status", status="executed"),
                     log_dir=log_dir,
                 )
 
-            self.assertIn("Logging directory does not exist", stderr_capture.getvalue())
+            stderr = stderr_capture.getvalue()
+            self.assertIsNone(returned)
+            self.assertIn("Logging directory does not exist", stderr)
+            self.assertNotIn(
+                "Failed to write log",
+                stderr,
+                "the missing directory must be detected before the write is "
+                "attempted, not by catching the resulting exception",
+            )
+            self.assertEqual(
+                list(Path(tmpdir).rglob("toolguard-*")),
+                [],
+                "nothing may be written when the log directory is missing",
+            )
 
-    def test_missing_log_dir_does_not_block_caller(self):
+    def test_missing_config_log_dir_warns_and_writes_nothing(self):
         """
-        Given a log directory path that does not exist
+        Given a resolved environment config whose log_dir does not exist and
+            which does not set create_log_dir
         When a command is logged
-        Then log_command returns normally instead of exiting, warning to stderr
+        Then the call returns normally, warns that the directory is missing,
+            and creates neither the directory nor any log file
+
+        The config-supplied directory is the path production actually takes
+        (the hook always passes config=, never log_dir=), so its missing-
+        directory branch is a separate mechanism from the explicit-log_dir
+        one above, not a duplicate of it.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir) / "nonexistent"
@@ -349,26 +393,41 @@ class TestLogging(unittest.TestCase):
             with contextlib.redirect_stderr(stderr_capture):
                 log_command(
                     LogRecord(command_str="git status", status="executed"),
-                    log_dir=log_dir,
+                    config={"logging_enabled": True, "log_dir": log_dir},
                 )
 
-            self.assertIn("Logging directory does not exist", stderr_capture.getvalue())
+            stderr = stderr_capture.getvalue()
+            self.assertIn("Logging directory does not exist", stderr)
+            self.assertIn(str(log_dir), stderr)
+            self.assertNotIn("Failed to write log", stderr)
+            self.assertFalse(log_dir.exists(), "the directory must not be created")
+            self.assertEqual(list(Path(tmpdir).rglob("toolguard-*")), [])
 
     def test_missing_project_root_does_not_block_caller(self):
         """
         Given no explicit log_dir/config and require_project_root raises RuntimeError
         When a command is logged
         Then log_command returns normally instead of exiting, warning to stderr
+
+        The patch is asserted to have been consulted: without it this test
+        would resolve the developer's REAL repository logs/ directory, and a
+        silently inert patch would look identical to a passing test.
         """
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
             with patch(
                 "toolguard.log_writer.require_project_root",
                 side_effect=RuntimeError("no project root"),
-            ):
+            ) as mock_require_root:
                 log_command(LogRecord(command_str="git status", status="executed"))
 
+        self.assertTrue(
+            mock_require_root.called,
+            "the project-root lookup was never reached -- this test would "
+            "otherwise be writing into the real repository logs/ directory",
+        )
         self.assertIn("Warning: Failed to write log", stderr_capture.getvalue())
+        self.assertIn("no project root", stderr_capture.getvalue())
 
 
 class TestMatchedRuleLogging(unittest.TestCase):
@@ -862,8 +921,7 @@ class TestAdditionalContextLogging(unittest.TestCase):
 
     def test_additional_context_in_markdown_format(self):
         """
-        Given a command logged with an additional_context short enough to fit
-            within the preview budget
+        Given a command logged with a short additional_context
         When the markdown log is written
         Then it contains a Context field with that exact text
         """
@@ -1007,13 +1065,13 @@ class TestLogFormatGoldenFile(unittest.TestCase):
 
     def test_markdown_golden_all_optional_fields_populated(self):
         """
-        Given every optional field (matched_rule, violated_rules,
+        Given every optional field (matched_rule, violated_rules, provenance,
             permission_mode, note, additional_context, extra_info) is
             populated
         When a command is logged in markdown format
         Then the file's content matches the exact expected markdown,
             byte-for-byte, in Status/Command/Matched Rule/Violated
-            Rules/Permission Mode/Note/Context/Agent order
+            Rules/Provenance/Permission Mode/Note/Context/Agent order
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
@@ -1024,6 +1082,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
                     violated_rules=["git push:*", "**/.env/**"],
                     extra_info="main-agent",
                     matched_rule="git push *",
+                    provenance="project: /p/toolguard_hook.toml",
                     note="pushed to protected branch",
                     permission_mode="default",
                     additional_context="be careful",
@@ -1039,6 +1098,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
                 "- **Command**: `git push origin main`\n"
                 "- **Matched Rule**: `git push *`\n"
                 "- **Violated Rules**: `git push:*`, `**/.env/**`\n"
+                "- **Provenance**: project: /p/toolguard_hook.toml\n"
                 "- **Permission Mode**: `default`\n"
                 "- **Note**: pushed to protected branch\n"
                 "- **Context**: be careful\n"
@@ -1076,7 +1136,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
             selected
         When a command is logged
         Then the entry's keys equal, in exact insertion order, timestamp,
-            status, command, violated_rules, matched_rule, note,
+            status, command, violated_rules, matched_rule, provenance, note,
             extra_info, permission_mode, additional_context, with values
             matching what was logged
         """
@@ -1089,6 +1149,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
                     violated_rules=["git push:*", "**/.env/**"],
                     extra_info="main-agent",
                     matched_rule="git push *",
+                    provenance="project: /p/toolguard_hook.toml",
                     note="pushed to protected branch",
                     permission_mode="default",
                     additional_context="be careful",
@@ -1105,6 +1166,7 @@ class TestLogFormatGoldenFile(unittest.TestCase):
                 "command": "git push origin main",
                 "violated_rules": ["git push:*", "**/.env/**"],
                 "matched_rule": "git push *",
+                "provenance": "project: /p/toolguard_hook.toml",
                 "note": "pushed to protected branch",
                 "extra_info": "main-agent",
                 "permission_mode": "default",
@@ -1141,6 +1203,233 @@ class TestLogFormatGoldenFile(unittest.TestCase):
             self.assertEqual(content, json.dumps(expected) + "\n\n")
             entry = json.loads(content.strip())
             self.assertEqual(list(entry.keys()), list(expected.keys()))
+
+
+class TestLogDirResolution(unittest.TestCase):
+    """Which directory an entry is written to: explicit log_dir, then config, then the default."""
+
+    def test_explicit_log_dir_wins_over_config_log_dir(self):
+        """
+        Given both an explicit log_dir and a config carrying a DIFFERENT,
+            equally existing log_dir
+        When a command is logged
+        Then the entry lands in the explicit directory and the config's
+            directory stays empty
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            explicit = Path(tmpdir) / "explicit"
+            from_config = Path(tmpdir) / "from_config"
+            explicit.mkdir()
+            from_config.mkdir()
+
+            log_command(
+                LogRecord(command_str="git status", status="executed"),
+                log_dir=explicit,
+                config={"logging_enabled": True, "log_dir": from_config},
+            )
+
+            self.assertEqual(len(list(explicit.glob("toolguard-*.md"))), 1)
+            self.assertEqual(list(from_config.glob("toolguard-*")), [])
+
+    def test_config_log_dir_is_used_when_no_explicit_log_dir(self):
+        """
+        Given a config carrying an existing log_dir and no explicit log_dir
+        When a command is logged
+        Then the entry lands in the config's directory
+
+        This is the shape production uses: toolguard.hook always passes
+        config=, never log_dir=.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from_config = Path(tmpdir) / "from_config"
+            from_config.mkdir()
+
+            log_command(
+                LogRecord(command_str="git status", status="executed"),
+                config={"logging_enabled": True, "log_dir": from_config},
+            )
+
+            files = list(from_config.glob("toolguard-*.md"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("`git status`", files[0].read_text())
+
+    def test_config_with_create_log_dir_creates_the_missing_directory(self):
+        """
+        Given a config whose log_dir does not exist and whose create_log_dir
+            is True
+        When a command is logged
+        Then the directory is created and the entry is written into it
+
+        Paired with test_missing_config_log_dir_warns_and_writes_nothing,
+        which is the same fixture with create_log_dir absent: the two differ
+        only in that flag.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir) / "made" / "on" / "demand"
+
+            stderr_capture = io.StringIO()
+            with contextlib.redirect_stderr(stderr_capture):
+                log_command(
+                    LogRecord(command_str="git status", status="executed"),
+                    config={
+                        "logging_enabled": True,
+                        "log_dir": log_dir,
+                        "create_log_dir": True,
+                    },
+                )
+
+            self.assertTrue(
+                log_dir.is_dir(), "create_log_dir must create the directory"
+            )
+            self.assertEqual(len(list(log_dir.glob("toolguard-*.md"))), 1)
+            self.assertNotIn(
+                "Logging directory does not exist", stderr_capture.getvalue()
+            )
+
+    def test_config_without_a_logging_enabled_key_still_logs(self):
+        """
+        Given a config that carries a log_dir but sets no logging_enabled key
+        When a command is logged
+        Then logging is ON -- the absent key defaults to enabled, matching the
+            no-config default
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            log_command(
+                LogRecord(command_str="git status", status="executed"),
+                config={"log_dir": log_dir},
+            )
+
+            self.assertEqual(
+                len(list(log_dir.glob("toolguard-*.md"))),
+                1,
+                "a config with no logging_enabled key must default to ON",
+            )
+
+
+class TestDiscoveryLog(unittest.TestCase):
+    """
+    Two log_discovery properties not covered by
+    test_logging_streams.TestDiscoveryDiagnostic, which owns the
+    change-detection behaviour (first write, unchanged repeat, changed
+    levels, project-root keying, torn line, tail window). Do not re-add
+    those here.
+    """
+
+    LEVELS_A = ["project: /p/.claude/toolguard_hook.toml", "user: /home/u/tg.toml"]
+    ROOT = "/p"
+
+    def test_the_mirrored_section_carries_no_status_field(self):
+        """
+        Given a discovery mirrored into the daily resolution log
+        When that log is parsed by the harvester
+        Then it yields no entries: the mirror is deliberately Status-less so
+            it is skipped as a permission decision rather than counted as one
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            log_discovery(self.LEVELS_A, log_dir, self.ROOT)
+
+            daily_path = log_dir / f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            self.assertNotIn("**Status**", daily_path.read_text())
+            self.assertEqual(parse_log_file(daily_path), [])
+
+    def test_an_unusable_log_dir_warns_but_does_not_raise(self):
+        """
+        Given a log directory path that is actually an existing FILE
+        When discovery is logged
+        Then the call returns normally with a warning on stderr -- logging
+            must never fail the hook call it is logging
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            not_a_dir = Path(tmpdir) / "afile"
+            not_a_dir.write_text("")
+
+            stderr_capture = io.StringIO()
+            with contextlib.redirect_stderr(stderr_capture):
+                log_discovery(self.LEVELS_A, not_a_dir, self.ROOT)
+
+            self.assertIn(
+                "Failed to write discovery diagnostic", stderr_capture.getvalue()
+            )
+
+
+class TestAuditTrailIsMachineReadable(unittest.TestCase):
+    """
+    What log_command writes must be recoverable by toolguard's own harvester
+    (toolguard/tools/log_harvest.py), which is the only reader of this format.
+    An entry that is written but cannot be read back is an audit record that
+    silently does not exist -- the same failure as the 813-of-975
+    under-logging defect, one layer further downstream.
+    """
+
+    def _write_and_harvest(self, command_str):
+        """Log *command_str*, then parse the day's log back with the harvester."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            log_command(
+                LogRecord(
+                    command_str=command_str, status="executed", matched_rule="uv *"
+                ),
+                log_dir=log_dir,
+            )
+            log_file = log_dir / f"toolguard-{datetime.now().strftime('%Y-%m-%d')}.md"
+            return log_file.read_text(), parse_log_file(log_file)
+
+    def test_a_single_line_command_round_trips(self):
+        """
+        Given an ordinary single-line command
+        When its entry is written and harvested back
+        Then exactly one entry is recovered, with the command intact
+        """
+        raw, entries = self._write_and_harvest("git status")
+
+        self.assertIn("`git status`", raw)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].command, "git status")
+        self.assertEqual(entries[0].status, "EXECUTED")
+
+    def test_a_multiline_command_round_trips(self):
+        """
+        Given a multi-line command -- a heredoc, the shape toolguard's own
+            disclosure rules are most concerned with
+        When its entry is written and harvested back
+        Then the entry is still recovered
+
+        Measured on this repository's own logs/ on 2026-08-13: 1,783 of
+        41,442 written Command fields cannot be recovered by the harvester,
+        because the renderer emits the command's newlines raw and the
+        harvester matches its fields line by line. The record is in the file
+        and is invisible to every consumer of it.
+        """
+        command = "uv run python - <<'PY'\nprint(1)\nPY"
+        raw, entries = self._write_and_harvest(command)
+
+        self.assertIn("uv run python", raw)
+        self.assertEqual(
+            len(entries), 1, "the multi-line command's audit entry was not recoverable"
+        )
+        self.assertEqual(entries[0].command, command)
+
+    def test_a_command_containing_a_markdown_heading_round_trips(self):
+        """
+        Given a command containing a line that begins with '## ' -- ordinary
+            in a repository whose commit messages and notes are markdown
+        When its entry is written and harvested back
+        Then one entry is recovered, not two fragments of one
+
+        The heading line splits the section in the harvester, so BOTH halves
+        are discarded: the first has no closing Command backtick, the second
+        has no Status.
+        """
+        command = "git commit -F - <<EOF\n## Release notes\nEOF"
+        raw, entries = self._write_and_harvest(command)
+
+        self.assertIn("git commit", raw)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].command, command)
 
 
 if __name__ == "__main__":

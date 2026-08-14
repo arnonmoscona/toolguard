@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config import discover_config_files, find_project_root
+from toolguard.env_config import find_project_root as env_find_project_root
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 
 
@@ -111,7 +112,8 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
         """
         Given a project with .claude/settings.local.json and toolguard_hook.json present
         When discover_config_files runs with the project root resolved
-        Then both project config files appear in the discovered config paths
+        Then both project config files are discovered, each tagged with its own
+            source type and format
         """
         _home, project_dir = self.isolate_config_environment()
         claude_dir = project_dir / ".claude"
@@ -122,22 +124,176 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
 
         configs = discover_config_files()
 
-        config_paths = [str(path) for path, _, _ in configs]
-        self.assertIn(str(claude_dir / "settings.local.json"), config_paths)
-        self.assertIn(str(claude_dir / "toolguard_hook.json"), config_paths)
+        self.assertIn((claude_dir / "settings.local.json", "claude", "json"), configs)
+        self.assertIn(
+            (claude_dir / "toolguard_hook.json", "toolguard_hook", "json"), configs
+        )
+
+    def test_discover_finds_user_level_configs(self):
+        """
+        Given a user ~/.claude holding toolguard_hook.toml and settings.json, and
+            a project whose .claude directory does not exist
+        When discover_config_files runs
+        Then both user-level files are discovered, each tagged with its own
+            source type and format
+        """
+        home, _project_dir = self.isolate_config_environment()
+        user_claude_dir = home / ".claude"
+        user_claude_dir.mkdir()
+
+        (user_claude_dir / "toolguard_hook.toml").write_text("permissions = {}\n")
+        (user_claude_dir / "settings.json").write_text("{}")
+
+        configs = discover_config_files()
+
+        self.assertIn(
+            (user_claude_dir / "toolguard_hook.toml", "toolguard_hook", "toml"),
+            configs,
+        )
+        self.assertIn((user_claude_dir / "settings.json", "claude", "json"), configs)
+
+    def test_discover_ranks_every_project_file_above_every_user_file(self):
+        """
+        Given the same two config files present at both the project and the user level
+        When discover_config_files runs
+        Then all four are discovered and both project files precede both user files
+        """
+        home, project_dir = self.isolate_config_environment()
+        user_claude_dir = home / ".claude"
+        project_claude_dir = project_dir / ".claude"
+        for directory in (user_claude_dir, project_claude_dir):
+            directory.mkdir()
+            (directory / "toolguard_hook.toml").write_text("permissions = {}\n")
+            (directory / "settings.json").write_text("{}")
+
+        config_paths = [path for path, _, _ in discover_config_files()]
+
+        self.assertEqual(len(config_paths), 4)
+        project_positions = [
+            i for i, p in enumerate(config_paths) if p.parent == project_claude_dir
+        ]
+        user_positions = [
+            i for i, p in enumerate(config_paths) if p.parent == user_claude_dir
+        ]
+        self.assertEqual(len(project_positions), 2)
+        self.assertEqual(len(user_positions), 2)
+        self.assertLess(max(project_positions), min(user_positions))
+
+    def test_discover_prefers_toml_for_toolguard_hook_sources(self):
+        """
+        Given both toolguard_hook.toml and toolguard_hook.json in the same .claude
+        When discover_config_files runs
+        Then the TOML file is discovered and the JSON one is not
+        """
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
+
+        (claude_dir / "toolguard_hook.toml").write_text("permissions = {}\n")
+        (claude_dir / "toolguard_hook.json").write_text("{}")
+
+        configs = discover_config_files()
+
+        self.assertIn(
+            (claude_dir / "toolguard_hook.toml", "toolguard_hook", "toml"), configs
+        )
+        self.assertNotIn(
+            claude_dir / "toolguard_hook.json", [path for path, _, _ in configs]
+        )
+
+    def test_discover_keeps_native_settings_json_only(self):
+        """
+        Given both settings.json and a settings.toml in the same .claude
+        When discover_config_files runs
+        Then the JSON file is discovered and the TOML one is ignored -- native
+            settings sources have no TOML form
+        """
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
+
+        (claude_dir / "settings.json").write_text("{}")
+        (claude_dir / "settings.toml").write_text("permissions = {}\n")
+
+        configs = discover_config_files()
+
+        self.assertIn((claude_dir / "settings.json", "claude", "json"), configs)
+        self.assertNotIn(claude_dir / "settings.toml", [path for path, _, _ in configs])
+
+    def test_discover_returns_only_files_that_exist(self):
+        """
+        Given a project .claude holding exactly one config file, and a user
+            .claude holding none
+        When discover_config_files runs
+        Then exactly that one file is returned -- absent candidates are not
+        """
+        home, project_dir = self.isolate_config_environment()
+        (home / ".claude").mkdir()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
+
+        (claude_dir / "settings.json").write_text("{}")
+
+        configs = discover_config_files()
+
+        self.assertEqual(configs, [(claude_dir / "settings.json", "claude", "json")])
+
+    def test_discover_does_not_double_count_when_the_project_root_is_home(self):
+        """
+        Given a home directory that is also the project root -- routine, since
+            ~/.claude is itself a strong project anchor -- holding two config files
+        When discover_config_files runs
+        Then each file is discovered once, not once per level
+
+        RED: both come back twice, because the project and user candidate blocks
+        resolve to the same directory. The live hierarchy path, _discover_levels,
+        collapses the same layout to a single 'user' level.
+        """
+        home, _project_dir = self.isolate_config_environment()
+        user_claude_dir = home / ".claude"
+        user_claude_dir.mkdir()
+        (user_claude_dir / "toolguard_hook.toml").write_text("permissions = {}\n")
+        (user_claude_dir / "settings.json").write_text("{}")
+
+        with patch(
+            "toolguard.config.find_project_root", return_value=home
+        ) as mock_find_root:
+            configs = discover_config_files()
+
+        self.assertTrue(mock_find_root.called)
+        self.assertEqual(
+            configs,
+            [
+                (user_claude_dir / "toolguard_hook.toml", "toolguard_hook", "toml"),
+                (user_claude_dir / "settings.json", "claude", "json"),
+            ],
+        )
 
     def test_discover_without_project_root(self):
         """
-        Given find_project_root raises RuntimeError (no project found)
+        Given find_project_root raises RuntimeError (no project found), with
+            config files present at both the project and the user level
         When discover_config_files runs
-        Then it does not crash and returns a list (only user-level configs, if any)
+        Then find_project_root was consulted, the project-level file is skipped,
+            and the user-level file is still discovered
         """
-        self.isolate_config_environment()
+        home, project_dir = self.isolate_config_environment()
+        project_claude_dir = project_dir / ".claude"
+        project_claude_dir.mkdir()
+        (project_claude_dir / "settings.json").write_text("{}")
+        user_claude_dir = home / ".claude"
+        user_claude_dir.mkdir()
+        (user_claude_dir / "settings.json").write_text("{}")
+
         with patch(
             "toolguard.config.find_project_root", side_effect=RuntimeError("No project")
-        ):
+        ) as mock_find_root:
             configs = discover_config_files()
-            self.assertIsInstance(configs, list)
+
+        self.assertTrue(mock_find_root.called)
+        self.assertEqual(
+            configs, [(user_claude_dir / "settings.json", "claude", "json")]
+        )
 
     def test_discover_prioritizes_local_over_regular(self):
         """
@@ -154,18 +310,24 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
 
         configs = discover_config_files()
 
-        config_paths = [path for path, _, _ in configs]
-        local_idx = next(
-            i for i, p in enumerate(config_paths) if p.name == "settings.local.json"
+        config_names = [path.name for path, _, _ in configs]
+        self.assertIn("settings.local.json", config_names)
+        self.assertIn("settings.json", config_names)
+        self.assertLess(
+            config_names.index("settings.local.json"),
+            config_names.index("settings.json"),
         )
-        regular_idx = next(
-            i for i, p in enumerate(config_paths) if p.name == "settings.json"
-        )
-        self.assertLess(local_idx, regular_idx)
 
 
 class TestFindProjectRoot(ConfigIsolationMixin, unittest.TestCase):
-    """Real (unmocked) tests of toolguard.config.find_project_root's marker walk."""
+    """
+    Real (unmocked) tests of toolguard.config.find_project_root's marker walk.
+
+    The mixin patches ``toolguard.config.find_project_root``, but this module
+    imported it by value, so these tests still call the real function; the mixin
+    is used here only for its ``Path.home()`` and environment isolation, which
+    the walk's home stop does depend on.
+    """
 
     def test_finds_git_directory(self):
         """
@@ -270,6 +432,22 @@ class TestFindProjectRoot(ConfigIsolationMixin, unittest.TestCase):
 
             self.assertEqual(result, project_dir)
 
+    def test_nearest_marker_wins_over_a_higher_one(self):
+        """
+        Given a project containing a nested inner project, each with its own .git
+        When find_project_root is called from below the inner one
+        Then the inner (nearest) directory is returned, not the outer one
+        """
+        _home, outer = self.isolate_config_environment()
+        inner = outer / "inner"
+        (inner / ".git").mkdir(parents=True)
+        subdir = inner / "subdir"
+        subdir.mkdir()
+
+        result = find_project_root(subdir)
+
+        self.assertEqual(result, inner)
+
     def test_raises_when_nothing_found(self):
         """
         Given a directory tree with no project markers, and home mocked to bound
@@ -283,6 +461,41 @@ class TestFindProjectRoot(ConfigIsolationMixin, unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             find_project_root(test_dir)
+
+    def test_walk_stops_at_home_and_ignores_markers_above_it(self):
+        """
+        Given a .git marker in home's own parent directory, and a start directory
+            under home with no marker of its own
+        When find_project_root is called
+        Then RuntimeError is raised -- the walk stops at home, so the marker
+            above home is never seen
+        """
+        home, _project = self.isolate_config_environment()
+        (home.parent / ".git").mkdir()
+        test_dir = home / "no_project"
+        test_dir.mkdir()
+
+        with self.assertRaises(RuntimeError):
+            find_project_root(test_dir)
+
+    def test_agrees_with_env_configs_own_find_project_root(self):
+        """
+        Given the two independent find_project_root implementations -- config's
+            and env_config's -- resolving the same directories
+        When a marker is reachable, and when none is
+        Then they resolve the same root, and where config's raises RuntimeError
+            env_config's returns None
+        """
+        home, project = self.isolate_config_environment()
+        subdir = project / "a" / "b"
+        subdir.mkdir(parents=True)
+        no_marker_dir = home / "no_project"
+        no_marker_dir.mkdir()
+
+        self.assertEqual(find_project_root(subdir), env_find_project_root(subdir))
+        with self.assertRaises(RuntimeError):
+            find_project_root(no_marker_dir)
+        self.assertIsNone(env_find_project_root(no_marker_dir))
 
 
 if __name__ == "__main__":

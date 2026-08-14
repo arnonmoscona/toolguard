@@ -654,10 +654,12 @@ class TestCommandSubstitution(unittest.TestCase):
         """
         Given an empty substitution ('echo $()')
         When extract_commands processes it
-        Then it does not crash and the outer command is still extracted
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- the outer command survives because nothing was parsed,
+            not because an empty substitution was understood
         """
         result = extract_commands("echo $()")
-        self.assertIn("echo $()", result)
+        self.assertEqual(result, ["echo $()"])
 
     def test_whitespace_in_substitution(self):
         """
@@ -687,19 +689,18 @@ class TestCommandSubstitution(unittest.TestCase):
         result = extract_commands("echo $(rm -rf /)")
         self.assertIn("rm -rf /", result)
 
-    def test_depth_limit_prevents_infinite_loop(self):
+    def test_six_deep_substitution_reaches_every_level(self):
         """
-        Given a substitution nested six or more levels deep
+        Given a substitution nested six levels deep
         When extract_commands processes it
-        Then it terminates without crashing and still extracts the outer command
-            (depth limit may prevent reaching all levels)
+        Then all seven levels are extracted, innermost 'level6' included --
+            no depth cutoff drops a deeply buried command before matching
         """
         cmd = "echo $(level1 $(level2 $(level3 $(level4 $(level5 $(level6))))))"
         result = extract_commands(cmd)
-        self.assertGreater(len(result), 1)
-        self.assertIn(
-            "echo $(level1 $(level2 $(level3 $(level4 $(level5 $(level6))))))", result
-        )
+        self.assertEqual(len(result), 7)
+        self.assertEqual(result[0], cmd)
+        self.assertEqual(result[-1], "level6")
 
 
 class TestSubshellExtraction(unittest.TestCase):
@@ -840,10 +841,11 @@ class TestSubshellExtraction(unittest.TestCase):
         """
         Given an empty subshell ('()')
         When extract_commands processes it
-        Then it does not crash and the '()' wrapper is present in the result
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- the wrapper is present because nothing was parsed
         """
         result = extract_commands("()")
-        self.assertIn("()", result)
+        self.assertEqual(result, ["()"])
 
     def test_whitespace_in_subshell(self):
         """
@@ -854,16 +856,18 @@ class TestSubshellExtraction(unittest.TestCase):
         result = extract_commands("(  ls  )")
         self.assertIn("ls", result)
 
-    def test_subshell_depth_limit(self):
+    def test_six_deep_subshell_reaches_every_level(self):
         """
-        Given subshells nested six or more levels deep ('((((((ls))))))')
+        Given subshells nested six levels deep ('((((((ls))))))')
         When extract_commands processes it
-        Then it terminates without crashing and the outer wrapper is still extracted
+        Then all seven levels are extracted, innermost 'ls' included -- no
+            depth cutoff drops a deeply buried command before matching
         """
         cmd = "((((((ls))))))"
         result = extract_commands(cmd)
-        self.assertGreater(len(result), 1)
-        self.assertIn("((((((ls))))))", result)
+        self.assertEqual(len(result), 7)
+        self.assertEqual(result[0], cmd)
+        self.assertEqual(result[-1], "ls")
 
     def test_subshell_not_confused_with_command_substitution(self):
         """
@@ -896,31 +900,33 @@ class TestEdgeCases(unittest.TestCase):
         """
         Given malformed input with consecutive operators ('cmd1 && && cmd2')
         When extract_commands processes it
-        Then it does not crash and returns at least one valid command
+        Then the grammar rejects it and extraction fails open with the whole
+            line as the one command -- unsplit, but nothing dropped before
+            rule matching
         """
         result = extract_commands("cmd1 && && cmd2")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["cmd1 && && cmd2"])
 
     def test_trailing_operator(self):
         """
         Given a command with a trailing && and no following command ('git status &&')
         When extract_commands processes it
-        Then it degrades gracefully, returning either 'git status' or the original string
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- 'git status' alone is NOT extracted, so a rule allowing
+            'git status' does not match this input
         """
         result = extract_commands("git status &&")
-        self.assertTrue(
-            "git status" in result or "git status &&" in result,
-            f"Expected either extracted command or original, got: {result}",
-        )
+        self.assertEqual(result, ["git status &&"])
 
     def test_leading_operator(self):
         """
         Given a command with a leading operator ('&& git status')
         When extract_commands processes it
-        Then it handles the malformed input gracefully and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole
+            line, leading operator included
         """
         result = extract_commands("&& git status")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["&& git status"])
 
     def test_very_long_command(self):
         """
@@ -1166,12 +1172,19 @@ class TestCommandSubstitutionAdvanced(unittest.TestCase):
 
     def test_nested_backticks(self):
         """
-        Given nested escaped backticks ('echo `echo \\`hostname\\``')
+        Given nested escaped backticks ('echo `echo \\`hostname\\``'), the
+            POSIX way to nest a substitution inside a backtick substitution
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the innermost 'hostname' is extracted as its own leaf, the same
+            as the equivalent 'echo $(echo $(hostname))' -- extract_commands
+            documents that it descends into backtick substitutions
+
+        FAILS: extraction stops one level short, so a command nested this way
+        never reaches the matcher on its own. Kept failing deliberately; do
+        not weaken to match the current behaviour.
         """
         result = extract_commands("echo `echo \\`hostname\\``")
-        self.assertGreater(len(result), 0)
+        self.assertIn("hostname", result)
 
     def test_substitution_with_semicolon_inside(self):
         """
@@ -1217,13 +1230,11 @@ class TestSubshellAdvanced(unittest.TestCase):
         """
         Given two adjacent subshells with no separator ('(cmd1) (cmd2)')
         When extract_commands processes it
-        Then it degrades gracefully, yielding both inner commands or the original string
+        Then both wrappers and both inner commands are extracted -- the
+            missing separator does not collapse this to a fail-open whole line
         """
         result = extract_commands("(cmd1) (cmd2)")
-        self.assertTrue(
-            ("cmd1" in result and "cmd2" in result) or "(cmd1) (cmd2)" in result,
-            f"Expected either extracted commands or original, got: {result}",
-        )
+        self.assertEqual(result, ["(cmd1)", "cmd1", "(cmd2)", "cmd2"])
 
     def test_subshell_with_redirect_inside(self):
         """
@@ -1519,74 +1530,83 @@ class TestParserRobustness(unittest.TestCase):
         """
         Given a command with an unmatched opening parenthesis ('(cmd')
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- the bare 'cmd' inside is NOT extracted as a leaf
         """
         result = extract_commands("(cmd")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["(cmd"])
 
     def test_unmatched_close_paren(self):
         """
         Given a command with an unmatched closing parenthesis ('cmd)')
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole line
         """
         result = extract_commands("cmd)")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["cmd)"])
 
     def test_unmatched_dollar_paren(self):
         """
         Given a command with an unmatched $( ('echo $(cmd')
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- the unterminated substitution's 'cmd' is NOT extracted
         """
         result = extract_commands("echo $(cmd")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["echo $(cmd"])
 
     def test_unmatched_backtick(self):
         """
         Given a command with an unmatched backtick ('echo `cmd')
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole line
         """
         result = extract_commands("echo `cmd")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["echo `cmd"])
 
     def test_unmatched_brace(self):
         """
         Given a command with an unmatched brace ('{ cmd')
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole line
         """
         result = extract_commands("{ cmd")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["{ cmd"])
 
     def test_only_operators(self):
         """
         Given a string of only operators ('&& || ; |')
         When extract_commands processes it
-        Then it completes without crashing
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- an operator-only string yields one unmatchable command,
+            not an empty list that would leave nothing to check
         """
-        extract_commands("&& || ; |")
+        result = extract_commands("&& || ; |")
+        self.assertEqual(result, ["&& || ; |"])
 
     def test_very_deep_nesting(self):
         """
         Given 10 levels of nested subshells around 'pwd'
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then every level is unwrapped -- 11 commands, the outermost wrapper
+            first and the innermost 'pwd' last, so nothing hides behind depth
         """
         cmd = "(" * 10 + "pwd" + ")" * 10
         result = extract_commands(cmd)
-        self.assertGreater(len(result), 0)
+        self.assertEqual(len(result), 11)
+        self.assertEqual(result[0], cmd)
+        self.assertEqual(result[-1], "pwd")
 
     def test_mixed_very_deep_nesting(self):
         """
         Given deeply nested, unbalanced mixed constructs ('($(($(($(pwd)))))')
         When extract_commands processes it
-        Then it does not crash and returns at least one command
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- no inner level is extracted from an unbalanced construct
         """
         cmd = "($(($(($(pwd)))))"
         result = extract_commands(cmd)
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, [cmd])
 
     def test_unicode_in_command(self):
         """
@@ -1620,37 +1640,39 @@ class TestParserRobustness(unittest.TestCase):
         """
         Given a completely empty subshell ('()')
         When extract_commands processes it
-        Then it handles it gracefully and the '()' wrapper is present in the result
+        Then the grammar rejects it and extraction fails open with the whole
+            line -- the wrapper is present because nothing was parsed, not
+            because an empty subshell was understood
         """
         result = extract_commands("()")
-        self.assertIn("()", result)
+        self.assertEqual(result, ["()"])
 
     def test_empty_substitution(self):
         """
         Given a completely empty substitution ('$()')
         When extract_commands processes it
-        Then it handles it gracefully and the '$()' wrapper is present in the result
+        Then the grammar rejects it and extraction fails open with the whole line
         """
         result = extract_commands("$()")
-        self.assertIn("$()", result)
+        self.assertEqual(result, ["$()"])
 
     def test_empty_brace_group(self):
         """
         Given an empty brace group ('{ }')
         When extract_commands processes it
-        Then it handles it gracefully and the '{ }' wrapper is present in the result
+        Then the grammar rejects it and extraction fails open with the whole line
         """
         result = extract_commands("{ }")
-        self.assertIn("{ }", result)
+        self.assertEqual(result, ["{ }"])
 
     def test_whitespace_only_subshell(self):
         """
         Given a subshell containing only whitespace ('(   )')
         When extract_commands processes it
-        Then it handles it gracefully and returns at least one element
+        Then the grammar rejects it and extraction fails open with the whole line
         """
         result = extract_commands("(   )")
-        self.assertGreater(len(result), 0)
+        self.assertEqual(result, ["(   )"])
 
     def test_nested_quotes(self):
         """

@@ -18,19 +18,23 @@ class TestSortPatterns(unittest.TestCase):
         """
         Given a list containing both Bash and Read patterns in any order
         When sort_patterns() is called
-        Then all Bash patterns appear before all Read patterns
+        Then all Bash patterns appear before all Read patterns, and no pattern
+             is lost on the way
         """
         patterns = ["Read(/tmp/*)", "Bash(git status:*)", "Read(/home/*)", "Bash(ls:*)"]
         result = sort_patterns(patterns)
         bash_indices = [i for i, p in enumerate(result) if p.startswith("Bash(")]
         read_indices = [i for i, p in enumerate(result) if p.startswith("Read(")]
+        self.assertEqual(len(bash_indices), 2)
+        self.assertEqual(len(read_indices), 2)
         self.assertTrue(max(bash_indices) < min(read_indices))
 
     def test_tool_priority_order_bash_read_write_edit(self):
         """
         Given a list with Bash, Read, Write, and Edit patterns in reverse order
         When sort_patterns() is called
-        Then the order is Bash, Read, Write, Edit
+        Then the order is exactly Bash, Read, Write, Edit -- which alphabetical
+             order alone would not produce (Edit precedes Read and Write)
         """
         patterns = [
             "Edit(~/project/file.py)",
@@ -39,10 +43,15 @@ class TestSortPatterns(unittest.TestCase):
             "Bash(git status:*)",
         ]
         result = sort_patterns(patterns)
-        self.assertTrue(result[0].startswith("Bash("))
-        self.assertTrue(result[1].startswith("Read("))
-        self.assertTrue(result[2].startswith("Write("))
-        self.assertTrue(result[3].startswith("Edit("))
+        self.assertEqual(
+            result,
+            [
+                "Bash(git status:*)",
+                "Read(/home/user/*)",
+                "Write(/tmp/out.txt)",
+                "Edit(~/project/file.py)",
+            ],
+        )
 
     def test_within_tool_sorted_alphabetically_by_full_pattern(self):
         """
@@ -57,26 +66,67 @@ class TestSortPatterns(unittest.TestCase):
             "Bash(cat:*)",
         ]
         result = sort_patterns(patterns)
-        self.assertEqual(result[0], "Bash(cat:*)")
-        self.assertEqual(result[1], "Bash(git status:*)")
-        self.assertEqual(result[2], "Bash(ls:*)")
-        self.assertEqual(result[3], "Bash(uv run pytest:*)")
+        self.assertEqual(
+            result,
+            [
+                "Bash(cat:*)",
+                "Bash(git status:*)",
+                "Bash(ls:*)",
+                "Bash(uv run pytest:*)",
+            ],
+        )
 
-    def test_empty_list_returns_empty(self):
+    def test_already_canonical_input_is_unchanged(self):
+        """
+        Given a list already in canonical order
+        When sort_patterns() is called
+        Then the order is unchanged -- sorting is idempotent, so a reversed or
+             otherwise re-ordered sort is visible even when nothing needs moving
+        """
+        canonical = [
+            "Bash(a:*)",
+            "Bash(b:*)",
+            "Read(/home/*)",
+            "Write(/tmp/out.txt)",
+            "Edit(file.py)",
+        ]
+        self.assertEqual(sort_patterns(canonical), canonical)
+
+    def test_duplicate_patterns_are_all_preserved(self):
+        """
+        Given a list containing the same pattern more than once
+        When sort_patterns() is called
+        Then every occurrence survives -- the result has the same length as the
+             input and the duplicate appears twice
+        """
+        patterns = ["Read(/tmp/*)", "Bash(ls:*)", "Bash(ls:*)", "Bash(cat:*)"]
+        result = sort_patterns(patterns)
+        self.assertEqual(len(result), len(patterns))
+        self.assertEqual(
+            result, ["Bash(cat:*)", "Bash(ls:*)", "Bash(ls:*)", "Read(/tmp/*)"]
+        )
+
+    def test_empty_list_returns_a_new_empty_list(self):
         """
         Given an empty pattern list
         When sort_patterns() is called
-        Then an empty list is returned
+        Then a new empty list is returned, not the caller's own list
         """
-        self.assertEqual(sort_patterns([]), [])
+        source = []
+        result = sort_patterns(source)
+        self.assertEqual(result, [])
+        self.assertIsNot(result, source)
 
-    def test_single_element_returns_unchanged(self):
+    def test_single_element_returns_unchanged_in_a_new_list(self):
         """
         Given a single-element pattern list
         When sort_patterns() is called
-        Then the same single element is returned
+        Then the same single element comes back in a new list
         """
-        self.assertEqual(sort_patterns(["Bash(git diff:*)"]), ["Bash(git diff:*)"])
+        source = ["Bash(git diff:*)"]
+        result = sort_patterns(source)
+        self.assertEqual(result, ["Bash(git diff:*)"])
+        self.assertIsNot(result, source)
 
     def test_original_list_not_mutated(self):
         """
@@ -91,46 +141,48 @@ class TestSortPatterns(unittest.TestCase):
 
     def test_stable_sort_preserves_equal_key_order(self):
         """
-        Given two patterns that normalise to the same key (same lowercase full pattern)
+        Given two patterns differing only in case, lowercase first
         When sort_patterns() is called
-        Then they retain their relative order (stable sort)
+        Then they retain their relative order -- the keys tie because the sort
+             is case-insensitive, and a stable sort leaves ties alone
         """
-        patterns = ["Bash(Git Status:*)", "Bash(git status:*)", "Read(/tmp/*)"]
+        patterns = ["Bash(git status:*)", "Bash(Git Status:*)", "Read(/tmp/*)"]
         result = sort_patterns(patterns)
         bash_in_result = [p for p in result if p.startswith("Bash(")]
         self.assertEqual(len(bash_in_result), 2)
-        idx_upper = result.index("Bash(Git Status:*)")
         idx_lower = result.index("Bash(git status:*)")
-        self.assertLess(idx_upper, idx_lower)
+        idx_upper = result.index("Bash(Git Status:*)")
+        self.assertLess(idx_lower, idx_upper)
 
     def test_case_insensitive_sort_within_tool(self):
         """
         Given Bash patterns with mixed case
         When sort_patterns() is called
-        Then sorting within the tool bucket is case-insensitive
+        Then sorting within the tool bucket is case-insensitive, so lowercase
+             'awk' precedes uppercase 'Curl' and 'Zsh'
         """
         patterns = ["Bash(Zsh:*)", "Bash(awk:*)", "Bash(Curl:*)"]
         result = sort_patterns(patterns)
-        bodies_lower = [p.lower() for p in result]
-        self.assertEqual(bodies_lower, sorted(bodies_lower))
+        self.assertEqual(result, ["Bash(awk:*)", "Bash(Curl:*)", "Bash(Zsh:*)"])
 
     def test_unknown_tool_sorts_after_edit(self):
         """
-        Given a pattern with an unrecognised tool name
+        Given a pattern whose unrecognised tool name sorts alphabetically BEFORE
+             every known tool
         When sort_patterns() is called
-        Then it sorts after Edit (priority 4 > Edit's 3)
+        Then it still sorts last, so only the priority rank (4, above Edit's 3)
+             can have put it there
         """
-        patterns = ["Bash(git:*)", "UnknownTool(some:*)", "Edit(file.py)"]
+        patterns = ["Bash(git:*)", "AaaTool(some:*)", "Edit(file.py)"]
         result = sort_patterns(patterns)
-        self.assertTrue(result[0].startswith("Bash("))
-        self.assertTrue(result[-1].startswith("UnknownTool("))
+        self.assertEqual(result, ["Bash(git:*)", "Edit(file.py)", "AaaTool(some:*)"])
 
     def test_extended_syntax_prefix_sorts_within_tool_bucket(self):
         """
         Given Bash patterns including extended-syntax prefixed forms
         When sort_patterns() is called
-        Then all Bash patterns sort in the Bash bucket, alphabetically by full pattern
-        (the [regex] prefix is part of the sort key within the Bash bucket)
+        Then all three stay in the Bash bucket ordered by full pattern, which
+             puts the '[' -prefixed forms ahead of a plain command
         """
         patterns = [
             "Bash([regex]^git\\b)",
@@ -138,9 +190,10 @@ class TestSortPatterns(unittest.TestCase):
             "Bash([glob]git/**)",
         ]
         result = sort_patterns(patterns)
-        self.assertTrue(all(p.startswith("Bash(") for p in result))
-        lowered = [p.lower() for p in result]
-        self.assertEqual(lowered, sorted(lowered))
+        self.assertEqual(
+            result,
+            ["Bash([glob]git/**)", "Bash([regex]^git\\b)", "Bash(uv run:*)"],
+        )
 
 
 class TestSortPatternsWithRuleEntry(unittest.TestCase):
@@ -181,53 +234,76 @@ class TestSortLayerRules(unittest.TestCase):
 
     def test_all_three_lists_sorted(self):
         """
-        Given allow, deny, and ask lists in arbitrary order
+        Given allow, deny, and ask lists with distinct contents, each unsorted
         When sort_layer_rules() is called
-        Then all three lists are returned sorted in canonical tool-priority order
+        Then each list comes back sorted and in its own position in the tuple
         """
         allow = ["Read(z/*)", "Bash(a:*)"]
         deny = ["Write(y.txt)", "Bash(b:*)"]
         ask = ["Edit(x.py)", "Bash(c:*)"]
         sa, sd, sask = sort_layer_rules(allow, deny, ask)
-        self.assertTrue(sa[0].startswith("Bash("))
-        self.assertTrue(sd[0].startswith("Bash("))
-        self.assertTrue(sask[0].startswith("Bash("))
+        self.assertEqual(sa, ["Bash(a:*)", "Read(z/*)"])
+        self.assertEqual(sd, ["Bash(b:*)", "Write(y.txt)"])
+        self.assertEqual(sask, ["Bash(c:*)", "Edit(x.py)"])
 
     def test_none_ask_returns_none(self):
         """
         Given None as the ask list
         When sort_layer_rules() is called
-        Then the returned ask value is also None
+        Then the returned ask value is also None, and allow and deny are sorted
         """
         sa, sd, sask = sort_layer_rules(
             ["Read(b/*)", "Bash(a:*)"], ["Write(d.txt)", "Bash(c:*)"], None
         )
         self.assertIsNone(sask)
+        self.assertEqual(sa, ["Bash(a:*)", "Read(b/*)"])
+        self.assertEqual(sd, ["Bash(c:*)", "Write(d.txt)"])
 
     def test_original_lists_not_mutated(self):
         """
-        Given allow and deny lists
+        Given allow, deny and ask lists
         When sort_layer_rules() is called
-        Then the original lists are not mutated
+        Then none of the originals is mutated
         """
         allow = ["Read(z/*)", "Bash(a:*)"]
         deny = ["Write(y.txt)", "Bash(b:*)"]
-        allow_copy = list(allow)
-        deny_copy = list(deny)
-        sort_layer_rules(allow, deny)
+        ask = ["Edit(x.py)", "Bash(c:*)"]
+        allow_copy, deny_copy, ask_copy = list(allow), list(deny), list(ask)
+        sort_layer_rules(allow, deny, ask)
         self.assertEqual(allow, allow_copy)
         self.assertEqual(deny, deny_copy)
+        self.assertEqual(ask, ask_copy)
 
     def test_empty_lists(self):
         """
-        Given empty allow and deny lists
+        Given empty allow, deny and ask lists
         When sort_layer_rules() is called
-        Then empty lists are returned
+        Then empty lists are returned -- an empty ask stays [] and does not
+             become None
         """
         sa, sd, sask = sort_layer_rules([], [], [])
         self.assertEqual(sa, [])
         self.assertEqual(sd, [])
         self.assertEqual(sask, [])
+
+    def test_accepts_structured_rule_entries(self):
+        """
+        Given RuleEntry objects rather than pattern strings
+        When sort_layer_rules() is called
+        Then they sort by .pattern like any other entry -- the List[str]
+             annotation is narrower than the behaviour
+        """
+        entry_bash = RuleEntry(
+            pattern="Bash(a:*)", metadata=MappingProxyType({"additionalContext": "x"})
+        )
+        entry_read = RuleEntry(
+            pattern="Read(/tmp/*)",
+            metadata=MappingProxyType({"additionalContext": "y"}),
+        )
+        sa, sd, sask = sort_layer_rules([entry_read, entry_bash], [], None)
+        self.assertEqual(sa, [entry_bash, entry_read])
+        self.assertEqual(sd, [])
+        self.assertIsNone(sask)
 
 
 class TestStableRuleKey(unittest.TestCase):
@@ -290,8 +366,10 @@ class TestStableRuleKey(unittest.TestCase):
     def test_key_ordering_consistent_with_sort(self):
         """
         Given a list of mixed-tool patterns
-        When patterns are sorted using stable_rule_key as the key
-        Then the order matches sort_patterns()
+        When sorted by stable_rule_key and by sort_patterns
+        Then both produce the same stated canonical order -- asserted as a
+             literal, so a wrong key cannot satisfy both sides by changing them
+             together
         """
         patterns = [
             "Write(/tmp/out.txt)",
@@ -299,6 +377,11 @@ class TestStableRuleKey(unittest.TestCase):
             "Edit(file.py)",
             "Read(/home/*)",
         ]
-        by_key = sorted(patterns, key=stable_rule_key)
-        by_sort = sort_patterns(patterns)
-        self.assertEqual(by_key, by_sort)
+        expected = [
+            "Bash(git:*)",
+            "Read(/home/*)",
+            "Write(/tmp/out.txt)",
+            "Edit(file.py)",
+        ]
+        self.assertEqual(sorted(patterns, key=stable_rule_key), expected)
+        self.assertEqual(sort_patterns(patterns), expected)

@@ -16,6 +16,7 @@ from toolguard.compound import (
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.parser.command_extractor import LeafCommand
 from toolguard.resolve import resolve_bash_permission_detailed
+from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY
 
 
 def _make_config(layers_content):
@@ -70,11 +71,14 @@ class TestSubMatchesCharacterization(unittest.TestCase):
         """
         Given a single non-compound command matching an allow pattern
         When resolve_bash_permission_detailed resolves it
-        Then sub_matches has exactly one entry, the genuine rule match
+        Then sub_matches has exactly one entry, the genuine rule match, and the
+            verdict attributes that same rule -- 'allow' alone would also be
+            produced by a no-rule fallback, which carries matched_rule None
         """
         config = _config(allow=["git *"])
         result = _resolve(config, "git status")
         self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "git *")
         self.assertEqual(
             [_shape(sm) for sm in result.sub_matches],
             [("git status", "allow", "git *", None)],
@@ -145,18 +149,24 @@ class TestSubMatchesCharacterization(unittest.TestCase):
     def test_undecidable_segment_plus_plain_leaf(self):
         """
         Given a command mixing an undecidable process-substitution segment
-            with a plain trailing leaf ('diff <(cat a) <(cat b) && ls -la')
+            with a plain trailing leaf, the segment deliberately longer than
+            the 80-character slice judge_unit uses for its REASON text
         When resolve_bash_permission_detailed resolves it
         Then sub_matches has TWO entries, in order: the judged undecidable
-            segment, then the plain leaf's own genuine match
+            segment -- keyed to its real, full text, never the 80-character
+            display slice -- then the plain leaf's own genuine match
         """
-        config = _config(allow=["ls*", "diff*"])
-        result = _resolve(config, "diff <(cat a) <(cat b) && ls -la")
+        segment = "diff <(cat " + "a" * 100 + ") <(cat b)"
+        self.assertGreater(len(segment), 80, "fixture must exceed the display slice")
+        # No 'diff*' rule: an undecidable unit has no parts, so no rule is ever
+        # consulted for it. Including one would imply it was evaluated and lost.
+        config = _config(allow=["ls*"])
+        result = _resolve(config, f"{segment} && ls -la")
         self.assertEqual(result.decision, "ask")
         self.assertEqual(
             [_shape(sm) for sm in result.sub_matches],
             [
-                ("diff <(cat a) <(cat b)", "ask", None, None),
+                (segment, "ask", None, None),
                 ("ls -la", "allow", "ls*", None),
             ],
         )
@@ -166,15 +176,91 @@ class TestSubMatchesCharacterization(unittest.TestCase):
         Given a command matching the unoverridable hard_deny pool
         When resolve_bash_permission_detailed resolves it
         Then sub_matches has exactly one entry, a genuine attribution to the
-            matched hard_deny pattern
+            matched hard_deny PATTERN (not the command text, which shares the
+            'rm -rf' prefix), and the verdict attributes that same pattern --
+            'deny' alone is also what a total extraction failure produces,
+            and that path carries matched_rule None
         """
         config = _config(hard_deny=["rm -rf*"])
         result = _resolve(config, "rm -rf /")
         self.assertEqual(result.decision, "deny")
+        self.assertEqual(result.matched_rule, "rm -rf*")
         self.assertEqual(
             [_shape(sm) for sm in result.sub_matches],
             [("rm -rf /", "deny", "rm -rf*", None)],
         )
+
+    def test_ask_floor_leaf_does_not_leak_the_stubs_additional_context(self):
+        """
+        Given an ASK-floor leaf whose outer-command stub matches an allow rule
+            carrying additionalContext
+        When resolve_bash_permission_detailed floors the leaf to 'ask'
+        Then neither the sub_match nor the verdict carries that enrichment --
+            the floor decided, and the stub's rule never read the leaf's real
+            content, so its explanatory text must not describe the outcome
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [
+                                {
+                                    "match": "Bash(python3 -c:*)",
+                                    ADDITIONAL_CONTEXT_KEY: "stub context",
+                                }
+                            ],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        result = _resolve(config, 'python3 -c "import os"')
+        self.assertEqual(result.decision, "ask")
+        self.assertIsNone(result.additional_context)
+        self.assertEqual(len(result.sub_matches), 1)
+        self.assertIsNone(result.sub_matches[0].additional_context)
+
+    def test_mixed_genuine_and_escape_hatch_allow_attributes_only_the_rule(self):
+        """
+        Given a compound whose first leaf allows by a genuine rule match and
+            whose second is an ASK-floor leaf allowed by
+            undecidable_fallback=allow (an escape hatch, not a rule)
+        When resolve_bash_permission_detailed resolves it
+        Then the verdict attributes the ONE genuine rule; the escape-hatch
+            leaf is excluded from the search for a single decider, so it
+            neither supplies an attribution nor cancels the genuine one
+        """
+        config = _config(allow=["ls*", "python3 -c:*"], fallback="allow")
+        result = _resolve(config, 'ls -la && python3 -c "import os"')
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.matched_rule, "ls*")
+        self.assertEqual(
+            [_shape(sm) for sm in result.sub_matches],
+            [
+                ("ls -la", "allow", "ls*", None),
+                ('python3 -c "import os"', "allow", None, "silent"),
+            ],
+        )
+
+    def test_while_loop_condition_reaches_sub_matches(self):
+        """
+        Given a 'while' loop whose CONDITION is a denied command
+            ('while rm -rf /tmp/x; do :; done' under a Bash(rm *) deny rule)
+        When resolve_bash_permission_detailed resolves it
+        Then the condition appears in sub_matches and the compound is denied,
+            exactly as the same command bare is denied
+        """
+        # RED: pins proposed ticket 19's P1 bypass. The condition is dropped by
+        # the extractor, so sub_matches records only ':' and the compound
+        # allows -- a sub-command reaching the shell with no rule applied.
+        config = _config(allow=["*"], deny=["rm *"])
+        result = _resolve(config, "while rm -rf /tmp/x; do :; done")
+        self.assertIn("rm -rf /tmp/x", [sm.sub_command for sm in result.sub_matches])
+        self.assertEqual(result.decision, "deny")
 
 
 class TestAskFloorFallbackMatrix(unittest.TestCase):
@@ -184,6 +270,7 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
     _FALLBACKS = ("ask", "deny", "allow_with_warning", "allow")
 
     def _leaf(self, text='python -c "import os"'):
+        """Return an ASK-floor LeafCommand for *text*."""
         return LeafCommand(text, ask_floor=True)
 
     def test_stub_deny_always_wins_regardless_of_fallback(self):
@@ -268,8 +355,9 @@ class TestAskFloorStubOverrideNeverLeaks(unittest.TestCase):
     def test_stub_override_does_not_leak_into_compound_overrides(self):
         """
         Given a more-specific level allowing 'python *' and a less-specific
-            level denying 'python *', and an ASK-floor leaf whose outer
-            command stub is 'python -c' (matches both)
+            level denying 'python *', an ASK-floor leaf whose outer command
+            stub is 'python -c' (matches both), and
+            undecidable_fallback='allow' so the leaf resolves to 'allow'
         When resolve_bash_permission_detailed resolves the leaf
         Then the outer stub's own allow-over-deny override (a real
             ConflictOverride at the per-level layer) does NOT appear in the
@@ -277,12 +365,21 @@ class TestAskFloorStubOverrideNeverLeaks(unittest.TestCase):
             cascade result, decides this leaf, and the probe must stay
             invisible
         """
+        # undecidable_fallback='allow' is load-bearing, not incidental. Under
+        # the default 'ask' the verdict is non-allow, and resolve.py clears
+        # overrides wholesale for any non-allow decision -- so the list would
+        # be empty whether or not the audits_as_one gate exists, and this
+        # test could not fail. Forcing 'allow' leaves the gate as the only
+        # thing keeping it empty.
         config = _make_config(
             [
                 (
                     "project",
                     "toolguard_hook",
-                    {"permissions": {"allow": ["Bash(python *)"], "deny": []}},
+                    {
+                        "undecidable_fallback": "allow",
+                        "permissions": {"allow": ["Bash(python *)"], "deny": []},
+                    },
                 ),
                 (
                     "user",
@@ -292,7 +389,7 @@ class TestAskFloorStubOverrideNeverLeaks(unittest.TestCase):
             ]
         )
         result = _resolve(config, 'python -c "import os"')
-        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.decision, "allow")
         self.assertEqual(result.overrides, [])
 
 
@@ -336,10 +433,42 @@ class TestUnitFromTuple(unittest.TestCase):
         )
         self.assertEqual(unit.fallback_kind, "warned")
 
+    def test_classifies_a_no_match_fallback_allow_as_silent(self):
+        """
+        Given an allow result whose reason names the no_match_fallback=allow
+            escape hatch
+        When _unit_from_tuple adapts it
+        Then fallback_kind is 'silent' -- and the 'allow_with_warning' reason
+            above is NOT also read as 'silent', even though
+            'no_match_fallback=allow' is a prefix of it: the markers are
+            ordered longest-first so the shorter never shadows the longer
+        """
+        unit = _unit_from_tuple(
+            "rm -rf /tmp/x",
+            (
+                "allow",
+                "No allow pattern matched; allowed anyway (no_match_fallback=allow)",
+                None,
+            ),
+        )
+        self.assertEqual(unit.fallback_kind, "silent")
+        shadowed = _unit_from_tuple(
+            "rm -rf /tmp/x",
+            (
+                "allow",
+                "No allow pattern matched; allowed anyway "
+                "(no_match_fallback=allow_with_warning)",
+                None,
+            ),
+        )
+        self.assertEqual(shadowed.fallback_kind, "warned")
+
 
 class TestJudgeUnitInvariants(unittest.TestCase):
     """``judge_unit``'s two failure modes -- a positional-length mismatch between
-    ``part_verdicts`` and ``unit.parts``, and an unrecognized ``CommandUnit.kind``."""
+    ``part_verdicts`` and ``unit.parts``, and an unrecognized ``CommandUnit.kind``
+    -- its two fail-closed defaults, and the ``_unit_for``/``decompose`` mapping
+    that produces the units it judges."""
 
     def test_raises_on_part_verdicts_length_mismatch(self):
         """
@@ -371,6 +500,35 @@ class TestJudgeUnitInvariants(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             judge_unit(unit, [])
+
+    def test_empty_plain_unit_fails_closed_to_deny(self):
+        """
+        Given a 'plain' CommandUnit whose grammar extraction produced no parts
+        When judge_unit judges it with no part_verdicts
+        Then it denies -- a defensive fail-closed default, so a leaf nothing
+            could be resolved for can never reach the shell unjudged
+        """
+        unit = CommandUnit(text="$(:)", kind="plain", parts=(), audits_as_one=False)
+        verdict = judge_unit(unit, [])
+        self.assertEqual(verdict.decision, "deny")
+        self.assertEqual(verdict.reason, "No valid commands found in leaf")
+        self.assertIsNone(verdict.matched_rule)
+        self.assertIsNone(verdict.fallback_kind)
+
+    def test_unknown_kind_unit_resolves_to_ask(self):
+        """
+        Given the defensive 'unknown' CommandUnit kind
+        When judge_unit judges it
+        Then it asks, with no rule attributed -- an extraction result of
+            neither known type is never silently allowed
+        """
+        unit = CommandUnit(
+            text="whatever", kind="unknown", parts=(), audits_as_one=False
+        )
+        verdict = judge_unit(unit, [])
+        self.assertEqual(verdict.decision, "ask")
+        self.assertEqual(verdict.reason, "Unknown extraction result; cannot verify")
+        self.assertIsNone(verdict.matched_rule)
 
     def test_unit_for_maps_ask_floor_leaf_to_inline_code_with_untruncated_stub(self):
         """

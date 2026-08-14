@@ -1,6 +1,7 @@
 """Unit tests for the per-concern log streams, conflict logging, and provenance in reasons."""
 
 import json
+import os
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -23,8 +24,10 @@ from toolguard.log_writer import (
     _DISCOVERY_TAIL_READ_BYTES,
     _parse_discovery_line,
     log_discovery,
+    resolve_log_dir,
 )
 from toolguard.permission_resolution import resolve_command_permission
+from toolguard.session_start import _count_conflict_entries
 
 
 def _bash_layer(allow, deny, specificity, path):
@@ -39,7 +42,17 @@ def _bash_layer(allow, deny, specificity, path):
     return ConfigLayer(provenance=prov, content=MappingProxyType(content))
 
 
-class TestLogStreamSeparation(unittest.TestCase):
+class StreamFileMixin:
+    """Reading one stream's file for a date, with a readable failure when it is missing."""
+
+    def stream_file(self, log_dir, stream):
+        """Return the single ``toolguard-<stream>-*.md`` file under *log_dir*."""
+        files = list(log_dir.glob(f"toolguard-{stream}-*.md"))
+        self.assertEqual(len(files), 1, f"{stream} stream: {files}")
+        return files[0]
+
+
+class TestLogStreamSeparation(StreamFileMixin, unittest.TestCase):
     """Each concern writes to its OWN per-date file."""
 
     def test_error_warning_conflict_are_separate_files(self):
@@ -47,7 +60,10 @@ class TestLogStreamSeparation(unittest.TestCase):
         Given a log directory
         When an error, a warning, and a conflict are each logged
         Then three distinct files exist (error/warning/conflict), each holding
-             only its own entry
+             only its own entry -- checked in every direction, since a finding
+             in the wrong stream is only visible if the other streams are read
+             too -- and each entry carries its own '## <timestamp> - <LEVEL>'
+             heading
         """
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
@@ -72,9 +88,46 @@ class TestLogStreamSeparation(unittest.TestCase):
 
             self.assertIn("careful", warning_text)
             self.assertNotIn("boom", warning_text)
+            self.assertNotIn("overlap", warning_text)
 
             self.assertIn("overlap", conflict_text)
-            self.assertIn("CONFLICT", conflict_text)
+            self.assertNotIn("boom", conflict_text)
+            self.assertNotIn("careful", conflict_text)
+
+            for text, level in (
+                (error_text, "ERROR"),
+                (warning_text, "WARNING"),
+                (conflict_text, "CONFLICT"),
+            ):
+                headings = [
+                    line for line in text.splitlines() if line.startswith("## ")
+                ]
+                self.assertEqual(len(headings), 1, text)
+                self.assertTrue(headings[0].endswith(f" - {level}"), headings[0])
+
+    def test_a_conflict_entry_is_countable_by_the_session_start_nag(self):
+        """
+        Given conflicts and a warning written by this module's own writers
+        When session_start's conflict counter reads each stream's file
+        Then it counts the conflicts and none of the warning
+
+        The '## <timestamp> - CONFLICT' heading is a contract between the
+        writer and the session-start nag, which is the only recurring channel
+        that surfaces unresolved conflicts. Every test on either side of it
+        supplies its own text, so nothing else exercises the pair together.
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_conflict("overlap", "resolve the conflict", log_dir)
+            log_conflict("another overlap", "resolve that one too", log_dir)
+            log_warning("careful", "fix the warning", log_dir)
+
+            self.assertEqual(
+                _count_conflict_entries(self.stream_file(log_dir, "conflict")), 2
+            )
+            self.assertEqual(
+                _count_conflict_entries(self.stream_file(log_dir, "warning")), 0
+            )
 
     def test_error_log_holds_only_errors(self):
         """
@@ -94,24 +147,36 @@ class TestTakeoverNoticeNotPersisted(unittest.TestCase):
 
     def test_takeover_notice_writes_no_log_file(self):
         """
-        Given a fresh log directory
+        Given a temporary project root whose logs/ IS the directory a writer
+            with no explicit log dir and no resolved config resolves to
         When issue_takeover_warning runs
-        Then no toolguard log stream file is created, and the notice is
-             echoed to stderr -- issue_takeover_warning no longer touches
-             the claim store at all (TOO-45 punch-list #01)
+        Then no toolguard file appears there, and the notice is echoed to
+             stderr -- issue_takeover_warning no longer touches the claim
+             store at all (TOO-45 punch-list #01)
+
+        The assertEqual against resolve_log_dir is a fixture self-guard: the
+        earlier version of this test globbed a directory the notice is never
+        told about and could not have written to under any implementation, so
+        its absence half compared [] with [].
         """
         from toolguard.session_warnings import issue_takeover_warning
 
-        with TemporaryDirectory() as tmp:
-            log_dir = Path(tmp) / "logs"
+        # enterContext first, addCleanup second: cleanups run LIFO, so the cwd
+        # is restored before the directory it points into is removed.
+        project_root = Path(self.enterContext(TemporaryDirectory())).resolve()
+        (project_root / ".git").mkdir()
+        log_dir = project_root / "logs"
+        log_dir.mkdir()
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(project_root)
 
-            with patch("sys.stderr", new_callable=StringIO) as err:
-                issue_takeover_warning(to_stdout=True)
+        self.assertEqual(resolve_log_dir(None, None), log_dir)
 
-            self.assertEqual(
-                list(log_dir.glob("toolguard-*.md")) if log_dir.exists() else [], []
-            )
-            self.assertIn("Takeover mode is active", err.getvalue())
+        with patch("sys.stderr", new_callable=StringIO) as err:
+            issue_takeover_warning(to_stdout=True)
+
+        self.assertEqual(list(log_dir.glob("toolguard-*")), [])
+        self.assertIn("Takeover mode is active", err.getvalue())
 
 
 class TestProvenanceInReasons(unittest.TestCase):
@@ -186,12 +251,21 @@ class TestConflictDetection(unittest.TestCase):
 
     def test_no_override_when_no_less_specific_deny(self):
         """
-        Given a single more-specific level allowing 'git *' and no deny anywhere
+        Given a more-specific level allowing 'git *' and a LESS-specific level
+            that also allows it, so the override scan has a matching level to
+            walk but no deny to find
         When 'git push' resolves
         Then the decision is allow and NO override is reported
+
+        The less-specific allow is what gives this test its subject: with only
+        the winning level configured, the override scan walks an empty tail and
+        reports nothing whatever it is looking for.
         """
         config = Configuration(
-            layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
+            layers=(
+                _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),
+                _bash_layer(["git *"], [], 1, "/home/.claude/toolguard_hook.toml"),
+            )
         )
         resolved = resolve_command_permission(config, "Bash", "git push")
         self.assertEqual(resolved.decision, "allow")
@@ -199,14 +273,18 @@ class TestConflictDetection(unittest.TestCase):
 
     def test_deny_decision_reports_no_override(self):
         """
-        Given a more-specific level that denies the command
+        Given a more-specific level denying the command, a middle level
+            allowing it, and a least-specific level that ALSO denies it
         When the command resolves
-        Then the decision is deny with NO override (overrides are allow-only)
+        Then the decision is deny with NO override -- overrides describe an
+             allow that beat a deny, so a winning deny reports none even
+             though a less-specific deny is sitting there to be found
         """
         config = Configuration(
             layers=(
                 _bash_layer([], ["rm *"], 0, "/proj/.claude/toolguard_hook.toml"),
-                _bash_layer(["rm *"], [], 1, "/home/.claude/toolguard_hook.toml"),
+                _bash_layer(["rm *"], [], 1, "/mid/.claude/toolguard_hook.toml"),
+                _bash_layer([], ["rm *"], 2, "/home/.claude/toolguard_hook.toml"),
             )
         )
         resolved = resolve_command_permission(config, "Bash", "rm -rf /")
@@ -260,7 +338,7 @@ class TestProvenanceHelpers(unittest.TestCase):
         self.assertEqual(resolved.overrides[0][1].overridden_provenance.specificity, 2)
 
 
-class TestDiscoveryDiagnostic(unittest.TestCase):
+class TestDiscoveryDiagnostic(StreamFileMixin, unittest.TestCase):
     """The change-detecting discovery diagnostic: log_discovery writes only on a change."""
 
     _LEVELS_A = [
@@ -437,8 +515,61 @@ class TestDiscoveryDiagnostic(unittest.TestCase):
                 "user: /home/.claude/toolguard_hook.toml\n"
             )
             self.assertIn(expected, text)
-            self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
-            self.assertEqual(list(log_dir.glob("toolguard-conflict-*.md")), [])
+
+    def test_discovery_and_the_other_streams_do_not_bleed_into_each_other(self):
+        """
+        Given a warning and a conflict already written into the log directory
+        When a discovery is logged into that same directory
+        Then the discovery text appears only in the resolution log, and the
+             warning and conflict texts stay out of it
+
+        The warning and conflict are written first on purpose: asserting that
+        log_discovery leaves an EMPTY warning stream empty says nothing, since
+        it has no way to write one.
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_warning("unrelated warning", "fix the warning", log_dir)
+            log_conflict("unrelated conflict", "resolve the conflict", log_dir)
+
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            warning_text = self.stream_file(log_dir, "warning").read_text()
+            conflict_text = self.stream_file(log_dir, "conflict").read_text()
+            resolution_path = self._resolution_log_path(log_dir)
+            self.assertTrue(resolution_path.exists(), sorted(log_dir.iterdir()))
+            resolution_text = resolution_path.read_text()
+
+            self.assertIn("**Discovery**", resolution_text)
+            self.assertNotIn("**Discovery**", warning_text)
+            self.assertNotIn("**Discovery**", conflict_text)
+            self.assertNotIn("unrelated warning", resolution_text)
+            self.assertNotIn("unrelated conflict", resolution_text)
+
+    def test_a_torn_final_line_does_not_shadow_an_earlier_record(self):
+        """
+        Given a discovery log holding a complete record for this project root
+            followed by a torn final line, as an interrupted write leaves it
+        When log_discovery runs with the SAME levels as the complete record
+        Then nothing is written: the torn line is skipped, not read as a
+             record whose levels are empty, so the earlier record still
+             suppresses the write
+
+        The sibling test above has only the torn line, so "skipped" and
+        "parsed as a record with no levels" produce the same outcome there.
+        """
+        with TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            discovery_path = self._discovery_log_path(log_dir)
+            with open(discovery_path, "a", encoding="utf-8") as f:
+                f.write("2026-01-01T00:00:00\t/proj")
+            before = discovery_path.read_bytes()
+
+            log_discovery(self._LEVELS_A, log_dir, "/proj")
+
+            self.assertEqual(discovery_path.read_bytes(), before)
 
     def test_oversized_file_no_longer_degrades_to_permanent_append_mode(self):
         """
@@ -571,14 +702,19 @@ class TestHookConflictLogging(unittest.TestCase):
 
     def test_hook_does_not_log_conflict_without_override(self):
         """
-        Given a single project level allowing 'git *' (no deny anywhere)
+        Given a project level allowing 'git *' and a user level that also
+            allows it, so the override scan has a level to walk and no deny
+            to find
         When the hook resolves 'git status'
         Then it allows the command and writes NO conflict-log file
         """
         from toolguard import hook as hook_mod
 
         config = self._config_with_levels(
-            [_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml")]
+            [
+                _bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),
+                _bash_layer(["git *"], [], 1, "/home/.claude/toolguard_hook.toml"),
+            ]
         )
         hook_input = {
             "tool_name": "Bash",
@@ -773,12 +909,19 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         When toolguard.hook._run_divergence_check runs TWICE for that
             project (simulating two separate tool-call invocations the same
             day)
-        Then migrate() is attempted exactly ONCE -- the divergence_warning
-             claim the first call takes gates every later same-day call
-             before it ever reaches run_auto_migration, so a failed
-             migration is retried the next day, not the same day (TOO-45
-             D4)
+        Then migrate() is attempted exactly ONCE and the second call does not
+             even re-run the divergence analysis: the divergence_warning claim
+             the first call takes short-circuits it before any file is read,
+             so a failed migration is retried the next day, not the same day
+             (TOO-45 D4)
+
+        The call_count on its own does not pin that gate. At least three
+        independent same-day claims each hold it at 1 on their own, so
+        removing any one of them leaves this assertion passing. The
+        get_native_permissions count is what makes the named gate the subject;
+        the auto_migration claim's own share is the sibling test below.
         """
+        from toolguard import config_divergence as divergence_mod
         from toolguard import hook as hook_mod
         from toolguard import once_per_store
         from toolguard.config import load_configuration
@@ -808,10 +951,86 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         config = load_configuration(proj_root, ignore_env_override=True)
         takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
 
-        with patch("toolguard.auto_migrate.migrate", return_value=1) as mock_migrate:
-            hook_mod._run_divergence_check(config, env_config, takeover_dict)
-            hook_mod._run_divergence_check(config, env_config, takeover_dict)
+        with patch.object(
+            divergence_mod,
+            "get_native_permissions",
+            wraps=divergence_mod.get_native_permissions,
+        ) as mock_native:
+            with patch(
+                "toolguard.auto_migrate.migrate", return_value=1
+            ) as mock_migrate:
+                hook_mod._run_divergence_check(config, env_config, takeover_dict)
+                hook_mod._run_divergence_check(config, env_config, takeover_dict)
 
+        self.assertEqual(mock_migrate.call_count, 1)
+        # wraps=, so the real analysis ran: mock_migrate above only reaches 1
+        # if the first call genuinely found the divergent pattern.
+        self.assertEqual(mock_native.call_count, 1)
+
+    def test_auto_migration_claim_stops_a_second_attempt_on_its_own(self):
+        """
+        Given the same project, but with the divergence check stubbed to
+            report divergence on EVERY call, so its own once-per-day claims
+            cannot be what stops the retry
+        When toolguard.hook._run_divergence_check runs twice
+        Then run_auto_migration still analyses the project only once, and
+             migrate() is still attempted only once
+
+        Isolates the auto_migration claim from the divergence_warning claim.
+        The two mask each other in the sibling test above, where either alone
+        produces the same call_count.
+        """
+        from toolguard import auto_migrate as auto_migrate_mod
+        from toolguard import hook as hook_mod
+        from toolguard import once_per_store
+        from toolguard.config import load_configuration
+
+        _home, proj_root = self.isolate_config_environment()
+        store_patcher = patch.object(
+            once_per_store, "_STORE_PATH", _home / ".toolguard" / "once_per.db"
+        )
+        store_patcher.start()
+        self.addCleanup(store_patcher.stop)
+        claude = proj_root / ".claude"
+        claude.mkdir()
+        (claude / "settings.local.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+        )
+        (claude / "toolguard_hook.json").write_text(
+            json.dumps(
+                {
+                    "permissions": {"allow": []},
+                    "config_sync": {"auto_migrate": True},
+                }
+            )
+        )
+
+        log_dir = proj_root / "logs"
+        env_config = {"log_dir": log_dir}
+        config = load_configuration(proj_root, ignore_env_override=True)
+        takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
+        always_divergent = DivergenceCheckResult(
+            divergent_patterns=["Bash(git push:*)"]
+        )
+
+        with patch.object(
+            hook_mod, "check_and_warn_divergence", return_value=always_divergent
+        ) as mock_check:
+            with patch.object(
+                auto_migrate_mod,
+                "load_configuration",
+                wraps=auto_migrate_mod.load_configuration,
+            ) as mock_load:
+                with patch(
+                    "toolguard.auto_migrate.migrate", return_value=1
+                ) as mock_migrate:
+                    hook_mod._run_divergence_check(config, env_config, takeover_dict)
+                    hook_mod._run_divergence_check(config, env_config, takeover_dict)
+
+        # The stub must be the thing that ran, or the divergence claim is
+        # still in play and this test measures the wrong gate.
+        self.assertEqual(mock_check.call_count, 2)
+        self.assertEqual(mock_load.call_count, 1)
         self.assertEqual(mock_migrate.call_count, 1)
 
 

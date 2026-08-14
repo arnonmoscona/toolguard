@@ -183,23 +183,31 @@ class TestWithLayerAllowReplaced(unittest.TestCase):
 
     def test_does_not_modify_other_layers(self):
         """
-        Given a config with two layers at different provenances
-        When with_layer_allow_replaced targets only the first layer
-        Then the second layer's allow list is unchanged.
+        Given two layers that BOTH hold the removed pattern, the TARGET layer
+            second
+        When with_layer_allow_replaced names the second layer's provenance
+        Then the first layer keeps its copy and only the named layer loses one
+            -- the edit is located by provenance, not by taking the first layer
+            that happens to hold the pattern.
         """
         prov_a = _make_provenance("/fake/a.toml")
         prov_b = _make_provenance("/fake/b.toml")
-        layer_a = _make_layer("Bash", allow=["git diff:*"], provenance=prov_a)
-        layer_b = _make_layer("Bash", allow=["git status:*"], provenance=prov_b)
-        config = _make_config(layer_a, layer_b)
+        other = _make_layer(
+            "Bash", allow=["git diff:*", "git status:*"], provenance=prov_a
+        )
+        target = _make_layer("Bash", allow=["git diff:*"], provenance=prov_b)
+        config = _make_config(other, target)
 
-        result = with_layer_allow_replaced(config, "Bash", prov_a, {"git diff:*"}, [])
+        result = with_layer_allow_replaced(config, "Bash", prov_b, {"git diff:*"}, [])
 
         from toolguard.tools.config_access import per_layer_rules
 
+        rules_a = [r for r in per_layer_rules(result, "Bash") if r.provenance == prov_a]
+        self.assertEqual(len(rules_a), 1)
+        self.assertIn("git diff:*", rules_a[0].allow)
+        self.assertIn("git status:*", rules_a[0].allow)
         rules_b = [r for r in per_layer_rules(result, "Bash") if r.provenance == prov_b]
-        self.assertEqual(len(rules_b), 1)
-        self.assertIn("git status:*", rules_b[0].allow)
+        self.assertNotIn("git diff:*", rules_b[0].allow)
 
     def test_inherits_structured_entry_preservation_from_delegate(self):
         """
@@ -447,7 +455,14 @@ class TestFamily1GitHappyPath(unittest.TestCase):
 
 
 class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
-    """Family-1 is equivalence-preserving: the no-changed-decision gate, not token-count structure, prevents the alembic landmine."""
+    """
+    What actually stops a family-1 consolidation: the no-changed-decision gate,
+    not the token-count structure of the grouping.
+
+    Passing that gate is evidence about the commands it ran, never a proof of
+    match-set equality -- shapes that pass it and still tighten are named in
+    :func:`toolguard.tools.consolidate._check_family1_safe`.
+    """
 
     def test_different_token_count_patterns_produce_no_proposals(self):
         """
@@ -456,7 +471,9 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
         When propose_consolidations is called for Bash
         Then no literal-alternation proposal is returned -- patterns with
              different token counts simply never form a group (incidental
-             structure, not the safety mechanism).
+             structure, not the safety mechanism). Equalising the token counts
+             makes the same two patterns group, so the empty result is the
+             grouping declining, not family 1 being inert.
         """
         prov = _make_provenance()
         layer = _make_layer(
@@ -476,15 +493,31 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
             f"Expected no family-1 proposals; got: {family1}",
         )
 
-    def test_equivalence_preserving_consolidation_accepted(self):
+        equal_counts = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["uv run alembic upgrade:*", "uv run alembic downgrade:*"],
+                provenance=prov,
+            )
+        )
+        self.assertTrue(
+            [
+                p
+                for p in propose_consolidations(equal_counts, "Bash")
+                if p.kind == "literal-alternation"
+            ]
+        )
+
+    def test_deny_guarded_landmine_survives_consolidation(self):
         """
         Given 'uv run alembic upgrade:*' and 'uv run alembic downgrade:*'
               (both 4 cmd tokens, varying at position 3) plus a deny guard on
               'uv run alembic db downgrade:*'
-        When propose_consolidations is called (no corpus)
-        Then any accepted family-1 proposal reports its probes were unchanged --
-             the consolidation neither widened the deny guard to allow nor
-             tightened a previously-allowed command.
+        When the accepted family-1 proposal is applied
+        Then exactly one proposal is accepted, its added pattern is the anchored
+             alternation over the two varying tokens, and every probed command
+             keeps its verdict: the deny guard stays 'deny', both consolidated
+             commands stay 'allow', and an unnamed sibling stays 'ask'.
         """
         prov = _make_provenance()
         layer = _make_layer(
@@ -497,10 +530,50 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
             provenance=prov,
         )
         config = _make_config(layer)
-        proposals = propose_consolidations(config, "Bash")
-        for p in proposals:
-            if p.kind == "literal-alternation":
-                self.assertIn("unchanged", p.replay_summary)
+        family1 = [
+            p
+            for p in propose_consolidations(config, "Bash")
+            if p.kind == "literal-alternation"
+        ]
+        self.assertEqual(len(family1), 1, f"Expected 1, got: {family1}")
+        p = family1[0]
+        self.assertEqual(p.added_pattern, "[regex]^uv run alembic (downgrade|upgrade)")
+
+        config_b = with_layer_allow_replaced(
+            config, "Bash", prov, set(p.removed_patterns), [p.added_pattern]
+        )
+        expected = {
+            "uv run alembic upgrade head": "allow",
+            "uv run alembic downgrade base": "allow",
+            "uv run alembic downgradex": "allow",
+            "uv run alembic db downgrade": "deny",
+            "uv run alembic destroy": "ask",
+        }
+        for cmd, verdict in expected.items():
+            self.assertEqual(decide(config, "Bash", cmd).decision, verdict, cmd)
+            self.assertEqual(decide(config_b, "Bash", cmd).decision, verdict, cmd)
+
+    def test_corpus_replay_rejects_a_tightening_consolidation(self):
+        """
+        Given 'cat ./x:*' and 'cat ./y:*', which the synthetic probes alone
+              accept, and a corpus holding 'cat x' -- a command the originals
+              allow only via path normalization, which the generated [regex]
+              does not apply
+        When propose_consolidations is called WITH that corpus
+        Then no family-1 proposal is emitted: the corpus replay sees the
+             tightening the probe set missed.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer("Bash", allow=["cat ./x:*", "cat ./y:*"], provenance=prov)
+        )
+        corpus = [_make_log_entry("Bash", "cat x")]
+        family1 = [
+            p
+            for p in propose_consolidations(config, "Bash", corpus=corpus)
+            if p.kind == "literal-alternation"
+        ]
+        self.assertEqual(family1, [], f"Expected rejection; got: {family1}")
 
     def test_gate_rejects_decision_changing_consolidation(self):
         """
@@ -618,15 +691,19 @@ class TestFamily2ConservativeNonClaim(unittest.TestCase):
 
     def test_unrelated_git_patterns_produce_no_subsumption_proposal(self):
         """
-        Given 'git diff:*' and 'git status:*' in the allow list
+        Given 'git diff:*' and 'git status:*', plus a third rule
+              '[regex]^git status' that keeps every probe for 'git status'
+              allowed after removal
         When propose_consolidations is called for Bash
-        Then no static-subsumption proposal is returned (neither command is a
-             word-boundary prefix of the other: 'git diff' != 'git status' prefix).
+        Then no static-subsumption proposal is returned. The third rule
+             deliberately satisfies the probe gate, so the ONLY thing left to
+             reject the pair is _static_prefix_of: 'git diff' is not a
+             structural prefix of 'git status'.
         """
         prov = _make_provenance()
         layer = _make_layer(
             "Bash",
-            allow=["git diff:*", "git status:*"],
+            allow=["git diff:*", "git status:*", "[regex]^git status"],
             provenance=prov,
         )
         config = _make_config(layer)
@@ -638,50 +715,82 @@ class TestFamily2ConservativeNonClaim(unittest.TestCase):
 
     def test_git_vs_git_annex_not_subsumed(self):
         """
-        Given 'git:*' (allows any git command) and 'git-annex:*' in the allow list
+        Given 'git:*' (allows any git command), 'git-annex:*', and a third rule
+              '[regex]^git-annex' that keeps every probe for 'git-annex'
+              allowed after removal
         When propose_consolidations is called for Bash
-        Then 'git-annex:*' is NOT reported as subsumed by 'git:*' because
-             'git-annex' does not start with 'git ' or 'git/'.
+        Then no static-subsumption proposal is returned: the third rule
+             satisfies the probe gate, and 'git-annex' does not extend 'git' at
+             a space or '/' boundary, so _static_prefix_of is the only rejector.
         """
         prov = _make_provenance()
         layer = _make_layer(
             "Bash",
-            allow=["git:*", "git-annex:*"],
+            allow=["git:*", "git-annex:*", "[regex]^git-annex"],
             provenance=prov,
         )
         config = _make_config(layer)
         proposals = propose_consolidations(config, "Bash")
         family2 = [p for p in proposals if p.kind == "static-subsumption"]
-        removed_sets = [set(p.removed_patterns) for p in family2]
-        self.assertNotIn(
-            {"git-annex:*"},
-            removed_sets,
-            "git-annex:* must not be reported as subsumed by git:*",
+        self.assertEqual(
+            family2,
+            [],
+            f"git-annex:* must not be reported as subsumed by git:*; got: {family2}",
         )
+
+    def test_probe_gate_rejects_unsound_path_boundary_subsumption(self):
+        """
+        Given '/usr/bin:*' and '/usr/bin/env:*', a pair _static_prefix_of
+              accepts (the '/' boundary) but match_command does not honour --
+              '/usr/bin:*' matches nothing under '/usr/bin/env'
+        When propose_consolidations is called for Bash
+        Then no static-subsumption proposal is returned: the positive-probe gate
+             rejects it, which is the only guard here.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer("Bash", allow=["/usr/bin:*", "/usr/bin/env:*"], provenance=prov)
+        )
+        family2 = [
+            p
+            for p in propose_consolidations(config, "Bash")
+            if p.kind == "static-subsumption"
+        ]
+        self.assertEqual(family2, [], f"Expected rejection; got: {family2}")
 
     def test_single_pattern_no_proposals(self):
         """
         Given a config with only one allow pattern
         When propose_consolidations is called for Bash
-        Then no proposals of any kind are returned (minimum 2 patterns required).
+        Then no proposals of any kind are returned -- and adding one groupable
+             sibling to the same layer DOES produce a proposal, so the empty
+             result means 'no opportunity', not 'nothing was analysed'.
         """
         prov = _make_provenance()
-        layer = _make_layer("Bash", allow=["git diff:*"], provenance=prov)
-        config = _make_config(layer)
-        proposals = propose_consolidations(config, "Bash")
-        self.assertEqual(proposals, [])
+        one = _make_config(_make_layer("Bash", allow=["git diff:*"], provenance=prov))
+        self.assertEqual(propose_consolidations(one, "Bash"), [])
+
+        two = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*"], provenance=prov)
+        )
+        self.assertNotEqual(propose_consolidations(two, "Bash"), [])
 
     def test_empty_allow_list_no_proposals(self):
         """
-        Given a config with an empty allow list for Bash
+        Given a config whose Bash layer has an empty allow list
         When propose_consolidations is called for Bash
-        Then no proposals are returned.
+        Then no proposals are returned -- and the same layer with two groupable
+             patterns DOES produce one, so the empty result distinguishes an
+             empty config from an analyzer that returns nothing regardless.
         """
         prov = _make_provenance()
-        layer = _make_layer("Bash", allow=[], provenance=prov)
-        config = _make_config(layer)
-        proposals = propose_consolidations(config, "Bash")
-        self.assertEqual(proposals, [])
+        empty = _make_config(_make_layer("Bash", allow=[], provenance=prov))
+        self.assertEqual(propose_consolidations(empty, "Bash"), [])
+
+        populated = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*"], provenance=prov)
+        )
+        self.assertNotEqual(propose_consolidations(populated, "Bash"), [])
 
 
 # ---------------------------------------------------------------------------
@@ -694,20 +803,23 @@ class TestConsolidateEdgeCases(unittest.TestCase):
 
     def test_non_default_patterns_not_grouped(self):
         """
-        Given a config with two [regex] patterns
+        Given two [regex] patterns whose BODIES are shaped exactly like the
+              DEFAULT 'cmd:*' prefixes family 1 groups
         When propose_consolidations is called
-        Then no literal-alternation proposal is returned (family-1 only handles DEFAULT).
+        Then no literal-alternation proposal is returned. The bodies pass every
+             other screen family 1 applies -- two cmd tokens, '*' args, literal
+             varying token -- so only the PatternType check keeps them apart.
         """
         prov = _make_provenance()
         layer = _make_layer(
             "Bash",
-            allow=["[regex]^git diff", "[regex]^git status"],
+            allow=["[regex]git diff:*", "[regex]git status:*"],
             provenance=prov,
         )
         config = _make_config(layer)
         proposals = propose_consolidations(config, "Bash")
         family1 = [p for p in proposals if p.kind == "literal-alternation"]
-        self.assertEqual(family1, [])
+        self.assertEqual(family1, [], f"Expected no family-1 proposals; got: {family1}")
 
     def test_wildcard_token_patterns_not_grouped(self):
         """
@@ -729,30 +841,39 @@ class TestConsolidateEdgeCases(unittest.TestCase):
 
     def test_proposals_are_deterministically_ordered(self):
         """
-        Given a config that produces multiple proposals
-        When propose_consolidations is called twice
-        Then the results are in the same order both times (deterministic sort).
+        Given four allow patterns that yield four same-kind proposals whose
+              DISCOVERY order (grouping-dict insertion) differs from their
+              sorted order
+        When propose_consolidations is called
+        Then the proposals come back sorted by removed_patterns, not in
+             discovery order -- and twice in a row gives the same list.
         """
         prov = _make_provenance()
         layer = _make_layer(
             "Bash",
-            allow=[
-                "git status:*",
-                "git diff:*",
-                "git log:*",
-            ],
+            allow=["zzz a:*", "zzz b:*", "aaa a:*", "aaa b:*"],
             provenance=prov,
         )
         config = _make_config(layer)
         first = propose_consolidations(config, "Bash")
-        second = propose_consolidations(config, "Bash")
-        self.assertEqual(first, second)
+        self.assertEqual(
+            [p.removed_patterns for p in first],
+            [
+                ("aaa a:*", "aaa b:*"),
+                ("aaa a:*", "zzz a:*"),
+                ("aaa b:*", "zzz b:*"),
+                ("zzz a:*", "zzz b:*"),
+            ],
+        )
+        self.assertEqual(propose_consolidations(config, "Bash"), first)
 
     def test_wrong_tool_produces_no_proposals(self):
         """
-        Given a config with Bash allow patterns
-        When propose_consolidations is called for 'Read' (different tool)
-        Then no proposals are returned.
+        Given a config whose ONLY allow patterns are Bash patterns
+        When propose_consolidations is called for 'Read'
+        Then no proposals are returned, while the same config queried for
+             'Bash' does produce one -- so the empty Read result reflects that
+             tool's rules rather than an analyzer that found nothing anywhere.
         """
         prov = _make_provenance()
         layer = _make_layer(
@@ -761,8 +882,8 @@ class TestConsolidateEdgeCases(unittest.TestCase):
             provenance=prov,
         )
         config = _make_config(layer)
-        proposals = propose_consolidations(config, "Read")
-        self.assertEqual(proposals, [])
+        self.assertEqual(propose_consolidations(config, "Read"), [])
+        self.assertNotEqual(propose_consolidations(config, "Bash"), [])
 
 
 class TestPrefixBroadening(unittest.TestCase):
@@ -797,8 +918,10 @@ class TestPrefixBroadening(unittest.TestCase):
         Given two narrow 'uv run alembic <sub>:*' allows plus a broader same-layer
             ask guard 'uv run:*'
         When propose_broadening_consolidations enumerates the broadening
-        Then overlaps_guard_rules names the overlapping ask guard (the fragility
-            signal), surfaced even though resolution protects it in-context.
+        Then overlaps_guard_rules names the overlapping ask guard. Resolution
+            does NOT protect this one: the broadened allow is more
+            literal-specific than the ask, so it wins the tie and the commands
+            the ask used to gate would become 'allow'.
         """
         prov = _make_provenance()
         config = _make_config(
@@ -857,7 +980,15 @@ class TestPrefixBroadening(unittest.TestCase):
 
 
 class TestStaticPrefixOf(unittest.TestCase):
-    """_static_prefix_of structurally proves a smaller command's match-set is a subset of a larger command's."""
+    """
+    _static_prefix_of's own contract: which command strings it treats as
+    structural prefixes of which.
+
+    It is a text test, not a proof about match-sets. Where the two diverge is
+    documented on the function; the caller's probe gate is what stands between
+    a divergence and an emitted proposal -- see
+    test_probe_gate_rejects_unsound_path_boundary_subsumption.
+    """
 
     def test_identical_commands_subsume(self):
         """

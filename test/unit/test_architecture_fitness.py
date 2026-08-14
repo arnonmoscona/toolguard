@@ -2510,15 +2510,15 @@ class TestFindNonLeafEntryPoints(unittest.TestCase):
 
     def test_relabeling_the_pyscn_toml_layer_map_has_no_effect(self):
         """
-        Given a module's .pyscn.toml layer label moved from "runtime" into a
-            different layer entirely, reproduced here as two DIFFERENT
-            ArchitectureConfig objects
+        Given every module relabelled into one "foundation" layer, installed by
+            patching parse_architecture_config -- the anchor that IS consulted
+            at call time (see the class-level note on PYSCN_TOML)
         When find_non_leaf_entry_points is called with the same graph and
-            entry_point_modules against both configs (it is never even given
-            the ArchitectureConfig at all)
-        Then the result is byte-identical either way -- .pyscn.toml content
-            cannot influence this predicate, because the function does not
-            accept an ArchitectureConfig parameter
+            entry_point_modules under the real map and under the gamed one
+        Then its result is unchanged, WHILE check_layers -- which does read the
+            map -- maps the same two modules differently under the two, so the
+            invariance is evidence about the predicate rather than evidence
+            that the relabelling never happened
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2530,15 +2530,22 @@ class TestFindNonLeafEntryPoints(unittest.TestCase):
                 inspect.signature(af.find_non_leaf_entry_points).parameters,
             )
             before = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
-            gamed_toml = root / "gamed.pyscn.toml"
-            gamed_toml.write_text(
-                "[architecture]\nenabled = true\n\n"
-                '[[architecture.layers]]\nname = "foundation"\npackages = ["hook"]\n',
-                encoding="utf-8",
+            real_arch = af.parse_architecture_config()
+            gamed_arch = af.ArchitectureConfig(
+                layers=(af.LayerDef("foundation", ("hook", "tools")),),
+                rules=(af.LayerRule("foundation", ("foundation",)),),
             )
-            af.parse_architecture_config(gamed_toml)
-            after = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
+            with mock.patch.object(
+                af, "parse_architecture_config", return_value=gamed_arch
+            ):
+                after = af.find_non_leaf_entry_points(graph, frozenset({"hook"}))
+                gamed_layers = af.check_layers(root)
             self.assertEqual(before, after)
+            self.assertNotEqual(
+                af.check_layers(root, real_arch).module_layer,
+                gamed_layers.module_layer,
+                "the gamed layer map reached nothing -- the invariance above is vacuous",
+            )
 
 
 class TestFindEnrichmentFootprint(unittest.TestCase):
@@ -3052,6 +3059,124 @@ class TestGuardCanaries(unittest.TestCase):
             self.assertIn("canary mismatch", report.failures[0])
 
 
+class TestPassHavingCheckedNothing(unittest.TestCase):
+    """
+    A fitness instrument must not report a clean result when its input set is
+    empty. Every test here asserts the CORRECT behaviour and currently fails;
+    each names the checker that reports success having examined nothing.
+    """
+
+    def test_run_guard_does_not_pass_with_an_empty_canary_set(self):
+        """
+        Given GUARD_CANARIES emptied -- reachable by a rename, a relocation, a
+            filter that narrows to nothing, or a load path that returns empty
+        When run_guard is called in canaries-only mode against a stub binary
+        Then it must not report ok=True: nothing in the result distinguishes
+            "every canary passed" from "there were no canaries"
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stub = _write_stub_hook_binary(root / "stub_toolguard", '"allow"')
+            with mock.patch.object(af, "GUARD_CANARIES", ()):
+                report = af.run_guard(
+                    repo_root=root, only_canaries=True, canary_binary=str(stub)
+                )
+            self.assertEqual(report.canary_results, [])
+            self.assertFalse(
+                report.ok,
+                "the guard reported PASS having evaluated zero canary cases",
+            )
+
+    def test_run_guard_canaries_does_not_report_a_clean_unskipped_empty_run(self):
+        """
+        Given the same emptied GUARD_CANARIES
+        When run_guard_canaries is called
+        Then it must not report skipped=False with zero mismatches and zero
+            results -- an empty case set is a configuration error, and the one
+            state it must never be confused with is a clean pass
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stub = _write_stub_hook_binary(root / "stub_toolguard", '"allow"')
+            with mock.patch.object(af, "GUARD_CANARIES", ()):
+                outcome = af.run_guard_canaries(repo_root=root, binary=str(stub))
+            self.assertEqual(outcome["results"], [])
+            self.assertTrue(
+                outcome["skipped"] or outcome["mismatches"],
+                "an empty canary set read as a clean, un-skipped run",
+            )
+
+    def test_check_layers_does_not_pass_over_a_tree_with_no_modules(self):
+        """
+        Given a source tree containing no Python modules at all -- what a
+            mistyped or relocated toolguard_dir produces
+        When check_layers is called with the real architecture config
+        Then it must not report ok=True having mapped zero modules; the
+            --layers half of the tool degrades as quietly here as the canary
+            guard does
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_tree = Path(tmp) / "toolguard"
+            empty_tree.mkdir()
+            report = af.check_layers(empty_tree, af.parse_architecture_config())
+            self.assertEqual(report.module_layer, {})
+            self.assertFalse(
+                report.ok,
+                "check_layers reported PASS having examined zero modules",
+            )
+
+    def test_check_layers_reports_a_declared_package_with_no_module_behind_it(self):
+        """
+        Given a layer declaring a package name that matches no module in the
+            tree -- the residue a rename or a deletion leaves in the map
+        When check_layers is called
+        Then the dead entry is reported and the report is not ok; a map entry
+            that protects nothing is indistinguishable from one that does
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "a.py", "x = 1\n")
+            _write(root / "b.py", "x = 1\n")
+            arch = af.ArchitectureConfig(
+                layers=(
+                    af.LayerDef("base", ("a",)),
+                    af.LayerDef("top", ("b", "a_package_that_no_longer_exists")),
+                ),
+                rules=(
+                    af.LayerRule("base", ("base",)),
+                    af.LayerRule("top", ("top", "base")),
+                ),
+            )
+            report = af.check_layers(root, arch)
+            self.assertFalse(
+                report.ok,
+                "a layer package with no module behind it was never reported",
+            )
+
+    def test_compute_predicates_does_not_pass_every_step_over_an_empty_tree(self):
+        """
+        Given a source tree containing no Python modules
+        When compute_predicates is called against it
+        Then the predicates that examine that tree must not all report pass --
+            R2, R3, R5 and R6 currently do, so four of the five step gates say
+            PASS on the strength of having found nothing to look at
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_tree = Path(tmp) / "toolguard"
+            empty_tree.mkdir()
+            predicates = af.compute_predicates(toolguard_dir=empty_tree)
+            passing = sorted(
+                key
+                for key, value in predicates.items()
+                if isinstance(value, dict) and value.get("pass") is True
+            )
+            self.assertEqual(
+                passing,
+                [],
+                f"predicates {passing} passed over a tree with zero modules",
+            )
+
+
 class TestMetricsPureHelpers(unittest.TestCase):
     """Tests for the pure helper functions behind --metrics."""
 
@@ -3255,57 +3380,47 @@ class TestComputePredicates(unittest.TestCase):
 
     def test_relabeling_pyscn_toml_layer_map_does_not_change_r5_verdict(self):
         """
-        Given the real tree's R5 result under the real .pyscn.toml
-        When .pyscn.toml is replaced (via PYSCN_TOML, never touching the real
-            file on disk) with a version moving
-            error_log/session_warnings/subagent/update_check out of the
-            "runtime" layer into "foundation", and log_writer into "config",
-            and compute_predicates is called again
-        Then R5's non_leaf_entry_points, cycles, and pass verdict are
-            byte-identical to the un-gamed run -- relabeling .pyscn.toml
-            cannot move R5's verdict, because compute_predicates does not
-            read .pyscn.toml for R5 (entry-point status comes from
-            pyproject.toml, not from any layer label)
+        Given the real tree's predicates under the real layer map
+        When every package is relabelled into a single "foundation" layer and
+            that map is installed by patching parse_architecture_config -- the
+            anchor that IS consulted (patching the PYSCN_TOML constant is not:
+            parse_architecture_config binds it as a default argument, so the
+            substitution never reaches any caller)
+        Then R5's non_leaf_entry_points, cycles and pass verdict are unchanged,
+            WHILE R6's guarded_modules -- derived from the layer map -- does
+            change, which is what proves the relabelling reached
+            compute_predicates at all
         """
-        baseline = af.compute_predicates()["R5"]
-        real_toml_text = af.PYSCN_TOML.read_text(encoding="utf-8")
-        gamed_text = (
-            real_toml_text.replace(
-                'packages = ["hook", "session_start", "log_writer", "error_log", '
-                '"session_warnings", "subagent", "update_check"]',
-                'packages = ["hook", "session_start"]',
-            )
-            .replace(
-                'packages = ["constants", "issues", "path_utils", "normalization", '
-                '"patterns", "toml_scan", "_git", "install_provenance", '
-                '"install_update"]',
-                'packages = ["constants", "issues", "path_utils", "normalization", '
-                '"patterns", "toml_scan", "_git", "install_provenance", '
-                '"install_update", "error_log", '
-                '"session_warnings", "subagent", "update_check"]',
-            )
-            .replace(
-                'packages = ["rule_entry", "config_types", "config", '
-                '"config_validation", "config_write_guard", "env_config", '
-                '"rule_sort", "auto_migrate", "config_divergence", '
-                '"permission_migration"]',
-                'packages = ["rule_entry", "config_types", "config", '
-                '"config_validation", "config_write_guard", "env_config", '
-                '"rule_sort", "auto_migrate", "config_divergence", '
-                '"permission_migration", "log_writer"]',
-            )
+        baseline = af.compute_predicates()
+        real_arch = af.parse_architecture_config()
+        gamed_arch = af.ArchitectureConfig(
+            layers=(
+                af.LayerDef(
+                    "foundation",
+                    tuple(
+                        sorted(pkg for lyr in real_arch.layers for pkg in lyr.packages)
+                    ),
+                ),
+            ),
+            rules=(af.LayerRule("foundation", ("foundation",)),),
         )
-        self.assertNotEqual(gamed_text, real_toml_text)
-        with tempfile.TemporaryDirectory() as tmp:
-            gamed_path = Path(tmp) / "gamed.pyscn.toml"
-            gamed_path.write_text(gamed_text, encoding="utf-8")
-            with mock.patch.object(af, "PYSCN_TOML", gamed_path):
-                gamed = af.compute_predicates()["R5"]
-        self.assertEqual(baseline["pass"], gamed["pass"])
+        self.assertNotEqual(gamed_arch, real_arch)
+        with mock.patch.object(
+            af, "parse_architecture_config", return_value=gamed_arch
+        ) as parse:
+            gamed = af.compute_predicates()
+        self.assertGreater(parse.call_count, 0)
+        self.assertNotEqual(
+            baseline["R6"]["guarded_modules"],
+            gamed["R6"]["guarded_modules"],
+            "the gamed layer map reached nothing -- the R5 invariance below is vacuous",
+        )
+        self.assertEqual(baseline["R5"]["pass"], gamed["R5"]["pass"])
         self.assertEqual(
-            baseline["non_leaf_entry_points"], gamed["non_leaf_entry_points"]
+            baseline["R5"]["non_leaf_entry_points"],
+            gamed["R5"]["non_leaf_entry_points"],
         )
-        self.assertEqual(baseline["cycles"], gamed["cycles"])
+        self.assertEqual(baseline["R5"]["cycles"], gamed["R5"]["cycles"])
 
     def test_r5_out_of_scope_packages_matches_r1s(self):
         """
@@ -3430,6 +3545,59 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         self.assertNotIn("tooling", allowed)
         self.assertNotIn("support", allowed)
 
+    def test_every_layer_allow_list_is_pinned_against_a_silent_loosening(self):
+        """
+        Given the real .pyscn.toml, which is simultaneously the specification
+            --layers checks against AND the only thing it is checked against
+        When every declared layer's allow-list is compared with the expected
+            map held here
+        Then they match exactly. Measured: an import that violates the map can
+            be erased either by fixing the import or by adding the target layer
+            to the source layer's allow-list, and check_layers' report is
+            identical in both cases. Only the "api" layer was pinned before, so
+            loosening any of the other seven was invisible. This pin makes such
+            an edit a deliberate, two-file change.
+        """
+        arch = af.parse_architecture_config()
+        actual = {rule.from_layer: rule.allow for rule in arch.rules}
+        self.assertEqual(
+            actual,
+            {
+                "foundation": ("foundation",),
+                "observability": ("observability", "foundation"),
+                "config": ("config", "observability", "foundation"),
+                "engine": ("engine", "config", "observability", "foundation"),
+                "api": ("api", "engine", "config", "observability", "foundation"),
+                "runtime": (
+                    "runtime",
+                    "api",
+                    "engine",
+                    "config",
+                    "observability",
+                    "foundation",
+                ),
+                "tooling": (
+                    "tooling",
+                    "runtime",
+                    "api",
+                    "engine",
+                    "config",
+                    "observability",
+                    "foundation",
+                ),
+                "support": (
+                    "support",
+                    "tooling",
+                    "runtime",
+                    "api",
+                    "engine",
+                    "config",
+                    "observability",
+                    "foundation",
+                ),
+            },
+        )
+
     def test_compute_predicates_runs_on_real_tree(self):
         """
         Given the real toolguard/ tree
@@ -3481,14 +3649,19 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         Given this machine's real installed toolguard binary (if any) and real
             permission config
         When run_guard is called with only_canaries=True and no stub binary
-        Then it returns a GuardReport without raising, and either evaluated
-            every real canary case or skipped cleanly with a stated reason
+        Then it either skipped with one stated reason and no results, or ran
+            and evaluated EVERY declared case -- branching on the skip warning
+            rather than on the result list, so "ran and evaluated nothing"
+            fails here by design instead of falling into the skip branch
         """
         report = af.run_guard(only_canaries=True)
-        if report.canary_results:
-            self.assertEqual(len(report.canary_results), len(af.GUARD_CANARIES))
+        skips = [w for w in report.warnings if "SKIPPED" in w]
+        if skips:
+            self.assertEqual(len(skips), 1)
+            self.assertEqual(report.canary_results, [])
         else:
-            self.assertEqual(len(report.warnings), 1)
+            self.assertGreater(len(report.canary_results), 0)
+            self.assertEqual(len(report.canary_results), len(af.GUARD_CANARIES))
 
     def test_main_layers_mode_smoke(self):
         """

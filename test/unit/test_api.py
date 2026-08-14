@@ -1,5 +1,6 @@
 """Unit tests for toolguard.api: the side-effect-free decide() primitive."""
 
+import dataclasses
 import os
 import sys
 import tempfile
@@ -8,6 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
+from test.unit._real_log_dir_guard import get_leak_events
 from toolguard.api import _decide_bash, decide
 from toolguard.config import (
     ConfigLayer,
@@ -15,7 +17,12 @@ from toolguard.config import (
     Provenance,
 )
 from toolguard.config_types import RuntimeVerdict
-from toolguard.resolve import UnitVerdict
+from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.resolve import (
+    UnitVerdict,
+    resolve_bash_permission_detailed,
+    resolve_file_path_permission_detailed,
+)
 
 
 def _make_config(layers_content):
@@ -33,18 +40,7 @@ def _make_config(layers_content):
     return Configuration(layers=tuple(layers), start_dir=None)
 
 
-class _IsolatedEnvTestCase(unittest.TestCase):
-    """Base: removes CLAUDE_SETTINGS_PATH for isolation."""
-
-    def setUp(self):
-        """Remove CLAUDE_SETTINGS_PATH for each test."""
-        self._env_patch = patch.dict(os.environ, {}, clear=False)
-        self._env_patch.start()
-        os.environ.pop("CLAUDE_SETTINGS_PATH", None)
-        self.addCleanup(self._env_patch.stop)
-
-
-class TestDecideSimpleBash(_IsolatedEnvTestCase):
+class TestDecideSimpleBash(unittest.TestCase):
     """Tests for decide() with simple Bash commands."""
 
     def test_allow_pattern_matches_command(self):
@@ -103,7 +99,10 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         """
         Given a config with 'rm -rf:*' in deny and 'rm:*' in allow
         When decide is called with 'rm -rf /tmp/foo'
-        Then the verdict is 'deny' (deny checked first within a level)
+        Then the verdict is 'deny' (deny checked first within a level),
+            attributed to the deny pattern at the project level -- the
+            fail-closed empty-extraction deny carries no matched_rule, so the
+            two are distinguishable
         """
 
         config = _make_config(
@@ -122,6 +121,9 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         )
         decision = decide(config, "Bash", "rm -rf /tmp/foo")
         self.assertEqual("deny", decision.decision)
+        self.assertEqual("rm -rf:*", decision.matched_rule)
+        self.assertIsNotNone(decision.provenance)
+        self.assertEqual("project", decision.provenance.level)
 
     def test_more_specific_allow_at_project_level_wins_over_user_deny(self):
         """
@@ -162,7 +164,10 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         """
         Given a config with 'rm -rf:*' in hard_deny.deny and 'rm:*' in allow
         When decide is called with 'rm -rf /'
-        Then the verdict is 'deny' (hard-deny cannot be overridden by any allow)
+        Then the verdict is 'deny' (hard-deny cannot be overridden by any
+            allow), attributed to the hard_deny pattern with no provenance --
+            the pool is shared across levels, and the fail-closed
+            empty-extraction deny would name no rule at all
         """
 
         config = _make_config(
@@ -185,16 +190,13 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
         )
         decision = decide(config, "Bash", "rm -rf /")
         self.assertEqual("deny", decision.decision)
+        self.assertEqual("rm -rf:*", decision.matched_rule)
+        self.assertIsNone(decision.provenance)
 
-    def test_hard_deny_carve_out_exempts_command(self):
-        """
-        Given a hard_deny that blocks 'rm -rf:*' but has a carve-out for
-        'rm -rf /tmp:*'
-        When decide is called with 'rm -rf /tmp/foo'
-        Then the verdict is 'allow' (hard-deny carve-out exempts the path)
-        """
-
-        config = _make_config(
+    @staticmethod
+    def _carve_out_config(carve_out):
+        """A hard_deny of 'rm -rf:*' with *carve_out* as its only exemption."""
+        return _make_config(
             [
                 (
                     "project",
@@ -206,17 +208,48 @@ class TestDecideSimpleBash(_IsolatedEnvTestCase):
                         },
                         "hard_deny": {
                             "deny": ["Bash(rm -rf:*)"],
-                            "allow": ["Bash(rm -rf /tmp:*)"],
+                            "allow": [carve_out],
                         },
                     },
                 )
             ]
         )
-        decision = decide(config, "Bash", "rm -rf /tmp/foo")
-        self.assertEqual("allow", decision.decision)
+
+    def test_hard_deny_carve_out_exempts_command(self):
+        """
+        Given a hard_deny that blocks 'rm -rf:*' with a '[glob]' carve-out for
+            'rm -rf /tmp/*'
+        When decide is called with 'rm -rf /tmp/foo' and with 'rm -rf /etc'
+        Then the first is 'allow' (the carve-out exempts it, so the allow rule
+            'rm:*' decides) and the second is still hard-denied
+        """
+
+        config = self._carve_out_config("Bash([glob]rm -rf /tmp/*)")
+        exempted = decide(config, "Bash", "rm -rf /tmp/foo")
+        self.assertEqual("allow", exempted.decision)
+        self.assertEqual("rm:*", exempted.matched_rule)
+
+        uncarved = decide(config, "Bash", "rm -rf /etc")
+        self.assertEqual("deny", uncarved.decision)
+        self.assertEqual("rm -rf:*", uncarved.matched_rule)
+
+    def test_hard_deny_carve_out_stops_at_the_path_boundary(self):
+        """
+        Given the same hard_deny with the prefix-form carve-out
+            'rm -rf /tmp:*'
+        When decide is called with 'rm -rf /tmpfoo' -- a DIFFERENT path that
+            merely shares the carve-out's last token as a text prefix
+        Then the verdict is 'deny': a carve-out for /tmp must not exempt
+            /tmpfoo
+        """
+
+        config = self._carve_out_config("Bash(rm -rf /tmp:*)")
+        decision = decide(config, "Bash", "rm -rf /tmpfoo")
+        self.assertEqual("deny", decision.decision)
+        self.assertEqual("rm -rf:*", decision.matched_rule)
 
 
-class TestDecideCompoundBash(_IsolatedEnvTestCase):
+class TestDecideCompoundBash(unittest.TestCase):
     """Tests for decide() with compound Bash commands."""
 
     def test_compound_all_allowed_yields_allow(self):
@@ -271,7 +304,7 @@ class TestDecideCompoundBash(_IsolatedEnvTestCase):
         self.assertEqual("ask", decision.decision)
 
 
-class TestDecideFilePath(_IsolatedEnvTestCase):
+class TestDecideFilePath(unittest.TestCase):
     """Tests for decide() with file-path tools (Read, Write, Edit)."""
 
     def test_read_allowed_by_glob_pattern(self):
@@ -349,6 +382,72 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         )
         decision = decide(config, "Read", "/home/user/project/.env")
         self.assertEqual("deny", decision.decision)
+        self.assertEqual("[glob]/home/*/project/.env", decision.matched_rule)
+        self.assertEqual("project", decision.provenance.level)
+
+    def test_file_path_hard_deny_blocks_path_and_names_its_pattern(self):
+        """
+        Given a config with Read allow='*' and '[glob]/etc/**' in hard_deny.deny
+        When decide is called for Read on '/etc/passwd'
+        Then the verdict is 'deny', and because the file-path resolver leaves
+            matched_rule None on the hard-deny branch, the pattern that did it
+            is read back from check_file_path_hard_deny instead
+        """
+
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Read(*)"],
+                            "deny": [],
+                        },
+                        "hard_deny": {
+                            "deny": ["Read([glob]/etc/**)"],
+                            "allow": [],
+                        },
+                    },
+                )
+            ]
+        )
+        decision = decide(config, "Read", "/etc/passwd")
+        self.assertEqual("deny", decision.decision)
+        self.assertIsNone(decision.provenance)
+
+        hard = check_file_path_hard_deny("Read", "/etc/passwd", config, True)
+        self.assertIsNotNone(hard)
+        self.assertEqual("deny", hard.decision)
+        self.assertEqual("[glob]/etc/**", hard.matched_pattern)
+
+    def test_write_tool_uses_the_file_path_branch(self):
+        """
+        Given a config whose only rule is a Write allow glob under ~/projects/
+        When decide is called with tool='Write' and a path under it
+        Then the verdict is 'allow' -- Write is routed to the file-path
+            resolver, not the Bash one, which would find no Bash rule and ask
+        """
+
+        home = str(Path.home())
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": [f"Write([glob]{home}/projects/**)"],
+                            "deny": [],
+                        }
+                    },
+                )
+            ]
+        )
+        decision = decide(config, "Write", f"{home}/projects/notes.md")
+        self.assertEqual("allow", decision.decision)
+        self.assertEqual(f"[glob]{home}/projects/**", decision.matched_rule)
+        self.assertEqual("Write", decision.tool)
 
     def test_edit_tool_uses_same_file_path_logic(self):
         """
@@ -376,14 +475,18 @@ class TestDecideFilePath(_IsolatedEnvTestCase):
         self.assertEqual("allow", decision.decision)
 
 
-class TestDecideSideEffectFree(_IsolatedEnvTestCase):
+class TestDecideSideEffectFree(unittest.TestCase):
     """Tests that decide() has no logging or process-exit side effects."""
 
     def test_decide_does_not_write_to_log_files(self):
         """
-        Given a config with allow and deny patterns
-        When decide is called multiple times (simulating a replay scenario)
-        Then no log files are written (no side effects from the decision primitive)
+        Given TOOLGUARD_LOG_DIR pointing at a fresh empty directory -- the
+            directory a decide() that logged would actually resolve, unlike an
+            anonymous temp directory it is never told about
+        When decide is called several times (simulating a replay scenario)
+        Then that directory stays empty, and the suite's real-log-dir guard
+            records no suppressed write -- which covers the other route, a
+            decide() resolving the repository's own logs/ directory
         """
 
         config = _make_config(
@@ -394,20 +497,24 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
                     {
                         "permissions": {
                             "allow": ["Bash(ls:*)"],
-                            "deny": [],
+                            "deny": ["Bash(rm -rf:*)"],
                         }
                     },
                 )
             ]
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir)
-            initial_files = set(logs_dir.iterdir())
-            decide(config, "Bash", "ls -la")
-            decide(config, "Bash", "whoami")
-            decide(config, "Bash", "git status")
-            after_files = set(logs_dir.iterdir())
-            self.assertEqual(initial_files, after_files)
+        log_dir = Path(self.enterContext(tempfile.TemporaryDirectory())) / "logs"
+        log_dir.mkdir()
+        self.enterContext(patch.dict(os.environ, {"TOOLGUARD_LOG_DIR": str(log_dir)}))
+        leaks_before = len(get_leak_events())
+
+        decide(config, "Bash", "ls -la")
+        decide(config, "Bash", "whoami")
+        decide(config, "Bash", "rm -rf /")
+        decide(config, "Read", "/etc/passwd")
+
+        self.assertEqual([], sorted(log_dir.rglob("*")))
+        self.assertEqual(leaks_before, len(get_leak_events()))
 
     def test_decide_does_not_call_sys_exit(self):
         """
@@ -443,10 +550,10 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
 
     def test_decide_returns_decision_dataclass(self):
         """
-        Given any valid configuration and command
+        Given a config allowing 'git:*' and the command 'git status'
         When decide is called
-        Then it returns a RuntimeVerdict instance with tool, target, decision,
-            and reason fields
+        Then it returns a RuntimeVerdict whose tool, target and reason echo the
+            call, and whose decision is the 'allow' this fixture must produce
         """
 
         config = _make_config(
@@ -467,12 +574,12 @@ class TestDecideSideEffectFree(_IsolatedEnvTestCase):
         self.assertIsInstance(result, RuntimeVerdict)
         self.assertEqual("Bash", result.tool)
         self.assertEqual("git status", result.target)
-        self.assertIn(result.decision, ("allow", "ask", "deny"))
-        self.assertIsInstance(result.reason, str)
-        self.assertGreater(len(result.reason), 0)
+        self.assertEqual("allow", result.decision)
+        self.assertEqual("git:*", result.matched_rule)
+        self.assertIn("git:*", result.reason)
 
 
-class TestProvenanceRegression(_IsolatedEnvTestCase):
+class TestProvenanceRegression(unittest.TestCase):
     """Regression guards for provenance surfacing through the decision layer."""
 
     def test_file_allow_provenance_is_non_none(self):
@@ -676,8 +783,10 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
         """
         Given a config with 'rm -rf:*' in hard_deny.deny
         When decide() is called with 'rm -rf /'
-        Then RuntimeVerdict.sub_matches[0].matched_rule contains the hard-deny pattern
-             and sub_matches[0].provenance is None (hard-deny is pooled)
+        Then RuntimeVerdict.sub_matches[0].matched_rule is the hard-deny
+             PATTERN, wrapper-stripped -- not the command, which shares its
+             leading text -- and sub_matches[0].provenance is None (hard-deny
+             is pooled)
         """
 
         config = _make_config(
@@ -705,12 +814,11 @@ class TestProvenanceRegression(_IsolatedEnvTestCase):
 
         sm = result.sub_matches[0]
         self.assertEqual("deny", sm.decision)
-        self.assertIsNotNone(sm.matched_rule)
-        self.assertIn("rm -rf", sm.matched_rule)
+        self.assertEqual("rm -rf:*", sm.matched_rule)
         self.assertIsNone(sm.provenance)
 
 
-class TestDecideAdditionalContext(_IsolatedEnvTestCase):
+class TestDecideAdditionalContext(unittest.TestCase):
     """RuntimeVerdict.additional_context as decide() populates it, for both branches."""
 
     def test_file_allow_structured_entry_surfaces_additional_context(self):
@@ -828,14 +936,137 @@ class TestDecideBashToolOverride(unittest.TestCase):
     def test_tool_override_replaces_only_the_tool_field(self):
         """
         Given a caller-supplied tool name that differs from the resolver's
-            hardcoded 'Bash'
+            hardcoded 'Bash', and a rule the command genuinely matches (so
+            reason, matched_rule and provenance are all populated and a lost
+            one is observable)
         When _decide_bash is called
         Then the returned verdict's tool field is the caller's own tool name,
-             with every other field unchanged from the resolver's own result
+             and putting 'Bash' back yields a verdict equal in EVERY field to
+             the resolver's own un-overridden result
         """
         config = _make_config(
             [("project", "toolguard_hook", {"permissions": {"allow": ["Bash(ls *)"]}})]
         )
+        hard_deny_deny, hard_deny_allow = config.hard_deny("Bash")
+        baseline = resolve_bash_permission_detailed(
+            "ls -la", config, True, hard_deny_deny, hard_deny_allow
+        )
+        self.assertEqual("Bash", baseline.tool)
+        self.assertEqual("ls *", baseline.matched_rule)
+        self.assertIsNotNone(baseline.provenance)
+
         result = _decide_bash(config, "mcp__terminal__run", "ls -la", True)
-        self.assertEqual(result.tool, "mcp__terminal__run")
-        self.assertEqual(result.decision, "allow")
+        self.assertEqual("mcp__terminal__run", result.tool)
+        self.assertEqual("allow", result.decision)
+        self.assertEqual(baseline, dataclasses.replace(result, tool="Bash"))
+
+    def test_mcp_terminal_tool_is_still_subject_to_the_bash_hard_deny_pool(self):
+        """
+        Given a Bash hard_deny of 'rm -rf:*' and an MCP terminal tool name
+        When decide is called with that tool name and 'rm -rf /'
+        Then the verdict is 'deny' naming the hard_deny pattern: the pool is
+            looked up under 'Bash', not under the caller's own tool name,
+            which has no rules of its own
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {"allow": ["Bash(rm:*)"], "deny": []},
+                        "hard_deny": {"deny": ["Bash(rm -rf:*)"], "allow": []},
+                    },
+                )
+            ]
+        )
+        decision = decide(config, "mcp__terminal__run", "rm -rf /")
+        self.assertEqual("deny", decision.decision)
+        self.assertEqual("rm -rf:*", decision.matched_rule)
+        self.assertEqual("mcp__terminal__run", decision.tool)
+
+
+class TestDecideRoutesWithoutAddingLogic(unittest.TestCase):
+    """decide() is a router: it picks a resolver and forwards its arguments
+    unchanged. Anything it drops or rewrites on the way is a defect here."""
+
+    CONTENT = {
+        "permissions": {
+            "allow": [
+                r"Bash([regex]^git\s+status$)",
+                r"Read([regex]^/tmp/[a-z]+\.txt$)",
+            ],
+            "deny": ["Bash(rm -rf:*)"],
+        },
+        "hard_deny": {"deny": ["Bash(curl:*)"], "allow": []},
+    }
+
+    def setUp(self):
+        """One config carrying a Bash and a file rule of every kind used below."""
+        self.config = _make_config([("project", "toolguard_hook", self.CONTENT)])
+
+    def test_bash_decision_equals_the_resolver_called_directly(self):
+        """
+        Given a config with Bash allow, deny and hard_deny rules
+        When decide() and resolve_bash_permission_detailed() are given the same
+            command, extended_syntax and the config's own Bash hard-deny pools
+        Then the two verdicts are equal field for field, for a rule match, an
+            unmatched command and a hard-denied command alike
+        """
+        hard_deny_deny, hard_deny_allow = self.config.hard_deny("Bash")
+        for command in ("git status", "whoami", "curl http://x"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    resolve_bash_permission_detailed(
+                        command, self.config, True, hard_deny_deny, hard_deny_allow
+                    ),
+                    decide(self.config, "Bash", command),
+                )
+
+    def test_file_path_decision_equals_the_resolver_called_directly(self):
+        """
+        Given the same config with a Read rule
+        When decide() and resolve_file_path_permission_detailed() are given the
+            same tool, path and extended_syntax
+        Then the two verdicts are equal field for field, for each file tool
+        """
+        for tool in ("Read", "Write", "Edit"):
+            for path in ("/tmp/abc.txt", "/etc/passwd"):
+                with self.subTest(tool=tool, path=path):
+                    self.assertEqual(
+                        resolve_file_path_permission_detailed(
+                            tool, path, self.config, True
+                        ),
+                        decide(self.config, tool, path),
+                    )
+
+    def test_extended_syntax_false_reaches_the_bash_matcher(self):
+        """
+        Given a Bash allow rule written with a '[regex]' prefix
+        When decide() is called with extended_syntax=False
+        Then the prefix is not honoured, so the command no longer matches and
+            the verdict falls back to 'ask' -- where extended_syntax=True
+            allows it and names the rule
+        """
+        honoured = decide(self.config, "Bash", "git status", True)
+        self.assertEqual("allow", honoured.decision)
+        self.assertEqual(r"[regex]^git\s+status$", honoured.matched_rule)
+
+        opted_out = decide(self.config, "Bash", "git status", False)
+        self.assertEqual("ask", opted_out.decision)
+        self.assertIsNone(opted_out.matched_rule)
+
+    def test_extended_syntax_false_reaches_the_file_path_matcher(self):
+        """
+        Given a Read allow rule written with a '[regex]' prefix
+        When decide() is called with extended_syntax=False
+        Then the prefix is not honoured and the verdict falls back to 'ask' --
+            where extended_syntax=True allows it and names the rule
+        """
+        honoured = decide(self.config, "Read", "/tmp/abc.txt", True)
+        self.assertEqual("allow", honoured.decision)
+        self.assertEqual(r"[regex]^/tmp/[a-z]+\.txt$", honoured.matched_rule)
+
+        opted_out = decide(self.config, "Read", "/tmp/abc.txt", False)
+        self.assertEqual("ask", opted_out.decision)
+        self.assertIsNone(opted_out.matched_rule)

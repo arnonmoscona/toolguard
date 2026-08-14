@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from contextlib import ExitStack
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -33,7 +34,7 @@ from toolguard.log_writer import LogRecord
 from toolguard.file_matching import decide_file_path_at_level_detailed
 from toolguard.resolve import resolve_bash_permission_detailed
 from toolguard.tool_spec import ToolKind, ToolSpec
-from toolguard import once_per_store
+from toolguard import error_log, once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
@@ -250,8 +251,11 @@ class TestPermissionDecisionSurvivesSqlite3Unavailable(unittest.TestCase):
         """
         Given takeover mode enabled, 'git *' allowed, sqlite3 unavailable
         When main() processes a 'git status' Bash invocation
-        Then the permission decision is still 'allow' -- sqlite3's absence
-             degrades throttling only, never the decision itself
+        Then the permission decision is still 'allow'
+
+        Measured 2026-08-13: main() reaches nothing in once_per_store on this
+        path, so this is a smoke test that the decision survives the patch,
+        not evidence about throttling.
         """
         config = _fake_config(
             governed=["Bash"],
@@ -586,7 +590,9 @@ class TestCheckFilePathPermission(unittest.TestCase):
         """
         Given an allow pattern that matches and a deny pattern that also matches
         When check_file_path_permission evaluates the path
-        Then the decision is 'deny' because deny is checked first
+        Then the decision is 'deny' and cites the deny pattern -- the adapter
+            also renders a no-match level as 'deny', so the pattern in the
+            reason is what shows deny-first actually fired
         """
         allow_patterns = ["/tmp/**"]
         deny_patterns = ["/tmp/secret/**"]
@@ -595,21 +601,35 @@ class TestCheckFilePathPermission(unittest.TestCase):
             "/tmp/secret/password.txt", allow_patterns, deny_patterns
         )
         self.assertEqual(decision, "deny")
+        self.assertIn("deny pattern: /tmp/secret/**", reason)
 
     def test_no_match_returns_deny(self):
         """
         Given an allow pattern '/home/**' that does not match the target path
-        When check_file_path_permission evaluates '/tmp/file.txt'
-        Then the decision is 'deny' and the reason says it does not match
+        When decide_file_path_at_level_detailed evaluates '/tmp/file.txt'
+        Then it reports no match at this level by returning None, which the
+            check_file_path_permission adapter renders as 'deny'
         """
         allow_patterns = ["/home/**"]
         deny_patterns = []
 
-        decision, reason = check_file_path_permission(
+        # The adapter synthesises both the 'deny' and its "does not match"
+        # wording when the level returns None, so asserting on them alone
+        # tests the adapter, not the matcher.
+        self.assertIsNone(
+            decide_file_path_at_level_detailed(
+                "/tmp/file.txt",
+                allow_patterns,
+                deny_patterns,
+                Configuration(layers=()),
+                True,
+            )
+        )
+
+        decision, _ = check_file_path_permission(
             "/tmp/file.txt", allow_patterns, deny_patterns
         )
         self.assertEqual(decision, "deny")
-        self.assertIn("does not match", reason)
 
     def test_tilde_expansion(self):
         """
@@ -885,9 +905,9 @@ class TestFilePathToolsInMain(unittest.TestCase):
         Given Write is governed and patterns only allow '/tmp/**' (rules ARE
             configured, but none matches the target path)
         When main() processes a Write to '/etc/passwd'
-        Then the decision is 'ask' (the default no_match_fallback -- a rule
-            set that simply does not cover this path prompts rather than
-            silently denying)
+        Then the decision is 'ask' AND the reason names the fallback that
+            produced it -- 'ask' alone cannot distinguish no_match_fallback
+            from any of the safety nets that also floor to 'ask'
         """
         hook_input = {
             "tool_name": "Write",
@@ -917,12 +937,20 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 output["hookSpecificOutput"]["permissionDecision"],
                                 "ask",
                             )
+                            self.assertIn(
+                                "no_match_fallback=ask",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
+                            )
 
     def test_edit_tool_with_deny_pattern(self):
         """
         Given Edit is governed with allow '/tmp/**' and deny '/tmp/secret/**'
         When main() processes an Edit of '/tmp/secret/config.txt'
-        Then the decision is 'deny' and the reason cites the deny pattern
+        Then the decision is 'deny' and the reason cites that exact deny
+            pattern -- naming it separates a real deny match from the
+            fail-closed denies, which carry no pattern at all
         """
         hook_input = {
             "tool_name": "Edit",
@@ -953,7 +981,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 "deny",
                             )
                             self.assertIn(
-                                "deny pattern",
+                                "deny pattern: /tmp/secret/**",
                                 output["hookSpecificOutput"][
                                     "permissionDecisionReason"
                                 ],
@@ -963,7 +991,8 @@ class TestFilePathToolsInMain(unittest.TestCase):
         """
         Given Read is governed but the tool input has no file_path
         When main() processes the invocation
-        Then the decision is 'deny' and the reason mentions file_path
+        Then the decision is 'deny' and the reason is the missing-file_path
+            guard specifically, not some other deny that also mentions the key
         """
         hook_input = {
             "tool_name": "Read",
@@ -991,7 +1020,7 @@ class TestFilePathToolsInMain(unittest.TestCase):
                                 "deny",
                             )
                             self.assertIn(
-                                "file_path",
+                                "No file_path provided",
                                 output["hookSpecificOutput"][
                                     "permissionDecisionReason"
                                 ],
@@ -1100,7 +1129,10 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
         Given a real Configuration governing Bash, allowing only 'git *', with
             NO no_match_fallback set at all (relying on the default)
         When main() processes a 'whoami' Bash invocation (matches no rule)
-        Then the decision is 'ask' (the default no_match_fallback)
+        Then the decision is 'ask' AND the reason names both the unmatched
+            sub-command and no_match_fallback=ask -- a bare 'ask' cannot
+            distinguish the default fallback from the undecidable-segment ask
+            floor, which every command also passes through
         """
         config = Configuration(
             layers=(
@@ -1137,6 +1169,11 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                 output["hookSpecificOutput"]["permissionDecision"],
                                 "ask",
                             )
+                            reason = output["hookSpecificOutput"][
+                                "permissionDecisionReason"
+                            ]
+                            self.assertIn("whoami", reason)
+                            self.assertIn("no_match_fallback=ask", reason)
 
     def test_permission_mode_from_hook_input_is_recorded_on_the_logged_decision(self):
         """
@@ -1237,8 +1274,10 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
             no_match_fallback set at all (relying on the default), allowing
             only 'git *' for Bash
         When main() processes a 'whoami' Bash invocation (matches no rule)
-        Then the decision is 'ask' (the default applies in takeover mode
-            too, not just non-takeover mode)
+        Then the decision is 'ask' AND the reason names the unmatched
+            sub-command and no_match_fallback=ask (the default applies in
+            takeover mode too, not just non-takeover mode) -- a bare 'ask'
+            cannot distinguish that from the undecidable ask floor
         """
         config = Configuration(
             layers=(
@@ -1280,6 +1319,11 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                     output["hookSpecificOutput"]["permissionDecision"],
                                     "ask",
                                 )
+                                reason = output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ]
+                                self.assertIn("whoami", reason)
+                                self.assertIn("no_match_fallback=ask", reason)
 
     def test_bash_allow_with_warning_fallback_allows_via_main(self):
         """
@@ -1691,8 +1735,11 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
         Given a real Configuration with takeover_mode enabled and an explicit
             no_match_fallback='deny', allowing only 'git *' for Bash
         When main() processes a 'whoami' Bash invocation (matches no rule)
-        Then the decision is still 'deny' (takeover mode does not weaken the
-             default fail-closed fallback)
+        Then the decision is still 'deny' AND the reason names the unmatched
+            sub-command and the no-allow-match cause (takeover mode does not
+            weaken the fail-closed fallback) -- a bare 'deny' cannot
+            distinguish the fallback from the empty-extraction deny, which
+            reports 'No valid commands found' and names no sub-command
         """
         config = Configuration(
             layers=(
@@ -1733,6 +1780,13 @@ class TestNoMatchFallbackThroughMain(unittest.TestCase):
                                 self.assertEqual(
                                     output["hookSpecificOutput"]["permissionDecision"],
                                     "deny",
+                                )
+                                reason = output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ]
+                                self.assertIn("whoami", reason)
+                                self.assertIn(
+                                    "does not match any allow patterns", reason
                                 )
 
 
@@ -1876,8 +1930,10 @@ class TestAdditionalContextThroughMain(unittest.TestCase):
         Given a governed Bash config and a hook input with NO 'command' key
             (an error/guard path -- there is no matched rule)
         When main() processes the event
-        Then the decision is 'deny' and the emitted JSON's hookSpecificOutput
-            has no 'additionalContext' key at all
+        Then the decision is the missing-command guard's own deny (named in
+            the reason, so it is not confused with any other fail-closed
+            deny) and the emitted JSON's hookSpecificOutput has no
+            'additionalContext' key at all
         """
         config = Configuration(
             layers=(
@@ -1921,6 +1977,12 @@ class TestAdditionalContextThroughMain(unittest.TestCase):
                             self.assertEqual(
                                 output["hookSpecificOutput"]["permissionDecision"],
                                 "deny",
+                            )
+                            self.assertIn(
+                                "No command provided",
+                                output["hookSpecificOutput"][
+                                    "permissionDecisionReason"
+                                ],
                             )
                             self.assertNotIn(
                                 "additionalContext", output["hookSpecificOutput"]
@@ -2062,9 +2124,15 @@ class TestStartupValidation(unittest.TestCase):
 
     def test_validation_ignores_settings_local_json(self):
         """
-        Given a native settings.local.json listing unsupported tools alongside a valid toolguard_hook config
-        When _run_startup_validation runs and delegates to Configuration.validation_issues()
-        Then no error log warns about the native-only tools (WebSearch, WebFetch, mcp__unknown__tool)
+        Given a native settings.local.json listing unsupported tools, alongside
+            a toolguard_hook layer carrying one unsupported tool of its OWN
+            (the positive control: without it the config yields zero issues,
+            nothing is ever written, and the assertions below cannot fail)
+        When _run_startup_validation runs and delegates to
+            Configuration.validation_issues()
+        Then the log it writes names the toolguard_hook tool and none of the
+            native-only ones -- proving the native layers are exempt, not that
+            validation simply found nothing anywhere
         """
         import tempfile
 
@@ -2101,7 +2169,13 @@ class TestStartupValidation(unittest.TestCase):
                 MappingProxyType(
                     {
                         "governed_tools": ["Bash", "Read"],
-                        "permissions": {"allow": ["Bash(ls:*)", "Read(/tmp/**)"]},
+                        "permissions": {
+                            "allow": [
+                                "Bash(ls:*)",
+                                "Read(/tmp/**)",
+                                "Nonesuch(/tmp/**)",
+                            ]
+                        },
                     }
                 ),
             )
@@ -2111,15 +2185,23 @@ class TestStartupValidation(unittest.TestCase):
 
             from toolguard.hook import _run_startup_validation
 
-            _run_startup_validation(env_config, str(project_dir), config)
+            with patch("sys.stderr", new_callable=StringIO):
+                _run_startup_validation(env_config, str(project_dir), config)
 
-            log_files = list(logs_dir.glob("toolguard-error-*.md"))
-
-            if log_files:
-                content = log_files[0].read_text()
-                self.assertNotIn("WebSearch", content)
-                self.assertNotIn("WebFetch", content)
-                self.assertNotIn("mcp__unknown__tool", content)
+            # Warnings land in toolguard-warning-*.md, not toolguard-error-*.md
+            # -- globbing the wrong stream is a second way for this to assert
+            # nothing.
+            log_files = sorted(logs_dir.glob("toolguard-*.md"))
+            self.assertTrue(
+                log_files,
+                "validation wrote nothing at all, so the exemption asserted "
+                "below is untested",
+            )
+            content = "\n".join(path.read_text() for path in log_files)
+            self.assertIn("Nonesuch", content)
+            self.assertNotIn("WebSearch", content)
+            self.assertNotIn("WebFetch", content)
+            self.assertNotIn("mcp__unknown__tool", content)
 
     def test_validation_logs_issues_from_config(self):
         """
@@ -3116,6 +3198,135 @@ class TestHookCrashCapture(unittest.TestCase):
             self.assertEqual(crash_context["tool_name"], "Bash")
             self.assertEqual(crash_context["tool_input"], {"command": "git status"})
             self.assertEqual(crash_context["cwd"], "/some/project/dir")
+
+
+class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
+    """
+    log_crash runs inside all three of main()'s except clauses, ahead of
+    _emit_decision, and error_log builds ~/.toolguard/errors ABOVE its own
+    try -- so an unresolvable home (unset $HOME, deleted home, a container
+    with no passwd entry) makes crash logging raise out of the handler and
+    the hook exits with nothing on stdout.
+
+    Nothing on stdout is not a denial. Claude Code treats only exit code 2 as
+    blocking, so an empty stdout is no permission hook at all, silently. The
+    assertion these tests exist for is therefore "stdout still carries a
+    verdict", never "log_crash did not raise" -- the second passes with the
+    bug present in a different arrangement.
+    """
+
+    class _HomelessPath:
+        """Stands in for error_log's Path; home() raises as pathlib does with no resolvable home."""
+
+        def __new__(cls, *args, **kwargs):
+            return Path(*args, **kwargs)
+
+        @staticmethod
+        def home():
+            raise RuntimeError("Could not determine home directory")
+
+    def _drive_main(self, stdin_text, extra_patches=()):
+        """Run main() with crash logging unable to resolve a home; return (stdout, escaped exception)."""
+        out = StringIO()
+        with TemporaryDirectory() as tmpdir:
+            with ExitStack() as stack:
+                for context in (
+                    patch("sys.stdin", StringIO(stdin_text)),
+                    patch("sys.stdin.isatty", return_value=False),
+                    patch("sys.stdout", out),
+                    patch("sys.stderr", new_callable=StringIO),
+                    patch("toolguard.error_log.Path", self._HomelessPath),
+                    # get_env_config() resolves before load_configuration(), so
+                    # the Reporter falls back to a log dir the module-level
+                    # TOOLGUARD_LOG_DIR isolation does not cover -- removing this
+                    # patch as redundant trips _real_log_dir_guard (see
+                    # .claude/rules/test-config-isolation.md).
+                    patch(
+                        "toolguard.log_writer.require_project_root",
+                        return_value=Path(tmpdir),
+                    ),
+                    *extra_patches,
+                ):
+                    stack.enter_context(context)
+
+                # Without this the fixture cannot produce the negative case and
+                # every assertion below would pass for the wrong reason.
+                with self.assertRaises(RuntimeError):
+                    error_log.Path.home()
+
+                escaped = None
+                try:
+                    main()
+                except SystemExit:
+                    pass
+                except Exception as exc:  # noqa: BLE001 -- the failure under test
+                    escaped = exc
+        return out.getvalue(), escaped
+
+    def _assert_deny_reached_stdout(self, stdout_text, escaped):
+        """Assert a parseable JSON deny decision reached stdout and nothing escaped main()."""
+        self.assertIsNone(
+            escaped,
+            f"main() let {type(escaped).__name__}({escaped}) escape its own "
+            f"except clause, so _emit_decision never ran",
+        )
+        self.assertTrue(
+            stdout_text.strip(),
+            "the hook exited with nothing on stdout -- Claude Code reads that "
+            "as no permission hook at all, not as a denial",
+        )
+        output = json.loads(stdout_text)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_json_decode_path_still_puts_a_deny_on_stdout(self):
+        """
+        Given malformed JSON on stdin and a home directory crash logging
+            cannot resolve
+        When main()'s `except json.JSONDecodeError` clause calls log_crash and
+            log_crash itself fails
+        Then a deny decision still reaches STDOUT
+        """
+        stdout_text, escaped = self._drive_main("not valid json {")
+        self._assert_deny_reached_stdout(stdout_text, escaped)
+
+    def test_value_error_path_still_puts_a_deny_on_stdout(self):
+        """
+        Given valid JSON on stdin missing hook_event_name, and a home
+            directory crash logging cannot resolve
+        When main()'s `except ValueError` clause calls log_crash and log_crash
+            itself fails
+        Then a deny decision still reaches STDOUT
+        """
+        stdout_text, escaped = self._drive_main(
+            json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+        )
+        self._assert_deny_reached_stdout(stdout_text, escaped)
+
+    def test_unexpected_exception_path_still_puts_a_deny_on_stdout(self):
+        """
+        Given a governed Bash event whose resolution raises, and a home
+            directory crash logging cannot resolve
+        When main()'s catch-all `except Exception` clause calls log_crash and
+            log_crash itself fails
+        Then a deny decision still reaches STDOUT
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "hook_event_name": "PreToolUse",
+        }
+        config = _fake_config(governed=["Bash"], bash=(["git *"], []))
+        stdout_text, escaped = self._drive_main(
+            json.dumps(hook_input),
+            extra_patches=(
+                patch("toolguard.hook.load_configuration", return_value=config),
+                patch(
+                    "toolguard.hook.resolve_bash_permission_detailed",
+                    side_effect=RuntimeError("boom from resolver"),
+                ),
+            ),
+        )
+        self._assert_deny_reached_stdout(stdout_text, escaped)
 
 
 class TestEmitDecisionStdoutFailureFallsBackToExit2(unittest.TestCase):

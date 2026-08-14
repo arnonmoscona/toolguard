@@ -3,18 +3,25 @@
 import io
 import os
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
+from toolguard import config as config_module
 from toolguard.config_validation import (
     KNOWN_SUPPORTED_TOOLS,
     extract_tool_name,
     validate_permissions,
 )
 from toolguard.error_log import log_warning, log_error
-from toolguard.config import _parse_source, discover_config_files, load_config_file
+from toolguard.config import (
+    _parse_source,
+    discover_config_files,
+    load_config_file,
+    load_configuration,
+)
 from toolguard.issues import Issue
 
 
@@ -102,7 +109,8 @@ allow = ["Bash(ls:*)", "mcp__custom__tool(*)"]
         """
         Given a file containing malformed TOML
         When load_config_file reads it as TOML
-        Then an exception (TOML decode error) is raised
+        Then tomllib.TOMLDecodeError specifically is raised -- not merely
+            "some exception", which a typo in the call would also satisfy
         """
         toml_content = b"""
 invalid toml [
@@ -113,7 +121,7 @@ invalid toml [
             filepath = Path(f.name)
 
         try:
-            with self.assertRaises(Exception):  # tomllib.TOMLDecodeError
+            with self.assertRaises(tomllib.TOMLDecodeError):
                 load_config_file(filepath, "toml")
         finally:
             filepath.unlink()
@@ -131,14 +139,31 @@ invalid toml [
 class TestParseSourceTomlDiagnostics(unittest.TestCase):
     """Test _parse_source()'s TOML-failure warning message."""
 
+    @staticmethod
+    def _warning_line(captured: io.StringIO) -> str:
+        """
+        The single ``[WARNING] ...`` line from captured stderr.
+
+        Asserting against the whole buffer cannot tell the warning line from
+        the ``Corrective steps:`` line that follows it -- both carry the
+        path, so a routing change that sent only the warning elsewhere left
+        the old whole-buffer assertions passing.
+        """
+        lines = [
+            ln for ln in captured.getvalue().splitlines() if ln.startswith("[WARNING]")
+        ]
+        assert len(lines) == 1, f"expected exactly one [WARNING] line, got {lines!r}"
+        return lines[0]
+
     def test_multiline_structured_entry_gets_actionable_message(self):
         """
         Given a toolguard_hook.toml whose only content is a structured entry
             written across multiple physical lines (not valid TOML 1.0)
         When _parse_source() parses it
-        Then it returns None (fail-open, unchanged) and prints a message
-            naming the file, the offending line, and the single-line fix --
-            not tomllib's own cryptic "Invalid initial character..." wording
+        Then it returns None (the file is skipped, not recorded as a parse
+            failure) and the [WARNING] line names the file, the offending
+            line, and the single-line fix -- not tomllib's own cryptic
+            "Invalid initial character..." wording
         """
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "toolguard_hook.toml"
@@ -154,7 +179,7 @@ class TestParseSourceTomlDiagnostics(unittest.TestCase):
                 result = _parse_source(path, "toml")
 
         self.assertIsNone(result)
-        message = captured.getvalue()
+        message = self._warning_line(captured)
         self.assertIn(str(path), message)
         self.assertIn("line 3", message)
         self.assertIn("single", message)
@@ -166,31 +191,56 @@ class TestParseSourceTomlDiagnostics(unittest.TestCase):
             error that has NOTHING to do with a multi-line structured entry
             (an unterminated array)
         When _parse_source() parses it
-        Then it returns None (fail-open, unchanged) and the printed message
-            is tomllib's own original message, unmodified -- detection must
-            not misattribute an unrelated error to the multi-line cause
+        Then it returns None and the [WARNING] line carries tomllib's own
+            message verbatim inside the "Failed to load <path>: ..." wrapper
+            -- detection must neither misattribute this to the multi-line
+            cause nor substitute some other wording of its own
         """
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "toolguard_hook.toml"
-            path.write_text("[permissions]\nallow = [\n")
+            source = "[permissions]\nallow = [\n"
+            path.write_text(source)
+            try:
+                tomllib.loads(source)
+            except tomllib.TOMLDecodeError as exc:
+                tomllib_message = str(exc)
+            else:  # pragma: no cover - the fixture is malformed by construction
+                self.fail("fixture parsed successfully; it cannot exercise the failure")
+
             with patch("sys.stderr", new_callable=io.StringIO) as captured:
                 result = _parse_source(path, "toml")
 
         self.assertIsNone(result)
-        message = captured.getvalue()
+        message = self._warning_line(captured)
         self.assertIn(str(path), message)
+        self.assertIn(tomllib_message, message)
         self.assertNotIn("single", message)
 
 
 class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
-    """Test load_config_file()'s stat-keyed parse cache against a same-mtime rewrite."""
+    """
+    load_config_file()'s parse cache keys on (path, format, st_mtime_ns, st_size).
 
-    def test_rewrite_within_same_mtime_tick_is_not_served_stale(self):
+    One test per component of that key, so a component's removal fails exactly
+    the test that names it, plus the third case -- an equal-length rewrite with
+    mtime restored -- which no component of the key covers.
+    """
+
+    def setUp(self):
+        # The cache is a module-level lru_cache shared across the whole test
+        # process; clear it either side so results do not depend on run order.
+        config_module._parse_config_file_cached.cache_clear()
+        self.addCleanup(config_module._parse_config_file_cached.cache_clear)
+
+    def test_differently_sized_rewrite_within_same_mtime_tick_is_not_served_stale(self):
         """
-        Given a TOML file is read once, then rewritten with new content while its
-            st_mtime_ns happens to be unchanged (simulating a same-tick rewrite)
+        Given a TOML file is read once, then rewritten to a DIFFERENT LENGTH while
+            its st_mtime_ns is restored to the original value
         When load_config_file reads it again
-        Then the SECOND read returns the NEW content, not a stale cached parse
+        Then the SECOND read returns the NEW content, because st_size is part of
+            the cache key -- st_mtime_ns is not what defeats the collision here
+            (removing st_size from the key fails this test; removing st_mtime_ns
+            does not)
         """
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "toolguard_hook.toml"
@@ -198,6 +248,7 @@ class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
 
             first = load_config_file(path, "toml")
             self.assertNotIn("permissions", first)
+            original_size = path.stat().st_size
 
             original_mtime_ns = path.stat().st_mtime_ns
             new_content = (
@@ -206,10 +257,67 @@ class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
             path.write_text(new_content)
             os.utime(path, ns=(original_mtime_ns, original_mtime_ns))
             self.assertEqual(path.stat().st_mtime_ns, original_mtime_ns)
+            self.assertNotEqual(path.stat().st_size, original_size)
 
             second = load_config_file(path, "toml")
             self.assertIn("permissions", second)
             self.assertEqual(second["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_equal_length_rewrite_with_a_new_mtime_is_not_served_stale(self):
+        """
+        Given a TOML file is read once, then rewritten to content of the SAME
+            byte length WITHOUT restoring st_mtime_ns
+        When load_config_file reads it again
+        Then the SECOND read returns the NEW content, because st_mtime_ns is
+            part of the cache key -- the one case size cannot cover, and the
+            only one that fails when st_mtime_ns is dropped from the key
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "toolguard_hook.toml"
+            path.write_text('governed_tools = ["Bash"]\n')
+
+            first = load_config_file(path, "toml")
+            self.assertEqual(first["governed_tools"], ["Bash"])
+            original = path.stat()
+
+            path.write_text('governed_tools = ["Read"]\n')
+            os.utime(
+                path,
+                ns=(original.st_mtime_ns + 1_000_000, original.st_mtime_ns + 1_000_000),
+            )
+            self.assertEqual(path.stat().st_size, original.st_size)
+            self.assertNotEqual(path.stat().st_mtime_ns, original.st_mtime_ns)
+
+            second = load_config_file(path, "toml")
+            self.assertEqual(second["governed_tools"], ["Read"])
+
+    def test_equal_length_same_mtime_rewrite_is_not_served_stale(self):
+        """
+        Given a TOML file is read once, then rewritten to content of the SAME
+            byte length with its st_mtime_ns restored -- the shape a
+            read-modify-write tool produces when it swaps one rule for another
+        When load_config_file reads it again
+        Then the SECOND read returns the NEW content
+
+        RED: proposed ticket 27. Neither key component changes, so the rewrite
+        collides with the cached entry and the stale parse is served. A content
+        hash in the key fixes it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "toolguard_hook.toml"
+            path.write_text('governed_tools = ["Bash"]\n')
+
+            first = load_config_file(path, "toml")
+            self.assertEqual(first["governed_tools"], ["Bash"])
+            original = path.stat()
+
+            path.write_text('governed_tools = ["Read"]\n')
+            os.utime(path, ns=(original.st_mtime_ns, original.st_mtime_ns))
+            self.assertEqual(path.stat().st_mtime_ns, original.st_mtime_ns)
+            self.assertEqual(path.stat().st_size, original.st_size)
+
+            second = load_config_file(path, "toml")
+            self.assertEqual(second["governed_tools"], ["Read"])
 
 
 class TestConfigDiscoveryTomlPrecedence(ConfigIsolationMixin, unittest.TestCase):
@@ -262,6 +370,155 @@ class TestConfigDiscoveryTomlPrecedence(ConfigIsolationMixin, unittest.TestCase)
         ]
 
         self.assertTrue(any(f == "json" for _, _, f in hook_configs))
+
+
+class TestWrongShapedTomlSections(ConfigIsolationMixin, unittest.TestCase):
+    """
+    TOML that parses but whose sections are the wrong TYPE.
+
+    A TOML document's top level is always a table, so ``_try_parse_source``'s
+    "expected a top-level object/table" guard can never fire for TOML -- it is
+    reachable from JSON only (proposed ticket 46). The TOML analogue is a
+    section of the wrong type one level down: ``[[permissions]]`` yields a
+    list where a table is expected, and ``allow = "..."`` yields a string
+    where a list is expected. Both parse cleanly and both discard every rule
+    in the section.
+    """
+
+    def _load_toml(self, text: str) -> dict:
+        """Write *text* to a temp toolguard_hook.toml and read it back through the real loader."""
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = tmp / "toolguard_hook.toml"
+        path.write_text(text)
+        config_module._parse_config_file_cached.cache_clear()
+        self.addCleanup(config_module._parse_config_file_cached.cache_clear)
+        return load_config_file(path, "toml")
+
+    def test_permissions_written_as_an_array_of_tables_round_trips_as_a_list(self):
+        """
+        Given a TOML config using [[permissions]] (an array of tables) instead
+            of [permissions] (a table)
+        When it is written to a file and read back through load_config_file
+        Then it parses without error and 'permissions' comes back as a list --
+            characterizing the shape the checks below have to cope with
+        """
+        config = self._load_toml(
+            'governed_tools = ["Bash"]\n\n[[permissions]]\nallow = ["Bash(ls:*)"]\n'
+        )
+        self.assertIsInstance(config, dict)
+        self.assertIsInstance(config["permissions"], list)
+        self.assertEqual(config["permissions"], [{"allow": ["Bash(ls:*)"]}])
+
+    def test_permissions_of_the_wrong_type_is_reported(self):
+        """
+        Given a TOML config whose [[permissions]] section parses to a list
+        When validate_permissions inspects it
+        Then it reports an error-level Issue naming the permissions section
+
+        RED. Today validate_permissions returns () for this input: the
+        `isinstance(permissions, dict)` guard returns early with no Issue, so
+        every rule the user wrote is discarded in silence. Same family as
+        proposed tickets 40 and 46 -- the codebase assumes a parsed document
+        is a dict and only sometimes checks.
+        """
+        config = self._load_toml(
+            'governed_tools = ["Bash"]\n\n[[permissions]]\nallow = ["Bash(ls:*)"]\n'
+        )
+        issues = validate_permissions(config)
+        self.assertTrue(
+            any(
+                issue.level == "error" and "permissions" in issue.message
+                for issue in issues
+            ),
+            f"expected an error naming the permissions section, got {issues!r}",
+        )
+
+    def test_allow_written_as_a_bare_string_is_reported(self):
+        """
+        Given a TOML config whose permissions.allow is a bare string rather
+            than an array of strings
+        When validate_permissions inspects it
+        Then it reports an error-level Issue naming the allow list
+
+        RED. Today the `isinstance(perms, list)` guard skips the list with no
+        Issue, so the rule is discarded in silence.
+        """
+        config = self._load_toml('[permissions]\nallow = "Bash(ls:*)"\n')
+        self.assertEqual(config["permissions"]["allow"], "Bash(ls:*)")
+        issues = validate_permissions(config)
+        self.assertTrue(
+            any(
+                issue.level == "error" and "allow" in issue.message for issue in issues
+            ),
+            f"expected an error naming the allow list, got {issues!r}",
+        )
+
+    def test_governed_tools_of_the_wrong_type_falls_back_to_bash_silently(self):
+        """
+        Given a TOML config whose governed_tools is a bare string
+        When validate_permissions inspects it
+        Then it silently substitutes the ['Bash'] default and reports nothing
+            about governed_tools itself
+
+        Characterization, not endorsement: this is the mildest of the three
+        wrong-type sites, because the fallback is safe (it governs more, not
+        less) and a permission for another tool still draws the
+        "not in governed_tools" warning. Pinned so a phase-2 change here is
+        visible rather than incidental.
+        """
+        config = self._load_toml(
+            'governed_tools = "Bash"\n\n[permissions]\nallow = ["Read(/tmp/**)"]\n'
+        )
+        self.assertEqual(config["governed_tools"], "Bash")
+        issues = validate_permissions(config)
+        self.assertEqual(
+            [issue.message for issue in issues],
+            ['Tool "Read" appears in permissions but is not in governed_tools list'],
+        )
+
+        # A string governed_tools that CONTAINS the tool name: without the
+        # fallback, membership degrades from list containment to substring
+        # containment and the warning silently disappears.
+        containing = self._load_toml(
+            'governed_tools = "BashRead"\n\n[permissions]\nallow = ["Read(/tmp/**)"]\n'
+        )
+        self.assertEqual(
+            [issue.message for issue in validate_permissions(containing)],
+            ['Tool "Read" appears in permissions but is not in governed_tools list'],
+        )
+
+    def test_a_discarded_permissions_section_is_surfaced_somewhere(self):
+        """
+        Given a project whose only config is a toolguard_hook.toml written with
+            [[permissions]] instead of [permissions]
+        When load_configuration() loads the hierarchy
+        Then the loss is surfaced -- as a recorded parse failure, a validation
+            issue, or rules that actually reached the layer
+
+        RED, and this is the blast radius of the two REDs above. Today all
+        three are empty: the layer loads "successfully" with zero allow rules,
+        zero parse failures and zero validation issues, so nothing anywhere
+        tells the user their entire allow list was dropped. Proposed ticket
+        29's family, on the TOML config path.
+        """
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "toolguard_hook.toml").write_text(
+            'governed_tools = ["Bash"]\n\n[[permissions]]\nallow = ["Bash(ls:*)"]\n'
+        )
+        config_module._parse_config_file_cached.cache_clear()
+        self.addCleanup(config_module._parse_config_file_cached.cache_clear)
+
+        configuration = load_configuration()
+
+        self.assertTrue(
+            configuration.parse_failures
+            or configuration.validation_issues()
+            or configuration.has_any_rules("Bash"),
+            "the [[permissions]] section was discarded with no parse failure, "
+            "no validation issue and no surviving rule",
+        )
 
 
 class TestExtractToolName(unittest.TestCase):
@@ -413,6 +670,11 @@ class TestValidatePermissions(unittest.TestCase):
         Given an empty config dict
         When validate_permissions runs
         Then it produces an empty tuple of issues
+
+        A crash smoke test, not a behavioural one: with no permissions the
+        entry loop runs zero times, so () is what every non-crashing
+        implementation returns. Kept for the crash coverage, labelled so it is
+        not mistaken for evidence about the defaulting it appears to check.
         """
         config = {}
         issues = validate_permissions(config)
@@ -579,7 +841,12 @@ class TestErrorLog(unittest.TestCase):
         """
         Given a log directory
         When log_warning writes a warning
-        Then exactly one toolguard-warning-*.md file is created (and no error file)
+        Then exactly one date-stamped toolguard-warning-YYYY-MM-DD.md file is
+            created, and no error file
+
+        The date stamp is the assertion that carries weight: the previous
+        startswith/endswith pair only restated the glob that produced the name
+        and so could not fail.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
@@ -588,10 +855,30 @@ class TestErrorLog(unittest.TestCase):
 
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)
-            self.assertTrue(warning_files[0].name.startswith("toolguard-warning-"))
-            self.assertTrue(warning_files[0].name.endswith(".md"))
+            self.assertRegex(
+                warning_files[0].name, r"^toolguard-warning-\d{4}-\d{2}-\d{2}\.md$"
+            )
 
             self.assertEqual(list(log_dir.glob("toolguard-error-*.md")), [])
+
+    def test_warning_log_dir_is_created_when_missing(self):
+        """
+        Given a log directory path that does not exist yet
+        When log_warning writes a warning
+        Then the directory is created and the entry lands in it
+
+        The other tests here hand log_warning a directory that already exists,
+        so none of them can see the mkdir disappear.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir) / "not" / "created" / "yet"
+            self.assertFalse(log_dir.exists())
+
+            log_warning("Test warning", "Fix by doing X", log_dir)
+
+            warning_files = list(log_dir.glob("toolguard-warning-*.md"))
+            self.assertEqual(len(warning_files), 1)
+            self.assertIn("Test warning", warning_files[0].read_text())
 
     def test_warning_log_format(self):
         """

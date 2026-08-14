@@ -4,15 +4,21 @@ Unit tests for config_divergence module.
 
 import io
 import json
+import os
 import unittest
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from toolguard import error_reporter, once_per_store
-from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.config import (
+    ConfigLayer,
+    Configuration,
+    Provenance,
+    load_configuration,
+)
 from toolguard.config_divergence import (
     DIVERGENCE_WARNING,
     check_and_warn_divergence,
@@ -22,6 +28,7 @@ from toolguard.config_divergence import (
 )
 from toolguard.once_per_store import ClaimStatus
 
+from test.unit._config_isolation import ConfigIsolationMixin
 from test.unit._once_per_isolation import IsolatedStoreMixin as _IsolatedStoreMixin
 from test.unit._subprocess_harness import release_barrier_when_ready, run_child
 
@@ -86,15 +93,24 @@ class TestGetNativePermissions(unittest.TestCase):
             self.assertIn("Edit(/tmp/**)", result["allow"])
             self.assertIn("Bash(ls:*)", result["allow"])
 
-    def test_missing_file(self):
+    def test_missing_file_is_empty_and_silent(self):
         """
         Given a path to a settings.local.json that does not exist
         When get_native_permissions reads it
-        Then it returns empty allow, deny, and ask lists
+        Then it returns empty allow, deny, and ask lists AND reports nothing --
+             a project with no settings.local.json is the normal case, not a
+             fault, and this runs on every hook invocation
+
+        The empty result alone cannot distinguish the two: letting the open()
+        fail instead reaches the same three empty lists through the error path,
+        differing only by the warning nobody was asserting was absent.
         """
-        result = get_native_permissions(Path("/nonexistent/settings.local.json"))
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            result = get_native_permissions(Path("/nonexistent/settings.local.json"))
 
         self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
+        self.assertEqual(buf.getvalue(), "")
 
     def test_invalid_json(self):
         """
@@ -105,6 +121,27 @@ class TestGetNativePermissions(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.local.json"
             settings_path.write_text("{ invalid json }")
+
+            result = get_native_permissions(settings_path)
+
+            self.assertEqual(result, {"allow": [], "deny": [], "ask": []})
+
+    def test_non_object_json_top_level_is_treated_as_unreadable(self):
+        """
+        Given a settings.local.json that is well-formed JSON but whose top
+            level is a list rather than an object
+        When get_native_permissions reads it
+        Then it returns empty allow, deny, and ask lists without raising --
+             a file toolguard cannot make sense of is handled the same way as
+             an unparseable one, because this runs on the live hook path
+
+        Currently RED: the try/except wraps only json.load, so the
+        config.get("permissions", {}) below it raises AttributeError out of
+        check_and_warn_divergence (TOO-45 follow-up row V2).
+        """
+        with TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.local.json"
+            settings_path.write_text(json.dumps(["Bash(git status:*)"]))
 
             result = get_native_permissions(settings_path)
 
@@ -579,7 +616,49 @@ class TestDivergenceWarningKey(unittest.TestCase):
         self.assertEqual(DIVERGENCE_WARNING._key, "divergence_warning")
 
 
-class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
+class _DivergenceFixture(ConfigIsolationMixin, _IsolatedStoreMixin):
+    """
+    Isolated home, project root, log dir and claim store, plus writers for the
+    two config files check_and_warn_divergence compares.
+
+    check_and_warn_divergence calls load_configuration, whose discovery reads
+    ~/.claude and the rules directories. Without ConfigIsolationMixin these
+    tests read the developer's real config: measured 2026-08-13, five real
+    files were loaded and a home config allowing Bash(git push:*) turned eight
+    of them red.
+    """
+
+    #: Preserved through the mixin's clear=True environment patch so child
+    #: processes launched from a test still get a usable PATH.
+    _EXTRA_ENV = {"PATH": os.environ.get("PATH", "")}
+
+    def setUp(self):
+        """Isolate the store, then the config hierarchy, and create the project's .claude."""
+        super().setUp()
+        self.home, self.project = self.isolate_config_environment(
+            extra_env=dict(self._EXTRA_ENV)
+        )
+        self.claude_dir = self.project / ".claude"
+        self.claude_dir.mkdir()
+
+    def write_native(self, allow=(), deny=(), ask=()):
+        """Write the project's native settings.local.json with these patterns."""
+        self._write("settings.local.json", allow, deny, ask)
+
+    def write_hook(self, allow=(), deny=(), ask=()):
+        """Write the project's toolguard_hook.json with these patterns."""
+        self._write("toolguard_hook.json", allow, deny, ask)
+
+    def _write(self, name, allow, deny, ask):
+        permissions = {"allow": list(allow), "deny": list(deny), "ask": list(ask)}
+        (self.claude_dir / name).write_text(json.dumps({"permissions": permissions}))
+
+
+#: The takeover_config shape used by tests that are not about takeover mode.
+_NO_TAKEOVER = {"enabled": False, "ignored_allow_patterns": []}
+
+
+class TestCheckAndWarnDivergence(_DivergenceFixture, unittest.TestCase):
     def test_no_divergence(self):
         """
         Given matching native settings and toolguard_hook configs in a project
@@ -587,30 +666,14 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         Then it returns a DivergenceCheckResult with an empty divergent_patterns
              list and no warning_message/corrective_steps (nothing to warn about)
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
+        self.write_native(allow=["Bash(git status:*)"])
+        self.write_hook(allow=["Bash(git status:*)"])
 
-            (project_root / "pyproject.toml").touch()
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-
-            config = {"permissions": {"allow": ["Bash(git status:*)"]}}
-
-            settings_path.write_text(json.dumps(config))
-
-            hook_path = project_root / ".claude" / "toolguard_hook.json"
-            hook_config = {"permissions": {"allow": ["Bash(git status:*)"]}}
-
-            hook_path.write_text(json.dumps(hook_config))
-
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
-
-            result = check_and_warn_divergence(project_root, takeover_config)
-
-            self.assertEqual(result.divergent_patterns, [])
-            self.assertIsNone(result.warning_message)
-            self.assertIsNone(result.corrective_steps)
+        self.assertEqual(result.divergent_patterns, [])
+        self.assertIsNone(result.warning_message)
+        self.assertIsNone(result.corrective_steps)
 
     def test_with_divergence(self):
         """
@@ -621,33 +684,16 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
              module hands the warning text to its caller rather than logging
              it itself)
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
+        self.write_native(allow=["Bash(git status:*)", "Bash(git push:*)"])
+        self.write_hook(allow=["Bash(git status:*)"])
 
-            (project_root / "pyproject.toml").touch()
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-
-            config = {
-                "permissions": {"allow": ["Bash(git status:*)", "Bash(git push:*)"]}
-            }
-
-            settings_path.write_text(json.dumps(config))
-
-            hook_path = project_root / ".claude" / "toolguard_hook.json"
-            hook_config = {"permissions": {"allow": ["Bash(git status:*)"]}}
-
-            hook_path.write_text(json.dumps(hook_config))
-
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
-
-            result = check_and_warn_divergence(project_root, takeover_config)
-
-            self.assertIn("Bash(git push:*)", result.divergent_patterns)
-            self.assertIsNotNone(result.warning_message)
-            self.assertIn("Bash(git push:*)", result.warning_message)
-            self.assertIsNotNone(result.corrective_steps)
+        self.assertEqual(result.divergent_patterns, ["Bash(git push:*)"])
+        self.assertIsNotNone(result.warning_message)
+        self.assertIn("Bash(git push:*)", result.warning_message)
+        self.assertNotIn("Bash(git status:*)", result.warning_message)
+        self.assertIsNotNone(result.corrective_steps)
 
     def test_deduplication(self):
         """
@@ -656,26 +702,160 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         Then the first call reports the divergence and the second is deduplicated to
              an empty divergent_patterns list with no warning_message
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
+        self.write_native(allow=["Bash(git push:*)"])
 
-            (project_root / "pyproject.toml").touch()
+        result1 = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+        self.assertIn("Bash(git push:*)", result1.divergent_patterns)
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
+        result2 = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+        self.assertEqual(result2.divergent_patterns, [])
+        self.assertIsNone(result2.warning_message)
 
-            config = {"permissions": {"allow": ["Bash(git push:*)"]}}
+    def test_already_warned_day_skips_the_config_analysis_entirely(self):
+        """
+        Given a project already warned about a divergent pattern today
+        When check_and_warn_divergence is called again the same day
+        Then load_configuration is not called a second time -- the once-per-day
+             pre-check short-circuits before the analysis, so an already-warned
+             day costs nothing on the hook's critical path
 
-            settings_path.write_text(json.dumps(config))
+        The dedup outcome alone cannot see this: .warn()'s own claim also
+        returns an empty result, so removing the pre-check leaves
+        test_deduplication green while re-running the whole analysis on every
+        PreToolUse call.
+        """
+        self.write_native(allow=["Bash(git push:*)"])
+        spy = MagicMock(wraps=load_configuration)
 
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+        with patch("toolguard.config_divergence.load_configuration", spy):
+            first = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+            self.assertIn("Bash(git push:*)", first.divergent_patterns)
 
-            result1 = check_and_warn_divergence(project_root, takeover_config)
-            self.assertIn("Bash(git push:*)", result1.divergent_patterns)
+            second = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+            self.assertEqual(second.divergent_patterns, [])
 
-            result2 = check_and_warn_divergence(project_root, takeover_config)
-            self.assertEqual(result2.divergent_patterns, [])
-            self.assertIsNone(result2.warning_message)
+            self.assertEqual(spy.call_count, 1)
+
+    def test_a_claim_taken_after_the_pre_check_still_suppresses_the_warning(self):
+        """
+        Given the day's slot already taken by another process, and this call's
+            once-per-day pre-check answering False -- the interleaving the
+            claim exists to close, where both processes get past their
+            pre-checks and only one may print
+        When check_and_warn_divergence runs
+        Then it reports nothing: the claim taken immediately before the notice
+             is a second, independent gate, not a restatement of the pre-check
+
+        done() is stubbed to reproduce that interleaving in one process.
+        Without the stub the pre-check answers first and masks this branch
+        entirely, which is why deleting either gate on its own leaves
+        test_deduplication green.
+        """
+        self.write_native(allow=["Bash(git push:*)"])
+        once_per_store.claim(
+            self.project,
+            "divergence_warning",
+            once_per_store.day_scope(),
+            timedelta(days=1),
+        )
+
+        with patch.object(DIVERGENCE_WARNING, "done", return_value=False) as pre_check:
+            result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+
+        self.assertTrue(pre_check.called, "the pre-check stub was never consulted")
+        self.assertEqual(result.divergent_patterns, [])
+        self.assertIsNone(result.warning_message)
+
+    def test_ungoverned_native_patterns_are_not_reported_divergent(self):
+        """
+        Given native settings allowing both a Bash pattern and a WebFetch
+            pattern, neither present in toolguard config, and no configured
+            governed_tools (so the default Bash/Read/Write/Edit applies)
+        When check_and_warn_divergence runs
+        Then only the Bash pattern is reported -- check_and_warn_divergence
+             passes the configuration's governed tools down to
+             find_divergent_patterns, so migrating the warning's contents can
+             never move a WebFetch rule out of settings.local.json and leave
+             it enforced by nobody
+        """
+        self.write_native(
+            allow=["Bash(git push:*)", "WebFetch(domain:docs.anthropic.com)"]
+        )
+
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+
+        self.assertEqual(result.divergent_patterns, ["Bash(git push:*)"])
+        self.assertNotIn("WebFetch", result.warning_message)
+
+    def test_governed_tools_filter_follows_the_configured_set(self):
+        """
+        Given the same native WebFetch pattern, and a toolguard_hook config
+            that DOES list WebFetch in governed_tools
+        When check_and_warn_divergence runs
+        Then the WebFetch pattern IS reported divergent -- the filter reads the
+             resolved configuration's governed_tools rather than a hardcoded
+             default set
+        """
+        self.write_native(allow=["WebFetch(domain:docs.anthropic.com)"])
+        (self.claude_dir / "toolguard_hook.json").write_text(
+            json.dumps({"governed_tools": ["Bash", "WebFetch"], "permissions": {}})
+        )
+
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+
+        self.assertEqual(
+            result.divergent_patterns, ["WebFetch(domain:docs.anthropic.com)"]
+        )
+
+    def test_stale_claude_settings_path_does_not_supply_the_toolguard_side(self):
+        """
+        Given CLAUDE_SETTINGS_PATH pointing at an unrelated project whose
+            adjacent toolguard_hook config already allows the pattern that
+            diverges in THIS project
+        When check_and_warn_divergence runs
+        Then the divergence is still reported -- the comparison is between one
+             project's settings.local.json and that same project's toolguard
+             config, so the environment override is ignored here even though
+             the hook honours it everywhere else
+        """
+        self.write_native(allow=["Bash(git push:*)"])
+
+        unrelated = self.project.parent / "unrelated"
+        unrelated.mkdir()
+        (unrelated / "settings.local.json").write_text(json.dumps({"permissions": {}}))
+        (unrelated / "toolguard_hook.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+        )
+
+        with patch.dict(
+            os.environ,
+            {"CLAUDE_SETTINGS_PATH": str(unrelated / "settings.local.json")},
+        ):
+            result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+
+        self.assertEqual(result.divergent_patterns, ["Bash(git push:*)"])
+
+    def test_warning_lists_ten_patterns_then_a_count_of_the_rest(self):
+        """
+        Given twelve divergent native patterns
+        When check_and_warn_divergence runs
+        Then all twelve are returned in divergent_patterns, but the warning
+             text lists only the first ten in sorted order and ends with a
+             count of the remaining two
+        """
+        patterns = [f"Bash(cmd{i:02d}:*)" for i in range(12)]
+        self.write_native(allow=patterns)
+
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+
+        self.assertEqual(result.divergent_patterns, patterns)
+        listed = [
+            line.strip()[2:]
+            for line in result.warning_message.splitlines()
+            if line.startswith("  - ")
+        ]
+        self.assertEqual(listed, patterns[:10])
+        self.assertIn("... and 2 more", result.warning_message)
 
     def test_takeover_mode_ignored_patterns(self):
         """
@@ -683,30 +863,70 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
         When check_and_warn_divergence runs
         Then only the non-ignored pattern is reported as divergent
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
+        self.write_native(allow=["Bash(uv run pytest:*)", "Bash(git push:*)"])
+        takeover_config = {
+            "enabled": True,
+            "ignored_allow_patterns": ["Bash(uv run pytest:*)"],
+            "additional_ignored_patterns": [],
+        }
 
-            (project_root / "pyproject.toml").touch()
+        result = check_and_warn_divergence(self.project, takeover_config)
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
+        self.assertEqual(result.divergent_patterns, ["Bash(git push:*)"])
 
-            config = {
-                "permissions": {"allow": ["Bash(uv run pytest:*)", "Bash(git push:*)"]}
-            }
+    def test_ignored_allow_patterns_apply_with_takeover_disabled(self):
+        """
+        Given takeover mode DISABLED and one of two divergent native patterns
+            listed in ignored_allow_patterns
+        When check_and_warn_divergence runs
+        Then the ignored pattern is not reported -- ignored_allow_patterns is
+             honoured whatever the takeover flag says
 
-            settings_path.write_text(json.dumps(config))
+        Pins today's behaviour, and nothing more. auto_migrate.run_auto_migration
+        ignores nothing unless takeover is enabled, so with takeover off a
+        pattern can be excluded from this warning and still be migrated by the
+        migration this warning gates (TOO-45 follow-up rows 20/EL3). Which of
+        the two is right is a product decision that has not been made; do not
+        read this test as settling it.
+        """
+        self.write_native(allow=["Bash(uv run pytest:*)", "Bash(git push:*)"])
+        takeover_config = {
+            "enabled": False,
+            "ignored_allow_patterns": ["Bash(uv run pytest:*)"],
+            "additional_ignored_patterns": [],
+        }
 
-            takeover_config = {
-                "enabled": True,
-                "ignored_allow_patterns": ["Bash(uv run pytest:*)"],
-                "additional_ignored_patterns": [],
-            }
+        result = check_and_warn_divergence(self.project, takeover_config)
 
-            result = check_and_warn_divergence(project_root, takeover_config)
+        self.assertEqual(result.divergent_patterns, ["Bash(git push:*)"])
 
-            self.assertIn("Bash(git push:*)", result.divergent_patterns)
-            self.assertNotIn("Bash(uv run pytest:*)", result.divergent_patterns)
+    def test_additional_ignored_patterns_apply_only_when_takeover_is_enabled(self):
+        """
+        Given a single divergent native pattern listed only in
+            additional_ignored_patterns
+        When check_and_warn_divergence runs first with takeover ENABLED and
+            then, the same day, with takeover DISABLED
+        Then the enabled run reports nothing and the disabled run reports the
+             pattern -- additional_ignored_patterns is gated on the takeover
+             flag where ignored_allow_patterns is not
+
+        The two runs share a day deliberately: the enabled run finds nothing,
+        and finding nothing does not consume the day's warning slot.
+        """
+        self.write_native(allow=["Bash(git push:*)"])
+        takeover_config = {
+            "enabled": True,
+            "ignored_allow_patterns": [],
+            "additional_ignored_patterns": ["Bash(git push:*)"],
+        }
+
+        enabled = check_and_warn_divergence(self.project, takeover_config)
+        self.assertEqual(enabled.divergent_patterns, [])
+
+        disabled = check_and_warn_divergence(
+            self.project, {**takeover_config, "enabled": False}
+        )
+        self.assertEqual(disabled.divergent_patterns, ["Bash(git push:*)"])
 
     def test_no_divergence_releases_claim_so_later_scan_same_day_still_works(self):
         """
@@ -718,37 +938,16 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
              DOES report the newly-added divergence -- finding nothing does
              not consume the day's warning slot, only actually warning does
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / "pyproject.toml").touch()
+        self.write_native(allow=["Bash(git status:*)"])
+        self.write_hook(allow=["Bash(git status:*)"])
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(
-                json.dumps({"permissions": {"allow": ["Bash(git status:*)"]}})
-            )
-            hook_path = project_root / ".claude" / "toolguard_hook.json"
-            hook_path.write_text(
-                json.dumps({"permissions": {"allow": ["Bash(git status:*)"]}})
-            )
+        result1 = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+        self.assertEqual(result1.divergent_patterns, [])
 
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
+        self.write_native(allow=["Bash(git status:*)", "Bash(git push:*)"])
 
-            result1 = check_and_warn_divergence(project_root, takeover_config)
-            self.assertEqual(result1.divergent_patterns, [])
-
-            settings_path.write_text(
-                json.dumps(
-                    {
-                        "permissions": {
-                            "allow": ["Bash(git status:*)", "Bash(git push:*)"]
-                        }
-                    }
-                )
-            )
-
-            result2 = check_and_warn_divergence(project_root, takeover_config)
-            self.assertIn("Bash(git push:*)", result2.divergent_patterns)
+        result2 = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+        self.assertIn("Bash(git push:*)", result2.divergent_patterns)
 
     def test_warning_claims_todays_slot(self):
         """
@@ -758,64 +957,44 @@ class TestCheckAndWarnDivergence(_IsolatedStoreMixin, unittest.TestCase):
              dedup goes through the once-per-day claim store, not a marker
              file
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / "pyproject.toml").touch()
+        self.write_native(allow=["Bash(git push:*)"])
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(
-                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
-            )
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
+        self.assertIn("Bash(git push:*)", result.divergent_patterns)
 
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
-            check_and_warn_divergence(project_root, takeover_config)
-
-            still_claimed = (
-                once_per_store.claim(
-                    project_root,
-                    "divergence_warning",
-                    once_per_store.day_scope(),
-                    timedelta(days=1),
-                ).status
-                == ClaimStatus.HELD_BY_SOMEONE_ELSE
-            )
-            self.assertTrue(still_claimed)
+        still_claimed = (
+            once_per_store.claim(
+                self.project,
+                "divergence_warning",
+                once_per_store.day_scope(),
+                timedelta(days=1),
+            ).status
+            == ClaimStatus.HELD_BY_SOMEONE_ELSE
+        )
+        self.assertTrue(still_claimed)
 
     def test_warns_when_sqlite_unavailable(self):
         """
         Given a project with a divergent pattern and sqlite3 unavailable
         When check_and_warn_divergence runs
         Then it still reports the divergence and prints the warning (a
-             warning fails OPEN -- see toolguard.session_warnings.OncePer.warn),
+             warning fails OPEN -- see toolguard.once_per.OncePer.warn),
              plus a one-time notice explaining that it can no longer be
              throttled to once per day
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / "pyproject.toml").touch()
+        self.write_native(allow=["Bash(git push:*)"])
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(
-                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
-            )
+        with patch.object(once_per_store, "sqlite3", None):
+            with patch("builtins.print") as mock_print:
+                result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
 
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
-
-            with patch.object(once_per_store, "sqlite3", None):
-                with patch("builtins.print") as mock_print:
-                    result = check_and_warn_divergence(project_root, takeover_config)
-
-            self.assertIn("Bash(git push:*)", result.divergent_patterns)
-            printed = " ".join(
-                str(c.args[0]) for c in mock_print.call_args_list if c.args
-            )
-            self.assertIn("sqlite3 is unavailable", printed)
-            self.assertIn("the configuration divergence warning", printed)
+        self.assertIn("Bash(git push:*)", result.divergent_patterns)
+        printed = " ".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertIn("sqlite3 is unavailable", printed)
+        self.assertIn("the configuration divergence warning", printed)
 
 
-class TestCheckAndWarnDivergenceExceptionSafety(_IsolatedStoreMixin, unittest.TestCase):
+class TestCheckAndWarnDivergenceExceptionSafety(_DivergenceFixture, unittest.TestCase):
     def test_exception_during_analysis_leaves_period_unclaimed(self):
         """
         Given load_configuration raises during the analysis phase (e.g. a
@@ -825,130 +1004,119 @@ class TestCheckAndWarnDivergenceExceptionSafety(_IsolatedStoreMixin, unittest.Te
              same day can still detect and report divergence -- the crash
              must not have consumed the day's warning slot
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            (project_root / "pyproject.toml").touch()
+        self.write_native(allow=["Bash(git push:*)"])
+        boom = RuntimeError("malformed config file")
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(
-                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
-            )
+        with patch(
+            "toolguard.config_divergence.load_configuration", side_effect=boom
+        ) as failing_load:
+            with self.assertRaises(RuntimeError):
+                check_and_warn_divergence(self.project, _NO_TAKEOVER)
+        self.assertTrue(failing_load.called)
 
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
-            boom = RuntimeError("malformed config file")
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
 
-            with patch(
-                "toolguard.config_divergence.load_configuration", side_effect=boom
-            ):
-                with self.assertRaises(RuntimeError):
-                    check_and_warn_divergence(project_root, takeover_config)
-
-            result = check_and_warn_divergence(project_root, takeover_config)
-
-            self.assertIn("Bash(git push:*)", result.divergent_patterns)
-            self.assertIsNotNone(result.warning_message)
+        self.assertIn("Bash(git push:*)", result.divergent_patterns)
+        self.assertIsNotNone(result.warning_message)
 
 
 class TestDivergenceCheckCreatesNoStorageWhenNothingToReport(
-    _IsolatedStoreMixin, unittest.TestCase
+    _DivergenceFixture, unittest.TestCase
 ):
     def test_no_divergence_creates_no_legacy_logs_dir_or_db(self):
         """
         Given a project with matching native and toolguard permissions (no
-            divergence) and a project logs directory that does not yet exist
+            divergence), a project logs directory that does not yet exist, and
+            a claim database that has never been written
         When check_and_warn_divergence runs -- this is what every hook
             invocation calls, regardless of whether takeover mode is on
-        Then the project's logs directory is never created -- a healthy,
-             non-diverging project must not gain a logs/ directory or claim
-             database it never asked for
+        Then neither the project's logs directory nor the claim database is
+             created: a healthy, non-diverging project must gain no storage it
+             never asked for, which holds only because the day's claim is taken
+             at the end, once there is something to show for it
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            logs_dir = project_root / "logs"
-            (project_root / "pyproject.toml").touch()
+        logs_dir = self.project / "logs"
+        store_path = once_per_store._STORE_PATH
+        self.assertFalse(store_path.exists(), "store pre-exists; fixture is not clean")
 
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-            config = {"permissions": {"allow": ["Bash(git status:*)"]}}
-            settings_path.write_text(json.dumps(config))
+        self.write_native(allow=["Bash(git status:*)"])
+        self.write_hook(allow=["Bash(git status:*)"])
 
-            hook_path = project_root / ".claude" / "toolguard_hook.json"
-            hook_path.write_text(json.dumps(config))
+        result = check_and_warn_divergence(self.project, _NO_TAKEOVER)
 
-            takeover_config = {"enabled": False, "ignored_allow_patterns": []}
-
-            result = check_and_warn_divergence(project_root, takeover_config)
-
-            self.assertEqual(result.divergent_patterns, [])
-            self.assertFalse(logs_dir.exists())
+        self.assertEqual(result.divergent_patterns, [])
+        self.assertFalse(logs_dir.exists())
+        self.assertFalse(store_path.exists())
 
 
-class TestConcurrentDivergenceWarning(_IsolatedStoreMixin, unittest.TestCase):
+class TestConcurrentDivergenceWarning(_DivergenceFixture, unittest.TestCase):
     def test_two_processes_only_one_warns(self):
         """
         Given two separate OS processes, both able to detect the same
             divergent pattern in a shared project, racing
-            check_and_warn_divergence against the same logs_dir,
+            check_and_warn_divergence against the same claim store,
             synchronized via a barrier file
         When both processes run concurrently
         Then exactly one reports a warning_message and the other reports
              none -- claiming only immediately before the stderr notice
              still closes the race
         """
-        with TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir)
-            barrier = Path(tmpdir) / "go"
-            ready_markers = [Path(tmpdir) / f"ready_{i}" for i in range(2)]
-            # The child processes inherit no test isolation. Without _STORE_PATH
-            # pointed here they write to the developer's real ~/.toolguard/once_per.db.
-            store_path = Path(tmpdir) / "once_per.db"
+        # The children are real processes and inherit no in-process patching:
+        # HOME and the store path have to travel to them explicitly, or they
+        # read the developer's real config and real ~/.toolguard/once_per.db.
+        store_path = once_per_store._STORE_PATH
+        child_env = {**os.environ, "HOME": str(self.home)}
 
-            (project_root / "pyproject.toml").touch()
-            settings_path = project_root / ".claude" / "settings.local.json"
-            settings_path.parent.mkdir(parents=True)
-            settings_path.write_text(
-                json.dumps({"permissions": {"allow": ["Bash(git push:*)"]}})
+        ipc = self.project.parent / "ipc"
+        ipc.mkdir()
+        barrier = ipc / "go"
+        ready_markers = [ipc / f"ready_{i}" for i in range(2)]
+
+        self.write_native(allow=["Bash(git push:*)"])
+
+        script = (
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "from toolguard import once_per_store\n"
+            "from toolguard.config_divergence import check_and_warn_divergence\n"
+            "once_per_store._STORE_PATH = Path(sys.argv[3])\n"
+            "project_root = Path(sys.argv[1])\n"
+            "barrier = Path(sys.argv[2])\n"
+            "Path(sys.argv[4]).touch()\n"
+            "deadline = time.monotonic() + 10\n"
+            "while not barrier.exists() and time.monotonic() < deadline:\n"
+            "    pass\n"
+            "result = check_and_warn_divergence(\n"
+            "    project_root,\n"
+            "    {'enabled': False, 'ignored_allow_patterns': []},\n"
+            ")\n"
+            "print(1 if result.warning_message else 0)\n"
+        )
+
+        procs = [
+            run_child(
+                script,
+                str(self.project),
+                str(barrier),
+                str(store_path),
+                str(ready),
+                env=child_env,
             )
+            for ready in ready_markers
+        ]
 
-            script = (
-                "import sys, time\n"
-                "from pathlib import Path\n"
-                "from toolguard import once_per_store\n"
-                "from toolguard.config_divergence import check_and_warn_divergence\n"
-                "once_per_store._STORE_PATH = Path(sys.argv[3])\n"
-                "project_root = Path(sys.argv[1])\n"
-                "barrier = Path(sys.argv[2])\n"
-                "Path(sys.argv[4]).touch()\n"
-                "deadline = time.monotonic() + 10\n"
-                "while not barrier.exists() and time.monotonic() < deadline:\n"
-                "    pass\n"
-                "result = check_and_warn_divergence(\n"
-                "    project_root,\n"
-                "    {'enabled': False, 'ignored_allow_patterns': []},\n"
-                ")\n"
-                "print(1 if result.warning_message else 0)\n"
-            )
+        self.assertTrue(
+            release_barrier_when_ready(barrier, ready_markers, timeout=10),
+            "children never reached the barrier wait loop",
+        )
 
-            procs = [
-                run_child(
-                    script, str(project_root), str(barrier), str(store_path), str(ready)
-                )
-                for ready in ready_markers
-            ]
+        outputs = []
+        for proc in procs:
+            stdout, stderr = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 0, msg=stderr)
+            outputs.append(stdout.strip())
 
-            self.assertTrue(
-                release_barrier_when_ready(barrier, ready_markers, timeout=10),
-                "children never reached the barrier wait loop",
-            )
-
-            outputs = []
-            for proc in procs:
-                stdout, stderr = proc.communicate(timeout=15)
-                self.assertEqual(proc.returncode, 0, msg=stderr)
-                outputs.append(stdout.strip())
-
-            self.assertEqual(sorted(outputs), ["0", "1"])
+        self.assertEqual(sorted(outputs), ["0", "1"])
 
 
 if __name__ == "__main__":

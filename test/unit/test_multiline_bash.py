@@ -2,40 +2,38 @@
 
 import unittest
 
-from toolguard.compound import resolve_compound_permission
-from toolguard.parser.multiline import LeafCommand, extract_structured
+from toolguard.compound import decompose, resolve_compound_permission
+from toolguard.parser.command_extractor import LeafCommand
+from toolguard.parser.multiline import extract_structured
 from toolguard.permissions import check_permission
 
 
-def _leaf_texts(command: str) -> list[str]:
-    """Return the text of every LeafCommand produced by the multi-line extractor."""
-    return [r.text for r in extract_structured(command) if isinstance(r, LeafCommand)]
+def _extracted(command: str) -> list[tuple]:
+    """Every extraction result in order: ``('leaf', text, ask_floor)`` / ``('undecidable', reason)``.
+
+    Asserted exactly, because a decision alone cannot tell correct decomposition
+    from a total extraction loss: an empty extraction fails CLOSED to ``deny``
+    and any undecidable segment floors to ``ask``.
+    """
+    rows: list[tuple] = []
+    for result in extract_structured(command):
+        if isinstance(result, LeafCommand):
+            rows.append(("leaf", result.text, result.ask_floor))
+        else:
+            rows.append(("undecidable", result.reason))
+    return rows
 
 
-def _leaf(command: str, needle: str) -> LeafCommand:
-    """Return the single LeafCommand whose text contains *needle* (fails if not exactly one)."""
-    matches = [
-        r
-        for r in extract_structured(command)
-        if isinstance(r, LeafCommand) and needle in r.text
-    ]
-    assert len(matches) == 1, (
-        f"expected exactly one leaf containing {needle!r}, got {matches!r}"
-    )
-    return matches[0]
+def _parts(command: str) -> list[tuple]:
+    """The sub-command tuple of each decomposed unit -- the strings a rule actually sees."""
+    return [unit.parts for unit in decompose(command)]
 
 
 def _resolve(command: str, allow: list[str], deny: list[str]) -> str:
     """Resolve a (possibly compound/multi-line) command to a bare decision string."""
-    _verdict = resolve_compound_permission(
+    return resolve_compound_permission(
         command, lambda c: (*check_permission(c, allow, deny), None)
-    )
-    decision, _reason, _context = (
-        _verdict.decision,
-        _verdict.reason,
-        _verdict.additional_context,
-    )
-    return decision
+    ).decision
 
 
 class TestMultilineBypassFix(unittest.TestCase):
@@ -45,8 +43,13 @@ class TestMultilineBypassFix(unittest.TestCase):
         """
         Given allow `git status:*` and deny `rm -rf:*`
         When a multi-line command runs `git status` then `rm -rf /` on the next line
-        Then the compound is DENIED (the newline is a statement separator, like `;`)
+        Then both lines become separate leaves (the newline is a statement separator,
+            like `;`) and the compound is DENIED
         """
+        self.assertEqual(
+            _extracted("git status\nrm -rf /"),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
         self.assertEqual(
             _resolve("git status\nrm -rf /", ["git status:*"], ["rm -rf:*"]), "deny"
         )
@@ -55,8 +58,12 @@ class TestMultilineBypassFix(unittest.TestCase):
         """
         Given allow `git status:*` and deny `rm -rf:*`
         When the first line ends in `;` and the second line is `rm -rf /`
-        Then the compound is DENIED
+        Then both lines become separate leaves and the compound is DENIED
         """
+        self.assertEqual(
+            _extracted("git status;\nrm -rf /"),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
         self.assertEqual(
             _resolve("git status;\nrm -rf /", ["git status:*"], ["rm -rf:*"]), "deny"
         )
@@ -65,8 +72,12 @@ class TestMultilineBypassFix(unittest.TestCase):
         """
         Given allow `git status:*` and deny `rm -rf:*`
         When a line ends with `&&` and the operand `rm -rf /` is on the next line
-        Then the two lines form ONE compound and it is DENIED
+        Then the two lines form ONE compound of two leaves and it is DENIED
         """
+        self.assertEqual(
+            _extracted("git status &&\nrm -rf /"),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
         self.assertEqual(
             _resolve("git status &&\nrm -rf /", ["git status:*"], ["rm -rf:*"]), "deny"
         )
@@ -75,8 +86,16 @@ class TestMultilineBypassFix(unittest.TestCase):
         """
         Given allow `git status:*` and deny `rm -rf:*`
         When the statements are separated by a Windows CRLF newline
-        Then the dangerous statement is still caught and the compound is DENIED
+        Then both statements still become separate leaves and the compound is DENIED
+
+        DOES NOT PIN `_normalize_line_endings`: measured 2026-08-12, the grammar's
+        `line_ws_char <- [ \\t\\n\\r]` splits CRLF and lone CR on its own, so removing
+        the pre-pass normaliser changes nothing here or anywhere in this module.
         """
+        self.assertEqual(
+            _extracted("git status\r\nrm -rf /"),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
         self.assertEqual(
             _resolve("git status\r\nrm -rf /", ["git status:*"], ["rm -rf:*"]), "deny"
         )
@@ -85,27 +104,34 @@ class TestMultilineBypassFix(unittest.TestCase):
         """
         Given allow `cd:*`,`echo:*` and deny `sudo:*`,`rm -rf:*`
         When a three-line sequence has a denied `sudo rm -rf /etc` in the middle
-        Then the whole compound is DENIED (not allowed on the first line's match)
+        Then all three lines become leaves and the whole compound is DENIED (not
+            allowed on the first line's match)
         """
+        cmd = "cd x\nsudo rm -rf /etc\necho done"
         self.assertEqual(
-            _resolve(
-                "cd x\nsudo rm -rf /etc\necho done",
-                ["cd:*", "echo:*"],
-                ["sudo:*", "rm -rf:*"],
-            ),
-            "deny",
+            _extracted(cmd),
+            [
+                ("leaf", "cd x", False),
+                ("leaf", "sudo rm -rf /etc", False),
+                ("leaf", "echo done", False),
+            ],
+        )
+        self.assertEqual(
+            _resolve(cmd, ["cd:*", "echo:*"], ["sudo:*", "rm -rf:*"]), "deny"
         )
 
     def test_backslash_continuation_joins_into_one_logical_line(self):
         """
         Given allow `cd:*`,`ls:*` (and deny `rm -rf:*`)
         When backslash-continued lines `cd ~/p; \\` + `ls \\` + `-l \\` + `~/` are issued
-        Then they join into `cd ~/p` and `ls -l ~/`, both allowed -> ALLOW
+        Then they join into exactly two leaves, `cd ~/p` and `ls -l ~/` -> ALLOW
         """
+        cmd = "cd ~/p; \\\nls \\\n-l \\\n~/"
         self.assertEqual(
-            _resolve("cd ~/p; \\\nls \\\n-l \\\n~/", ["cd:*", "ls:*"], ["rm -rf:*"]),
-            "allow",
+            _extracted(cmd),
+            [("leaf", "cd ~/p", False), ("leaf", "ls -l ~/", False)],
         )
+        self.assertEqual(_resolve(cmd, ["cd:*", "ls:*"], ["rm -rf:*"]), "allow")
 
 
 class TestMultilineHeredocAndInlineCode(unittest.TestCase):
@@ -115,18 +141,32 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
         """
         Given allow `uv run*` and deny `rm -rf:*`
         When a heredoc body is fed to the Python interpreter (`uv run python - <<'PY'`)
-        Then it resolves to ASK (foreign inline/stdin code; un-downgradable by a broad allow)
+        Then the body is discarded behind one ask_floor sentinel leaf and the command
+            resolves to ASK (un-downgradable by a broad allow)
         """
         cmd = "uv run python - <<'PY'\nimport os\nos.system('rm -rf /')\nPY"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "uv run python - __HEREDOC_TO_python__", True)],
+        )
         self.assertEqual(_resolve(cmd, ["uv run*"], ["rm -rf:*"]), "ask")
 
     def test_heredoc_into_bash_decomposes_body_and_denies_danger(self):
         """
         Given allow `cat:*`,`bash:*`,`git status:*` and deny `rm -rf:*`
         When a heredoc body containing `rm -rf /` is piped into `bash` (a bash-family sink)
-        Then the body is decomposed as bash and the compound is DENIED
+        Then the body lines become leaves of their own and the compound is DENIED
         """
         cmd = "cat <<'EOF' | bash\ngit status\nrm -rf /\nEOF"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                ("leaf", "git status", False),
+                ("leaf", "rm -rf /", False),
+                ("leaf", "cat", False),
+                ("leaf", "bash", False),
+            ],
+        )
         self.assertEqual(
             _resolve(cmd, ["cat:*", "bash:*", "git status:*"], ["rm -rf:*"]), "deny"
         )
@@ -135,18 +175,27 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
         """
         Given allow `cat:*`,`pbcopy:*` and deny `rm -rf:*`
         When a heredoc whose body literally contains `rm -rf /` is piped to `pbcopy`
-        Then the body is DATA (not parsed); both leaves are allowed -> ALLOW
+        Then the body is DATA -- it is not a leaf -- and both real leaves are allowed
         """
         cmd = "cat <<'EOF' | pbcopy\nrm -rf /\nEOF"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "cat __HEREDOC_TO_pbcopy__", False), ("leaf", "pbcopy", False)],
+        )
         self.assertEqual(_resolve(cmd, ["cat:*", "pbcopy:*"], ["rm -rf:*"]), "allow")
 
     def test_bash_dash_c_inner_string_is_decomposed_and_denied(self):
         """
         Given allow `bash -c:*`,`git status:*` and deny `rm -rf:*`
         When `bash -c "git status; rm -rf /"` is issued
-        Then the inner string is decomposed as bash and the compound is DENIED
+        Then the inner string is decomposed into its own leaves (the `bash -c` wrapper
+            is not a leaf) and the compound is DENIED
         """
         cmd = 'bash -c "git status; rm -rf /"'
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "git status", False), ("leaf", "rm -rf /", False)],
+        )
         self.assertEqual(
             _resolve(cmd, ["bash -c:*", "git status:*"], ["rm -rf:*"]), "deny"
         )
@@ -155,18 +204,31 @@ class TestMultilineHeredocAndInlineCode(unittest.TestCase):
         """
         Given allow `uv run*` and deny `rm -rf:*`
         When `uv run python -c "<multiline python>"` is issued
-        Then it resolves to ASK (inline foreign code floor; `uv run*` cannot downgrade it)
+        Then the whole invocation is one ask_floor leaf -- the Python is never split
+            into bash leaves -- and it resolves to ASK
         """
         cmd = "uv run python -c \"\nimport os\nos.system('rm -rf /')\n\""
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                (
+                    "leaf",
+                    "uv run python -c \"\nimport os\nos.system('rm -rf /')\n\"",
+                    True,
+                )
+            ],
+        )
         self.assertEqual(_resolve(cmd, ["uv run*"], ["rm -rf:*"]), "ask")
 
     def test_python_dash_c_inline_code_asks(self):
         """
         Given allow `python3 -c:*` and deny `rm -rf:*`
         When `python3 -c "..."` carries inline Python (even one mentioning rm -rf)
-        Then it resolves to ASK (inline foreign code floor; not parsed as bash, not allowed)
+        Then it is one ask_floor leaf and resolves to ASK (not parsed as bash, and the
+            allow cannot downgrade it)
         """
         cmd = "python3 -c \"import os; os.system('rm -rf /')\""
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, True)])
         self.assertEqual(_resolve(cmd, ["python3 -c:*"], ["rm -rf:*"]), "ask")
 
 
@@ -177,18 +239,26 @@ class TestMultilineControlStructuresAndProcsub(unittest.TestCase):
         """
         Given allow `echo:*`,`grep:*` (and deny `rm -rf:*`)
         When a non-nested `for` loop runs only `echo` and `grep` in its body
-        Then the body commands are validated and the compound is ALLOWED
+        Then each body command is its own leaf and the compound is ALLOWED
         """
         cmd = "for f in a b; do echo $f; grep $f g; done"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "echo $f", False), ("leaf", "grep $f g", False)],
+        )
         self.assertEqual(_resolve(cmd, ["echo:*", "grep:*"], ["rm -rf:*"]), "allow")
 
     def test_simple_for_loop_with_dangerous_body_is_denied(self):
         """
         Given allow `echo:*` and deny `rm -rf:*`
         When a non-nested `for` loop body contains `rm -rf $f`
-        Then the body is validated and the compound is DENIED
+        Then `rm -rf $f` is a leaf in its own right and the compound is DENIED
         """
         cmd = "for f in a b; do echo $f; rm -rf $f; done"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "echo $f", False), ("leaf", "rm -rf $f", False)],
+        )
         self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "deny")
 
     def test_simple_for_loop_with_newline_body_is_validated(self):
@@ -196,37 +266,62 @@ class TestMultilineControlStructuresAndProcsub(unittest.TestCase):
         Given allow `echo:*` (and deny `rm -rf:*`)
         When a non-nested `for` loop uses a newline-separated body (the common real form,
             not the `;`-delimited form)
-        Then the body is decomposed and the safe compound is ALLOWED (same as the `;` form)
+        Then the body is decomposed into leaves and the safe compound is ALLOWED
         """
         cmd = "for f in a b; do\n  echo $f\ndone"
+        self.assertEqual(_extracted(cmd), [("leaf", "echo $f", False)])
         self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "allow")
 
     def test_simple_for_loop_with_newline_body_and_danger_is_denied(self):
         """
         Given allow `echo:*` and deny `rm -rf:*`
         When a non-nested `for` loop with a newline-separated body contains `rm -rf $f`
-        Then the body is decomposed, the danger is caught, and the compound is DENIED
-            (must match the `;`-delimited form's behavior -- not silently downgrade to ASK)
+        Then it yields the same two leaves as the `;`-delimited form and is DENIED
+            (not silently downgraded to ASK)
         """
         cmd = "for f in a b; do\n  echo $f\n  rm -rf $f\ndone"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "echo $f", False), ("leaf", "rm -rf $f", False)],
+        )
         self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "deny")
 
     def test_complex_nested_control_structure_asks(self):
         """
         Given any allow/deny config
         When a command nests a `while` loop around an `if`/`else`
-        Then it is too complex to decompose and resolves to ASK
+        Then the nested-control guard makes the whole loop ONE undecidable segment,
+            naming that guard, and it resolves to ASK
         """
         cmd = 'while read l; do if [ -e "$l" ]; then echo ok; else echo no; fi; done'
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                (
+                    "undecidable",
+                    "loop with nested control structure cannot be statically decomposed",
+                )
+            ],
+        )
         self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "ask")
 
     def test_process_substitution_asks(self):
         """
         Given allow `diff:*` (and deny `rm -rf:*`)
         When a command uses process substitution `diff <(sort a) <(sort b)`
-        Then the inner commands cannot be safely decomposed today and it resolves to ASK
+        Then it becomes one undecidable segment naming process substitution -- the inner
+            `sort` commands are never leaves -- and it resolves to ASK
         """
         cmd = "diff <(sort a) <(sort b)"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                (
+                    "undecidable",
+                    "command contains process substitution <(...) or >(...)",
+                )
+            ],
+        )
         self.assertEqual(_resolve(cmd, ["diff:*"], ["rm -rf:*"]), "ask")
 
 
@@ -237,9 +332,18 @@ class TestMultilineRegressionGuards(unittest.TestCase):
         """
         Given allow `cd:*`,`echo:*`,`grep:*` (and deny `rm -rf:*`)
         When a benign multi-line banner sequence runs cd/echo/grep across lines
-        Then every statement is allowed and the compound is ALLOWED
+        Then it splits into exactly four leaves, all allowed -> ALLOW
         """
         cmd = 'cd x\necho "=== a ===" && grep -rn p f\necho ""'
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                ("leaf", "cd x", False),
+                ("leaf", 'echo "=== a ==="', False),
+                ("leaf", "grep -rn p f", False),
+                ("leaf", 'echo ""', False),
+            ],
+        )
         self.assertEqual(
             _resolve(cmd, ["cd:*", "echo:*", "grep:*"], ["rm -rf:*"]), "allow"
         )
@@ -248,36 +352,54 @@ class TestMultilineRegressionGuards(unittest.TestCase):
         """
         Given allow `echo:*` and deny `rm -rf:*`
         When `echo "rm -rf /; safe"` carries `rm -rf` inside a quoted argument
-        Then the quoted content is not a command and the compound is ALLOWED
+        Then the whole thing stays ONE leaf (the quoted `;` is not a separator) -> ALLOW
         """
-        self.assertEqual(
-            _resolve('echo "rm -rf /; safe"', ["echo:*"], ["rm -rf:*"]), "allow"
-        )
+        cmd = 'echo "rm -rf /; safe"'
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, False)])
+        self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "allow")
 
     def test_hash_inside_argument_is_not_a_comment(self):
         """
         Given allow `echo:*`
         When `echo http://x#frag` contains a `#` mid-argument (not at a word boundary)
-        Then it is not treated as a comment and the command is ALLOWED
+        Then the fragment SURVIVES INTO THE LEAF -- it is not treated as a comment --
+            and the command is ALLOWED
+
+        The leaf assertion is the load-bearing one. The decision alone cannot fail:
+        stripping `#frag` leaves `echo http://x`, which matches `echo:*` just as well
+        (follow-up-queue MB3, shape 4).
         """
+        self.assertEqual(
+            _extracted("echo http://x#frag"), [("leaf", "echo http://x#frag", False)]
+        )
         self.assertEqual(_resolve("echo http://x#frag", ["echo:*"], []), "allow")
 
     def test_full_line_comment_is_dropped(self):
         """
         Given allow `git status:*` and deny `rm -rf:*`
         When a leading full-line comment `# rm -rf /` precedes `git status`
-        Then the comment is dropped and the compound is ALLOWED
+        Then the comment yields no leaf at all and the compound is ALLOWED
+
+        Two mechanisms strip comments -- `multiline._strip_comments` and the grammar's
+        own `comment` rule -- and each alone is invisible here (shape 19). Disabling
+        only one leaves this test green; that is measured, not assumed.
         """
-        self.assertEqual(
-            _resolve("# rm -rf /\ngit status", ["git status:*"], ["rm -rf:*"]), "allow"
-        )
+        cmd = "# rm -rf /\ngit status"
+        self.assertEqual(_extracted(cmd), [("leaf", "git status", False)])
+        self.assertEqual(_resolve(cmd, ["git status:*"], ["rm -rf:*"]), "allow")
 
     def test_blank_lines_and_padding_are_trimmed(self):
         """
         Given allow `git status:*`
         When the command has leading/trailing blank lines and surrounding whitespace
-        Then padding is trimmed and the single statement is ALLOWED
+        Then a single trimmed leaf comes out and it is ALLOWED
+
+        Same masking as the comment case: `_collapse_whitespace` and the grammar's
+        `line_ws` both do this, so neither is detectable alone.
         """
+        self.assertEqual(
+            _extracted("\n\n  git status \n"), [("leaf", "git status", False)]
+        )
         self.assertEqual(_resolve("\n\n  git status \n", ["git status:*"], []), "allow")
 
 
@@ -288,47 +410,53 @@ class TestHeredocSentinelShape(unittest.TestCase):
         """
         Given a heredoc piped to a non-executor (`cat <<EOF | pbcopy`)
         When the command is structured-extracted
-        Then the bearer leaf is `cat __HEREDOC_TO_pbcopy__` with ask_floor False, the `pbcopy`
-            leaf is present, and the heredoc body is NOT a command leaf
+        Then the result is exactly the bearer leaf `cat __HEREDOC_TO_pbcopy__` with
+            ask_floor False plus the `pbcopy` leaf -- the body is not a command leaf
         """
-        cmd = "cat <<'EOF' | pbcopy\nrm -rf /\nEOF"
-        texts = _leaf_texts(cmd)
-        self.assertIn("cat __HEREDOC_TO_pbcopy__", texts)
-        self.assertIn("pbcopy", texts)
-        self.assertNotIn("rm -rf /", texts)
-        self.assertFalse(_leaf(cmd, "__HEREDOC_TO_pbcopy__").ask_floor)
+        self.assertEqual(
+            _extracted("cat <<'EOF' | pbcopy\nrm -rf /\nEOF"),
+            [("leaf", "cat __HEREDOC_TO_pbcopy__", False), ("leaf", "pbcopy", False)],
+        )
 
     def test_sentinel_preserves_bearer_arguments(self):
         """
         Given a heredoc on a command with dangerous args (`tee /etc/passwd <<EOF`)
         When structured-extracted
-        Then the bearer args are preserved in the leaf (`tee /etc/passwd __HEREDOC_TO_tee__`)
-            so a deny on the bearer/args can still fire
+        Then the bearer args are preserved in the one leaf
+            (`tee /etc/passwd __HEREDOC_TO_tee__`) so a deny on the bearer/args can fire
         """
-        self.assertIn(
-            "tee /etc/passwd __HEREDOC_TO_tee__",
-            _leaf_texts("tee /etc/passwd <<'EOF'\nx\nEOF"),
+        self.assertEqual(
+            _extracted("tee /etc/passwd <<'EOF'\nx\nEOF"),
+            [("leaf", "tee /etc/passwd __HEREDOC_TO_tee__", False)],
         )
 
     def test_foreign_sink_sentinel_has_ask_floor(self):
         """
         Given a heredoc fed to the Python interpreter via `uv run python -`
         When structured-extracted
-        Then the sink resolves to `python` and the sentinel leaf carries ask_floor True
+        Then the sink resolves to `python` and that single leaf carries ask_floor True
         """
-        leaf = _leaf("uv run python - <<'PY'\nx\nPY", "__HEREDOC_TO_python__")
-        self.assertTrue(leaf.ask_floor)
+        self.assertEqual(
+            _extracted("uv run python - <<'PY'\nx\nPY"),
+            [("leaf", "uv run python - __HEREDOC_TO_python__", True)],
+        )
 
     def test_bash_family_sink_decomposes_body_with_no_sentinel(self):
         """
         Given a heredoc piped to `bash` (a bash-family sink)
         When structured-extracted
-        Then the body is decomposed into command leaves and NO `__HEREDOC_TO_` sentinel is emitted
+        Then the body is decomposed into command leaves and NO `__HEREDOC_TO_` sentinel
+            is emitted
         """
-        texts = _leaf_texts("cat <<'EOF' | bash\ngit status\nrm -rf /\nEOF")
-        self.assertIn("rm -rf /", texts)
-        self.assertIn("git status", texts)
-        self.assertFalse(any("__HEREDOC_TO_" in t for t in texts))
+        self.assertEqual(
+            _extracted("cat <<'EOF' | bash\ngit status\nrm -rf /\nEOF"),
+            [
+                ("leaf", "git status", False),
+                ("leaf", "rm -rf /", False),
+                ("leaf", "cat", False),
+                ("leaf", "bash", False),
+            ],
+        )
 
     def test_sentinel_is_matchable_by_a_rule_deny(self):
         """
@@ -336,12 +464,12 @@ class TestHeredocSentinelShape(unittest.TestCase):
         When a non-executor heredoc (`cat <<EOF | pbcopy`) is resolved
         Then the sentinel leaf matches the deny and the compound is DENIED
         """
+        cmd = "cat <<'EOF' | pbcopy\nx\nEOF"
         self.assertEqual(
-            _resolve(
-                "cat <<'EOF' | pbcopy\nx\nEOF", ["pbcopy:*"], ["[regex]__HEREDOC_TO_"]
-            ),
-            "deny",
+            _extracted(cmd),
+            [("leaf", "cat __HEREDOC_TO_pbcopy__", False), ("leaf", "pbcopy", False)],
         )
+        self.assertEqual(_resolve(cmd, ["pbcopy:*"], ["[regex]__HEREDOC_TO_"]), "deny")
 
     def test_sentinel_is_matchable_by_a_rule_allow(self):
         """
@@ -360,30 +488,37 @@ class TestHeredocSentinelShape(unittest.TestCase):
 
 
 class TestCommandSubstitution(unittest.TestCase):
-    """Inner commands of `` `...` `` / `$(...)` substitutions are extracted and gated."""
+    """Inner commands of `` `...` `` / `$(...)` substitutions become their own sub-commands."""
 
     def test_backtick_inner_command_is_gated(self):
         """
         Given allow `rm:*` and deny `ls:*`
         When the outer `rm` takes a backtick substitution running the denied `ls`
-        Then the inner `ls` is validated and the compound is DENIED
+        Then `ls` is a sub-command of the single leaf and the compound is DENIED
         """
+        self.assertEqual(_parts("rm `ls`"), [("rm `ls`", "ls")])
         self.assertEqual(_resolve("rm `ls`", ["rm:*"], ["ls:*"]), "deny")
 
     def test_dollar_paren_inner_command_is_gated(self):
         """
         Given allow `rm:*` and deny `ls:*`
         When the outer `rm` takes a `$(...)` substitution running the denied `ls`
-        Then the inner `ls` is validated and the compound is DENIED
+        Then `ls` is a sub-command of the single leaf and the compound is DENIED
         """
+        self.assertEqual(_parts("rm $(ls)"), [("rm $(ls)", "ls")])
         self.assertEqual(_resolve("rm $(ls)", ["rm:*"], ["ls:*"]), "deny")
 
     def test_nested_substitution_inner_command_is_gated(self):
         """
         Given allow `echo:*`,`ls:*` and deny `pwd:*`
         When a nested substitution `echo $(ls $(pwd))` runs the denied `pwd`
-        Then the deepest inner command is validated and the compound is DENIED
+        Then every nesting level -- including the innermost `pwd` -- is a sub-command
+            and the compound is DENIED
         """
+        self.assertEqual(
+            _parts("echo $(ls $(pwd))"),
+            [("echo $(ls $(pwd))", "ls $(pwd)", "pwd")],
+        )
         self.assertEqual(
             _resolve("echo $(ls $(pwd))", ["echo:*", "ls:*"], ["pwd:*"]), "deny"
         )
@@ -391,9 +526,14 @@ class TestCommandSubstitution(unittest.TestCase):
     def test_substitution_all_inner_allowed_is_allowed(self):
         """
         Given allow `rm:*`,`ls:*`
-        When `rm `ls`` has both outer and inner commands allowed
-        Then the compound is ALLOWED
+        When ``rm `ls` `` has both outer and inner commands allowed
+        Then the inner `ls` IS presented as its own sub-command and the compound is ALLOWED
+
+        The parts assertion is the load-bearing one: the decision alone cannot fail,
+        since never descending into the substitution also yields ALLOW on `rm:*`
+        (shape 20 -- ticket 34's defect wears exactly this shape).
         """
+        self.assertEqual(_parts("rm `ls`"), [("rm `ls`", "ls")])
         self.assertEqual(_resolve("rm `ls`", ["rm:*", "ls:*"], []), "allow")
 
 
@@ -404,65 +544,89 @@ class TestControlStructureClassification(unittest.TestCase):
         """
         Given allow `grep:*` and deny `rm -rf:*`
         When a non-nested `if ...; then ...; fi` (no else) has `rm -rf x` in its body
-        Then the body is decomposed and the compound is DENIED
+        Then the condition AND the body each become leaves and the compound is DENIED
         """
+        cmd = "if grep -q foo f; then rm -rf x; fi"
         self.assertEqual(
-            _resolve("if grep -q foo f; then rm -rf x; fi", ["grep:*"], ["rm -rf:*"]),
-            "deny",
+            _extracted(cmd),
+            [("leaf", "grep -q foo f", False), ("leaf", "rm -rf x", False)],
         )
+        self.assertEqual(_resolve(cmd, ["grep:*"], ["rm -rf:*"]), "deny")
 
     def test_simple_if_safe_body_is_allowed(self):
         """
         Given allow `grep:*`,`cat:*` and deny `rm -rf:*`
         When a simple `if grep ...; then cat f; fi` has only allowed commands
-        Then the condition and body are validated and the compound is ALLOWED
+        Then the condition command is emitted as a leaf alongside the body's, and the
+            compound is ALLOWED
         """
+        cmd = "if grep -q foo f; then cat f; fi"
         self.assertEqual(
-            _resolve(
-                "if grep -q foo f; then cat f; fi", ["grep:*", "cat:*"], ["rm -rf:*"]
-            ),
-            "allow",
+            _extracted(cmd),
+            [("leaf", "grep -q foo f", False), ("leaf", "cat f", False)],
         )
+        self.assertEqual(_resolve(cmd, ["grep:*", "cat:*"], ["rm -rf:*"]), "allow")
 
     def test_posix_test_condition_is_not_treated_as_a_command(self):
         """
         Given allow `cat:*` only (no rule for the `[` test builtin)
         When `if [ -f x ]; then cat f; fi` is resolved
-        Then the `[ -f x ]` test is not a command needing a rule and the compound is ALLOWED
+        Then `[ -f x ]` produces NO leaf -- it is a test, not a command -- and the
+            compound is ALLOWED on `cat f` alone
         """
-        self.assertEqual(
-            _resolve("if [ -f x ]; then cat f; fi", ["cat:*"], ["rm -rf:*"]), "allow"
-        )
+        cmd = "if [ -f x ]; then cat f; fi"
+        self.assertEqual(_extracted(cmd), [("leaf", "cat f", False)])
+        self.assertEqual(_resolve(cmd, ["cat:*"], ["rm -rf:*"]), "allow")
 
     def test_if_with_else_asks(self):
         """
         Given allow `echo:*`
         When an `if ...; then ...; else ...; fi` has an else branch
-        Then it is too complex to decompose and resolves to ASK
+        Then the else/elif guard makes it one undecidable segment naming that guard,
+            and it resolves to ASK
         """
+        cmd = "if [ -f x ]; then echo a; else echo b; fi"
         self.assertEqual(
-            _resolve("if [ -f x ]; then echo a; else echo b; fi", ["echo:*"], []), "ask"
+            _extracted(cmd),
+            [
+                (
+                    "undecidable",
+                    "if statement with else/elif cannot be statically decomposed",
+                )
+            ],
         )
+        self.assertEqual(_resolve(cmd, ["echo:*"], []), "ask")
 
     def test_case_statement_asks(self):
         """
         Given allow `echo:*`
-        When a `case ... esac` statement is resolved
-        Then it is not statically decomposed and resolves to ASK
+        When a one-line `case ... esac` statement is resolved
+        Then the GRAMMAR REJECTS IT -- the undecidable segment reads "command did not
+            parse", not the extractor's case-statement reason -- and it resolves to ASK
+
+        CHARACTERIZATION, pinning a known defect: proposed ticket 19's P7 says a
+        one-line `case` does not parse at all, so `_structured_from_ir_element`'s
+        `CASE_STMT` branch is unreachable from here and untested by this file.
+        Do not relax this to a bare `assertEqual(..., "ask")`: ASK is also what a
+        plain parse failure produces, which is what made this test unfalsifiable
+        before. When the grammar learns `case`, this SHOULD fail -- that is the point.
         """
+        cmd = "case $x in a) echo hi;; esac"
         self.assertEqual(
-            _resolve("case $x in a) echo hi;; esac", ["echo:*"], []), "ask"
+            _extracted(cmd),
+            [("undecidable", "command did not parse; cannot safely decompose")],
         )
+        self.assertEqual(_resolve(cmd, ["echo:*"], []), "ask")
 
     def test_foreign_node_inline_code_asks(self):
         """
         Given allow `node -e:*`
         When `node -e "..."` carries inline JavaScript
-        Then it resolves to ASK (inline foreign code floor; allow cannot downgrade it)
+        Then it is one ask_floor leaf and resolves to ASK (allow cannot downgrade it)
         """
-        self.assertEqual(
-            _resolve('node -e "process.exit(0)"', ["node -e:*"], []), "ask"
-        )
+        cmd = 'node -e "process.exit(0)"'
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, True)])
+        self.assertEqual(_resolve(cmd, ["node -e:*"], []), "ask")
 
 
 class TestQuoteRobustness(unittest.TestCase):
@@ -472,22 +636,22 @@ class TestQuoteRobustness(unittest.TestCase):
         """
         Given allow `echo:*` and deny `rm -rf:*`
         When `echo "a\\"b; rm -rf /"` has an escaped quote before a `; rm -rf /` inside the string
-        Then the escaped quote does not close the string, the `rm -rf` stays quoted data, and
-            the compound is ALLOWED
+        Then the escaped quote does not close the string, the whole thing stays ONE leaf,
+            and the compound is ALLOWED
         """
-        self.assertEqual(
-            _resolve(r'echo "a\"b; rm -rf /"', ["echo:*"], ["rm -rf:*"]), "allow"
-        )
+        cmd = r'echo "a\"b; rm -rf /"'
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, False)])
+        self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "allow")
 
     def test_single_quote_idiom_does_not_split_statement(self):
         """
         Given allow `echo:*` and deny `rm -rf:*`
         When `echo 'a'\\''b; rm -rf /'` uses the `'\\''` single-quote idiom around a `; rm -rf /`
-        Then the content stays a single quoted argument and the compound is ALLOWED
+        Then the content stays a single quoted argument in one leaf and the compound is ALLOWED
         """
-        self.assertEqual(
-            _resolve(r"echo 'a'\''b; rm -rf /'", ["echo:*"], ["rm -rf:*"]), "allow"
-        )
+        cmd = r"echo 'a'\''b; rm -rf /'"
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, False)])
+        self.assertEqual(_resolve(cmd, ["echo:*"], ["rm -rf:*"]), "allow")
 
 
 class TestForeignInterpreterVersionRobustness(unittest.TestCase):
@@ -497,29 +661,36 @@ class TestForeignInterpreterVersionRobustness(unittest.TestCase):
         """
         Given allow `python3.14 -c:*` (a Python version not enumerated anywhere)
         When `python3.14 -c "..."` runs inline code
-        Then it is still recognized as a foreign interpreter and ASK-floored (allow can't downgrade)
+        Then the leaf carries ask_floor and resolves to ASK (allow can't downgrade it)
         """
-        self.assertEqual(
-            _resolve('python3.14 -c "import os"', ["python3.14 -c:*"], []), "ask"
-        )
+        cmd = 'python3.14 -c "import os"'
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, True)])
+        self.assertEqual(_resolve(cmd, ["python3.14 -c:*"], []), "ask")
 
     def test_arbitrary_python_minor_version_inline_code_is_floored(self):
         """
         Given allow `python3.99 -c:*`
         When an arbitrary far-future Python minor version runs inline code
-        Then it is ASK-floored (prefix recognition, not a maintained version list)
+        Then the leaf carries ask_floor and resolves to ASK (prefix recognition, not a
+            maintained version list)
         """
-        self.assertEqual(_resolve('python3.99 -c "x"', ["python3.99 -c:*"], []), "ask")
+        cmd = 'python3.99 -c "x"'
+        self.assertEqual(_extracted(cmd), [("leaf", cmd, True)])
+        self.assertEqual(_resolve(cmd, ["python3.99 -c:*"], []), "ask")
 
     def test_heredoc_into_versioned_python_asks(self):
         """
         Given allow `python3.13:*`
         When a heredoc is fed to `python3.13` (a versioned interpreter)
-        Then the sink is recognized as foreign and the compound resolves to ASK
+        Then the sentinel names the versioned sink, carries ask_floor, and the compound
+            resolves to ASK
         """
+        cmd = "python3.13 - <<'PY'\nx\nPY"
         self.assertEqual(
-            _resolve("python3.13 - <<'PY'\nx\nPY", ["python3.13:*"], []), "ask"
+            _extracted(cmd),
+            [("leaf", "python3.13 - __HEREDOC_TO_python3_13__", True)],
         )
+        self.assertEqual(_resolve(cmd, ["python3.13:*"], []), "ask")
 
 
 if __name__ == "__main__":

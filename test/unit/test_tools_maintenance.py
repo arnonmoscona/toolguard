@@ -14,17 +14,24 @@ from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from unittest import mock
 
 from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.config_write_guard import ConfigWriteVerificationError
+from toolguard.tools import decision_ledger
+from toolguard.tools.clarity import InteractionFinding
+from toolguard.tools.consolidate import BroadeningProposal, ConsolidationProposal
+from toolguard.tools.hierarchy import CrossLayerRedundancy
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.maintenance import (
     MaintenanceReport,
+    ToolMaintenance,
     _collect_annotations,
     _nosecurity_block_reason,
     _partition_nosecurity,
     _permission_patterns_in_text,
+    _render_apply,
     _render_ledger,
     _render_replay,
     _run_annotate,
@@ -40,6 +47,8 @@ from toolguard.tools.maintenance import (
     run_maintenance,
     render,
 )
+from toolguard.tools.mining import CommandGroup, MiningReport
+from toolguard.tools.redundancy import RedundancyFinding
 from toolguard.tools.replay import replay
 from toolguard.tools.rule_apply import ChangeReport, FileChange
 
@@ -170,16 +179,253 @@ class TestRunMaintenance(unittest.TestCase):
         self.assertFalse(report.has_any_findings)
         self.assertIn("No maintenance findings", render(report))
 
+    def test_redundancy_and_cross_layer_findings_reach_the_report(self):
+        """
+        Given a user layer and a more-specific project layer that both allow
+            'git:*', the project layer holding it twice
+        When run_maintenance is called
+        Then the Bash report carries BOTH the within-layer redundancy and the
+            cross-layer redundancy -- the two engines whose output the
+            aggregator otherwise wires up unobserved.
+
+        Asserts only that the aggregator surfaces what the engines returned.
+        Proposed ticket 22 establishes that these findings can name a rule
+        whose removal changes decisions, so their CONTENT is not endorsed here.
+        """
+        user = _make_layer(
+            "Bash",
+            allow=["git:*"],
+            provenance=Provenance(
+                level="user",
+                source_type="toolguard_hook",
+                file_format="toml",
+                path=Path("/fake/home/.claude/toolguard_hook.toml"),
+                specificity=0,
+            ),
+        )
+        project = _make_layer(
+            "Bash", allow=["git:*", "git:*"], provenance=_make_provenance(specificity=5)
+        )
+        report = run_maintenance(_make_config(user, project), tools=["Bash"])
+        bash = report.tools[0]
+        self.assertEqual(
+            [(r.redundant_pattern, r.kind) for r in bash.redundancies],
+            [("git:*", "static")],
+        )
+        self.assertEqual([x.pattern for x in bash.cross_layer_redundancies], ["git:*"])
+        self.assertTrue(report.has_any_findings)
+
+    def test_report_order_follows_the_requested_tool_order(self):
+        """
+        Given the same config inspected twice with the tool list reversed
+        When run_maintenance is called
+        Then the report's tool order mirrors the requested order both times --
+            report order is part of the output, not an accident of iteration.
+        """
+        config = _make_config(_make_layer("Bash", allow=[]))
+        self.assertEqual(
+            [t.tool for t in run_maintenance(config, tools=["Read", "Bash"]).tools],
+            ["Read", "Bash"],
+        )
+        self.assertEqual(
+            [t.tool for t in run_maintenance(config, tools=["Bash", "Read"]).tools],
+            ["Bash", "Read"],
+        )
+
+    def test_default_inspects_the_four_builtin_tools_in_sorted_order(self):
+        """
+        Given no explicit tool list
+        When run_maintenance is called
+        Then it inspects exactly Bash, Edit, Read and Write, in that order.
+
+        CHARACTERIZATION of the current default, not an endorsement: the
+        follow-up queue's row M7 records that the default should come from
+        Configuration.governed_tools(), so a user-governed MCP terminal tool is
+        silently skipped today. This test exists so that change is visible.
+        """
+        config = _make_config(_make_layer("Bash", allow=[]))
+        report = run_maintenance(config)
+        self.assertEqual(
+            [t.tool for t in report.tools], ["Bash", "Edit", "Read", "Write"]
+        )
+
+
+def _report_with_counts(
+    redundancies: int = 1,
+    consolidations: int = 1,
+    broadenings: int = 1,
+    cross_layer: int = 1,
+    interactions: int = 1,
+    mining: int = 1,
+) -> MaintenanceReport:
+    """
+    A hand-built report with a chosen number of findings in each category, plus
+    a second tool with none.
+
+    Hand-built rather than engine-derived so the renderer is measured against
+    known counts: the engines emit at most two categories from any fixture
+    small enough to keep in a test.  The per-category counts are separately
+    settable because equal counts make a transposed category invisible.
+    """
+    provenance = _make_provenance()
+    bash = ToolMaintenance(
+        tool="Bash",
+        redundancies=redundancies
+        * (
+            RedundancyFinding(
+                redundant_pattern="git diff:*",
+                provenance=provenance,
+                kind="static",
+                list_type="allow",
+                tool="Bash",
+                covered_by="git:*",
+                note="duplicate of 'git:*'",
+            ),
+        ),
+        consolidations=consolidations
+        * (
+            ConsolidationProposal(
+                kind="literal-alternation",
+                tool="Bash",
+                list_type="allow",
+                layer_provenance=provenance,
+                removed_patterns=("git log:*", "git status:*"),
+                added_pattern="[regex]^git (log|status)",
+                rationale="the subcommand varies",
+                replay_summary="10 probes unchanged; no corpus",
+            ),
+        ),
+        broadenings=broadenings
+        * (
+            BroadeningProposal(
+                kind="prefix-broadening",
+                tool="Bash",
+                list_type="allow",
+                layer_provenance=provenance,
+                removed_patterns=("git log:*",),
+                added_pattern="git :*",
+                rationale="admits every git subcommand",
+                newly_admitted_commands=("git push origin main",),
+                overlaps_guard_rules=("deny 'git push:*'",),
+                probe_admitted_surface=(),
+            ),
+        ),
+        cross_layer_redundancies=cross_layer
+        * (
+            CrossLayerRedundancy(
+                tool="Bash",
+                pattern="git fetch:*",
+                redundant_provenance=provenance,
+                covered_by_provenance=provenance,
+                note="a broader copy exists at user level",
+            ),
+        ),
+        interactions=interactions
+        * (
+            InteractionFinding(
+                tool="Bash",
+                provenance=provenance,
+                kind="deny-shadows-allow",
+                allow_pattern="uv run alembic:*",
+                guard_section="deny",
+                guard_pattern="uv run:*",
+                explanation="the deny wins at this level",
+                guard_provenance=None,
+            ),
+        ),
+    )
+    quiet = ToolMaintenance(
+        tool="Read",
+        redundancies=(),
+        consolidations=(),
+        broadenings=(),
+        cross_layer_redundancies=(),
+        interactions=(),
+    )
+    mining_report = MiningReport(
+        groups=mining
+        * (
+            CommandGroup(
+                tool="Bash",
+                command_key="npm publish",
+                signal="allow-candidate",
+                distinct_commands=("npm publish --dry-run",),
+                occurrences=4,
+                current_verdict="ask",
+                observed_counts={"EXECUTED": 4},
+            ),
+        )
+    )
+    return MaintenanceReport(tools=(bash, quiet), mining=mining_report)
+
 
 class TestRenderMaintenance(unittest.TestCase):
     """Rendering of the aggregate maintenance summary."""
 
+    def test_headline_counts_every_category_separately(self):
+        """
+        Given a report whose six categories hold a DIFFERENT number of findings
+            each (1..6)
+        When it is rendered
+        Then the headline reports each count against its own label.
+
+        The counts are deliberately unequal: with one finding per category a
+        transposed pair -- reporting the clarity count as the redundancy count,
+        say -- produces an identical line.
+        """
+        report = _report_with_counts(
+            redundancies=1,
+            consolidations=2,
+            broadenings=3,
+            cross_layer=4,
+            interactions=5,
+            mining=6,
+        )
+        out = render(report, "text")
+        self.assertIn(
+            "1 redundancy, 2 strict-consolidation, 3 broadening (agent-judged), "
+            "4 cross-layer, 5 clarity, 6 mining candidate(s).",
+            out,
+        )
+
+    def test_every_finding_category_appears_in_the_body(self):
+        """
+        Given a report carrying one finding of every category
+        When it is rendered as text
+        Then each category contributes its own line naming the rule it is
+            about -- the redundancy, the consolidation's before/after, the
+            broadening, the cross-layer finding, the clarity interaction, and
+            the corpus-mining section.
+        """
+        out = render(_report_with_counts(), "text")
+        self.assertIn("redundant: `git diff:*` -- duplicate of 'git:*'", out)
+        self.assertIn(
+            "consolidate (literal-alternation): ['git log:*', 'git status:*'] "
+            "-> `[regex]^git (log|status)`",
+            out,
+        )
+        self.assertIn("broaden (prefix-broadening, AGENT-JUDGED): -> `git :*`", out)
+        self.assertIn("cross-layer redundant: `git fetch:*`", out)
+        self.assertIn("clarity (deny-shadows-allow): the deny wins at this level", out)
+        self.assertIn("Corpus mining", out)
+        self.assertIn("npm publish", out)
+
+    def test_a_tool_with_no_findings_gets_no_section(self):
+        """
+        Given a report whose second tool produced nothing
+        When it is rendered
+        Then only the tool that found something gets a section heading.
+        """
+        out = render(_report_with_counts(), "markdown")
+        self.assertIn("## Bash", out)
+        self.assertNotIn("## Read", out)
+
     def test_render_lists_headline_and_tool_section(self):
         """
-        Given a report with Bash findings
+        Given an engine-derived report with Bash findings
         When render is called in markdown
-        Then the output carries the headline counts and a Bash section naming a
-            broadening proposal.
+        Then the headline reports the one consolidation and the one broadening
+            the engines found, and the Bash section names the broadened rule.
         """
         config = _make_config(
             _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
@@ -188,8 +434,9 @@ class TestRenderMaintenance(unittest.TestCase):
         out = render(report, "markdown")
         self.assertIsInstance(report, MaintenanceReport)
         self.assertIn("Maintenance summary", out)
-        self.assertIn("Bash", out)
-        self.assertIn("broaden", out)
+        self.assertIn("1 strict-consolidation, 1 broadening (agent-judged)", out)
+        self.assertIn("## Bash", out)
+        self.assertIn("broaden (prefix-broadening, AGENT-JUDGED): -> `git :*`", out)
 
 
 class TestReportToDict(unittest.TestCase):
@@ -257,7 +504,10 @@ class TestMaintenanceCLI(unittest.TestCase):
         """
         Given a config with Bash findings (load_config patched to return it)
         When main(['--tool', 'Bash', '--format', 'text']) is invoked
-        Then it returns 0 and prints the maintenance summary to stdout.
+        Then it returns 0 and prints a summary OF THAT CONFIG -- naming the
+            git family it proposes to merge, so the run is known to have
+            analysed the injected config rather than whatever config happens
+            to exist in the current directory.
         """
         config = _make_config(
             _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
@@ -267,13 +517,18 @@ class TestMaintenanceCLI(unittest.TestCase):
             with redirect_stdout(buffer):
                 code = main(["--tool", "Bash", "--format", "text"])
         self.assertEqual(code, 0)
-        self.assertIn("Maintenance summary", buffer.getvalue())
+        out = buffer.getvalue()
+        self.assertIn("Maintenance summary", out)
+        self.assertIn("1 strict-consolidation", out)
+        self.assertIn("[regex]^git (diff|log|status)", out)
 
     def test_json_format_prints_valid_serialized_report(self):
         """
         Given a config with Bash findings
         When main(['--tool', 'Bash', '--format', 'json']) is invoked
-        Then it returns 0 and stdout is valid JSON carrying the Bash tool entry.
+        Then it returns 0 and stdout is valid JSON whose Bash entry carries the
+            findings of the injected config -- not merely a Bash entry, which
+            any config at all produces.
         """
         config = _make_config(
             _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
@@ -285,6 +540,48 @@ class TestMaintenanceCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(buffer.getvalue())
         self.assertEqual([t["tool"] for t in payload["tools"]], ["Bash"])
+        self.assertEqual(
+            [c["added_pattern"] for c in payload["tools"][0]["consolidations"]],
+            ["[regex]^git (diff|log|status)"],
+        )
+
+    def test_a_misspelled_tool_name_is_distinguishable_from_a_clean_run(self):
+        """
+        Given the same config inspected as '--tool Bash' and as '--tool Bahs'
+        When main runs both
+        Then the two runs are distinguishable -- either the misspelled one is
+            rejected, or its output differs.
+
+        RED, asserting the correct behaviour (follow-up-queue row M8, proposed
+        ticket 29's family). Measured at HEAD: an unrecognised tool name yields
+        five empty finding tuples, so the run exits 0 and prints a clean
+        'No maintenance findings' report byte-identical to a real run over a
+        rule-free config. Nothing distinguishes "checked and found nothing"
+        from "checked nothing", which is the failure mode that hides a typo in
+        a skill-generated command line.
+        """
+        config = _make_config(_make_layer("Bash", allow=[]))
+
+        def _run(tool):
+            buffer = io.StringIO()
+            with mock.patch(
+                "toolguard.tools.maintenance.load_config", return_value=config
+            ):
+                try:
+                    with redirect_stdout(buffer):
+                        code = main(["--tool", tool, "--format", "text"])
+                except SystemExit as exc:
+                    return ("exit", exc.code)
+            return ("returned", code, buffer.getvalue())
+
+        known = _run("Bash")
+        unknown = _run("Bahs")
+        self.assertNotEqual(
+            unknown,
+            known,
+            "an unrecognised tool name produced the same clean report as a real "
+            "run over a rule-free config",
+        )
 
     def test_corpus_off_by_default_does_not_harvest(self):
         """
@@ -349,12 +646,54 @@ class TestApplyMode(unittest.TestCase):
         """
         Given a report with a consolidatable git-family allow set
         When collect_consolidations runs
-        Then it returns the strict consolidation proposal(s) only.
+        Then it returns the one strict consolidation, carrying the family it
+            merges and the kind that named it.
         """
         report = run_maintenance(self._git_config(), tools=["Bash"])
         proposals = collect_consolidations(report)
-        self.assertTrue(proposals)
-        self.assertTrue(all(p.kind for p in proposals))
+        self.assertEqual([p.kind for p in proposals], ["literal-alternation"])
+        self.assertEqual(
+            set(proposals[0].removed_patterns),
+            {"git diff:*", "git log:*", "git status:*"},
+        )
+
+    def test_collect_consolidations_excludes_agent_judged_broadenings(self):
+        """
+        Given a report whose Bash tool carries BOTH a strict consolidation and
+            a prefix-broadening over the same three git rules
+        When collect_consolidations runs
+        Then it returns exactly the strict consolidations and nothing else --
+            the broadening (which admits 'git anything') must never reach the
+            apply path, which enacts whatever this function returns.
+        """
+        report = run_maintenance(self._git_config(), tools=["Bash"])
+        bash = report.tools[0]
+        self.assertTrue(bash.consolidations)
+        self.assertTrue(bash.broadenings, "fixture must produce a broadening too")
+        proposals = collect_consolidations(report)
+        self.assertEqual(proposals, list(bash.consolidations))
+        self.assertNotIn("git :*", [p.added_pattern for p in proposals])
+
+    def test_static_subsumption_becomes_a_pure_removal(self):
+        """
+        Given a static-subsumption proposal, whose added_pattern is None
+        When consolidation_to_edit_proposal converts it
+        Then the edit removes the subsumed rule and adds NOTHING -- a
+            synthesized `None` pattern would be written into the allow list.
+        """
+        prop = ConsolidationProposal(
+            kind="static-subsumption",
+            tool="Bash",
+            list_type="allow",
+            layer_provenance=_make_provenance(),
+            removed_patterns=("uv run python:*",),
+            added_pattern=None,
+            rationale="subsumed by 'uv run:*'",
+            replay_summary="2 positive probes pass; no corpus",
+        )
+        ep = consolidation_to_edit_proposal(prop)
+        self.assertEqual(ep.edits[0].removed_patterns, ("uv run python:*",))
+        self.assertEqual(ep.edits[0].added_patterns, ())
 
     def test_consolidation_to_edit_proposal_maps_to_replace(self):
         """
@@ -396,8 +735,20 @@ class TestApplyMode(unittest.TestCase):
                 code = main(["--tool", "Bash", "--apply", "--format", "json"])
         self.assertEqual(code, 0)
         payload = json.loads(buffer.getvalue())
-        self.assertTrue(payload["edit_proposals"])
+        self.assertEqual(len(payload["edit_proposals"]), 1)
         self.assertEqual(payload["edit_proposals"][0]["action"], "replace")
+        edits = payload["edit_proposals"][0]["edits"]
+        self.assertEqual(
+            set(edits[0]["removed_patterns"]),
+            {"git diff:*", "git log:*", "git status:*"},
+        )
+        self.assertEqual(edits[0]["added_patterns"], ["[regex]^git (diff|log|status)"])
+        # The same fixture also yields a 'git :*' broadening; it is agent-judged
+        # and must not be handed to the audit-and-apply path.
+        self.assertNotIn(
+            "git :*",
+            [pat for e in edits for pat in e["added_patterns"]],
+        )
 
     def test_change_report_to_dict_includes_diff_and_outcome(self):
         """
@@ -418,10 +769,37 @@ class TestApplyMode(unittest.TestCase):
         )
         payload = change_report_to_dict(ChangeReport(files=(fchange,)))
         self.assertEqual(payload["files"][0]["written"], True)
-        self.assertIn("diff", payload["files"][0])
+        self.assertEqual(payload["files"][0]["diff"], "--- a\n+++ b\n")
+        self.assertEqual(payload["files"][0]["patterns_removed"], ["Bash(git diff:*)"])
+        self.assertEqual(
+            payload["files"][0]["patterns_added"],
+            ["Bash([regex]^git (diff|log|status))"],
+        )
         self.assertEqual(
             payload["files_written"], ["/proj/.claude/toolguard_hook.toml"]
         )
+
+    def test_render_apply_inlines_each_changed_file_diff(self):
+        """
+        Given a change report with one file carrying a unified diff
+        When _render_apply renders it
+        Then the file's path and its diff body appear under the summary -- for
+            a preview the diff is the whole point, and render_change_report
+            deliberately leaves it out.
+        """
+        fchange = FileChange(
+            path=Path("/proj/.claude/toolguard_hook.toml"),
+            file_format="toml",
+            applied=(),
+            skipped=(),
+            patterns_removed=("Bash(git diff:*)",),
+            patterns_added=("Bash([regex]^git (diff|log|status))",),
+            diff="--- a\n+++ b\n-Bash(git diff:*)\n",
+            written=False,
+        )
+        out = _render_apply(ChangeReport(files=(fchange,)), "text")
+        self.assertIn("Diff: /proj/.claude/toolguard_hook.toml", out)
+        self.assertIn("-Bash(git diff:*)", out)
 
     def test_apply_preview_is_dry_run_and_writes_nothing(self):
         """
@@ -541,12 +919,14 @@ class TestNoSecurityWithholding(unittest.TestCase):
 
     _ALLOWS = ["git diff:*", "git status:*", "git log:*"]
 
-    def _config_with_real_file(self, tmpdir: str, tagged: bool) -> Configuration:
+    def _config_with_real_file(
+        self, tmpdir: str, tagged: bool, reason: str = ": audited manually"
+    ) -> Configuration:
         """Write a real toolguard_hook.toml, optionally #NOSECURITY-tagging 'git diff:*', and return its Configuration."""
         lines = []
         for body in self._ALLOWS:
             if tagged and body == "git diff:*":
-                lines.append(f"    'Bash({body})',  # NOSECURITY: audited manually")
+                lines.append(f"    'Bash({body})',  # NOSECURITY{reason}")
             else:
                 lines.append(f"    'Bash({body})',")
         text = (
@@ -610,6 +990,107 @@ class TestNoSecurityWithholding(unittest.TestCase):
             )
             prop = collect_consolidations(report)[0]
             self.assertEqual(_nosecurity_block_reason(prop), "audited manually")
+
+    def test_a_bare_nosecurity_tag_with_no_reason_still_withholds(self):
+        """
+        Given 'git diff:*' tagged '# NOSECURITY' with NO reason after it
+        When _partition_nosecurity runs over the collected consolidations
+        Then the proposal is still withheld, carrying the empty reason --
+            an untagged rule and a rule tagged without a reason are both
+            falsy, and only the untagged one may be rewritten.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=True, reason=""), tools=["Bash"]
+            )
+            proposals = collect_consolidations(report)
+            self.assertTrue(proposals)
+            self.assertEqual(_nosecurity_block_reason(proposals[0]), "")
+            appliable, withheld = _partition_nosecurity(proposals)
+            self.assertEqual(appliable, [])
+            self.assertEqual([r for _p, r in withheld], [""])
+
+    def test_a_withheld_proposal_is_never_handed_to_the_writer(self):
+        """
+        Given the same git family, once #NOSECURITY-blessed and once not
+        When _run_apply runs over each
+        Then apply_proposals -- the function that actually edits the file --
+            is handed the proposal in the untagged case and NOTHING in the
+            blessed case.
+
+        Both directions are checked because the JSON payload's edit_proposals
+        list is built separately from the apply call: a report that correctly
+        names the rule as withheld can sit above an apply call that rewrites it
+        anyway, and an empty hand-off proves nothing without the control.
+        """
+
+        def _handed_to_apply(tagged: bool):
+            with tempfile.TemporaryDirectory() as d:
+                report = run_maintenance(
+                    self._config_with_real_file(d, tagged=tagged), tools=["Bash"]
+                )
+                self.assertTrue(collect_consolidations(report), "fixture must propose")
+                args = argparse.Namespace(write=False, format="json", dir=d)
+                with mock.patch(
+                    "toolguard.tools.maintenance.apply_proposals",
+                    return_value=ChangeReport(files=()),
+                ) as apply:
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(_run_apply(args, report), 0)
+                handed = apply.call_args.args[0]
+                return [p for prop in handed for p in prop.removed_patterns]
+
+        self.assertIn("git diff:*", _handed_to_apply(tagged=False))
+        self.assertEqual(_handed_to_apply(tagged=True), [])
+
+    def test_apply_text_output_names_the_withheld_rule_and_its_reason(self):
+        """
+        Given --apply in text mode over a #NOSECURITY-blessed git family
+        When _run_apply renders the preview
+        Then the human-readable output states that the rule was withheld and
+            why -- the JSON contract is not the only surface a user reads.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=True), tools=["Bash"]
+            )
+            args = argparse.Namespace(write=False, format="text", dir=d)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(_run_apply(args, report), 0)
+            out = buf.getvalue()
+            self.assertIn("Withheld (blessed by #NOSECURITY", out)
+            self.assertIn("git diff:*", out)
+            self.assertIn("#NOSECURITY: audited manually", out)
+
+    def test_a_write_that_applied_nothing_reports_zero_files_written(self):
+        """
+        Given --apply --write where EVERY proposal was withheld
+        When _run_apply runs with a clean pre-flight
+        Then the output still reports '0 file(s) written' alongside its
+            "APPLIED" banner, so a run that changed nothing is distinguishable
+            from one that changed something (the banner alone is not).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            report = run_maintenance(
+                self._config_with_real_file(d, tagged=True), tools=["Bash"]
+            )
+            args = argparse.Namespace(write=True, format="text", dir=d)
+            buf = io.StringIO()
+            with (
+                mock.patch(
+                    "toolguard.tools.maintenance.migration_preflight",
+                    return_value=mock.Mock(blockers=[]),
+                ),
+                mock.patch(
+                    "toolguard.tools.maintenance.apply_proposals",
+                    return_value=ChangeReport(files=()),
+                ),
+            ):
+                with redirect_stdout(buf):
+                    self.assertEqual(_run_apply(args, report), 0)
+            self.assertIn("0 applied, 0 skipped, 0 file(s) written.", buf.getvalue())
+            self.assertIn("Withheld (blessed by #NOSECURITY", buf.getvalue())
 
     def test_apply_json_lists_withheld_and_omits_blessed_edit(self):
         """
@@ -705,11 +1186,16 @@ class TestAnnotateMode(unittest.TestCase):
             self.assertIn("# toolguard:", payload["files"][0]["diff"])
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
-    def test_write_refused_on_unsafe_tree(self):
+    def test_write_refused_when_no_project_boundary_can_be_established(self):
         """
-        Given --annotate --write in a directory that is not a clean git work tree
+        Given --annotate --write in a bare directory holding no project marker
         When _run_annotate runs
-        Then it refuses (exit 2) and leaves the file untouched
+        Then it refuses (exit 2), NAMES the project-boundary blocker, and
+            leaves the file untouched.
+
+        The blocker is asserted because a bare temp dir trips the project-root
+        gate, not the work-tree gate this test was previously described as
+        exercising -- exit code 2 alone cannot tell the two apart.
         """
         with tempfile.TemporaryDirectory() as d:
             config = self._confusing_config(d)
@@ -720,6 +1206,29 @@ class TestAnnotateMode(unittest.TestCase):
             with redirect_stdout(buf):
                 code = _run_annotate(args, config)
             self.assertEqual(code, 2)
+            self.assertIn("Refusing to write annotations", buf.getvalue())
+            self.assertIn("project boundary cannot be established", buf.getvalue())
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_write_refused_when_the_project_root_is_not_a_git_work_tree(self):
+        """
+        Given --annotate --write where a project marker exists but the root is
+            not a git work tree
+        When _run_annotate runs
+        Then it refuses (exit 2) naming the work-tree blocker -- a change that
+            could not be reviewed or reverted is never written.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            (Path(d) / "CLAUDE.md").write_text("marker\n", encoding="utf-8")
+            path = Path(d) / "toolguard_hook.toml"
+            before = path.read_text(encoding="utf-8")
+            args = argparse.Namespace(write=True, format="text", dir=d, tool=["Bash"])
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = _run_annotate(args, config)
+            self.assertEqual(code, 2)
+            self.assertIn("not a git work tree", buf.getvalue())
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_write_with_clean_preflight_routes_through_verified_write_config(self):
@@ -754,6 +1263,83 @@ class TestAnnotateMode(unittest.TestCase):
                 set(call_kwargs["expected_patterns"]),
                 {"Bash(git:*)", "Bash(git push:*)"},
             )
+
+    def test_an_annotation_that_would_drop_a_rule_is_refused(self):
+        """
+        Given --annotate --write, a clean pre-flight, and an annotator that
+            (contrary to its contract) returns text with 'Bash(git push:*)'
+            deleted
+        When _run_annotate runs
+        Then verified_write_config refuses, the exception names the dropped
+            pattern, and the file on disk is untouched.
+
+        This is the TOO-19 corrective change the sibling test names but cannot
+        observe: annotation never changes a rule, so expected_patterns taken
+        from the PRE-annotation text and from the post-annotation text agree on
+        every real input. Only a would-be loss separates them.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            path = Path(d) / "toolguard_hook.toml"
+            before = path.read_text(encoding="utf-8")
+
+            def _lossy(target: Path, notes) -> Tuple[str, str]:
+                old = target.read_text(encoding="utf-8")
+                return old, old.replace("    'Bash(git push:*)',\n", "")
+
+            args = argparse.Namespace(write=True, format="text", dir=d, tool=["Bash"])
+            with (
+                mock.patch(
+                    "toolguard.tools.maintenance.migration_preflight",
+                    return_value=mock.Mock(blockers=[]),
+                ),
+                mock.patch("toolguard.tools.maintenance.annotate_config_file", _lossy),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(ConfigWriteVerificationError) as caught:
+                        _run_annotate(args, config)
+            self.assertIn("Bash(git push:*)", str(caught.exception))
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_annotating_an_already_annotated_file_writes_nothing(self):
+        """
+        Given a config file that a previous --annotate --write pass already
+            annotated
+        When _run_annotate runs again
+        Then it reports zero changed files and says there is nothing to write
+            -- the documented idempotence, and the reason the results list is
+            filtered to files whose text actually changed.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            config = self._confusing_config(d)
+            path = Path(d) / "toolguard_hook.toml"
+            args = argparse.Namespace(write=True, format="text", dir=d, tool=["Bash"])
+            clean = mock.Mock(blockers=[])
+            with mock.patch(
+                "toolguard.tools.maintenance.migration_preflight", return_value=clean
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(_run_annotate(args, config), 0)
+                annotated = path.read_text(encoding="utf-8")
+                self.assertIn("# toolguard:", annotated)
+
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    self.assertEqual(_run_annotate(args, config), 0)
+            self.assertIn("No clarity annotations to write", buf.getvalue())
+            self.assertEqual(path.read_text(encoding="utf-8"), annotated)
+
+    def test_permission_patterns_in_text_without_a_permissions_section(self):
+        """
+        Given text with no [permissions] section at all
+        When _permission_patterns_in_text extracts expected_patterns
+        Then it returns an empty list rather than raising or scanning the
+            whole file.
+        """
+        self.assertEqual(_permission_patterns_in_text(""), [])
+        self.assertEqual(
+            _permission_patterns_in_text("[hard_deny]\ndeny = ['Bash(rm -rf /)']\n"), []
+        )
 
     def test_permission_patterns_in_text_excludes_malformed_entry(self):
         """
@@ -908,6 +1494,32 @@ class TestReplayCandidate(unittest.TestCase):
         self.assertIn("vacuous", text)
         self.assertNotIn("BROADENED", text)
 
+    def test_a_clean_replay_is_not_reported_the_way_a_vacuous_one_is(self):
+        """
+        Given a corpus replayed against an unchanged candidate (nothing moved)
+        When the result is rendered
+        Then it reports the observations it actually replayed and does NOT use
+            the empty-corpus 'proves NOTHING' wording.
+
+        The sibling test asserts the vacuous case; this is the other half. A
+        clean pass and a replay that examined nothing both produce zero
+        broadened and zero tightened counts, so only the wording separates
+        them.
+        """
+        config = _make_config(_make_layer("Bash", allow=["rm:*"], deny=["git push:*"]))
+        corpus = [
+            _make_log_entry("Bash", "git push origin main"),
+            _make_log_entry("Bash", "rm -rf /tmp/x"),
+        ]
+        diff = replay(corpus, config, config)
+        text = _render_replay(diff, corpus_size=len(corpus))
+
+        self.assertIn("Observations replayed: 2", text)
+        self.assertIn("unchanged:                     2", text)
+        self.assertNotIn("vacuous", text)
+        self.assertNotIn("BROADENED", text)
+        self.assertIn("Necessary, not sufficient", text)
+
     def test_cli_missing_candidate_dir_returns_2(self):
         """
         Given a --replay-candidate directory that does not exist
@@ -981,6 +1593,64 @@ class TestReplayCandidate(unittest.TestCase):
 
 class TestLedgerMode(unittest.TestCase):
     """The prior-decision ledger CLI modes (--ledger-show / --record-decision)."""
+
+    def setUp(self):
+        """
+        Redirect the USER ledger into this test's own temp dir.
+
+        ``decision_ledger.USER_LEDGER_PATH`` is a module-level constant built
+        from ``Path.home()`` at import, so patching ``Path.home`` does not move
+        it. ``--ledger-show`` merges it with the project ledger, so without
+        this every assertion on the merged result silently depends on the
+        developer not having a ``~/.toolguard/decisions.json`` -- measured: one
+        entry in that file fails two tests in this class.
+        """
+        self._user_ledger_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._user_ledger_dir.cleanup)
+        self.user_ledger = Path(self._user_ledger_dir.name) / "decisions.json"
+        patcher = mock.patch.object(
+            decision_ledger, "USER_LEDGER_PATH", self.user_ledger
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_user_level_decisions_are_merged_into_the_shown_ledger(self):
+        """
+        Given one decision recorded at project level and one at user level
+        When --ledger-show --format json runs
+        Then both are listed, each labelled with the level it came from.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            for level, family in (("project", "proj-fam"), ("user", "user-fam")):
+                entry = root / f"{level}.json"
+                entry.write_text(
+                    json.dumps({"kind": "custom", "family_id": family, "target": "t"})
+                )
+                with redirect_stdout(io.StringIO()):
+                    rc = main(
+                        [
+                            "--dir",
+                            str(root),
+                            "--record-decision",
+                            str(entry),
+                            "--ledger-level",
+                            level,
+                        ]
+                    )
+                self.assertEqual(rc, 0)
+            self.assertTrue(self.user_ledger.exists())
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(
+                    main(["--dir", str(root), "--ledger-show", "--format", "json"]), 0
+                )
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(
+                sorted((d["family_id"], d["level"]) for d in payload),
+                [("proj-fam", "project"), ("user-fam", "user")],
+            )
 
     def test_record_then_show_roundtrips_via_cli(self):
         """

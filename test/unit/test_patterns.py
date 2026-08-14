@@ -1,5 +1,6 @@
 """Unit tests for extended pattern matching in toolguard."""
 
+import os
 import unittest
 from toolguard.patterns import PatternType, parse_pattern, match_pattern
 
@@ -46,6 +47,16 @@ class TestParsePattern(unittest.TestCase):
         pattern_type, pattern = parse_pattern("git *")
         self.assertEqual(pattern_type, PatternType.DEFAULT)
         self.assertEqual(pattern, "git *")
+
+    def test_parse_with_extended_syntax_disabled(self):
+        """
+        Given a pattern string carrying a [regex] prefix
+        When parse_pattern parses it with extended_syntax=False
+        Then the type is DEFAULT and the prefix is left in the pattern body
+        """
+        pattern_type, pattern = parse_pattern("[regex]^git .*", extended_syntax=False)
+        self.assertEqual(pattern_type, PatternType.DEFAULT)
+        self.assertEqual(pattern, "[regex]^git .*")
 
     def test_parse_with_whitespace(self):
         """
@@ -125,22 +136,28 @@ class TestGlobGlobstar(unittest.TestCase):
 
     def test_glob_with_tilde_expansion(self):
         """
-        Given a GLOB pattern starting with ~ and a command using the expanded home path
+        Given GLOB patterns and commands where either side spells the home directory as ~
         When match_pattern compares them
-        Then the ~ is expanded to the home directory and the path matches
+        Then ~ is expanded on both sides, so either spelling matches the other, and a
+        path outside the pattern's directory still does not match
         """
-        import os
-
         home = os.path.expanduser("~")
-        pattern = "~/test/*.txt"
-        command = f"{home}/test/file.txt"
-        self.assertTrue(match_pattern(PatternType.GLOB, pattern, command))
+        self.assertTrue(
+            match_pattern(PatternType.GLOB, "~/test/*.txt", f"{home}/test/file.txt")
+        )
+        self.assertTrue(
+            match_pattern(PatternType.GLOB, f"{home}/test/*.txt", "~/test/file.txt")
+        )
+        self.assertFalse(
+            match_pattern(PatternType.GLOB, "~/test/*.txt", "~/other/file.txt")
+        )
 
-    def test_glob_wildcard_in_command(self):
+    def test_glob_star_covers_a_filename_but_not_a_deeper_path(self):
         """
         Given GLOB patterns whose wildcard covers the filename part of a command
-        When matched against commands with arbitrary filenames
-        Then the wildcard matches both extensioned and extensionless filenames
+        When matched against commands with arbitrary filenames and with a deeper path
+        Then the wildcard matches both extensioned and extensionless filenames, but not
+        a filename one directory deeper
         """
         self.assertTrue(
             match_pattern(PatternType.GLOB, "cat /tmp/*.txt", "cat /tmp/anything.txt")
@@ -150,6 +167,21 @@ class TestGlobGlobstar(unittest.TestCase):
                 PatternType.GLOB, "cat /tmp/*", "cat /tmp/file_without_extension"
             )
         )
+        self.assertFalse(
+            match_pattern(PatternType.GLOB, "cat /tmp/*", "cat /tmp/sub/file")
+        )
+
+    def test_double_star_inside_a_component_is_not_a_globstar(self):
+        """
+        Given a GLOB pattern whose ** sits inside a path component rather than being a
+        whole component of its own
+        When matched against a path with an extra directory level there
+        Then it does not match -- ** degrades to a plain * unless it is the whole
+        component, which the /**/ form is
+        """
+        self.assertFalse(match_pattern(PatternType.GLOB, "/tmp/a**b", "/tmp/a/x/b"))
+        self.assertTrue(match_pattern(PatternType.GLOB, "/tmp/a**b", "/tmp/axb"))
+        self.assertTrue(match_pattern(PatternType.GLOB, "/tmp/a/**/b", "/tmp/a/x/b"))
 
     def test_glob_multiple_components(self):
         """
@@ -198,7 +230,8 @@ class TestNativePattern(unittest.TestCase):
         """
         Given a NATIVE pattern with * between two fixed words (e.g. 'git * main')
         When matched against commands ending in the trailing word
-        Then commands with the bracketing words match and those ending differently do not
+        Then commands with the bracketing words match, and commands lacking the trailing
+        word or continuing past it do not
         """
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "git * main", "git checkout main")
@@ -212,12 +245,16 @@ class TestNativePattern(unittest.TestCase):
         self.assertFalse(
             match_pattern(PatternType.NATIVE, "git * main", "git checkout develop")
         )
+        self.assertFalse(
+            match_pattern(PatternType.NATIVE, "git * main", "git checkout main.py")
+        )
 
     def test_native_leading_wildcard(self):
         """
         Given a NATIVE pattern starting with * followed by a word (e.g. '* install')
         When matched against various commands ending in that word
-        Then commands ending with the word match and ones with a different word do not
+        Then commands ending with the word match, and ones with a different word or with
+        anything after the word do not -- a pattern not ending in * is end-anchored
         """
         self.assertTrue(match_pattern(PatternType.NATIVE, "* install", "npm install"))
         self.assertTrue(match_pattern(PatternType.NATIVE, "* install", "pip install"))
@@ -225,17 +262,23 @@ class TestNativePattern(unittest.TestCase):
         self.assertFalse(
             match_pattern(PatternType.NATIVE, "* install", "npm uninstall")
         )
+        self.assertFalse(
+            match_pattern(PatternType.NATIVE, "* install", "npm install pkg")
+        )
 
     def test_native_trailing_wildcard(self):
         """
         Given a NATIVE pattern ending with * after a word (e.g. 'npm *')
         When matched against commands starting with that word
-        Then commands beginning with the word match and ones with a different word do not
+        Then commands beginning with the word match, and ones with a different word or
+        with the word somewhere other than the start do not -- a pattern not starting
+        with * is anchored at position 0
         """
         self.assertTrue(match_pattern(PatternType.NATIVE, "npm *", "npm install"))
         self.assertTrue(match_pattern(PatternType.NATIVE, "npm *", "npm run build"))
         self.assertTrue(match_pattern(PatternType.NATIVE, "npm *", "npm test"))
         self.assertFalse(match_pattern(PatternType.NATIVE, "npm *", "yarn install"))
+        self.assertFalse(match_pattern(PatternType.NATIVE, "npm *", "sudo npm install"))
 
     def test_native_multiple_wildcards(self):
         """
@@ -294,7 +337,8 @@ class TestNativePattern(unittest.TestCase):
         """
         Given a NATIVE pattern with adjacent ** between words (e.g. 'git ** main')
         When matched against commands with a single intervening word
-        Then the adjacent wildcards behave like a single wildcard and match
+        Then the adjacent wildcards behave like a single wildcard: the same commands
+        match, and the same commands are rejected
         """
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "git ** main", "git checkout main")
@@ -302,18 +346,23 @@ class TestNativePattern(unittest.TestCase):
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "git ** main", "git merge main")
         )
+        self.assertFalse(
+            match_pattern(PatternType.NATIVE, "git ** main", "git checkout develop")
+        )
 
     def test_native_segments_must_be_in_order(self):
         """
-        Given a NATIVE pattern 'git * main'
-        When matched against a command with the words in the correct order versus reversed
-        Then the in-order command matches and the reversed command does not
+        Given a NATIVE pattern whose two literal segments both occur in the command
+        When matched against that command in pattern order versus reversed
+        Then only the in-order command matches
         """
         self.assertTrue(
-            match_pattern(PatternType.NATIVE, "git * main", "git checkout main")
+            match_pattern(
+                PatternType.NATIVE, "*checkout*main*", "git checkout upstream main x"
+            )
         )
         self.assertFalse(
-            match_pattern(PatternType.NATIVE, "git * main", "main checkout git")
+            match_pattern(PatternType.NATIVE, "*checkout*main*", "git main checkout")
         )
 
     def test_native_case_sensitive(self):
@@ -368,8 +417,9 @@ class TestPatternTypeComparison(unittest.TestCase):
     def test_glob_vs_native_wildcard_semantics(self):
         """
         Given the same wildcard pattern interpreted as GLOB versus NATIVE
-        When matched against commands containing spaces in the wildcard region
-        Then GLOB's * spans spaces within a component while NATIVE finds the segments in order
+        When matched against commands containing spaces, and then a path separator, in
+        the wildcard region
+        Then both types' * spans spaces, but only NATIVE's also spans a path separator
         """
         self.assertTrue(
             match_pattern(PatternType.GLOB, "cat *.txt", "cat file name.txt")
@@ -379,6 +429,31 @@ class TestPatternTypeComparison(unittest.TestCase):
         self.assertTrue(
             match_pattern(PatternType.NATIVE, "cat *.txt", "cat file name.txt")
         )
+
+        self.assertFalse(
+            match_pattern(PatternType.GLOB, "cat *.txt", "cat dir/file.txt")
+        )
+        self.assertTrue(
+            match_pattern(PatternType.NATIVE, "cat *.txt", "cat dir/file.txt")
+        )
+
+    def test_native_end_anchored_pattern_under_matches_unlike_glob_and_default(self):
+        """
+        Given an end-anchored wildcard pattern whose final literal also occurs earlier in
+        the command
+        When the same pattern and command are matched as NATIVE, GLOB and DEFAULT
+        Then GLOB and DEFAULT match while NATIVE does not, because NATIVE's cursor stops
+        at the first occurrence of the final segment rather than the last
+        """
+        pattern, command = "*id_rsa", "cat id_rsa.pub id_rsa"
+
+        # NATIVE's False here is a false negative -- on a deny rule, a bypass. Asserted
+        # as the shipped behaviour so proposed ticket 17's fix cannot land silently.
+        self.assertFalse(match_pattern(PatternType.NATIVE, pattern, command))
+        self.assertTrue(match_pattern(PatternType.GLOB, pattern, command))
+        self.assertTrue(match_pattern(PatternType.DEFAULT, pattern, command))
+
+        self.assertTrue(match_pattern(PatternType.NATIVE, pattern, "cat id_rsa"))
 
     def test_glob_requires_full_match_native_finds_segments(self):
         """
@@ -394,6 +469,51 @@ class TestPatternTypeComparison(unittest.TestCase):
 
         self.assertTrue(match_pattern(PatternType.NATIVE, "git * --oneline", command))
         self.assertFalse(match_pattern(PatternType.NATIVE, "log", command))
+
+
+class TestRegexAndDefaultPatterns(unittest.TestCase):
+    """Test the REGEX and DEFAULT branches of match_pattern."""
+
+    def test_regex_is_unanchored_but_honours_its_own_anchors(self):
+        """
+        Given REGEX patterns with and without a leading ^
+        When matched against a command whose first word differs from the pattern
+        Then the bare pattern matches anywhere in the command while the ^-anchored one
+        matches only at the start
+        """
+        self.assertTrue(match_pattern(PatternType.REGEX, "log", "git log --oneline"))
+        self.assertFalse(match_pattern(PatternType.REGEX, "^git", "sudo git push"))
+        self.assertTrue(match_pattern(PatternType.REGEX, "^git", "git push"))
+
+    def test_malformed_regex_does_not_match_and_does_not_raise(self):
+        """
+        Given REGEX patterns that are not compilable regular expressions
+        When match_pattern is called with them
+        Then it returns False rather than propagating re.error
+        """
+        self.assertFalse(match_pattern(PatternType.REGEX, "[", "anything"))
+        self.assertFalse(match_pattern(PatternType.REGEX, "*bad(", "anything"))
+
+    def test_default_star_crosses_path_separators_unlike_glob(self):
+        """
+        Given the same * pattern under DEFAULT and under GLOB
+        When matched against a command whose path is one level deeper than the pattern
+        Then DEFAULT matches, because fnmatch's * spans /, while GLOB does not
+        """
+        pattern, command = "cat /tmp/*", "cat /tmp/a/b.txt"
+        self.assertTrue(match_pattern(PatternType.DEFAULT, pattern, command))
+        self.assertFalse(match_pattern(PatternType.GLOB, pattern, command))
+
+    def test_default_supports_fnmatch_single_character_wildcard(self):
+        """
+        Given a DEFAULT pattern using fnmatch's ? single-character wildcard
+        When matched against one-character and two-character filenames
+        Then only the one-character filename matches, and NATIVE -- which has no ? and
+        no wildcard in this pattern at all -- matches neither
+        """
+        self.assertTrue(match_pattern(PatternType.DEFAULT, "cat ?.txt", "cat a.txt"))
+        self.assertFalse(match_pattern(PatternType.DEFAULT, "cat ?.txt", "cat ab.txt"))
+        self.assertFalse(match_pattern(PatternType.NATIVE, "cat ?.txt", "cat a.txt"))
 
 
 if __name__ == "__main__":

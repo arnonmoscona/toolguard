@@ -24,6 +24,7 @@ from unittest.mock import patch
 from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools import installer as installer_module
+from toolguard.tools import self_integrity as self_integrity_module
 from toolguard.tools.installer import main
 from toolguard.tools.self_integrity import required_self_integrity_hard_deny_patterns
 from toolguard.tools.self_permission import required_self_permissions
@@ -840,10 +841,9 @@ class TestHookRegistrationFindingsInterpreterIdentification(unittest.TestCase):
             fake_interpreter.write_text("#!/bin/sh\n")
             os.chmod(fake_interpreter, 0o755)
             command = "toolguard-fake-python3 -E -P -m toolguard.hook"
-            with patch.dict(
-                os.environ,
-                {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
-            ):
+            # PATH is the fixture's directory ALONE: inheriting the developer's
+            # PATH would let a machine-provided binary satisfy the assertion.
+            with patch.dict(os.environ, {"PATH": str(bin_dir)}):
                 findings = self._findings_for(Path(d), command)
         self.assertEqual(len(findings), 1)
         self.assertFalse(findings[0]["interpreter_missing"])
@@ -907,8 +907,10 @@ class TestRegisterHooks(InstallerTestCase):
         SessionStart must stay registered as the bare "<binary>-session-start" form,
         never hardened through _hardened_hook_command. Hardening it would make
         install_provenance.governing_package_root() resolve the INSTALLED distribution
-        unconditionally, making session_start.py's shadow/stale-install detection
-        permanently and silently blind to a checkout shadowing the installed hook.
+        unconditionally, making session_start.py's LIVE-SHADOW detection permanently
+        and silently blind to a checkout shadowing the installed hook. The
+        stale-install half survives: session_start passes an explicit checkout_root
+        into stale_install_report, so it never goes through governing_package_root().
         See technical-notes.md, "Shadowed-hook detection and install hardening (TOO-19)".
 
         Given register-hooks registers the SessionStart hook for a binary
@@ -1150,8 +1152,30 @@ class TestRegisterHooks(InstallerTestCase):
         self.assertIn("UNHARDENED", out)
 
 
+# An expectation independent of toolguard.tools.self_integrity, so an empty or
+# truncated canonical table FAILS these tests instead of collapsing every
+# `for protection in required_self_integrity_hard_deny_patterns()` loop into a
+# vacuous pass. Mirrors _EXPECTED_HARD_DENY_PATTERNS below.
+_EXPECTED_SELF_INTEGRITY_PATTERNS = (
+    r"Bash([regex]^rm\b.*\.toolguard)",
+    r"Bash([regex]^find\b.*\.toolguard.*-delete)",
+)
+
+
 class TestSeedSelfPerms(InstallerTestCase):
     """Behavior of the seed-self-perms subcommand."""
+
+    def test_canonical_self_integrity_table_is_populated_and_unchanged(self):
+        """
+        Given toolguard.tools.self_integrity's canonical table
+        When it is compared against this file's independent expectation
+        Then it holds exactly those patterns -- an empty table is a failure
+        here rather than a silent no-op in every test that loops over it
+        """
+        self.assertEqual(
+            tuple(p.pattern for p in required_self_integrity_hard_deny_patterns()),
+            _EXPECTED_SELF_INTEGRITY_PATTERNS,
+        )
 
     def _write_base_config(self):
         """Write a minimal base toolguard_hook.toml via the CLI under test."""
@@ -1303,18 +1327,23 @@ class TestSeedSelfPerms(InstallerTestCase):
 
         self.assertEqual(code, 0)
         config_path = self.home / ".claude" / "toolguard_hook.toml"
-        deny_list = tomllib.loads(config_path.read_text())["hard_deny"]["deny"]
-        for protection in required_self_integrity_hard_deny_patterns():
-            self.assertIn(protection.pattern, deny_list)
+        # .get, not [...]: a config with no [hard_deny] at all is the case this
+        # test exists to catch, and it should FAIL rather than raise KeyError.
+        deny_list = (
+            tomllib.loads(config_path.read_text()).get("hard_deny", {}).get("deny", [])
+        )
+        for pattern in _EXPECTED_SELF_INTEGRITY_PATTERNS:
+            self.assertIn(pattern, deny_list)
 
     def test_self_integrity_hard_deny_blocks_rm_of_toolguard_state_dir(self):
         """
         Given seed-self-perms has been run (self-integrity hard_deny seeded)
         When the resulting config is loaded and a Bash `rm -rf ~/.toolguard`
         command is evaluated through the real decision engine
-        Then it is hard-denied -- this is the actual regression the fix
-        exists to prevent: a real install had ~/.toolguard deleted by an
-        agent that decided, unprompted, to "go further for a clean slate"
+        Then it is hard-denied BY THE SEEDED rm PATTERN -- this is the actual
+        regression the fix exists to prevent: a real install had ~/.toolguard
+        deleted by an agent that decided, unprompted, to "go further for a
+        clean slate"
         """
         self._write_base_config()
         self.run_cli(["seed-self-perms", "--scope", "user"])
@@ -1328,6 +1357,10 @@ class TestSeedSelfPerms(InstallerTestCase):
         configuration = Configuration(layers=(layer,))
         decision = decide(configuration, "Bash", "rm -rf ~/.toolguard")
         self.assertEqual(decision.decision, "deny")
+        # matched_rule is None on a fail-closed deny (empty extraction), so
+        # naming the rule is what separates "the seeded pattern matched" from
+        # "the command could not be parsed at all".
+        self.assertEqual(decision.matched_rule, r"[regex]^rm\b.*\.toolguard")
 
     def test_running_twice_does_not_duplicate_hard_deny_patterns(self):
         """
@@ -1341,9 +1374,53 @@ class TestSeedSelfPerms(InstallerTestCase):
         code, out = self.run_cli(["seed-self-perms", "--scope", "user"])
         self.assertEqual(code, 0)
         config_path = self.home / ".claude" / "toolguard_hook.toml"
-        deny_list = tomllib.loads(config_path.read_text())["hard_deny"]["deny"]
-        for protection in required_self_integrity_hard_deny_patterns():
-            self.assertEqual(deny_list.count(protection.pattern), 1)
+        deny_list = (
+            tomllib.loads(config_path.read_text()).get("hard_deny", {}).get("deny", [])
+        )
+        for pattern in _EXPECTED_SELF_INTEGRITY_PATTERNS:
+            self.assertEqual(deny_list.count(pattern), 1)
+
+    def test_seeding_zero_self_integrity_protections_is_not_reported_as_success(self):
+        """
+        Given a build of toolguard whose canonical self-integrity table is empty
+        When seed-self-perms runs and therefore seeds no ~/.toolguard protection
+        Then it does not report success -- an install that protects nothing must
+        not look like a completed one. RED at present: the run exits 0 and its
+        summary is a verdict ("already present, no changes needed") that never
+        states how many protections it accounted for, so zero and all-present
+        read the same. If the chosen fix is the reporting one (a seeded/checked
+        count) rather than a refusal, rewrite this to assert the count -- do not
+        delete it.
+        """
+        self._write_base_config()
+        empty = (
+            patch.object(
+                installer_module, "required_self_integrity_hard_deny_patterns", tuple
+            ),
+            patch.object(
+                self_integrity_module,
+                "required_self_integrity_hard_deny_patterns",
+                tuple,
+            ),
+        )
+        with empty[0], empty[1]:
+            code, out = self.run_cli(["seed-self-perms", "--scope", "user"])
+
+        # The fixture really does produce the negative case: the config it wrote
+        # carries none of the protections.
+        config_path = self.home / ".claude" / "toolguard_hook.toml"
+        deny_list = (
+            tomllib.loads(config_path.read_text()).get("hard_deny", {}).get("deny", [])
+        )
+        for pattern in _EXPECTED_SELF_INTEGRITY_PATTERNS:
+            self.assertNotIn(pattern, deny_list)
+
+        self.assertNotEqual(
+            code,
+            0,
+            "seed-self-perms reported success having seeded zero self-integrity "
+            f"protections; summary was:\n{out}",
+        )
 
     def test_uv_bin_path_prepend_rule_allows_only_the_safe_form(self):
         """
@@ -1722,7 +1799,10 @@ class TestSummaryOutput(InstallerTestCase):
         """
         Given seed-self-perms has already been run once
         When it is run again with nothing new to add
-        Then the summary says explicitly that nothing needed to change
+        Then the summary says explicitly that nothing needed to change, and
+        accounts for every self-integrity protection by name -- so a summary
+        that changed nothing because there was nothing to seed is not mistaken
+        for one that verified the protections are present
         """
         self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
         self.run_cli(["seed-self-perms", "--scope", "user"])
@@ -1736,6 +1816,8 @@ class TestSummaryOutput(InstallerTestCase):
             or "no changes" in lowered
             or "nothing to add" in lowered
         )
+        for pattern in _EXPECTED_SELF_INTEGRITY_PATTERNS:
+            self.assertIn(pattern, out)
 
     def test_register_hooks_reminds_of_remaining_checklist_phases(self):
         """
@@ -1995,7 +2077,8 @@ class TestDiscoverProjects(InstallerTestCase):
         """
         Given multiple candidate projects discovered in a non-alphabetical order
         When discover-projects runs
-        Then the output is sorted by path for determinism
+        Then both appear, in path order -- naming the expected list, because
+        `paths == sorted(paths)` also holds for a list that lost an element
         """
         zeta = self._make_project_dir("zeta")
         alpha = self._make_project_dir("alpha")
@@ -2005,7 +2088,7 @@ class TestDiscoverProjects(InstallerTestCase):
 
         self.assertEqual(code, 0)
         paths = [entry["path"] for entry in json.loads(out)]
-        self.assertEqual(paths, sorted(paths))
+        self.assertEqual(paths, [str(alpha), str(zeta)])
 
 
 class TestParseGitSource(unittest.TestCase):
@@ -2346,7 +2429,8 @@ class TestSeedHardDeny(InstallerTestCase):
         Given seed-hard-deny has already been run once
         When it is run again
         Then it is a no-op: no new backup, no new journal entry, and the summary
-        says explicitly that nothing needed to change (mirrors seed-self-perms)
+        says explicitly that nothing needed to change and names every canonical
+        pattern it found present (mirrors seed-self-perms)
         """
         self._write_base_config()
         self.run_cli(["seed-hard-deny", "--scope", "user"])
@@ -2365,6 +2449,8 @@ class TestSeedHardDeny(InstallerTestCase):
             or "no changes" in lowered
             or "nothing to add" in lowered
         )
+        for pattern in _EXPECTED_HARD_DENY_PATTERNS:
+            self.assertIn(pattern, out)
 
     def test_preserves_preexisting_hard_deny_content(self):
         """
@@ -2590,6 +2676,7 @@ class TestSkillsStatus(InstallerTestCase):
         self.assertEqual(code, 0)
         data = json.loads(out)
         statuses = {(e["skill"], e["scope"]): e["status"] for e in data["skills"]}
+        self.assertEqual(len(statuses), 4)
         self.assertTrue(all(status == "installed" for status in statuses.values()))
 
     def test_symlink_to_real_valid_skill_dir_reports_installed(self):
@@ -2788,6 +2875,7 @@ class TestSkillsStatus(InstallerTestCase):
         self.assertEqual(code, 0)
         data = json.loads(out)
         project_paths = {e["path"] for e in data["skills"] if e["scope"] == "project"}
+        self.assertEqual(len(project_paths), len(installer_module._BUNDLED_SKILL_NAMES))
         self.assertTrue(all(str(self.project_dir) in p for p in project_paths))
 
     def test_no_journal_entry_or_backup_is_ever_written(self):
@@ -2804,6 +2892,10 @@ class TestSkillsStatus(InstallerTestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(self.journal_indices(), [])
+        backups_dir = self.home / ".toolguard" / "backups"
+        self.assertEqual(
+            list(backups_dir.iterdir()) if backups_dir.exists() else [], []
+        )
 
     def test_format_text_is_human_readable_and_mentions_every_skill(self):
         """
@@ -3154,6 +3246,74 @@ class TestSeedCommandsWithStructuredEntries(InstallerTestCase):
             {"match": "Bash(rm -rf /)", "additionalContext": "never"},
             deny,
         )
+
+    def _seed_hard_deny_over_context(self, toml_context_literal):
+        """
+        Seed a fresh config whose [hard_deny] already holds one structured entry
+        with the given TOML string literal as its additionalContext.
+
+        Returns ``(exit_code, parsed_config_or_None)``. _render_hard_deny_section
+        re-renders EVERY entry from scratch, so the pre-existing one goes back
+        through the TOML string escaper -- this is the installer's from-scratch
+        writer, and the only place a pre-existing enrichment gets re-escaped.
+        """
+        self.run_cli(["write-config", "--scope", "user", "--governed-tools", "Bash"])
+        path = self.user_config_path()
+        path.write_text(
+            path.read_text()
+            + "\n[hard_deny]\ndeny = [\n"
+            + f'    {{ match = "Read(**/custom.key)", additionalContext = "{toml_context_literal}" }},\n'
+            + "]\n"
+        )
+        code, _ = self.run_cli(["seed-hard-deny", "--scope", "user"])
+        try:
+            return code, tomllib.loads(path.read_text())
+        except tomllib.TOMLDecodeError:
+            return code, None
+
+    def test_a_quote_in_an_existing_entrys_context_survives_the_rerender(self):
+        """
+        Given a [hard_deny] structured entry whose additionalContext contains a
+            double quote
+        When seed-hard-deny re-renders the section from scratch
+        Then the canonical patterns are seeded and the quoted text round-trips
+            -- the quote half of the TOML escaper, which nothing else in this
+            module reaches
+        """
+        code, parsed = self._seed_hard_deny_over_context('say \\"hi\\" now')
+
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(parsed)
+        deny = parsed["hard_deny"]["deny"]
+        self.assertIn(
+            {"match": "Read(**/custom.key)", "additionalContext": 'say "hi" now'},
+            deny,
+        )
+        for pattern in _EXPECTED_HARD_DENY_PATTERNS:
+            self.assertIn(pattern, deny)
+
+    def test_a_newline_in_an_existing_entrys_context_still_seeds_hard_deny(self):
+        """
+        Given a [hard_deny] structured entry whose additionalContext contains a
+            newline -- legal TOML that an ordinary JSON config can carry
+        When seed-hard-deny runs
+        Then it completes and seeds the canonical patterns. RED at present:
+            _escape_toml_string leaves the newline unescaped, the re-rendered
+            section spans lines, the write guard correctly refuses it, and the
+            install step that seeds the sensitive-file protections can never
+            complete on that config (proposed ticket 24, reaching the installer).
+        """
+        code, parsed = self._seed_hard_deny_over_context("line1\\nline2")
+
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(parsed)
+        deny = parsed["hard_deny"]["deny"]
+        self.assertIn(
+            {"match": "Read(**/custom.key)", "additionalContext": "line1\nline2"},
+            deny,
+        )
+        for pattern in _EXPECTED_HARD_DENY_PATTERNS:
+            self.assertIn(pattern, deny)
 
 
 if __name__ == "__main__":

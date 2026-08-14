@@ -7,12 +7,14 @@ at the start of each Claude Code session.
 
 import contextlib
 import json
+import os
 import unittest
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
+from toolguard import env_config
 from toolguard.config import (
     Configuration,
     Provenance,
@@ -68,6 +70,22 @@ def _write_conflict_entries(log_file: Path, count: int) -> None:
             f.write("---\n\n")
 
 
+def _clean_config(project_root=None, conflict=None, parse_failures=()):
+    """Helper: a Configuration mock with nothing to report unless asked for."""
+    config = MagicMock(spec=Configuration)
+    config.takeover_mode.return_value = TakeoverConfig(
+        enabled=False,
+        ignored_allow_patterns=(),
+        additional_ignored_patterns=(),
+        no_match_fallback="deny",
+        conflict=conflict,
+    )
+    config.project_root = project_root
+    config.parse_failures = parse_failures
+    config.unrecognized_fallback_settings.return_value = ()
+    return config
+
+
 class TestParseSessionStartInput(unittest.TestCase):
     """Tests for _parse_session_start_input."""
 
@@ -116,6 +134,24 @@ class TestParseSessionStartInput(unittest.TestCase):
         with patch("sys.stdin", StringIO("   \n\t  ")):
             result = _parse_session_start_input()
         self.assertEqual(result, {})
+
+    def test_returns_empty_dict_on_valid_json_that_is_not_an_object(self):
+        """
+        Given stdin holding well-formed JSON that is not an object
+        When _parse_session_start_input is called
+        Then it returns an empty dict, as its "malformed input yields an empty
+            dict" contract promises
+
+        RED. Only a JSON parse ERROR is caught; a list, string or number
+        parses fine and is returned as-is, so main()'s `payload.get("cwd")`
+        raises AttributeError into the blanket handler. Measured: with an
+        unresolved takeover conflict present, stdin of `[1,2,3]` produces an
+        EMPTY stdout and load_configuration is never called -- one malformed
+        payload silently disables every session-start check.
+        """
+        for raw in ("[1, 2, 3]", '"a bare string"', "5", "null"):
+            with self.subTest(raw=raw), patch("sys.stdin", StringIO(raw)):
+                self.assertEqual(_parse_session_start_input(), {})
 
     def test_parses_payload_without_tool_fields(self):
         """
@@ -355,7 +391,7 @@ class TestFormatSummary(unittest.TestCase):
 
     def test_includes_header_line(self):
         """
-        Given both static and dynamic conflicts
+        Given both static and dynamic conflicts and nothing else to report
         When _format_summary is called
         Then the result starts with the standard conflict-detected header
         """
@@ -363,7 +399,9 @@ class TestFormatSummary(unittest.TestCase):
         summary = _format_summary(
             conflict, ("logs/toolguard-conflict-2025-01-01.md", 2)
         )
-        self.assertIn("toolguard: configuration conflicts detected", summary)
+        self.assertTrue(
+            summary.startswith("toolguard: configuration conflicts detected"), summary
+        )
 
     def test_includes_takeover_conflict_line_when_present(self):
         """
@@ -408,9 +446,12 @@ class TestFormatSummary(unittest.TestCase):
 
     def test_includes_provenance_in_static_line(self):
         """
-        Given a static conflict with known level/path in the provenance
+        Given a static conflict whose two sources disagree (True at project,
+            False at user), each with a distinct file path
         When _format_summary is called
-        Then the static conflict line cites the provenance
+        Then the static conflict line cites BOTH levels, BOTH file paths and
+            BOTH disagreeing values -- a reader must be able to open the two
+            files without going hunting
         """
         conflict = _make_conflict(
             [
@@ -425,8 +466,8 @@ class TestFormatSummary(unittest.TestCase):
             ]
         )
         summary = _format_summary(conflict, None)
-        self.assertIn("project", summary)
-        self.assertIn("user", summary)
+        self.assertIn("True [project: /proj/.claude/toolguard_hook.toml]", summary)
+        self.assertIn("False [user: /home/u/.claude/toolguard_hook.toml]", summary)
 
     def test_no_conflicts_no_broken_files_returns_empty_string(self):
         """
@@ -457,28 +498,96 @@ class TestFormatSummary(unittest.TestCase):
         When _format_summary is called with both
         Then the result contains both the broken-file section and the
             existing conflict-detected section, unmodified
+
+        The broken file's path must NOT be one that also appears in the
+        conflict fixture's provenance, or the conflict section alone would
+        satisfy the broken-file assertion and this test would stop checking
+        the coexistence it is named for.
         """
         conflict = _make_conflict()
-        broken = Path("/proj/.claude/toolguard_hook.toml")
+        broken = Path("/elsewhere/.claude/broken_only_here.toml")
+        self.assertNotIn(
+            str(broken), _format_summary(conflict, None), "fixture paths collide"
+        )
+
         summary = _format_summary(conflict, None, broken_files=((broken, "boom"),))
-        self.assertIn(str(broken), summary)
+
+        self.assertIn("CONFIG BROKEN", summary)
+        self.assertIn(f"{broken}: boom", summary)
         self.assertIn("configuration conflicts detected", summary)
         self.assertIn("takeover_mode.enabled", summary)
 
-    def test_existing_conflict_only_output_unchanged_by_new_parameter(self):
+    def test_conflict_only_summary_is_exactly_the_expected_user_visible_text(self):
         """
-        Given a static + dynamic conflict combination identical to
-            test_includes_header_line, called WITHOUT broken_files
+        Given a static conflict across project/user and a dynamic conflict of
+            2 entries, with nothing else to report
         When _format_summary is called
-        Then the output is byte-identical to calling it with the explicit
-            default broken_files=() -- the new optional parameter does not
-            alter the pre-existing conflict-only formatting
+        Then the emitted text is exactly the expected four lines -- header,
+            static bullet with both provenances, dynamic bullet with path and
+            count, and the closing call to action
+
+        This is the notification channel's contract; every other test in this
+        class pins one clause of it, this one pins the whole message.
         """
         conflict = _make_conflict()
         dynamic = ("logs/toolguard-conflict-2025-01-01.md", 2)
-        without_default = _format_summary(conflict, dynamic)
-        with_explicit_default = _format_summary(conflict, dynamic, broken_files=())
-        self.assertEqual(without_default, with_explicit_default)
+
+        summary = _format_summary(conflict, dynamic)
+
+        self.assertEqual(
+            summary,
+            "toolguard: configuration conflicts detected --\n"
+            "  - takeover_mode.enabled disagrees across levels; failed safe to "
+            "OFF (True [project: /proj/.claude/toolguard_hook.toml]; "
+            "False [user: /home/user/.claude/toolguard_hook.toml])\n"
+            "  - conflict log logs/toolguard-conflict-2025-01-01.md has 2 "
+            "recorded entries\n"
+            "Review and resolve; see the conflict log for details.",
+        )
+
+    def test_sections_are_emitted_in_the_documented_severity_order(self):
+        """
+        Given every section firing at once -- broken config, unrecognized
+            fallback, conflicts, running-from-source and stale install
+        When _format_summary is called
+        Then all five appear, in the order the module documents: broken config
+            first (it disables rule enforcement), then the bad fallback value,
+            then conflicts, then the two install-provenance alerts
+
+        Order is part of what reaches the user: the first section is the one
+        read when the rest scrolls past.
+        """
+        status = ShadowStatus(
+            checkout_root=Path("/home/dev/toolguard"),
+            running_from_checkout=True,
+            installed_root=Path("/installed/toolguard"),
+            stale=True,
+        )
+        summary = _format_summary(
+            _make_conflict(),
+            ("logs/toolguard-conflict-2025-01-01.md", 2),
+            ((Path("/elsewhere/broken.toml"), "boom"),),
+            status,
+            (
+                UnrecognizedFallbackSetting(
+                    key="no_match_fallback",
+                    value="allow_with_no_warning",
+                    provenance=_make_provenance(level="user"),
+                    accepted=("allow", "allow_with_no_warnings", "ask", "deny"),
+                ),
+            ),
+        )
+
+        markers = [
+            "CONFIG BROKEN",
+            "UNRECOGNIZED FALLBACK SETTING",
+            "configuration conflicts detected",
+            "RUNNING FROM A SOURCE TREE",
+            "INSTALLED COPY IS STALE",
+        ]
+        positions = [summary.find(m) for m in markers]
+        self.assertNotIn(-1, positions, f"a section is missing: {summary}")
+        self.assertEqual(positions, sorted(positions), summary)
 
 
 class TestDetectBrokenConfigFiles(unittest.TestCase):
@@ -549,19 +658,24 @@ class TestUnrecognizedFallbackAtSessionStart(unittest.TestCase):
 
     def test_summary_names_value_setting_file_and_accepted_spellings(self):
         """
-        Given one unrecognized fallback record
+        Given one unrecognized fallback record whose misspelt value is a
+            PREFIX of an accepted spelling (the realistic typo)
         When _format_summary renders it
         Then the section names the offending value, the setting it was on,
             the file it came from, the accepted spellings, and the fact that
             the effective behaviour is 'ask'
+
+        The offending value is asserted in its quoted repr form. Bare
+        `allow_with_no_warning` is a substring of the accepted spelling
+        `allow_with_no_warnings`, so rendering the accepted list alone would
+        satisfy it and the offending value could vanish unnoticed.
         """
         summary = _format_summary(None, None, (), None, (self._bad(),))
 
-        self.assertIn("allow_with_no_warning", summary)
-        self.assertIn("no_match_fallback", summary)
-        self.assertIn("toolguard_hook.toml", summary)
-        self.assertIn("allow_with_no_warnings", summary)
-        self.assertIn("ask", summary)
+        self.assertIn("no_match_fallback = 'allow_with_no_warning' in", summary)
+        self.assertIn("user: /fake/.claude/toolguard_hook.toml", summary)
+        self.assertIn("accepted: allow, allow_with_no_warnings, ask, deny", summary)
+        self.assertIn("falls back to 'ask'", summary)
 
     def test_summary_omits_the_section_when_there_is_nothing_to_report(self):
         """
@@ -578,30 +692,17 @@ class TestUnrecognizedFallbackAtSessionStart(unittest.TestCase):
         When main() runs the SessionStart hook
         Then the warning is printed to stdout on its own -- it must not
             depend on some other problem also being present
+
+        The conflict and shadow checks run for real: project_root is None, so
+        both reach their empty answers unaided.
         """
-        config = MagicMock(spec=Configuration)
-        config.takeover_mode.return_value = TakeoverConfig(
-            enabled=False,
-            ignored_allow_patterns=(),
-            additional_ignored_patterns=(),
-            no_match_fallback="deny",
-            conflict=None,
-        )
-        config.parse_failures = ()
-        config.project_root = None
+        config = _clean_config()
         config.unrecognized_fallback_settings.return_value = (self._bad(),)
 
         payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/fake"})
         with (
             patch("sys.stdin", StringIO(payload)),
             patch("toolguard.session_start.load_configuration", return_value=config),
-            patch(
-                "toolguard.session_start._check_dynamic_conflicts", return_value=None
-            ),
-            patch(
-                "toolguard.session_start._detect_shadow_status",
-                return_value=_EMPTY_SHADOW_STATUS,
-            ),
             patch("sys.stdout", new_callable=StringIO) as out,
         ):
             with contextlib.suppress(SystemExit):
@@ -609,7 +710,7 @@ class TestUnrecognizedFallbackAtSessionStart(unittest.TestCase):
 
         printed = out.getvalue()
         self.assertIn("UNRECOGNIZED FALLBACK SETTING", printed)
-        self.assertIn("allow_with_no_warning", printed)
+        self.assertIn("no_match_fallback = 'allow_with_no_warning' in", printed)
 
 
 class TestDetectConflicts(unittest.TestCase):
@@ -689,6 +790,48 @@ class TestDetectConflicts(unittest.TestCase):
         path_str, count = dynamic_conflict
         self.assertEqual(count, 2)
 
+    def test_scan_honours_the_log_directory_the_writer_actually_uses(self):
+        """
+        Given TOOLGUARD_LOG_DIR points somewhere other than project_root/logs,
+            a conflict-bearing log written there (as the PreToolUse hook would),
+            and an empty project_root/logs
+        When _detect_conflicts is called
+        Then the recorded conflict is reported
+
+        RED: proposed ticket 26. _detect_conflicts scans
+        `config.project_root / "logs"`, while the writer resolves its directory
+        through `env_config.get("log_dir")`. Setting TOOLGUARD_LOG_DIR
+        therefore disables the dynamic-conflict nag with no error, no warning,
+        and no way to tell "no conflicts" from "never looked".
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir) / "project"
+            (project_root / "logs").mkdir(parents=True)
+            writer_log_dir = Path(tmpdir) / "elsewhere-logs"
+            writer_log_dir.mkdir()
+            _write_conflict_entries(
+                writer_log_dir / "toolguard-conflict-2025-06-18.md", 3
+            )
+
+            config = self._make_config_with_conflict(project_root=project_root)
+
+            with patch.dict(
+                os.environ, {"TOOLGUARD_LOG_DIR": str(writer_log_dir)}, clear=False
+            ):
+                # Guard the fixture itself: the directory this test calls "the
+                # writer's" must be the one env_config actually resolves.
+                self.assertEqual(
+                    env_config.get_env_config(project_root)["log_dir"],
+                    writer_log_dir.resolve(),
+                )
+                _static, dynamic_conflict = _detect_conflicts(config)
+
+            self.assertIsNotNone(
+                dynamic_conflict,
+                "the conflict written to the writer's log directory was not seen",
+            )
+            self.assertEqual(dynamic_conflict[1], 3)
+
     def test_handles_missing_project_root_gracefully(self):
         """
         Given a configuration with project_root=None (no project found)
@@ -721,25 +864,52 @@ class TestDetectShadowStatus(unittest.TestCase):
         config.project_root = project_root
         return config
 
+    @staticmethod
+    def _forbid_provenance_probes():
+        """Patch the three costly install_provenance probes to fail if consulted."""
+        return [
+            patch.object(
+                install_provenance,
+                name,
+                side_effect=AssertionError(f"{name} must not run past the gate"),
+            )
+            for name in (
+                "governing_package_root",
+                "installed_distribution_root",
+                "stale_install_report",
+            )
+        ]
+
     def test_no_project_root_returns_empty_status(self):
         """
         Given a configuration with project_root=None
         When _detect_shadow_status runs
         Then it returns _EMPTY_SHADOW_STATUS without touching install_provenance
+
+        The probes are patched to raise, so "without touching" is checked
+        rather than claimed -- each does real filesystem, importlib.metadata
+        or git work against the developer's own machine.
         """
         config = self._make_config(project_root=None)
-        self.assertEqual(_detect_shadow_status(config), _EMPTY_SHADOW_STATUS)
+        with contextlib.ExitStack() as stack:
+            for probe in self._forbid_provenance_probes():
+                stack.enter_context(probe)
+            self.assertEqual(_detect_shadow_status(config), _EMPTY_SHADOW_STATUS)
 
     def test_project_that_is_not_a_toolguard_checkout_returns_empty_status(self):
         """
         Given the active project is an ordinary (non-toolguard) directory
         When _detect_shadow_status runs
-        Then it returns _EMPTY_SHADOW_STATUS -- meaningless for any other project
+        Then it returns _EMPTY_SHADOW_STATUS -- meaningless for any other
+            project -- and the install_provenance probes are never consulted
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             config = self._make_config(project_root=project_root)
-            self.assertEqual(_detect_shadow_status(config), _EMPTY_SHADOW_STATUS)
+            with contextlib.ExitStack() as stack:
+                for probe in self._forbid_provenance_probes():
+                    stack.enter_context(probe)
+                self.assertEqual(_detect_shadow_status(config), _EMPTY_SHADOW_STATUS)
 
     def test_governing_copy_matching_checkout_reports_running_from_checkout(self):
         """
@@ -1164,11 +1334,122 @@ class TestMain(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("RUNNING FROM A SOURCE TREE", stdout_text)
 
+    def test_stdout_alert_when_installed_copy_is_stale(self):
+        """
+        Given the active project IS a toolguard checkout whose installed copy
+            is reported stale
+        When main() is called
+        Then stdout carries the INSTALLED COPY IS STALE alert and the
+            reinstall command
+
+        The stale half of the shadow check had no end-to-end coverage; only
+        _format_summary was exercised, so nothing observed the flag actually
+        travelling from _detect_shadow_status through main() to the user.
+        """
+        with TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            _write_fake_toolguard_checkout(project_root)
+            installed = Path("/fake/installed/toolguard")
+            config = _clean_config(project_root=project_root)
+
+            payload = json.dumps(
+                {"hook_event_name": "SessionStart", "cwd": str(project_root)}
+            )
+            with (
+                patch.object(
+                    install_provenance,
+                    "governing_package_root",
+                    return_value=Path("/somewhere/else/toolguard"),
+                ),
+                patch.object(
+                    install_provenance,
+                    "installed_distribution_root",
+                    return_value=installed,
+                ),
+                patch.object(
+                    install_provenance,
+                    "stale_install_report",
+                    return_value=install_provenance.StaleInstallReport(
+                        True, project_root, installed
+                    ),
+                ),
+            ):
+                stdout_text, exit_code = self._run_main_with_stdin(
+                    payload, config=config
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("INSTALLED COPY IS STALE", stdout_text)
+            self.assertIn(
+                f"uv tool install --force {project_root} toolguard", stdout_text
+            )
+            self.assertNotIn("RUNNING FROM A SOURCE TREE", stdout_text)
+
+    def test_the_nag_repeats_and_is_never_suppressed_after_a_first_showing(self):
+        """
+        Given the same unresolved static conflict and the same session_id on
+            two consecutive main() invocations
+        When main() runs twice
+        Then both runs print the same non-empty summary -- the hook nags every
+            session while the condition holds, by design
+
+        Silence from a suppressed second showing and silence from a condition
+        that was never detected are indistinguishable to the user, so the
+        first run is asserted non-empty before the two are compared.
+        """
+        config = _clean_config(conflict=_make_conflict())
+        payload = json.dumps(
+            {"hook_event_name": "SessionStart", "session_id": "same", "cwd": "/tmp"}
+        )
+
+        first, _ = self._run_main_with_stdin(payload, config=config)
+        second, _ = self._run_main_with_stdin(payload, config=config)
+
+        self.assertIn("takeover_mode.enabled", first)
+        self.assertEqual(first, second)
+
+    def test_a_failing_checker_does_not_suppress_the_other_checks(self):
+        """
+        Given an unresolved takeover conflict AND a shadow check that raises
+        When main() is called
+        Then the takeover conflict still reaches stdout, and the failed check
+            is reported on stderr
+
+        session_start's module docstring states its checks are "independent of
+        each other". They share one try block and one print at the end, so any
+        detector that raises silently withholds every other detector's finding
+        -- on the user's only recurring notification channel.
+        """
+        config = _clean_config(conflict=_make_conflict())
+        payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
+
+        with (
+            patch("sys.stdin", StringIO(payload)),
+            patch("sys.stdout", new_callable=StringIO) as out,
+            patch("sys.stderr", new_callable=StringIO) as err,
+            patch("toolguard.session_start.load_configuration", return_value=config),
+            patch(
+                "toolguard.session_start._detect_shadow_status",
+                side_effect=RuntimeError("provenance probe exploded"),
+            ) as shadow,
+        ):
+            with contextlib.suppress(SystemExit):
+                main()
+
+        self.assertTrue(shadow.called, "the patched checker was never consulted")
+        self.assertIn("provenance probe exploded", err.getvalue())
+        self.assertIn("takeover_mode.enabled", out.getvalue())
+
     def test_graceful_on_load_configuration_exception(self):
         """
         Given load_configuration raises an unexpected exception
         When main() is called
-        Then it still exits 0 with no traceback propagation
+        Then it exits 0 with no traceback propagation AND says so on stderr,
+            naming the failure -- exiting 0 silently would leave the session
+            believing the checks ran and found nothing
+
+        Exit code 0 alone cannot fail here: main() swallows every exception,
+        so it would still be 0 if the report were deleted.
         """
         payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
         with (
@@ -1177,7 +1458,7 @@ class TestMain(unittest.TestCase):
                 "toolguard.session_start.load_configuration",
                 side_effect=RuntimeError("boom"),
             ),
-            patch("sys.stderr", new_callable=StringIO),
+            patch("sys.stderr", new_callable=StringIO) as err,
         ):
             exit_code = None
             try:
@@ -1185,16 +1466,32 @@ class TestMain(unittest.TestCase):
             except SystemExit as e:
                 exit_code = e.code
         self.assertEqual(exit_code, 0)
+        self.assertIn("toolguard session-start", err.getvalue())
+        self.assertIn("boom", err.getvalue())
 
     def test_uses_getcwd_when_cwd_absent_from_payload(self):
         """
         Given a SessionStart payload without a 'cwd' key
         When main() is called
-        Then os.getcwd() is used as the working directory (no KeyError)
+        Then load_configuration is called with os.getcwd()
+
+        Asserting only exit code 0 cannot fail: a KeyError on the missing key
+        is caught by main()'s blanket handler, which also exits 0.
         """
         payload = json.dumps({"hook_event_name": "SessionStart", "session_id": "x"})
-        _stdout, exit_code = self._run_main_with_stdin(payload)
-        self.assertEqual(exit_code, 0)
+        config = _clean_config()
+
+        with (
+            patch("sys.stdin", StringIO(payload)),
+            patch("sys.stdout", new_callable=StringIO),
+            patch(
+                "toolguard.session_start.load_configuration", return_value=config
+            ) as load,
+        ):
+            with contextlib.suppress(SystemExit):
+                main()
+
+        load.assert_called_once_with(os.getcwd())
 
 
 class TestSessionStartArgparseAndIsatty(unittest.TestCase):
@@ -1204,64 +1501,79 @@ class TestSessionStartArgparseAndIsatty(unittest.TestCase):
         """
         Given --help on the command line
         When main is called
-        Then argparse exits with code 0 (informational, not an error)
+        Then argparse exits with code 0 (informational, not an error) and the
+            help text says this is an internal hook, not a command to run
         """
         import sys
 
+        out = StringIO()
         with (
             patch.object(sys, "argv", ["toolguard-session-start", "--help"]),
-            patch("sys.stdout", StringIO()),
+            patch("sys.stdout", out),
         ):
             with self.assertRaises(SystemExit) as ctx:
                 main()
         self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("toolguard-session-start", out.getvalue())
+        self.assertIn("INTERNAL (Claude Code hook)", out.getvalue())
 
     def test_isatty_true_prints_explanation_and_does_not_read_stdin(self):
         """
-        Given a terminal invocation (sys.stdin.isatty() returns True)
+        Given a terminal invocation (sys.stdin.isatty() returns True) whose
+            stdin nevertheless holds a valid SessionStart payload
         When main is called
-        Then it prints an explanation to stderr, exits 0, and does not read from stdin
+        Then it prints an explanation to stderr, exits 0, reads nothing from
+            stdin, and runs none of the checks
+
+        The payload is deliberately valid and load_configuration is patched
+        and asserted un-called: without that, an interactive run that fell
+        through the guard and ran the whole hook would look identical.
         """
         err = StringIO()
-        stdin_mock = StringIO("")
+        stdin_mock = MagicMock(wraps=StringIO(json.dumps({"cwd": "/tmp"})))
+        stdin_mock.isatty.return_value = True
 
         with (
             patch("sys.stdin", stdin_mock),
-            patch("sys.stdin.isatty", return_value=True),
             patch("sys.stderr", err),
+            patch(
+                "toolguard.session_start.load_configuration",
+                return_value=_clean_config(),
+            ) as load,
         ):
             with self.assertRaises(SystemExit) as ctx:
                 main()
 
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("Claude Code", err.getvalue())
+        stdin_mock.read.assert_not_called()
+        load.assert_not_called()
 
     def test_isatty_false_processes_piped_event_normally(self):
         """
         Given a piped (non-TTY) invocation with a valid SessionStart payload
         When main is called (sys.stdin.isatty() returns False)
-        Then the hook processes the event normally (exits 0, no traceback)
+        Then the hook runs the checks against the payload's cwd and exits 0
+
+        Exit code 0 alone cannot distinguish this from the TTY guard firing
+        or from an exception being swallowed, so the call into
+        load_configuration is what is asserted.
         """
         payload = json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp"})
-        config = MagicMock(spec=Configuration)
-        config.takeover_mode.return_value = TakeoverConfig(
-            enabled=False,
-            ignored_allow_patterns=(),
-            additional_ignored_patterns=(),
-            no_match_fallback="deny",
-            conflict=None,
-        )
-        config.project_root = None
 
         with (
             patch("sys.stdin", StringIO(payload)),
             patch("sys.stdin.isatty", return_value=False),
-            patch("toolguard.session_start.load_configuration", return_value=config),
+            patch(
+                "toolguard.session_start.load_configuration",
+                return_value=_clean_config(),
+            ) as load,
         ):
             with self.assertRaises(SystemExit) as ctx:
                 main()
 
         self.assertEqual(ctx.exception.code, 0)
+        load.assert_called_once_with("/tmp")
 
 
 if __name__ == "__main__":

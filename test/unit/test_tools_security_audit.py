@@ -29,7 +29,7 @@ from toolguard.tools.security_audit import (
     security_audit,
 )
 from toolguard.tools.edit_proposal import EditProposal
-from toolguard.tools.config_access import per_layer_rules
+from toolguard.tools.config_access import discover_tools, per_layer_rules
 from toolguard.tools.danger import DangerFinding, Severity
 from toolguard.tools.edit_proposal import apply_edits, edit_proposal_to_dict
 
@@ -61,6 +61,15 @@ def tearDownModule():
 # Helpers
 # ---------------------------------------------------------------------------
 
+#: Allow patterns that trip no detector in any of the four analysers. A "clean"
+#: fixture needs them: with no permission rules at all the danger and clarity
+#: analysers examine nothing, and "no findings" then says only that there was
+#: nothing to read.
+_SAFE_ALLOW = ["Bash(git status:*)", "Bash(ls:*)", "Bash([regex]^git diff)"]
+
+#: An allow rule the danger analyser reports as CRITICAL arbitrary-exec-allow.
+_DANGEROUS_ALLOW = "Bash(uv run python:*)"
+
 
 def _prov(
     level: str = "project",
@@ -84,6 +93,7 @@ def _toolguard_layer(
     no_match_fallback: str = "deny",
     ignored_allow_patterns: Optional[List[str]] = None,
     allow: Optional[List[str]] = None,
+    deny: Optional[List[str]] = None,
     specificity: int = 0,
     undecidable_fallback: Optional[str] = None,
 ) -> ConfigLayer:
@@ -110,10 +120,10 @@ def _toolguard_layer(
     if undecidable_fallback is not None:
         content["undecidable_fallback"] = undecidable_fallback
 
-    if allow:
+    if allow or deny:
         content["permissions"] = {
-            "allow": allow,
-            "deny": [],
+            "allow": allow or [],
+            "deny": deny or [],
             "ask": [],
         }
 
@@ -158,9 +168,18 @@ def _hooks_for(*tools: str) -> dict:
 
 
 def _danger_allow_layer(
-    tool: str, allow: List[str], specificity: int = 0
+    tool: str, allow: List[str], specificity: int = 2
 ) -> ConfigLayer:
-    """Build a toolguard_hook layer with ``tool``'s dangerous allow patterns wrapped in ``Tool(inner)`` form, as stored in real configs."""
+    """
+    Build a toolguard_hook layer with ``tool``'s dangerous allow patterns wrapped
+    in ``Tool(inner)`` form, as stored in real configs.
+
+    The default specificity differs from ``_toolguard_layer``'s deliberately.  Two
+    layers whose Provenance compares equal are merged, and the merged rules are
+    then attributed to both -- so a single dangerous rule was reported TWICE, and
+    the phantom duplicate is what made this file's severity-ordering assertion
+    hold for every permutation.
+    """
     wrapped = [f"{tool}({p})" for p in allow]
     return ConfigLayer(
         provenance=_prov(specificity=specificity),
@@ -182,10 +201,89 @@ def _make_config(*layers: ConfigLayer) -> Configuration:
 
 
 def _clean_config() -> Configuration:
-    """Return a Configuration with Bash governed and hooked, no_match_fallback='deny', and no dangerous rules -- produces no findings from either analyser."""
+    """
+    Return a Configuration with Bash governed and hooked, no_match_fallback='deny',
+    and the three harmless ``_SAFE_ALLOW`` rules -- produces no findings from any
+    analyser.
+
+    The rules are not decoration: without them the danger and clarity analysers
+    are handed nothing, and every "no findings" assertion below would hold equally
+    for a config that was never examined.
+    """
     tg_layer = _toolguard_layer(
         governed_tools=["Bash"],
         no_match_fallback="deny",
+        allow=_SAFE_ALLOW,
+    )
+    native_layer = _native_layer(hooks=_hooks_for("Bash"))
+    return _make_config(tg_layer, native_layer)
+
+
+def _clean_config_with_one_dangerous_rule() -> Configuration:
+    """Return ``_clean_config()``'s exact shape plus ``_DANGEROUS_ALLOW`` -- the positive control proving the clean fixture's rules do reach the danger analyser."""
+    tg_layer = _toolguard_layer(
+        governed_tools=["Bash"],
+        no_match_fallback="deny",
+        allow=[*_SAFE_ALLOW, _DANGEROUS_ALLOW],
+    )
+    native_layer = _native_layer(hooks=_hooks_for("Bash"))
+    return _make_config(tg_layer, native_layer)
+
+
+def _multi_severity_config() -> Configuration:
+    """
+    Return a Configuration producing one finding at each of the four severities.
+
+    The analysers emit them CRITICAL, MEDIUM (danger), HIGH (takeover), LOW, LOW
+    (clarity) -- deliberately NOT in descending order, so insertion order cannot
+    satisfy a descending-order assertion on its own.
+    """
+    tg_layer = _toolguard_layer(
+        governed_tools=["Bash"],
+        no_match_fallback="deny",
+        undecidable_fallback="allow_with_warning",
+        allow=["Bash([regex]rm)", "Bash(uv run alembic upgrade:*)", _DANGEROUS_ALLOW],
+        deny=["Bash(uv run:*)"],
+    )
+    native_layer = _native_layer(hooks=_hooks_for("Bash"))
+    return _make_config(tg_layer, native_layer)
+
+
+def _cross_source_tie_config() -> Configuration:
+    """Return a Configuration with two HIGH findings whose source order ('rule' < 'takeover') is the OPPOSITE of both their finding_id order and their tool order, so the sort key's source component is observable."""
+    tg_layer = _toolguard_layer(
+        governed_tools=["Bash"],
+        no_match_fallback="deny",
+        undecidable_fallback="allow_with_warning",
+        allow=["Bash(cat ~/.ssh/id_rsa:*)"],
+    )
+    native_layer = _native_layer(hooks=_hooks_for("Bash"))
+    return _make_config(tg_layer, native_layer)
+
+
+def _same_source_tie_config() -> Configuration:
+    """Return a Configuration with two HIGH source='rule' findings that the danger analyser emits in the REVERSE of their finding_id order, so the sort key's finding_id component is observable."""
+    tg_layer = _toolguard_layer(
+        governed_tools=["Bash"],
+        no_match_fallback="deny",
+        allow=["Bash(cat ~/.ssh/id_rsa:*)", "Bash(rm -rf:*)"],
+    )
+    native_layer = _native_layer(hooks=_hooks_for("Bash"))
+    return _make_config(tg_layer, native_layer)
+
+
+#: A dangerous allow whose body is not ASCII (written as escapes to keep this file
+#: ASCII). Pattern bodies are copied verbatim out of the user's config files, so
+#: this reaches the renderer unchanged.
+_NON_ASCII_ALLOW = "Bash(uv run python caf\u00e9 \u2603:*)"
+
+
+def _non_ascii_pattern_config() -> Configuration:
+    """Return a Configuration whose single dangerous allow carries a non-ASCII pattern body."""
+    tg_layer = _toolguard_layer(
+        governed_tools=["Bash"],
+        no_match_fallback="deny",
+        allow=[_NON_ASCII_ALLOW],
     )
     native_layer = _native_layer(hooks=_hooks_for("Bash"))
     return _make_config(tg_layer, native_layer)
@@ -271,6 +369,46 @@ def _locus_config() -> Configuration:
 
 class TestSecurityAuditEmpty(unittest.TestCase):
     """Tests for a configuration that produces zero findings."""
+
+    def test_clean_fixture_gives_the_analysers_something_to_examine(self):
+        """
+        Given the clean configuration
+        When its rules are inspected before any audit runs
+        Then it names a governed tool and carries every _SAFE_ALLOW rule, so the
+             zero-findings assertions below are a verdict on real rules rather
+             than the absence of rules
+        """
+        config = _clean_config()
+        self.assertEqual(discover_tools(config), ("Bash",))
+        allow = [p for lr in per_layer_rules(config, "Bash") for p in lr.allow]
+        self.assertEqual(
+            len(allow),
+            len(_SAFE_ALLOW),
+            msg=f"clean fixture must submit {len(_SAFE_ALLOW)} rules, got {allow!r}",
+        )
+
+    def test_one_dangerous_rule_added_to_the_clean_fixture_is_reported(self):
+        """
+        Given the clean configuration plus a single arbitrary-exec allow
+        When security_audit() is called
+        Then the finding appears -- the positive control showing the clean
+             fixture's silence comes from safe rules, not from analysers that
+             were never given anything
+        """
+        report = security_audit(_clean_config_with_one_dangerous_rule(), env={})
+        self.assertIn("arbitrary-exec-allow", [f.finding_id for f in report.findings])
+
+    def test_a_configuration_with_no_layers_is_not_reported_as_clean(self):
+        """
+        Given a Configuration holding no layers at all
+        When security_audit() is called
+        Then it does NOT report a clean bill of health: the default-governed tools
+             have no hook registered and the fallback is not 'deny'
+        """
+        report = security_audit(Configuration(layers=(), start_dir=None), env={})
+        self.assertNotEqual(report.findings, ())
+        self.assertGreater(report.highest_severity, 0)
+        self.assertIn("hook-not-registered", {f.finding_id for f in report.findings})
 
     def test_empty_findings_tuple(self):
         """
@@ -601,15 +739,6 @@ class TestSecurityAuditMixed(unittest.TestCase):
         self.assertIn("rule", sources)
         self.assertIn("takeover", sources)
 
-    def test_sorted_severity_descending(self):
-        """
-        Given multiple findings at various severities
-        When security_audit() is called
-        Then findings are ordered with highest severity_value first (descending)
-        """
-        values = [f.severity_value for f in self.report.findings]
-        self.assertEqual(values, sorted(values, reverse=True))
-
     def test_same_severity_sorted_source_then_id(self):
         """
         Given two CRITICAL findings -- one 'rule' and one 'takeover' -- at the same tool
@@ -628,6 +757,95 @@ class TestSecurityAuditMixed(unittest.TestCase):
             sources,
             sorted(sources),
             msg=f"Expected source ordering asc within CRITICAL: {sources!r}",
+        )
+
+
+class TestSeverityOrdering(unittest.TestCase):
+    """Findings are ordered severity-descending, then by source, then by finding_id -- pinned on fixtures the analysers emit in none of those orders."""
+
+    def test_fixture_spans_all_four_severities(self):
+        """
+        Given the multi-severity configuration
+        When security_audit() is called
+        Then its findings cover all four severity values.  A single-severity
+             fixture satisfies a descending-order assertion under every
+             permutation, including one produced by no sort at all
+        """
+        report = security_audit(_multi_severity_config(), env={})
+        values = [f.severity_value for f in report.findings]
+        self.assertEqual(
+            set(values), {1, 2, 3, 4}, msg=f"fixture lost a severity: {values!r}"
+        )
+
+    def test_sorted_severity_descending(self):
+        """
+        Given findings at four severities that the analysers emit in the order
+             CRITICAL, MEDIUM, HIGH, LOW, LOW
+        When security_audit() is called
+        Then the report lists them highest severity first
+        """
+        report = security_audit(_multi_severity_config(), env={})
+        values = [f.severity_value for f in report.findings]
+        self.assertEqual(
+            values,
+            [4, 3, 2, 1, 1],
+            msg=f"findings are not severity-descending: "
+            f"{[(f.severity_label, f.source, f.finding_id) for f in report.findings]!r}",
+        )
+
+    def test_highest_severity_is_the_maximum_actually_present(self):
+        """
+        Given a report whose worst finding is CRITICAL and one whose worst is
+             MEDIUM
+        When security_audit() is called on each
+        Then highest_severity is 4 and 2 respectively -- a report's headline
+             severity tracks its findings, not a constant
+        """
+        self.assertEqual(
+            security_audit(_multi_severity_config(), env={}).highest_severity, 4
+        )
+        medium_only = _make_config(
+            _toolguard_layer(
+                governed_tools=["Bash"],
+                no_match_fallback="deny",
+                allow=["Bash([regex]rm)"],
+            ),
+            _native_layer(hooks=_hooks_for("Bash")),
+        )
+        report = security_audit(medium_only, env={})
+        self.assertEqual([f.severity_value for f in report.findings], [2])
+        self.assertEqual(report.highest_severity, 2)
+
+    def test_source_outranks_finding_id_within_a_severity(self):
+        """
+        Given two HIGH findings whose source order ('rule' < 'takeover') is the
+             opposite of their finding_id order ('loose-...' < 'secrets-...')
+        When security_audit() is called
+        Then the rule finding comes first, so source is a real component of the
+             sort key rather than an accident of the ids or of the tool names
+        """
+        report = security_audit(_cross_source_tie_config(), env={})
+        high = [f for f in report.findings if f.severity_value == 3]
+        self.assertEqual(
+            [(f.source, f.finding_id) for f in high],
+            [
+                ("rule", "secrets-exposure-allow"),
+                ("takeover", "loose-undecidable-fallback"),
+            ],
+        )
+
+    def test_finding_id_breaks_the_tie_within_one_source(self):
+        """
+        Given two HIGH source='rule' findings the danger analyser emits in the
+             reverse of their finding_id order
+        When security_audit() is called
+        Then the report re-orders them by finding_id
+        """
+        report = security_audit(_same_source_tie_config(), env={})
+        high = [f for f in report.findings if f.severity_value == 3]
+        self.assertEqual(
+            [f.finding_id for f in high],
+            ["destructive-cmd-allow", "secrets-exposure-allow"],
         )
 
 
@@ -748,6 +966,105 @@ class TestCountsDict(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestRenderedFindingBody(unittest.TestCase):
+    """Every field a reader acts on reaches the rendered report. The report text is the audit's whole user-visible product, so a field that never renders is a field the user never sees."""
+
+    def _one_rule_finding(self) -> RankedFinding:
+        """The single arbitrary-exec-allow finding of the danger-only fixture."""
+        report = security_audit(_danger_only_config(), env={})
+        matches = [f for f in report.findings if f.finding_id == "arbitrary-exec-allow"]
+        self.assertEqual(len(matches), 1, msg=f"fixture changed: {report.findings!r}")
+        return matches[0]
+
+    def test_markdown_renders_every_field_of_a_rule_finding(self):
+        """
+        Given a rule finding carrying a pattern, a locus, a summary, a remediation
+             and a structured proposal
+        When render() is called with fmt='markdown'
+        Then each one appears on its own labelled line
+        """
+        f = self._one_rule_finding()
+        out = render(security_audit(_danger_only_config(), env={}), fmt="markdown")
+        lines = out.splitlines()
+        for expected in (
+            f"- **[{f.finding_id}]** source={f.source}  tool={f.tool}",
+            f"  - pattern: `{f.pattern}`",
+            f"  - locus: {f.locus}",
+            f"  - summary: {f.summary}",
+            f"  - remediation: {f.remediation.text}",
+            "  - structured fix: available (see JSON `remediation.proposal`)",
+        ):
+            self.assertIn(expected, lines, msg=f"missing markdown line: {expected!r}")
+
+    def test_text_renders_every_field_of_a_rule_finding(self):
+        """
+        Given the same rule finding
+        When render() is called with fmt='text'
+        Then each field appears on its own labelled indented line
+        """
+        f = self._one_rule_finding()
+        out = render(security_audit(_danger_only_config(), env={}), fmt="text")
+        lines = out.splitlines()
+        for expected in (
+            f"  [{f.finding_id}]  source={f.source}  tool={f.tool}",
+            f"    pattern     : {f.pattern}",
+            f"    locus       : {f.locus}",
+            f"    summary     : {f.summary}",
+            f"    remediation : {f.remediation.text}",
+            "    structured  : fix available (see JSON remediation.proposal)",
+        ):
+            self.assertIn(expected, lines, msg=f"missing text line: {expected!r}")
+
+    def test_impact_of_a_takeover_finding_reaches_both_formats(self):
+        """
+        Given a takeover finding, the only source carrying a non-empty impact
+        When render() is called in both formats
+        Then the impact text appears on its own labelled line in each
+        """
+        report = security_audit(_takeover_only_config(), env={})
+        hook = [f for f in report.findings if f.finding_id == "hook-not-registered"][0]
+        self.assertNotEqual(hook.impact, "", msg="fixture cannot show an impact line")
+        self.assertIn(
+            f"  - impact: {hook.impact}", render(report, fmt="markdown").splitlines()
+        )
+        self.assertIn(
+            f"    impact      : {hook.impact}", render(report, fmt="text").splitlines()
+        )
+
+    def test_severity_tally_line_reflects_the_counts(self):
+        """
+        Given a report with one CRITICAL, one HIGH, one MEDIUM and two LOW findings
+        When render() is called in both formats
+        Then each carries the tally line naming all four labels with those numbers
+        """
+        report = security_audit(_multi_severity_config(), env={})
+        tally = "CRITICAL: 1  HIGH: 1  MEDIUM: 1  LOW: 2"
+        self.assertIn(tally, render(report, fmt="markdown"))
+        self.assertIn(tally, render(report, fmt="text"))
+
+    def test_markdown_groups_run_from_critical_down_to_low(self):
+        """
+        Given findings at all four severities
+        When render() is called with fmt='markdown'
+        Then the severity headings appear in descending order
+        """
+        out = render(security_audit(_multi_severity_config(), env={}), fmt="markdown")
+        headings = [ln for ln in out.splitlines() if ln.startswith("## ")]
+        self.assertEqual(headings, ["## CRITICAL", "## HIGH", "## MEDIUM", "## LOW"])
+
+    def test_text_groups_run_from_critical_down_to_low(self):
+        """
+        Given findings at all four severities
+        When render() is called with fmt='text'
+        Then the severity headings appear in descending order
+        """
+        out = render(security_audit(_multi_severity_config(), env={}), fmt="text")
+        headings = [
+            ln for ln in out.splitlines() if ln.startswith("[") and ln.endswith("]")
+        ]
+        self.assertEqual(headings, ["[CRITICAL]", "[HIGH]", "[MEDIUM]", "[LOW]"])
+
+
 class TestRenderAsciiOnly(unittest.TestCase):
     """Tests that render output is strict ASCII (no Unicode, no emoji)."""
 
@@ -799,6 +1116,34 @@ class TestRenderAsciiOnly(unittest.TestCase):
         report = security_audit(_mixed_config())
         out = render(report, fmt="text")
         self._assert_ascii(out, "text/findings")
+
+    def test_non_ascii_fixture_really_carries_non_ascii(self):
+        """
+        Given the non-ASCII-pattern configuration
+        When security_audit() is called
+        Then the finding's pattern genuinely contains characters above ASCII, so
+             the fold tests below can distinguish folding from doing nothing
+        """
+        report = security_audit(_non_ascii_pattern_config(), env={})
+        patterns = [f.pattern for f in report.findings if f.pattern]
+        self.assertTrue(
+            any(ord(c) >= 128 for p in patterns for c in p),
+            msg=f"fixture is all-ASCII, so it cannot exercise the fold: {patterns!r}",
+        )
+
+    def test_render_folds_a_non_ascii_pattern_in_both_formats(self):
+        """
+        Given a finding whose pattern was copied verbatim from a config file and
+             is not ASCII
+        When render() is called
+        Then the output is strict ASCII and the offending characters are replaced
+             ('caf?') rather than passed through or dropped
+        """
+        report = security_audit(_non_ascii_pattern_config(), env={})
+        for fmt in ("markdown", "text"):
+            out = render(report, fmt=fmt)
+            self._assert_ascii(out, f"{fmt}/non-ascii-pattern")
+            self.assertIn("caf?", out, msg=f"{fmt}: replacement char missing")
 
 
 class TestRenderInvalidFormat(unittest.TestCase):
@@ -908,23 +1253,33 @@ class TestRenderJson(unittest.TestCase):
         """
         Given a --migrations path that cannot be read
         When main() runs
-        Then it exits (argparse error) rather than producing a report.
+        Then it exits with argparse's usage code and names the offending option
+             and path on stderr.  A bare SystemExit is also what a mistyped flag
+             produces, so the message is what identifies the cause
         """
+        err = io.StringIO()
+        # Both patches are deliberately never consulted: argparse errors before
+        # load_config is reached. They stay so that a change making the bad path
+        # reachable cannot start doing real config discovery unnoticed.
         with patch("toolguard.tools.security_audit.load_config") as mock_load:
             with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
                 mock_load.return_value = MagicMock()
                 mock_sa.return_value = self._make_report()
-                with self.assertRaises(SystemExit):
-                    self._capture_main(
-                        [
-                            "--dir",
-                            ".",
-                            "--format",
-                            "json",
-                            "--migrations",
-                            "/no/such/file.json",
-                        ]
-                    )
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as ctx:
+                        self._capture_main(
+                            [
+                                "--dir",
+                                ".",
+                                "--format",
+                                "json",
+                                "--migrations",
+                                "/no/such/file.json",
+                            ]
+                        )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--migrations", err.getvalue())
+        self.assertIn("/no/such/file.json", err.getvalue())
 
     def test_json_findings_list_with_required_fields(self):
         """
@@ -980,17 +1335,57 @@ class TestRenderJson(unittest.TestCase):
 
     def test_json_is_ascii_safe(self):
         """
-        Given a report rendered to JSON
-        When the output is inspected character by character
-        Then all characters are ASCII (ord < 128) due to ensure_ascii=True
+        Given a report whose pattern and summary are not ASCII, as they may be when
+             copied verbatim out of a config file
+        When main() renders it as JSON
+        Then the emitted text is all ASCII (ensure_ascii=True) and the values still
+             round-trip unchanged -- escaped, not replaced or dropped
+        """
+        pattern = "uv run python caf\u00e9:*"
+        summary = "permits arbitrary code execution \u2603"
+        finding = RankedFinding(
+            source="rule",
+            finding_id="arbitrary-exec-allow",
+            severity_value=4,
+            severity_label="CRITICAL",
+            tool="Bash",
+            locus="project: /fake/path.toml",
+            pattern=pattern,
+            summary=summary,
+            impact="",
+            remediation=Remediation(text="remove the rule", proposal=None),
+            takeover_active=False,
+        )
+        report = SecurityReport(
+            findings=(finding,),
+            takeover_active=False,
+            highest_severity=4,
+            counts={"CRITICAL": 1},
+        )
+        with patch("toolguard.tools.security_audit.load_config") as mock_load:
+            with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
+                mock_load.return_value = MagicMock()
+                mock_sa.return_value = report
+                out, _ = self._capture_main(["--dir", ".", "--format", "json"])
+        non_ascii = [c for c in out if ord(c) >= 128]
+        self.assertEqual(non_ascii, [])
+        decoded = json.loads(out)["findings"][0]
+        self.assertEqual(decoded["pattern"], pattern)
+        self.assertEqual(decoded["summary"], summary)
+
+    def test_dir_argument_reaches_the_config_loader(self):
+        """
+        Given --dir naming a directory other than the default
+        When main() runs
+        Then load_config is called with exactly that path.  Asserting the option
+             parses is not asserting its value reaches the loader
         """
         with patch("toolguard.tools.security_audit.load_config") as mock_load:
             with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
                 mock_load.return_value = MagicMock()
                 mock_sa.return_value = self._make_report()
-                out, _ = self._capture_main(["--dir", ".", "--format", "json"])
-        non_ascii = [c for c in out if ord(c) >= 128]
-        self.assertEqual(non_ascii, [])
+                self._capture_main(["--dir", "/some/other/project", "--format", "json"])
+        self.assertEqual(mock_load.call_args.args, (Path("/some/other/project"),))
 
     def test_json_highest_severity_value(self):
         """
@@ -1184,22 +1579,13 @@ class TestWithContextFlag(unittest.TestCase):
             counts={},
         )
 
-    def _run_with_context_json(self, config_fn=None) -> dict:
-        """Run main() with --format json --with-context (real config or mocked objects) and return the parsed JSON dict."""
-        if config_fn is not None:
-            with patch("toolguard.tools.security_audit.load_config") as mock_load:
-                mock_load.return_value = config_fn()
-                out, _ = self._capture_main(
-                    ["--dir", ".", "--format", "json", "--with-context"]
-                )
-        else:
-            with patch("toolguard.tools.security_audit.load_config") as mock_load:
-                with patch("toolguard.tools.security_audit.security_audit") as mock_sa:
-                    mock_load.return_value = MagicMock()
-                    mock_sa.return_value = self._make_report()
-                    out, _ = self._capture_main(
-                        ["--dir", ".", "--format", "json", "--with-context"]
-                    )
+    def _run_with_context_json(self, config_fn) -> dict:
+        """Run main() with --format json --with-context over the configuration ``config_fn`` builds, and return the parsed JSON dict."""
+        with patch("toolguard.tools.security_audit.load_config") as mock_load:
+            mock_load.return_value = config_fn()
+            out, _ = self._capture_main(
+                ["--dir", ".", "--format", "json", "--with-context"]
+            )
         return json.loads(out)
 
     def test_with_context_adds_context_key_in_json(self):
@@ -1286,6 +1672,70 @@ class TestWithContextFlag(unittest.TestCase):
         ctx = data["context"]
         nap = ctx["takeover"]["neutralized_allow_patterns"]
         self.assertIsInstance(nap, list)
+
+    def test_summary_carries_the_directories_the_audit_walked(self):
+        """
+        Given --format json --with-context
+        When main() is called
+        Then context['summary'] carries start_dir and project_root, so a reader can
+             tell WHICH hierarchy produced the findings
+        """
+        summary = self._run_with_context_json(config_fn=_clean_config)["context"][
+            "summary"
+        ]
+        for key in ("start_dir", "project_root"):
+            self.assertIn(key, summary, f"Missing summary field: {key}")
+
+    def test_layers_report_which_of_them_is_native(self):
+        """
+        Given a configuration with one toolguard layer and one native layer
+        When main() is called with --with-context
+        Then exactly one of Bash's layers is flagged is_native -- a constant would
+             mis-attribute every rule's origin to the AI-assisted pass
+        """
+        ctx = self._run_with_context_json(config_fn=_clean_config)["context"]
+        bash = [t for t in ctx["tools"] if t["tool"] == "Bash"]
+        self.assertEqual(len(bash), 1, msg=f"tools: {ctx['tools']!r}")
+        flags = sorted(layer["is_native"] for layer in bash[0]["layers"])
+        self.assertEqual(flags, [False, True])
+
+    def test_layer_comments_carry_recovered_nosecurity_reasons(self):
+        """
+        Given a real on-disk toolguard_hook.toml whose allow rule carries an inline
+             '# NOSECURITY: <reason>' comment
+        When main() is called with --with-context
+        Then that reason reaches context['tools'][..]['layers'][..]['comments'].
+             It is the only place the AI-assisted pass can learn a risk was
+             deliberately accepted, and dropping it is silent
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "toolguard_hook.toml"
+            path.write_text(
+                "[permissions]\n"
+                "allow = [\n"
+                "    'Bash(node:*)',  # NOSECURITY: intentional dev tool\n"
+                "]\n"
+                "deny = []\nask = []\n",
+                encoding="utf-8",
+            )
+            layer = ConfigLayer(
+                provenance=_prov(path=str(path)),
+                content=MappingProxyType(
+                    {"permissions": {"allow": ["Bash(node:*)"], "deny": [], "ask": []}}
+                ),
+            )
+            data = self._run_with_context_json(config_fn=lambda: _make_config(layer))
+        comments = [
+            c
+            for tool in data["context"]["tools"]
+            for lc in tool["layers"]
+            for c in lc.get("comments", [])
+        ]
+        self.assertIn(
+            "intentional dev tool",
+            [c["nosecurity_reason"] for c in comments],
+            msg=f"comments block: {comments!r}",
+        )
 
     def test_without_flag_no_context_key_in_json(self):
         """
@@ -1411,6 +1861,69 @@ class TestSecurityAuditClarity(unittest.TestCase):
         self.assertEqual(len(clarity), 1)
         self.assertEqual(clarity[0].finding_id, "deny-shadows-allow")
         self.assertEqual(clarity[0].severity_label, "LOW")
+
+
+class TestClarityScope(unittest.TestCase):
+    """The clarity analyser must cover every tool the configuration governs, not only the first-party defaults."""
+
+    #: A governed tool that is not one of the four first-party built-ins.
+    MCP_TOOL = "mcp__jetbrains__execute_terminal_command"
+
+    def _governed_mcp_config(self) -> Configuration:
+        """Bash and an MCP tool both governed and hooked, with the MCP tool carrying the same allow/deny overlap that produces deny-shadows-allow for Bash."""
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash", self.MCP_TOOL],
+            no_match_fallback="deny",
+            allow=[f"{self.MCP_TOOL}(uv run alembic upgrade:*)"],
+            deny=[f"{self.MCP_TOOL}(uv run:*)"],
+        )
+        native_layer = _native_layer(hooks=_hooks_for("Bash", self.MCP_TOOL))
+        return _make_config(tg_layer, native_layer)
+
+    def test_the_same_overlap_on_bash_is_reported(self):
+        """
+        Given a Bash allow overlapped by a broader Bash deny in the same file
+        When security_audit() is called
+        Then a clarity finding names Bash -- the control establishing that the
+             overlap itself is detectable
+        """
+        tg_layer = _toolguard_layer(
+            governed_tools=["Bash"],
+            no_match_fallback="deny",
+            allow=["Bash(uv run alembic upgrade:*)"],
+            deny=["Bash(uv run:*)"],
+        )
+        report = security_audit(
+            _make_config(tg_layer, _native_layer(hooks=_hooks_for("Bash"))), env={}
+        )
+        clarity = [f for f in report.findings if f.source == "clarity"]
+        self.assertEqual([f.tool for f in clarity], ["Bash"])
+
+    def test_a_governed_non_builtin_tool_gets_clarity_coverage(self):
+        """
+        Given a governed, hooked MCP tool carrying that identical overlap
+        When security_audit() is called
+        Then a clarity finding names that tool too.  Governance is declared per
+             tool, so a tool toolguard is asked to govern must be audited like
+             any other
+        """
+        report = security_audit(self._governed_mcp_config(), env={})
+        clarity = [f for f in report.findings if f.source == "clarity"]
+        self.assertEqual(
+            [f.tool for f in clarity],
+            [self.MCP_TOOL],
+            msg=f"whole report: {[(f.source, f.finding_id, f.tool) for f in report.findings]!r}",
+        )
+
+    def test_a_governed_non_builtin_tool_is_named_somewhere_in_the_report(self):
+        """
+        Given the same configuration, whose only defect concerns the MCP tool
+        When the report is rendered
+        Then the tool's name appears in it.  A report that names nothing is
+             indistinguishable from a clean one
+        """
+        report = security_audit(self._governed_mcp_config(), env={})
+        self.assertIn(self.MCP_TOOL, render(report, fmt="markdown"))
 
 
 class TestSecurityAuditEnvironment(unittest.TestCase):
@@ -1709,21 +2222,60 @@ class TestEditsReview(unittest.TestCase):
             "arbitrary-exec-allow", [f["finding_id"] for f in delta["resolved"]]
         )
 
+    def test_text_output_prints_the_as_if_enacted_banner_before_the_report(self):
+        """
+        Given an --edits file and a human output format
+        When main runs
+        Then the as-if-enacted banner is printed ahead of the report, naming the
+             finding the edits resolve -- without it the reader sees an audit of a
+             configuration that is not on disk and no sign that it is hypothetical
+        """
+        config = self._dangerous_config()
+        base = security_audit(config)
+        removal = [
+            f.remediation.proposal for f in base.findings if f.remediation.proposal
+        ][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            edits_path = Path(tmp) / "edits.json"
+            edits_path.write_text(json.dumps([edit_proposal_to_dict(removal)]))
+            with patch(
+                "toolguard.tools.security_audit.load_config", return_value=config
+            ):
+                out, code = self._capture_main(
+                    ["--dir", ".", "--format", "text", "--edits", str(edits_path)]
+                )
+        self.assertEqual(code, 0)
+        self.assertIn("AS-IF-ENACTED REVIEW", out)
+        self.assertIn("- resolved   arbitrary-exec-allow", out)
+        self.assertLess(
+            out.index("AS-IF-ENACTED REVIEW"),
+            out.index("Toolguard Security Audit"),
+            msg="the banner must precede the report it qualifies",
+        )
+
     def test_malformed_edits_file_errors_out(self):
         """
         Given an --edits file that is not valid JSON
         When main runs
-        Then argparse errors out (SystemExit) rather than crashing.
+        Then argparse errors out with its usage code and names --edits and the
+             offending path on stderr, rather than crashing or auditing anyway
         """
         config = self._dangerous_config()
+        err = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "bad.json"
             bad.write_text("{not json")
+            # Never consulted -- argparse errors first. Kept for the same reason as
+            # in test_bad_migrations_file_raises_system_exit.
             with patch(
                 "toolguard.tools.security_audit.load_config", return_value=config
             ):
-                with self.assertRaises(SystemExit):
-                    self._capture_main(["--dir", ".", "--edits", str(bad)])
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as ctx:
+                        self._capture_main(["--dir", ".", "--edits", str(bad)])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("--edits", err.getvalue())
+            self.assertIn(str(bad), err.getvalue())
 
 
 class TestNoSecurityAcknowledgement(unittest.TestCase):
@@ -1860,15 +2412,22 @@ class TestNoSecurityAcknowledgement(unittest.TestCase):
         self.assertEqual(exec_json[0]["acknowledgement"], "intentional dev tool")
 
 
-def _ranked(finding_id, acknowledged=False, acknowledgement=None, pattern="git push:*"):
+def _ranked(
+    finding_id,
+    acknowledged=False,
+    acknowledgement=None,
+    pattern="git push:*",
+    tool="Bash",
+    locus="project: /fake/path.toml",
+):
     """Build a RankedFinding for acknowledgement / delta rendering tests."""
     return RankedFinding(
         source="rule",
         finding_id=finding_id,
         severity_value=3,
         severity_label="HIGH",
-        tool="Bash",
-        locus="project: /fake/path.toml",
+        tool=tool,
+        locus=locus,
         pattern=pattern,
         summary="summary text",
         impact="",
@@ -1965,6 +2524,45 @@ class TestFindingDeltaAndBanner(unittest.TestCase):
         self.assertEqual(delta["introduced"], [])
         self.assertEqual(delta["resolved"], [])
 
+    def test_findings_differing_only_in_pattern_are_two_findings(self):
+        """
+        Given a base and a proposed audit whose findings share a finding_id, tool
+             and locus but differ in pattern
+        When the finding delta is computed
+        Then one is introduced and the other resolved, rather than collapsing into
+             a single unchanged finding
+        """
+        base = self._report(_ranked("X", pattern="a:*"))
+        proposed = self._report(_ranked("X", pattern="b:*"))
+        delta = _finding_delta(base, proposed)
+        self.assertEqual([i["pattern"] for i in delta["introduced"]], ["b:*"])
+        self.assertEqual([r["pattern"] for r in delta["resolved"]], ["a:*"])
+
+    def test_findings_differing_only_in_locus_are_two_findings(self):
+        """
+        Given the same finding_id, tool and pattern reported at two different loci
+        When the finding delta is computed
+        Then the two loci are treated as distinct findings -- the same rule in a
+             different file is a different problem to fix
+        """
+        base = self._report(_ranked("X", locus="project: /a.toml"))
+        proposed = self._report(_ranked("X", locus="user: /b.toml"))
+        delta = _finding_delta(base, proposed)
+        self.assertEqual([i["locus"] for i in delta["introduced"]], ["user: /b.toml"])
+        self.assertEqual([r["locus"] for r in delta["resolved"]], ["project: /a.toml"])
+
+    def test_findings_differing_only_in_tool_are_two_findings(self):
+        """
+        Given the same finding_id, pattern and locus reported for two tools
+        When the finding delta is computed
+        Then each tool's finding is tracked separately
+        """
+        base = self._report(_ranked("X", tool="Bash"))
+        proposed = self._report(_ranked("X", tool="Read"))
+        delta = _finding_delta(base, proposed)
+        self.assertEqual([i["tool"] for i in delta["introduced"]], ["Read"])
+        self.assertEqual([r["tool"] for r in delta["resolved"]], ["Bash"])
+
     def test_render_edit_banner_lists_delta(self):
         """
         Given proposals and a delta with one introduced and one resolved finding
@@ -1983,6 +2581,29 @@ class TestFindingDeltaAndBanner(unittest.TestCase):
         self.assertIn("+ INTRODUCED B", banner)
         self.assertIn("- resolved   A", banner)
         self.assertTrue(all(ord(c) < 128 for c in banner))
+
+    def test_render_edit_banner_counts_are_not_constants(self):
+        """
+        Given two proposals and a delta with two introduced and one resolved
+             finding -- three numbers no two of which are equal
+        When the banner is rendered
+        Then each headline number matches its own collection.  A one-of-each
+             fixture cannot tell these apart from hardcoded ones
+        """
+        shared = _ranked("S", pattern="s:*")
+        base = self._report(shared, _ranked("A", pattern="a:*"))
+        proposed = self._report(
+            shared, _ranked("B", pattern="b:*"), _ranked("C", pattern="c:*")
+        )
+        delta = _finding_delta(base, proposed)
+        proposals = [
+            EditProposal(action="replace", tool="Bash", rationale="r", edits=()),
+            EditProposal(action="remove", tool="Bash", rationale="r", edits=()),
+        ]
+        banner = _render_edit_banner(proposals, delta)
+        self.assertIn("as if 2 proposed edit(s)", banner)
+        self.assertIn("Findings introduced by the edits: 2", banner)
+        self.assertIn("Findings resolved by the edits:   1", banner)
 
 
 if __name__ == "__main__":

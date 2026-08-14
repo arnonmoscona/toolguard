@@ -83,12 +83,13 @@ class TestContainsPathComponent(unittest.TestCase):
 
     def test_component_after_slash(self):
         """
-        Given a command where the target component appears after a slash in a path
+        Given a command where the target component appears after a / or \\ separator
         When contains_path_component checks for that component
-        Then it reports a match
+        Then it reports a match, backslash being treated as a separator too
         """
         self.assertTrue(contains_path_component("cat dir/.env", ".env"))
         self.assertTrue(contains_path_component("cat /path/to/.env", ".env"))
+        self.assertTrue(contains_path_component("cat dir\\.env", ".env"))
 
     def test_component_before_slash(self):
         """
@@ -108,12 +109,15 @@ class TestContainsPathComponent(unittest.TestCase):
 
     def test_no_match(self):
         """
-        Given a command that does not contain the target path component
+        Given a command that does not contain the target as a whole path segment
         When contains_path_component checks for that component
-        Then it reports no match
+        Then it reports no match, including when the component is only a substring
+        of a longer segment
         """
         self.assertFalse(contains_path_component("cat file.txt", ".env"))
         self.assertFalse(contains_path_component("git status", ".env"))
+        self.assertFalse(contains_path_component("cat .environment", ".env"))
+        self.assertFalse(contains_path_component("cat env/.envfile", ".env"))
 
     def test_command_only_no_match(self):
         """
@@ -198,14 +202,18 @@ class TestMatchCommand(unittest.TestCase):
 
     def test_double_star_normalization(self):
         """
-        Given a pattern using ** (e.g. 'git **')
-        When match_command checks a command with extra arguments
-        Then ** is normalized to * for fnmatch and the command matches
+        Given a DEFAULT pattern using ** (e.g. 'git **')
+        When match_command checks commands with extra arguments and with a path argument
+        Then ** behaves as a DEFAULT *: it matches the extra arguments and, unlike a
+        [glob] wildcard, spans path separators
         """
         patterns = ["git **"]
         matched, pattern = match_command("git status --short", patterns)
         self.assertTrue(matched)
         self.assertEqual(pattern, "git **")
+
+        matched, _ = match_command("git log docs/a/b.md", patterns)
+        self.assertTrue(matched)
 
     def test_relative_path_command_matches_dotslash_pattern(self):
         """
@@ -259,19 +267,20 @@ class TestCheckPermission(unittest.TestCase):
         """
         Given a command matching an allow pattern and no deny patterns
         When check_permission evaluates it
-        Then the decision is 'allow' and the reason cites an allow pattern
+        Then the decision is 'allow' and the reason names the allow pattern that matched
         """
         allow_patterns = ["git *", "ls *"]
         deny_patterns = []
         decision, reason = check_permission("git status", allow_patterns, deny_patterns)
         self.assertEqual(decision, "allow")
         self.assertIn("allow pattern", reason.lower())
+        self.assertIn("git *", reason)
 
     def test_deny_pattern_match(self):
         """
         Given a command matching a deny pattern
         When check_permission evaluates it
-        Then the decision is 'deny' and the reason cites a deny pattern
+        Then the decision is 'deny' and the reason names the deny pattern that matched
         """
         allow_patterns = ["git *"]
         deny_patterns = ["git push:*"]
@@ -280,17 +289,20 @@ class TestCheckPermission(unittest.TestCase):
         )
         self.assertEqual(decision, "deny")
         self.assertIn("deny pattern", reason.lower())
+        self.assertIn("git push:*", reason)
 
     def test_deny_takes_precedence(self):
         """
         Given a command matching both an allow and a deny pattern
         When check_permission evaluates it
-        Then deny wins and the decision is 'deny'
+        Then deny wins and the decision is 'deny' by a deny match, not by fail-closed
+        fallthrough
         """
         allow_patterns = ["git *"]
         deny_patterns = ["git *"]
         decision, reason = check_permission("git status", allow_patterns, deny_patterns)
         self.assertEqual(decision, "deny")
+        self.assertIn("deny pattern", reason.lower())
 
     def test_not_in_allow_list(self):
         """
@@ -317,7 +329,7 @@ class TestCheckPermission(unittest.TestCase):
 
 
 class TestExtendedPatterns(unittest.TestCase):
-    """Test extended pattern matching (REGEX and GLOB)."""
+    """Test extended pattern matching ([regex], [glob] and [native])."""
 
     def test_regex_pattern_in_allow_list(self):
         """
@@ -366,7 +378,8 @@ class TestExtendedPatterns(unittest.TestCase):
         """
         Given an allow list with a [glob] pattern matching the whole command string
         When match_command checks commands with matching and mismatching paths/extensions
-        Then only commands matching the full glob match
+        Then only commands matching the full glob match, a single * covering exactly one
+        path component (unlike a DEFAULT pattern's *, which spans separators)
         """
         patterns = ["[glob]cat /Users/*/projects/**/*.py"]
 
@@ -375,6 +388,11 @@ class TestExtendedPatterns(unittest.TestCase):
         )
         self.assertTrue(matched)
         self.assertEqual(pattern, "[glob]cat /Users/*/projects/**/*.py")
+
+        matched, pattern = match_command(
+            "cat /Users/arnon/dev/projects/flowers/main.py", patterns
+        )
+        self.assertFalse(matched)
 
         matched, pattern = match_command(
             "vim /Users/bob/projects/myapp/src/app.py", patterns
@@ -555,11 +573,20 @@ class TestExtendedPatterns(unittest.TestCase):
         matched, pattern = match_command("cat .env", glob_patterns)
         self.assertTrue(matched)
 
+        # The same **/<component>/** spelling, prefixed: no special handling, so it is
+        # matched as an ordinary glob/regex against the command and does not match.
+        matched, pattern = match_command("cat .env", ["[glob]**/.env/**"])
+        self.assertFalse(matched)
+
+        matched, pattern = match_command("cat .env", ["[regex]**/.env/**"])
+        self.assertFalse(matched)
+
     def test_native_pattern_uses_native_semantics(self):
         """
         Given an allow list with a [native] pattern (e.g. '[native]git * main')
-        When match_command checks commands ending in the trailing word versus not
-        Then word-level NATIVE segment matching is used: matching commands match and others do not
+        When match_command checks commands that only NATIVE semantics decide correctly
+        Then NATIVE's own segment matching is used, not [glob]'s or DEFAULT's: * spans any
+        run of characters including a path separator, and ? is a literal character
         """
         patterns = ["[native]git * main"]
 
@@ -571,6 +598,20 @@ class TestExtendedPatterns(unittest.TestCase):
         self.assertTrue(matched)
 
         matched, pattern = match_command("git checkout develop", patterns)
+        self.assertFalse(matched)
+
+        # [glob] would refuse this: its * does not cross '/'.
+        matched, pattern = match_command("git checkout feature/x main", patterns)
+        self.assertTrue(matched)
+
+        # DEFAULT (fnmatch) and [glob] both treat '?' as a single-character wildcard;
+        # NATIVE's only metacharacter is *, so '?' must match itself.
+        literal_patterns = ["[native]git * ?"]
+
+        matched, pattern = match_command("git checkout ?", literal_patterns)
+        self.assertTrue(matched)
+
+        matched, pattern = match_command("git checkout x", literal_patterns)
         self.assertFalse(matched)
 
     def test_native_pattern_in_deny_list(self):
@@ -590,6 +631,35 @@ class TestExtendedPatterns(unittest.TestCase):
 
         decision, _ = check_permission("git status", allow_patterns, deny_patterns)
         self.assertEqual(decision, "allow")
+
+        # NATIVE's * spans the '/', so the deny still covers a path-bearing argument;
+        # under [glob] semantics this command would fall through to the 'git *' allow.
+        decision, reason = check_permission(
+            "git push a/b", allow_patterns, deny_patterns
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("[native]git push *", reason)
+
+    def test_extended_syntax_disabled_treats_prefix_as_literal(self):
+        """
+        Given a [regex] pattern and a command the regex would match
+        When match_command is called with extended_syntax=False
+        Then the prefix is not recognised, the pattern is matched as DEFAULT and the
+        command does not match, while a plain DEFAULT pattern still matches
+        """
+        patterns = ["[regex]^git .*"]
+
+        matched, pattern = match_command("git anything", patterns)
+        self.assertTrue(matched)
+
+        matched, pattern = match_command(
+            "git anything", patterns, extended_syntax=False
+        )
+        self.assertFalse(matched)
+        self.assertIsNone(pattern)
+
+        matched, _ = match_command("git anything", ["git *"], extended_syntax=False)
+        self.assertTrue(matched)
 
 
 if __name__ == "__main__":

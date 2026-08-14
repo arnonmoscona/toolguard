@@ -5,6 +5,7 @@ to config files and producing a structured change report.
 
 import json
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -44,6 +45,26 @@ def _git_family_proposal(prov: Provenance) -> ConsolidationProposal:
     )
 
 
+def _lists_on_disk(path: Path, file_format: str = "toml") -> dict:
+    """
+    Read a config file's allow/deny/ask pattern lists straight off disk.
+
+    Parses with ``tomllib``/``json`` rather than toolguard's own reader, so a
+    placement assertion cannot pass because the read and the write share a bug.
+    Structured entries contribute their ``match`` value.
+    """
+    text = path.read_text()
+    data = json.loads(text) if file_format == "json" else tomllib.loads(text)
+    perms = data.get("permissions", {})
+    return {
+        list_type: [
+            entry.get("match") if isinstance(entry, dict) else entry
+            for entry in (perms.get(list_type, []) or [])
+        ]
+        for list_type in ("allow", "deny", "ask")
+    }
+
+
 _TOML_WITH_FIND = (
     "[permissions]\n"
     "allow = [\n"
@@ -54,6 +75,32 @@ _TOML_WITH_FIND = (
     '  "Bash(ls:*)",\n'
     "]\n"
 )
+
+#: The git family plus a populated deny and ask list. A consolidation touches
+#: `allow` only, so the other two lists are the negative case for every
+#: "was anything else disturbed?" question.
+_TOML_THREE_LISTS = (
+    "[permissions]\n"
+    "allow = [\n"
+    '  "Bash(git diff:*)",\n'
+    '  "Bash(git status:*)",\n'
+    '  "Bash(ls:*)",\n'
+    "]\n"
+    "deny = [\n"
+    '  "Bash(rm -rf /:*)",\n'
+    "]\n"
+    "ask = [\n"
+    '  "Bash(curl:*)",\n'
+    "]\n"
+)
+
+_JSON_THREE_LISTS = {
+    "allow": ["Bash(git diff:*)", "Bash(git status:*)", "Bash(ls:*)"],
+    "deny": ["Bash(rm -rf /:*)"],
+    "ask": ["Bash(curl:*)"],
+}
+
+_CONSOLIDATED = "Bash([regex]^git (diff|status))"
 
 
 class _TempConfigMixin:
@@ -82,8 +129,9 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
         """
         Given a TOML config with git diff/status allow rules and a matching proposal
         When apply_proposals runs (not dry)
-        Then the originals are removed, the consolidated regex is present, and the
-             file is reported as written.
+        Then the resulting allow list on disk is EXACTLY the two untouched rules
+             plus the consolidated regex -- no duplicate, no survivor, nothing
+             displaced into deny or ask -- and the file is reported as written.
         """
         cfg = self._write("toolguard_hook.toml", _TOML_WITH_FIND)
         report = apply_proposals([_git_family_proposal(_prov(cfg))])
@@ -91,11 +139,32 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
         text = cfg.read_text()
         self.assertNotIn("Bash(git diff:*)", text)
         self.assertNotIn("Bash(git status:*)", text)
-        self.assertIn("Bash([regex]^git (diff|status))", text)
+
+        # The whole list, not a substring: an `assertIn` over the file text is
+        # satisfied by the pattern appearing in ANY list (proposed ticket 39).
+        lists = _lists_on_disk(cfg)
+        self.assertEqual(
+            sorted(lists["allow"]),
+            sorted(
+                [
+                    _CONSOLIDATED,
+                    "Bash([regex]\\bfind\\b(?!.*-exec))",
+                    "Bash(ls:*)",
+                ]
+            ),
+        )
+        self.assertEqual(lists["deny"], [])
+        self.assertEqual(lists["ask"], [])
+
         self.assertEqual(report.total_applied, 1)
         self.assertEqual(report.total_skipped, 0)
         self.assertEqual(len(report.files_written), 1)
         self.assertTrue(report.files[0].written)
+        self.assertEqual(
+            report.files[0].patterns_removed,
+            ("Bash(git diff:*)", "Bash(git status:*)"),
+        )
+        self.assertEqual(report.files[0].patterns_added, (_CONSOLIDATED,))
 
     def test_single_quoted_literal_and_other_rules_preserved(self):
         """
@@ -135,12 +204,13 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
         Given a TOML config with a matching consolidation proposal (not dry-run)
         When apply_proposals runs
         Then toolguard.tools.rule_apply.verified_write_config is called with the
-             real target path, file_format="toml", and expected_patterns covering
-             every pattern in the newly-consolidated allow list (the final
-             real-file write must go through the same self-protection gate
-             as the writer functions it reuses)
+             real target path, file_format="toml", the exact text that would be
+             written, and an expected_patterns set holding every surviving
+             pattern from ALL THREE lists (the final real-file write must go
+             through the same self-protection gate as the writer functions it
+             reuses)
         """
-        cfg = self._write("toolguard_hook.toml", _TOML_WITH_FIND)
+        cfg = self._write("toolguard_hook.toml", _TOML_THREE_LISTS)
         with patch("toolguard.tools.rule_apply.verified_write_config") as mock_write:
             apply_proposals([_git_family_proposal(_prov(cfg))])
 
@@ -148,8 +218,30 @@ class TestApplyToml(_TempConfigMixin, unittest.TestCase):
         args, kwargs = mock_write.call_args
         self.assertEqual(args[0], cfg)
         self.assertEqual(args[2], "toml")
-        self.assertIn("Bash([regex]^git (diff|status))", kwargs["expected_patterns"])
-        self.assertIn("Bash(ls:*)", kwargs["expected_patterns"])
+
+        # The text handed to the guard is the whole point of the call; parsing
+        # it proves the consolidated rule is being written as an ALLOW.
+        candidate = tomllib.loads(args[1])["permissions"]
+        self.assertEqual(
+            sorted(candidate["allow"]), sorted([_CONSOLIDATED, "Bash(ls:*)"])
+        )
+        self.assertEqual(candidate["deny"], ["Bash(rm -rf /:*)"])
+        self.assertEqual(candidate["ask"], ["Bash(curl:*)"])
+
+        # Exact set, so a guard narrowed to one list is visible here. It is a
+        # flat set of bare patterns and carries no list identity, which is why
+        # a rule MOVED between lists still verifies (proposed ticket 39).
+        self.assertEqual(
+            sorted(kwargs["expected_patterns"]),
+            sorted(
+                [
+                    _CONSOLIDATED,
+                    "Bash(ls:*)",
+                    "Bash(rm -rf /:*)",
+                    "Bash(curl:*)",
+                ]
+            ),
+        )
 
     def test_refused_write_propagates_and_reports_unwritten(self):
         """
@@ -254,8 +346,6 @@ def _rule_entry_metadata(path: Path, file_format: str, list_type: str, pattern: 
 class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
     """A proposal is refused, whole, rather than silently dropping rule enrichment."""
 
-    _CONSOLIDATED = "Bash([regex]^git (diff|status))"
-
     def test_contradiction_is_skipped_and_file_is_byte_unchanged(self):
         """
         Given a TOML allow list where the proposal's own consolidated pattern
@@ -272,8 +362,8 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
             "allow = [\n"
             '  "Bash(git diff:*)",\n'
             '  "Bash(git status:*)",\n'
-            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
-            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepB" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", additionalContext = "keepB" }},\n'
             "]\n"
         )
         cfg = self._write("toolguard_hook.toml", toml_content)
@@ -302,8 +392,8 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
             "allow = [\n"
             '  "Bash(git diff:*)",\n'
             '  "Bash(git status:*)",\n'
-            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
-            f'  {{ match = "{self._CONSOLIDATED}", owner = "bob" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", owner = "bob" }},\n'
             "]\n"
         )
         cfg = self._write("toolguard_hook.toml", toml_content)
@@ -315,9 +405,9 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
         text = cfg.read_text()
         self.assertNotIn("Bash(git diff:*)", text)
         self.assertNotIn("Bash(git status:*)", text)
-        self.assertEqual(text.count(f'match = "{self._CONSOLIDATED}"'), 1)
+        self.assertEqual(text.count(f'match = "{_CONSOLIDATED}"'), 1)
 
-        metadata = _rule_entry_metadata(cfg, "toml", "allow", self._CONSOLIDATED)
+        metadata = _rule_entry_metadata(cfg, "toml", "allow", _CONSOLIDATED)
         self.assertEqual(metadata, {"additionalContext": "keepA", "owner": "bob"})
 
     def test_bare_vs_structured_same_pattern_applies_no_guard(self):
@@ -336,7 +426,7 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
             "allow = [\n"
             '  "Bash(git diff:*)",\n'
             '  "Bash(git status:*)",\n'
-            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", additionalContext = "keepA" }},\n'
             "]\n"
         )
         cfg = self._write("toolguard_hook.toml", toml_content)
@@ -346,9 +436,9 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(report.total_applied, 1)
         self.assertEqual(report.total_skipped, 0)
         text = cfg.read_text()
-        self.assertEqual(text.count(f'match = "{self._CONSOLIDATED}"'), 1)
+        self.assertEqual(text.count(f'match = "{_CONSOLIDATED}"'), 1)
 
-        metadata = _rule_entry_metadata(cfg, "toml", "allow", self._CONSOLIDATED)
+        metadata = _rule_entry_metadata(cfg, "toml", "allow", _CONSOLIDATED)
         self.assertEqual(metadata, {"additionalContext": "keepA"})
 
     def test_unrelated_enriched_entry_untouched_dict_preserved(self):
@@ -394,8 +484,8 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
             "allow = [\n"
             '  "Bash(git diff:*)",\n'
             '  "Bash(git status:*)",\n'
-            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepA" }},\n'
-            f'  {{ match = "{self._CONSOLIDATED}", additionalContext = "keepB" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", additionalContext = "keepA" }},\n'
+            f'  {{ match = "{_CONSOLIDATED}", additionalContext = "keepB" }},\n'
             "]\n"
         )
         cfg = self._write("toolguard_hook.toml", toml_content)
@@ -428,6 +518,324 @@ class TestApplyJson(_TempConfigMixin, unittest.TestCase):
         self.assertNotIn("Bash(git status:*)", allow)
         self.assertIn("Bash([regex]^git (diff|status))", allow)
         self.assertIn("Bash(ls:*)", allow)
+
+
+class TestUntargetedListsSurvive(_TempConfigMixin, unittest.TestCase):
+    """An allow-list consolidation must leave deny and ask exactly as it found them."""
+
+    def test_toml_deny_and_ask_are_untouched(self):
+        """
+        Given a TOML config with a populated deny list and ask list alongside the
+             allow rules a consolidation targets
+        When apply_proposals applies the git-family consolidation
+        Then allow holds exactly the consolidated regex plus the untargeted rule,
+             and deny and ask come back off disk exactly as written
+        """
+        cfg = self._write("toolguard_hook.toml", _TOML_THREE_LISTS)
+        apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        lists = _lists_on_disk(cfg)
+        self.assertEqual(sorted(lists["allow"]), sorted([_CONSOLIDATED, "Bash(ls:*)"]))
+        self.assertEqual(lists["deny"], ["Bash(rm -rf /:*)"])
+        self.assertEqual(lists["ask"], ["Bash(curl:*)"])
+
+    def test_json_deny_and_ask_are_untouched(self):
+        """
+        Given a JSON config with a populated deny list and ask list alongside the
+             allow rules a consolidation targets
+        When apply_proposals applies the git-family consolidation
+        Then allow holds exactly the consolidated regex plus the untargeted rule,
+             and deny and ask come back off disk exactly as written
+        """
+        cfg = self._write_json("toolguard_hook.json", _JSON_THREE_LISTS)
+        apply_proposals([_git_family_proposal(_prov(cfg, "json"))])
+
+        lists = _lists_on_disk(cfg, "json")
+        self.assertEqual(sorted(lists["allow"]), sorted([_CONSOLIDATED, "Bash(ls:*)"]))
+        self.assertEqual(lists["deny"], ["Bash(rm -rf /:*)"])
+        self.assertEqual(lists["ask"], ["Bash(curl:*)"])
+
+    def test_consolidated_rule_lands_in_allow_and_nowhere_else(self):
+        """
+        Given a TOML config with all three permission lists populated
+        When apply_proposals applies an ALLOW-list consolidation
+        Then the consolidated pattern appears in allow and in NEITHER deny nor
+             ask -- a rule that changed lists is the one edit the write guard's
+             flat expected_patterns cannot see (proposed ticket 39), so it has
+             to be caught here
+        """
+        cfg = self._write("toolguard_hook.toml", _TOML_THREE_LISTS)
+        apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        lists = _lists_on_disk(cfg)
+        self.assertIn(_CONSOLIDATED, lists["allow"])
+        self.assertNotIn(_CONSOLIDATED, lists["deny"])
+        self.assertNotIn(_CONSOLIDATED, lists["ask"])
+        # The untargeted rules did not move either.
+        self.assertNotIn("Bash(rm -rf /:*)", lists["allow"])
+        self.assertNotIn("Bash(curl:*)", lists["allow"])
+
+
+class TestUnsupportedListType(_TempConfigMixin, unittest.TestCase):
+    """Only allow-list proposals are enacted; anything else is refused, not redirected."""
+
+    def test_deny_list_proposal_is_skipped_and_nothing_is_written(self):
+        """
+        Given a proposal whose list_type is 'deny' but whose patterns are all
+             present in the file's ALLOW list
+        When apply_proposals runs
+        Then it is skipped naming the unsupported list type, the file is
+             byte-unchanged, and in particular the proposal's added pattern was
+             NOT written into allow -- silently treating a deny proposal as an
+             allow one is how this module would enact a widening
+        """
+        cfg = self._write("toolguard_hook.toml", _TOML_THREE_LISTS)
+        before = cfg.read_text()
+        prop = ConsolidationProposal(
+            kind="literal-alternation",
+            tool="Bash",
+            list_type="deny",
+            layer_provenance=_prov(cfg),
+            removed_patterns=("git diff:*", "git status:*"),
+            added_pattern="[regex]^git (diff|status)",
+            rationale="alternation at token 1",
+            replay_summary="probes unchanged; no corpus",
+        )
+
+        report = apply_proposals([prop])
+
+        self.assertEqual(report.total_applied, 0)
+        self.assertEqual(report.total_skipped, 1)
+        self.assertIn("unsupported list_type", report.files[0].skipped[0][1])
+        self.assertIn("deny", report.files[0].skipped[0][1])
+        self.assertFalse(report.files[0].written)
+        self.assertEqual(cfg.read_text(), before)
+        self.assertNotIn(_CONSOLIDATED, _lists_on_disk(cfg)["allow"])
+
+
+class TestIdempotence(_TempConfigMixin, unittest.TestCase):
+    """Re-applying a consolidation that already landed changes nothing."""
+
+    def test_second_apply_of_the_same_proposal_is_a_no_op(self):
+        """
+        Given a consolidation that has already been applied to a TOML config
+        When the very same proposal is applied a second time
+        Then the second run applies nothing, skips with a drift reason, writes
+             no file, leaves the text byte-identical to the first run's output,
+             and does not duplicate the consolidated rule
+        """
+        cfg = self._write("toolguard_hook.toml", _TOML_THREE_LISTS)
+        first = apply_proposals([_git_family_proposal(_prov(cfg))])
+        after_first = cfg.read_text()
+
+        second = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(first.total_applied, 1)
+        self.assertTrue(first.files[0].written)
+        self.assertEqual(second.total_applied, 0)
+        self.assertEqual(second.total_skipped, 1)
+        self.assertIn("not found", second.files[0].skipped[0][1])
+        self.assertFalse(second.files[0].written)
+        self.assertEqual(cfg.read_text(), after_first)
+        self.assertEqual(_lists_on_disk(cfg)["allow"].count(_CONSOLIDATED), 1)
+
+
+class TestDuplicateRemovedPattern(_TempConfigMixin, unittest.TestCase):
+    """Removal takes one occurrence per removed pattern, not every match."""
+
+    def test_a_second_copy_of_a_removed_rule_survives(self):
+        """
+        Given a TOML allow list carrying 'Bash(git diff:*)' TWICE
+        When the git-family consolidation removing it is applied
+        Then exactly one copy is removed and one survives alongside the new
+             regex.
+
+        Characterization of the deliberate one-occurrence removal in
+        _apply_to_file, not an endorsement: the survivor is narrower than the
+        regex that replaced it, so the outcome is a redundant rule rather than
+        a widening -- but the consolidation is incomplete. Recorded so a change
+        of policy is visible.
+        """
+        cfg = self._write(
+            "toolguard_hook.toml",
+            (
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(git diff:*)",\n'
+                '  "Bash(ls:*)",\n'
+                '  "Bash(git diff:*)",\n'
+                '  "Bash(git status:*)",\n'
+                "]\n"
+            ),
+        )
+        report = apply_proposals([_git_family_proposal(_prov(cfg))])
+
+        self.assertEqual(report.total_applied, 1)
+        allow = _lists_on_disk(cfg)["allow"]
+        self.assertEqual(allow.count("Bash(git diff:*)"), 1)
+        self.assertEqual(allow.count("Bash(git status:*)"), 0)
+        self.assertEqual(allow.count(_CONSOLIDATED), 1)
+
+
+class TestMultipleFiles(_TempConfigMixin, unittest.TestCase):
+    """Proposals naming different files are applied to their own file, not merged."""
+
+    def test_each_file_gets_only_its_own_proposal(self):
+        """
+        Given two TOML configs, each with its own proposal -- a git-family
+             consolidation on the first and a pure-drop subsumption on the
+             second
+        When apply_proposals runs over both
+        Then two FileChanges come back in first-seen order, each naming its own
+             path, and each file on disk carries only its own edit
+        """
+        first = self._write("first.toml", _TOML_THREE_LISTS)
+        second = self._write(
+            "second.toml",
+            (
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(mkdir -p /tmp/:*)",\n'
+                '  "Bash(mkdir -p /tmp/claude-code:*)",\n'
+                "]\n"
+            ),
+        )
+        drop = ConsolidationProposal(
+            kind="static-subsumption",
+            tool="Bash",
+            list_type="allow",
+            layer_provenance=_prov(second),
+            removed_patterns=("mkdir -p /tmp/claude-code:*",),
+            added_pattern=None,
+            rationale="subsumed by mkdir -p /tmp/:*",
+            replay_summary="static proof",
+        )
+
+        report = apply_proposals([_git_family_proposal(_prov(first)), drop])
+
+        self.assertEqual([f.path for f in report.files], [first, second])
+        self.assertEqual(report.total_applied, 2)
+        self.assertEqual(len(report.files_written), 2)
+
+        first_allow = _lists_on_disk(first)["allow"]
+        self.assertEqual(sorted(first_allow), sorted([_CONSOLIDATED, "Bash(ls:*)"]))
+
+        second_allow = _lists_on_disk(second)["allow"]
+        self.assertEqual(second_allow, ["Bash(mkdir -p /tmp/:*)"])
+        self.assertNotIn(_CONSOLIDATED, second_allow)
+
+
+class TestBatchAtomicity(_TempConfigMixin, unittest.TestCase):
+    """A batch must not leave a file rewritten while the caller loses the report."""
+
+    _MALFORMED = 'permissions = "hello"\n'
+
+    def test_a_rewritten_file_is_never_lost_from_the_report(self):
+        """
+        Given two proposals, the first naming a good TOML config and the second
+             naming a config whose `permissions` key is a string rather than a
+             table, so re-rendering it raises
+        When apply_proposals runs over both
+        Then the caller can still account for every file that changed: either
+             the call returns a report naming both files, or it raises having
+             written nothing at all.
+
+        Deliberately mechanism-agnostic -- it passes whether the fix is to skip
+        the unrenderable file with a reason or to validate every target before
+        the first write. At HEAD it fails: the first file is rewritten on disk
+        and the exception destroys the ChangeReport, so a user's config is
+        modified with no record of what changed.
+        """
+        good = self._write("good.toml", _TOML_THREE_LISTS)
+        bad = self._write("bad.toml", self._MALFORMED)
+        before_good = good.read_text()
+
+        try:
+            report = apply_proposals(
+                [_git_family_proposal(_prov(good)), _git_family_proposal(_prov(bad))]
+            )
+        except Exception:
+            self.assertEqual(
+                good.read_text(),
+                before_good,
+                "apply_proposals raised after already rewriting an earlier file, "
+                "so the caller has a modified config and no report of the change",
+            )
+        else:
+            self.assertEqual([f.path for f in report.files], [good, bad])
+
+    def test_a_dry_run_previews_the_files_it_can_render(self):
+        """
+        Given the same good/malformed pair
+        When apply_proposals runs with dry_run=True
+        Then the caller gets a preview covering the good file rather than
+             losing it -- a dry run writes nothing, so an unrenderable sibling
+             has nothing to protect the caller from.
+
+        Mechanism-agnostic in the same way as the sibling test, and RED at HEAD:
+        _render_via_writer runs for every target before the dry-run gate, so one
+        malformed file aborts the whole preview.
+        """
+        good = self._write("good.toml", _TOML_THREE_LISTS)
+        bad = self._write("bad.toml", self._MALFORMED)
+
+        report = apply_proposals(
+            [_git_family_proposal(_prov(good)), _git_family_proposal(_prov(bad))],
+            dry_run=True,
+        )
+
+        self.assertIn(good, [f.path for f in report.files])
+        good_change = next(f for f in report.files if f.path == good)
+        self.assertIn(_CONSOLIDATED, good_change.diff)
+        self.assertEqual(good.read_text(), _TOML_THREE_LISTS)
+
+
+class TestRawPermissionsRead(_TempConfigMixin, unittest.TestCase):
+    """_read_raw_permissions degrades to three empty lists rather than raising."""
+
+    def test_absent_file_reads_as_three_empty_lists(self):
+        """
+        Given a path that does not exist
+        When _read_raw_permissions reads it
+        Then all three lists come back empty rather than the read raising
+        """
+        missing = self.tmpdir / "nope.toml"
+        self.assertFalse(missing.exists())
+
+        self.assertEqual(
+            _read_raw_permissions(missing, "toml"),
+            {"allow": [], "deny": [], "ask": []},
+        )
+
+    def test_a_proposal_naming_an_absent_file_is_skipped_not_created(self):
+        """
+        Given a proposal whose provenance names a config file that no longer exists
+        When apply_proposals runs
+        Then the proposal is skipped as drift, nothing is written, and the file
+             is NOT brought into being by the apply
+        """
+        missing = self.tmpdir / "nope.toml"
+        report = apply_proposals([_git_family_proposal(_prov(missing))])
+
+        self.assertEqual(report.total_applied, 0)
+        self.assertEqual(report.total_skipped, 1)
+        self.assertIn("not found", report.files[0].skipped[0][1])
+        self.assertFalse(report.files[0].written)
+        self.assertFalse(missing.exists())
+
+    def test_a_non_table_permissions_key_reads_as_three_empty_lists(self):
+        """
+        Given a TOML file whose `permissions` key holds a string, not a table
+        When _read_raw_permissions reads it
+        Then all three lists come back empty rather than the read raising an
+             AttributeError on the string
+        """
+        cfg = self._write("toolguard_hook.toml", 'permissions = "hello"\n')
+
+        self.assertEqual(
+            _read_raw_permissions(cfg, "toml"),
+            {"allow": [], "deny": [], "ask": []},
+        )
 
 
 class TestDriftAndSkips(_TempConfigMixin, unittest.TestCase):
@@ -544,6 +952,70 @@ class TestRenderChangeReport(_TempConfigMixin, unittest.TestCase):
 
         self.assertIn("# Toolguard Rule Change Report", out)
         self.assertIn("## ", out)
+
+    def test_pure_drop_is_rendered_as_a_drop_not_a_replacement(self):
+        """
+        Given a report from a static-subsumption proposal, which drops a rule
+             and adds nothing (added_pattern is None)
+        When render_change_report(fmt='text') is called
+        Then the line says the rule was dropped and shows no '->' replacement
+             arrow, so a pure drop is distinguishable from a consolidation
+        """
+        cfg = self._write(
+            "toolguard_hook.toml",
+            (
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(mkdir -p /tmp/:*)",\n'
+                '  "Bash(mkdir -p /tmp/claude-code:*)",\n'
+                "]\n"
+            ),
+        )
+        drop = ConsolidationProposal(
+            kind="static-subsumption",
+            tool="Bash",
+            list_type="allow",
+            layer_provenance=_prov(cfg),
+            removed_patterns=("mkdir -p /tmp/claude-code:*",),
+            added_pattern=None,
+            rationale="subsumed by mkdir -p /tmp/:*",
+            replay_summary="static proof",
+        )
+        out = render_change_report(apply_proposals([drop]), fmt="text")
+
+        self.assertIn("static-subsumption: drop Bash(mkdir -p /tmp/claude-code:*)", out)
+        self.assertNotIn("->", out)
+
+    def test_an_unwritten_file_is_reported_as_not_written(self):
+        """
+        Given a report whose only proposal was skipped, so nothing was written
+        When render_change_report(fmt='text') is called
+        Then the file's line says 'not written' -- a reader must be able to tell
+             an enacted change from a refused one without reading the counts
+        """
+        cfg = self._write(
+            "toolguard_hook.toml",
+            '[permissions]\nallow = [\n  "Bash(ls:*)",\n]\n',
+        )
+        out = render_change_report(
+            apply_proposals([_git_family_proposal(_prov(cfg))]), fmt="text"
+        )
+
+        self.assertIn("not written", out)
+        self.assertIn("0 applied, 1 skipped, 0 file(s) written.", out)
+
+    def test_a_pathless_file_change_is_labelled_no_path(self):
+        """
+        Given a proposal whose provenance carries no file path
+        When render_change_report(fmt='text') is called
+        Then the file heading reads '(no path)' rather than rendering None
+        """
+        out = render_change_report(
+            apply_proposals([_git_family_proposal(_prov(None))]), fmt="text"
+        )
+
+        self.assertIn("(no path)", out)
+        self.assertNotIn("None [toml]", out)
 
     def test_invalid_format_raises_value_error(self):
         """

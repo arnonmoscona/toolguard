@@ -5,6 +5,7 @@ here is built directly from hand-constructed values with zero file I/O, so per
 needed for this file.
 """
 
+import dataclasses
 import unittest
 from types import MappingProxyType
 
@@ -22,6 +23,7 @@ from toolguard.rule_entry import (
     normalize_entries_preserving,
     normalize_entry,
     real_patterns,
+    strip_tool_wrapper,
 )
 
 
@@ -294,6 +296,58 @@ class TestNormalizeEntryOtherTypes(unittest.TestCase):
                 self.assertGreaterEqual(len(issues), 1)
 
 
+class TestPlainStringWithEmbeddedNewline(unittest.TestCase):
+    """
+    A newline-bearing PLAIN string: accepted with no issue, scoped to its
+    tool, displayed as configured, and able to match nothing. Both tests below
+    assert the CORRECT behaviour and FAIL against the shipped code -- they are
+    a live marker for proposed ticket 25, not a regression.
+    """
+
+    #: An operator writing this into a deny list gets a rule they believe is
+    #: in force. The embedded newline defeats the wrapper strip, so the
+    #: pattern is compared whole and matches no command.
+    NEWLINE_DENY = "Bash(rm -rf /)\nBash(dd *)"
+
+    def test_plain_string_with_embedded_newline_is_reported(self):
+        """
+        Given a plain-string entry with an embedded newline splicing two
+             tool-wrapper expressions together
+        When normalize_entry parses it
+        Then at least one Issue is raised -- the identical value in a
+             STRUCTURED entry is already rejected with an error, and silence
+             is the whole defect: nothing warns at parse, load or decision time
+
+        FAILS AGAINST SHIPPED CODE BY DESIGN. Measured 2026-08-13: returns
+        (RuleEntry(...), ()). Resolution-agnostic -- both of the ticket's
+        candidate fixes (reject, or accept-and-warn) satisfy this assertion.
+        """
+        _entry, issues = normalize_entry(self.NEWLINE_DENY, is_native=False)
+
+        self.assertNotEqual(
+            issues, (), "an entry that can never match must not parse silently"
+        )
+
+    def test_newline_bearing_entry_does_not_survive_as_an_active_bash_rule(self):
+        """
+        Given the same newline-bearing deny entry
+        When it is normalized and then scoped with entries_for_tool("Bash")
+        Then nothing survives -- an entry cannot be both scoped to Bash and
+             unstrippable, which is exactly the state that reads as configured
+             and enforces nothing
+
+        FAILS AGAINST SHIPPED CODE BY DESIGN. Measured 2026-08-13: the entry
+        is kept (it starts with "Bash(" and ends with ")") while
+        stripped_pattern returns it unchanged. This encodes the ticket's
+        RECOMMENDED resolution, rejection; if "accept and warn" is chosen
+        instead, rewrite this to assert the warning rather than deleting it.
+        """
+        entry, _issues = normalize_entry(self.NEWLINE_DENY, is_native=False)
+        scoped = entries_for_tool((entry,) if entry is not None else (), "Bash")
+
+        self.assertEqual(scoped, ())
+
+
 class TestIsToolWrapper(unittest.TestCase):
     """is_tool_wrapper() direct tests, including the embedded-newline case."""
 
@@ -344,6 +398,66 @@ class TestIsToolWrapper(unittest.TestCase):
         self.assertFalse(is_tool_wrapper("Bash(a)\nEvil(b)"))
 
 
+class TestStrippedPattern(unittest.TestCase):
+    """RuleEntry.stripped_pattern and the public strip_tool_wrapper(): turning the wrapper-intact authored pattern into the inner pattern consumers match on."""
+
+    def test_wrapper_is_removed(self):
+        """
+        Given a wrapper-intact entry
+        When stripped_pattern is read
+        Then the Tool(...) wrapper is gone and .pattern is untouched
+        """
+        entry, _ = normalize_entry("Bash(git *)", is_native=False)
+
+        self.assertEqual(entry.stripped_pattern, "git *")
+        self.assertEqual(entry.pattern, "Bash(git *)")
+
+    def test_parentheses_inside_the_body_survive(self):
+        """
+        Given an entry whose inner pattern itself contains parentheses
+        When stripped_pattern is read
+        Then only the outermost wrapper is removed -- the greedy match runs to
+             the LAST closing paren, so an inner group is not truncated
+        """
+        entry = RuleEntry(pattern="Bash([regex]^git (push|pull))")
+
+        self.assertEqual(entry.stripped_pattern, "[regex]^git (push|pull)")
+
+    def test_a_pattern_that_is_not_a_whole_wrapper_is_returned_unchanged(self):
+        """
+        Given patterns that are not wholly Tool(...)-wrapped: an unwrapped
+             word, and one with trailing text after the closing paren
+        When stripped_pattern is read
+        Then each comes back unchanged rather than partially stripped -- the
+             strip is a fullmatch, so a prefix that merely looks wrapped is
+             left alone
+        """
+        for pattern in ("not-wrapped-at-all", "Bash(a)x"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(RuleEntry(pattern=pattern).stripped_pattern, pattern)
+
+    def test_public_helper_strips_for_a_caller_holding_no_entry(self):
+        """
+        Given bare pattern strings held by a caller with no RuleEntry
+        When strip_tool_wrapper() is called on each
+        Then it returns the literal inner pattern (or the input unchanged when
+             there is no wrapper)
+
+        Expectations are literals, not `RuleEntry(...).stripped_pattern`: both
+        spellings delegate to the same private function, so comparing them
+        would move together under any change and could never fail.
+        """
+        cases = {
+            "Bash(git *)": "git *",
+            "Read(/etc/*)": "/etc/*",
+            "not-wrapped-at-all": "not-wrapped-at-all",
+        }
+
+        for pattern, expected in cases.items():
+            with self.subTest(pattern=pattern):
+                self.assertEqual(strip_tool_wrapper(pattern), expected)
+
+
 class TestEntriesForTool(unittest.TestCase):
     """entries_for_tool() tool-scoping behaviour."""
 
@@ -364,18 +478,23 @@ class TestEntriesForTool(unittest.TestCase):
 
     def test_matches_exactly_startswith_and_endswith_semantics(self):
         """
-        Given entries including a decoy that starts with the tool prefix but
-             is not tool-wrapped for it (no closing paren immediately at the
-             pattern's own end is not representable for a wrapped pattern,
-             so this instead checks a same-prefix different-tool case)
+        Given a real Bash entry plus one decoy per half of the filter: a
+             same-prefix different-tool pattern ("BashOther(git *)", which
+             fails startswith) and a wrapper-prefixed pattern with trailing
+             text ("Bash(a)x", which fails endswith)
         When entries_for_tool filters for "Bash"
-        Then only entries whose pattern both starts with "Bash(" and ends
-             with ")" are kept -- mirroring permission_layers()'s inline
-             filter exactly (perm.startswith(prefix) and perm.endswith(")"))
+        Then only the real Bash entry survives -- both halves of
+             permission_layers()'s inline filter
+             (perm.startswith(prefix) and perm.endswith(")")) are load-bearing
+             and separately observable
+
+        The endswith decoy is representable because normalize_entry applies
+        no wrapper-shape validation to plain strings.
         """
         bash_entry, _ = normalize_entry("Bash(git *)", is_native=False)
-        bash_star_entry, _ = normalize_entry("BashOther(git *)", is_native=False)
-        entries = (bash_entry, bash_star_entry)
+        other_tool_decoy, _ = normalize_entry("BashOther(git *)", is_native=False)
+        unterminated_decoy, _ = normalize_entry("Bash(a)x", is_native=False)
+        entries = (bash_entry, other_tool_decoy, unterminated_decoy)
 
         result = entries_for_tool(entries, "Bash")
 
@@ -481,6 +600,10 @@ class TestNormalizeEntriesPreserving(unittest.TestCase):
         Then each one reproduces its ORIGINAL raw_list element exactly,
              element-for-element in order -- including the None element,
              which must come back as None, not the string "None"
+
+        The length is asserted before zipping: zip() truncates to the shorter
+        sequence, so a dropped element would leave every surviving pair
+        matching and the Then's "element-for-element" claim unchecked.
         """
         raw_list = [
             "Bash(git *)",
@@ -493,6 +616,7 @@ class TestNormalizeEntriesPreserving(unittest.TestCase):
 
         result = normalize_entries_preserving(raw_list, is_native=False)
 
+        self.assertEqual(len(result), len(raw_list))
         for original, entry in zip(raw_list, result):
             with self.subTest(original=original):
                 self.assertEqual(entry.to_source(), original)
@@ -540,9 +664,13 @@ class TestRuleEntryTypeContract(unittest.TestCase):
         When hash() is computed via a hypothetical dataclass-default
              __hash__ (i.e. hashing the raw field tuple directly, which is
              what @dataclass(frozen=True) without a custom __hash__ would do)
-        Then that hypothetical hash raises TypeError -- proving RuleEntry's
-             custom __hash__ (hashing identity() instead) is load-bearing,
-             not incidental
+        Then that hypothetical hash raises TypeError while hash(entry) does
+             not -- proving RuleEntry needs a custom __hash__ at all
+
+        It does NOT show that hashing identity() specifically is required:
+        hashing .pattern alone would also be consistent with __eq__ and would
+        also pass here. What identity() buys is covered by
+        test_identity_is_independent_of_metadata_insertion_order.
         """
         entry = RuleEntry(
             pattern="Bash(git *)",
@@ -642,9 +770,13 @@ class TestRuleEntryTypeContract(unittest.TestCase):
 
     def test_metadata_is_genuinely_immutable(self):
         """
-        Given a RuleEntry's metadata (built as a MappingProxyType)
-        When an attempt is made to mutate it
-        Then it raises TypeError -- "frozen" is not a lie
+        Given metadata on a hand-built RuleEntry AND on one normalize_entry
+             produced from a structured dict
+        When an attempt is made to mutate either
+        Then both raise TypeError -- "frozen" is not a lie. The parsed case is
+             the one that matters: a hand-built fixture supplies its own
+             MappingProxyType, so it cannot observe whether normalize_entry
+             -- the only site that builds metadata for real -- wraps it at all
         """
         entry = RuleEntry(
             pattern="Bash(git *)",
@@ -653,6 +785,51 @@ class TestRuleEntryTypeContract(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             entry.metadata["additionalContext"] = "different"
+
+        parsed, _ = normalize_entry(
+            {PATTERN_KEY: "Bash(git *)", ADDITIONAL_CONTEXT_KEY: "why"},
+            is_native=False,
+        )
+
+        self.assertIsInstance(parsed.metadata, MappingProxyType)
+        with self.assertRaises(TypeError):
+            parsed.metadata[ADDITIONAL_CONTEXT_KEY] = "different"
+
+    def test_rule_entry_itself_is_frozen(self):
+        """
+        Given a RuleEntry
+        When one of its fields is assigned
+        Then it raises FrozenInstanceError -- the entry's own immutability is
+             a separate mechanism from the MappingProxyType wrapping its
+             metadata, and configuration layers are shared across consumers
+        """
+        entry = RuleEntry(pattern="Bash(git *)")
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            entry.pattern = "Bash(rm -rf /)"
+
+    def test_identity_is_independent_of_metadata_insertion_order(self):
+        """
+        Given two RuleEntry objects whose metadata holds the same pairs but
+             was built in different key insertion orders
+        When identity(), hash() and set membership are compared
+        Then all three treat them as one entry -- identity() canonicalises via
+             json.dumps(sort_keys=True); without it two entries that compare
+             EQUAL would hash differently, breaking merge_entries' dedup
+        """
+        entry_a = RuleEntry(
+            pattern="Bash(git *)",
+            metadata=MappingProxyType({"alpha": 1, "beta": 2}),
+        )
+        entry_b = RuleEntry(
+            pattern="Bash(git *)",
+            metadata=MappingProxyType({"beta": 2, "alpha": 1}),
+        )
+
+        self.assertEqual(entry_a, entry_b)
+        self.assertEqual(entry_a.identity(), entry_b.identity())
+        self.assertEqual(hash(entry_a), hash(entry_b))
+        self.assertEqual(len({entry_a, entry_b}), 1)
 
     def test_entries_differing_only_in_raw_compare_equal(self):
         """
@@ -861,9 +1038,11 @@ class TestMergeEntries(unittest.TestCase):
         Given two structured entries that are LITERALLY identical (same
              pattern, same metadata)
         When merge_entries is called
-        Then they collapse to a single entry with no conflict -- the
-             identity()-based fast path inside merge_entries, distinct from
-             the union-merge path
+        Then the survivor is the FIRST INPUT OBJECT ITSELF, with no conflict
+             -- identity by `is`, not merely by equality, because the
+             union-merge path would produce an equal-but-distinct RuleEntry
+             from the same inputs, and equality alone cannot tell the two
+             paths apart
         """
         entry_a = RuleEntry(
             pattern="Bash(git push:*)",
@@ -877,6 +1056,7 @@ class TestMergeEntries(unittest.TestCase):
         outcome = merge_entries([entry_a, entry_b])
 
         self.assertEqual(len(outcome.entries), 1)
+        self.assertIs(outcome.entries[0], entry_a)
         self.assertEqual(outcome.conflicts, ())
 
     def test_different_patterns_are_never_merged_together(self):
@@ -933,7 +1113,10 @@ class TestMergeEntries(unittest.TestCase):
         Given a MergeConflict record produced by a real conflict
         When its fields are inspected
         Then it exposes pattern (str), key (str), and entries (tuple of the
-             conflicting RuleEntry objects) -- and is itself immutable
+             conflicting RuleEntry objects), and assignment raises
+             FrozenInstanceError SPECIFICALLY -- a bare assertRaises(Exception)
+             is also satisfied by an unrelated AttributeError from a renamed
+             or missing attribute, so it cannot tell "frozen" from "broken"
         """
         entry_a = RuleEntry(
             pattern="Bash(git push:*)",
@@ -947,7 +1130,14 @@ class TestMergeEntries(unittest.TestCase):
         conflict = outcome.conflicts[0]
 
         self.assertIsInstance(conflict, MergeConflict)
-        with self.assertRaises(Exception):
+        self.assertIsInstance(conflict.pattern, str)
+        self.assertEqual(conflict.pattern, "Bash(git push:*)")
+        self.assertIsInstance(conflict.key, str)
+        self.assertEqual(conflict.key, "additionalContext")
+        self.assertIsInstance(conflict.entries, tuple)
+        self.assertEqual(conflict.entries, (entry_a, entry_b))
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
             conflict.key = "somethingElse"
 
 

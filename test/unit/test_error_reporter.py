@@ -2,13 +2,16 @@
 
 import io
 import unittest
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from toolguard import error_log, error_reporter
 from toolguard.error_reporter import Reporter
+
+#: The prefix `Reporter._dispatch` prints when the log call itself raised.
+LOG_FAILURE_PREFIX = "Warning: error reporter failed to write log:"
 
 
 @contextmanager
@@ -17,6 +20,30 @@ def _captured_stderr_reporter(log_dir):
     buf = io.StringIO()
     with redirect_stderr(buf):
         yield Reporter(log_dir=log_dir), buf
+
+
+@contextmanager
+def _captured_streams():
+    """Redirect both standard streams; yields ``(stdout_buffer, stderr_buffer)``."""
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        yield out, err
+
+
+class _RecordingReporter(Reporter):
+    """A `Reporter` that records the calls it receives, so a test can assert WHICH instance was reached."""
+
+    def __init__(self, log_dir=None):
+        super().__init__(log_dir=log_dir)
+        self.received = []
+
+    def notice(self, message):
+        self.received.append(("notice", message))
+        super().notice(message)
+
+    def warning(self, message, corrective_steps):
+        self.received.append(("warning", message))
+        super().warning(message, corrective_steps)
 
 
 class TestDefaultReporterHasNoLogDir(unittest.TestCase):
@@ -70,6 +97,49 @@ class TestDefaultReporterHasNoLogDir(unittest.TestCase):
         self.assertEqual(reporter.drain_claude_context(), "toolguard is broken")
 
 
+class TestNothingIsWrittenToStdout(unittest.TestCase):
+    """
+    stdout is the hook's decision channel, so no severity may print there.
+
+    The other tests here capture stderr with `redirect_stderr`, which is
+    satisfied by a report landing on NEITHER stream as well as by one landing
+    on stderr. These two watch both streams at once.
+    """
+
+    def test_no_severity_writes_to_stdout_when_logging_succeeds(self):
+        """
+        Given a Reporter with a resolvable log directory
+        When notice(), warning() and fault() are all called
+        Then stdout is empty and every message is on stderr
+        """
+        with TemporaryDirectory() as tmpdir:
+            reporter = Reporter(log_dir=Path(tmpdir))
+            with _captured_streams() as (out, err):
+                reporter.notice("a notice")
+                reporter.warning("a warning", "fix it")
+                reporter.fault("a fault", "investigate")
+
+        self.assertEqual(out.getvalue(), "")
+        for message in ("a notice", "a warning", "a fault"):
+            self.assertIn(message, err.getvalue())
+
+    def test_no_severity_writes_to_stdout_on_the_stderr_fallback(self):
+        """
+        Given a Reporter with no log_dir, so every severity takes the stderr fallback
+        When notice(), warning() and fault() are all called
+        Then stdout is empty and every message is on stderr
+        """
+        reporter = Reporter()
+        with _captured_streams() as (out, err):
+            reporter.notice("a notice")
+            reporter.warning("a warning", "fix it")
+            reporter.fault("a fault", "investigate")
+
+        self.assertEqual(out.getvalue(), "")
+        for message in ("a notice", "a warning", "a fault"):
+            self.assertIn(message, err.getvalue())
+
+
 class TestReporterRoutesWarning(unittest.TestCase):
     """A warning, with a resolvable log directory."""
 
@@ -90,6 +160,7 @@ class TestReporterRoutesWarning(unittest.TestCase):
             self.assertIn("bad config", stderr_text)
             self.assertIn("fix the file", stderr_text)
             self.assertEqual(stderr_text.count("bad config"), 1)
+            self.assertNotIn(LOG_FAILURE_PREFIX, stderr_text)
 
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)
@@ -107,7 +178,8 @@ class TestReporterRoutesWarning(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             reporter = Reporter(log_dir=Path(tmpdir))
-            reporter.warning("bad config", "fix the file")
+            with redirect_stderr(io.StringIO()):
+                reporter.warning("bad config", "fix the file")
             self.assertIsNone(reporter.drain_claude_context())
 
 
@@ -145,7 +217,8 @@ class TestReporterRoutesFault(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             reporter = Reporter(log_dir=Path(tmpdir))
-            reporter.fault("boom", "fix it")
+            with redirect_stderr(io.StringIO()):
+                reporter.fault("boom", "fix it")
             self.assertIsNotNone(reporter.drain_claude_context())
             self.assertIsNone(reporter.drain_claude_context())
 
@@ -157,8 +230,9 @@ class TestReporterRoutesFault(unittest.TestCase):
         """
         with TemporaryDirectory() as tmpdir:
             reporter = Reporter(log_dir=Path(tmpdir))
-            reporter.fault("first", "a")
-            reporter.fault("second", "b")
+            with redirect_stderr(io.StringIO()):
+                reporter.fault("first", "a")
+                reporter.fault("second", "b")
             text = reporter.drain_claude_context()
 
         self.assertIsNotNone(text)
@@ -186,21 +260,31 @@ class TestReporterRoutesNotice(unittest.TestCase):
             self.assertIsNone(claude_text)
 
 
-class TestLogDirectoryUnresolvable(unittest.TestCase):
-    """The log directory does not exist / cannot be written to."""
+class TestMissingLogDirectoryIsCreated(unittest.TestCase):
+    """A log directory that does not exist YET is created, not degraded away from."""
 
-    def test_unresolvable_log_dir_falls_back_to_stderr_without_raising(self):
+    def test_a_log_dir_that_does_not_exist_yet_is_created_and_written(self):
         """
         Given the Reporter's log_dir does not exist
         When warning() is called
-        Then it does not raise, and stderr still carries the message
+        Then the directory is created, the warning lands in a log file inside
+             it, and neither failure path says anything on stderr -- no
+             degradation happened
         """
         with TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "does-not-exist"
             with _captured_stderr_reporter(missing) as (reporter, buf):
                 reporter.warning("bad config", "fix the file")
 
-            self.assertIn("bad config", buf.getvalue())
+            self.assertTrue(missing.is_dir())
+            warning_files = list(missing.glob("toolguard-warning-*.md"))
+            self.assertEqual(len(warning_files), 1)
+            self.assertIn("bad config", warning_files[0].read_text())
+
+            stderr_text = buf.getvalue()
+            self.assertIn("bad config", stderr_text)
+            self.assertNotIn(LOG_FAILURE_PREFIX, stderr_text)
+            self.assertNotIn("Failed to write to log file", stderr_text)
 
 
 class TestLogWriteFailureDegradesToStderr(unittest.TestCase):
@@ -211,7 +295,10 @@ class TestLogWriteFailureDegradesToStderr(unittest.TestCase):
         Given the Reporter's "log directory" is actually a regular file (so
             the log stream's own mkdir() raises instead of writing)
         When fault() is called
-        Then no exception propagates, and stderr still carries the message
+        Then no exception propagates, stderr carries both the message and the
+             reporter's own report of the failed log write, nothing was
+             written next to the occupied path, and the fault still reaches
+             Claude
         """
         with TemporaryDirectory() as tmpdir:
             not_a_directory = Path(tmpdir) / "log_dir_is_a_file"
@@ -219,8 +306,49 @@ class TestLogWriteFailureDegradesToStderr(unittest.TestCase):
 
             with _captured_stderr_reporter(not_a_directory) as (reporter, buf):
                 reporter.fault("toolguard is broken", "investigate")
+                claude_text = reporter.drain_claude_context()
 
-            self.assertIn("toolguard is broken", buf.getvalue())
+            stderr_text = buf.getvalue()
+            self.assertIn("toolguard is broken", stderr_text)
+            self.assertIn("investigate", stderr_text)
+            self.assertIn(LOG_FAILURE_PREFIX, stderr_text)
+
+            self.assertEqual(not_a_directory.read_text(), "occupied")
+            self.assertEqual(
+                [p.name for p in Path(tmpdir).iterdir()], ["log_dir_is_a_file"]
+            )
+            self.assertEqual(claude_text, "toolguard is broken")
+
+
+class TestLogDirIsRefinedInPlace(unittest.TestCase):
+    """`log_dir` is a plain mutable attribute -- `hook.main()` resolves it in two stages on ONE Reporter."""
+
+    def test_a_log_dir_set_after_construction_takes_effect(self):
+        """
+        Given a Reporter that reported a fault before its log_dir was known
+        When log_dir is assigned afterwards and a second fault is reported
+        Then only the second fault reached the log file, while the Claude
+             buffer still holds both -- the reporter reads log_dir per report,
+             and refining it neither replaces the instance nor drops the buffer
+        """
+        with TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            reporter = Reporter()
+            with redirect_stderr(io.StringIO()):
+                reporter.fault("before the log dir resolved", "investigate")
+                reporter.log_dir = log_dir
+                reporter.fault("after the log dir resolved", "investigate")
+
+            error_files = list(log_dir.glob("toolguard-error-*.md"))
+            self.assertEqual(len(error_files), 1)
+            logged = error_files[0].read_text()
+            self.assertIn("after the log dir resolved", logged)
+            self.assertNotIn("before the log dir resolved", logged)
+
+            claude_text = reporter.drain_claude_context()
+            self.assertIsNotNone(claude_text)
+            self.assertIn("before the log dir resolved", claude_text)
+            self.assertIn("after the log dir resolved", claude_text)
 
 
 class TestReportersDoNotShareState(unittest.TestCase):
@@ -230,19 +358,24 @@ class TestReportersDoNotShareState(unittest.TestCase):
         """
         Given a first Reporter reported a fault and was never drained
         When a second, separate Reporter is constructed
-        Then the second Reporter's Claude buffer is empty -- the first
-             Reporter's unfinished state does not leak into it
+        Then the second Reporter's Claude buffer is empty while the first
+             still holds its own message -- the first Reporter's unfinished
+             state neither leaks into the second nor is consumed by it
         """
         with TemporaryDirectory() as tmpdir:
             first = Reporter(log_dir=Path(tmpdir))
-            first.fault("leftover from the first reporter", "n/a")
+            with redirect_stderr(io.StringIO()):
+                first.fault("leftover from the first reporter", "n/a")
 
             second = Reporter(log_dir=Path(tmpdir))
             self.assertIsNone(second.drain_claude_context())
+            self.assertEqual(
+                first.drain_claude_context(), "leftover from the first reporter"
+            )
 
 
 class TestFallbackShapeMatchesTheLoggedEcho(unittest.TestCase):
-    """A reader of stderr cannot tell whether the log write happened."""
+    """A reader of stderr cannot tell whether the log write happened -- with one documented exception."""
 
     def test_warning_stderr_is_identical_logged_or_degraded(self):
         """
@@ -262,6 +395,28 @@ class TestFallbackShapeMatchesTheLoggedEcho(unittest.TestCase):
 
         self.assertEqual(logged_buf.getvalue(), degraded_buf.getvalue())
 
+    def test_empty_corrective_steps_is_the_one_documented_divergence(self):
+        """
+        Given a warning with EMPTY corrective steps, reported once with a log
+            directory and once without
+        When each is captured on its own stderr
+        Then the logged one still prints the corrective-steps line and the
+             degraded one omits it -- the single case where the two shapes
+             differ, per _print_fallback's docstring
+        """
+        with TemporaryDirectory() as tmpdir:
+            with _captured_stderr_reporter(Path(tmpdir)) as (reporter, logged_buf):
+                reporter.warning("bad config", "")
+
+        degraded_buf = io.StringIO()
+        with redirect_stderr(degraded_buf):
+            Reporter().warning("bad config", "")
+
+        self.assertEqual(
+            logged_buf.getvalue(), "[WARNING] bad config\nCorrective steps: \n"
+        )
+        self.assertEqual(degraded_buf.getvalue(), "[WARNING] bad config\n")
+
 
 class TestRoutingLooksUpLogFnByName(unittest.TestCase):
     """`_ROUTING` must resolve `error_log`'s functions at dispatch time, not bind them at import."""
@@ -272,7 +427,9 @@ class TestRoutingLooksUpLogFnByName(unittest.TestCase):
             AFTER `error_reporter` was already imported
         When warning() is called on a Reporter with a resolvable log directory
         Then the stand-in is called, not the original -- proving the
-             reporter looks the function up at dispatch time
+             reporter looks the function up at dispatch time. The absent log
+             file is the other half of that proof: the real log_warning did
+             not also run
         """
         calls = []
 
@@ -280,10 +437,15 @@ class TestRoutingLooksUpLogFnByName(unittest.TestCase):
             calls.append(message)
 
         with TemporaryDirectory() as tmpdir:
-            with patch.object(error_log, "log_warning", side_effect=_stand_in):
-                Reporter(log_dir=Path(tmpdir)).warning("bad config", "fix the file")
+            log_dir = Path(tmpdir)
+            with patch.object(
+                error_log, "log_warning", side_effect=_stand_in
+            ) as mock_log_warning:
+                Reporter(log_dir=log_dir).warning("bad config", "fix the file")
 
-        self.assertEqual(calls, ["bad config"])
+            self.assertTrue(mock_log_warning.called)
+            self.assertEqual(calls, ["bad config"])
+            self.assertEqual(list(log_dir.iterdir()), [])
 
 
 class TestActiveRegistersTheAmbientReporter(unittest.TestCase):
@@ -298,35 +460,43 @@ class TestActiveRegistersTheAmbientReporter(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             reporter = Reporter(log_dir=log_dir)
-            with error_reporter.active(reporter):
-                error_reporter.report_warning("bad config", "fix the file")
+            with redirect_stderr(io.StringIO()):
+                with error_reporter.active(reporter):
+                    error_reporter.report_warning("bad config", "fix the file")
 
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)
+            self.assertIn("bad config", warning_files[0].read_text())
 
     def test_report_notice_routes_through_the_registered_reporter(self):
         """
         Given a Reporter is registered via active()
         When the module-level report_notice() is called
-        Then it reaches that Reporter's stderr fallback (notice has no log
-             stream), not a bare unregistered default
+        Then that very instance receives the call. Identity is the only
+             observable here: notice has no log stream, so a registered
+             Reporter and an unregistered default emit identical stderr
         """
-        buf = io.StringIO()
         with TemporaryDirectory() as tmpdir:
-            reporter = Reporter(log_dir=Path(tmpdir))
-            with redirect_stderr(buf):
+            reporter = _RecordingReporter(log_dir=Path(tmpdir))
+            with _captured_streams() as (out, err):
                 with error_reporter.active(reporter):
                     error_reporter.report_notice("migration running")
 
-        self.assertEqual(buf.getvalue(), "migration running\n")
+        self.assertEqual(reporter.received, [("notice", "migration running")])
+        self.assertEqual(err.getvalue(), "migration running\n")
+        self.assertEqual(out.getvalue(), "")
 
     def test_no_reporter_registered_falls_back_to_the_default(self):
         """
-        Given no Reporter has ever been registered via active()
+        Given no Reporter is currently registered via active()
         When report_warning() is called
-        Then it degrades to the bare stderr-only default (a plain
-             `Reporter()`, no log_dir)
+        Then it degrades to the stderr-only default -- a `Reporter` whose
+             log_dir is None. The binding is asserted directly because a
+             default holding a log directory would produce identical stderr
         """
+        self.assertIsInstance(error_reporter._active, Reporter)
+        self.assertIsNone(error_reporter._active.log_dir)
+
         buf = io.StringIO()
         with redirect_stderr(buf):
             error_reporter.report_warning("unregistered", "n/a")
@@ -337,19 +507,26 @@ class TestActiveRegistersTheAmbientReporter(unittest.TestCase):
 
     def test_active_restores_the_previous_registration_on_exit(self):
         """
-        Given a Reporter is registered via active()
-        When the with-block exits
-        Then report_warning() afterward falls back to the default again --
-             no leak into the next call
+        Given a Reporter with a log directory is registered via active()
+        When the with-block exits and report_warning() is called again
+        Then the exited Reporter receives nothing and its log directory stays
+             empty. Its stderr shape cannot carry this: a leaked registration
+             prints the same bytes the default does
         """
         with TemporaryDirectory() as tmpdir:
-            with error_reporter.active(Reporter(log_dir=Path(tmpdir))):
-                pass
+            log_dir = Path(tmpdir)
+            registered = _RecordingReporter(log_dir=log_dir)
+            with redirect_stderr(io.StringIO()):
+                with error_reporter.active(registered):
+                    pass
 
-            buf = io.StringIO()
-            with redirect_stderr(buf):
-                error_reporter.report_warning("after the block", "n/a")
+                registered.received.clear()
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    error_reporter.report_warning("after the block", "n/a")
 
+            self.assertEqual(registered.received, [])
+            self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
             self.assertEqual(
                 buf.getvalue(), "[WARNING] after the block\nCorrective steps: n/a\n"
             )
@@ -358,38 +535,55 @@ class TestActiveRegistersTheAmbientReporter(unittest.TestCase):
         """
         Given an outer Reporter is registered via active()
         When a nested active() registers an inner Reporter and exits
-        Then the outer Reporter is in effect again afterward (LIFO restore)
+        Then each Reporter's log stream holds only its own message (LIFO restore)
         """
         with TemporaryDirectory() as outer_dir, TemporaryDirectory() as inner_dir:
             outer = Reporter(log_dir=Path(outer_dir))
-            with error_reporter.active(outer):
-                with error_reporter.active(Reporter(log_dir=Path(inner_dir))):
-                    error_reporter.report_warning("inner", "n/a")
+            with redirect_stderr(io.StringIO()):
+                with error_reporter.active(outer):
+                    with error_reporter.active(Reporter(log_dir=Path(inner_dir))):
+                        error_reporter.report_warning("inner", "n/a")
 
-                error_reporter.report_warning("outer", "n/a")
+                    error_reporter.report_warning("outer", "n/a")
 
-            self.assertTrue(list(Path(inner_dir).glob("toolguard-warning-*.md")))
-            self.assertTrue(list(Path(outer_dir).glob("toolguard-warning-*.md")))
+            inner_text = _only_warning_log(self, Path(inner_dir)).read_text()
+            outer_text = _only_warning_log(self, Path(outer_dir)).read_text()
+            self.assertIn("inner", inner_text)
+            self.assertNotIn("outer", inner_text)
+            self.assertIn("outer", outer_text)
+            self.assertNotIn("inner", outer_text)
 
     def test_active_restores_on_exception(self):
         """
-        Given a Reporter is registered via active()
+        Given a Reporter with a log directory is registered via active()
         When the with-block raises
-        Then the previous registration is still restored -- report_warning()
-             afterward falls back to the default, not the exited registration
+        Then the registration is still undone -- the exited Reporter receives
+             nothing afterward and its log directory stays empty
         """
         with TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            registered = _RecordingReporter(log_dir=log_dir)
             with self.assertRaises(RuntimeError):
-                with error_reporter.active(Reporter(log_dir=Path(tmpdir))):
+                with error_reporter.active(registered):
                     raise RuntimeError("boom")
 
+            registered.received.clear()
             buf = io.StringIO()
             with redirect_stderr(buf):
                 error_reporter.report_warning("after the crash", "n/a")
 
+            self.assertEqual(registered.received, [])
+            self.assertEqual(list(log_dir.glob("toolguard-warning-*.md")), [])
             self.assertEqual(
                 buf.getvalue(), "[WARNING] after the crash\nCorrective steps: n/a\n"
             )
+
+
+def _only_warning_log(test_case, log_dir):
+    """Return the single warning log file in *log_dir*, failing the test if there is not exactly one."""
+    files = list(log_dir.glob("toolguard-warning-*.md"))
+    test_case.assertEqual(len(files), 1, f"expected one warning log in {log_dir}")
+    return files[0]
 
 
 if __name__ == "__main__":

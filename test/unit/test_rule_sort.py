@@ -647,15 +647,21 @@ class TestReassemblePermissionsSectionRoundTrip(unittest.TestCase):
         self.assertNotIn("deny", reassembled)
         self.assertNotIn("ask", reassembled)
 
-    def test_comment_before_first_rule_stays_anchored_to_top_after_reorder(self):
+    def test_comment_before_first_rule_travels_with_its_own_rule(self):
         """
-        Given a comment block before the FIRST (unsorted-order) rule, where
-            sorting will reorder that rule away from the top
+        Given a comment block describing the FIRST (unsorted-order) rule,
+            where sorting will move that rule away from the top
         When the section is parsed and reassembled with auto_sort=True
-        Then the comment block stays pinned at the top of the list (anchored
-            to the SECTION, not "attached" and traveling with its original
-            rule) -- this matches the parser's own documented "anchored to the
-            top" behaviour for pre-first-rule comments, not a bug
+        Then the comment moves with the rule it describes -- "about the zebra
+            rule" still sits directly above zebra, now below apple
+
+        RED until proposed ticket 24's second finding lands. Today the block
+        stays pinned to the top of the list and ends up annotating apple: a
+        safety note ("NEVER remove: this is what blocks the force push")
+        silently re-attributed to a rule it does not describe, which a reader
+        trusts. This is the same guarantee
+        test_comment_on_a_non_first_rule_travels_with_that_rule_after_reorder
+        already holds the code to for every other position.
         """
         text = (
             "[permissions]\n"
@@ -675,12 +681,133 @@ class TestReassemblePermissionsSectionRoundTrip(unittest.TestCase):
         expected = (
             "[permissions]\n"
             "allow = [\n"
-            "  # about the zebra rule\n"
             '  "Bash(apple:*)",\n'
+            "  # about the zebra rule\n"
             '  "Bash(zebra:*)",\n'
             "]\n"
         )
         self.assertEqual(reassembled, expected)
+
+    def test_comment_on_a_non_first_rule_travels_with_that_rule_after_reorder(self):
+        """
+        Given a comment block attached to a rule that is NOT the first in the
+            file, where sorting moves that rule to a different position
+        When the section is parsed and reassembled with auto_sort=True
+        Then the comment moves with its own rule and still sits directly
+            above it -- the guarantee reassemble_permissions_section()
+            documents, and the counterpart to the pre-first-rule case above
+
+        The rule is chosen to sort into the MIDDLE, so "the comment travelled"
+        and "the comment was pinned to the top" produce different text.
+        """
+        text = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(zzz:*)",\n'
+            "  # about the mmm rule\n"
+            '  "Bash(mmm:*)",\n'
+            '  "Bash(aaa:*)",\n'
+            "]\n"
+        )
+        parsed = parse_permissions_section_with_comments(text)
+        reassembled = reassemble_permissions_section(
+            parsed,
+            {
+                "allow": ["Bash(zzz:*)", "Bash(mmm:*)", "Bash(aaa:*)"],
+                "deny": [],
+                "ask": [],
+            },
+        )
+        expected = (
+            "[permissions]\n"
+            "allow = [\n"
+            '  "Bash(aaa:*)",\n'
+            "  # about the mmm rule\n"
+            '  "Bash(mmm:*)",\n'
+            '  "Bash(zzz:*)",\n'
+            "]\n"
+        )
+        self.assertEqual(reassembled, expected)
+
+    def test_entry_absent_from_the_file_is_rendered_fresh_with_indent_and_comma(self):
+        """
+        Given new_permissions containing a pattern that does NOT appear in the
+            parsed section, so there is no original source line to replay
+        When the section is reassembled
+        Then the new entry is rendered through render_toml_entry() with the
+            list's two-space indent and a delimiting comma, and the result
+            parses as TOML with both patterns present
+        """
+        text = '[permissions]\nallow = [\n  "Bash(zz:*)",\n]\n'
+        parsed = parse_permissions_section_with_comments(text)
+        reassembled = reassemble_permissions_section(
+            parsed, {"allow": ["Bash(zz:*)", "Bash(aa:*)"], "deny": [], "ask": []}
+        )
+        self.assertEqual(
+            reassembled,
+            '[permissions]\nallow = [\n  "Bash(aa:*)",\n  "Bash(zz:*)",\n]\n',
+        )
+        self.assertEqual(
+            tomllib.loads(reassembled)["permissions"]["allow"],
+            ["Bash(aa:*)", "Bash(zz:*)"],
+        )
+
+    def test_synthesized_entry_is_re_rendered_rather_than_replayed(self):
+        """
+        Given a RuleEntry whose pattern IS in the file but which carries no
+            `raw` (has_raw False -- enrichment added since the file was read)
+        When the section is reassembled
+        Then the entry is rendered fresh from its metadata as a structured
+            entry, NOT replayed as the file's original bare-string line,
+            which would silently drop the new additionalContext
+        """
+        text = '[permissions]\nallow = [\n  "Bash(git:*)",\n]\n'
+        parsed = parse_permissions_section_with_comments(text)
+        entry = RuleEntry(
+            pattern="Bash(git:*)",
+            metadata=MappingProxyType({"additionalContext": "read-only"}),
+        )
+        self.assertFalse(entry.has_raw)
+        reassembled = reassemble_permissions_section(
+            parsed, {"allow": [entry], "deny": [], "ask": []}
+        )
+        self.assertEqual(
+            tomllib.loads(reassembled)["permissions"]["allow"],
+            [{"match": "Bash(git:*)", "additionalContext": "read-only"}],
+        )
+
+    def test_newline_in_additional_context_keeps_the_section_parseable(self):
+        """
+        Given an entry whose additionalContext contains a literal newline --
+            reachable from any JSON config holding "line1\\nline2"
+        When the section is reassembled
+        Then the emitted section is still valid TOML and the value round-trips
+
+        KNOWN FAILURE, proposed ticket 24 finding 1: _escape_toml_string
+        escapes only backslash and double quote, so the newline passes through
+        and the inline table spans two physical lines. tomllib then rejects the
+        whole file, and an unparseable config clamps every governed decision to
+        "ask" -- toolguard's own writer bricking its own permission system.
+        """
+        text = '[permissions]\nallow = [\n  "Bash(git:*)",\n]\n'
+        parsed = parse_permissions_section_with_comments(text)
+        entry = RuleEntry(
+            pattern="Bash(aaa:*)",
+            metadata=MappingProxyType({"additionalContext": "line1\nline2"}),
+        )
+        reassembled = reassemble_permissions_section(
+            parsed, {"allow": [entry, "Bash(git:*)"], "deny": [], "ask": []}
+        )
+        try:
+            loaded = tomllib.loads(reassembled)
+        except tomllib.TOMLDecodeError as exc:
+            self.fail(
+                f"reassembled section is not parseable TOML: {exc}\n{reassembled}"
+            )
+        self.assertEqual(
+            loaded["permissions"]["allow"][0],
+            {"match": "Bash(aaa:*)", "additionalContext": "line1\nline2"},
+        )
 
     def test_round_trip_byte_identical_for_unchanged_single_line_structured_entry(
         self,
@@ -689,18 +816,19 @@ class TestReassemblePermissionsSectionRoundTrip(unittest.TestCase):
         HEADLINE requirement (TOO-19 corrective change: single-line is the ONLY
             valid contract for a structured entry -- see this module's
             top-of-file docstring): given [permissions] section text with a
-            single-line structured entry (leading full-line comment above it,
-            trailing inline comment on its own -- only -- line)
+            single-line structured entry, a full-line comment above it and
+            another full-line comment below it
         When it is parsed and reassembled with a RuleEntry carrying the SAME
             pattern (and a recorded "raw", i.e. has_raw is True -- meaning
             nothing changed about it)
-        Then the reassembled text is byte-identical to the original input
+        Then the reassembled text is byte-identical to the original input,
+            bottom comment included
         """
         text = (
             "[permissions]\n"
             "allow = [\n"
             "  # about the structured rule\n"
-            '  { match = "Bash(git status)", additionalContext = "read-only" },'
+            '  { match = "Bash(git status)", additionalContext = "read-only" },\n'
             "  # trailing note\n"
             "]\n"
         )
@@ -1155,13 +1283,20 @@ class TestSplitArrayElements(unittest.TestCase):
 
     def test_element_positions_are_correct_offsets_into_input(self):
         """
-        Given a simple single-element input
+        Given a simple single-element input, '\\n  "Bash(ls:*)",\\n'
         When split_array_elements() is called
-        Then start_pos/end_pos slice exactly the element's own .text out of
-            the original input string
+        Then start_pos/end_pos are the value's ACTUAL offsets in the input --
+            3 and 15, past the newline and the two-space indent
+
+        The slice-equals-.text check alone cannot fail: .text is built as
+        text[start_pos:end_pos], so a scan that located the value one
+        character early would move both sides together and still agree. The
+        literal offsets are what pin the scan.
         """
         text = '\n  "Bash(ls:*)",\n'
         element = split_array_elements(text)[0]
+        self.assertEqual(element.start_pos, 3)
+        self.assertEqual(element.end_pos, 15)
         self.assertEqual(text[element.start_pos : element.end_pos], element.text)
 
     def test_leading_text_trailing_reconstruct_each_elements_own_segment(self):
@@ -1170,10 +1305,13 @@ class TestSplitArrayElements(unittest.TestCase):
         When its leading, text, and trailing are concatenated
         Then the result equals the original input's slice from segment_start
             to segment_end for that element (per-element reconstruction
-            invariant)
+            invariant), for each of the two elements the input contains --
+            the count is asserted because the invariant is checked in a loop,
+            which an empty result would satisfy vacuously
         """
         text = '\n  # a note\n  "Bash(a:*)",\n  "Bash(b:*)",  # trailing note\n'
         elements = split_array_elements(text)
+        self.assertEqual(len(elements), 2)
         for element in elements:
             self.assertEqual(
                 element.leading + element.text + element.trailing,
@@ -1352,14 +1490,70 @@ class TestRenderTomlEntry(unittest.TestCase):
         self.assertEqual(render_toml_entry(True), "true")
         self.assertEqual(render_toml_entry(False), "false")
 
-    def test_none_entry_value_renders_without_crashing(self):
+    def test_none_entry_value_renders_as_the_literal_string_None(self):
         """
         Given a None entry value (e.g. a parsed JSON `null` element)
         When render_toml_entry() is called
-        Then it renders via the scalar renderer's str() fallback instead of
-            raising AttributeError
+        Then it does not raise, but emits the STRING "None" -- a rule named
+            None, written into the config
+
+        Characterization of a known defect, not an endorsement: TOML has no
+        null, and the scalar renderer's str() fallback silently turns one into
+        a pattern. This is the corruption rule_entry._UNSET exists to prevent
+        one level up (follow-up-queue rows S1/RS2).
         """
         self.assertEqual(render_toml_entry(None), '"None"')
+
+    def test_double_quote_in_metadata_is_escaped_so_the_entry_reparses(self):
+        """
+        Given a structured entry whose additionalContext contains a double quote
+        When render_toml_entry() is called
+        Then the quote is backslash-escaped and tomllib reads the value back
+            unchanged
+        """
+        rendered = render_toml_entry(
+            {"match": "Bash(echo)", "additionalContext": 'say "hi" now'}
+        )
+        self.assertEqual(
+            rendered,
+            '{ match = "Bash(echo)", additionalContext = "say \\"hi\\" now" }',
+        )
+        self.assertEqual(
+            tomllib.loads(f"x = [{rendered}]")["x"][0],
+            {"match": "Bash(echo)", "additionalContext": 'say "hi" now'},
+        )
+
+    def test_metadata_key_needing_quoting_is_quoted_so_it_stays_one_key(self):
+        """
+        Given a metadata key that is not a bare TOML key -- here one
+            containing a dot
+        When render_toml_entry() is called
+        Then the key is emitted quoted and tomllib reads it back as that one
+            key; unquoted, TOML would read "note.text" as a dotted key and
+            silently turn it into a nested table
+        """
+        rendered = render_toml_entry({"match": "Bash(x)", "note.text": "y"})
+        self.assertEqual(rendered, '{ match = "Bash(x)", "note.text" = "y" }')
+        self.assertEqual(
+            tomllib.loads(f"x = [{rendered}]")["x"][0],
+            {"match": "Bash(x)", "note.text": "y"},
+        )
+
+    def test_backslash_in_pattern_is_escaped_so_the_entry_reparses(self):
+        """
+        Given a structured entry whose match pattern contains backslashes, as
+            every [regex] pattern does
+        When render_toml_entry() is called
+        Then each backslash is doubled and tomllib reads the pattern back
+            unchanged -- unescaped, "\\s" would come back as a TOML escape
+            sequence, not as the two characters the matcher needs
+        """
+        rendered = render_toml_entry({"match": r"Bash([regex]^git\s+status$)"})
+        self.assertEqual(rendered, '{ match = "Bash([regex]^git\\\\s+status$)" }')
+        self.assertEqual(
+            tomllib.loads(f"x = [{rendered}]")["x"][0],
+            {"match": r"Bash([regex]^git\s+status$)"},
+        )
 
     def test_list_entry_value_renders_without_crashing(self):
         """
@@ -1435,16 +1629,22 @@ class TestIsSyntheticPattern(unittest.TestCase):
     def test_synthetic_pattern_still_behaves_as_a_plain_string(self):
         """
         Given a SyntheticPattern value produced for a malformed entry
-        When used as a plain string (equality, dict key)
-        Then it behaves identically to an ordinary str -- the marker is
-            purely a type-level tag, not a behavioural difference, so every
-            existing consumer keying off parsed_value keeps working unchanged
+        When it is used as a dict key and looked up with an ORDINARY str of
+            the same text
+        Then the lookup succeeds -- the marker is purely a type-level tag, so
+            every existing consumer keying off parsed_value keeps working
+
+        Looking the key up with the SyntheticPattern itself cannot fail: any
+        object is retrievable by itself whatever its __eq__ and __hash__ do.
+        A plain str on one side of the lookup is what makes the claim testable.
         """
         text = '[permissions]\nallow = [\n  { additionalContext = "oops" },\n]\n'
         parsed = parse_permissions_section_with_comments(text)
         (_item_type, _content, value) = parsed["allow"][0]
-        self.assertEqual(value, repr({"additionalContext": "oops"}))
-        self.assertEqual({value: "ok"}[value], "ok")
+        plain = repr({"additionalContext": "oops"})
+        self.assertEqual(value, plain)
+        self.assertEqual({value: "ok"}[plain], "ok")
+        self.assertEqual({plain: "ok"}[value], "ok")
 
 
 if __name__ == "__main__":

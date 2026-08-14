@@ -4,11 +4,15 @@ definitions."""
 import ast
 import contextlib
 import io
+import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools import change_role_classifier as crc
 
@@ -1474,18 +1478,37 @@ class TestTestVsProductionAdversarialCases(unittest.TestCase):
             root.mkdir(parents=True)
             self.assertFalse(crc._root_forces_test_context(root))
 
-    def test_distant_unrelated_ancestor_named_test_does_not_force_test(self):
+    def test_distant_ancestor_named_test_does_not_force_test(self):
         """
-        Given a root whose analysis-relevant path is deeply nested, with "test" appearing only
-        as a DISTANT ancestor well outside the bounded trailing window
+        Given a root with a component that IS exactly "test", sitting further from the end than
+        the bounded trailing window reaches
         When the root-context check runs
-        Then it does NOT force test context -- the bound protects against distant,
-        unrelated ancestor collisions
+        Then it does NOT force test context -- the bound is what stops a distant, unrelated
+        ancestor from emptying an entire tree's production bucket
         """
-        distant = Path(
-            "/tmp/test_unrelated_ancestor_name/workspace/scratch/deep/candidate"
-        )
+        distant = Path("/tmp/test/workspace/scratch/deep/candidate")
         self.assertFalse(crc._root_forces_test_context(distant))
+
+    def test_ancestor_named_test_inside_the_window_does_force_test(self):
+        """
+        Given the same shape with "test" inside the trailing window
+        When the root-context check runs
+        Then it DOES force test context -- the control that keeps the bound test above from
+        passing for the wrong reason
+        """
+        self.assertTrue(crc._root_forces_test_context(Path("/tmp/a/test/b/c")))
+
+    def test_a_name_merely_beginning_with_test_never_forces_test(self):
+        """
+        Given a root whose ancestor is named `test_unrelated_ancestor_name` -- similar to, but
+        not equal to, "test"
+        When the root-context check runs
+        Then it does NOT force test context, at any distance: components are matched by exact
+        equality, never by prefix
+        """
+        self.assertFalse(
+            crc._root_forces_test_context(Path("/tmp/test_unrelated_ancestor_name/pkg"))
+        )
 
     def test_file_lists_are_printed_in_the_report(self):
         """
@@ -1624,6 +1647,655 @@ class TestSymlinkedDirectoryTraversal(unittest.TestCase):
             (root / "self_link").symlink_to(root, target_is_directory=True)
             found = crc.discover_python_files(root)
             self.assertIn(Path("a.py"), found)
+
+
+class _RuleCase(unittest.TestCase):
+    """Base for the per-rule tables below: one anchored occurrence, one exact role set.
+
+    Asserting the EXACT role tuple matters. Every rule in ``_governing_role`` falls through to
+    UNCLASSIFIED when it is absent, so an ``assertIn(ROLE_X, roles)`` written against a
+    single-role construct would still pass for several neighbouring rules; exact equality is
+    what makes one deleted rule fail one test."""
+
+    def roles_at(
+        self, source: str, needle: str, subject: str = "mode"
+    ) -> tuple[str, ...]:
+        analysis = _analyze(source, [subject])
+        hits = _at(analysis, source, needle)
+        self.assertEqual(
+            len(hits), 1, f"expected exactly one occurrence on the {needle!r} line"
+        )
+        return hits[0].roles
+
+
+class TestTerminalGoverningRules(_RuleCase):
+    """One test per ``_governing_role`` rule that decides a role outright."""
+
+    def test_not_operand_is_decision(self):
+        """
+        Given the subject as the operand of `not`
+        When analyzed
+        Then the occurrence is DECISION (negation is a test, unlike other unary operators)
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    if not mode:\n        pass\n", "not mode"),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_while_test_is_decision(self):
+        """
+        Given the subject as a `while` loop's test
+        When analyzed
+        Then the occurrence is DECISION
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    while mode:\n        break\n", "while mode:"
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_assert_test_is_decision(self):
+        """
+        Given the subject as an `assert` statement's condition
+        When analyzed
+        Then the occurrence is DECISION
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    assert mode\n", "assert mode"),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_assert_message_is_conduit_not_decision(self):
+        """
+        Given the subject as an `assert`'s MESSAGE rather than its condition
+        When analyzed
+        Then the occurrence is CONDUIT -- the message is carried, not tested
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode, c):\n    assert c, mode\n", "assert c, mode"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_comprehension_filter_is_decision(self):
+        """
+        Given the subject in a comprehension's `if` filter
+        When analyzed
+        Then the occurrence is DECISION
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, r):\n    return [i for i in r if mode]\n", "if mode]"
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_comprehension_iterable_is_conduit(self):
+        """
+        Given the subject as a comprehension's iterable
+        When analyzed
+        Then the occurrence is CONDUIT, not DECISION -- iterating is not testing
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    return [i for i in mode]\n", "in mode]"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_match_case_literal_pattern_is_decision(self):
+        """
+        Given the subject as the value of a match-case VALUE pattern (`case mod.mode:`)
+        When analyzed
+        Then the occurrence is DECISION -- the pattern is what the match compares against
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(c, mod):\n    match c:\n        case mod.mode:\n            pass\n",
+                "case mod.mode:",
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_annotated_assignment_into_a_local_is_conduit(self):
+        """
+        Given the subject as the value of `name: T = subject`
+        When analyzed
+        Then the occurrence is CONDUIT -- it flows into a plain local
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    flag: bool = mode\n    return flag\n",
+                "flag: bool = mode",
+            ),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_annotated_assignment_into_an_attribute_is_write(self):
+        """
+        Given the subject as the value of `obj.field: T = subject`
+        When analyzed
+        Then the occurrence is WRITE -- it is persisted into another object
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, o):\n    o.flag: bool = mode\n", "o.flag: bool = mode"
+            ),
+            (crc.ROLE_WRITE,),
+        )
+
+    def test_augmented_assignment_into_a_local_is_conduit(self):
+        """
+        Given the subject as the value of `local += subject`
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, total):\n    total += mode\n    return total\n",
+                "total += mode",
+            ),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_augmented_assignment_into_an_attribute_is_write(self):
+        """
+        Given the subject as the value of `obj.field += subject`
+        When analyzed
+        Then the occurrence is WRITE
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode, o):\n    o.total += mode\n", "o.total += mode"),
+            (crc.ROLE_WRITE,),
+        )
+
+    def test_return_value_is_conduit(self):
+        """
+        Given the subject as a `return` value
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    return mode\n", "return mode"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_yield_value_is_conduit(self):
+        """
+        Given the subject as a `yield` value
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    yield mode\n", "yield mode"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_yield_from_value_is_conduit(self):
+        """
+        Given the subject as a `yield from` value
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    yield from mode\n", "yield from mode"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_for_loop_iterable_is_conduit(self):
+        """
+        Given the subject as a `for` loop's iterable
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    for item in mode:\n        pass\n", "in mode:"
+            ),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_with_context_expression_is_conduit(self):
+        """
+        Given the subject as a `with` statement's context expression
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    with mode:\n        pass\n", "with mode:"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_raised_exception_is_conduit(self):
+        """
+        Given the subject as the exception of a `raise`
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    raise mode\n", "raise mode"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_raise_cause_is_conduit(self):
+        """
+        Given the subject as the `from` cause of a `raise`
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    raise ValueError() from mode\n", "from mode"
+            ),
+            (crc.ROLE_CONDUIT,),
+        )
+
+    def test_lambda_body_is_conduit(self):
+        """
+        Given the subject as the whole body of a lambda
+        When analyzed
+        Then the occurrence is CONDUIT
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    return lambda: mode\n", "lambda: mode"),
+            (crc.ROLE_CONDUIT,),
+        )
+
+
+class TestTransparentConstructsReachTheEnclosingDecision(_RuleCase):
+    """The rules that classify nothing themselves and only keep the walk going. Probing them
+    inside a branch test is what makes them observable: their absence stops the walk at
+    UNCLASSIFIED instead of reaching the enclosing `if`."""
+
+    def test_arithmetic_negation_is_walked_through(self):
+        """
+        Given `if -subject:`
+        When analyzed
+        Then the occurrence is DECISION -- a non-`not` unary operator decides nothing itself
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    if -mode:\n        pass\n", "if -mode:"),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_binary_operation_is_walked_through(self):
+        """
+        Given `if subject + 1:`
+        When analyzed
+        Then the occurrence is DECISION
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    if mode + 1:\n        pass\n", "if mode + 1:"
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_ternary_result_branch_is_walked_through(self):
+        """
+        Given the subject in a ternary's RESULT slot (not its test) inside a branch test
+        When analyzed
+        Then the occurrence is DECISION -- the ternary itself decides nothing about the subject
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, c):\n    if (mode if c else 0):\n        pass\n",
+                "if (mode if c else 0):",
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_dict_literal_key_and_value_are_walked_through(self):
+        """
+        Given the subject as a dict-literal key, and separately as a value, inside a branch test
+        When analyzed
+        Then both occurrences are DECISION
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    if {mode: 1}:\n        pass\n", "if {mode: 1}:"
+            ),
+            (crc.ROLE_DECISION,),
+        )
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    if {1: mode}:\n        pass\n", "if {1: mode}:"
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_list_and_tuple_literals_are_walked_through(self):
+        """
+        Given the subject inside a list literal, and separately a tuple literal, in a branch test
+        When analyzed
+        Then both occurrences are DECISION
+        """
+        self.assertEqual(
+            self.roles_at("def f(mode):\n    if [mode]:\n        pass\n", "if [mode]:"),
+            (crc.ROLE_DECISION,),
+        )
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode):\n    if (mode, 2):\n        pass\n", "if (mode, 2):"
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_starred_unpacking_is_walked_through(self):
+        """
+        Given `if g(*subject):`
+        When analyzed
+        Then the occurrence carries DECISION (the branch test) and CONDUIT (the call hop)
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, g):\n    if g(*mode):\n        pass\n", "if g(*mode):"
+            ),
+            (crc.ROLE_DECISION, crc.ROLE_CONDUIT),
+        )
+
+    def test_comprehension_element_is_walked_through(self):
+        """
+        Given the subject as the produced element of a list comprehension, and of a set
+        comprehension, each inside a branch test
+        When analyzed
+        Then both occurrences are DECISION
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, r):\n    if [mode for i in r]:\n        pass\n",
+                "if [mode for",
+            ),
+            (crc.ROLE_DECISION,),
+        )
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, r):\n    if {mode for i in r}:\n        pass\n",
+                "if {mode for",
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+    def test_dict_comprehension_key_and_value_are_walked_through(self):
+        """
+        Given the subject as a dict comprehension's key, and separately its value, in a branch
+        test
+        When analyzed
+        Then both occurrences are DECISION
+        """
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, r):\n    if {mode: 1 for i in r}:\n        pass\n",
+                "if {mode: 1 for",
+            ),
+            (crc.ROLE_DECISION,),
+        )
+        self.assertEqual(
+            self.roles_at(
+                "def f(mode, r):\n    if {1: mode for i in r}:\n        pass\n",
+                "if {1: mode for",
+            ),
+            (crc.ROLE_DECISION,),
+        )
+
+
+class TestRoleTupleIsOrderedByPrecedence(unittest.TestCase):
+    """An occurrence's `roles` tuple is sorted by the same precedence `primary_role` uses, so
+    the first element is always the strongest role. Nothing else pinned that order."""
+
+    def test_write_and_decision_are_ordered_decision_first(self):
+        """
+        Given a walrus binding that is itself the branch test (WRITE + DECISION)
+        When analyzed
+        Then the roles tuple reads (DECISION, WRITE), not the reverse
+        """
+        source = "def f(compute):\n    if (mode := compute()):\n        return True\n    return False\n"
+        analysis = _analyze(source, ["mode"])
+        hits = _at(analysis, source, "mode := compute()")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].roles, (crc.ROLE_DECISION, crc.ROLE_WRITE))
+
+    def test_conduit_and_decision_are_ordered_decision_first(self):
+        """
+        Given `if bool(subject):` (CONDUIT + DECISION)
+        When analyzed
+        Then the roles tuple reads (DECISION, CONDUIT), not the reverse
+        """
+        source = "x = None\nif bool(x):\n    pass\n"
+        analysis = _analyze(source, ["x"])
+        hits = _at(analysis, source, "if bool(x):")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].roles, (crc.ROLE_DECISION, crc.ROLE_CONDUIT))
+
+
+class TestDiscoveryExcludesBuildAndCacheDirectories(unittest.TestCase):
+    def test_excluded_directory_names_are_skipped(self):
+        """
+        Given a tree with a real module alongside `__pycache__/`, `.venv/` and `cover/` copies
+        When discover_python_files walks it
+        Then only the real module is returned -- build and cache noise is skipped
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("mode = True\n")
+            for junk in ("__pycache__", ".venv", "cover"):
+                (root / junk).mkdir()
+                (root / junk / "stale.py").write_text("mode = True\n")
+            self.assertEqual(crc.discover_python_files(root), [Path("a.py")])
+
+
+class TestClosureGrowthRulesIndividually(unittest.TestCase):
+    """Each growth rule admitted (or refused) on its own, so one rule's removal fails one test."""
+
+    def test_constant_assigned_from_a_tracked_constant_joins_by_name_alias(self):
+        """
+        Given `MODE_KEY = 'mode'` and a second constant `ALIASED = MODE_KEY`
+        When the closure is computed
+        Then ALIASED joins at hop 2 under the name-alias rule
+        """
+        trees = _trees({"a.py": "MODE_KEY = 'mode'\n\n\nALIASED = MODE_KEY\n"})
+        closure = crc.compute_symbol_closure(trees, ["mode"], hop_limit=2)
+        self.assertIn("ALIASED", closure.tracked_names)
+        self.assertEqual(closure.members["ALIASED"].hop, 2)
+        self.assertEqual(closure.members["ALIASED"].rule, crc.CLOSURE_RULE_NAME_ALIAS)
+
+    def test_a_constant_spelled_like_the_subject_stays_the_seed(self):
+        """
+        Given a module-level `mode = 'mode'` -- a constant whose NAME is the subject and whose
+        VALUE is the subject string, so the string-literal rule would re-admit it
+        When the closure is computed
+        Then it is still the hop-0 seed, not re-admitted at hop 1 under another rule
+        """
+        trees = _trees({"a.py": "mode = 'mode'\n"})
+        closure = crc.compute_symbol_closure(trees, ["mode"], hop_limit=2)
+        self.assertEqual(closure.members["mode"].hop, 0)
+        self.assertEqual(closure.members["mode"].rule, crc.CLOSURE_RULE_SEED)
+
+    def test_a_constant_containing_the_subject_as_a_substring_does_not_join(self):
+        """
+        Given a constant bound to a string that CONTAINS the subject as a substring
+        ('the_mode_extra' vs subject 'mode')
+        When the closure is computed
+        Then it does not join -- the string-literal rule is exact equality, not containment
+        """
+        trees = _trees({"a.py": "NEAR_KEY = 'the_mode_extra'\n"})
+        closure = crc.compute_symbol_closure(trees, ["mode"], hop_limit=2)
+        self.assertNotIn("NEAR_KEY", closure.tracked_names)
+
+    def test_default_hop_limit_stops_a_three_hop_chain(self):
+        """
+        Given a constant -> accessor -> wrapper chain, analyzed through the public entry point
+        WITHOUT passing closure_hop_limit (so the shipped default is what is exercised)
+        When run_single_tree analyzes it
+        Then the accessor is tracked and the wrapper is not -- the default is 2, pinned here
+        from above as well as below, since the parameter's default is captured at import and a
+        change to the constant is otherwise invisible
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text(
+                "KEY = 'flag'\n\n\ndef get_key():\n    return KEY\n\n\n"
+                "def wrapper():\n    return get_key\n"
+            )
+            result = crc.run_single_tree(root, ["flag"])
+            self.assertEqual(result.closure.hop_limit, 2)
+            self.assertIn("get_key", result.closure.tracked_names)
+            self.assertNotIn("wrapper", result.closure.tracked_names)
+            self.assertEqual(
+                [(c.name, c.would_be_hop) for c in result.closure.excluded],
+                [("wrapper", 3)],
+            )
+
+
+class TestGitRenameDetectionIsNotGitsDefault(unittest.TestCase):
+    """`-M` is redundant under git's own `diff.renames=true` default, so `TestGitRenameDetection`
+    passes with the flag removed. Forcing `diff.renames=false` is what makes the flag
+    load-bearing -- and it also removes this file's dependence on the developer's ~/.gitconfig,
+    since the classifier's own `git diff` inherits the ambient environment."""
+
+    def test_pure_rename_is_detected_even_when_git_config_disables_renames(self):
+        """
+        Given a throwaway repo with a byte-identical `git mv`, and a global git config that
+        turns rename detection OFF
+        When run_git_diff analyzes base..head
+        Then it still reports zero occurrences for the renamed file -- the tool's own `-M`,
+        not git's default, is what finds the pre-image
+        """
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            _git_run(repo, "init", "-q")
+            (repo / "a.py").write_text("mode = True\nif mode:\n    pass\n")
+            _git_run(repo, "add", "a.py")
+            _git_run(repo, "commit", "-q", "-m", "base")
+            base = _git_head(repo)
+            _git_run(repo, "mv", "a.py", "b.py")
+            _git_run(repo, "commit", "-q", "-m", "rename")
+            head = _git_head(repo)
+
+            config = repo / "no-renames.gitconfig"
+            config.write_text("[diff]\n\trenames = false\n")
+            with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
+                # Proves the patched config is actually consulted: without `-M`, this same
+                # diff must degrade to a delete plus an add. If the env patch were inert this
+                # control would report R100 and the test would fail here, not silently pass.
+                control = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repo),
+                        "diff",
+                        "--name-status",
+                        f"{base}..{head}",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.split()
+                self.assertEqual(control, ["D", "a.py", "A", "b.py"])
+
+                result = crc.run_git_diff(repo, base, head, ["mode"])
+
+            self.assertEqual(len(result.files_analyzed), 1)
+            self.assertEqual(result.files_analyzed[0].file, "b.py")
+            self.assertEqual(result.files_analyzed[0].occurrences, [])
+            self.assertEqual(result.removed_files, [])
+
+
+class TestMainEntryPoint(unittest.TestCase):
+    """`main` and `_parse_args` had no coverage at all."""
+
+    def _run_main(self, argv: list[str]) -> tuple[int, str]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = crc.main(argv)
+        return code, buf.getvalue()
+
+    def test_single_tree_run_reports_the_occurrence_it_found(self):
+        """
+        Given a one-file tree containing a decision on the subject
+        When main runs in --tree mode
+        Then it exits 0 and the printed report names the file and one analyzed file
+        """
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a.py").write_text("mode = True\nif mode:\n    pass\n")
+            code, out = self._run_main(["--subject", "mode", "--tree", d])
+        self.assertEqual(code, 0)
+        self.assertIn("files analyzed: 1", out)
+        self.assertIn("a.py", out)
+
+    def test_json_output_carries_the_same_occurrences_as_the_report(self):
+        """
+        Given the same one-file tree
+        When main runs with --json
+        Then the emitted JSON parses and its occurrence lines match the analysis directly
+        """
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a.py").write_text("mode = True\nif mode:\n    pass\n")
+            code, out = self._run_main(["--subject", "mode", "--tree", d, "--json"])
+            direct = crc.run_single_tree(Path(d), ["mode"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        expected = [o.line for fa in direct.files_analyzed for o in fa.occurrences]
+        self.assertEqual(expected, [1, 2])
+        self.assertEqual([o["line"] for o in payload["occurrences"]], expected)
+
+    def test_a_tree_that_does_not_exist_is_reported_as_an_error(self):
+        """
+        Given --tree pointing at a path that does not exist (a typo, or a stale path in a
+        script)
+        When main runs
+        Then it exits non-zero -- a measurement instrument must not answer "0 occurrences,
+        0 parse failures" for a tree it never opened
+
+        RED: the tool currently exits 0 and prints a complete-looking report of zeros, which is
+        indistinguishable from a genuine clean result on a real tree.
+        """
+        code, _out = self._run_main(
+            ["--subject", "mode", "--tree", "/nonexistent/definitely/not/here"]
+        )
+        self.assertNotEqual(code, 0)
+
+
+class TestReportedRuleTextMatchesTheClassifier(unittest.TestCase):
+    """`test_rule_text_is_present_in_report` only proves the key exists: it compares
+    `build_report`'s verbatim copy of TEST_VS_PRODUCTION_RULE against the same constant. The
+    text can go arbitrarily stale without failing anything, so the prose is checked against
+    `is_test_path`'s actual behaviour here instead."""
+
+    def test_every_directory_name_the_rule_text_names_is_classified_as_test(self):
+        """
+        Given the quoted directory names in TEST_VS_PRODUCTION_RULE
+        When each is used as a directory component of a path
+        Then is_test_path returns True for it, and the quoted set is exactly TEST_DIR_NAMES --
+        so the prose cannot claim a name the code does not implement, or omit one it does
+        """
+        quoted = set(re.findall(r"'([^']+)'", crc.TEST_VS_PRODUCTION_RULE))
+        directory_names = {q for q in quoted if "." not in q and "*" not in q}
+        self.assertEqual(directory_names, set(crc.TEST_DIR_NAMES))
+        for name in sorted(directory_names):
+            with self.subTest(directory=name):
+                self.assertTrue(crc.is_test_path(Path(name) / "module.py"))
+
+    def test_every_filename_the_rule_text_names_is_classified_as_test(self):
+        """
+        Given the quoted filenames and filename globs in TEST_VS_PRODUCTION_RULE
+        When each is used as a filename under a production directory
+        Then is_test_path returns True for it
+        """
+        quoted = set(re.findall(r"'([^']+)'", crc.TEST_VS_PRODUCTION_RULE))
+        filenames = {q for q in quoted if q.endswith(".py")}
+        self.assertEqual(filenames, {"conftest.py", "test_*.py", "*_test.py"})
+        for pattern in sorted(filenames):
+            with self.subTest(filename=pattern):
+                self.assertTrue(
+                    crc.is_test_path(Path("pkg") / pattern.replace("*", "thing"))
+                )
+
+    def test_a_production_path_matches_none_of_the_names_the_rule_text_lists(self):
+        """
+        Given an ordinary production path
+        When classified
+        Then it is production -- the control the two tests above need to not be vacuous
+        """
+        self.assertFalse(crc.is_test_path(Path("pkg") / "module.py"))
 
 
 if __name__ == "__main__":

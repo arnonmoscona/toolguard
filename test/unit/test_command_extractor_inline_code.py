@@ -8,7 +8,11 @@ forcing human review of foreign (non-bash) inline code such as
 
 import unittest
 
-from toolguard.parser.command_extractor import _detect_foreign_inline_code
+from toolguard.parser.command_extractor import (
+    LeafCommand,
+    _detect_foreign_inline_code,
+)
+from toolguard.parser.multiline import extract_structured
 
 
 class TestForeignInlineCodeBaseline(unittest.TestCase):
@@ -78,6 +82,24 @@ class TestForeignInlineCodeBaseline(unittest.TestCase):
         """
         self.assertTrue(_detect_foreign_inline_code('uv run python -c "print(1)"'))
 
+    def test_absolute_path_to_interpreter_detected(self):
+        """
+        Given `/usr/bin/python3 -c "code"` -- the interpreter named by an
+            absolute path rather than by a bare name
+        When _detect_foreign_inline_code inspects it
+        Then the path is stripped to its basename and it is recognised (True)
+        """
+        self.assertTrue(_detect_foreign_inline_code('/usr/bin/python3 -c "import os"'))
+
+    def test_versioned_interpreter_detected(self):
+        """
+        Given `python3.13 -c "code"` -- a version suffix on a known
+            interpreter family, which no enumerated name matches
+        When _detect_foreign_inline_code inspects it
+        Then the family prefix is recognised (True), with no version list to maintain
+        """
+        self.assertTrue(_detect_foreign_inline_code('python3.13 -c "import os"'))
+
     # --- Negative cases: must stay False (guard against over-detection) ---
 
     def test_python_script_file_not_flagged(self):
@@ -123,6 +145,26 @@ class TestForeignInlineCodeBaseline(unittest.TestCase):
         Then it is NOT flagged as inline code (False)
         """
         self.assertFalse(_detect_foreign_inline_code('git commit -m "x"'))
+
+    def test_name_merely_starting_with_an_interpreter_name_not_flagged(self):
+        """
+        Given `pythonic -c foo` -- a command whose name only starts with a
+            recognised interpreter family
+        When _detect_foreign_inline_code inspects it
+        Then it is NOT flagged (False): a family prefix must be followed by a
+            non-letter, so the version-suffix rule cannot swallow other commands
+        """
+        self.assertFalse(_detect_foreign_inline_code("pythonic -c foo"))
+
+    def test_inline_flag_of_a_different_executor_not_flagged(self):
+        """
+        Given `python -e "code"` -- an inline-code flag that belongs to node
+            and perl, not to python
+        When _detect_foreign_inline_code inspects it
+        Then it is NOT flagged (False): the flag table is consulted per
+            executor rather than as one pooled set of letters
+        """
+        self.assertFalse(_detect_foreign_inline_code('python -e "import os"'))
 
 
 class TestForeignInlineCodeBypasses(unittest.TestCase):
@@ -216,6 +258,24 @@ class TestForeignInlineCodeBypasses(unittest.TestCase):
         """
         self.assertTrue(_detect_foreign_inline_code('python -uc "import os"'))
 
+    def test_node_attached_dash_e_flag(self):
+        """
+        Given `node -e'console.log(1)'` -- the attached form on an executor
+            whose inline flag is -e rather than -c
+        When _detect_foreign_inline_code inspects it
+        Then it is recognised (True): the attached/bundled forms are not
+            specific to -c
+        """
+        self.assertTrue(_detect_foreign_inline_code("node -e'console.log(1)'"))
+
+    def test_perl_combined_short_flags(self):
+        """
+        Given `perl -we 'code'` (combined short flags -w and -e in one token)
+        When _detect_foreign_inline_code inspects it
+        Then it is recognised (True)
+        """
+        self.assertTrue(_detect_foreign_inline_code("perl -we 'print 1'"))
+
     def test_uv_run_python_intervening_flag(self):
         """
         Given `uv run python -u -c "code"` -- a wrapped executor AND an
@@ -226,18 +286,163 @@ class TestForeignInlineCodeBypasses(unittest.TestCase):
         """
         self.assertTrue(_detect_foreign_inline_code('uv run python -u -c "import os"'))
 
-    def test_python_dash_capital_x_dev_dash_c_KNOWN_LIMITATION(self):
+
+class TestForeignInlineCodeMissedForms(unittest.TestCase):
+    """Commands that carry foreign inline code and are NOT floored.
+
+    Every test here states the required behaviour and is expected to FAIL
+    against current code. Each is a way to run inline code past the ASK floor.
+    Do not weaken these to match what the detector does today.
+    """
+
+    def test_deep_short_flag_bundle(self):
+        """
+        Given `python -uBIc "code"` -- three short flags bundled ahead of -c,
+            one more than the token pattern allows before the code letter
+        When _detect_foreign_inline_code inspects it
+        Then it must be recognised (True); bundle depth is not a security boundary
+        """
+        self.assertTrue(_detect_foreign_inline_code('python -uBIc "import os"'))
+
+    def test_uppercase_inline_flag(self):
+        """
+        Given `perl -E 'say 1'` -- perl's other inline-code flag, which differs
+            from -e only in case
+        When _detect_foreign_inline_code inspects it
+        Then it must be recognised (True); the code letters are matched
+            case-sensitively today, so -E, php's -R and php's -B all escape
+        """
+        self.assertTrue(_detect_foreign_inline_code("perl -E 'say 1'"))
+
+    def test_long_form_inline_flag(self):
+        """
+        Given `node --eval "code"` -- the long spelling of node's -e
+        When _detect_foreign_inline_code inspects it
+        Then it must be recognised (True); the flag table and its token pattern
+            are short-form only, so `--eval` and node's -p escape as well
+        """
+        self.assertTrue(_detect_foreign_inline_code('node --eval "console.log(1)"'))
+
+    def test_flag_taking_a_separate_value_token(self):
         """
         Given `python -X dev -c "code"`, where -X takes its value as a separate
-            following token -- indistinguishable, under the "stop scanning at
-            the first non-flag token" rule that `-m mymod` requires, from a
-            module argument
+            following token
         When _detect_foreign_inline_code inspects it
-        Then it is NOT flagged (False) -- a known residual gap, not a
-            regression. Closing it needs a per-flag table of which flags
-            consume a following value token.
+        Then it must be recognised (True); scanning stops at the first non-flag
+            token, so any value-taking flag (-X, -W, node's -r, ruby's -E)
+            hides the inline code behind it. Closing this needs a per-flag
+            table of which flags consume a following token
         """
-        self.assertFalse(_detect_foreign_inline_code('python -X dev -c "import os"'))
+        self.assertTrue(_detect_foreign_inline_code('python -X dev -c "import os"'))
+
+    def test_awk_inline_program(self):
+        """
+        Given `awk '{print $1}' f` -- awk's inline program, which is a bare
+            argument rather than a flag value
+        When _detect_foreign_inline_code inspects it
+        Then it must be recognised (True). Detecting a bare program argument
+            needs a rule the flag scan cannot express, so the fix direction is
+            an open decision -- but the current answer is a false negative
+        """
+        self.assertTrue(_detect_foreign_inline_code("awk '{print $1}' f"))
+
+    def test_awk_program_from_a_file_is_not_inline(self):
+        """
+        Given `awk -f prog.awk f` -- awk's -f, which reads the program FROM A
+            FILE and is the opposite of inline code
+        When _detect_foreign_inline_code inspects it
+        Then it must NOT be flagged (False); the flag table maps awk to -f,
+            which is inverted, and gawk silently disagrees with awk today
+        """
+        self.assertFalse(_detect_foreign_inline_code("awk -f prog.awk f"))
+
+    def test_gawk_and_awk_agree(self):
+        """
+        Given the same `-f` program-file invocation spelled `awk` and `gawk`
+        When _detect_foreign_inline_code inspects both
+        Then they must agree; gawk is a recognised executor but has no flag
+            table entry, so it takes a different path from awk
+        """
+        self.assertEqual(
+            _detect_foreign_inline_code("awk -f prog.awk f"),
+            _detect_foreign_inline_code("gawk -f prog.awk f"),
+        )
+
+
+class TestForeignInlineCodeOverDetection(unittest.TestCase):
+    """The other direction: benign commands that must not be floored.
+
+    The executor scan is unanchored so that a wrapped interpreter is still
+    found. The wrapper cases below are what a fix for the first test must not
+    break.
+    """
+
+    def test_interpreter_name_as_an_argument_not_flagged(self):
+        """
+        Given `grep python -c file` -- `python` is grep's search pattern and
+            `-c` is grep's count flag; no interpreter runs
+        When _detect_foreign_inline_code inspects it
+        Then it must NOT be flagged (False). Every token is tested as an
+            executor and the flag scan then runs over the rest of the line, so
+            this benign command is floored today. Do not weaken this test; fix
+            it without breaking the two wrapper cases below
+        """
+        self.assertFalse(_detect_foreign_inline_code("grep python -c file"))
+
+    def test_wrapper_before_the_interpreter_still_flagged(self):
+        """
+        Given `timeout 5 python -c "code"` -- a wrapper command, its own
+            argument, then the real interpreter
+        When _detect_foreign_inline_code inspects it
+        Then it is recognised (True)
+        """
+        self.assertTrue(_detect_foreign_inline_code('timeout 5 python -c "import os"'))
+
+    def test_env_assignment_before_the_interpreter_still_flagged(self):
+        """
+        Given `env X=1 python -c "code"`
+        When _detect_foreign_inline_code inspects it
+        Then it is recognised (True)
+        """
+        self.assertTrue(_detect_foreign_inline_code('env X=1 python -c "import os"'))
+
+
+class TestInlineCodeFloorReachesTheLeaf(unittest.TestCase):
+    """The floor must survive the trip from detection to the emitted leaf.
+
+    Detection is a predicate; what governs a command is ``LeafCommand.ask_floor``.
+    These assert the exact leaf list, so an empty extraction or a parse failure
+    is distinguishable from the floor firing.
+    """
+
+    def test_bare_inline_code_leaf_carries_the_floor(self):
+        """
+        Given `python -c "import os"` on its own
+        When extract_structured decomposes it
+        Then it yields exactly one leaf, whole, carrying ask_floor
+        """
+        self.assertEqual(
+            extract_structured('python -c "import os"'),
+            [LeafCommand(text='python -c "import os"', ask_floor=True)],
+        )
+
+    def test_inline_code_in_an_if_condition_keeps_the_floor(self):
+        """
+        Given `if python -c "import os"; then :; fi` -- inline code in the
+            condition of an if
+        When extract_structured decomposes it
+        Then the condition leaf must carry ask_floor. It does not: the if path
+            builds its condition leaf directly instead of through the leaf
+            policy, so under a blanket allow the bare command asks and this one
+            is allowed. Do not weaken this test
+        """
+        self.assertEqual(
+            extract_structured('if python -c "import os"; then :; fi'),
+            [
+                LeafCommand(text='python -c "import os"', ask_floor=True),
+                LeafCommand(text=":", ask_floor=False),
+            ],
+        )
 
 
 if __name__ == "__main__":

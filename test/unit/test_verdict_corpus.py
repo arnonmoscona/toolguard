@@ -18,22 +18,30 @@ difference these tests catch is never an artifact of divergent scaffolding.
 
 import os
 import unittest
+from collections import defaultdict
 from unittest.mock import patch
 
 from test.verdict_corpus.fixture_loader import (
     CASES_PATH,
     E2E_CASES_PATH,
     E2E_GOLDENS_PATH,
+    FIXTURE_IDS,
     GOLDENS_PATH,
     ComparisonResult,
+    CompoundBreakdownMismatch,
     E2EComparisonResult,
+    ProseDiff,
+    VerdictMismatch,
     build_hook_payload,
     compare_e2e_goldens,
     compare_goldens,
     generate_e2e_goldens_in_memory,
     generate_goldens_in_memory,
+    load_fixture_configuration,
     read_jsonl,
 )
+from toolguard.constants import FILE_TOOLS
+from toolguard.file_matching import check_file_path_hard_deny
 from toolguard.tool_spec import ToolKind, ToolSpec
 
 #: Set to "1" to acknowledge already-reviewed TRACKED-tier differences without
@@ -319,6 +327,221 @@ class TestBuildHookPayloadPayloadKeySeam(unittest.TestCase):
                 "tool_name": "mcp__local-tools__checked_bash",
                 "tool_input": {"command": "ls"},
             },
+        )
+
+
+#: Committed corpus population, as a FLOOR. Every check above compares
+#: cases.jsonl against goldens.jsonl, so the two shrinking TOGETHER -- which is
+#: what `--extract` followed by `--generate` does on a tree whose logs/ is
+#: smaller or absent -- leaves both files mutually consistent and every other
+#: test in this module green. Measured 2026-08-13: dropping both files to 3200
+#: cases produced 4 passes and no skips. Raise these when the corpus grows;
+#: lowering one is a reviewed decision, not a repair.
+_MIN_CASES = 6401
+_MIN_E2E_CASES = 61
+
+#: Minimum surviving population per region of the decision space. A corpus that
+#: kept its total but lost, say, every compound case would still be a green
+#: regression net over nothing. Keys are ``"<kind>/<verdict>"`` plus the two
+#: structural regions; values are the counts committed alongside _MIN_CASES.
+_MIN_BY_REGION = {
+    "bash/allow": 5351,
+    "bash/ask": 129,
+    "bash/deny": 151,
+    "file_path/allow": 731,
+    "file_path/ask": 35,
+    "file_path/deny": 4,
+    "compound": 1066,
+    "override": 33,
+}
+
+
+def _regions(golden):
+    """Yield every :data:`_MIN_BY_REGION` key the golden record belongs to."""
+    kind = "file_path" if golden["tool"] in FILE_TOOLS else "bash"
+    yield f"{kind}/{golden['verdict']}"
+    if len(golden.get("sub_matches") or []) > 1:
+        yield "compound"
+    if golden.get("overrides"):
+        yield "override"
+
+
+class TestCorpusPopulation(unittest.TestCase):
+    """
+    Guards the corpus's SIZE and SPREAD, which every comparison above is blind
+    to by construction: they check cases against goldens, and a case that
+    exists in neither file is not a difference. Deliberately its own class with
+    no ``setUpClass`` -- :class:`TestVerdictCorpus` SKIPS on an empty corpus,
+    and a skip reports green.
+    """
+
+    def test_the_corpus_has_not_silently_shrunk(self):
+        """
+        Given the committed cases/goldens files for both corpora
+        When their record counts are compared to the committed floors
+        Then neither corpus has lost cases, and each still has one golden per case
+        """
+        cases = read_jsonl(CASES_PATH)
+        goldens = read_jsonl(GOLDENS_PATH)
+        e2e_cases = read_jsonl(E2E_CASES_PATH)
+        e2e_goldens = read_jsonl(E2E_GOLDENS_PATH)
+        self.assertGreaterEqual(
+            len(cases),
+            _MIN_CASES,
+            f"in-process corpus shrank to {len(cases)} cases -- regenerating "
+            "cases.jsonl and goldens.jsonl together hides this from every other "
+            "test here. Confirm the loss is intended before raising/lowering "
+            "_MIN_CASES.",
+        )
+        self.assertGreaterEqual(
+            len(e2e_cases),
+            _MIN_E2E_CASES,
+            f"end-to-end corpus shrank to {len(e2e_cases)} cases -- see _MIN_E2E_CASES.",
+        )
+        self.assertEqual(
+            len(cases), len(goldens), "cases.jsonl/goldens.jsonl differ in size"
+        )
+        self.assertEqual(
+            len(e2e_cases), len(e2e_goldens), "e2e cases/goldens differ in size"
+        )
+
+    def test_every_declared_fixture_is_exercised(self):
+        """
+        Given the fixture ids the corpus declares in FIXTURE_IDS
+        When each is looked for in cases.jsonl
+        Then every one has at least one case -- a fixture nothing replays
+             contributes no coverage while still reading as configured
+        """
+        exercised = {case["fixture"] for case in read_jsonl(CASES_PATH)}
+        self.assertEqual(
+            [],
+            [fixture for fixture in FIXTURE_IDS if fixture not in exercised],
+            "declared fixture(s) with no case in cases.jsonl",
+        )
+
+    def test_every_region_of_the_decision_space_is_still_populated(self):
+        """
+        Given every committed golden, bucketed by tool kind, verdict and shape
+        When each bucket's size is compared to its committed floor
+        Then no region of the decision space has been emptied out
+        """
+        populations = defaultdict(int)
+        for golden in read_jsonl(GOLDENS_PATH):
+            for region in _regions(golden):
+                populations[region] += 1
+        for region, minimum in sorted(_MIN_BY_REGION.items()):
+            with self.subTest(region=region):
+                self.assertGreaterEqual(
+                    populations[region],
+                    minimum,
+                    f"corpus coverage of {region!r} fell from {minimum} to "
+                    f"{populations[region]}",
+                )
+
+
+class TestProseAcknowledgementIsNarrow(unittest.TestCase):
+    """
+    ``TOOLGUARD_CORPUS_ACCEPT_PROSE=1`` must silence the TRACKED tier and
+    nothing else. It is the one switch that can turn a check here green without
+    a code change, and an exported one applies to every later run.
+    """
+
+    @staticmethod
+    def _mismatch_in_every_tier():
+        """A ComparisonResult carrying one difference of each tier."""
+        return ComparisonResult(
+            verdict_mismatches=[
+                VerdictMismatch("f", "Bash", "rm -rf /", "deny", "allow")
+            ],
+            breakdown_mismatches=[
+                CompoundBreakdownMismatch(
+                    "f", "Bash", "a && b", "sub_matches", [{}], []
+                )
+            ],
+            prose_diffs=[ProseDiff("f", "Bash", "ls", "matched_rule", "ls:*", None)],
+        )
+
+    def test_acknowledging_prose_does_not_silence_the_hard_tiers(self):
+        """
+        Given a comparison carrying a verdict, a breakdown AND a tracked difference
+        When TOOLGUARD_CORPUS_ACCEPT_PROSE=1 is set
+        Then both HARD checks still fail and only the tracked check goes quiet
+        """
+        with (
+            patch.object(TestVerdictCorpus, "result", self._mismatch_in_every_tier()),
+            patch.dict(os.environ, {_ACCEPT_PROSE_ENV_VAR: "1"}),
+        ):
+            case = TestVerdictCorpus("test_no_verdict_changed")
+            with self.assertRaises(AssertionError):
+                case.test_no_verdict_changed()
+            with self.assertRaises(AssertionError):
+                case.test_no_sub_command_breakdown_changed()
+            case.test_tracked_fields_unchanged_or_acknowledged()
+
+    def test_the_tracked_tier_fails_without_the_acknowledgement(self):
+        """
+        Given the same comparison, carrying a tracked difference
+        When TOOLGUARD_CORPUS_ACCEPT_PROSE is absent from the environment
+        Then the tracked check fails -- the acknowledgement above is what
+             silenced it, not the fixture being unable to produce a failure
+        """
+        with (
+            patch.object(TestVerdictCorpus, "result", self._mismatch_in_every_tier()),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            case = TestVerdictCorpus("test_tracked_fields_unchanged_or_acknowledged")
+            with self.assertRaises(AssertionError):
+                case.test_tracked_fields_unchanged_or_acknowledged()
+
+
+class TestFilePathHardDenyAttribution(unittest.TestCase):
+    """
+    A file-path hard-deny's deciding pattern must survive into the golden as
+    DATA. ``resolve_file_path_permission_detailed`` sets ``matched_rule=None``
+    on that branch, citing this corpus, so the pattern that refused the access
+    exists only inside the prose ``reason`` -- the tier this corpus's own
+    README says a refactor may legitimately reword.
+    """
+
+    def test_a_file_path_hard_deny_golden_records_the_deciding_pattern(self):
+        """
+        Given every committed golden that denies a file-path tool
+        When the deciding hard-deny pattern is recomputed from its own fixture
+        Then the golden's matched_rule carries that pattern rather than None
+        """
+        denied_by_fixture = defaultdict(list)
+        for golden in read_jsonl(GOLDENS_PATH):
+            if golden["tool"] in FILE_TOOLS and golden["verdict"] == "deny":
+                denied_by_fixture[golden["fixture"]].append(golden)
+        self.assertTrue(
+            denied_by_fixture,
+            "no file-path deny golden exists at all -- the corpus cannot see "
+            "this branch, let alone justify a design constraint on it",
+        )
+
+        unattributed = []
+        for fixture_id, goldens in sorted(denied_by_fixture.items()):
+            with load_fixture_configuration(fixture_id) as (config, _sanitize):
+                for golden in goldens:
+                    hard = check_file_path_hard_deny(
+                        golden["tool"], golden["target"], config, True
+                    )
+                    # None means the cascade denied instead; that branch does
+                    # pass matched_rule through, so it is not this gap.
+                    if (
+                        hard is not None
+                        and golden["matched_rule"] != hard.matched_pattern
+                    ):
+                        unattributed.append(
+                            f"  [{fixture_id}] {golden['tool']}({golden['target']!r}): "
+                            f"denied by {hard.matched_pattern!r}, golden records "
+                            f"{golden['matched_rule']!r}"
+                        )
+        self.assertEqual(
+            [],
+            unattributed,
+            "file-path hard-deny golden(s) do not record which pattern denied.\n"
+            + "\n".join(unattributed),
         )
 
 

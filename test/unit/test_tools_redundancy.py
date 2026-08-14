@@ -9,6 +9,8 @@ from typing import List, Optional
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.redundancy import (
+    _config_without_allow,
+    find_corpus_redundant_allows,
     find_redundancy,
     find_static_duplicates,
     find_static_duplicates_across_layers,
@@ -134,14 +136,17 @@ class TestFindStaticDuplicates(unittest.TestCase):
 
     def test_three_duplicates_flags_two(self):
         """
-        Given three identical patterns
+        Given three distinct spellings that all normalise to the same body
         When find_static_duplicates() is called
-        Then two findings are returned (the 2nd and 3rd occurrences)
+        Then the 2nd and 3rd are returned, both naming the FIRST as covered_by
         """
-        patterns = ["ls:*", "ls:*", "ls:*"]
+        patterns = ["ls :*", "ls:*", "ls  :*"]
         prov = _make_provenance()
         findings = find_static_duplicates(patterns, prov, "Bash", "allow")
         self.assertEqual(len(findings), 2)
+        self.assertEqual([f.redundant_pattern for f in findings], ["ls:*", "ls  :*"])
+        # First-seen, not previous-seen: the group's canonical never moves.
+        self.assertEqual([f.covered_by for f in findings], ["ls :*", "ls :*"])
 
     def test_finding_carries_correct_tool_and_list_type(self):
         """
@@ -156,13 +161,24 @@ class TestFindStaticDuplicates(unittest.TestCase):
         self.assertEqual(findings[0].tool, "Read")
         self.assertEqual(findings[0].list_type, "deny")
 
-    def test_empty_list_returns_empty(self):
+    def test_no_duplicate_possible_returns_empty(self):
         """
-        Given an empty pattern list
+        Given a pattern list too short to hold a duplicate -- empty, then one pattern
         When find_static_duplicates() is called
-        Then an empty list is returned
+        Then an empty list is returned for both
         """
-        findings = find_static_duplicates([], _make_provenance(), "Bash", "allow")
+        prov = _make_provenance()
+        self.assertEqual(find_static_duplicates([], prov, "Bash", "allow"), [])
+        self.assertEqual(find_static_duplicates(["ls:*"], prov, "Bash", "allow"), [])
+
+    def test_same_body_different_pattern_type_not_a_duplicate(self):
+        """
+        Given '[regex]git *' and 'git *' -- one body, two pattern types
+        When find_static_duplicates() is called
+        Then neither is flagged, because the pattern type is part of the key
+        """
+        patterns = ["[regex]git *", "git *"]
+        findings = find_static_duplicates(patterns, _make_provenance(), "Bash", "allow")
         self.assertEqual(findings, [])
 
 
@@ -193,6 +209,19 @@ class TestFindStaticDuplicatesAcrossLayers(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].list_type, "deny")
 
+    def test_ask_duplicates_also_detected(self):
+        """
+        Given a configuration with duplicate ask patterns
+        When find_static_duplicates_across_layers() is called
+        Then the duplicate in the ask list is found
+        """
+        layer = _make_layer("Bash", allow=[], ask=["curl:*", "curl:*"])
+        config = _make_config(layer)
+        findings = find_static_duplicates_across_layers(config, "Bash")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].list_type, "ask")
+        self.assertEqual(findings[0].redundant_pattern, "curl:*")
+
     def test_distinct_patterns_no_findings(self):
         """
         Given a configuration with all distinct patterns
@@ -208,7 +237,7 @@ class TestFindStaticDuplicatesAcrossLayers(unittest.TestCase):
         """
         Given a configuration with 'uv run pytest :*' and 'uv run pytest:*'
         When find_static_duplicates_across_layers() is called
-        Then the normalised-equal duplicate is detected (required test fixture)
+        Then the second is flagged as a duplicate of the first (required test fixture)
         """
         layer = _make_layer(
             "Bash",
@@ -218,7 +247,8 @@ class TestFindStaticDuplicatesAcrossLayers(unittest.TestCase):
         findings = find_static_duplicates_across_layers(config, "Bash")
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].kind, "static")
-        self.assertIn("pytest", findings[0].redundant_pattern)
+        self.assertEqual(findings[0].redundant_pattern, "uv run pytest:*")
+        self.assertEqual(findings[0].covered_by, "uv run pytest :*")
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +261,12 @@ class TestCorpusRedundancy(unittest.TestCase):
 
     def test_corpus_redundant_rule_detected(self):
         """
-        Given a configuration where rule A is a sub-pattern covered by rule B,
-        and the corpus only contains commands matching B
-        When find_redundancy() is called with a corpus
-        Then a corpus-backed finding is returned for A (removing A changes nothing)
+        Given 'git status:*' and the broader 'git:*', and a corpus every entry of
+            which both rules match
+        When find_redundancy() is called with that corpus
+        Then BOTH are reported corpus-redundant -- each one's removal leaves the
+            other covering the whole corpus, so a finding is a review candidate
+            and not a licence to delete both
         """
         layer = _make_layer("Bash", allow=["git status:*", "git:*"])
         config = _make_config(layer)
@@ -244,8 +276,10 @@ class TestCorpusRedundancy(unittest.TestCase):
         ]
         findings = find_redundancy(config, "Bash", corpus)
         corpus_findings = [f for f in findings if f.kind == "corpus"]
-        redundant_patterns = [f.redundant_pattern for f in corpus_findings]
-        self.assertIn("git status:*", redundant_patterns)
+        self.assertEqual(
+            {f.redundant_pattern for f in corpus_findings},
+            {"git status:*", "git:*"},
+        )
 
     def test_non_redundant_rule_not_flagged(self):
         """
@@ -266,21 +300,30 @@ class TestCorpusRedundancy(unittest.TestCase):
 
     def test_empty_corpus_skips_corpus_check(self):
         """
-        Given a configuration with duplicate rules but an empty corpus
-        When find_redundancy() is called
-        Then only static findings are returned (no corpus check performed)
+        Given a configuration holding a static duplicate but an empty corpus
+        When find_redundancy() is called, and find_corpus_redundant_allows()
+            is called directly with the same empty corpus
+        Then the static duplicate is still reported, no corpus finding is, and
+            the primitive returns empty on its own -- not only because the
+            facade declined to call it
         """
-        layer = _make_layer("Bash", allow=["git:*", "git status:*"])
+        layer = _make_layer("Bash", allow=["git status:*", "git status:*", "git:*"])
         config = _make_config(layer)
+
         findings = find_redundancy(config, "Bash", corpus=[])
-        corpus_findings = [f for f in findings if f.kind == "corpus"]
-        self.assertEqual(corpus_findings, [])
+        self.assertEqual([f.kind for f in findings], ["static"])
+        self.assertEqual(findings[0].redundant_pattern, "git status:*")
+
+        # Asserted separately because find_redundancy's `if corpus:` and
+        # find_corpus_redundant_allows' own empty guard mask each other: with
+        # only the facade exercised, either one can be removed unnoticed.
+        self.assertEqual(find_corpus_redundant_allows(config, "Bash", []), [])
 
     def test_combined_static_and_corpus_findings(self):
         """
         Given a configuration with both an exact duplicate and a corpus-redundant rule
         When find_redundancy() is called with a corpus
-        Then both static and corpus findings are returned
+        Then both static and corpus findings are returned, static ones first
         """
         layer = _make_layer(
             "Bash",
@@ -292,30 +335,36 @@ class TestCorpusRedundancy(unittest.TestCase):
             _make_log_entry("Bash", "ls"),
         ]
         findings = find_redundancy(config, "Bash", corpus)
-        kinds = {f.kind for f in findings}
-        self.assertIn("static", kinds)
-        static_findings = [f for f in findings if f.kind == "static"]
-        self.assertGreater(len(static_findings), 0)
+        self.assertEqual([f.kind for f in findings], ["static", "corpus", "corpus"])
+        self.assertEqual(findings[0].redundant_pattern, "ls:*")
+        self.assertEqual(
+            {f.redundant_pattern for f in findings[1:]},
+            {"git:*", "git status:*"},
+        )
 
     def test_finding_attributes_populated(self):
         """
         Given a configuration with two patterns where one is corpus-redundant
         When find_redundancy() is called
-        Then the corpus finding has populated attributes (tool, list_type, kind, note)
+        Then at least one corpus finding is returned, carrying tool, list_type,
+            the owning layer's provenance, a non-empty note, and covered_by=None
         """
         layer = _make_layer("Bash", allow=["git status:*", "git:*"])
         config = _make_config(layer)
         corpus = [_make_log_entry("Bash", "git status")]
         findings = find_redundancy(config, "Bash", corpus)
         corpus_findings = [f for f in findings if f.kind == "corpus"]
-        if corpus_findings:
-            f = corpus_findings[0]
-            self.assertEqual(f.tool, "Bash")
-            self.assertEqual(f.list_type, "allow")
-            self.assertIsInstance(f.note, str)
-            self.assertGreater(len(f.note), 0)
+        self.assertGreater(len(corpus_findings), 0)
+        f = corpus_findings[0]
+        self.assertEqual(f.tool, "Bash")
+        self.assertEqual(f.list_type, "allow")
+        self.assertEqual(f.provenance, layer.provenance)
+        # A replay diff shows that nothing changed, never which rule took over.
+        self.assertIsNone(f.covered_by)
+        self.assertIsInstance(f.note, str)
+        self.assertGreater(len(f.note), 0)
 
-    def test_structured_entry_detected_as_corpus_redundant_once_fixed(self):
+    def test_structured_entry_detected_as_corpus_redundant(self):
         """
         Given an allow list holding a structured entry (a dict, not a bare
             string) 'git push:*' that is genuinely covered by a broader
@@ -361,7 +410,9 @@ class TestCorpusRedundancy(unittest.TestCase):
             bare string) as the only rule covering a corpus command, so
             removing it necessarily changes that command's decision
         When find_redundancy() is called with a corpus exercising it
-        Then the structured entry is NOT reported corpus-redundant.
+        Then the structured entry is NOT reported corpus-redundant -- and the
+            removal it was spared by was really attempted, not skipped because
+            the engine failed to locate the entry at all.
         """
         prov = Provenance(
             level="project",
@@ -388,6 +439,11 @@ class TestCorpusRedundancy(unittest.TestCase):
         )
         config = _make_config(layer)
         corpus = [_make_log_entry("Bash", "git push origin main")]
+
+        # Without this, the assertion below is satisfied by either of two very
+        # different worlds: the rule was replayed and found load-bearing, or the
+        # engine never found the dict entry and skipped it on the identity guard.
+        self.assertIsNot(_config_without_allow(config, "Bash", "git push:*"), config)
 
         findings = find_redundancy(config, "Bash", corpus)
 

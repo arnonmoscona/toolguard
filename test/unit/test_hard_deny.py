@@ -7,13 +7,12 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.compound import resolve_compound_permission
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
 from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.hook import resolve_file_path_permission_detailed
-from toolguard.permission_resolution import resolve_command_permission
 from toolguard.permissions import check_hard_deny
-from toolguard.rule_entry import _strip_tool_wrapper
+from toolguard.resolve import resolve_bash_permission_detailed
+from toolguard.rule_entry import normalize_entry
 
 
 def _write(claude_dir: Path, filename: str, content: str) -> None:
@@ -216,7 +215,9 @@ class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
         When both Configuration.hard_deny and .hard_deny_entries are read for
             the same tool
         Then hard_deny()[i] is the wrapper-stripped form of
-            hard_deny_entries()[i].pattern, for both deny and allow tuples
+            hard_deny_entries()[i].pattern, for both deny and allow tuples --
+            asserted against the fixture's own literal patterns, in source
+            order, so the two views cannot agree by both being wrong
         """
         config = Configuration(
             layers=(
@@ -234,12 +235,14 @@ class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
         )
         deny, allow = config.hard_deny("Bash")
         deny_entries, allow_entries = config.hard_deny_entries("Bash")
-        self.assertEqual(len(deny), len(deny_entries))
-        self.assertEqual(len(allow), len(allow_entries))
-        for pattern, entry in zip(deny, deny_entries):
-            self.assertEqual(pattern, _strip_tool_wrapper(entry.pattern))
-        for pattern, entry in zip(allow, allow_entries):
-            self.assertEqual(pattern, _strip_tool_wrapper(entry.pattern))
+        self.assertEqual(deny, ("wget *", "curl *"))
+        self.assertEqual(allow, ("curl localhost*",))
+        self.assertEqual(
+            tuple(e.pattern for e in deny_entries), ("Bash(wget *)", "Bash(curl *)")
+        )
+        self.assertEqual(
+            tuple(e.pattern for e in allow_entries), ("Bash(curl localhost*)",)
+        )
 
     def test_hard_deny_pooling_dedup_first_occurrence_metadata_wins(self):
         """
@@ -270,15 +273,18 @@ class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
         )
         deny_entries, _allow_entries = config.hard_deny_entries("Bash")
         self.assertEqual(len(deny_entries), 1)
-        self.assertEqual(deny_entries[0].metadata["additionalContext"], "most specific")
+        self.assertEqual(
+            deny_entries[0].metadata.get("additionalContext"), "most specific"
+        )
 
     def test_hard_deny_native_layer_structured_entry_contributes_nothing(self):
         """
         Given a NATIVE Claude settings layer whose hard_deny.deny holds a
             STRUCTURED entry for Bash
         When Configuration.hard_deny_entries and .hard_deny are read
-        Then both return empty -- native layers are skipped wholesale,
-            before the structured entry is ever normalized
+        Then both return empty AND normalize_entry is never called -- native
+            layers are skipped wholesale, before the structured entry is ever
+            normalized
         """
         config = Configuration(
             layers=(
@@ -291,8 +297,15 @@ class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
                 ),
             )
         )
-        self.assertEqual(config.hard_deny_entries("Bash"), ((), ()))
-        self.assertEqual(config.hard_deny("Bash"), ((), ()))
+        # The emptiness alone cannot fail: normalize_entry rejects a structured
+        # entry from a native layer anyway, so the skip and the rejection mask
+        # each other. Only the call count observes which one acted.
+        with patch(
+            "toolguard.config.normalize_entry", wraps=normalize_entry
+        ) as spy_normalize:
+            self.assertEqual(config.hard_deny_entries("Bash"), ((), ()))
+            self.assertEqual(config.hard_deny("Bash"), ((), ()))
+        spy_normalize.assert_not_called()
 
     def test_hard_deny_malformed_entry_does_not_raise(self):
         """
@@ -312,12 +325,12 @@ class TestHardDenyStructuredEntries(_IsolatedEnvTestCase):
 
     def test_hard_deny_non_list_deny_value_tolerated(self):
         """
-        Given a hard_deny section whose 'deny' value is not a list (a
-            scalar misconfiguration)
+        Given a hard_deny section whose 'deny' value is a NON-ITERABLE scalar
+            (an int misconfiguration -- iterating it raises TypeError)
         When Configuration.hard_deny is read
         Then it is tolerated as empty rather than raising
         """
-        config = Configuration(layers=(_layer(0, hard_deny={"deny": "not-a-list"}),))
+        config = Configuration(layers=(_layer(0, hard_deny={"deny": 123}),))
         self.assertEqual(config.hard_deny("Bash"), ((), ()))
 
 
@@ -325,24 +338,12 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for commands."""
 
     def _resolve(self, config, command):
-        """Resolve a command, checking hard_deny first then the cascade; return (decision, reason)."""
+        """Resolve a command through production's Bash entry point; return (decision, reason)."""
         hd_deny, hd_allow = config.hard_deny("Bash")
-
-        def _resolve_one(sub):
-            hard = check_hard_deny(sub, list(hd_deny), list(hd_allow))
-            if hard is not None:
-                return hard.decision, hard.reason, None
-
-            resolved = resolve_command_permission(config, "Bash", sub)
-            return resolved.decision, resolved.reason, resolved.additional_context
-
-        _verdict = resolve_compound_permission(command, _resolve_one)
-        decision, reason, _context = (
-            _verdict.decision,
-            _verdict.reason,
-            _verdict.additional_context,
+        verdict = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
         )
-        return decision, reason
+        return verdict.decision, verdict.reason
 
     def test_hard_deny_overrides_more_specific_allow(self):
         """
@@ -455,8 +456,8 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
         """
         TOO-19: Given a hard_deny match for 'rm -rf /' AND a Configuration
             recording a broken (unparseable) config file elsewhere
-        When 'rm -rf /' is resolved (hard_deny checked first, same as
-            resolve_bash_permission_detailed does in production)
+        When 'rm -rf /' is resolved through resolve_bash_permission_detailed,
+            which checks hard_deny before the cascade
         Then the decision is still 'deny' -- the fail-open ASK floor never
             reaches hard_deny (it is checked and returned BEFORE
             resolve_command_permission is ever called), so hard_deny
@@ -498,11 +499,17 @@ class TestCheckHardDenyUnit(unittest.TestCase):
 
     def test_returns_none_when_no_deny_patterns(self):
         """
-        Given an empty hard_deny.deny list
-        When check_hard_deny runs
-        Then it returns None (fall through to the normal cascade)
+        Given the SAME command under an empty hard_deny.deny list and under a
+            pool that matches it
+        When check_hard_deny runs on each
+        Then the empty pool returns None (fall through to the normal cascade)
+            while the matching pool denies -- the pair distinguishes "the pool
+            is empty" from "this function never denies"
         """
         self.assertIsNone(check_hard_deny("curl x", [], []))
+        denied = check_hard_deny("curl x", ["curl *"], [])
+        self.assertIsNotNone(denied)
+        self.assertEqual(denied.decision, "deny")
 
     def test_returns_none_when_no_deny_match(self):
         """
@@ -540,20 +547,6 @@ class TestCheckHardDenyUnit(unittest.TestCase):
 
 class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for Read/Write/Edit."""
-
-    def _build_config(self, home, project, target_level, hard_deny_toml, project_allow):
-        """Write a hard_deny section at the chosen level plus a project-level allow."""
-        target = {
-            "project": project / ".claude",
-            "user": home / ".claude",
-        }[target_level]
-        _write(target, "toolguard_hook.toml", hard_deny_toml)
-        if target_level != "project":
-            _write(
-                project / ".claude",
-                "toolguard_hook.toml",
-                f"[permissions]\nallow = {project_allow}\n",
-            )
 
     def test_read_hard_deny_overrides_project_allow(self):
         """

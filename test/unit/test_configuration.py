@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import MappingProxyType
 from typing import Optional, Sequence
@@ -33,7 +34,7 @@ from toolguard.config import (
 )
 from toolguard.config_types import LevelMatch, entry_for_pattern
 from toolguard.permission_resolution import resolve_permission_cascade
-from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry, _strip_tool_wrapper
+from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY, RuleEntry
 
 
 def _resolve_via_cascade(config, tool_name, decide, subject="Command"):
@@ -174,8 +175,8 @@ class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
             f.flush()
             path = f.name
         try:
-            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": path}):
-                config = load_configuration()
+            self.isolate_config_environment(extra_env={"CLAUDE_SETTINGS_PATH": path})
+            config = load_configuration()
             self.assertEqual(len(config.layers), 1)
             self.assertEqual(config.layers[0].provenance.level, "explicit")
             self.assertTrue(config.layers[0].is_native)
@@ -193,8 +194,10 @@ class TestLoadConfigurationHierarchy(ConfigIsolationMixin, unittest.TestCase):
             settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
             hook = Path(tmp) / "toolguard_hook.json"
             hook.write_text(json.dumps({"permissions": {"allow": ["Bash(ls *)"]}}))
-            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(settings)}):
-                config = load_configuration()
+            self.isolate_config_environment(
+                extra_env={"CLAUDE_SETTINGS_PATH": str(settings)}
+            )
+            config = load_configuration()
             types = [layer.provenance.source_type for layer in config.layers]
             self.assertIn("claude", types)
             self.assertIn("toolguard_hook", types)
@@ -399,9 +402,9 @@ class TestPermissionLayers(unittest.TestCase):
         """
         Given an allow list mixing a plain string and a structured entry with metadata
         When permission_layers('Bash') is computed
-        Then allow_entries holds both RuleEntry objects in the same order as allow, and
-        each allow[i] is the wrapper-stripped form of allow_entries[i].pattern (the
-        index invariant later increments rely on)
+        Then allow_entries holds both RuleEntry objects in source order with their
+        Tool(...) wrappers INTACT, layer.allow is the wrapper-stripped view of the
+        same entries in the same order, and the structured entry keeps its metadata
         """
         layers = (
             ConfigLayer(
@@ -433,9 +436,10 @@ class TestPermissionLayers(unittest.TestCase):
             per_layer = config.permission_layers("Bash")
         layer = per_layer[0]
         self.assertEqual(layer.allow, ("git *", "ls *"))
-        self.assertEqual(len(layer.allow), len(layer.allow_entries))
-        for pattern, entry in zip(layer.allow, layer.allow_entries):
-            self.assertEqual(_strip_tool_wrapper(entry.pattern), pattern)
+        self.assertEqual(
+            [entry.pattern for entry in layer.allow_entries],
+            ["Bash(git *)", "Bash(ls *)"],
+        )
         self.assertEqual(
             dict(layer.allow_entries[1].metadata),
             {"additionalContext": "read-only listing"},
@@ -543,10 +547,12 @@ class TestPermissionLayers(unittest.TestCase):
 
     def test_malformed_entries_do_not_raise_and_are_excluded(self):
         """
-        Given an allow list with a malformed structured entry (missing 'match') and a bare int
+        Given an allow list with a malformed structured entry (missing 'match'), a bare
+        int, and a plain string whose 'Bash(' wrapper is never closed
         When permission_layers('Bash') is computed
-        Then no exception is raised and neither malformed element appears in .allow or
-        .allow_entries
+        Then no exception is raised and none of the three reaches .allow or
+        .allow_entries -- in particular the unclosed wrapper is not a Bash pattern,
+        and must not arrive in .allow with its 'Bash(' prefix still attached
         """
         layers = (
             ConfigLayer(
@@ -560,6 +566,7 @@ class TestPermissionLayers(unittest.TestCase):
                                 "Bash(git *)",
                                 {"no_match_key": 1},
                                 42,
+                                "Bash(git status",
                             ],
                             "deny": [],
                         }
@@ -576,7 +583,125 @@ class TestPermissionLayers(unittest.TestCase):
             per_layer = config.permission_layers("Bash")
         layer = per_layer[0]
         self.assertEqual(layer.allow, ("git *",))
-        self.assertEqual(len(layer.allow_entries), 1)
+        self.assertEqual(
+            [entry.pattern for entry in layer.allow_entries], ["Bash(git *)"]
+        )
+
+
+class TestPermissionLevelGrouping(unittest.TestCase):
+    """permission_levels_with_provenance() groups layers by SPECIFICITY."""
+
+    @staticmethod
+    def _hook_layer(level, specificity, allow):
+        """Build a toolguard_hook ConfigLayer at the given level/specificity."""
+        return ConfigLayer(
+            Provenance(
+                level,
+                "toolguard_hook",
+                "toml",
+                Path(f"/{level}-{specificity}/toolguard_hook.toml"),
+                specificity,
+            ),
+            MappingProxyType({"permissions": {"allow": allow, "deny": []}}),
+        )
+
+    def _levels(self, layers):
+        """Group *layers* for 'Bash' with takeover mode off, asserting the patch ran."""
+        config = Configuration(layers=layers)
+        with patch.object(
+            Configuration,
+            "takeover_mode",
+            return_value=TakeoverConfig(False, (), (), "deny"),
+        ) as takeover:
+            levels = config.permission_levels_with_provenance("Bash")
+        self.assertTrue(takeover.called, "the takeover_mode patch was never consulted")
+        return levels
+
+    def test_same_level_name_at_different_specificity_stays_two_levels(self):
+        """
+        Given two hook layers sharing the level NAME 'project' at different
+            specificities -- the project's own .claude and an ancestor's, which
+            discovery labels 'project' for every step of the upward walk
+        When permission_levels_with_provenance('Bash') groups them
+        Then they remain TWO levels, most-specific first: grouping is keyed on
+            specificity, and keying it on the level label instead would collapse
+            the whole ancestor walk into one level and destroy more-specific-wins
+        """
+        levels = self._levels(
+            (
+                self._hook_layer("project", 0, ["Bash(own *)"]),
+                self._hook_layer("project", 1, ["Bash(ancestor *)"]),
+            )
+        )
+        self.assertEqual(
+            [allow for allow, _deny, _ask, _layers in levels],
+            [("own *",), ("ancestor *",)],
+        )
+
+
+class TestNativeLayersAreNotToolguardExtensionSources(unittest.TestCase):
+    """takeover_mode() and hard_deny() read their sections from toolguard_hook
+    layers only, never from a native Claude settings layer."""
+
+    @staticmethod
+    def _native_layer(content):
+        """Build a native ('claude') settings ConfigLayer."""
+        return ConfigLayer(
+            Provenance(
+                "project", "claude", "json", Path("/p/.claude/settings.json"), 0
+            ),
+            MappingProxyType(content),
+        )
+
+    def test_takeover_mode_ignores_a_native_layer(self):
+        """
+        Given ONLY a native settings.json layer carrying a full [takeover_mode]
+            section that would switch takeover on and extend both pattern lists
+        When takeover_mode() resolves
+        Then none of it is honoured: enabled stays False, neither extra pattern
+            appears, and no_match_fallback keeps its 'ask' default
+        """
+        config = Configuration(
+            layers=(
+                self._native_layer(
+                    {
+                        "takeover_mode": {
+                            "enabled": True,
+                            "ignored_allow_patterns": ["Foo(*)"],
+                            "additional_ignored_patterns": ["Read(/x/**)"],
+                            "no_match_fallback": "deny",
+                        }
+                    }
+                ),
+            )
+        )
+        tc = config.takeover_mode()
+        self.assertFalse(tc.enabled)
+        self.assertNotIn("Foo(*)", tc.ignored_allow_patterns)
+        self.assertEqual(tc.additional_ignored_patterns, ())
+        self.assertEqual(tc.no_match_fallback, "ask")
+
+    def test_hard_deny_ignores_a_native_layer(self):
+        """
+        Given ONLY a native settings.json layer carrying a [hard_deny] section
+            with both a deny pattern and an allow carve-out
+        When hard_deny('Bash') pools patterns
+        Then both returned tuples are empty -- a native file can neither add a
+            hard denial nor punch a carve-out in one
+        """
+        config = Configuration(
+            layers=(
+                self._native_layer(
+                    {
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf /)"],
+                            "allow": ["Bash(rm -rf /tmp/scratch)"],
+                        }
+                    }
+                ),
+            )
+        )
+        self.assertEqual(config.hard_deny("Bash"), ((), ()))
 
 
 class TestScalarsAndConfigSync(unittest.TestCase):
@@ -956,20 +1081,22 @@ class TestImmutability(unittest.TestCase):
         """
         Given a Configuration instance
         When its layers attribute is reassigned
-        Then an exception is raised because the dataclass is frozen
+        Then FrozenInstanceError is raised -- specifically, not merely "some
+        exception", which any unrelated failure would also satisfy
         """
         config = Configuration(layers=())
-        with self.assertRaises(Exception):
+        with self.assertRaises(FrozenInstanceError):
             config.layers = (1,)
 
     def test_provenance_frozen(self):
         """
         Given a Provenance instance
         When its level attribute is reassigned
-        Then an exception is raised because the dataclass is frozen
+        Then FrozenInstanceError is raised -- specifically, not merely "some
+        exception", which any unrelated failure would also satisfy
         """
         prov = Provenance("project", "claude", "json", Path("/x"))
-        with self.assertRaises(Exception):
+        with self.assertRaises(FrozenInstanceError):
             prov.level = "user"
 
 
@@ -1534,6 +1661,20 @@ class TestResolvedNoMatchFallback(unittest.TestCase):
         config = Configuration(layers=(native_layer,))
         self.assertEqual(config.resolved_no_match_fallback(), "ask")
 
+    def test_non_string_top_level_value_is_treated_as_unset(self):
+        """
+        Given a hook layer whose top-level 'no_match_fallback' is a LIST rather
+            than a string (a plausible TOML slip: ["deny"] instead of "deny")
+        When Configuration.resolved_no_match_fallback() resolves
+        Then the layer counts as not setting the key at all and the default
+            'ask' is returned -- resolution must reject the value by TYPE before
+            it reaches the alias/valid-value lookups, which a list cannot even
+            be looked up in
+        """
+        layers = (self._hook_layer("project", {"no_match_fallback": ["deny"]}),)
+        config = Configuration(layers=layers)
+        self.assertEqual(config.resolved_no_match_fallback(), "ask")
+
     def test_invalid_top_level_value_falls_back_to_ask(self):
         """
         Given a layer sets the top-level 'no_match_fallback' to an unrecognized
@@ -2061,7 +2202,7 @@ class TestValidationAdditionalSupportedTools(unittest.TestCase):
         self.assertNotIn("not a known supported tool", messages)
 
 
-class TestExplicitModeAdjacentToml(unittest.TestCase):
+class TestExplicitModeAdjacentToml(ConfigIsolationMixin, unittest.TestCase):
     """CLAUDE_SETTINGS_PATH with an adjacent toolguard_hook.toml (TOML preferred)."""
 
     def test_adjacent_toml_layer(self):
@@ -2078,8 +2219,10 @@ class TestExplicitModeAdjacentToml(unittest.TestCase):
             (Path(tmp) / "toolguard_hook.json").write_text(
                 json.dumps({"permissions": {"allow": ["Bash(skip)"]}})
             )
-            with patch.dict(os.environ, {"CLAUDE_SETTINGS_PATH": str(settings)}):
-                config = load_configuration()
+            self.isolate_config_environment(
+                extra_env={"CLAUDE_SETTINGS_PATH": str(settings)}
+            )
+            config = load_configuration()
             formats = {
                 layer.provenance.file_format
                 for layer in config.layers
@@ -3270,8 +3413,10 @@ class TestParseFailureAskFloor(unittest.TestCase):
 
     def test_ask_reason_rewritten_to_name_broken_file(self):
         """
-        Given a config with NO matching rule (falls through to the default
-            'ask' no-match-fallback) AND a recorded parse failure
+        Given a config that HAS a Bash allow rule but not one matching this
+            command (so it falls through to the default 'ask' no-match-fallback
+            rather than to the no-rules-configured-at-all branch) AND a
+            recorded parse failure
         When resolve_permission_cascade('Bash', ...) resolves the command
         Then the decision is 'ask' and the reason is the ASK-floor message
             naming the broken file -- not the generic no-match reason --
@@ -3279,13 +3424,21 @@ class TestParseFailureAskFloor(unittest.TestCase):
             for a non-deny decision rather than only rewriting on 'allow'
         """
         broken = Path("/p/.claude/toolguard_hook.toml")
-        config = self._config(parse_failures=((broken, "bad TOML"),))
+        config = self._config(allow=["ls *"], parse_failures=((broken, "bad TOML"),))
 
+        # TakeoverConfig's 4th field is no_match_fallback, which
+        # resolved_no_match_fallback() honours as its legacy alias -- so this
+        # class's usual "takeover off" stand-in, TakeoverConfig(False, (), (),
+        # "deny"), would also silently make the fallback 'deny' and skip the
+        # ASK floor entirely. Both self-checks below pin the fixture this test
+        # actually needs.
         with patch.object(
             Configuration,
             "takeover_mode",
-            return_value=TakeoverConfig(False, (), (), "deny"),
+            return_value=TakeoverConfig(False, (), (), "ask"),
         ):
+            self.assertTrue(config.has_any_rules("Bash"))
+            self.assertEqual(config.resolved_no_match_fallback(), "ask")
             resolved = _resolve_via_cascade(config, "Bash", self._decide_allow_git)
 
         self.assertEqual(resolved.decision, "ask")

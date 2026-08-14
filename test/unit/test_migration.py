@@ -137,6 +137,11 @@ class TestBackupCreation(unittest.TestCase):
                 source_file.write_text('{"version": 2}')
                 second_backup = create_backup(source_file, backup_dir)
 
+            # Proves the patched clock is the one create_backup reads: without
+            # this the test passes on real timestamps that merely happened to
+            # collide, which is not the scenario the Given describes.
+            self.assertEqual(mock_datetime.now.call_count, 2)
+
             self.assertNotEqual(first_backup, second_backup)
             self.assertTrue(first_backup.exists())
             self.assertTrue(second_backup.exists())
@@ -170,6 +175,8 @@ class TestBackupCreation(unittest.TestCase):
                 source_file.write_text('{"version": 3}')
                 third_backup = create_backup(source_file, backup_dir)
 
+            self.assertEqual(mock_datetime.now.call_count, 3)
+
             all_backups = {first_backup, second_backup, third_backup}
             self.assertEqual(len(all_backups), 3, "all three paths must be distinct")
 
@@ -196,6 +203,7 @@ class TestBackupCreation(unittest.TestCase):
                 mock_datetime.now.return_value = fixed_now
                 backup_path = create_backup(source_file, backup_dir)
 
+            self.assertEqual(mock_datetime.now.call_count, 1)
             self.assertEqual(backup_path.name, "settings.local.2026-02-05-143022.json")
 
 
@@ -290,18 +298,21 @@ class TestSimilarPatternDetection(unittest.TestCase):
         self.assertIn("Read(/tmp/*)", similar_patterns)
         self.assertNotIn("Read(/var/*)", similar_patterns)
 
-    def test_identical_pattern_not_similar(self):
+    def test_identical_pattern_is_reported_as_a_perfect_non_superset_match(self):
         """
         Given an existing pattern and a new pattern identical to it
         When detect_similar_patterns runs
-        Then it does not crash and returns a list (duplicates are handled gracefully elsewhere)
+        Then exactly that one pattern comes back, with a similarity of 1.0 and
+             the superset flag False (a pattern is not a superset of itself --
+             see test_not_superset_for_identical_patterns), and the unrelated
+             pattern is not reported
         """
         existing = ["Bash(git:*)", "Bash(ls:*)"]
         new_pattern = "Bash(git:*)"
 
         similar = detect_similar_patterns(new_pattern, existing)
 
-        self.assertIsInstance(similar, list)
+        self.assertEqual(similar, [("Bash(git:*)", 1.0, False)])
 
     def test_no_similar_patterns(self):
         """
@@ -523,6 +534,35 @@ class TestTOMLConfigWriting(unittest.TestCase):
             content = config_path.read_text()
 
             self.assertIn('echo \\"test\\"', content)
+
+    def test_newline_in_additional_context_still_produces_a_writable_config(self):
+        """
+        Given a structured entry whose additionalContext contains a literal
+            newline -- reachable from any JSON config, e.g.
+            {"additionalContext": "line1\\nline2"}
+        When write_toml_config writes it
+        Then the file is written and re-parses with the newline intact.
+            Currently RED: rule_sort._escape_toml_string escapes only \\\\ and
+            ", so the newline ends the TOML basic string, the emitted inline
+            table spans two lines, and the write guard refuses the whole write
+            -- one enrichment string makes the config unwritable (proposed
+            ticket 24). Asserting the correct behaviour, not the defect.
+        """
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "toolguard_hook.toml"
+
+            entry = RuleEntry(
+                pattern="Bash(git push:*)",
+                metadata=MappingProxyType({"additionalContext": "line1\nline2"}),
+            )
+            permissions = {"allow": [entry], "deny": [], "ask": []}
+
+            write_toml_config(config_path, permissions, auto_sort=False)
+
+            written = tomllib.loads(config_path.read_text())["permissions"]["allow"]
+            self.assertEqual(len(written), 1)
+            self.assertEqual(written[0]["match"], "Bash(git push:*)")
+            self.assertEqual(written[0]["additionalContext"], "line1\nline2")
 
     def test_same_pattern_different_metadata_both_survive_write_round_trip(self):
         """
@@ -973,6 +1013,43 @@ class TestSettingsFileUpdate(unittest.TestCase):
             self.assertEqual(updated["permissions"]["deny"], [])
             self.assertEqual(updated["permissions"]["ask"], [])
 
+    def test_surviving_patterns_are_handed_to_the_write_guard(self):
+        """
+        Given a settings file where only some patterns are being removed
+        When update_settings_file runs
+        Then it writes through verified_write_config with exactly the SURVIVING
+             patterns as expected_patterns -- the content-loss guard for the
+             user's native settings file. Deleting that argument list is
+             otherwise undetectable: it only ever fires when some other defect
+             drops a survivor, so nothing observes it from behaviour alone.
+        """
+        with TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.local.json"
+            settings = {
+                "permissions": {
+                    "allow": ["Bash(ls:*)", "Bash(git:*)"],
+                    "deny": ["Bash(rm:*)"],
+                    "ask": ["Bash(curl:*)"],
+                }
+            }
+            settings_path.write_text(json.dumps(settings))
+
+            migrated = {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
+            redundant = {"allow": [], "deny": ["Bash(rm:*)"], "ask": []}
+
+            with patch(
+                "toolguard.permission_migration.verified_write_config"
+            ) as mock_write:
+                update_settings_file(settings_path, migrated, redundant)
+
+            mock_write.assert_called_once()
+            args, kwargs = mock_write.call_args
+            self.assertEqual(args[0], settings_path)
+            self.assertEqual(args[2], "json")
+            self.assertEqual(
+                set(kwargs["expected_patterns"]), {"Bash(ls:*)", "Bash(curl:*)"}
+            )
+
 
 class TestMigration(ConfigIsolationMixin, unittest.TestCase):
     """Full migration process. Isolates Path.home() because load_configuration()'s aggregated toolguard_perms still reads it even though write-target selection is already restricted to project_root's own .claude directory."""
@@ -1034,15 +1111,175 @@ class TestMigration(ConfigIsolationMixin, unittest.TestCase):
         toml_path = claude_dir / "toolguard_hook.toml"
         self.assertTrue(toml_path.exists())
 
-        content = toml_path.read_text()
-        self.assertIn("Bash(ls:*)", content)
-        self.assertIn("Bash(git:*)", content)
+        # Assert against the PARSED structure, not a substring of the file: a
+        # pattern written into the wrong list, or into a comment, satisfies
+        # assertIn on the raw text just as well as a correct write does.
+        written = tomllib.loads(toml_path.read_text())["permissions"]
+        self.assertEqual(sorted(written["allow"]), ["Bash(git:*)", "Bash(ls:*)"])
+        self.assertEqual(written.get("deny", []), [])
+        self.assertEqual(written.get("ask", []), [])
 
         with open(settings_path, "r") as f:
             updated_settings = json.load(f)
 
         self.assertEqual(updated_settings["permissions"]["allow"], [])
         self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+    def test_migrate_puts_each_native_list_in_the_matching_toolguard_list(self):
+        """
+        Given settings.local.json with a divergent pattern in EACH of allow,
+            deny and ask
+        When migrate runs
+        Then each pattern lands in the toolguard config list of the same name,
+             and in no other list -- placement, not mere presence. The suite's
+             other migrate tests assert `assertIn(pattern, file_text)`, which
+             a rule moved from allow into deny satisfies unchanged; that
+             inversion is the single most dangerous edit a config writer can
+             make (proposed ticket 39).
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_path.write_text(
+            '[permissions]\nallow = ["Bash(ls:*)"]\ndeny = []\nask = []\n'
+        )
+
+        settings_path = claude_dir / "settings.local.json"
+        settings = {
+            "permissions": {
+                "allow": ["Bash(git:*)"],
+                "deny": ["Bash(rm -rf /:*)"],
+                "ask": ["Bash(curl:*)"],
+            }
+        }
+        with open(settings_path, "w") as f:
+            json.dump(settings, f)
+
+        outcome = migrate(project_root)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+        written = tomllib.loads(toml_path.read_text())["permissions"]
+        self.assertEqual(sorted(written["allow"]), ["Bash(git:*)", "Bash(ls:*)"])
+        self.assertEqual(written["deny"], ["Bash(rm -rf /:*)"])
+        self.assertEqual(written["ask"], ["Bash(curl:*)"])
+
+    def test_existing_hard_deny_section_survives_a_migration(self):
+        """
+        Given a toolguard config with a [hard_deny] section and a migration
+            that rewrites [permissions]
+        When migrate runs
+        Then the hard deny is still in hard_deny.deny afterwards and has NOT
+             appeared in permissions.allow -- the write guard's content-loss
+             check compares a flat set of pattern strings and so cannot see a
+             pattern that moved between lists (proposed ticket 39), which
+             leaves this end-to-end assertion as the only thing watching it.
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_path.write_text(
+            "[hard_deny]\n"
+            'deny = ["Bash(rm -rf /)"]\n'
+            "\n"
+            "[permissions]\n"
+            'allow = ["Bash(ls:*)"]\n'
+            "deny = []\n"
+        )
+
+        settings_path = claude_dir / "settings.local.json"
+        with open(settings_path, "w") as f:
+            json.dump(
+                {"permissions": {"allow": ["Bash(git:*)"], "deny": [], "ask": []}}, f
+            )
+
+        outcome = migrate(project_root)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+        reparsed = tomllib.loads(toml_path.read_text())
+        self.assertEqual(reparsed["hard_deny"]["deny"], ["Bash(rm -rf /)"])
+        self.assertNotIn("Bash(rm -rf /)", reparsed["permissions"]["allow"])
+
+    def test_a_rule_for_an_ungoverned_tool_stays_in_settings(self):
+        """
+        Given settings.local.json holding a rule for a tool toolguard does not
+            govern (WebFetch) alongside a governed Bash rule
+        When migrate runs
+        Then the WebFetch rule is still in settings.local.json and was NOT
+             written into the toolguard config -- migrating it would remove it
+             from Claude's own settings while toolguard ignores it, leaving the
+             rule enforced by nobody
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+
+        toml_path = claude_dir / "toolguard_hook.toml"
+        toml_path.write_text('[permissions]\nallow = ["Bash(ls:*)"]\ndeny = []\n')
+
+        settings_path = claude_dir / "settings.local.json"
+        with open(settings_path, "w") as f:
+            json.dump(
+                {
+                    "permissions": {
+                        "allow": ["Bash(git:*)", "WebFetch(domain:example.com)"],
+                        "deny": [],
+                        "ask": [],
+                    }
+                },
+                f,
+            )
+
+        outcome = migrate(project_root)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+        with open(settings_path) as f:
+            remaining = json.load(f)["permissions"]["allow"]
+        self.assertEqual(remaining, ["WebFetch(domain:example.com)"])
+
+        written = tomllib.loads(toml_path.read_text())["permissions"]["allow"]
+        self.assertEqual(sorted(written), ["Bash(git:*)", "Bash(ls:*)"])
+
+    def test_a_refused_config_write_fails_the_migration_and_loses_no_rule(self):
+        """
+        Given the config write guard refusing the toolguard config write
+            (standing in for any text this project could not parse back)
+        When migrate runs
+        Then it returns MigrationOutcome.FAILED, the target config keeps its
+             original bytes, and settings.local.json still holds every pattern
+             it started with -- a failed migration must not be a migration that
+             removed the rules from one file without adding them to the other
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+
+        toml_path = claude_dir / "toolguard_hook.toml"
+        original_toml = '[permissions]\nallow = ["Bash(ls:*)"]\ndeny = []\n'
+        toml_path.write_text(original_toml)
+
+        settings_path = claude_dir / "settings.local.json"
+        original_settings = {
+            "permissions": {"allow": ["Bash(git:*)"], "deny": [], "ask": []}
+        }
+        with open(settings_path, "w") as f:
+            json.dump(original_settings, f)
+
+        with patch.object(
+            permission_migration_module,
+            "verified_write_config",
+            side_effect=ConfigWriteVerificationError(toml_path, "invalid TOML", "boom"),
+        ) as mock_write:
+            outcome = migrate(project_root)
+
+        mock_write.assert_called()
+        self.assertEqual(outcome, MigrationOutcome.FAILED)
+        self.assertEqual(toml_path.read_text(), original_toml)
+        with open(settings_path) as f:
+            self.assertEqual(json.load(f), original_settings)
 
     def test_migration_adds_to_existing_toml(self):
         """
@@ -1081,10 +1318,12 @@ deny = []
 
         outcome = migrate(project_root)
 
-        content = toml_path.read_text()
-        self.assertIn("Bash(ls:*)", content)
-        self.assertIn("Bash(git:*)", content)
-        self.assertIn("Read(/tmp/*)", content)
+        written = tomllib.loads(toml_path.read_text())["permissions"]
+        self.assertEqual(
+            sorted(written["allow"]),
+            ["Bash(git:*)", "Bash(ls:*)", "Read(/tmp/*)"],
+        )
+        self.assertEqual(written.get("deny", []), [])
 
         with open(settings_path, "r") as f:
             updated_settings = json.load(f)
@@ -1577,17 +1816,31 @@ class TestMigratePermissionsMainExitCodes(unittest.TestCase):
     """End-to-end check that migrate_permissions.main() returns a plain int exit code, even though migrate() itself returns a MigrationOutcome."""
 
     def _main_with_mocked_migrate(self, outcome: MigrationOutcome) -> int:
-        """Run main() with find_project_root and migrate() both mocked."""
+        """
+        Run main() with find_project_root and migrate() both mocked, asserting
+        both mocks were consulted -- a mis-targeted find_project_root patch
+        would otherwise let main() resolve the real repository root and every
+        test here would still pass.
+        """
         with (
             patch.object(
                 migrate_permissions_module,
                 "find_project_root",
                 return_value=Path("/irrelevant"),
-            ),
-            patch.object(migrate_permissions_module, "migrate", return_value=outcome),
+            ) as mock_root,
+            patch.object(
+                migrate_permissions_module, "migrate", return_value=outcome
+            ) as mock_migrate,
             patch.object(migrate_permissions_module.sys, "argv", ["toolguard-migrate"]),
         ):
-            return migrate_permissions_module.main()
+            exit_code = migrate_permissions_module.main()
+
+        mock_root.assert_called_once()
+        mock_migrate.assert_called_once()
+        self.assertEqual(
+            mock_migrate.call_args.kwargs["project_root"], Path("/irrelevant")
+        )
+        return exit_code
 
     def test_success_exits_zero(self):
         """
@@ -1763,24 +2016,30 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
 
     def test_similarity_returns_ranked_results(self):
         """
-        Given several existing patterns of varying closeness to the new pattern
+        Given existing patterns of which TWO are close enough to the new
+             pattern to be reported (the previous three-pattern fixture
+             produced a single match, so the descending-score loop below ran
+             zero times and the ranking this test is named for was never
+             checked)
         When detect_similar_patterns runs
-        Then the most similar pattern is first and scores descend across the results
+        Then two matches come back, the closest one first, with scores in
+             descending order
         """
         existing = [
             "Bash(uv run ruff:*)",
-            "Bash(uv run pytest:*)",
+            "Bash(uv run ruff format --diff:*)",
             "Bash(uv run mypy:*)",
         ]
         new_pattern = "Bash(uv run ruff format:*)"
 
         similar = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        if len(similar) > 0:
-            first_pattern, first_score, _ = similar[0]
-            self.assertEqual(first_pattern, "Bash(uv run ruff:*)")
-            for i in range(len(similar) - 1):
-                self.assertGreaterEqual(similar[i][1], similar[i + 1][1])
+        self.assertEqual(
+            [pattern for pattern, _score, _superset in similar],
+            ["Bash(uv run ruff format --diff:*)", "Bash(uv run ruff:*)"],
+        )
+        scores = [score for _pattern, score, _superset in similar]
+        self.assertEqual(scores, sorted(scores, reverse=True))
 
     def test_similarity_identifies_supersets(self):
         """
@@ -1800,22 +2059,26 @@ class TestImprovedSimilarityDetection(unittest.TestCase):
 
     def test_max_similar_matches_limit(self):
         """
-        Given more candidate similar patterns than the max_matches limit
-        When detect_similar_patterns runs with max_matches=2
-        Then at most 2 matches are returned
+        Given three candidate patterns that ALL qualify as similar
+        When detect_similar_patterns runs with max_matches=2 and again with 3
+        Then exactly 2 come back for 2 and exactly 3 for 3, and the two are the
+             top of the same ranking. The previous fixture produced a single
+             match whatever the limit, so `assertLessEqual(len(similar), 2)`
+             held for any implementation of the cap, including none.
         """
         existing = [
-            "Bash(uv run pytest:*)",
-            "Bash(uv run mypy:*)",
-            "Bash(uv run ruff:*)",
-            "Bash(uv run black:*)",
-            "Bash(uv run isort:*)",
+            "Bash(uv run ruff formatter:*)",
+            "Bash(uv run ruff format --diff:*)",
+            "Bash(uv run ruff format --check:*)",
         ]
         new_pattern = "Bash(uv run ruff format:*)"
 
-        similar = detect_similar_patterns(new_pattern, existing, max_matches=2)
+        capped = detect_similar_patterns(new_pattern, existing, max_matches=2)
+        uncapped = detect_similar_patterns(new_pattern, existing, max_matches=3)
 
-        self.assertLessEqual(len(similar), 2)
+        self.assertEqual(len(capped), 2)
+        self.assertEqual(len(uncapped), 3)
+        self.assertEqual(capped, uncapped[:2])
 
     def test_common_prefix_not_flagged_as_similar(self):
         """
@@ -2340,11 +2603,19 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         self.assertEqual(extract_meaningful_prefix("Read(/tmp/*)"), "/tmp/")
         self.assertEqual(extract_meaningful_prefix("Bash(git push:*)"), "git push")
 
-    def test_similarity_respects_max_matches_per_pattern(self):
+    def test_lowering_max_matches_can_suppress_every_match(self):
         """
-        Given more candidate patterns than the max_matches limit for a single new pattern
-        When detect_similar_patterns runs with max_matches=2
-        Then at most 2 matches are returned for that pattern
+        Given five same-prefix candidates, exactly one of which is reported as
+            similar at max_matches=2
+        When detect_similar_patterns runs with max_matches=1 instead
+        Then NOTHING is reported -- max_matches is not only a display cap, it
+             also scales the "this prefix isn't discriminating" suppression at
+             permission_migration.py:464-470, so asking for fewer matches can
+             drop the superset warning entirely rather than truncate it.
+             Characterization of measured behaviour that contradicts the
+             parameter's own docstring ("Maximum number of similar patterns to
+             return"). Previously this was a duplicate of
+             test_max_similar_matches_limit, on a fixture neither could fail on.
         """
         existing = [
             "Bash(uv run pytest:*)",
@@ -2355,9 +2626,12 @@ class TestBlanketPatternSimilarity(unittest.TestCase):
         ]
         new_pattern = "Bash(uv run ruff format:*)"
 
-        similar = detect_similar_patterns(new_pattern, existing, max_matches=2)
-
-        self.assertLessEqual(len(similar), 2)
+        self.assertEqual(
+            len(detect_similar_patterns(new_pattern, existing, max_matches=2)), 1
+        )
+        self.assertEqual(
+            detect_similar_patterns(new_pattern, existing, max_matches=1), []
+        )
 
 
 class TestMigrationWithRedundantPatterns(ConfigIsolationMixin, unittest.TestCase):
@@ -2368,8 +2642,13 @@ class TestMigrationWithRedundantPatterns(ConfigIsolationMixin, unittest.TestCase
         Given a toolguard config and settings.local.json containing duplicates, subsets, and one
         genuinely new pattern
         When migrate runs the full flow
-        Then all redundant and migrated patterns are removed from settings, the new pattern is
-        added to the toolguard config, and it exits 0
+        Then all redundant and migrated patterns are removed from settings and
+        it exits 0 -- and the toolguard config ends up holding the patterns
+        just reported as redundant TOO, not only the genuinely new one.
+        Characterization, not endorsement: divergent and redundant are computed
+        independently, so a pattern reported as "COVERED BY" a superset is
+        still written. The previous Then claimed only the new pattern was
+        added, which the file contradicts.
         """
         _home, project_root = self.isolate_config_environment()
         claude_dir = project_root / ".claude"
@@ -2412,8 +2691,18 @@ deny = []
         self.assertNotIn("Bash(uv run ruff format:*)", remaining)
         self.assertNotIn("Bash(ls:*)", remaining)
 
-        content = toml_path.read_text()
-        self.assertIn("Bash(ls:*)", content)
+        written = tomllib.loads(toml_path.read_text())["permissions"]
+        self.assertEqual(
+            sorted(written["allow"]),
+            [
+                "Bash(git push:*)",
+                "Bash(git:*)",
+                "Bash(ls:*)",
+                "Bash(uv run ruff format:*)",
+                "Bash(uv run ruff:*)",
+            ],
+        )
+        self.assertEqual(written.get("deny", []), [])
 
         self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
 
@@ -2465,14 +2754,66 @@ class TestMigrationTargetLevel(ConfigIsolationMixin, unittest.TestCase):
 
         outcome = migrate(project_root)
 
-        project_content = project_toml_path.read_text()
-        self.assertIn("Bash(ls:*)", project_content)
+        project_written = tomllib.loads(project_toml_path.read_text())["permissions"]
+        self.assertEqual(
+            sorted(project_written["allow"]), ["Bash(git:*)", "Bash(ls:*)"]
+        )
 
         user_content = user_toml_path.read_text()
         self.assertNotIn("Bash(ls:*)", user_content)
         self.assertEqual(user_content, user_toml_original)
 
         self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+    def test_a_pattern_already_allowed_at_the_user_level_is_not_migrated(self):
+        """
+        Given a pattern present in the USER-level ~/.claude/toolguard_hook.toml
+            and in the project's settings.local.json, with the project having
+            its own toolguard config that does NOT contain it
+        When migrate runs
+        Then the pattern is not written into the project config -- toolguard
+             already allows it through the user level, so migrating it would
+             duplicate the rule. Without this, nothing here distinguishes
+             "the user level was read" from "the user level was ignored":
+             deleting the ~/.claude candidates from discover_config_files
+             leaves the rest of this module green.
+        """
+        home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+
+        project_toml_path = claude_dir / "toolguard_hook.toml"
+        project_toml_path.write_text(
+            '[permissions]\nallow = ["Bash(git:*)"]\ndeny = []\n'
+        )
+
+        home_claude_dir = home / ".claude"
+        home_claude_dir.mkdir()
+        (home_claude_dir / "toolguard_hook.toml").write_text(
+            '[permissions]\nallow = ["Bash(user-level:*)"]\ndeny = []\n'
+        )
+
+        settings_path = claude_dir / "settings.local.json"
+        with open(settings_path, "w") as f:
+            json.dump(
+                {
+                    "permissions": {
+                        "allow": ["Bash(user-level:*)", "Bash(ls:*)"],
+                        "deny": [],
+                        "ask": [],
+                    }
+                },
+                f,
+            )
+
+        outcome = migrate(project_root)
+        self.assertEqual(outcome, MigrationOutcome.SUCCEEDED)
+
+        project_written = tomllib.loads(project_toml_path.read_text())["permissions"]
+        self.assertEqual(
+            sorted(project_written["allow"]), ["Bash(git:*)", "Bash(ls:*)"]
+        )
+        self.assertNotIn("Bash(user-level:*)", project_written["allow"])
 
     def test_migration_creates_project_config_instead_of_using_user_level(self):
         """
