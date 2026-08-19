@@ -3470,6 +3470,468 @@ class TestComputePredicates(unittest.TestCase):
         self.assertTrue(predicates["R1"]["pass"])
 
 
+def _mock_fixture(tmp: Path, package: dict, tests: dict) -> dict:
+    """
+    Write a synthetic ``pkg/`` tree and ``tests/`` tree under *tmp* from
+    {filename: source} maps, and return them as kwargs for check_inert_patches.
+    """
+    for name, source in package.items():
+        _write(tmp / "pkg" / name, source)
+    for name, source in tests.items():
+        _write(tmp / "tests" / name, source)
+    return {
+        "test_root": tmp / "tests",
+        "roots": {"pkg": tmp / "pkg"},
+        "subject_packages": ("pkg",),
+        "repo_root": tmp,
+    }
+
+
+def _patching_test(*targets: str) -> str:
+    """Return test-module source containing one ``with patch(target)`` per target."""
+    body = "\n".join(f'    with patch("{t}"):\n        pass' for t in targets)
+    return "from unittest.mock import patch\n\n\ndef test_it():\n" + body + "\n"
+
+
+class TestInertPatchCheck(unittest.TestCase):
+    """Guards the by-value import hazard: patch("mod.name") is inert for a consumer that imported name by value."""
+
+    def test_by_value_consumer_makes_the_defining_module_inert(self):
+        """
+        Given a consumer that does `from pkg.source import fn` and calls fn()
+        When a test patches "pkg.source.fn"
+        Then the site is reported inert, naming pkg.consumer.fn as the target
+            that would actually take effect
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.failures, [])
+        self.assertEqual(len(report.inert), 1)
+        found = report.inert[0]
+        self.assertEqual((found.module, found.name), ("pkg.source", "fn"))
+        self.assertEqual(found.stale_bindings, ("pkg.consumer.fn",))
+        self.assertEqual(found.site.file, "tests/test_it.py")
+
+    def test_aliased_binding_is_reported_under_its_local_name(self):
+        """
+        Given a consumer that does `from pkg.source import fn as helper`
+        When a test patches "pkg.source.fn"
+        Then the effective target reported is pkg.consumer.helper, the name the
+            consumer actually holds
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from pkg.source import fn as helper\n\n\ndef run():\n    return helper()\n",
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(len(report.inert), 1)
+        self.assertEqual(report.inert[0].stale_bindings, ("pkg.consumer.helper",))
+
+    def test_patching_the_consumer_binding_is_not_flagged(self):
+        """
+        Given the same by-value consumer
+        When a test patches "pkg.consumer.fn" -- the correct target
+        Then nothing is reported, and the target still counts as resolved
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                },
+                {"test_it.py": _patching_test("pkg.consumer.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.inert, [])
+        self.assertEqual(report.resolved_targets, 1)
+        self.assertEqual(report.failures, [])
+
+    def test_module_alias_consumer_is_not_flagged(self):
+        """
+        Given one consumer binding fn by value and another doing
+            `import pkg.source as source` and calling source.fn()
+        When a test patches "pkg.source.fn"
+        Then nothing is reported: the second consumer does see the patch
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                    "attr_consumer.py": "import pkg.source as source\n\n\ndef run():\n    return source.fn()\n",
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.inert, [])
+        self.assertEqual(report.resolved_targets, 1)
+
+    def test_a_correct_patch_elsewhere_does_not_suppress_or_widen_the_finding(self):
+        """
+        Given a by-value consumer, and two patch sites -- one on the defining
+            module and one on the consumer's own binding
+        When the check runs
+        Then exactly the defining-module site is reported, and the correct site
+            produces no false positive of its own
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                },
+                {
+                    "test_wrong.py": _patching_test("pkg.source.fn"),
+                    "test_right.py": _patching_test("pkg.consumer.fn"),
+                },
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.resolved_targets, 2)
+        self.assertEqual([f.site.file for f in report.inert], ["tests/test_wrong.py"])
+
+    def test_function_local_import_observes_the_patch(self):
+        """
+        Given one consumer holding fn by value and a second whose only import of
+            fn is inside a function body, so the name is re-read per call
+        When a test patches "pkg.source.fn"
+        Then nothing is reported: the by-value holder alone is not enough when
+            some other module does see the patch
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                    "late_consumer.py": "def run():\n    from pkg.source import fn\n\n    return fn()\n",
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.inert, [])
+        self.assertEqual(report.resolved_targets, 1)
+
+    def test_defining_modules_own_call_observes_the_patch(self):
+        """
+        Given a defining module that calls fn itself, plus a by-value consumer
+        When a test patches "pkg.source.fn"
+        Then nothing is reported: the defining module reads the patched global
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n\n\ndef caller():\n    return fn()\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.inert, [])
+
+    def test_a_test_modules_read_through_the_module_suppresses_the_finding(self):
+        """
+        Given the test tree inside *roots*, as the production default has it,
+            and a by-value consumer in pkg
+        When one run's test module only patches "pkg.source.fn", and another's
+            also calls source.fn() through the module
+        Then only the first is reported -- a test module is excluded from the
+            evidence side but not from the suppression side
+        """
+        package = {
+            "source.py": "def fn():\n    return 1\n",
+            "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+        }
+        reading_test = (
+            "import pkg.source as source\n"
+            "from unittest.mock import patch\n\n\n"
+            "def test_it():\n"
+            '    with patch("pkg.source.fn"):\n'
+            "        source.fn()\n"
+        )
+        found = []
+        for test_module in (_patching_test("pkg.source.fn"), reading_test):
+            with tempfile.TemporaryDirectory() as tmp:
+                kwargs = _mock_fixture(Path(tmp), package, {"test_it.py": test_module})
+                kwargs["roots"]["tests"] = Path(tmp) / "tests"
+                report = af.check_inert_patches(**kwargs)
+            self.assertEqual(report.resolved_targets, 1)
+            found.append(len(report.inert))
+        self.assertEqual(found, [1, 0])
+
+    def test_relative_by_value_import_is_resolved(self):
+        """
+        Given a consumer binding by value through a relative `from .source import fn`
+        When a test patches "pkg.source.fn"
+        Then the site is still reported, with the resolved absolute target
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "__init__.py": "",
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": "from .source import fn\n\n\ndef run():\n    return fn()\n",
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(len(report.inert), 1)
+        self.assertEqual(report.inert[0].stale_bindings, ("pkg.consumer.fn",))
+
+    def test_relative_import_above_the_top_level_package_resolves_to_nothing(self):
+        """
+        Given an importer `pkg.a.b` and relative imports of increasing depth
+        When _absolute_import_module resolves each one
+        Then depths within the package resolve, and a depth that walks above the
+            top-level package gives None rather than a fabricated absolute name
+        """
+        importer = af.RepoModule("pkg.a.b", Path("pkg/a/b.py"), is_package=False)
+        self.assertEqual(af._absolute_import_module("x", 1, importer), "pkg.a.x")
+        self.assertEqual(af._absolute_import_module("x", 2, importer), "pkg.x")
+        self.assertIsNone(af._absolute_import_module("x", 3, importer))
+        self.assertIsNone(af._absolute_import_module("x", 4, importer))
+
+    def test_module_level_import_under_a_try_binds_by_value(self):
+        """
+        Given a consumer importing fn inside a module-level try/except, which
+            still binds once at import time
+        When a test patches "pkg.source.fn"
+        Then the site is reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "def fn():\n    return 1\n",
+                    "consumer.py": (
+                        "try:\n"
+                        "    from pkg.source import fn\n"
+                        "except ImportError:\n"
+                        "    fn = None\n"
+                        "\n\n"
+                        "def run():\n"
+                        "    return fn()\n"
+                    ),
+                },
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(len(report.inert), 1)
+        self.assertEqual(report.inert[0].stale_bindings, ("pkg.consumer.fn",))
+
+    def test_constructs_the_check_cannot_resolve_are_counted_not_dropped(self):
+        """
+        Given patch calls using patch.object, a non-literal target, a stdlib
+            target and a target naming two attributes below a repo module
+        When the check runs alongside one resolvable target
+        Then each construct is counted under its own key in `unseen`, and only
+            the one resolvable target is counted as resolved
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            source = (
+                "from unittest.mock import patch\n"
+                "import pkg.source as source\n"
+                "\n"
+                "TARGET = 'pkg.source.fn'\n"
+                "\n"
+                "def test_it():\n"
+                "    with patch.object(source, 'fn'):\n"
+                "        pass\n"
+                "    with patch(TARGET):\n"
+                "        pass\n"
+                "    with patch('os.path.exists'):\n"
+                "        pass\n"
+                "    with patch('pkg.source.os.replace'):\n"
+                "        pass\n"
+                "    with patch('pkg.consumer.fn'):\n"
+                "        pass\n"
+            )
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {
+                    "source.py": "import os\n\n\ndef fn():\n    return os.getcwd()\n",
+                    "consumer.py": "from pkg.source import fn\n\n\ndef run():\n    return fn()\n",
+                },
+                {"test_it.py": source},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.resolved_targets, 1)
+        self.assertEqual(report.unseen[af.UNSEEN_PATCH_HELPER], 1)
+        self.assertEqual(report.unseen[af.UNSEEN_NON_LITERAL_TARGET], 1)
+        self.assertEqual(report.unseen[af.UNSEEN_FOREIGN_TARGET], 1)
+        self.assertEqual(report.unseen[af.UNSEEN_OBJECT_ATTRIBUTE], 1)
+        self.assertEqual(report.examined_calls, 5)
+
+    def test_patch_bound_under_another_name_is_not_seen(self):
+        """
+        Given `patch` imported under another name, and an unrelated method also
+            named `patch`
+        When the check runs
+        Then only the method call is counted: matching is on the called name, so
+            the aliased import is missed silently rather than counted in `unseen`
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            source = (
+                "from unittest.mock import patch as p\n"
+                "\n"
+                "class Recorder:\n"
+                "    def patch(self, target):\n"
+                "        return target\n"
+                "\n"
+                "def test_it():\n"
+                "    with p('pkg.source.fn'):\n"
+                "        pass\n"
+                "    Recorder().patch('pkg.source.fn')\n"
+            )
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {"source.py": "def fn():\n    return 1\n"},
+                {"test_it.py": source},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.examined_calls, 1)
+        self.assertEqual(report.resolved_targets, 1)
+        self.assertEqual(report.unseen, {})
+
+    def test_zero_test_files_is_a_failure_not_a_clean_pass(self):
+        """
+        Given a test tree containing no Python files at all
+        When the check runs
+        Then it must not report ok: an empty input set is the checker being
+            broken, not a suite with no inert patches
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp), {"source.py": "def fn():\n    return 1\n"}, {}
+            )
+            (Path(tmp) / "tests").mkdir(exist_ok=True)
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.examined_files, 0)
+        self.assertFalse(report.ok, "reported a clean run having read zero test files")
+        self.assertTrue(any("zero test files" in f for f in report.failures))
+
+    def test_zero_patch_calls_is_a_failure(self):
+        """
+        Given a test tree whose files contain no patch() call
+        When the check runs
+        Then it reports a failure rather than a clean pass over zero patch calls
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {"source.py": "def fn():\n    return 1\n"},
+                {"test_it.py": "def test_it():\n    return True\n"},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertFalse(report.ok)
+        self.assertTrue(any("zero patch" in f for f in report.failures))
+
+    def test_no_resolvable_target_is_a_failure(self):
+        """
+        Given patch calls that all target modules outside the scanned packages
+        When the check runs
+        Then it reports a failure: zero targets were actually checked, which is
+            not the same as zero inert patches
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {"source.py": "def fn():\n    return 1\n"},
+                {"test_it.py": _patching_test("os.path.exists")},
+            )
+            report = af.check_inert_patches(**kwargs)
+        self.assertEqual(report.resolved_targets, 0)
+        self.assertFalse(report.ok)
+        self.assertTrue(any("zero targets" in f for f in report.failures))
+
+    def test_empty_module_map_is_a_failure(self):
+        """
+        Given roots pointing at a directory that does not exist
+        When the check runs
+        Then it reports a failure rather than a clean pass over no modules
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = _mock_fixture(
+                Path(tmp),
+                {"source.py": "def fn():\n    return 1\n"},
+                {"test_it.py": _patching_test("pkg.source.fn")},
+            )
+            kwargs["roots"] = {"pkg": Path(tmp) / "absent"}
+            report = af.check_inert_patches(**kwargs)
+        self.assertFalse(report.ok)
+        self.assertTrue(any("zero repo modules" in f for f in report.failures))
+
+    def test_render_distinguishes_a_finding_from_a_clean_pass(self):
+        """
+        Given one report with an inert-patch finding and an otherwise-identical clean report
+        When both are rendered with render_inert_patch_text
+        Then the finding's stale reference appears and only the clean report's text says
+            PASS, while both still report the same examined call count
+        """
+        site = af.PatchSite("tests/test_it.py", 3, "pkg.source.fn")
+        found = af.InertPatchReport(
+            inert=[af.InertPatch(site, "pkg.source", "fn", ("pkg.consumer.fn",))],
+            examined_files=1,
+            examined_calls=1,
+            resolved_targets=1,
+        )
+        clean = af.InertPatchReport(
+            examined_files=1, examined_calls=1, resolved_targets=1
+        )
+        found_text = af.render_inert_patch_text(found)
+        clean_text = af.render_inert_patch_text(clean)
+        self.assertIn("pkg.consumer.fn", found_text)
+        self.assertIn("PASS", clean_text)
+        self.assertNotIn("PASS", found_text)
+        for text in (found_text, clean_text):
+            self.assertIn("1 patch-family call(s)", text)
+
+    def test_real_tree_scan_examines_a_non_empty_input(self):
+        """
+        Given this repo's real test tree and packages
+        When check_inert_patches runs with its defaults
+        Then it reports no check failure and non-zero examined counts -- the
+            guard against this instrument silently scanning nothing
+        """
+        report = af.check_inert_patches()
+        self.assertEqual(report.failures, [])
+        self.assertGreater(report.examined_files, 0)
+        self.assertGreater(report.examined_calls, 0)
+        self.assertGreater(report.resolved_targets, 0)
+
+    def test_main_mocks_json_mode_smoke(self):
+        """
+        Given the --mocks --json CLI flags
+        When main runs over the real repo tree
+        Then it exits 0 or 1 and prints a JSON payload whose "mocks" section has a non-zero
+            resolved-target count and a list-valued "inert" field
+        """
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = af.main(["--mocks", "--json"])
+        self.assertIn(code, (0, 1))
+        payload = json.loads(buf.getvalue())["mocks"]
+        self.assertGreater(payload["resolved_targets"], 0)
+        self.assertIsInstance(payload["inert"], list)
+
+
 class TestShippedCodeDoesNotImportDevTools(unittest.TestCase):
     """Guards a naming hazard: repo-root ``tools/`` (dev-only) and ``toolguard/tools/`` (shipped) share a name but not a shipping status, and no shipped module may import the bare ``tools`` package."""
 

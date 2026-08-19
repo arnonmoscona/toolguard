@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Dev instrument for the TOO-45 architecture-refactoring loop: four modes over this
-repo's own source, layer map and git history. Not shipped. Stdlib only, like
-toolguard's own runtime.
+Dev instrument for the TOO-45 architecture-refactoring loop: five modes over this
+repo's own source, test tree, layer map and git history. Not shipped. Stdlib only,
+like toolguard's own runtime.
 
 Every number printed here is an INSTRUMENT, not a TARGET. A predicate or metric
 going the "right" way is evidence to bring to a human or a judge subagent, never a
@@ -10,11 +10,11 @@ self-sufficient stopping condition.
 
 **An exclusion the operator cannot see is indistinguishable from a bug.** That is
 the standing rule behind the ``*_excluded``, ``sanctioned_exclusions``,
-``known_limitations`` and ``unchecked_predicate_clauses`` entries in the output:
-each names something a detector left out, or cannot check at all. Stated once,
-here, rather than at every site that follows it.
+``known_limitations``, ``unseen`` and ``unchecked_predicate_clauses`` entries in
+the output: each names something a detector left out, or cannot check at all.
+Stated once, here, rather than at every site that follows it.
 
-Four modes
+Five modes
 ----------
 ``--layers``
     Validate every module under ``toolguard/`` against the ``[architecture]``
@@ -36,14 +36,18 @@ Generated code
     A generated file (banner-detected -- see
     :func:`tools.generated_files.is_generated_file`) is excluded from
     ``--predicates`` and ``--metrics``: a predicate only satisfiable by
-    hand-editing generated code is a trap. NOT excluded from ``--layers``, whose
-    job is validating the real import graph, which a generated file is still
-    part of.
+    hand-editing generated code is a trap. NOT excluded from ``--layers`` or
+    ``--mocks``, whose job is validating the real import graph, which a
+    generated file is still part of.
 
 ``--metrics``
     History-based metrics from ``git log``, grouped by logical change (the
     ``TOO-nn`` ticket token in the full commit message, not by raw commit --
     grouping by ticket is what removes the commit-splitting gaming vector).
+
+``--mocks``
+    Report each ``patch("mod.name")`` in the test tree that a by-value consumer
+    makes inert.
 
 ``--guard``
     The deterministic half of the loop's safety inspector: fails on an
@@ -59,6 +63,7 @@ Usage::
     uv run python tools/architecture_fitness.py --layers
     uv run python tools/architecture_fitness.py --predicates --json
     uv run python tools/architecture_fitness.py --metrics
+    uv run python tools/architecture_fitness.py --mocks
     uv run python tools/architecture_fitness.py --guard --since HEAD
 """
 
@@ -3436,6 +3441,407 @@ def render_guard_text(report: GuardReport) -> str:
 
 
 # =============================================================================
+# --mocks: patches aimed at a binding nothing reads
+# =============================================================================
+
+# `patch("mod.name")` rebinds an attribute on `mod`. A consumer that did
+# `from mod import name` copied the reference at import time, so that name never
+# consults `mod` again: the patch is inert for it and the effective target is
+# `consumer.name`. The same patch is exactly right for a consumer that does
+# `import mod` and calls `mod.name()` -- telling those apart is the whole job.
+
+#: Packages whose by-value imports count as evidence. A test's own by-value
+#: import is not evidence -- but a test's *read* still suppresses, since every
+#: module in *roots* is scanned for readers.
+INERT_PATCH_SUBJECT_PACKAGES = ("toolguard", "tools")
+
+#: Whether a finding fails the run. False while known findings are unrepaired.
+INERT_PATCH_CHECK_IS_FATAL = False
+
+UNSEEN_NON_LITERAL_TARGET = "patch target is not a literal string"
+UNSEEN_PATCH_HELPER = (
+    "patch.object/.dict/.multiple -- this scan resolves only patch()'s literal target"
+)
+UNSEEN_FOREIGN_TARGET = "target is not a repo module attribute (stdlib, third party)"
+UNSEEN_OBJECT_ATTRIBUTE = (
+    "target names more than one attribute below a repo module "
+    "(class member, or a module imported into it)"
+)
+
+PATCH_HELPER_ATTRS = frozenset({"object", "dict", "multiple"})
+
+
+@dataclass(frozen=True)
+class RepoModule:
+    """A module found under one of the scanned package roots."""
+
+    dotted: str
+    path: Path
+    is_package: bool
+
+
+@dataclass(frozen=True)
+class ValueBinding:
+    """A ``from source import name [as local]`` outside any function, where *name* is not itself a module."""
+
+    source: str
+    name: str
+    local: str
+
+
+@dataclass(frozen=True)
+class ModuleBindings:
+    value_bindings: Tuple[ValueBinding, ...]
+    #: ``(module, name)`` imported inside a function body, so re-read per call.
+    late_bindings: FrozenSet[Tuple[str, str]]
+    #: ``(module, attribute)`` read through a module alias.
+    attribute_reads: FrozenSet[Tuple[str, str]]
+    #: Every bare name loaded anywhere in this module.
+    global_reads: FrozenSet[str]
+
+
+@dataclass(frozen=True)
+class PatchSite:
+    """One ``patch("target")`` call in the scanned test tree."""
+
+    file: str
+    line: int
+    target: str
+
+
+@dataclass(frozen=True)
+class InertPatch:
+    """A patch site a by-value consumer makes inert."""
+
+    site: PatchSite
+    module: str
+    name: str
+    #: Dotted ``module.local`` of each stale reference.
+    stale_bindings: Tuple[str, ...]
+
+
+@dataclass
+class InertPatchReport:
+    inert: List[InertPatch] = field(default_factory=list)
+    examined_files: int = 0
+    examined_calls: int = 0
+    #: Targets split into a repo module and one attribute name (existence not checked).
+    resolved_targets: int = 0
+    #: Construct -> how many patch calls this scan could not resolve to a target.
+    unseen: Dict[str, int] = field(default_factory=dict)
+    #: Why the check could not do its job; any entry means not ok.
+    failures: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures and not (INERT_PATCH_CHECK_IS_FATAL and self.inert)
+
+
+def map_repo_modules(roots: Optional[Dict[str, Path]] = None) -> Dict[str, RepoModule]:
+    """
+    Map the dotted name of every module under *roots* to a RepoModule.
+
+    Args:
+        roots: Top-level package name -> that package's own directory. Defaults
+            to this repo's ``toolguard``, ``tools`` and ``test`` trees. A
+            missing directory contributes nothing.
+    """
+    if roots is None:
+        roots = {
+            "toolguard": TOOLGUARD_DIR,
+            "tools": REPO_ROOT / "tools",
+            "test": REPO_ROOT / "test",
+        }
+    found: Dict[str, RepoModule] = {}
+    for package, directory in roots.items():
+        if not directory.is_dir():
+            continue
+        for py_file in iter_python_files(directory):
+            parts = list(py_file.relative_to(directory).parts)
+            is_package = parts[-1] == "__init__.py"
+            if is_package:
+                parts = parts[:-1]
+            else:
+                parts[-1] = parts[-1][: -len(".py")]
+            dotted = ".".join([package] + parts)
+            found[dotted] = RepoModule(dotted, py_file, is_package)
+    return found
+
+
+def _absolute_import_module(
+    module: Optional[str], level: int, importer: RepoModule
+) -> Optional[str]:
+    """
+    Resolve an import statement's module part to an absolute dotted name.
+
+    *level* is ``ast.ImportFrom.level``: 0 for an absolute import, N for N
+    leading dots. Returns None when the dots walk above the top-level package.
+    """
+    if level == 0:
+        return module
+    base = (
+        importer.dotted if importer.is_package else importer.dotted.rpartition(".")[0]
+    )
+    parts = base.split(".") if base else []
+    if level - 1 >= len(parts):
+        return None
+    parts = parts[: len(parts) - (level - 1)]
+    if module:
+        parts = parts + module.split(".")
+    return ".".join(parts) or None
+
+
+def _dotted_expr(node: ast.expr) -> Optional[str]:
+    """Return the dotted name of a pure ``a.b.c`` attribute chain, or None for anything else."""
+    parts: List[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _split_on_module_prefix(
+    dotted: str, known_modules: Dict[str, RepoModule]
+) -> Optional[Tuple[str, List[str]]]:
+    """
+    Split *dotted* into its longest known-module proper prefix and the remaining
+    attribute names, or None when no proper prefix is a known module.
+    """
+    parts = dotted.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        head = ".".join(parts[:cut])
+        if head in known_modules:
+            return head, parts[cut:]
+    return None
+
+
+def _function_scoped_node_ids(tree: ast.Module) -> Set[int]:
+    """Return the ids of every node in a function definition subtree in *tree*."""
+    inside: Set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            inside.update(id(child) for child in ast.walk(node))
+    return inside
+
+
+def analyse_module_bindings(
+    module: RepoModule, known_modules: Dict[str, RepoModule]
+) -> ModuleBindings:
+    """
+    Parse *module* and record how it binds and reads names from other repo modules.
+
+    ``global_reads`` over-approximates -- it collects every bare name loaded in
+    the file, locals included. That direction is deliberate: a spurious reader
+    suppresses a finding rather than inventing one.
+    """
+    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    in_function = _function_scoped_node_ids(tree)
+    aliases: Dict[str, str] = {}
+    value_bindings: List[ValueBinding] = []
+    late_bindings: Set[Tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                aliases[alias.asname or root] = alias.name if alias.asname else root
+        elif isinstance(node, ast.ImportFrom):
+            source = _absolute_import_module(node.module, node.level, module)
+            if source is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                submodule = f"{source}.{alias.name}"
+                if submodule in known_modules:
+                    aliases[local] = submodule
+                elif id(node) in in_function:
+                    late_bindings.add((source, alias.name))
+                else:
+                    value_bindings.append(ValueBinding(source, alias.name, local))
+
+    attribute_reads: Set[Tuple[str, str]] = set()
+    global_reads: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            global_reads.add(node.id)
+            continue
+        if not isinstance(node, ast.Attribute):
+            continue
+        dotted = _dotted_expr(node)
+        if dotted is None:
+            continue
+        head, _, rest = dotted.partition(".")
+        if head not in aliases:
+            continue
+        split = _split_on_module_prefix(
+            f"{aliases[head]}.{rest}" if rest else aliases[head], known_modules
+        )
+        if split is not None:
+            attribute_reads.add((split[0], split[1][0]))
+    return ModuleBindings(
+        value_bindings=tuple(value_bindings),
+        late_bindings=frozenset(late_bindings),
+        attribute_reads=frozenset(attribute_reads),
+        global_reads=frozenset(global_reads),
+    )
+
+
+def _patch_call_name(func: ast.expr) -> Optional[str]:
+    """Return the trailing name of a called expression (``patch``, ``mock.patch`` -> ``patch``)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def collect_patch_sites(
+    test_root: Path, repo_root: Path = REPO_ROOT
+) -> Tuple[List[PatchSite], Counter, int]:
+    """
+    Find ``patch(...)`` calls under *test_root*.
+
+    Returns the sites carrying a literal target string, a counter of constructs
+    that name no resolvable target, and the number of files read.
+
+    Matching is on the called name, so an unrelated method named ``patch`` is
+    counted and ``patch`` bound under another name is not seen.
+    """
+    sites: List[PatchSite] = []
+    unseen: Counter = Counter()
+    files = list(iter_python_files(test_root)) if test_root.is_dir() else []
+    for py_file in files:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        label = py_file.resolve().relative_to(repo_root.resolve()).as_posix()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _patch_call_name(node.func)
+            if name in PATCH_HELPER_ATTRS:
+                if _patch_call_name(getattr(node.func, "value", None)) == "patch":
+                    unseen[UNSEEN_PATCH_HELPER] += 1
+                continue
+            if name != "patch":
+                continue
+            target = node.args[0] if node.args else None
+            if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                sites.append(PatchSite(label, node.lineno, target.value))
+            else:
+                unseen[UNSEEN_NON_LITERAL_TARGET] += 1
+    return sites, unseen, len(files)
+
+
+def check_inert_patches(
+    test_root: Path = REPO_ROOT / "test",
+    roots: Optional[Dict[str, Path]] = None,
+    subject_packages: Sequence[str] = INERT_PATCH_SUBJECT_PACKAGES,
+    repo_root: Path = REPO_ROOT,
+) -> InertPatchReport:
+    """
+    Report each ``patch("mod.name")`` under *test_root* that a by-value consumer
+    makes inert.
+
+    A site is inert when some module in *subject_packages* holds ``name`` as a
+    by-value import from ``mod``, and no module anywhere in *roots* reads
+    ``mod.name`` through a route the patch would reach.
+
+    Args:
+        test_root: Directory scanned for patch call sites.
+        roots: Package name -> directory, as :func:`map_repo_modules` takes.
+        subject_packages: Packages whose by-value bindings count as evidence.
+        repo_root: Base for the repo-relative paths reported in each finding.
+    """
+    modules = map_repo_modules(roots)
+    sites, unseen, examined_files = collect_patch_sites(test_root, repo_root)
+    report = InertPatchReport(
+        examined_files=examined_files, examined_calls=len(sites) + sum(unseen.values())
+    )
+
+    stale: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    observed: Set[Tuple[str, str]] = set()
+    for dotted, module in sorted(modules.items()):
+        bindings = analyse_module_bindings(module, modules)
+        if first_segment(dotted) in subject_packages:
+            for binding in bindings.value_bindings:
+                stale[(binding.source, binding.name)].append(
+                    f"{dotted}.{binding.local}"
+                )
+        observed |= bindings.late_bindings
+        observed |= bindings.attribute_reads
+        observed |= {(dotted, name) for name in bindings.global_reads}
+
+    for site in sites:
+        split = _split_on_module_prefix(site.target, modules)
+        if split is None:
+            unseen[UNSEEN_FOREIGN_TARGET] += 1
+            continue
+        module_name, attributes = split
+        if len(attributes) > 1:
+            unseen[UNSEEN_OBJECT_ATTRIBUTE] += 1
+            continue
+        report.resolved_targets += 1
+        name = attributes[0]
+        holders = stale.get((module_name, name))
+        if holders and (module_name, name) not in observed:
+            report.inert.append(
+                InertPatch(site, module_name, name, tuple(sorted(holders)))
+            )
+    report.unseen = dict(unseen)
+
+    if not modules:
+        report.failures.append("mapped zero repo modules: nothing could be resolved")
+    elif examined_files == 0:
+        report.failures.append(f"examined zero test files under {test_root}")
+    elif report.examined_calls == 0:
+        report.failures.append(
+            f"found zero patch(...) calls in {examined_files} test file(s)"
+        )
+    elif report.resolved_targets == 0:
+        report.failures.append(
+            f"none of {report.examined_calls} patch-family call(s) split into a repo "
+            "module and one attribute name: zero targets were actually checked"
+        )
+    return report
+
+
+def render_inert_patch_text(report: InertPatchReport) -> str:
+    """
+    Render :func:`check_inert_patches`'s output. Headlines are kept distinct so
+    a run that examined nothing cannot read as a clean pass.
+    """
+    if report.failures:
+        headline = "FAIL -- the check examined nothing usable"
+    elif not report.inert:
+        headline = "PASS -- no inert patch found"
+    elif INERT_PATCH_CHECK_IS_FATAL:
+        headline = f"FAIL -- {len(report.inert)} inert patch(es)"
+    else:
+        headline = f"FINDINGS -- {len(report.inert)} inert patch(es), not fatal yet"
+    lines = [
+        f"=== --mocks: {headline} ===",
+        f"examined: {report.examined_files} test file(s), {report.examined_calls} "
+        f"patch-family call(s), {report.resolved_targets} target(s) split into a repo "
+        "module and one attribute name (existence not checked)",
+    ]
+    for construct, count in sorted(report.unseen.items()):
+        lines.append(f"  not checked: {count} x {construct}")
+    for failure in report.failures:
+        lines.append(f"  CHECK FAILURE: {failure}")
+    for found in report.inert:
+        lines.append(
+            f'  - {found.site.file}:{found.site.line} patch("{found.site.target}")'
+        )
+        lines.append(
+            f"      effective targets (patch each): {', '.join(found.stale_bindings)}"
+        )
+    return "\n".join(lines)
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -3460,6 +3866,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--metrics",
         action="store_true",
         help="Emit history-based co-change/structure metrics.",
+    )
+    parser.add_argument(
+        "--mocks",
+        action="store_true",
+        help="Report patch() targets a by-value consumer makes inert.",
     )
     parser.add_argument(
         "--guard",
@@ -3497,12 +3908,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.layers,
             args.predicates,
             args.metrics,
+            args.mocks,
             args.guard,
             args.guard_canaries_only,
         ]
     ):
         parser.error(
-            "at least one of --layers, --predicates, --metrics, --guard, "
+            "at least one of --layers, --predicates, --metrics, --mocks, --guard, "
             "--guard-canaries-only is required"
         )
 
@@ -3536,6 +3948,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.json:
             print(render_metrics_text(metrics))
             print()
+
+    if args.mocks:
+        mock_report = check_inert_patches()
+        payload["mocks"] = {
+            "ok": mock_report.ok,
+            "examined_files": mock_report.examined_files,
+            "examined_calls": mock_report.examined_calls,
+            "resolved_targets": mock_report.resolved_targets,
+            "unseen": mock_report.unseen,
+            "failures": mock_report.failures,
+            "inert": [
+                {
+                    "file": found.site.file,
+                    "line": found.site.line,
+                    "target": found.site.target,
+                    "stale_bindings": list(found.stale_bindings),
+                }
+                for found in mock_report.inert
+            ],
+        }
+        if not args.json:
+            print(render_inert_patch_text(mock_report))
+            print()
+        if not mock_report.ok:
+            exit_code = 1
 
     if args.guard or args.guard_canaries_only:
         report = run_guard(
