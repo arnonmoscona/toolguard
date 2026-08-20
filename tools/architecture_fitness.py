@@ -3870,11 +3870,11 @@ PATH_AMBIENT_MEMBERS = frozenset({"absolute", "cwd", "expanduser", "home", "reso
 
 #: Ambient members a module may not name without a :data:`PATH_AMBIENT_OWNERS`
 #: entry for that ``(module, member)`` pair -- an entry for one member exempts
-#: only that member. ``resolve``'s absence is pragmatic, not principled: it and ``absolute``
-#: both read the working directory only for a relative receiver, which this scan
-#: does not evaluate, so no rule tells the two apart. ``absolute`` has no site in
-#: this tree to exempt, while ``resolve`` has one in most modules that handle
-#: paths, so its sites are inventoried rather than failed.
+#: only that member. ``resolve``'s absence is pragmatic, not principled: it and
+#: ``absolute`` both read the working directory only for a relative receiver,
+#: which this scan does not evaluate, so no rule tells the two apart.
+#: ``absolute`` has no site in this tree; ``resolve``'s sites are inventoried
+#: rather than failed.
 PATH_AMBIENT_FATAL_MEMBERS = frozenset({"absolute", "cwd", "expanduser", "home"})
 
 #: ``Path`` members inherited from ``PurePath``.
@@ -3907,8 +3907,9 @@ PATH_PURE_MEMBERS = frozenset(
     }
 )
 
-#: ``Path`` members that reach the filesystem. A separate concern from ambient
-#: state and not policed here.
+#: ``Path`` members that are not ambient reads: filesystem operations, plus
+#: ``from_uri``, which only parses. A separate concern from ambient state and
+#: not policed here.
 PATH_FILESYSTEM_MEMBERS = frozenset(
     {
         "chmod",
@@ -4042,7 +4043,7 @@ class AmbientSite:
     line: int
     module: str
     rule: str
-    #: The imported name for an ``os`` import, the member name for a ``Path`` read.
+    #: The imported text for an ``os`` import, the member name for a ``Path`` read.
     name: str
 
 
@@ -4193,8 +4194,9 @@ def check_ambient_routes(
     modules: Optional[Dict[str, RepoModule]] = None,
 ) -> AmbientReport:
     """
-    Report every read of machine state under *scan_root* that no owner entry
-    accounts for, plus the state of the pathlib classification itself.
+    Report every ``os`` import and ``Path`` ambient-member read under
+    *scan_root* that no owner entry accounts for, plus the state of the pathlib
+    classification itself.
 
     Args:
         scan_root: Package directory to walk.
@@ -4281,7 +4283,10 @@ def render_ambient_text(report: AmbientReport) -> str:
     elif inventory:
         headline = f"FINDINGS -- {len(inventory)} unowned resolve() site(s)"
     else:
-        headline = "PASS -- every read of machine state has an owner"
+        headline = (
+            "PASS -- every os import and Path ambient-member read this scan saw "
+            "has an owner"
+        )
     surface = report.surface
     lines = [
         f"=== --ambient: {headline} ===",
@@ -4339,7 +4344,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--ambient",
         action="store_true",
-        help="Report reads of home/cwd/environment that bypass toolguard.ambient.",
+        help="Report unowned reads of home/cwd/environment that bypass toolguard.ambient.",
     )
     parser.add_argument(
         "--guard",
