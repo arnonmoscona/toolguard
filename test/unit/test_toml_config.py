@@ -298,10 +298,6 @@ class TestLoadConfigFileCacheInvalidation(unittest.TestCase):
             read-modify-write tool produces when it swaps one rule for another
         When load_config_file reads it again
         Then the SECOND read returns the NEW content
-
-        RED: proposed ticket 27. Neither key component changes, so the rewrite
-        collides with the cached entry and the stale parse is served. A content
-        hash in the key fixes it.
         """
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "toolguard_hook.toml"

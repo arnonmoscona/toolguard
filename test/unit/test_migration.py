@@ -542,11 +542,6 @@ class TestTOMLConfigWriting(unittest.TestCase):
             {"additionalContext": "line1\\nline2"}
         When write_toml_config writes it
         Then the file is written and re-parses with the newline intact.
-            Currently RED: rule_sort._escape_toml_string escapes only \\\\ and
-            ", so the newline ends the TOML basic string, the emitted inline
-            table spans two lines, and the write guard refuses the whole write
-            -- one enrichment string makes the config unwritable (proposed
-            ticket 24). Asserting the correct behaviour, not the defect.
         """
         with TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "toolguard_hook.toml"

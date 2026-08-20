@@ -2244,9 +2244,6 @@ class TestMainEntryPoint(unittest.TestCase):
         When main runs
         Then it exits non-zero -- a measurement instrument must not answer "0 occurrences,
         0 parse failures" for a tree it never opened
-
-        RED: the tool currently exits 0 and prints a complete-looking report of zeros, which is
-        indistinguishable from a genuine clean result on a real tree.
         """
         code, _out = self._run_main(
             ["--subject", "mode", "--tree", "/nonexistent/definitely/not/here"]

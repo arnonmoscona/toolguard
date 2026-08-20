@@ -244,10 +244,6 @@ class TestConfigDiscovery(ConfigIsolationMixin, unittest.TestCase):
             ~/.claude is itself a strong project anchor -- holding two config files
         When discover_config_files runs
         Then each file is discovered once, not once per level
-
-        RED: both come back twice, because the project and user candidate blocks
-        resolve to the same directory. The live hierarchy path, _discover_levels,
-        collapses the same layout to a single 'user' level.
         """
         home, _project_dir = self.isolate_config_environment()
         user_claude_dir = home / ".claude"

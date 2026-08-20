@@ -134,10 +134,6 @@ class TestGetNativePermissions(unittest.TestCase):
         Then it returns empty allow, deny, and ask lists without raising --
              a file toolguard cannot make sense of is handled the same way as
              an unparseable one, because this runs on the live hook path
-
-        Currently RED: the try/except wraps only json.load, so the
-        config.get("permissions", {}) below it raises AttributeError out of
-        check_and_warn_divergence (TOO-45 follow-up row V2).
         """
         with TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.local.json"

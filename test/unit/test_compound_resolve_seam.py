@@ -254,9 +254,6 @@ class TestSubMatchesCharacterization(unittest.TestCase):
         Then the condition appears in sub_matches and the compound is denied,
             exactly as the same command bare is denied
         """
-        # RED: pins proposed ticket 19's P1 bypass. The condition is dropped by
-        # the extractor, so sub_matches records only ':' and the compound
-        # allows -- a sub-command reaching the shell with no rule applied.
         config = _config(allow=["*"], deny=["rm *"])
         result = _resolve(config, "while rm -rf /tmp/x; do :; done")
         self.assertIn("rm -rf /tmp/x", [sm.sub_command for sm in result.sub_matches])

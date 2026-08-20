@@ -797,12 +797,6 @@ class TestDetectConflicts(unittest.TestCase):
             and an empty project_root/logs
         When _detect_conflicts is called
         Then the recorded conflict is reported
-
-        RED: proposed ticket 26. _detect_conflicts scans
-        `config.project_root / "logs"`, while the writer resolves its directory
-        through `env_config.get("log_dir")`. Setting TOOLGUARD_LOG_DIR
-        therefore disables the dynamic-conflict nag with no error, no warning,
-        and no way to tell "no conflicts" from "never looked".
         """
         with TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir) / "project"

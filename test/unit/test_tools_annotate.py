@@ -551,12 +551,6 @@ class TestHostileCharactersInANote(unittest.TestCase):
         When the section is annotated
         Then the section still parses and the note is emitted as ONE comment line
             with the break normalised to a single space
-
-        RED: a break currently ends the comment mid-array and the section no
-        longer parses.  This is proposed ticket 24's defect on a different
-        surface -- the comment renderer, not _escape_toml_string -- so the fix
-        Arnon decided there (normalise a newline to a space) does not reach it:
-        a note is generated prose and never passes through normalize_entry.
         """
         out = annotate_section_text(_SECTION, {"Bash(git:*)": ["one\ntwo"]})
         try:
@@ -667,11 +661,6 @@ class TestAnnotationIsAttachedToTheNamedRule(unittest.TestCase):
             overlap clarity itself reports as deny-shadows-allow
         When the file's clarity annotations are applied to its section
         Then only the allow rule is annotated
-
-        RED: _rule_first_line_patterns keys one dict by source line across allow,
-        deny and ask, so the allow's note is also inserted above the identical
-        deny line, where it reads as a claim about the deny itself.  Follow-up
-        queue entry AE1.
         """
         config = _config(allow=["git:*"], deny=["git:*"])
         annotations = clarity_annotations(config, "Bash")[_FAKE_PATH]
