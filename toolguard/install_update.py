@@ -32,7 +32,6 @@ place of the three above.
 
 import importlib.metadata
 import json
-import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -41,6 +40,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+from toolguard import ambient
 from toolguard._git import run_git
 from toolguard.constants import DIST_NAME as _DEFAULT_DIST_NAME
 
@@ -166,7 +166,7 @@ def local_remote_head(repo: Path) -> Optional[str]:
     Return the ``origin`` HEAD commit SHA as seen from the checkout ``repo``,
     or None on any failure (no ``origin``, offline, git missing).
     """
-    env = dict(os.environ)
+    env = dict(ambient.env())
     env["GIT_TERMINAL_PROMPT"] = "0"
     result = run_git(["-C", str(repo), "ls-remote", "origin", "HEAD"], env=env)
     if result is None or result.returncode != 0:
@@ -240,7 +240,7 @@ def remote_head(url: str) -> Optional[str]:
     Return the HEAD commit SHA at the git remote ``url``, or None on any
     failure (offline, git missing, timeout, unexpected output).
     """
-    env = dict(os.environ)
+    env = dict(ambient.env())
     env["GIT_TERMINAL_PROMPT"] = "0"
     result = run_git(["ls-remote", url, "HEAD"], env=env)
     if result is None or result.returncode != 0:

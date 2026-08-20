@@ -2,7 +2,8 @@
 Low-level filesystem path helpers: the bounded walk up the parent directories,
 the project-root marker sets, and project-root resolution.
 
-Stdlib only, importing nothing from toolguard: it is a foundation-layer leaf.
+Foundation layer: stdlib plus :mod:`toolguard.ambient`, which is where the home
+and current directories come from.
 """
 
 from dataclasses import dataclass
@@ -10,14 +11,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Tuple
 
+from toolguard import ambient
+
 
 def iter_dirs_upward(start: Path) -> Iterator[Path]:
     """
-    Yield ``start``, then each parent, stopping at ``Path.home()`` or at the top
-    of the path -- ``/`` for an absolute path, ``.`` for a relative one.
+    Yield ``start``, then each parent, stopping at the home directory or at the
+    top of the path -- ``/`` for an absolute path, ``.`` for a relative one.
 
-    Home is recognised by exact equality with ``Path.home()``, so a walk that
-    starts outside home never meets it and runs all the way to the top.
+    Home is recognised by exact equality with :func:`ambient.home`, so a walk
+    that starts outside home never meets it and runs all the way to the top.
 
     Args:
         start: Directory to begin climbing from.
@@ -25,7 +28,7 @@ def iter_dirs_upward(start: Path) -> Iterator[Path]:
     Yields:
         Each directory from ``start`` upward, including the stopping point.
     """
-    home = Path.home()
+    home = ambient.home()
     current = start
     while True:
         yield current
@@ -212,7 +215,7 @@ def resolve_project_root(
     Returns:
         A :class:`ProjectRootResolution` describing what was found.
     """
-    start = (start_dir or Path.cwd()).resolve()
+    start = (start_dir or ambient.cwd()).resolve()
 
     if override is not None:
         resolved = override.resolve()
@@ -302,13 +305,14 @@ def require_project_root(start_dir: Optional[Path] = None) -> Path:
     Raises:
         RuntimeError: If the walk-up finds no marker.
     """
-    start = Path(start_dir) if start_dir else Path.cwd()
+    start = Path(start_dir) if start_dir else ambient.cwd()
     resolution = resolve_project_root(
         start, strict=True, indicators=CONFIG_ROOT_INDICATORS
     )
     if resolution.root is None:
         raise RuntimeError(
-            "Project root not found. Searched for pyproject.toml or .git directory "
-            f"from {start} up to {Path.home()}. Something is badly wrong."
+            f"Project root not found. Searched from {start.resolve()} upward, stopping "
+            f"at {ambient.home()} or the filesystem root, for any of: "
+            f"{', '.join(CONFIG_ROOT_INDICATORS)}. Something is badly wrong."
         )
     return resolution.root

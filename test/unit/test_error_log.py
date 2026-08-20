@@ -20,19 +20,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import error_log
+from toolguard import ambient
 from toolguard.error_log import log_crash, log_warning
 
 
-class _HomelessPath:
-    """Stands in for error_log's Path; home() raises as pathlib does with no resolvable home."""
-
-    def __new__(cls, *args, **kwargs):
-        return Path(*args, **kwargs)
-
-    @staticmethod
-    def home():
-        raise RuntimeError("Could not determine home directory")
+def _homeless():
+    """Stands in for ambient.home(); raises as pathlib does with no resolvable home."""
+    raise RuntimeError("Could not determine home directory")
 
 
 def _raise_from_a_named_frame():
@@ -205,27 +199,23 @@ class TestLogCrash(unittest.TestCase):
 
     def test_log_crash_returns_none_when_no_home_directory_resolves(self):
         """
-        Given a machine where no home directory can be resolved, so Path.home()
-        raises (a container, a missing passwd entry, a deleted home)
+        Given a machine where no home directory can be resolved, so resolving
+        home raises (a container, a missing passwd entry, a deleted home)
         When log_crash is called from inside a caller's except clause
         Then it degrades the way every other crash-report failure does: the cause
         is named on stderr and None is returned, rather than a second exception
         being raised into a caller that is already handling one
-
-        RED at HEAD: errors_dir = Path.home() / ... is built above log_crash's own
-        try, so the RuntimeError propagates. Every call site is one of
-        hook.main()'s top-level except clauses, ahead of the decision it must
-        still emit; proposed ticket 23 states that consequence, and this states
-        the same defect as log_crash's own contract.
         """
         stderr = StringIO()
         with (
-            patch("toolguard.error_log.Path", _HomelessPath),
+            # Patching the accessor, not isolating config: only an ambient.home
+            # that raises produces the machine this test is about.
+            patch("toolguard.ambient.home", _homeless),
             patch("sys.stderr", stderr),
         ):
             # Without this the fixture cannot produce the negative case.
             with self.assertRaises(RuntimeError):
-                error_log.Path.home()
+                ambient.home()
 
             try:
                 raise ValueError("boom")

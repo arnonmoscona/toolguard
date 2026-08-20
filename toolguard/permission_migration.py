@@ -30,7 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from toolguard import file_lock
+from toolguard import ambient, file_lock
 from toolguard.config import (
     Configuration,
     discover_config_files,
@@ -122,12 +122,12 @@ def _migration_lock_path(project_root: Path) -> Path:
     deliberate divergence from that module, not an inconsistency to copy --
     see this function's caller for the follow-up note.
 
-    ``Path.home()`` is resolved here, at call time, never at module import:
-    this module is on the hook's import path.
+    Home is resolved per call, never at import: this module is on the hook's
+    import path.
     """
     digest = hashlib.sha256(str(project_root.resolve()).encode()).hexdigest()
     return (
-        Path.home()
+        ambient.home()
         / ".toolguard"
         / _LOCK_SUBDIR
         / f"migrate-{digest[:_LOCK_KEY_HEX_LEN]}.lock"

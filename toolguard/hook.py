@@ -17,12 +17,11 @@ fails, or from argparse's own usage-error path on a malformed CLI invocation
 import argparse
 import io
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from toolguard import error_reporter
+from toolguard import ambient, error_reporter
 from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
 from toolguard.compound import (
@@ -791,7 +790,7 @@ def _warn_if_settings_path_override(reporter: Reporter) -> None:
     machine (and, if that config is fail-closed takeover, lock it out), so the
     bypass must never be invisible.
     """
-    settings_path_override = os.environ.get("CLAUDE_SETTINGS_PATH")
+    settings_path_override = ambient.env_var("CLAUDE_SETTINGS_PATH")
     if not settings_path_override:
         return
     reporter.warning(
@@ -1238,11 +1237,11 @@ def main() -> None:
     # config-layer modules' report_notice/report_warning calls resolve --
     # deep call chains make threading a Reporter through every signature
     # impractical, so an ambient registry stands in instead (see that
-    # module's docstring for the full rationale). It wraps the whole
-    # try/except below -- including the except handlers -- so a fault
-    # reported anywhere in this call still drains into the same reporter the
-    # response is built from.
-    with error_reporter.active(reporter):
+    # module's docstring for the full rationale).
+    # ambient.active binds home, cwd and the environment for the block below.
+    # Both bindings wrap the whole try/except, handlers included, and release on
+    # the way out.
+    with ambient.active(ambient.resolve()), error_reporter.active(reporter):
         try:
             # Coarse log-dir fallback, resolved before env_config is known,
             # so get_env_config()'s own report_warning call sites (necessarily

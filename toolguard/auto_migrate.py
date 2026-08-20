@@ -6,7 +6,7 @@ the project's toolguard config, at most once per calendar day per project.
 from pathlib import Path
 from typing import Dict, List
 
-from toolguard import once_per
+from toolguard import ambient, once_per
 from toolguard.config import config_sync_settings_from_sources, load_configuration
 from toolguard.config_divergence import (
     find_divergent_patterns,
@@ -70,7 +70,7 @@ def run_auto_migration(
     config = load_configuration(project_root, ignore_env_override=True)
 
     backup_dir_str = config_sync.get("backup_dir", "logs/config-backups")
-    backup_dir = Path(config.resolve_config_path(backup_dir_str)).expanduser()
+    backup_dir = ambient.expanduser(config.resolve_config_path(backup_dir_str))
 
     auto_sort = config_sync.get("auto_sort_on_migrate", True)
 

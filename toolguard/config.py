@@ -29,13 +29,13 @@ else is underscore-prefixed.
 import functools
 import hashlib
 import json
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Dict, List, Mapping, Optional, Set, Tuple
 
+from toolguard import ambient
 from toolguard.config_types import ConfigLayer as ConfigLayer
 from toolguard.config_types import ConflictOverride as ConflictOverride
 from toolguard.config_types import Provenance as Provenance
@@ -263,7 +263,7 @@ def discover_config_files(start_dir: Path = None) -> List[Tuple[Path, str, str]]
     # User level -- skipped when it is the same directory as the project
     # level already added above (the project root is home), which would
     # otherwise duplicate every file found there.
-    user_claude_dir = Path.home() / ".claude"
+    user_claude_dir = ambient.home() / ".claude"
     if (
         project_claude_dir is None
         or user_claude_dir.resolve() != project_claude_dir.resolve()
@@ -326,12 +326,12 @@ def _rules_dirs() -> Tuple[Path, Path]:
     Returns:
         ``(xdg_dir, legacy_dir)``, in precedence order (XDG first).
     """
-    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    xdg_config_home = ambient.env_var("XDG_CONFIG_HOME")
     if xdg_config_home:
         xdg_dir = Path(xdg_config_home) / "toolguard" / "rules"
     else:
-        xdg_dir = Path.home() / ".config" / "toolguard" / "rules"
-    legacy_dir = Path.home() / ".toolguard" / "rules"
+        xdg_dir = ambient.home() / ".config" / "toolguard" / "rules"
+    legacy_dir = ambient.home() / ".toolguard" / "rules"
     return (xdg_dir, legacy_dir)
 
 
@@ -584,7 +584,7 @@ def _discover_levels(start_dir: Path = None) -> List[Tuple[Path, str, str, int, 
         least-specific tier (``~/.claude`` plus the rules directories) and
         ``'project'`` otherwise.
     """
-    home = Path.home()
+    home = ambient.home()
     user_claude_dir = home / ".claude"
 
     try:
@@ -1951,7 +1951,7 @@ def load_configuration(
     parse_failures: List[Tuple[Path, str]] = []
 
     settings_path = (
-        None if ignore_env_override else os.environ.get("CLAUDE_SETTINGS_PATH")
+        None if ignore_env_override else ambient.env_var("CLAUDE_SETTINGS_PATH")
     )
     if settings_path:
         explicit = Path(settings_path)

@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from toolguard import ambient
 from toolguard.constants import (
     BUILTIN_TOOLS,
     STATUS_ERROR,
@@ -73,7 +74,7 @@ def transcript_dir_for_project(
     Returns:
         ``<claude_home>/projects/<encoded>``. Existence is NOT checked.
     """
-    home = claude_home or (Path.home() / ".claude")
+    home = claude_home or (ambient.home() / ".claude")
     encoded = str(project_dir.resolve()).replace("/", "-")
     return home / "projects" / encoded
 

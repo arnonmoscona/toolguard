@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import error_reporter
+from toolguard import ambient, error_reporter
 from toolguard.env_config import (
     find_project_root,
     get_bool_env,
@@ -850,6 +850,33 @@ class TestGetEnvConfig(unittest.TestCase):
             self.assertTrue(
                 mock_find.called, "find_project_root mock was not consulted"
             )
+            self.assertEqual(config["log_dir"], home / "mylogs")
+
+    def test_a_bound_ambient_home_governs_a_tilde_log_dir(self):
+        """
+        Given an ambient binding whose home is a temp directory, no $HOME in the
+              process environment, and TOOLGUARD_LOG_DIR set to '~/mylogs'
+        When get_env_config is called
+        Then config['log_dir'] lands under the bound home rather than under the
+             machine's real home, which is where the passwd fallback would put it
+        """
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir).resolve()
+            project_root = home / "project"
+            project_root.mkdir()
+            facts = ambient.AmbientFacts(
+                home=home,
+                cwd=project_root,
+                env={"TOOLGUARD_LOG_DIR": "~/mylogs"},
+            )
+
+            with clean_env():
+                with ambient.active(facts):
+                    with patch("toolguard.env_config.find_project_root") as mock_find:
+                        mock_find.return_value = project_root
+
+                        config = get_env_config()
+
             self.assertEqual(config["log_dir"], home / "mylogs")
 
     def test_log_dir_may_come_from_the_env_file(self):

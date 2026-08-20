@@ -44,6 +44,7 @@ from re import MULTILINE, compile as re_compile
 from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from toolguard import ambient
 from toolguard.config import load_config_file
 from toolguard.config_write_guard import (
     ConfigWriteVerificationError,
@@ -137,7 +138,7 @@ _README_TEMPLATE = (
 
 def _state_dir() -> Path:
     """Return toolguard's per-user state directory."""
-    return Path.home() / ".toolguard"
+    return ambient.home() / ".toolguard"
 
 
 def _backups_dir() -> Path:
@@ -186,7 +187,7 @@ def _claude_dir(scope: str, project_dir: Optional[str]) -> Path:
         return Path(project_dir) / ".claude"
     if project_dir:
         raise InstallerError("--project-dir is only valid with --scope project")
-    return Path.home() / ".claude"
+    return ambient.home() / ".claude"
 
 
 def _config_path(scope: str, project_dir: Optional[str]) -> Path:
@@ -1301,7 +1302,7 @@ def cmd_discover_projects(args: argparse.Namespace) -> int:
     Returns:
         ``0``. A candidate that does not qualify is dropped, not reported.
     """
-    home = Path.home()
+    home = ambient.home()
     seen: "dict[str, None]" = {}
     for project_path_str in _load_claude_json_projects(home / ".claude.json"):
         seen.setdefault(str(Path(project_path_str)), None)
@@ -2016,7 +2017,7 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
             paths. A missing or invalid skill, or an undeterminable binary
             status, is a reportable outcome, not an error.
     """
-    project_dir = args.project_dir or str(Path.cwd())
+    project_dir = args.project_dir or str(ambient.cwd())
     scoped_claude_dirs = (
         ("user", _claude_dir("user", None)),
         ("project", _claude_dir("project", project_dir)),

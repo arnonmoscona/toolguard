@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 from typing import Optional, Tuple
 
+from toolguard import ambient
+
 
 def _involves_a_symlink(path_obj: Path) -> bool:
     """Whether path_obj is a symlink, or is absolute with a symlinked ancestor directory.
@@ -35,10 +37,10 @@ def _home_spellings() -> Tuple[Path, ...]:
     """The home directory as reported and, where it differs, as resolved; empty if neither.
 
     Both spellings are needed because the symlink step above may have rewritten the
-    path into its real form while ``Path.home()`` still reports the symlinked one.
+    path into its real form while ``ambient.home()`` still reports the symlinked one.
     """
     try:
-        home = Path.home()
+        home = ambient.home()
     except OSError, RuntimeError:
         return ()
     try:
@@ -134,7 +136,7 @@ def expand_tilde(path: str) -> str:
     if not path or not path.startswith("~"):
         return path
 
-    home = str(Path.home())
+    home = str(ambient.home())
 
     if path == "~":
         return home

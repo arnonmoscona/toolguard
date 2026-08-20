@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from toolguard import ambient
+
 
 def log_warning(message: str, corrective_steps: str, log_dir: Path) -> None:
     """
@@ -143,9 +145,8 @@ def log_crash(
     now = datetime.now()
 
     try:
-        # Inside the try: Path.home() raises where no home resolves, and this
-        # runs in callers that must still emit a decision afterwards.
-        errors_dir = Path.home() / ".toolguard" / "errors"
+        # Inside the try: home may not resolve, and this must not raise.
+        errors_dir = ambient.home() / ".toolguard" / "errors"
         errors_dir.mkdir(parents=True, exist_ok=True)
 
         base_name = f"toolguard-error-{now.strftime('%Y-%m-%d-%H%M%S')}"

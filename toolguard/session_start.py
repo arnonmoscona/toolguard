@@ -38,13 +38,12 @@ Exit code: Always 0 (a SessionStart hook must never block the session).
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from toolguard import env_config, install_provenance
+from toolguard import ambient, env_config, install_provenance
 from toolguard.config import Configuration, load_configuration
 
 
@@ -438,7 +437,7 @@ def main() -> None:
 
     try:
         payload = _parse_session_start_input()
-        cwd = payload.get("cwd") or os.getcwd()
+        cwd = payload.get("cwd") or str(ambient.cwd())
 
         # Loaded once and shared by every _detect_* check below, so they see
         # a consistent snapshot.

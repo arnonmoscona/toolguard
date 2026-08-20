@@ -4,10 +4,10 @@ project root is, where logs go, and whether extended pattern syntax is
 enabled. Nothing here reads permission rules.
 """
 
-import os
 from pathlib import Path
 from typing import Dict, Optional
 
+from toolguard import ambient
 from toolguard.error_reporter import report_warning
 from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
 
@@ -26,7 +26,7 @@ def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
     Returns:
         Path to project root, or None if not found
     """
-    start = start_dir if start_dir else Path.cwd()
+    start = start_dir if start_dir else ambient.cwd()
     resolution = resolve_project_root(
         start, strict=True, indicators=CONFIG_ROOT_INDICATORS
     )
@@ -44,7 +44,7 @@ def load_env_file(project_root: Path, source_root: str = "") -> Dict[str, str]:
     value. Nothing else is interpreted -- a trailing ``# comment`` ends up
     inside the value, and ``export KEY=v`` yields the key ``"export KEY"``.
 
-    Reads only; never sets or overrides anything in ``os.environ``.
+    Reads only; never sets or overrides anything in the process environment.
 
     Args:
         project_root: Path to project root
@@ -93,7 +93,7 @@ def get_bool_env(
     """
     Read a boolean setting, case-insensitively.
 
-    Precedence: ``os.environ``, then *env_vars*, then *default*. Accepts
+    Precedence: the process environment, then *env_vars*, then *default*. Accepts
     ``true``/``1``/``yes`` and ``false``/``0``/``no`` in any case; any other
     value reports a warning and falls back to *default*.
 
@@ -105,7 +105,7 @@ def get_bool_env(
     Returns:
         Boolean value
     """
-    value = os.environ.get(name)
+    value = ambient.env_var(name)
 
     if value is None and env_vars:
         value = env_vars.get(name)
@@ -130,7 +130,7 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
     """
     Load toolguard's environment configuration.
 
-    ``os.environ`` wins over ``.env`` -- except for ``TOOLGUARD_PROJECT_ROOT``
+    The process environment wins over ``.env`` -- except for ``TOOLGUARD_PROJECT_ROOT``
     and ``TOOLGUARD_SOURCE_ROOT``, which are read from the environment only,
     since both are needed to locate the ``.env`` file in the first place.
 
@@ -152,18 +152,19 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
     """
     if start_dir is not None:
         project_root = (
-            find_project_root(Path(start_dir)) or Path(start_dir).expanduser().resolve()
+            find_project_root(Path(start_dir))
+            or ambient.expanduser(start_dir).resolve()
         )
     else:
-        project_root_str = os.environ.get("TOOLGUARD_PROJECT_ROOT")
+        project_root_str = ambient.env_var("TOOLGUARD_PROJECT_ROOT")
         if project_root_str:
-            project_root = Path(project_root_str).expanduser().resolve()
+            project_root = ambient.expanduser(project_root_str).resolve()
         else:
             project_root = find_project_root()
             if project_root is None:
-                project_root = Path.cwd()
+                project_root = ambient.cwd()
 
-    source_root = os.environ.get("TOOLGUARD_SOURCE_ROOT", "")
+    source_root = ambient.env_var("TOOLGUARD_SOURCE_ROOT", "")
 
     env_vars = load_env_file(project_root, source_root)
 
@@ -171,12 +172,12 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
     extended_syntax = get_bool_env("TOOLGUARD_EXTENDED_SYNTAX", True, env_vars)
     create_log_dir = get_bool_env("TOOLGUARD_CREATE_LOG_DIR", False, env_vars)
 
-    log_dir_str = os.environ.get("TOOLGUARD_LOG_DIR")
+    log_dir_str = ambient.env_var("TOOLGUARD_LOG_DIR")
     if log_dir_str is None and env_vars:
         log_dir_str = env_vars.get("TOOLGUARD_LOG_DIR")
 
     if log_dir_str:
-        log_dir = Path(log_dir_str).expanduser()
+        log_dir = ambient.expanduser(log_dir_str)
         if not log_dir.is_absolute():
             log_dir = project_root / log_dir
     else:

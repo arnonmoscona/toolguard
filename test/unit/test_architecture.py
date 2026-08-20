@@ -23,8 +23,9 @@ PYSCN_TOML = TOOLGUARD_ROOT.parent / ".pyscn.toml"
 #: does, so the map cannot be loosened without also changing the code.
 LAYERS = (
     ("toolguard.issues", frozenset()),
-    ("toolguard.path_utils", frozenset()),
-    ("toolguard.normalization", frozenset()),
+    ("toolguard.ambient", frozenset()),
+    ("toolguard.path_utils", frozenset({"toolguard.ambient"})),
+    ("toolguard.normalization", frozenset({"toolguard.ambient"})),
     ("toolguard.toml_scan", frozenset()),
     ("toolguard.file_lock", frozenset()),
     ("toolguard.tool_spec", frozenset()),
@@ -37,7 +38,7 @@ LAYERS = (
     ),
     (
         "toolguard.install_update",
-        frozenset({"toolguard._git", "toolguard.constants"}),
+        frozenset({"toolguard._git", "toolguard.ambient", "toolguard.constants"}),
     ),
     ("toolguard.config_write_guard", frozenset()),
     ("toolguard.rule_entry", frozenset({"toolguard.issues"})),

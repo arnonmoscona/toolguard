@@ -38,6 +38,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from toolguard import ambient
+
 try:
     # pragma: no cover - stdlib built without the optional _sqlite3 extension
     import sqlite3
@@ -149,25 +151,18 @@ def _project_key(project: Optional[Path]) -> Optional[str]:
 
 def _resolve_store_path() -> Optional[Path]:
     """
-    Resolve the claim database path, lazily.
+    The test-patched :data:`_STORE_PATH` when set, else
+    ``~/.toolguard/once_per.db`` computed per call -- never at import, where a
+    home lookup would break importing this module on a container with no
+    ``HOME`` and no passwd entry.
 
-    Returns the test-patched :data:`_STORE_PATH` override when one is set,
-    otherwise computes ``~/.toolguard/once_per.db`` fresh on every call --
-    never cached at module scope -- so a store-touching call always picks
-    up whatever ``$HOME`` is live for the current process. Also never
-    resolved at import time: a module-level ``Path.home()`` call would make
-    this module -- and anything that imports it -- fail to import on a
-    container/CI shape with no ``HOME`` and no passwd entry.
-
-    Returns ``None`` ("store unavailable") if ``Path.home()`` cannot be
-    resolved (e.g. no ``HOME`` and no passwd entry for the uid, an ordinary
-    container/CI shape). Every caller here must treat ``None`` like any
-    other storage error: fail soft, never raise.
+    ``None`` means the store is unavailable because home does not resolve; no
+    caller may let that reach the user as a crash.
     """
     if _STORE_PATH is not None:
         return _STORE_PATH
     try:
-        return Path.home() / ".toolguard" / "once_per.db"
+        return ambient.home() / ".toolguard" / "once_per.db"
     except RuntimeError:
         return None
 

@@ -22,7 +22,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from toolguard import error_log, error_reporter
+from toolguard import ambient, error_reporter
 from toolguard.config import TakeoverConfig
 from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import _finalize_output, _resolve_reporter_log_dir, main
@@ -48,26 +48,14 @@ _HOOK_INPUT = {
 _CRASH_PREFIX = "toolguard crashed while deciding"
 
 
-class _FixtureHomePath:
-    """Stands in for error_log's Path; home() is the fixture's, never the developer's."""
-
-    def __new__(cls, *args, **kwargs):
-        return Path(*args, **kwargs)
-
-    @staticmethod
-    def home():
-        return _crash_home
+def _fixture_home():
+    """Stands in for ambient.home(); the fixture's home, never the developer's."""
+    return _crash_home
 
 
-class _HomelessPath:
-    """Stands in for error_log's Path; home() raises as pathlib does with no resolvable home."""
-
-    def __new__(cls, *args, **kwargs):
-        return Path(*args, **kwargs)
-
-    @staticmethod
-    def home():
-        raise RuntimeError("Could not determine home directory")
+def _homeless():
+    """Stands in for ambient.home(); raises as pathlib does with no resolvable home."""
+    raise RuntimeError("Could not determine home directory")
 
 
 def _errors_dir_contents():
@@ -92,10 +80,9 @@ def setUpModule():
     directory: measured 2026-08-13, both its tests fail in a copy of the tree
     without one.
 
-    `toolguard.error_log.Path` -- log_crash hard-codes `Path.home()` (proposed
-    ticket 23), so a test driving main() through a crash writes a real crash
-    report into the developer's ~/.toolguard/errors. Measured: 2 files per run
-    of this module, against a directory that had accumulated 1,622.
+    `toolguard.ambient.home` -- log_crash resolves `~/.toolguard/errors`, so a
+    test driving main() through a crash writes a real crash report into the
+    developer's ~/.toolguard/errors.
     """
     global _log_tmp_dir, _log_patcher, _root_tmp_dir, _root_patcher
     global _home_tmp_dir, _home_patcher, _crash_home
@@ -112,7 +99,7 @@ def setUpModule():
 
     _home_tmp_dir = TemporaryDirectory(prefix="too45_hook_reporter_home_")
     _crash_home = Path(_home_tmp_dir.name)
-    _home_patcher = patch("toolguard.error_log.Path", _FixtureHomePath)
+    _home_patcher = patch("toolguard.ambient.home", _fixture_home)
     _home_patcher.start()
 
 
@@ -186,8 +173,8 @@ class TestFixtureIsolationIsLive(unittest.TestCase):
     def test_a_crash_writes_its_report_into_the_fixture_home(self):
         """
         Given main() crashes while resolving, so its except handler calls
-            log_crash, which resolves ~/.toolguard/errors from Path.home()
-        When the fixture's error_log.Path stands in for pathlib's
+            log_crash, which resolves ~/.toolguard/errors from ambient.home()
+        When the fixture's ambient.home stands in for the real one
         Then the crash report lands under the fixture home, proving the patch
              is consulted and that no report reaches the real ~/.toolguard/errors
         """
@@ -285,25 +272,28 @@ class TestFaultSurvivesCrashLoggingFailing(unittest.TestCase):
     """
     The reporter-side half of proposed ticket 23. test_hook.py's
     TestDecisionReachesStdoutWhenCrashLoggingFails asserts a deny still reaches
-    stdout when log_crash raises; nothing asserts the CRASH FAULT still reaches
-    Claude on that path, which is what this module is about. log_crash runs
-    ahead of _report_crash_fault in all three handlers, so its failure takes
-    the fault with it.
+    stdout on that path; nothing asserts the CRASH FAULT still reaches Claude,
+    which is what this module is about. log_crash runs ahead of
+    _report_crash_fault in all three handlers, so anything escaping it would
+    take the fault with it.
     """
 
     def test_the_crash_fault_still_reaches_additional_context(self):
         """
         Given a crash during resolution and a home directory crash logging
-            cannot resolve, so log_crash raises inside main()'s except clause
+            cannot resolve, so log_crash writes no report inside main()'s
+            except clause
         When main() builds its JSON response
         Then additionalContext still carries the crash fault
         """
         escaped = None
         output = None
-        with patch("toolguard.error_log.Path", _HomelessPath):
+        # Patching the accessor, not isolating config: only an ambient.home that
+        # raises produces the machine this test is about.
+        with patch("toolguard.ambient.home", _homeless):
             # Without this the fixture cannot produce the negative case.
             with self.assertRaises(RuntimeError):
-                error_log.Path.home()
+                ambient.home()
             try:
                 output, _stderr, _log = _run_main(
                     divergence_side_effect=RuntimeError("crash with logging broken")
@@ -364,8 +354,7 @@ class TestInvocationStateDoesNotLeakBetweenCalls(unittest.TestCase):
         Given a first main() invocation that crashes and reports a fault
         When a second, separate invocation crashes with a different message
         Then the second response carries only its own fault text -- the first
-             invocation's is gone, which an in-process replay harness would
-             otherwise expose
+             invocation's is gone
         """
         first_output, _stderr, _log = _run_main(
             divergence_side_effect=RuntimeError("first invocation's crash")
@@ -515,6 +504,89 @@ class TestOrdinaryInvocationStderr(unittest.TestCase):
         _output, stderr_text, _log = _run_main(takeover=takeover_enabled)
 
         self.assertEqual(stderr_text, expected)
+
+
+def _ambient_probe(observed):
+    """A _run_divergence_check stand-in recording the AmbientFacts in force inside main()."""
+
+    def probe(*_args, **_kwargs):
+        observed.append(ambient._active)
+
+    return probe
+
+
+class TestAmbientStateIsBoundForTheInvocationOnly(unittest.TestCase):
+    """
+    The binding main() installs around its resolve/decide block fixes home, cwd
+    and the environment for one invocation and releases them on the way out, so
+    the many places that read them agree with each other without a second
+    invocation in the same process inheriting the first's. The --eval and
+    interactive-stdin returns sit above that binding and bind nothing.
+    """
+
+    def test_main_binds_ambient_facts_while_it_runs(self):
+        """
+        Given a step inside main()'s try block that records the bound facts
+        When main() runs
+        Then facts are bound while it runs, so the reads below main() answer
+             from one resolution rather than each going to the machine
+        """
+        observed = []
+        _run_main(divergence_side_effect=_ambient_probe(observed))
+
+        self.assertEqual(len(observed), 1)
+        self.assertIsInstance(
+            observed[0], ambient.AmbientFacts, "main() left ambient state unbound"
+        )
+
+    def test_each_invocation_resolves_its_own_facts(self):
+        """
+        Given two invocations in this one process
+        When each records the facts bound inside it
+        Then they are separate objects, so the second resolved the machine for
+             itself instead of inheriting a resolution that outlived the first
+        """
+        observed = []
+        _run_main(divergence_side_effect=_ambient_probe(observed))
+        _run_main(divergence_side_effect=_ambient_probe(observed))
+
+        self.assertEqual(len(observed), 2)
+        self.assertIsNot(observed[0], observed[1])
+
+    def test_nothing_is_bound_after_main_returns(self):
+        """
+        Given a completed invocation
+        When the binding is inspected afterwards
+        Then nothing is bound, so a second invocation in the same process
+             resolves the machine again instead of inheriting the first's facts
+        """
+        _run_main()
+
+        self.assertIsNone(ambient._active)
+
+    def test_the_eval_path_binds_nothing(self):
+        """
+        Given --eval, which returns above the binding
+        When the facts in force are recorded from inside its own resolution
+        Then nothing is bound, so a test isolating --eval patches pathlib rather
+             than relying on the binding to carry its fixtures
+        """
+        observed = []
+        config = _fake_config(
+            governed=["Bash"], bash=(["git *"], []), takeover=_NO_TAKEOVER
+        )
+
+        def _record_and_load(*_args, **_kwargs):
+            observed.append(ambient._active)
+            return config
+
+        with patch("sys.stdin", StringIO(json.dumps(_HOOK_INPUT))):
+            with patch("sys.stdout", new_callable=StringIO):
+                with patch("sys.argv", ["toolguard", "--eval"]):
+                    with patch("toolguard.hook.load_configuration", _record_and_load):
+                        main()
+
+        self.assertEqual(observed, [None])
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ from toolguard.log_writer import LogRecord
 from toolguard.file_matching import decide_file_path_at_level_detailed
 from toolguard.resolve import resolve_bash_permission_detailed
 from toolguard.tool_spec import ToolKind, ToolSpec
-from toolguard import error_log, once_per_store
+from toolguard import ambient, once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
 
@@ -3200,13 +3200,18 @@ class TestHookCrashCapture(unittest.TestCase):
             self.assertEqual(crash_context["cwd"], "/some/project/dir")
 
 
+def _homeless():
+    """Stands in for ambient.home(); raises as pathlib does with no resolvable home."""
+    raise RuntimeError("Could not determine home directory")
+
+
 class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
     """
     log_crash runs inside all three of main()'s except clauses, ahead of
-    _emit_decision, and error_log builds ~/.toolguard/errors ABOVE its own
-    try -- so an unresolvable home (unset $HOME, deleted home, a container
-    with no passwd entry) makes crash logging raise out of the handler and
-    the hook exits with nothing on stdout.
+    _emit_decision, so anything escaping it takes the verdict with it and the
+    hook exits with nothing on stdout. An unresolvable home (unset $HOME,
+    deleted home, a container with no passwd entry) is the way to provoke that:
+    log_crash resolves ~/.toolguard/errors from ambient.home().
 
     Nothing on stdout is not a denial. Claude Code treats only exit code 2 as
     blocking, so an empty stdout is no permission hook at all, silently. The
@@ -3214,16 +3219,6 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
     verdict", never "log_crash did not raise" -- the second passes with the
     bug present in a different arrangement.
     """
-
-    class _HomelessPath:
-        """Stands in for error_log's Path; home() raises as pathlib does with no resolvable home."""
-
-        def __new__(cls, *args, **kwargs):
-            return Path(*args, **kwargs)
-
-        @staticmethod
-        def home():
-            raise RuntimeError("Could not determine home directory")
 
     def _drive_main(self, stdin_text, extra_patches=()):
         """Run main() with crash logging unable to resolve a home; return (stdout, escaped exception)."""
@@ -3235,7 +3230,10 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
                     patch("sys.stdin.isatty", return_value=False),
                     patch("sys.stdout", out),
                     patch("sys.stderr", new_callable=StringIO),
-                    patch("toolguard.error_log.Path", self._HomelessPath),
+                    # Patching the accessor, not isolating config: only an
+                    # ambient.home that raises produces the machine these tests
+                    # are about.
+                    patch("toolguard.ambient.home", _homeless),
                     # get_env_config() resolves before load_configuration(), so
                     # the Reporter falls back to a log dir the module-level
                     # TOOLGUARD_LOG_DIR isolation does not cover -- removing this
@@ -3252,7 +3250,7 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
                 # Without this the fixture cannot produce the negative case and
                 # every assertion below would pass for the wrong reason.
                 with self.assertRaises(RuntimeError):
-                    error_log.Path.home()
+                    ambient.home()
 
                 escaped = None
                 try:
