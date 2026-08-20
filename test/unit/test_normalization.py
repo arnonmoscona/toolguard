@@ -4,9 +4,16 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from toolguard.normalization import normalize_path, expand_tilde, normalize_command
+from toolguard import ambient
+from toolguard.normalization import (
+    normalize_path,
+    expand_tilde,
+    expand_tilde_in_command,
+    normalize_command,
+)
 
 
 def _symlink_or_skip(case: unittest.TestCase, link: Path, target: Path) -> None:
@@ -15,6 +22,17 @@ def _symlink_or_skip(case: unittest.TestCase, link: Path, target: Path) -> None:
         link.symlink_to(target)
     except OSError:
         case.skipTest("Symlink creation not supported")
+
+
+def _passwd_lookup(directory):
+    """A pwd.getpwnam replacement resolving only the names *directory* maps to a home."""
+
+    def getpwnam(name):
+        if name in directory:
+            return SimpleNamespace(pw_dir=directory[name])
+        raise KeyError(f"getpwnam(): name not found: {name!r}")
+
+    return getpwnam
 
 
 class TestNormalizePath(unittest.TestCase):
@@ -352,15 +370,214 @@ class TestExpandTilde(unittest.TestCase):
         expected = str(Path.home()) + "/projects/*.py"
         self.assertEqual(result, expected)
 
-    def test_expand_tilde_other_users_home_is_left_alone(self):
+    def test_expand_tilde_unknown_user_is_left_alone(self):
         """
-        Given a '~username' form and a doubled tilde
+        Given a '~name' the passwd database does not know, and a doubled tilde
         When expand_tilde is applied
-        Then both are returned unchanged -- only '~' and '~/...' are expanded
+        Then both are returned unchanged
         """
-        self.assertEqual(expand_tilde("~root"), "~root")
-        self.assertEqual(expand_tilde("~root/.ssh"), "~root/.ssh")
+        with patch("pwd.getpwnam", side_effect=KeyError("no such user")):
+            self.assertEqual(expand_tilde("~nosuchuser"), "~nosuchuser")
+            self.assertEqual(expand_tilde("~nosuchuser/.ssh"), "~nosuchuser/.ssh")
         self.assertEqual(expand_tilde("~~"), "~~")
+
+
+class TestExpandTildeWithNoResolvableHome(unittest.TestCase):
+    """An expansion is one spelling among several, so losing it must not raise."""
+
+    def test_a_tilde_path_comes_back_unchanged(self):
+        """
+        Given a machine where the home directory cannot be resolved
+        When expand_tilde is applied to a '~' path
+        Then the path is returned unchanged rather than the call raising, leaving a
+        caller mid-match one spelling short instead of holding an exception
+        """
+        # patch.object(Path, "home") rather than ConfigIsolationMixin: the subject is a
+        # home that resolves to nothing at all, which the mixin's layout cannot build.
+        with patch.object(Path, "home", side_effect=RuntimeError("no HOME")):
+            self.assertEqual(expand_tilde("~/.ssh/id_rsa"), "~/.ssh/id_rsa")
+            self.assertEqual(expand_tilde("~"), "~")
+
+
+class TestExpandTildeWithANamedUser(unittest.TestCase):
+    """
+    '~<name>' resolves through the passwd database to that account's own home
+    directory, matching a shell -- never through ambient.home() or the identity of
+    the process's own user, which only bare '~' consults.
+    """
+
+    HOME = "/home/otheruser"
+    NAME = "otheruser"
+
+    def setUp(self):
+        """Make NAME resolve to HOME through a patched passwd lookup, nothing else."""
+        self.enterContext(
+            patch("pwd.getpwnam", side_effect=_passwd_lookup({self.NAME: self.HOME}))
+        )
+
+    def test_the_name_alone_and_the_name_with_a_path_both_expand(self):
+        """
+        Given '~<name>' and '~<name>/...' for a name the passwd database knows
+        When expand_tilde is applied
+        Then each gives that account's passwd home directory
+        """
+        self.assertEqual(expand_tilde(f"~{self.NAME}"), self.HOME)
+        self.assertEqual(
+            expand_tilde(f"~{self.NAME}/.ssh/id_rsa"), f"{self.HOME}/.ssh/id_rsa"
+        )
+
+    def test_a_longer_name_starting_with_this_one_is_left_alone(self):
+        """
+        Given a '~name' whose name merely starts with a known account's name
+        When expand_tilde is applied
+        Then it is unchanged: the name must end at the path separator, or a rule would
+        report a hit on some other account's directory
+        """
+        self.assertEqual(expand_tilde(f"~{self.NAME}2/.ssh"), f"~{self.NAME}2/.ssh")
+
+    def test_an_unknown_name_costs_the_spelling_not_an_exception(self):
+        """
+        Given a '~name' the passwd database does not know
+        When expand_tilde is applied
+        Then it comes back unchanged rather than raising, leaving a caller mid-match
+        one spelling short instead of holding an exception
+        """
+        self.assertEqual(expand_tilde("~nosuchuser/x"), "~nosuchuser/x")
+
+
+class TestExpandTildeWithNoPasswdModule(unittest.TestCase):
+    """A platform with no passwd database (e.g. Windows) never expands '~name'."""
+
+    def test_a_named_user_is_left_unchanged(self):
+        """
+        Given a platform where the pwd module is unavailable
+        When expand_tilde is applied to a '~name' path
+        Then it is returned unchanged rather than raising
+        """
+        with patch("toolguard.normalization.pwd", None):
+            self.assertEqual(expand_tilde("~someuser/x"), "~someuser/x")
+
+
+class TestExpandTildeInCommand(unittest.TestCase):
+    """Test expand_tilde_in_command function."""
+
+    HOME = Path("/home/testuser")
+    USER = "testuser"
+
+    def setUp(self):
+        """Bind a fixed home, and make USER resolve to it through a patched passwd
+        lookup, so no expansion varies by machine."""
+        self.enterContext(
+            ambient.active(ambient.AmbientFacts(home=self.HOME, cwd=self.HOME, env={}))
+        )
+        self.enterContext(
+            patch(
+                "pwd.getpwnam", side_effect=_passwd_lookup({self.USER: str(self.HOME)})
+            )
+        )
+
+    def test_a_tilde_argument_is_expanded(self):
+        """
+        Given a command whose argument starts with '~/'
+        When expand_tilde_in_command is applied
+        Then that argument becomes the absolute path under home
+        """
+        self.assertEqual(
+            expand_tilde_in_command("cat ~/.ssh/id_rsa"),
+            f"cat {self.HOME}/.ssh/id_rsa",
+        )
+
+    def test_the_command_name_itself_is_expanded(self):
+        """
+        Given a command invoked through a '~'-spelled path
+        When expand_tilde_in_command is applied
+        Then the command name expands too -- a rule may name the interpreter
+        """
+        self.assertEqual(
+            expand_tilde_in_command("~/bin/deploy --now"),
+            f"{self.HOME}/bin/deploy --now",
+        )
+
+    def test_a_command_with_no_tilde_is_returned_byte_for_byte(self):
+        """
+        Given a command containing no expandable '~'
+        When expand_tilde_in_command is applied
+        Then it comes back unchanged, whitespace included, so a caller collecting
+        spellings deduplicates it away instead of carrying a near-copy
+        """
+        self.assertEqual(expand_tilde_in_command("ls  -la   /tmp"), "ls  -la   /tmp")
+
+    def test_whitespace_around_an_expanded_token_is_preserved(self):
+        """
+        Given a command with runs of whitespace around a '~' argument
+        When expand_tilde_in_command is applied
+        Then only the token changes and the spacing is left as written
+        """
+        self.assertEqual(
+            expand_tilde_in_command("cat  ~/a   b"), f"cat  {self.HOME}/a   b"
+        )
+
+    def test_another_users_home_and_a_tilde_behind_an_opening_quote_are_left_alone(
+        self,
+    ):
+        """
+        Given a '~root' argument and one whose '~' sits behind an opening quote
+        When expand_tilde_in_command is applied
+        Then both are unchanged: '~root' names an account the passwd stub does not
+        know, and the second token starts with a quote rather than a '~'
+        """
+        self.assertEqual(
+            expand_tilde_in_command('cat ~root/.ssh/id_rsa "~/notes.txt"'),
+            'cat ~root/.ssh/id_rsa "~/notes.txt"',
+        )
+
+    def test_a_tilde_quoted_mid_token_is_expanded_anyway(self):
+        """
+        Given a quoted argument whose '~' is not behind the opening quote
+        When expand_tilde_in_command is applied
+        Then it IS expanded, unlike in a shell: tokens here are whitespace-delimited,
+        not shell words, so this over-expansion is pinned rather than claimed absent
+        """
+        self.assertEqual(
+            expand_tilde_in_command("echo 'a ~/b'"), f"echo 'a {self.HOME}/b'"
+        )
+
+    def test_a_named_user_is_expanded_through_the_passwd_lookup(self):
+        """
+        Given a command naming a file as '~<name>/...' for a name the passwd lookup
+            resolves to this same home
+        When expand_tilde_in_command is applied
+        Then it expands to the same absolute path a bare '~' would give
+        """
+        self.assertEqual(
+            expand_tilde_in_command(f"cat ~{self.USER}/.ssh/id_rsa"),
+            f"cat {self.HOME}/.ssh/id_rsa",
+        )
+
+    def test_a_tilde_inside_a_token_is_left_alone(self):
+        """
+        Given a token whose '~' is not at its start ('HEAD~1')
+        When expand_tilde_in_command is applied
+        Then it is unchanged: only a leading '~' names a home directory
+        """
+        self.assertEqual(expand_tilde_in_command("git diff HEAD~1"), "git diff HEAD~1")
+
+    def test_a_heredoc_delimiter_starting_with_tilde_is_left_alone(self):
+        """
+        Given a heredoc operator glued to a word starting with '~' ('<<~EOF')
+        When expand_tilde_in_command is applied
+        Then it is unchanged: the word is a delimiter, not a path the shell opens
+        """
+        self.assertEqual(expand_tilde_in_command("cat <<~EOF"), "cat <<~EOF")
+
+    def test_a_herestring_starting_with_tilde_is_left_alone(self):
+        """
+        Given a here-string operator glued to a word starting with '~' ('<<<~/x')
+        When expand_tilde_in_command is applied
+        Then it is unchanged: the '~' does not open the whitespace-delimited token, so
+        only a token-leading '~' is a candidate for expansion here
+        """
+        self.assertEqual(expand_tilde_in_command("cat <<<~/x"), "cat <<<~/x")
 
 
 class TestNormalizeCommand(unittest.TestCase):

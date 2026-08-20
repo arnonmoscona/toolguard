@@ -39,8 +39,8 @@ def absolute_from_cwd(path: Union[str, Path]) -> Path:
 def expanduser(path: Union[str, Path]) -> Path:
     """
     *path* with a leading ``~`` replaced by :func:`ambient.home`, so an override
-    there governs it. A ``~user`` form names somebody else's home and is left to
-    :meth:`pathlib.Path.expanduser`.
+    there governs it. A ``~user`` form is left to :meth:`pathlib.Path.expanduser`,
+    which resolves it against the password database, override or no override.
     """
     expanded = Path(path)
     parts = expanded.parts

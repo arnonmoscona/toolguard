@@ -15,6 +15,11 @@ from pathlib import Path
 import re
 from typing import Optional, Tuple
 
+try:
+    import pwd
+except ImportError:  # No passwd database (e.g. Windows).
+    pwd = None
+
 from toolguard import ambient
 
 
@@ -121,30 +126,82 @@ def normalize_path(
     return path
 
 
-def expand_tilde(path: str) -> str:
-    """Expand a leading '~' to the user's home directory path.
+def _passwd_home(name: str) -> Optional[str]:
+    """The home directory the passwd database reports for account *name*.
 
-    Only '~' alone and '~/...' are expanded. A '~username' form is returned unchanged,
-    as is any path with no leading '~'.
+    None where the platform has no passwd database, or *name* is unknown to it.
+    """
+    if pwd is None:
+        return None
+    try:
+        return pwd.getpwnam(name).pw_dir
+    except KeyError, ValueError:
+        return None
+
+
+def _expand_named_user(path: str) -> str:
+    """*path* with a leading '~<name>' replaced by that account's passwd home directory.
+
+    Unchanged where *name* is unknown to the passwd database, or the platform has none --
+    a shell leaves an unresolvable '~name' as written too.
+    """
+    name_end = path.find("/", 1)
+    name = path[1:] if name_end == -1 else path[1:name_end]
+    home = _passwd_home(name)
+    if home is None:
+        return path
+    return home if name_end == -1 else home + path[name_end:]
+
+
+def expand_tilde(path: str) -> str:
+    """Expand a leading '~' to a home directory path.
+
+    Expanded: '~' alone and '~/...', to :func:`ambient.home`; '~name' and '~name/...',
+    to the home directory the passwd database reports for that account -- matching a
+    shell, which resolves '~name' through the database rather than through '$HOME'. An
+    unknown name, or any path with no leading '~', is returned unchanged.
 
     Args:
         path: A path or pattern, possibly '~'-prefixed.
 
     Returns:
-        path with a leading '~' expanded; otherwise path unchanged.
+        path with a leading '~' expanded; otherwise path unchanged -- including when
+        the home directory cannot be resolved, which leaves callers with one fewer
+        spelling to match rather than an exception raised mid-match.
     """
     if not path or not path.startswith("~"):
         return path
 
-    home = str(ambient.home())
+    if path != "~" and not path.startswith("~/"):
+        return _expand_named_user(path)
 
-    if path == "~":
-        return home
+    try:
+        home = str(ambient.home())
+    except OSError, RuntimeError:
+        return path
 
-    if path.startswith("~/"):
-        return home + path[1:]
+    return home if path == "~" else home + path[1:]
 
-    return path
+
+def expand_tilde_in_command(command: str) -> str:
+    """Expand a '~' in every whitespace-delimited token of a command string.
+
+    Runs :func:`normalize_path`'s home collapse backwards, so a rule written with an
+    absolute path under the home directory can still be matched against a command
+    written with '~'.
+
+    Tokens are whitespace-delimited, not shell words: a quoted ``"~/x"`` is left as
+    written, while the ``~/b`` in ``echo 'a ~/b'`` is expanded even though the shell
+    would not expand it.
+
+    Args:
+        command: The command string to expand.
+
+    Returns:
+        command with each token's '~' expanded. Whitespace is preserved as written,
+        unlike :func:`normalize_command`.
+    """
+    return re.sub(r"\S+", lambda m: expand_tilde(m.group()), command)
 
 
 def normalize_command(

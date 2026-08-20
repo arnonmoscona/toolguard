@@ -17,8 +17,9 @@ cannot tell a matched ask rule from a command nothing matched.
 
 import unittest
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import List, Optional, Tuple
+from unittest.mock import patch
 
 from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
@@ -314,6 +315,28 @@ class TestFilePathAskResolution(unittest.TestCase):
         """
         cfg = _config(_layer(tool="Read", deny=["/secrets/**"], ask=["/secrets/**"]))
         self.assertEqual(decide(cfg, "Read", "/secrets/key.txt").decision, "deny")
+
+    def test_a_named_user_path_matches_the_absolute_deny_pattern(self):
+        """
+        Given a Read deny rule naming a file by its absolute path under some
+            user's home
+        When the target is spelled '~<name>/...' for a name the passwd lookup
+            resolves to that same home
+        Then the decision is deny -- file_matching.py expands '~name' through
+            the same :func:`toolguard.normalization.expand_tilde` the Bash
+            command matcher uses, so this spelling cannot walk past a rule
+            keyed on the absolute path
+        """
+        home = "/home/alice"
+        cfg = _config(_layer(tool="Read", deny=[f"{home}/.ssh/id_rsa"]))
+
+        def getpwnam(name):
+            if name == "alice":
+                return SimpleNamespace(pw_dir=home)
+            raise KeyError(name)
+
+        with patch("pwd.getpwnam", side_effect=getpwnam):
+            self.assertEqual(decide(cfg, "Read", "~alice/.ssh/id_rsa").decision, "deny")
 
 
 class TestParseFailureAskFloor(unittest.TestCase):

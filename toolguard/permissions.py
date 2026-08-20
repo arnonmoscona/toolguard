@@ -25,7 +25,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from .config_types import CommandSpellings, LevelMatch
 from .patterns import parse_pattern, match_pattern, PatternType
-from .normalization import normalize_command, normalize_path
+from .normalization import expand_tilde_in_command, normalize_command, normalize_path
 
 
 def normalize_path_in_command(
@@ -103,13 +103,14 @@ def _matches_on_token_boundary(command_str: str, cmd_pattern: str) -> bool:
 
 def _command_variants(command_str: str) -> List[str]:
     """
-    The spellings of *command_str* a DEFAULT pattern is matched against: raw,
-    path-normalized, and path-normalized with symlinks resolved, deduplicated.
+    The spellings of *command_str* a DEFAULT pattern is matched against, deduplicated:
+    raw, path-normalized, and path-normalized with symlinks resolved.
 
-    The last two diverge only under a symlink, and then they name different places --
-    ``~/.claude/x`` through a symlinked ``.claude`` resolves under the link's target.
-    Each is a spelling a rule author plausibly wrote, so all are kept: dropping one
-    silently narrows every deny rule written in it (TOO-45).
+    The latter two diverge only under a symlink, and then they name different places --
+    ``~/.claude/x`` through a symlinked ``.claude`` resolves under the link's target. Both
+    are kept because a rule author may have written either spelling. The tilde-expanded
+    spelling that lets an absolute-path rule see a ``~``-spelled command is added earlier,
+    by :func:`match_command`'s own ``spellings`` loop, before this function ever runs.
     """
     variants = [command_str]
     for variant in (
@@ -131,10 +132,12 @@ def match_command(
     """
     Check whether *command_str* matches any pattern in *patterns*; return the first hit.
 
-    Every pattern type is matched against *command_str* AND against each entry of
-    *also_spelled*. Offering an alternative spelling to the DEFAULT branch alone would
-    leave ``[regex]``/``[glob]``/``[native]`` denies bypassable by the very prefix
-    the alternative exists to see past.
+    Every pattern type is matched against *command_str*, against each entry of
+    *also_spelled*, and against the tilde-expanded form of each -- so a rule naming a
+    location by its absolute path under home still sees a command that names it with
+    ``~``. Offering an alternative spelling to the DEFAULT branch alone would leave
+    ``[regex]``/``[glob]``/``[native]`` denies bypassable by the very spelling the
+    alternative exists to see past.
 
     A DEFAULT pattern (no ``[regex]``/``[glob]``/``[native]`` prefix) is checked first
     for a ``**/<component>/**`` shape -- before ``**`` is normalized down to ``*`` --
@@ -170,7 +173,16 @@ def match_command(
         returning a normalized/wrapper-stripped pattern here would silently break it.
     """
     command_has_newline = "\n" in command_str or "\r" in command_str
-    spellings = [command_str, *(s for s in also_spelled if s != command_str)]
+    spellings: List[str] = []
+    # The GLOB branch of match_pattern expands '~' too, but only at the very start of
+    # each side: this subsumes its command side, and leaves its pattern side as the
+    # one route among [regex]/[glob]/[native] by which a '~'-spelled rule reaches an
+    # absolutely-spelled command. A DEFAULT rule reaches it too, via _command_variants'
+    # home collapse below.
+    for spelling in (command_str, *also_spelled):
+        for variant in (spelling, expand_tilde_in_command(spelling)):
+            if variant not in spellings:
+                spellings.append(variant)
     command_variants: List[str] = []
     for spelling in spellings:
         for variant in _command_variants(spelling):

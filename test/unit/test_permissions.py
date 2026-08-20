@@ -1,16 +1,31 @@
 """Unit tests for toolguard permission checking logic."""
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from toolguard import ambient
 from toolguard.permissions import (
     normalize_path_in_command,
     contains_path_component,
     match_command,
     check_permission,
+    _command_variants,
 )
+
+
+def _passwd_lookup(directory):
+    """A pwd.getpwnam replacement resolving only the names *directory* maps to a home."""
+
+    def getpwnam(name):
+        if name in directory:
+            return SimpleNamespace(pw_dir=directory[name])
+        raise KeyError(f"getpwnam(): name not found: {name!r}")
+
+    return getpwnam
 
 
 class TestNormalizePathInCommand(unittest.TestCase):
@@ -794,6 +809,312 @@ class TestMatchCommandUnderASymlinkedHomeDirectory(unittest.TestCase):
                     f"cat {self.home}/.claude/other.json", [rule]
                 )
                 self.assertFalse(matched)
+
+
+class TestMatchCommandAcrossTheTwoHomeSpellings(unittest.TestCase):
+    """
+    A DEFAULT rule meets its command whichever of '~' and the absolute path each was
+    written in. The sibling class below covers the other three pattern types, which
+    cross in one direction only.
+
+    Isolation exception (`.claude/rules/test-config-isolation.md`): match_command never
+    reaches toolguard.config's discovery path, so ConfigIsolationMixin does not apply;
+    the only anchor is the home directory, bound here through toolguard.ambient.
+    """
+
+    HOME = Path("/home/testuser")
+    USER = "testuser"
+
+    def setUp(self):
+        """Bind a fixed home, and make USER resolve to it through a patched passwd
+        lookup, so no spelling depends on the machine."""
+        self.enterContext(
+            ambient.active(ambient.AmbientFacts(home=self.HOME, cwd=self.HOME, env={}))
+        )
+        self.enterContext(
+            patch(
+                "pwd.getpwnam", side_effect=_passwd_lookup({self.USER: str(self.HOME)})
+            )
+        )
+
+    def test_an_absolutely_spelled_rule_fires_on_the_tilde_spelling(self):
+        """
+        Given a deny rule naming a file by its absolute path under home
+        When a command names that same file with '~'
+        Then it matches -- an absolute path is the natural spelling for a deny rule,
+        and leaving '~' unexpanded lets the very command it names walk past it
+        """
+        matched, pattern = match_command(
+            "cat ~/.ssh/id_rsa", [f"cat {self.HOME}/.ssh/id_rsa"]
+        )
+        self.assertTrue(matched)
+        self.assertEqual(pattern, f"cat {self.HOME}/.ssh/id_rsa")
+
+    def test_a_tilde_spelled_rule_still_fires_on_the_absolute_spelling(self):
+        """
+        Given a deny rule written with '~'
+        When a command names the same file by absolute path
+        Then it matches, as before: the expanded spelling joins the others rather
+        than replacing the home-collapsed one that answers this direction
+        """
+        matched, pattern = match_command(
+            f"cat {self.HOME}/.ssh/id_rsa", ["cat ~/.ssh/id_rsa"]
+        )
+        self.assertTrue(matched)
+        self.assertEqual(pattern, "cat ~/.ssh/id_rsa")
+
+    def test_command_variants_does_not_itself_expand_tilde(self):
+        """
+        Given a command written with '~', passed straight to _command_variants
+        When it builds the deduplicated path-normalization list
+        Then no variant has the leading '~' expanded -- that spelling is added earlier,
+        by match_command's own spellings loop, so a future edit that makes the tilde
+        spelling load-bearing again has somewhere to add it instead of reintroducing it
+        here as dead weight
+        """
+        self.assertEqual(_command_variants("cat ~/notes.txt"), ["cat ~/notes.txt"])
+
+    def test_either_spelling_of_a_default_rule_matches_either_command_spelling(self):
+        """
+        Given a DEFAULT rule and a command differing only in how home is written
+        When all four combinations are evaluated
+        Then every one matches
+        """
+        spellings = ("cat ~/notes.txt", f"cat {self.HOME}/notes.txt")
+        for rule in spellings:
+            for command in spellings:
+                with self.subTest(rule=rule, command=command):
+                    matched, _ = match_command(command, [rule])
+                    self.assertTrue(matched)
+
+    def test_an_unknown_name_is_not_read_as_this_home(self):
+        """
+        Given a rule naming a file under THIS home
+        When a command names the same suffix under '~root', a name the passwd stub
+            does not know
+        Then it does not match: an unresolved '~root' names a different file than the
+        rule -- expanding it against this home would report a hit the command never named
+        """
+        matched, _ = match_command(
+            "cat ~root/.ssh/id_rsa", [f"cat {self.HOME}/.ssh/id_rsa"]
+        )
+        self.assertFalse(matched)
+
+    def test_a_named_user_is_read_as_the_home_the_passwd_lookup_gives_it(self):
+        """
+        Given a rule naming a file by its absolute path under home
+        When a command names that same file as '~<name>/...' for a name the passwd
+            lookup resolves to this same home
+        Then it matches: a name spells its passwd home as surely as '~' does,
+        so a rule blind to it could be walked past by writing it that way
+        """
+        matched, _ = match_command(
+            f"cat ~{self.USER}/.ssh/id_rsa", [f"cat {self.HOME}/.ssh/id_rsa"]
+        )
+        self.assertTrue(matched)
+
+    def test_a_deny_rule_reaches_a_named_user_resolving_to_this_home(self):
+        """
+        Given an absolutely-spelled deny rule and a blanket allow
+        When the command spells the denied file '~<name>/...' for a name the passwd
+            lookup resolves to this same home
+        Then the decision is deny -- the restricting direction the expansion is for
+        """
+        decision, _ = check_permission(
+            f"cat ~{self.USER}/.ssh/id_rsa", ["*"], [f"cat {self.HOME}/.ssh/id_rsa"]
+        )
+        self.assertEqual(decision, "deny")
+
+    def test_an_unrelated_file_under_home_is_not_matched(self):
+        """
+        Given the same absolute rule
+        When a command names a DIFFERENT file under home
+        Then it does not match -- the extra spelling widens the names one location
+        answers to, not the set of locations
+        """
+        matched, _ = match_command(
+            "cat ~/.ssh/known_hosts", [f"cat {self.HOME}/.ssh/id_rsa"]
+        )
+        self.assertFalse(matched)
+
+    def test_an_unresolvable_home_does_not_raise_out_of_the_matcher(self):
+        """
+        Given a machine where the home directory cannot be resolved at all
+        When a '~'-spelled command is matched against both rule spellings
+        Then the matcher returns a verdict instead of raising: the expanded spelling
+        is simply unavailable, and the spellings that survive still decide
+        """
+        # patch.object(Path, "home") rather than ConfigIsolationMixin: the subject is a
+        # home that resolves to nothing at all, which the mixin's layout cannot build.
+        homeless = ambient.AmbientFacts(home=None, cwd=Path("/tmp"), env={})
+        with patch.object(Path, "home", side_effect=RuntimeError("no HOME")):
+            with ambient.active(homeless):
+                absolute_rule, _ = match_command(
+                    "cat ~/.ssh/id_rsa", [f"cat {self.HOME}/.ssh/id_rsa"]
+                )
+                tilde_rule, _ = match_command(
+                    "cat ~/.ssh/id_rsa", ["cat ~/.ssh/id_rsa"]
+                )
+        self.assertFalse(absolute_rule)
+        self.assertTrue(tilde_rule)
+
+
+class TestEveryPatternTypeCrossesTheTwoHomeSpellings(unittest.TestCase):
+    """
+    An absolutely-spelled rule reaches a '~'-spelled command under [regex], [glob] and
+    [native] too, not only DEFAULT, and for granting rules as well as restricting ones.
+
+    Isolation exception (`.claude/rules/test-config-isolation.md`): match_command never
+    reaches toolguard.config's discovery path, so ConfigIsolationMixin does not apply;
+    the only anchor is the home directory, bound here through toolguard.ambient.
+    """
+
+    HOME = Path("/home/testuser")
+    USER = "testuser"
+
+    def setUp(self):
+        """Bind a fixed home, and make USER resolve to it through a patched passwd
+        lookup, so no spelling depends on the machine."""
+        self.enterContext(
+            ambient.active(ambient.AmbientFacts(home=self.HOME, cwd=self.HOME, env={}))
+        )
+        self.enterContext(
+            patch(
+                "pwd.getpwnam", side_effect=_passwd_lookup({self.USER: str(self.HOME)})
+            )
+        )
+
+    def _one_rule_per_pattern_type(self, command):
+        """*command*, spelled as a rule of each pattern type, keyed by type name."""
+        return {
+            "DEFAULT": command,
+            "[glob]": f"[glob]{command}",
+            "[regex]": "[regex]" + re.escape(command),
+            "[native]": f"[native]{command}",
+        }
+
+    def test_every_pattern_type_sees_the_tilde_spelling(self):
+        """
+        Given a rule naming a file by its absolute path under home
+        When the same file is named with '~' by the command
+        Then every pattern type matches -- offering the expanded spelling to DEFAULT
+        alone leaves the same deny bypassable by writing it as [regex]/[glob]/[native]
+        """
+        rules = self._one_rule_per_pattern_type(f"cat {self.HOME}/.ssh/id_rsa")
+        for type_name, rule in rules.items():
+            with self.subTest(pattern_type=type_name):
+                matched, _ = match_command("cat ~/.ssh/id_rsa", [rule])
+                self.assertTrue(matched)
+
+    def test_a_deny_rule_reaches_the_tilde_spelling(self):
+        """
+        Given an absolutely-spelled [regex] deny rule and a blanket allow
+        When a '~'-spelled command names the denied file
+        Then the decision is deny -- the restricting direction this exists for
+        """
+        decision, _ = check_permission(
+            "cat ~/.ssh/id_rsa",
+            ["*"],
+            ["[regex]" + re.escape(f"cat {self.HOME}/.ssh/id_rsa")],
+        )
+        self.assertEqual(decision, "deny")
+
+    def test_an_allow_rule_reaches_it_on_the_same_terms(self):
+        """
+        Given an absolutely-spelled [regex] ALLOW rule
+        When a '~'-spelled command names the same file
+        Then it is allowed: unlike looking past a 'NAME=value' prefix, expanding '~'
+        discards nothing -- the two spellings name one file -- so the granting side
+        gets the spelling on the same terms as the restricting side
+        """
+        decision, _ = check_permission(
+            "cat ~/notes.txt",
+            ["[regex]" + re.escape(f"cat {self.HOME}/notes.txt")],
+            [],
+        )
+        self.assertEqual(decision, "allow")
+
+    def test_a_further_spelling_is_expanded_too(self):
+        """
+        Given a command whose leading assignment is looked past by a further spelling
+        When that further spelling is the one carrying the '~'
+        Then it is expanded as well, so the two accommodations compose rather than
+        each hiding the command from the other
+        """
+        matched, _ = match_command(
+            "TG_X=1 cat ~/notes.txt",
+            ["[regex]" + re.escape(f"cat {self.HOME}/notes.txt")],
+            also_spelled=("cat ~/notes.txt",),
+        )
+        self.assertTrue(matched)
+
+    def test_a_component_pattern_now_answers_to_the_home_path_segments(self):
+        """
+        Given a '**/<component>/**' rule naming a segment of the home path itself
+        When a '~'-spelled command is matched
+        Then it matches, where before the expansion it did not: '~/x' IS
+        '/home/testuser/x', so 'testuser' genuinely is one of its path segments
+        """
+        matched, _ = match_command("cat ~/notes.txt", ["**/testuser/**"])
+        self.assertTrue(matched)
+
+    def test_an_unknown_name_is_not_expanded_under_any_pattern_type(self):
+        """
+        Given a rule naming a file under THIS home
+        When a command names the same suffix under '~root', a name the passwd stub
+            does not know
+        Then no pattern type matches: an unresolved '~root' names a different file than
+        the rule
+        """
+        rules = self._one_rule_per_pattern_type(f"cat {self.HOME}/.ssh/id_rsa")
+        for type_name, rule in rules.items():
+            with self.subTest(pattern_type=type_name):
+                matched, _ = match_command("cat ~root/.ssh/id_rsa", [rule])
+                self.assertFalse(matched)
+
+    def test_a_named_user_is_expanded_under_every_pattern_type(self):
+        """
+        Given a rule naming a file by its absolute path under home
+        When a command names that same file as '~<name>/...' for a name the passwd
+            lookup resolves to this same home
+        Then every pattern type matches, on the same terms as a bare '~'
+        """
+        rules = self._one_rule_per_pattern_type(f"cat {self.HOME}/.ssh/id_rsa")
+        for type_name, rule in rules.items():
+            with self.subTest(pattern_type=type_name):
+                matched, _ = match_command(f"cat ~{self.USER}/.ssh/id_rsa", [rule])
+                self.assertTrue(matched)
+
+    def test_an_unrelated_file_under_home_is_not_matched_under_any_pattern_type(self):
+        """
+        Given the same absolute rule
+        When a command names a DIFFERENT file under home
+        Then no pattern type matches -- the extra spelling widens the names one
+        location answers to, not the set of locations
+        """
+        rules = self._one_rule_per_pattern_type(f"cat {self.HOME}/.ssh/id_rsa")
+        for type_name, rule in rules.items():
+            with self.subTest(pattern_type=type_name):
+                matched, _ = match_command("cat ~/.ssh/known_hosts", [rule])
+                self.assertFalse(matched)
+
+    def test_an_unresolvable_home_does_not_raise_out_of_any_pattern_type(self):
+        """
+        Given a machine where the home directory cannot be resolved at all
+        When a '~'-spelled command is matched under each pattern type
+        Then each returns a verdict instead of raising: the expanded spelling is
+        simply unavailable, and the raw spelling still decides
+        """
+        # patch.object(Path, "home") rather than ConfigIsolationMixin: the subject is a
+        # home that resolves to nothing at all, which the mixin's layout cannot build.
+        homeless = ambient.AmbientFacts(home=None, cwd=Path("/tmp"), env={})
+        rules = self._one_rule_per_pattern_type(f"cat {self.HOME}/.ssh/id_rsa")
+        with patch.object(Path, "home", side_effect=RuntimeError("no HOME")):
+            with ambient.active(homeless):
+                for type_name, rule in rules.items():
+                    with self.subTest(pattern_type=type_name):
+                        matched, _ = match_command("cat ~/.ssh/id_rsa", [rule])
+                        self.assertFalse(matched)
 
 
 if __name__ == "__main__":

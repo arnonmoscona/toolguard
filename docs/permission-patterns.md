@@ -174,7 +174,7 @@ Toolguard normalizes paths in commands -- and the command-name portion of DEFAUL
 | Normalization | Example |
 |---------------|---------|
 | Tilde conversion | `/Users/arnon/projects` -> `~/projects` |
-| Symlink resolution | Up to 3 iterations to prevent loops |
+| Symlink resolution | A link is replaced by its target, including a dangling one; a symlinked ancestor directory is followed too, but only for an absolute path |
 | Leading slashes | `//tmp` -> `/tmp` |
 | Relative path args | `cat file.txt` -> `cat ./file.txt` |
 | Relative path as command | `bin/script.sh` -> `./bin/script.sh` (only when the first token contains `/`; bare names like `ls`, `git` are left alone) |
@@ -184,14 +184,40 @@ and `bin/script.sh` invocations, and likewise `Bash(bin/script.sh:*)` covers bot
 match is symmetric in either direction. You no longer need to list both `./bin/X` and
 `bin/X` variants.
 
+**A rule written with an absolute home path fires on the `~` spelling.** Every `Bash` rule
+is matched against the command as written **and** with a leading `~` in each token
+expanded, so `deny Bash(cat /Users/arnon/.ssh/id_rsa)` fires on `cat ~/.ssh/id_rsa`. That
+direction holds for all four pattern types.
+
+**The reverse direction is a DEFAULT accommodation, with one `[glob]` exception.** A
+DEFAULT rule is matched against
+two further spellings -- normalized, and normalized with symlinks resolved -- which is how
+a rule written with `~` fires on the absolute spelling. `[regex]` and `[native]` rules get
+no such spelling. `[glob]` gets it only when the whole pattern begins with `~`:
+`[glob]~/bin/*` matches `/Users/arnon/bin/x`, but `[glob]cat ~/.ssh/*` does not match
+`cat /Users/arnon/.ssh/id_rsa`. So write an extended-syntax rule about a home path with the
+absolute path, or expect to write both spellings.
+
+**Unlike the assignment asymmetry below, the tilde spelling is offered to `allow` too.**
+Looking past `FOO=1` discards something real, so a granting rule must not do it. `~name`
+resolves through the passwd database to that account's actual home directory -- the same
+resolution a shell performs -- so `~/x` and `/Users/arnon/x`, or `~arnon/x` and
+`/Users/arnon/x`, are two spellings of one file; there is nothing for a granting rule to be
+protected from.
+
+`~<name>` is expanded through the passwd database to that account's home directory,
+whether or not it is the account this process runs as: a rule blind to it could be walked
+past by spelling it that way. A name the database does not know, a `~` that does not start
+a token, and a `~` inside a quote opened at the start of its token are all left as written.
+
 **Normalization by pattern type**:
 
 | Pattern type | Pattern normalization | Command normalization |
 |--------------|----------------------|----------------------|
-| DEFAULT | Command-name (`base_cmd`) canonicalized when it contains `/`; rest of pattern untouched | Full |
-| GLOB | Tilde expansion only | Tilde expansion only |
-| REGEX | None | None |
-| NATIVE | None | None |
+| DEFAULT | Command-name (`base_cmd`) canonicalized when it contains `/`; rest of pattern untouched | Full, plus per-token tilde expansion |
+| GLOB | Leading `~` only -- so `[glob]~/bin/*` reaches an absolutely-spelled command, but `[glob]cat ~/bin/*` does not | Per-token tilde expansion |
+| REGEX | None | Per-token tilde expansion |
+| NATIVE | None | Per-token tilde expansion |
 
 ## Leading environment assignments
 
