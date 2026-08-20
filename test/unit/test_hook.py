@@ -30,6 +30,7 @@ from toolguard.hook import (
     main,
     parse_hook_input,
 )
+from toolguard.error_log import log_crash
 from toolguard.log_writer import LogRecord
 from toolguard.file_matching import decide_file_path_at_level_detailed
 from toolguard.resolve import resolve_bash_permission_detailed
@@ -3218,11 +3219,28 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
     assertion these tests exist for is therefore "stdout still carries a
     verdict", never "log_crash did not raise" -- the second passes with the
     bug present in a different arrangement.
+
+    _drive_main also self-checks that log_crash was actually reached and
+    actually failed, so a refactor that moves log_crash off ambient.home()
+    fails loudly here instead of leaving this class isolating nothing.
     """
 
     def _drive_main(self, stdin_text, extra_patches=()):
-        """Run main() with crash logging unable to resolve a home; return (stdout, escaped exception)."""
+        """
+        Run main() with crash logging unable to resolve a home; return
+        (stdout, escaped exception).
+
+        Also asserts that log_crash was actually reached and actually failed
+        under this fixture.
+        """
         out = StringIO()
+        crash_results = []
+
+        def _spy_log_crash(*args, **kwargs):
+            result = log_crash(*args, **kwargs)
+            crash_results.append(result)
+            return result
+
         with TemporaryDirectory() as tmpdir:
             with ExitStack() as stack:
                 for context in (
@@ -3243,12 +3261,15 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
                         "toolguard.log_writer.require_project_root",
                         return_value=Path(tmpdir),
                     ),
+                    # Spies on the real log_crash so a future refactor moving it
+                    # off ambient.home() fails loudly here, instead of silently
+                    # leaving this fixture isolating nothing.
+                    patch("toolguard.hook.log_crash", side_effect=_spy_log_crash),
                     *extra_patches,
                 ):
                     stack.enter_context(context)
 
-                # Without this the fixture cannot produce the negative case and
-                # every assertion below would pass for the wrong reason.
+                # Without this the fixture cannot produce the negative case.
                 with self.assertRaises(RuntimeError):
                     ambient.home()
 
@@ -3259,6 +3280,17 @@ class TestDecisionReachesStdoutWhenCrashLoggingFails(unittest.TestCase):
                     pass
                 except Exception as exc:  # noqa: BLE001 -- the failure under test
                     escaped = exc
+
+        self.assertTrue(
+            crash_results,
+            "log_crash was never reached, or raised on the way -- either way "
+            "this fixture is no longer isolating what it claims to",
+        )
+        self.assertIsNone(
+            crash_results[0],
+            "log_crash did not fail under this fixture, so these tests never "
+            "exercise the deny-still-reaches-stdout path they are about",
+        )
         return out.getvalue(), escaped
 
     def _assert_deny_reached_stdout(self, stdout_text, escaped):
