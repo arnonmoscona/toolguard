@@ -4505,5 +4505,44 @@ class TestPathlibClassificationVersionPin(unittest.TestCase):
         self.assertEqual(af.PATH_PURE_MEMBERS & af.PATH_FILESYSTEM_MEMBERS, frozenset())
 
 
+class TestStdlibOnlyCheck(unittest.TestCase):
+    """
+    The runtime must import nothing but the standard library. The dev venv can
+    import numpy and sentence_transformers, so a regression would not surface
+    as an ImportError here -- only this check would catch it.
+    """
+
+    def test_the_real_package_imports_only_the_standard_library(self):
+        """
+        Given toolguard/ as shipped
+        When its imports are collected and compared to sys.stdlib_module_names
+        Then nothing outside the standard library is imported
+        """
+        self.assertEqual(af.check_stdlib(), [])
+
+    def test_a_foreign_import_is_reported_and_stdlib_and_relative_ones_are_not(self):
+        """
+        Given a package containing foreign, stdlib, dotted-stdlib and relative imports
+        When the check runs over it
+        Then only the foreign roots are reported
+
+        The negative half is the point: a check that reports nothing is
+        indistinguishable from a clean tree until it is shown to fire.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            planted = Path(tmp) / "planted.py"
+            planted.write_text(
+                "import numpy\n"
+                "from sentence_transformers import X\n"
+                "import json\n"
+                "import os.path\n"
+                "from . import sibling\n",
+                encoding="utf-8",
+            )
+            roots = [root for _, _, root in af.check_stdlib(Path(tmp))]
+
+        self.assertEqual(sorted(roots), ["numpy", "sentence_transformers"])
+
+
 if __name__ == "__main__":
     unittest.main()

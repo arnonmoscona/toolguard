@@ -4311,6 +4311,70 @@ def render_ambient_text(report: AmbientReport) -> str:
 
 
 # =============================================================================
+# --stdlib: runtime imports outside the standard library
+# =============================================================================
+
+#: Import roots the runtime may use besides the standard library.
+STDLIB_ALLOWED_ROOTS = frozenset({"toolguard"})
+
+
+def check_stdlib(
+    package_dir: Path = REPO_ROOT / "toolguard",
+) -> List[Tuple[str, int, str]]:
+    """
+    Return ``(file, line, root)`` for every import in *package_dir* whose root
+    package is neither in the standard library nor in
+    :data:`STDLIB_ALLOWED_ROOTS`.
+
+    Membership comes from ``sys.stdlib_module_names``, so the answer is exact
+    for the running interpreter and changes only with a Python release.
+    """
+    findings: List[Tuple[str, int, str]] = []
+    known = sys.stdlib_module_names | STDLIB_ALLOWED_ROOTS
+    for path in sorted(package_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots = [(a.name.split(".")[0], node.lineno) for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # level > 0 is a relative import, which cannot leave the package.
+                roots = (
+                    []
+                    if node.level
+                    else [((node.module or "").split(".")[0], node.lineno)]
+                )
+            else:
+                continue
+            for root, line in roots:
+                if root and root not in known:
+                    # Relative for the repo's own files; absolute for a
+                    # package_dir outside it, which is how this check is
+                    # validated against a planted import.
+                    try:
+                        shown = str(path.relative_to(REPO_ROOT))
+                    except ValueError:
+                        shown = str(path)
+                    findings.append((shown, line, root))
+    return findings
+
+
+def render_stdlib_text(findings: Sequence[Tuple[str, int, str]]) -> str:
+    """Render :func:`check_stdlib`'s findings as the ``--stdlib`` section."""
+    headline = "PASS" if not findings else f"FAIL ({len(findings)} import(s))"
+    lines = [
+        f"=== --stdlib: {headline} ===",
+        f"stdlib roots known to Python {sys.version_info[0]}.{sys.version_info[1]}: "
+        f"{len(sys.stdlib_module_names)}; also allowed: "
+        f"{', '.join(sorted(STDLIB_ALLOWED_ROOTS))}",
+    ]
+    for file, line, root in findings:
+        lines.append(f"  - {file}:{line} imports {root!r}")
+    return "\n".join(lines)
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -4345,6 +4409,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--ambient",
         action="store_true",
         help="Report unowned reads of home/cwd/environment that bypass toolguard.ambient.",
+    )
+    parser.add_argument(
+        "--stdlib",
+        action="store_true",
+        help="Report runtime imports whose root is outside the standard library.",
     )
     parser.add_argument(
         "--guard",
@@ -4384,13 +4453,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.metrics,
             args.mocks,
             args.ambient,
+            args.stdlib,
             args.guard,
             args.guard_canaries_only,
         ]
     ):
         parser.error(
             "at least one of --layers, --predicates, --metrics, --mocks, --ambient, "
-            "--guard, --guard-canaries-only is required"
+            "--stdlib, --guard, --guard-canaries-only is required"
         )
 
     exit_code = 0
@@ -4408,6 +4478,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(render_layers_text(report))
             print()
         if not report.ok:
+            exit_code = 1
+
+    if args.stdlib:
+        findings = check_stdlib()
+        payload["stdlib"] = {"ok": not findings, "findings": findings}
+        if not args.json:
+            print(render_stdlib_text(findings))
+            print()
+        if findings:
             exit_code = 1
 
     if args.predicates:

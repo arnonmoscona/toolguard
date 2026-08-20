@@ -12,6 +12,11 @@ command matching (glob is native for Read/Write/Edit but not for Bash). Full beh
 
 Ticket prefix: `TOO-`. basic-memory project: `toolguard`.
 
+**Never state what native permission syntax does from memory -- fetch the docs and quote them.**
+`[native]` mirrors an external, evolving spec, so a blinded review cannot check the claim: it
+compares prose against *this* repo, and native is not in it. False claims got through twice in
+one day. Procedure: `.claude/rules/native-fidelity-claims.md`.
+
 ## Two architectural constraints
 
 **Runtime is standard-library only.** Running toolguard must require nothing but the Python
@@ -239,6 +244,10 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
 
 ## Pre-push, in addition to the global checklist
 
+* `uv run python tools/architecture_fitness.py --stdlib` -- fails on any runtime import
+  whose root is outside `sys.stdlib_module_names`. **The dev venv would otherwise mask this**:
+  `numpy` and `sentence_transformers` are importable there, so a stray import raises nothing
+  locally and breaks only on a user's machine.
 * `uv run python tools/architecture_fitness.py --ambient` -- fails on an `os` import or a
   home/cwd/absolute/expanduser read with no owner entry. Exit 0 does not mean nothing reads
   ambient state directly: owner entries exempt real reads, and an unowned `resolve()` is
@@ -307,6 +316,7 @@ GEMINI.md and QODER.md were installer cruft for agents Arnon does not use; delet
 Moved out to path-scoped rules (load on demand, not every session):
   - PEG/canopy two-phase procedure -> .claude/rules/bash-grammar.md
   - unittest/BDD/coverage conventions -> .claude/rules/testing.md
+  - fetching native's documented semantics -> .claude/rules/native-fidelity-claims.md
 
 Removed as redundant with current models:
   - The inlined 15-line `tools/coverage_stdlib.py` source. The file exists in the repo; the
