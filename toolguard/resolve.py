@@ -29,6 +29,7 @@ from toolguard.config_types import ResolveConfig
 from toolguard.config_types import RuntimeVerdict as RuntimeVerdict
 from toolguard.config_types import UnitVerdict as UnitVerdict
 from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.parser.command_extractor import command_spellings
 from toolguard.permission_resolution import (
     apply_parse_failure_floor,
     resolve_command_permission,
@@ -218,11 +219,17 @@ def resolve_bash_permission_detailed(
     """
     overrides: List[Tuple[str, ConflictOverride]] = []
     sub_matches: List[UnitVerdict] = []
+    looked_past = config.assignments_looked_past_when_granting()
 
     def _decide(sub_command: str) -> Tuple[UnitVerdict, Optional[ConflictOverride]]:
         """Resolve one sub-command: hard-deny pool first, then the cascade."""
+        spellings = command_spellings(sub_command, looked_past)
         hard = check_hard_deny(
-            sub_command, list(hard_deny_deny), list(hard_deny_allow), extended_syntax
+            sub_command,
+            list(hard_deny_deny),
+            list(hard_deny_allow),
+            extended_syntax,
+            spellings=spellings,
         )
         if hard is not None:
             return (
@@ -241,7 +248,7 @@ def resolve_bash_permission_detailed(
             )
 
         resolved = resolve_command_permission(
-            config, "Bash", sub_command, extended_syntax
+            config, "Bash", sub_command, extended_syntax, spellings=spellings
         )
         fallback_kind = None
         if resolved.decision == "allow" and resolved.matched_rule is None:

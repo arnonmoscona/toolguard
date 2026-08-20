@@ -17,6 +17,7 @@ question in front of you.
   - [NATIVE patterns](#native-patterns)
 - [File path patterns (Read, Write, Edit)](#file-path-patterns-read-write-edit)
 - [Path normalization](#path-normalization)
+- [Leading environment assignments](#leading-environment-assignments)
 - [Compound and multi-line commands](#compound-and-multi-line-commands)
   - [The governing principle: when in doubt, ASK](#the-governing-principle-when-in-doubt-ask)
   - [Operators](#operators)
@@ -39,7 +40,7 @@ Toolguard supports two categories of pattern matching.
 | DEFAULT | (none) | fnmatch prefix + path normalization | Standard Claude Code patterns |
 | REGEX | `[regex]` | `re.search()` | Complex matching with regex |
 | GLOB | `[glob]` | `PurePath.full_match()` | File path patterns with globstar |
-| NATIVE | `[native]` | Word-level segment matching | Claude Code 2.10 wildcard style |
+| NATIVE | `[native]` | Word-level segment matching | Claude Code's own wildcard style |
 
 **2. File path patterns** (for `Read`, `Write`, `Edit` tools)
 
@@ -63,8 +64,7 @@ Bash(git log:*)                   # git log with any arguments
 Bash(./bin/precommit_checks.sh:*) # matches both `./bin/...` and `bin/...` invocations
 ```
 
-The `:*` suffix enables prefix matching -- the command must start with the pattern before
-the colon.
+The `:*` suffix enables prefix matching -- the command must start with the pattern before the colon, and that prefix must end on a token boundary. So `Bash(git log:*)` matches `git log` and `git log --oneline`, but not `git logfoo`. This mirrors Claude Code's own `Bash(git log *)`, which `:*` is equivalent to.
 
 **Relative-path commands are canonicalized**: `bin/script.sh` and `./bin/script.sh` are
 treated as equivalent on both sides of the match, so a single rule `Bash(./bin/script.sh:*)`
@@ -110,7 +110,9 @@ or when `TOOLGUARD_EXTENDED_SYNTAX` is disabled.
 
 ### NATIVE patterns
 
-Use the `[native]` prefix (inside the tool wrapper) for Claude Code 2.10 wildcard syntax:
+**`[native]` is defined by reference to Claude Code's own builtin rules, which change.** What it is supposed to mirror — quoted verbatim, with the date it was last verified and the known divergences — is in [native-pattern-reference.md](native-pattern-reference.md). **Check that file's date before relying on equivalence**, and update it there rather than restating the semantics here.
+
+Use the `[native]` prefix (inside the tool wrapper) for Claude Code's wildcard syntax:
 
 ```
 Bash([native]git * main)               # git checkout main, git merge main, etc.
@@ -190,6 +192,25 @@ match is symmetric in either direction. You no longer need to list both `./bin/X
 | GLOB | Tilde expansion only | Tilde expansion only |
 | REGEX | None | None |
 | NATIVE | None | None |
+
+## Leading environment assignments
+
+A command may set variables before the thing it runs: `FOO=1 rm -rf /tmp/x`. Matched literally, the leaf begins with `FOO=1`, not with `rm`, so `deny Bash(rm:*)` never fires. Toolguard therefore matches such a command **twice** -- as written, and with the assignment prefix removed -- but not symmetrically:
+
+| List | What it is matched against |
+|---|---|
+| `deny`, `ask`, `hard_deny` | the command as written, **and** with the leading assignments removed |
+| `allow`, and a `hard_deny` carve-out | the command as written; with the assignments removed **only** when every one of their names is listed in `assignments_looked_past_when_granting` |
+
+**The asymmetry is the point.** Looking past an assignment when granting is how `LD_PRELOAD=/tmp/evil.so ls` would slip through `allow Bash(ls:*)`; `PATH`, `PYTHONPATH` and `LD_LIBRARY_PATH` are the same shape. So a restricting rule always sees the command underneath, and a granting rule only sees past names you have named.
+
+Both spellings are matched by **every** pattern type -- DEFAULT, `[regex]`, `[glob]` and `[native]` alike. The command as written is always matched too, so a rule deliberately keyed on the prefix, like `deny Bash(TG_INTENT=1 rm:*)`, keeps working.
+
+The prefix is identified by the bash grammar, so `FOO+=1`, quoted values and a substitution in the value (`FOO=$(id) rm`) are all recognised, and an assignment-looking token that is not leading (`echo FOO=1`) is not one. Configuring the granting side is covered in [configuration.md](configuration.md#assignments-looked-past-when-granting).
+
+**Compared with Claude Code.** Native's documented behaviour has the same shape: a deny or ask rule matches past any leading assignment, and an allow rule matches past only "certain known-safe environment variables". What differs is the list -- native's is Claude Code's own and its members are not named in that documentation, whereas toolguard's is `assignments_looked_past_when_granting` and starts empty, so nothing is looked past when granting until you say so. This applies to the whole matching engine, not to `[native]` patterns specifically -- the quoted source is in [native-pattern-reference.md](native-pattern-reference.md#known-divergences-between-toolguard-and-the-above).
+
+**Known limitation**: an array-element assignment (`arr[0]=$(id) rm -rf /tmp/x`) is not modelled by the grammar, so it still hides the command from a deny rule. Recorded deliberately rather than closed, because subscripts pull the grammar toward general bash.
 
 ## Compound and multi-line commands
 

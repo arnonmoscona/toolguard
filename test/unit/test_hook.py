@@ -128,6 +128,9 @@ def _fake_config(
         def resolved_no_match_fallback(self_inner):
             return "ask"
 
+        def assignments_looked_past_when_granting(self_inner):
+            return ()
+
         parse_failures = ()
 
         def describe_levels(self_inner):

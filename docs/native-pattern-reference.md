@@ -33,6 +33,10 @@ And on the bare form:
 
 > `Bash(*)` is equivalent to `Bash` and matches all Bash commands.
 
+On a leading environment-variable assignment, from the "Wrappers" subsection of the same page (this quote verified 2026-08-20, later than the header date, which covers the quotes above it):
+
+> Claude Code also strips a leading assignment of certain known-safe environment variables, so `Bash(npm test *)` matches `NODE_ENV=test npm test`. An allow rule won't match past an assignment of any other variable. A deny or ask rule matches past any leading assignment, so `Bash(rm *)` in deny still matches `FOO=bar rm -rf tmp/`.
+
 ---
 
 ## Known divergences between toolguard and the above
@@ -42,8 +46,10 @@ Recorded here because a reader comparing the two needs them in one place. Each i
 | # | native says | toolguard does |
 |---|---|---|
 | 17 | `Bash(* install)` matches any command **ending with** ` install` | `[native]*id_rsa` does **not** match `cat id_rsa.pub id_rsa`. The matcher takes the **first** occurrence of the final segment and never backtracks, so the end-anchor check tests the wrong occurrence |
-| 18 | `Bash(ls *)` enforces a **word boundary** — matches `ls -la`, not `lsof`; and `:*` is equivalent to ` *` | `git log:*` matches `git logfoo` |
+| 18 | `Bash(ls *)` enforces a **word boundary** — matches `ls -la`, not `lsof`; and `:*` is equivalent to ` *` | **resolved** — the boundary is enforced on the whole prefix, so `git log:*` no longer matches `git logfoo`. A trailing `*` still crosses spaces, so `Bash(rm FILE:*)` matches `rm FILE /etc/passwd`, exactly as native does |
 | 18 | `:*` is recognised **only at the end**; `Bash(git:* push)` treats the colon literally | **not yet measured** |
+
+Leading `VAR=value` assignments are **engine-wide rather than `[native]`-specific**, so they are documented with the matching engine instead of in the table above. Per the quote above, the two policies have the same shape -- restricting rules match past the prefix, granting rules only for known-safe names -- and differ over the list: native's is Claude Code's own and its members are not named in that documentation, while toolguard's is `assignments_looked_past_when_granting` and starts empty. See [Leading environment assignments](permission-patterns.md#leading-environment-assignments). It is mentioned here because a reader comparing toolguard against the quoted documentation will otherwise not find it.
 
 ---
 

@@ -19,10 +19,12 @@ floor -- lives here rather than in the grammar or the IR.
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Set, Union
+from typing import List, Optional, Sequence, Set, Union
 
+from toolguard.config_types import CommandSpellings
 from toolguard.parser import bash_parser
 from toolguard.parser.command_model import (
+    IRAssignmentPrefix,
     IRCompound,
     IRControlStructure,
     IRPipeline,
@@ -845,6 +847,68 @@ def _collect_commands_from_compound(
 # ---------------------------------------------------------------------------
 # Public API: extract_commands and parse_command_line
 # ---------------------------------------------------------------------------
+
+
+def command_spellings(
+    command_text: str, looked_past_when_granting: Sequence[str] = ()
+) -> CommandSpellings:
+    """How *command_text* may be spelled for permission matching.
+
+    A granting list gets the stripped spelling only when EVERY leading
+    assignment's name is in *looked_past_when_granting*: one unlisted name in the
+    prefix and the grant sees the raw command only, so ``TG_INTENT=1 LD_PRELOAD=x
+    ls`` is not granted by ``allow Bash(ls:*)``.
+
+    Args:
+        command_text: One leaf command, as handed to permission matching.
+        looked_past_when_granting: Assignment variable names a granting list may
+            be matched past.
+
+    Returns:
+        A :class:`~toolguard.config_types.CommandSpellings`. Both fields are empty
+        when *command_text* carries no leading assignment, which leaves matching
+        exactly as it was.
+    """
+    prefix = leading_assignments(command_text)
+    if prefix is None or prefix.without_prefix == command_text:
+        return CommandSpellings()
+    granted = all(name in looked_past_when_granting for name in prefix.names)
+    return CommandSpellings(
+        restricting=(prefix.without_prefix,),
+        granting=(prefix.without_prefix,) if granted else (),
+    )
+
+
+def leading_assignments(command_text: str) -> Optional[IRAssignmentPrefix]:
+    """The leading ``NAME=value`` assignments *command_text* runs its command with.
+
+    Recognised by the grammar, so ``FOO+=1``, a quoted value and a substitution
+    in the value are all covered, and an assignment-looking token that is not
+    leading (``echo FOO=1``) is not one.
+
+    Args:
+        command_text: One leaf command, as handed to permission matching.
+
+    Returns:
+        An :class:`~toolguard.parser.command_model.IRAssignmentPrefix`, or None
+        when *command_text* has no leading assignment, does not parse, or is
+        more than a single simple command -- a caller reading this to decide
+        what a rule may match must not be handed a guess.
+    """
+    if not command_text or not command_text.strip():
+        return None
+
+    try:
+        ir = build_ir(bash_parser.parse(command_text))
+    except Exception:
+        return None
+
+    if len(ir.statements) != 1 or len(ir.statements[0].pipelines) != 1:
+        return None
+    elements = ir.statements[0].pipelines[0].elements
+    if len(elements) != 1 or not isinstance(elements[0], IRSimpleCmd):
+        return None
+    return elements[0].assignment_prefix
 
 
 def extract_commands(command_line: str) -> List[str]:

@@ -41,6 +41,7 @@ more-specific level already decided the outcome.
 from typing import List, Optional, Sequence, Tuple
 
 from toolguard.config_types import (
+    CommandSpellings,
     ConflictOverride,
     FilePathResolutionConfig,
     LevelMatch,
@@ -369,6 +370,8 @@ def resolve_command_permission(
     tool_name: str,
     command: str,
     extended_syntax: bool = True,
+    *,
+    spellings: CommandSpellings = CommandSpellings(),
 ) -> RuntimeVerdict:
     """
     Resolve one (already-decomposed) command against ``tool_name``'s cascade.
@@ -377,6 +380,11 @@ def resolve_command_permission(
     :func:`~toolguard.permissions.decide_command_at_level_detailed`, then
     folds the results with :func:`resolve_permission_cascade`. The
     production entry point for Bash/MCP-terminal resolution.
+
+    *spellings* is built by the caller: this module does not import the parser, an
+    import ``test/unit/test_architecture.py``'s per-module allow-list rejects.
+    Omitting it matches *command* as spelled, which is what a caller with no leaf in
+    hand should do.
     """
     levels = config.permission_levels_with_provenance(tool_name)
     matched_levels: List[LevelOutcome] = [
@@ -387,6 +395,7 @@ def resolve_command_permission(
                 list(deny),
                 extended_syntax,
                 ask_patterns=list(ask),
+                spellings=spellings,
             ),
             layers,
         )

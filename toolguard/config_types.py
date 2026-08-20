@@ -357,6 +357,31 @@ class ConflictOverride:
 
 
 @dataclass(frozen=True)
+class CommandSpellings:
+    """
+    The further spellings of one leaf command each kind of pattern list may match.
+
+    Empty on both sides -- the default -- matches the command exactly as spelled, which
+    is what a caller holding no parse of it should pass.
+
+    Lives here because it is built by
+    :func:`toolguard.parser.command_extractor.command_spellings` and consumed by
+    :mod:`toolguard.permissions`, whose per-module import allow-list in
+    ``test/unit/test_architecture.py`` excludes the parser.
+
+    Attributes:
+        restricting: What a deny, ask or hard_deny list may also match. A leading
+            ``NAME=value`` assignment is looked past here unconditionally.
+        granting: What an allow list, or a hard-deny carve-out, may also match. An
+            assignment prefix is looked past only for names configured safe to look
+            past, and that asymmetry is the whole point of the pair.
+    """
+
+    restricting: Tuple[str, ...] = ()
+    granting: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class LevelMatch:
     """
     A single hierarchy-level (or hard-deny-pool) pattern-match result.
@@ -594,7 +619,7 @@ class ResolutionConfig(Protocol):
     Closes the gap left by :mod:`toolguard.permission_resolution` being architecturally
     forbidden from importing :mod:`toolguard.config`: any object handed in as ``config`` --
     in practice always a real :class:`~toolguard.config.Configuration`, but a test double
-    needs only this surface -- must structurally supply exactly these four members.
+    needs only this surface -- must structurally supply exactly these five members.
     Restating the whole of ``Configuration`` here would defeat the purpose.
 
     :mod:`toolguard.resolve` needs a wider surface, so none of its ``config`` parameters
@@ -660,6 +685,16 @@ class ResolutionConfig(Protocol):
 
         Consulted only in the no-match branch, once every hierarchy level has matched
         nothing.
+        """
+        ...
+
+    def assignments_looked_past_when_granting(self) -> Tuple[str, ...]:
+        """
+        Return the assignment variable names an allow rule may be matched past --
+        already de-duplicated and defaulted to empty, never a raw config value.
+
+        Only a command carrying a leading ``NAME=value`` assignment can be affected
+        by the list, so an empty result is the normal case rather than a gap.
         """
         ...
 

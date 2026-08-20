@@ -31,6 +31,8 @@ question in front of you.
 - [No-match fallback](#no-match-fallback) -- what happens when nothing matches
 - [Undecidable fallback](#undecidable-fallback) -- what happens when a command cannot be
   safely parsed at all
+- [Assignments looked past when granting](#assignments-looked-past-when-granting) -- letting
+  an allow rule see past a leading `VAR=value`
 - [Verifying configuration](#verifying-configuration)
 - [Environment variables](#environment-variables)
   - [Boolean values](#boolean-values)
@@ -386,7 +388,7 @@ Extended pattern types:
 
 - `[regex]` -- regular expression matching with `re.search()`
 - `[glob]` -- true glob patterns with proper `**` globstar support
-- `[native]` -- Claude Code 2.10 word-level wildcard matching
+- `[native]` -- Claude Code's own word-level wildcard matching
 
 All three prefixes work for both command tools (`Bash(...)`,
 `mcp__jetbrains__execute_terminal_command(...)`) and file-path tools (`Read(...)`,
@@ -457,8 +459,9 @@ structured rule entry starting at line 3 spans multiple physical lines, which is
 TOML 1.0 (an inline table must be written on a single line). Rewrite it as one line.
 ```
 
-A file that fails to parse does not fail silently or fail open: every decision is clamped to
-`ask` until you fix it, and the broken file is named in the output. Read
+A file that fails to parse does not fail silently or fail open: every decision except an
+already-`deny` one is clamped to `ask` until you fix it, and the broken file is named in the
+output. Read
 [Security: a broken config file also fails safe, not open](security.md#a-broken-config-file-also-fails-safe-not-open)
 before relying on that clamp in an unattended session -- it behaves differently there.
 
@@ -645,6 +648,24 @@ is planned; this is a brand-new setting with no prior spelling to preserve. Appl
 **both** takeover and non-takeover modes, resolved more-specific-wins across the
 [configuration hierarchy](#configuration-hierarchy) the same way `no_match_fallback` is.
 
+## Assignments looked past when granting
+
+A command can set environment variables before the thing it runs -- `TG_INTENT=1 ls -la`. Matched literally, that leaf starts with `TG_INTENT=1`, not with `ls`, so `allow Bash(ls:*)` does not cover it and the command falls through to `ask`.
+
+`assignments_looked_past_when_granting` lists the variable names an **allow** rule (and a `hard_deny` carve-out) may be matched past. A command whose leading assignments are all listed is matched a second time with them removed:
+
+```toml
+assignments_looked_past_when_granting = ["TG_INTENT", "TG_ATTEST_READONLY"]
+```
+
+**Empty by default**, and only names you list are ever looked past. That is the security of the setting: `LD_PRELOAD=/tmp/evil.so ls` must not be granted by `allow Bash(ls:*)`, and `PATH`, `PYTHONPATH` and `LD_LIBRARY_PATH` are the same shape. Put a name here only when setting that variable cannot change what the command does.
+
+**Every name in the prefix must be listed**, or the grant sees the command as written. With only `TG_INTENT` listed, `TG_INTENT=1 LD_PRELOAD=x ls` is not granted by `allow Bash(ls:*)` -- one unlisted name withdraws the whole thing.
+
+**Deny, ask and `hard_deny` rules ignore this setting**: they always see the command underneath the prefix, listed or not, so `FOO=1 rm -rf /tmp/x` is denied by `deny Bash(rm:*)` with nothing configured. The reasoning behind the asymmetry, and how it compares with Claude Code's own behaviour, is in [permission-patterns.md](permission-patterns.md#leading-environment-assignments).
+
+**Pooled across the hierarchy**, like `governed_tools`: every level's list is unioned, so a name set once at the user level applies in every project and cannot be withdrawn by a more specific level. A value that is not a list, or an entry that is not a string, contributes nothing and is reported as a validation warning.
+
 ## Verifying configuration
 
 After configuration, restart Claude Code and check the logs:
@@ -678,13 +699,11 @@ Boolean environment variables accept (case-insensitive):
 
 ### Project root detection
 
-If `TOOLGUARD_PROJECT_ROOT` is not set, toolguard searches upward from the current
-directory for:
-
-1. a `.git` directory
-2. a `pyproject.toml` file
-
-The first directory containing either marker is used as the project root.
+If `TOOLGUARD_PROJECT_ROOT` is not set, toolguard searches upward from the current directory
+for any of six markers: a `.git`, `.hg` or `.jj` directory, a `.claude` directory, a
+`CLAUDE.md` file, or a `pyproject.toml` file. The nearest directory containing any of them is
+used as the project root -- so a stray `.claude/` or `CLAUDE.md` in a subdirectory will stop
+the walk early.
 
 ### .env file
 
@@ -778,7 +797,7 @@ cp docs/gh-cli-rules-example.toml ~/.config/toolguard/rules/gh.toml
 
 It is then discovered automatically as a user-level source, and a matched rule from it is
 logged with its own provenance, e.g. `[user: ~/.config/toolguard/rules/gh.toml]` -- see
-[architecture.md](architecture.md#logging) for the provenance format.
+[architecture-as-built.md](architecture-as-built.md#12-logging) for the provenance format.
 
 **Single-file override**: Setting the `CLAUDE_SETTINGS_PATH` environment variable forces
 toolguard to read only that one settings file and bypass the hierarchy entirely -- including
@@ -799,7 +818,8 @@ Complete TOML configuration structure with all available sections:
 # TOOLGUARD CONFIGURATION REFERENCE
 # ============================================================================
 
-# List of tools that toolguard will govern (required)
+# List of tools that toolguard will govern
+# (optional -- defaults to Bash, Read, Write, Edit when no level sets it)
 governed_tools = [
     "Bash",
     "Read",
@@ -813,8 +833,8 @@ additional_supported_tools = [
     "mcp__custom__my_bash_tool"
 ]
 
-# Limit discovery to project + user levels only (default: true = full hierarchy).
-# Read ONLY from the project-level config.
+# Walk the full ancestor hierarchy (default: true). Set false to limit discovery
+# to the project and user levels only. Read ONLY from the project-level config.
 hierarchical_configuration = true
 
 # What to do when a governed tool HAS rules but a command matches none (a tool with no
@@ -838,6 +858,15 @@ no_match_fallback = "ask"
 # is an identical long-form alias). See "Undecidable fallback" above for the full
 # explanation, including the parse-failure exemption.
 undecidable_fallback = "ask"
+
+# Environment-variable names an ALLOW rule may be matched past when they appear as a
+# leading assignment: with "TG_INTENT" listed, allow Bash(ls:*) also covers
+# "TG_INTENT=1 ls -la". EMPTY BY DEFAULT, and every name in the prefix must be listed
+# or the grant sees the command as written -- which is what keeps
+# "LD_PRELOAD=/tmp/evil.so ls" outside an ls rule. Deny/ask/hard_deny ignore this and
+# always see the command underneath. A toolguard extension, pooled across all levels
+# like governed_tools. See "Assignments looked past when granting" above.
+assignments_looked_past_when_granting = []
 
 # ============================================================================
 # TAKEOVER MODE - Claude sees blanket allows, toolguard enforces real rules

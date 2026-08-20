@@ -47,8 +47,9 @@ entry over letting it silently go stale.
   set to `"allow_with_warning"`. See
   [configuration.md#undecidable-fallback](configuration.md#undecidable-fallback).
 - **Q: Why isn't my rule being enforced even though I added it?**
-  A: A tool is only governed if it's in **both** the hook matcher (native settings) **and**
-  `governed_tools` (`toolguard_hook.toml`) -- check both. See
+  A: A tool is governed only if it's in **both** the hook matcher (native settings) **and**
+  `governed_tools` (`toolguard_hook.toml`, which defaults to `Bash`/`Read`/`Write`/`Edit`
+  when unset) -- check both. See
   [agent-guides.md#ground-rules-read-first](agent-guides.md#ground-rules-read-first).
 - **Q: What is `CLAUDE_SETTINGS_PATH` and why does it matter?**
   A: An env var that forces single-file mode, bypassing the whole config hierarchy -- a real
@@ -76,6 +77,11 @@ entry over letting it silently go stale.
   `Bash`?**
   A: All three work on file-path tools too, not just command tools. See
   [permission-patterns.md#file-path-patterns-read-write-edit](permission-patterns.md#file-path-patterns-read-write-edit).
+- **Q: Does `[native]` actually match what Claude Code's own permission rules do?**
+  A: It is *meant* to, but Claude Code's rules change and ours can drift. What it mirrors is
+  quoted verbatim, with the date last verified and the known divergences, in
+  [native-pattern-reference.md](native-pattern-reference.md). **Check that date before
+  relying on equivalence.**
 - **Q: How do I write a deny rule that nothing (no more-specific level, no explicit allow)
   can override?**
   A: `[hard_deny]`, ideally at the user level. See
@@ -91,8 +97,19 @@ entry over letting it silently go stale.
 - **Q: How does toolguard handle heredocs, multi-line commands, and compound commands
   (`&&`, `;`, `|`, subshells)?**
   A: Decomposed into sub-commands and validated separately; anything it can't safely
-  decompose resolves to ASK, never a silent allow. See
+  decompose takes the `undecidable_fallback` floor, which defaults to ASK but can be
+  loosened. See
   [permission-patterns.md#compound-and-multi-line-commands](permission-patterns.md#compound-and-multi-line-commands).
+- **Q: Does `FOO=1 rm -rf /tmp/x` match a rule written for `rm`, and does `TG_INTENT=1 ls`
+  still match `allow Bash(ls:*)`?**
+  A: Deny, ask and `hard_deny` always see the command underneath a leading `VAR=value`, so
+  the first is denied. An allow rule does not, unless every variable in the prefix is listed
+  in `assignments_looked_past_when_granting` -- so the second falls to `ask` until you
+  configure it. The asymmetry is what stops `LD_PRELOAD=x ls` inheriting an `ls` allow, and
+  it diverges from Claude Code in both directions. See
+  [permission-patterns.md#leading-environment-assignments](permission-patterns.md#leading-environment-assignments)
+  and
+  [configuration.md#assignments-looked-past-when-granting](configuration.md#assignments-looked-past-when-granting).
 - **Q: Can a rule explain itself to Claude -- e.g. tell it why a command was denied, or what
   to do instead?**
   A: Yes -- add `additionalContext` to a structured rule entry (toolguard config files only;
@@ -182,19 +199,30 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Recipe: diagnose "my command was denied"](agent-guides.md#recipe-diagnose-my-command-was-denied)
 - [Recipe: clean up accumulated permissions](agent-guides.md#recipe-clean-up-accumulated-permissions)
 
-**`docs/architecture.md`**
-- [Contents](architecture.md#contents)
-- [Package structure](architecture.md#package-structure)
-- [Hook flow](architecture.md#hook-flow)
-- [Writing configuration](architecture.md#writing-configuration)
-- [Configuration hierarchy](architecture.md#configuration-hierarchy)
-- [Pattern matching implementation](architecture.md#pattern-matching-implementation)
-  - [Command tool patterns](architecture.md#command-tool-patterns)
-  - [Compound command resolution](architecture.md#compound-command-resolution)
-  - [File path tool patterns](architecture.md#file-path-tool-patterns)
-- [Logging](architecture.md#logging)
-  - [Error and warning logs](architecture.md#error-and-warning-logs)
-  - [Conflict logging and SessionStart alerts](architecture.md#conflict-logging-and-sessionstart-alerts)
+**`docs/architecture-as-built.md`** (replaced `docs/architecture.md`, which was merged into it)
+- [1. What toolguard has to do, and what it may not](architecture-as-built.md#1-what-toolguard-has-to-do-and-what-it-may-not)
+  - [One process per tool call](architecture-as-built.md#one-process-per-tool-call)
+- [2. Standard library only](architecture-as-built.md#2-standard-library-only)
+- [3. All bash parsing goes through the PEG grammar](architecture-as-built.md#3-all-bash-parsing-goes-through-the-peg-grammar)
+  - [Why](architecture-as-built.md#why)
+  - [The written rule exists because this has regressed](architecture-as-built.md#the-written-rule-exists-because-this-has-regressed)
+- [4. Two halves: the core runtime and the operator tooling](architecture-as-built.md#4-two-halves-the-core-runtime-and-the-operator-tooling)
+  - [Why the split matters more than the line count suggests](architecture-as-built.md#why-the-split-matters-more-than-the-line-count-suggests)
+- [5. The layer model](architecture-as-built.md#5-the-layer-model)
+  - [Which module sits where](architecture-as-built.md#which-module-sits-where)
+  - [Why `observability` sits below `config`](architecture-as-built.md#why-observability-sits-below-config)
+  - [Why `api` exists](architecture-as-built.md#why-api-exists)
+  - [What is checked, and what is not](architecture-as-built.md#what-is-checked-and-what-is-not)
+- [6. The verdict altitudes: `LevelMatch`, `UnitVerdict`, `RuntimeVerdict`](architecture-as-built.md#6-the-verdict-altitudes-levelmatch-unitverdict-runtimeverdict)
+- [7. The decision path, end to end](architecture-as-built.md#7-the-decision-path-end-to-end)
+  - [A compound Bash command: what runs around the cascade](architecture-as-built.md#a-compound-bash-command-what-runs-around-the-cascade)
+  - [Four public entry points that are not on this path](architecture-as-built.md#four-public-entry-points-that-are-not-on-this-path)
+- [8. The runtime dependency no import graph shows](architecture-as-built.md#8-the-runtime-dependency-no-import-graph-shows)
+- [9. The configuration hierarchy](architecture-as-built.md#9-the-configuration-hierarchy)
+- [10. Pattern matching](architecture-as-built.md#10-pattern-matching)
+- [11. Writing configuration](architecture-as-built.md#11-writing-configuration)
+- [12. Logging](architecture-as-built.md#12-logging)
+- [Sources](architecture-as-built.md#sources)
 
 **`docs/auto-mode.md`**
 - [The honest tradeoff](auto-mode.md#the-honest-tradeoff)
@@ -211,11 +239,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Auto-migration](config-sync.md#auto-migration)
 - [Backup handling](config-sync.md#backup-handling)
 - [Similarity detection and duplicate removal](config-sync.md#similarity-detection-and-duplicate-removal)
-- [Session warnings](config-sync.md#session-warnings)
-  - [How warnings work](config-sync.md#how-warnings-work)
-  - [Marker files location](config-sync.md#marker-files-location)
-  - [Marker cleanup](config-sync.md#marker-cleanup)
-  - [Warning types](config-sync.md#warning-types)
+- [Warning throttling](config-sync.md#warning-throttling)
 
 **`docs/configuration.md`**
 - [Contents](configuration.md#contents)
@@ -230,6 +254,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [additionalContext: injecting guidance alongside a decision](configuration.md#additionalcontext-injecting-guidance-alongside-a-decision)
 - [No-match fallback](configuration.md#no-match-fallback)
 - [Undecidable fallback](configuration.md#undecidable-fallback)
+- [Assignments looked past when granting](configuration.md#assignments-looked-past-when-granting)
 - [Verifying configuration](configuration.md#verifying-configuration)
 - [Environment variables](configuration.md#environment-variables)
   - [Boolean values](configuration.md#boolean-values)
@@ -265,6 +290,11 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Phase R -- Rollback during install (if the user changes their mind)](install.md#phase-r----rollback-during-install-if-the-user-changes-their-mind)
 - [Phase T -- Trace dump and issue reporting (offer this)](install.md#phase-t----trace-dump-and-issue-reporting-offer-this)
 
+**`docs/native-pattern-reference.md`**
+- [Quoted verbatim from Claude Code's documentation](native-pattern-reference.md#quoted-verbatim-from-claude-codes-documentation)
+- [Known divergences between toolguard and the above](native-pattern-reference.md#known-divergences-between-toolguard-and-the-above)
+- [What this file is not](native-pattern-reference.md#what-this-file-is-not)
+
 **`docs/permission-patterns.md`**
 - [Contents](permission-patterns.md#contents)
 - [Pattern types](permission-patterns.md#pattern-types)
@@ -275,6 +305,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [NATIVE patterns](permission-patterns.md#native-patterns)
 - [File path patterns (Read, Write, Edit)](permission-patterns.md#file-path-patterns-read-write-edit)
 - [Path normalization](permission-patterns.md#path-normalization)
+- [Leading environment assignments](permission-patterns.md#leading-environment-assignments)
 - [Compound and multi-line commands](permission-patterns.md#compound-and-multi-line-commands)
   - [The governing principle: when in doubt, ASK](permission-patterns.md#the-governing-principle-when-in-doubt-ask)
   - [Operators](permission-patterns.md#operators)
@@ -306,6 +337,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Backup importance](security.md#backup-importance)
 - [Testing with dry-run](security.md#testing-with-dry-run)
 - [Verify toolguard is running](security.md#verify-toolguard-is-running)
+- [The hook can be silently shadowed](security.md#the-hook-can-be-silently-shadowed)
 - [Ongoing security review](security.md#ongoing-security-review)
 - [Maintaining your toolguard configuration](security.md#maintaining-your-toolguard-configuration)
 - [Recommended deny patterns](security.md#recommended-deny-patterns)

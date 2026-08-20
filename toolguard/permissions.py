@@ -10,12 +10,20 @@ the unoverridable hard-deny pool (:func:`check_hard_deny`), one hierarchy level 
 more-specific-wins cascade (:func:`decide_command_at_level_detailed`), and the
 allow/ask tie-break primitives (:func:`resolve_allow_ask`, :func:`is_universal_pattern`)
 that combine matches into a level's outcome.
+
+No bash structure is parsed here -- commands arrive already decomposed by the grammar,
+and the splitting this module does is token-level. Further spellings of one command --
+notably the one with a leading ``NAME=value`` assignment removed -- arrive as a
+:class:`~toolguard.config_types.CommandSpellings` built by
+:func:`toolguard.parser.command_extractor.command_spellings`. Importing the parser here
+instead fails the exact per-module import allow-list in ``test/unit/test_architecture.py``;
+``.pyscn.toml`` puts both in one layer and permits it, so that test is what holds the line.
 """
 
 import fnmatch
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
-from .config_types import LevelMatch
+from .config_types import CommandSpellings, LevelMatch
 from .patterns import parse_pattern, match_pattern, PatternType
 from .normalization import normalize_command, normalize_path
 
@@ -114,20 +122,29 @@ def _command_variants(command_str: str) -> List[str]:
 
 
 def match_command(
-    command_str: str, patterns: List[str], extended_syntax: bool = True
+    command_str: str,
+    patterns: List[str],
+    extended_syntax: bool = True,
+    *,
+    also_spelled: Sequence[str] = (),
 ) -> Tuple[bool, Optional[str]]:
     """
     Check whether *command_str* matches any pattern in *patterns*; return the first hit.
 
+    Every pattern type is matched against *command_str* AND against each entry of
+    *also_spelled*. Offering an alternative spelling to the DEFAULT branch alone would
+    leave ``[regex]``/``[glob]``/``[native]`` denies bypassable by the very prefix
+    the alternative exists to see past.
+
     A DEFAULT pattern (no ``[regex]``/``[glob]``/``[native]`` prefix) is checked first
     for a ``**/<component>/**`` shape -- before ``**`` is normalized down to ``*`` --
-    matching when the raw *command_str* contains that literal path component anywhere
+    matching when a spelling contains that literal path component anywhere
     (via :func:`contains_path_component`). Otherwise it is matched via ``fnmatch``
-    against every spelling :func:`_command_variants` produces -- as a ``cmd:args``
-    prefix-and-args split when the pattern contains a ``:``, or as a whole-string match
-    otherwise. ``[regex]``/``[glob]``/``[native]`` patterns bypass all DEFAULT handling
-    and match directly against the raw command via
-    :func:`~toolguard.patterns.match_pattern`.
+    against every path-normalization :func:`_command_variants` produces from each
+    spelling -- as a ``cmd:args`` prefix-and-args split when the pattern contains a
+    ``:``, or as a whole-string match otherwise.
+    ``[regex]``/``[glob]``/``[native]`` patterns bypass all DEFAULT handling and match
+    the spellings directly via :func:`~toolguard.patterns.match_pattern`.
 
     A leaf command that still contains a newline (should not normally happen after the
     multi-line pre-pass upstream) is excluded from DEFAULT matching, so a DEFAULT prefix
@@ -138,6 +155,11 @@ def match_command(
         command_str: The command string to match.
         patterns: Patterns to match against, tried in order.
         extended_syntax: If False, skip parsing ``[regex]``/``[glob]``/``[native]`` prefixes.
+        also_spelled: Further spellings of the same command to match -- whichever
+            side of a :class:`~toolguard.config_types.CommandSpellings` suits
+            *patterns*. Empty -- the default -- matches *command_str* alone, so a
+            caller that omits it can neither widen a grant nor lose a restriction it
+            had before.
 
     Returns:
         ``(matched, matched_pattern)``. ``matched_pattern`` is the RAW list element from
@@ -148,13 +170,21 @@ def match_command(
         returning a normalized/wrapper-stripped pattern here would silently break it.
     """
     command_has_newline = "\n" in command_str or "\r" in command_str
-    command_variants = _command_variants(command_str)
+    spellings = [command_str, *(s for s in also_spelled if s != command_str)]
+    command_variants: List[str] = []
+    for spelling in spellings:
+        for variant in _command_variants(spelling):
+            if variant not in command_variants:
+                command_variants.append(variant)
 
     for pattern in patterns:
         pattern_type, actual_pattern = parse_pattern(pattern, extended_syntax)
 
         if pattern_type in (PatternType.REGEX, PatternType.GLOB, PatternType.NATIVE):
-            if match_pattern(pattern_type, actual_pattern, command_str):
+            if any(
+                match_pattern(pattern_type, actual_pattern, spelling)
+                for spelling in spellings
+            ):
                 return True, pattern
             continue
 
@@ -165,7 +195,9 @@ def match_command(
 
         if actual_pattern.startswith("**/") and actual_pattern.endswith("/**"):
             component = actual_pattern[3:-3]
-            if contains_path_component(command_str, component):
+            if any(
+                contains_path_component(spelling, component) for spelling in spellings
+            ):
                 return True, pattern
             continue
 
@@ -219,6 +251,8 @@ def check_hard_deny(
     deny_patterns: List[str],
     allow_patterns: List[str],
     extended_syntax: bool = True,
+    *,
+    spellings: CommandSpellings = CommandSpellings(),
 ) -> Optional[LevelMatch]:
     """
     Apply the unoverridable hard-deny rule to a single command.
@@ -235,6 +269,8 @@ def check_hard_deny(
         deny_patterns: Pooled hard-deny deny patterns (wrapper-free).
         allow_patterns: Pooled hard-deny allow (carve-out) patterns (wrapper-free).
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
+        spellings: Further spellings of *command*. The carve-out list grants an
+            exemption, so it is matched against the granting side.
 
     Returns:
         A :class:`~toolguard.config_types.LevelMatch` with ``decision='deny'``
@@ -247,12 +283,16 @@ def check_hard_deny(
     if not deny_patterns:
         return None
 
-    matched, pattern = match_command(command, deny_patterns, extended_syntax)
+    matched, pattern = match_command(
+        command, deny_patterns, extended_syntax, also_spelled=spellings.restricting
+    )
     if not matched:
         return None
 
     if allow_patterns:
-        exempt, exempt_pattern = match_command(command, allow_patterns, extended_syntax)
+        exempt, exempt_pattern = match_command(
+            command, allow_patterns, extended_syntax, also_spelled=spellings.granting
+        )
         if exempt:
             return None
 
@@ -268,6 +308,8 @@ def check_permission(
     allow_patterns: List[str],
     deny_patterns: List[str],
     extended_syntax: bool = True,
+    *,
+    spellings: CommandSpellings = CommandSpellings(),
 ) -> Tuple[str, str]:
     """
     Check a command against a flat, unprovenanced allow/deny pattern pair. Deny-first;
@@ -278,16 +320,21 @@ def check_permission(
         allow_patterns: Patterns that allow the command.
         deny_patterns: Patterns that deny the command.
         extended_syntax: If False, skip parsing ``[regex]``/``[glob]``/``[native]`` prefixes.
+        spellings: Further spellings of *command*.
 
     Returns:
         ``(decision, reason)`` where decision is ``'allow'`` or ``'deny'``.
     """
     if deny_patterns:
-        matched, pattern = match_command(command, deny_patterns, extended_syntax)
+        matched, pattern = match_command(
+            command, deny_patterns, extended_syntax, also_spelled=spellings.restricting
+        )
         if matched:
             return "deny", f"Command matches deny pattern: {pattern}"
 
-    matched, pattern = match_command(command, allow_patterns, extended_syntax)
+    matched, pattern = match_command(
+        command, allow_patterns, extended_syntax, also_spelled=spellings.granting
+    )
     if matched:
         return "allow", f"Command matches allow pattern: {pattern}"
 
@@ -374,6 +421,8 @@ def decide_command_at_level_detailed(
     deny_patterns: List[str],
     extended_syntax: bool = True,
     ask_patterns: Optional[List[str]] = None,
+    *,
+    spellings: CommandSpellings = CommandSpellings(),
 ) -> Optional[LevelMatch]:
     """
     Decide a command's outcome against ONE hierarchy level's patterns.
@@ -393,13 +442,17 @@ def decide_command_at_level_detailed(
         extended_syntax: If False, skip parsing [regex]/[glob]/[native] prefixes.
         ask_patterns: This level's ask patterns (wrapper-free); omitted or empty
             means no ask pattern gates this level.
+        spellings: Further spellings of *command*. The ask list restricts, so it is
+            matched against the restricting side alongside the deny list.
 
     Returns:
         A :class:`~toolguard.config_types.LevelMatch` when this level matches,
         else ``None`` so the cascade falls through to the next level.
     """
     if deny_patterns:
-        matched, pattern = match_command(command, deny_patterns, extended_syntax)
+        matched, pattern = match_command(
+            command, deny_patterns, extended_syntax, also_spelled=spellings.restricting
+        )
         if matched:
             return LevelMatch(
                 decision="deny",
@@ -407,13 +460,20 @@ def decide_command_at_level_detailed(
                 matched_pattern=pattern,
             )
 
-    allow_hit = match_command(command, allow_patterns, extended_syntax)
+    allow_hit = match_command(
+        command, allow_patterns, extended_syntax, also_spelled=spellings.granting
+    )
 
     ask_hit: Tuple[bool, Optional[str]] = (False, None)
     if ask_patterns:
         non_blanket_ask = [p for p in ask_patterns if not is_universal_pattern(p)]
         if non_blanket_ask:
-            ask_hit = match_command(command, non_blanket_ask, extended_syntax)
+            ask_hit = match_command(
+                command,
+                non_blanket_ask,
+                extended_syntax,
+                also_spelled=spellings.restricting,
+            )
 
     combined = resolve_allow_ask(allow_hit, ask_hit)
     if combined is None:

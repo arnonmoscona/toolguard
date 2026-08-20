@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +127,21 @@ def node_kind(node) -> NodeKind:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class IRAssignmentPrefix:
+    """The ``NAME=value`` assignments a simple command runs its command word with.
+
+    Attributes:
+        names: Each assignment's variable name, in source order. The ``+`` of
+            bash's ``NAME+=value`` is the operator, not part of the name.
+        without_prefix: The command text from the executed word onward, cleaned
+            the same way :attr:`IRSimpleCmd.text` is.
+    """
+
+    names: Tuple[str, ...]
+    without_prefix: str
+
+
 @dataclass
 class IRSimpleCmd:
     """A leaf simple command from a pipeline_element node.
@@ -140,11 +155,16 @@ class IRSimpleCmd:
             argument list. Broken out because an inner ``$(rm -rf /)``
             argument is as dangerous as a top-level ``rm -rf /``, and *text*
             alone would only ever be matched as one string.
+        assignment_prefix: The leading assignments, or None where there are
+            none. Broken out because *text* names the assignment rather than
+            the command under it, so a rule written against the command would
+            not match.
     """
 
     text: str
     has_proc_subst: bool = False
     cmd_substs: List["IRCompound"] = field(default_factory=list)
+    assignment_prefix: Optional[IRAssignmentPrefix] = None
 
 
 @dataclass
@@ -292,6 +312,36 @@ def _clean_simple_cmd_text(text: str) -> str:
     while text.endswith(";") or text.endswith("&&") or text.endswith("||"):
         text = text.rstrip(";").rstrip("&").rstrip("|").strip()
     return text
+
+
+def _assignment_prefix(node) -> Optional[IRAssignmentPrefix]:
+    """Read a simple command's leading assignments off raw *node*, or None if it has none.
+
+    Args:
+        node: A raw Canopy simple_command TreeNode.
+
+    Returns:
+        An :class:`IRAssignmentPrefix`, or None when the grammar matched no
+        ``assigned_command`` here.
+    """
+    cmd_name = getattr(node, "command_name", None)
+    if cmd_name is None:
+        return None
+    prefix = getattr(cmd_name, "assignment_prefix", None)
+    command_start = getattr(cmd_name, "command_start", None)
+    if prefix is None or command_start is None:
+        return None
+
+    names = tuple(
+        assignment.assignment_name.text for assignment in _get_elements(prefix)
+    )
+    # Offsets are into the whole input, so the executed part is found by
+    # rebasing the command word's offset onto this node's own text.
+    node_text = node.text if hasattr(node, "text") and node.text else ""
+    without_prefix = node_text[command_start.offset - node.offset :]
+    return IRAssignmentPrefix(
+        names=names, without_prefix=_clean_simple_cmd_text(without_prefix)
+    )
 
 
 def _tree_has_proc_subst(node) -> bool:
@@ -494,6 +544,28 @@ def _collect_cmd_substs(node, depth: int = 0) -> List["IRCompound"]:
     return results
 
 
+def _build_simple_cmd(node) -> IRSimpleCmd:
+    """Build an :class:`IRSimpleCmd` from a raw simple_command *node*."""
+    # simple_command <- command_name (proc_subst / redirection /
+    # cmd_substitution / command_arg)* -- so elements[1] is the argument
+    # repetition. Both halves can hold a substitution: `$(which python) -V`
+    # puts one in the command name, `echo $(id)` in the arguments.
+    elems = _get_elements(node)
+    cmd_substs: List[IRCompound] = []
+    cmd_name = getattr(node, "command_name", None)
+    if cmd_name is not None:
+        cmd_substs.extend(_collect_cmd_substs(cmd_name))
+    if len(elems) > 1:
+        for arg_item in _get_elements(elems[1]):
+            cmd_substs.extend(_collect_cmd_substs(arg_item))
+    return IRSimpleCmd(
+        text=_clean_simple_cmd_text(_get_text(node)),
+        has_proc_subst=_tree_has_proc_subst(node),
+        cmd_substs=cmd_substs,
+        assignment_prefix=_assignment_prefix(node),
+    )
+
+
 def _build_pipeline_element(node) -> Optional[IRPipelineElement]:
     """Build an IR node from a single pipeline_element raw node.
 
@@ -520,21 +592,7 @@ def _build_pipeline_element(node) -> Optional[IRPipelineElement]:
         return _build_control_structure(node, kind)
 
     if kind == NodeKind.SIMPLE_CMD:
-        text = _clean_simple_cmd_text(_get_text(node))
-        has_ps = _tree_has_proc_subst(node)
-        # simple_command <- command_name (proc_subst / redirection /
-        # cmd_substitution / command_arg)* -- so elements[1] is the argument
-        # repetition. Both halves can hold a substitution: `$(which python) -V`
-        # puts one in the command name, `echo $(id)` in the arguments.
-        elems = _get_elements(node)
-        cmd_substs: List[IRCompound] = []
-        cmd_name = getattr(node, "command_name", None)
-        if cmd_name is not None:
-            cmd_substs.extend(_collect_cmd_substs(cmd_name))
-        if len(elems) > 1:
-            for arg_item in _get_elements(elems[1]):
-                cmd_substs.extend(_collect_cmd_substs(arg_item))
-        return IRSimpleCmd(text=text, has_proc_subst=has_ps, cmd_substs=cmd_substs)
+        return _build_simple_cmd(node)
 
     if kind == NodeKind.SUBSHELL_OR_BRACE:
         wrapper_text = _get_text(node)
@@ -649,22 +707,7 @@ def _build_compound(compound_node) -> IRCompound:
         return comp
 
     if kind == NodeKind.SIMPLE_CMD:
-        text = _clean_simple_cmd_text(_get_text(compound_node))
-        has_ps = _tree_has_proc_subst(compound_node)
-        elems = _get_elements(compound_node)
-        cmd_substs: List[IRCompound] = []
-        cmd_name = getattr(compound_node, "command_name", None)
-        if cmd_name is not None:
-            cmd_substs.extend(_collect_cmd_substs(cmd_name))
-        if len(elems) > 1:
-            for arg_item in _get_elements(elems[1]):
-                cmd_substs.extend(_collect_cmd_substs(arg_item))
-        sc_pl = IRPipeline(
-            elements=[
-                IRSimpleCmd(text=text, has_proc_subst=has_ps, cmd_substs=cmd_substs)
-            ]
-        )
-        comp.pipelines.append(sc_pl)
+        comp.pipelines.append(IRPipeline(elements=[_build_simple_cmd(compound_node)]))
         return comp
 
     first_pipeline = getattr(compound_node, "pipeline", None)

@@ -65,6 +65,11 @@ _DEFAULT_IGNORED_ALLOW_PATTERNS: Tuple[str, ...] = (
     "Edit(*)",
     "mcp__jetbrains__execute_terminal_command(*)",
 )
+#: Top-level ``toolguard_hook`` key naming the assignment variables an allow rule
+#: may be matched past -- see
+#: :meth:`Configuration.assignments_looked_past_when_granting`.
+_LOOKED_PAST_KEY = "assignments_looked_past_when_granting"
+
 _DEFAULT_NO_MATCH_FALLBACK = "ask"
 #: Recognized values for ``no_match_fallback`` after alias normalization --
 #: ``warn_deny`` and ``allow_with_no_warnings`` are accepted spellings that
@@ -792,6 +797,36 @@ class Configuration:
                     seen.setdefault(tool, None)
         if not seen:
             return DEFAULT_GOVERNED_TOOLS
+        return tuple(seen.keys())
+
+    def assignments_looked_past_when_granting(self) -> Tuple[str, ...]:
+        """
+        Return the assignment variable names an allow rule may be matched past.
+
+        A leaf carrying only these as leading ``NAME=value`` assignments is also
+        matched with them removed, so ``allow Bash(ls:*)`` can cover
+        ``TG_INTENT=1 ls``. Names absent from this list are never looked past when
+        granting, which is what keeps ``LD_PRELOAD=/tmp/evil.so ls`` outside that
+        rule. Restricting lists (deny, ask, hard_deny) look past an assignment
+        prefix regardless -- see :func:`toolguard.permissions.match_spellings`.
+
+        UNION across all toolguard_hook layers, de-duplicated and kept in
+        first-occurrence (most-specific-first) order, matching
+        :meth:`governed_tools`; a user-level entry therefore cannot be revoked by a
+        more specific level. Native Claude settings layers are ignored. Empty when
+        no level configures any name, and a non-list value or non-string entry
+        contributes nothing (reported by :meth:`validation_issues`).
+        """
+        seen: Dict[str, None] = {}
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            names = layer.content.get(_LOOKED_PAST_KEY, [])
+            if not isinstance(names, list):
+                continue
+            for name in names:
+                if isinstance(name, str):
+                    seen.setdefault(name, None)
         return tuple(seen.keys())
 
     # -- takeover mode -----------------------------------------------------
@@ -1535,6 +1570,8 @@ class Configuration:
         - A ``no_match_fallback``/``undecidable_fallback`` value toolguard
           does not recognize.
         - A non-boolean ``takeover_mode.enabled``.
+        - An ``assignments_looked_past_when_granting`` value that is not a list,
+          or an entry of one that is not a string.
         - A rules-directory file defining a top-level key outside
           ``[permissions]``/``[hard_deny]``.
         - Unsupported tools referenced in toolguard_hook permissions.
@@ -1679,6 +1716,51 @@ class Configuration:
                             "Set takeover_mode.enabled to a boolean (true/false). "
                             "Non-boolean values are not coerced and the level does not "
                             "participate in resolving takeover mode."
+                        ),
+                    )
+                )
+
+        # 2b) A malformed assignments_looked_past_when_granting contributes no
+        #     names, which presents as an allow rule that mysteriously stops
+        #     covering a marked command. A 'warning': the effective behaviour is
+        #     the strict one.
+        for layer in self.layers:
+            if layer.is_native or _LOOKED_PAST_KEY not in layer.content:
+                continue
+            value = layer.content[_LOOKED_PAST_KEY]
+            where = layer.provenance.describe()
+            if not isinstance(value, list):
+                issues.append(
+                    Issue(
+                        level="warning",
+                        message=(
+                            f"{_LOOKED_PAST_KEY} in {where} is "
+                            f"{type(value).__name__}, not a list; the whole setting "
+                            f"is ignored"
+                        ),
+                        corrective_steps=(
+                            f"Set {_LOOKED_PAST_KEY} to a list of environment "
+                            f'variable names, e.g. ["TG_INTENT"]. A bare name is not '
+                            f"a one-element list. While the setting is ignored no "
+                            f"name is looked past, so an allow rule keeps missing "
+                            f"commands that carry one."
+                        ),
+                    )
+                )
+                continue
+            for offender in (name for name in value if not isinstance(name, str)):
+                issues.append(
+                    Issue(
+                        level="warning",
+                        message=(
+                            f"{_LOOKED_PAST_KEY} in {where} contains a non-string "
+                            f"entry {offender!r}; that entry is ignored"
+                        ),
+                        corrective_steps=(
+                            f"Every entry of {_LOOKED_PAST_KEY} must be an "
+                            f'environment variable name, e.g. ["TG_INTENT"]. An '
+                            f"ignored entry is never looked past, so an allow rule "
+                            f"keeps missing commands that carry it."
                         ),
                     )
                 )
