@@ -43,8 +43,8 @@ def audit_environment(
     Audit the process environment for a toolguard-hook-shadowing condition.
 
     Args:
-        env: Environment mapping to inspect (defaults to ``os.environ``).
-            Exposed for testing without mutating the real environment.
+        env: Environment mapping to inspect (defaults to the ambient
+            environment). Exposed for testing without mutating the real one.
 
     Returns:
         A list with one HIGH finding when ``PYTHONPATH`` holds a shadowing

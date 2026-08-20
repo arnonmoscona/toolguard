@@ -4,6 +4,11 @@ environment.
 
 Nothing here reads the machine at import.
 
+This module answers what a fact *is*; it performs no operation on one. A path
+transformation that needs a fact belongs with the path helpers, or every stdlib
+call touching machine state acquires a twin here, each one a fresh place to
+diverge from what it mimics.
+
 An entry point may bind one :class:`AmbientFacts` for the whole invocation via
 :func:`active`; unbound, each accessor reads live. A binding governs reads that
 come through this module, not reads the rest of the package makes directly.
@@ -14,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Generator, Mapping, Optional, Union
+from typing import Generator, Mapping, Optional
 
 
 _UNRESOLVABLE = (OSError, RuntimeError)
@@ -105,16 +110,3 @@ def env_var(name: str, default: Optional[str] = None) -> Optional[str]:
     Answers from :func:`env`, so an override there governs this too.
     """
     return env().get(name, default)
-
-
-def expanduser(path: Union[str, Path]) -> Path:
-    """
-    *path* with a leading ``~`` replaced by :func:`home`, so an override there
-    governs it. A ``~user`` form names somebody else's home and is left to
-    :meth:`pathlib.Path.expanduser`.
-    """
-    expanded = Path(path)
-    parts = expanded.parts
-    if parts and parts[0] == "~":
-        return home().joinpath(*parts[1:])
-    return expanded.expanduser()

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Dev instrument for the TOO-45 architecture-refactoring loop: five modes over this
-repo's own source, test tree, layer map and git history. Not shipped. Stdlib only,
-like toolguard's own runtime.
+Dev instrument for the TOO-45 architecture-refactoring loop, over this repo's own
+source, test tree, layer map and git history. Not shipped. Stdlib only, like
+toolguard's own runtime.
 
 Every number printed here is an INSTRUMENT, not a TARGET. A predicate or metric
 going the "right" way is evidence to bring to a human or a judge subagent, never a
@@ -14,8 +14,8 @@ the standing rule behind the ``*_excluded``, ``sanctioned_exclusions``,
 the output: each names something a detector left out, or cannot check at all.
 Stated once, here, rather than at every site that follows it.
 
-Five modes
-----------
+Six modes
+---------
 ``--layers``
     Validate every module under ``toolguard/`` against the ``[architecture]``
     block of ``.pyscn.toml``, the single source of truth for the layer map. Two
@@ -49,6 +49,18 @@ Generated code
     Report each ``patch("mod.name")`` in the test tree that a by-value consumer
     makes inert.
 
+``--ambient``
+    Report reads of home, the working directory or the environment under
+    ``toolguard/`` that bypass ``toolguard.ambient`` with no owner entry, plus
+    ``not checked`` counts for the reads this scan cannot see. ``os`` may be
+    imported only by the modules in :data:`OS_IMPORT_OWNERS`, and a ``pathlib``
+    ambient member only where :data:`PATH_AMBIENT_OWNERS` has an entry for that
+    ``(module, member)`` pair. An unowned ``os`` import or
+    :data:`PATH_AMBIENT_FATAL_MEMBERS` read fails the check; an unowned
+    ``resolve`` is inventoried instead and does not fail the run. The
+    classification of ``dir(Path)`` is re-derived on every run, so a Python
+    release that adds a member fails the check instead of widening it silently.
+
 ``--guard``
     The deterministic half of the loop's safety inspector: fails on an
     out-of-scope file touch, a shrinking test count, a new runtime dependency,
@@ -64,6 +76,7 @@ Usage::
     uv run python tools/architecture_fitness.py --predicates --json
     uv run python tools/architecture_fitness.py --metrics
     uv run python tools/architecture_fitness.py --mocks
+    uv run python tools/architecture_fitness.py --ambient
     uv run python tools/architecture_fitness.py --guard --since HEAD
 """
 
@@ -3842,6 +3855,457 @@ def render_inert_patch_text(report: InertPatchReport) -> str:
 
 
 # =============================================================================
+# --ambient: direct reads of home, cwd and the environment
+# =============================================================================
+
+
+#: Python feature version the pathlib classification below was read against.
+#: Bump only after the revalidation :data:`AMBIENT_PIN_MESSAGE` describes.
+AMBIENT_PYTHON_PIN = (3, 14)
+
+#: ``Path`` members that answer from machine state rather than from their
+#: receiver alone. ``home`` and ``cwd`` always do; ``absolute``, ``resolve`` and
+#: ``expanduser`` do so for a relative or ``~``-prefixed receiver.
+PATH_AMBIENT_MEMBERS = frozenset({"absolute", "cwd", "expanduser", "home", "resolve"})
+
+#: Ambient members a module may not name without a :data:`PATH_AMBIENT_OWNERS`
+#: entry for that ``(module, member)`` pair -- an entry for one member exempts
+#: only that member. ``resolve``'s absence is pragmatic, not principled: it and ``absolute``
+#: both read the working directory only for a relative receiver, which this scan
+#: does not evaluate, so no rule tells the two apart. ``absolute`` has no site in
+#: this tree to exempt, while ``resolve`` has one in most modules that handle
+#: paths, so its sites are inventoried rather than failed.
+PATH_AMBIENT_FATAL_MEMBERS = frozenset({"absolute", "cwd", "expanduser", "home"})
+
+#: ``Path`` members inherited from ``PurePath``.
+PATH_PURE_MEMBERS = frozenset(
+    {
+        "anchor",
+        "as_posix",
+        "as_uri",
+        "drive",
+        "full_match",
+        "is_absolute",
+        "is_relative_to",
+        "is_reserved",
+        "joinpath",
+        "match",
+        "name",
+        "parent",
+        "parents",
+        "parser",
+        "parts",
+        "relative_to",
+        "root",
+        "stem",
+        "suffix",
+        "suffixes",
+        "with_name",
+        "with_segments",
+        "with_stem",
+        "with_suffix",
+    }
+)
+
+#: ``Path`` members that reach the filesystem. A separate concern from ambient
+#: state and not policed here.
+PATH_FILESYSTEM_MEMBERS = frozenset(
+    {
+        "chmod",
+        "copy",
+        "copy_into",
+        "exists",
+        "from_uri",
+        "glob",
+        "group",
+        "hardlink_to",
+        "info",
+        "is_block_device",
+        "is_char_device",
+        "is_dir",
+        "is_fifo",
+        "is_file",
+        "is_junction",
+        "is_mount",
+        "is_socket",
+        "is_symlink",
+        "iterdir",
+        "lchmod",
+        "lstat",
+        "mkdir",
+        "move",
+        "move_into",
+        "open",
+        "owner",
+        "read_bytes",
+        "read_text",
+        "readlink",
+        "rename",
+        "replace",
+        "rglob",
+        "rmdir",
+        "samefile",
+        "stat",
+        "symlink_to",
+        "touch",
+        "unlink",
+        "walk",
+        "write_bytes",
+        "write_text",
+    }
+)
+
+AMBIENT_PIN_MESSAGE = (
+    "pathlib's ambient-reading members were classified against Python "
+    f"{AMBIENT_PYTHON_PIN[0]}.{AMBIENT_PYTHON_PIN[1]}: "
+    + ", ".join(sorted(PATH_AMBIENT_MEMBERS))
+    + ". Enumerating dir(Path) sees a member added or removed; it cannot see an "
+    "existing member start to consult the working or home directory, and only a "
+    "person reading the release notes can. Read them for changes to how those "
+    "five resolve, re-check the classification in tools/architecture_fitness.py, "
+    "and update AMBIENT_PYTHON_PIN last."
+)
+
+AMBIENT_RULE_OS_IMPORT = "os-import"
+AMBIENT_RULE_PATH_MEMBER = "path-member"
+
+AMBIENT_UNSEEN_SELF_ATTRIBUTE = (
+    "attribute read off self/cls -- this scan does not follow an object's fields"
+)
+AMBIENT_UNSEEN_MODULE_ALIAS = (
+    "attribute read through an imported module alias (e.g. ambient.resolve)"
+)
+
+#: Module (toolguard-relative dotted) -> why it may import ``os``. Every other
+#: module reaches the environment through :mod:`toolguard.ambient`, which makes
+#: ``os.environ``, ``os.getcwd``, ``os.getenv`` and ``os.path.expanduser``
+#: unreachable elsewhere rather than merely undetected.
+OS_IMPORT_OWNERS: Dict[str, str] = {
+    "ambient": "the facade: os.environ is the environment fact it reports",
+    "config_write_guard": "atomic write: os.fdopen, os.fsync, os.replace",
+    "file_lock": "advisory locking: os.open, os.lseek, os.close and the O_/SEEK_ flags",
+    "install_provenance": "os.pathsep to split PYTHONPATH",
+    "log_writer": "os.SEEK_END for the tail read",
+    "testing.sandbox": "builds a child process environment and guards real writes",
+    "tools.installer": "os.access and os.X_OK to test an executable",
+}
+
+#: (module, ``Path`` member) -> why that module may read the fact directly.
+PATH_AMBIENT_OWNERS: Dict[Tuple[str, str], str] = {
+    ("ambient", "cwd"): "the facade",
+    ("ambient", "home"): "the facade",
+    ("path_utils", "expanduser"): "pathlib's own expanduser, for the ~user form",
+    ("config", "resolve"): "compares discovered config directories",
+    (
+        "install_provenance",
+        "resolve",
+    ): "install-location paths: __file__, git rev-parse output, a checkout root",
+    ("install_update", "resolve"): "__file__",
+    (
+        "normalization",
+        "resolve",
+    ): "the home directory's two spellings, and a rule-matching path's",
+    ("path_utils", "resolve"): "anchors against ambient.cwd() first",
+    (
+        "permission_migration",
+        "resolve",
+    ): "keys a lockfile on the project directory, and scopes a file search to it",
+    ("session_start", "resolve"): "compares two package roots",
+    ("testing.sandbox", "home"): "reads its own fake-home field off a Sandbox",
+    (
+        "testing.sandbox",
+        "resolve",
+    ): "the sandbox root, a guarded write's target, and __file__",
+    ("tools.installer", "resolve"): "follows the console-script symlink to its venv",
+    ("tools.transcript_harvest", "resolve"): "builds Claude Code's project key",
+}
+
+
+@dataclass(frozen=True)
+class PathSurface:
+    """``dir(Path)`` split against the stored classification."""
+
+    ambient: Tuple[str, ...]
+    pure: Tuple[str, ...]
+    filesystem: Tuple[str, ...]
+    #: Present on ``Path`` and in no stored bucket.
+    unclassified: Tuple[str, ...]
+    #: In a stored bucket and no longer present on ``Path``.
+    missing: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AmbientSite:
+    """One direct read of machine state in the scanned tree."""
+
+    file: str
+    line: int
+    module: str
+    rule: str
+    #: The imported name for an ``os`` import, the member name for a ``Path`` read.
+    name: str
+
+
+@dataclass
+class AmbientReport:
+    findings: List[AmbientSite] = field(default_factory=list)
+    surface: Optional[PathSurface] = None
+    examined_files: int = 0
+    examined_os_imports: int = 0
+    examined_path_reads: int = 0
+    #: Owner entries that matched no site, so nothing keeps them true.
+    stale_owners: List[str] = field(default_factory=list)
+    #: Construct -> how many attribute reads this scan deliberately passed over.
+    unseen: Dict[str, int] = field(default_factory=dict)
+    #: Why the check could not do its job; any entry means not ok.
+    failures: List[str] = field(default_factory=list)
+
+    @staticmethod
+    def is_fatal(site: AmbientSite) -> bool:
+        """Whether *site* fails the check rather than being inventoried."""
+        return (
+            site.rule == AMBIENT_RULE_OS_IMPORT
+            or site.name in PATH_AMBIENT_FATAL_MEMBERS
+        )
+
+    @property
+    def fatal_findings(self) -> List[AmbientSite]:
+        return [site for site in self.findings if self.is_fatal(site)]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures and not self.fatal_findings
+
+
+def classify_path_surface() -> PathSurface:
+    """
+    Enumerate ``dir(Path)`` on the running interpreter and split it against the
+    stored buckets, so a version that adds or removes a member cannot widen the
+    classification silently.
+    """
+    present = {name for name in dir(Path) if not name.startswith("_")}
+    stored = PATH_AMBIENT_MEMBERS | PATH_PURE_MEMBERS | PATH_FILESYSTEM_MEMBERS
+    return PathSurface(
+        ambient=tuple(sorted(PATH_AMBIENT_MEMBERS & present)),
+        pure=tuple(sorted(PATH_PURE_MEMBERS & present)),
+        filesystem=tuple(sorted(PATH_FILESYSTEM_MEMBERS & present)),
+        unclassified=tuple(sorted(present - stored)),
+        missing=tuple(sorted(stored - present)),
+    )
+
+
+def _module_alias_names(tree: ast.Module, modules: Dict[str, RepoModule]) -> Set[str]:
+    """
+    Local names in *tree* bound to a module rather than to a value.
+
+    ``import a.b`` binds ``a`` and ``import a.b as x`` binds ``x``;
+    ``from p import n`` binds ``n`` only where ``p.n`` is a module in *modules*,
+    so a package outside the scanned roots contributes nothing.
+    """
+    aliases: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if f"{node.module}.{alias.name}" in modules:
+                    aliases.add(alias.asname or alias.name)
+    return aliases
+
+
+def _is_os_import(node: ast.AST) -> Optional[str]:
+    """Return the imported text where *node* imports ``os`` or a submodule of it."""
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name == "os" or alias.name.startswith("os."):
+                return alias.name
+    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        if node.module == "os" or node.module.startswith("os."):
+            return f"{node.module} import {', '.join(a.name for a in node.names)}"
+    return None
+
+
+def scan_ambient_routes(
+    scan_root: Path = TOOLGUARD_DIR,
+    repo_root: Path = REPO_ROOT,
+    modules: Optional[Dict[str, RepoModule]] = None,
+) -> Tuple[List[AmbientSite], Counter, int]:
+    """
+    Find every ``os`` import and every ``Path`` ambient-member read under
+    *scan_root*.
+
+    Args:
+        scan_root: Package directory to walk. Module names in the result are
+            relative to it.
+        repo_root: Base for the repo-relative path reported on each site.
+        modules: Repo module map, as :func:`map_repo_modules` returns, used to
+            recognise ``from package import module`` aliases.
+
+    Returns:
+        The sites, a counter of attribute reads deliberately passed over, and
+        the number of files read.
+    """
+    if modules is None:
+        modules = map_repo_modules()
+    sites: List[AmbientSite] = []
+    unseen: Counter = Counter()
+    files = list(iter_python_files(scan_root)) if scan_root.is_dir() else []
+    for py_file in files:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        label = py_file.resolve().relative_to(repo_root.resolve()).as_posix()
+        module = relative_module_path(py_file, scan_root)
+        aliases = _module_alias_names(tree, modules)
+        for node in ast.walk(tree):
+            imported = _is_os_import(node)
+            if imported is not None:
+                sites.append(
+                    AmbientSite(
+                        label, node.lineno, module, AMBIENT_RULE_OS_IMPORT, imported
+                    )
+                )
+                continue
+            if not isinstance(node, ast.Attribute):
+                continue
+            if node.attr not in PATH_AMBIENT_MEMBERS:
+                continue
+            receiver = node.value
+            if isinstance(receiver, ast.Name):
+                if receiver.id in ("self", "cls"):
+                    unseen[AMBIENT_UNSEEN_SELF_ATTRIBUTE] += 1
+                    continue
+                if receiver.id in aliases:
+                    unseen[AMBIENT_UNSEEN_MODULE_ALIAS] += 1
+                    continue
+            sites.append(
+                AmbientSite(
+                    label, node.lineno, module, AMBIENT_RULE_PATH_MEMBER, node.attr
+                )
+            )
+    return sites, unseen, len(files)
+
+
+def check_ambient_routes(
+    scan_root: Path = TOOLGUARD_DIR,
+    repo_root: Path = REPO_ROOT,
+    os_owners: Optional[Dict[str, str]] = None,
+    path_owners: Optional[Dict[Tuple[str, str], str]] = None,
+    modules: Optional[Dict[str, RepoModule]] = None,
+) -> AmbientReport:
+    """
+    Report every read of machine state under *scan_root* that no owner entry
+    accounts for, plus the state of the pathlib classification itself.
+
+    Args:
+        scan_root: Package directory to walk.
+        repo_root: Base for the repo-relative paths reported.
+        os_owners: Module -> reason it may import ``os``.
+        path_owners: ``(module, member)`` -> reason it may read that fact.
+        modules: Repo module map, as :func:`map_repo_modules` returns.
+    """
+    os_owners = OS_IMPORT_OWNERS if os_owners is None else os_owners
+    path_owners = PATH_AMBIENT_OWNERS if path_owners is None else path_owners
+
+    sites, unseen, examined_files = scan_ambient_routes(scan_root, repo_root, modules)
+    report = AmbientReport(
+        surface=classify_path_surface(), examined_files=examined_files
+    )
+    report.unseen = dict(unseen)
+
+    used_os_owners: Set[str] = set()
+    used_path_owners: Set[Tuple[str, str]] = set()
+    for site in sites:
+        if site.rule == AMBIENT_RULE_OS_IMPORT:
+            report.examined_os_imports += 1
+            if site.module in os_owners:
+                used_os_owners.add(site.module)
+                continue
+        else:
+            report.examined_path_reads += 1
+            if (site.module, site.name) in path_owners:
+                used_path_owners.add((site.module, site.name))
+                continue
+        report.findings.append(site)
+
+    report.stale_owners = sorted(
+        [f"os import: {module}" for module in set(os_owners) - used_os_owners]
+        + [
+            f"{member} in {module}"
+            for module, member in set(path_owners) - used_path_owners
+        ]
+    )
+
+    if sys.version_info[:2] != AMBIENT_PYTHON_PIN:
+        report.failures.append(
+            f"running Python {sys.version_info[0]}.{sys.version_info[1]}. "
+            + AMBIENT_PIN_MESSAGE
+        )
+    if report.surface.unclassified:
+        report.failures.append(
+            "pathlib gained "
+            + ", ".join(f"`{name}`" for name in report.surface.unclassified)
+            + "; classify each as ambient-reading or not in "
+            "tools/architecture_fitness.py"
+        )
+    if report.surface.missing:
+        report.failures.append(
+            "the stored classification names "
+            + ", ".join(f"`{name}`" for name in report.surface.missing)
+            + ", which pathlib no longer has; drop them from the buckets"
+        )
+    if examined_files == 0:
+        report.failures.append(f"examined zero python files under {scan_root}")
+    elif not sites:
+        report.failures.append(
+            f"found no os import and no Path ambient-member read in {examined_files} "
+            "file(s): nothing was actually checked"
+        )
+    for stale in report.stale_owners:
+        report.failures.append(
+            f"owner entry matched no site and nothing keeps it true: {stale}"
+        )
+    return report
+
+
+def render_ambient_text(report: AmbientReport) -> str:
+    """
+    Render :func:`check_ambient_routes`'s output. Headlines are kept distinct so
+    a run that examined nothing cannot read as a clean pass.
+    """
+    fatal = report.fatal_findings
+    inventory = [site for site in report.findings if not report.is_fatal(site)]
+    if report.failures:
+        headline = "FAIL -- the check could not do its job"
+    elif fatal:
+        headline = f"FAIL -- {len(fatal)} unowned read(s) of machine state"
+    elif inventory:
+        headline = f"FINDINGS -- {len(inventory)} unowned resolve() site(s)"
+    else:
+        headline = "PASS -- every read of machine state has an owner"
+    surface = report.surface
+    lines = [
+        f"=== --ambient: {headline} ===",
+        f"examined: {report.examined_files} file(s), {report.examined_os_imports} "
+        f"os import(s), {report.examined_path_reads} Path ambient-member read(s)",
+        f"pathlib surface on Python {sys.version_info[0]}.{sys.version_info[1]}: "
+        f"{len(surface.ambient)} ambient, {len(surface.pure)} pure, "
+        f"{len(surface.filesystem)} filesystem, {len(surface.unclassified)} "
+        "unclassified",
+        "  not checked: whether a receiver is relative, which is what decides "
+        "whether resolve()/absolute() read the working directory",
+    ]
+    for construct, count in sorted(report.unseen.items()):
+        lines.append(f"  not checked: {count} x {construct}")
+    for failure in report.failures:
+        lines.append(f"  CHECK FAILURE: {failure}")
+    for site in fatal:
+        lines.append(f"  - {site.file}:{site.line} [{site.rule}] {site.name}")
+    for site in inventory:
+        lines.append(f"  - {site.file}:{site.line} [inventory] {site.name}")
+    return "\n".join(lines)
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -3871,6 +4335,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--mocks",
         action="store_true",
         help="Report patch() targets a by-value consumer makes inert.",
+    )
+    parser.add_argument(
+        "--ambient",
+        action="store_true",
+        help="Report reads of home/cwd/environment that bypass toolguard.ambient.",
     )
     parser.add_argument(
         "--guard",
@@ -3909,13 +4378,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.predicates,
             args.metrics,
             args.mocks,
+            args.ambient,
             args.guard,
             args.guard_canaries_only,
         ]
     ):
         parser.error(
-            "at least one of --layers, --predicates, --metrics, --mocks, --guard, "
-            "--guard-canaries-only is required"
+            "at least one of --layers, --predicates, --metrics, --mocks, --ambient, "
+            "--guard, --guard-canaries-only is required"
         )
 
     exit_code = 0
@@ -3972,6 +4442,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(render_inert_patch_text(mock_report))
             print()
         if not mock_report.ok:
+            exit_code = 1
+
+    if args.ambient:
+        ambient_report = check_ambient_routes()
+        surface = ambient_report.surface
+        payload["ambient"] = {
+            "ok": ambient_report.ok,
+            "examined_files": ambient_report.examined_files,
+            "examined_os_imports": ambient_report.examined_os_imports,
+            "examined_path_reads": ambient_report.examined_path_reads,
+            "unseen": ambient_report.unseen,
+            "stale_owners": ambient_report.stale_owners,
+            "failures": ambient_report.failures,
+            "surface": {
+                "ambient": list(surface.ambient),
+                "pure": list(surface.pure),
+                "filesystem": list(surface.filesystem),
+                "unclassified": list(surface.unclassified),
+                "missing": list(surface.missing),
+            },
+            "findings": [
+                {
+                    "file": site.file,
+                    "line": site.line,
+                    "module": site.module,
+                    "rule": site.rule,
+                    "name": site.name,
+                    "fatal": ambient_report.is_fatal(site),
+                }
+                for site in ambient_report.findings
+            ],
+        }
+        if not args.json:
+            print(render_ambient_text(ambient_report))
+            print()
+        if not ambient_report.ok:
             exit_code = 1
 
     if args.guard or args.guard_canaries_only:

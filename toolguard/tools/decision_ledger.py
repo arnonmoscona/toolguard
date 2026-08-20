@@ -24,6 +24,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+from toolguard import ambient
 from toolguard.config import find_project_root
 
 #: Schema tag written into every ledger file. ``load_ledger`` does not check it.
@@ -32,9 +33,9 @@ LEDGER_SCHEMA = "toolguard-decision-ledger/1"
 #: Project-level ledger location, relative to the resolved project root.
 PROJECT_LEDGER_RELPATH = Path(".claude") / "toolguard_decisions.json"
 
-#: User-level ledger location -- toolguard's own namespace, deliberately not
-#: ``~/.claude``.
-USER_LEDGER_PATH = Path.home() / ".toolguard" / "decisions.json"
+#: User-level ledger location under the home directory, deliberately toolguard's
+#: own namespace rather than ``~/.claude``.
+USER_LEDGER_RELPATH = Path(".toolguard") / "decisions.json"
 
 #: Recognised decision kinds. ``custom`` is the escape hatch for a meta-decision
 #: that does not fit the enumerated shapes.
@@ -237,6 +238,15 @@ def ledger_to_dict(decisions: Sequence[LedgerDecision], level: str) -> dict:
     }
 
 
+def user_ledger_path() -> Path:
+    """Return the user-level ledger path, under the home directory reported now.
+
+    A function rather than a constant: a path built at import predates every
+    test's redirection of home and silently ignores it.
+    """
+    return ambient.home() / USER_LEDGER_RELPATH
+
+
 def project_ledger_path(project_dir: Path) -> Path:
     """Return the project-level ledger path for ``project_dir``.
 
@@ -258,7 +268,7 @@ def ledger_path_for_level(level: str, project_dir: Path) -> Path:
         LedgerError: If ``level`` is not one of :data:`VALID_LEVELS`.
     """
     if level == "user":
-        return USER_LEDGER_PATH
+        return user_ledger_path()
     if level == "project":
         return project_ledger_path(project_dir)
     raise LedgerError(
@@ -270,7 +280,7 @@ def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
     """Load decisions from a single ledger file.
 
     Each decision's ``level`` comes from WHICH FILE was read (``path`` matching
-    :data:`USER_LEDGER_PATH` means ``user``, anything else means ``project``),
+    :func:`user_ledger_path` means ``user``, anything else means ``project``),
     never from the file's own ``level`` field -- that field is untrusted
     content and is ignored, so a project ledger cannot claim ``user`` and
     redirect a later write there.
@@ -292,7 +302,7 @@ def load_ledger(path: Path) -> Tuple[LedgerDecision, ...]:
         raise LedgerError(f"cannot read decision ledger {path}: {exc}") from exc
     if not isinstance(data, dict) or "decisions" not in data:
         raise LedgerError(f"decision ledger {path} is missing a 'decisions' array")
-    level = "user" if Path(path) == Path(USER_LEDGER_PATH) else "project"
+    level = "user" if Path(path) == Path(user_ledger_path()) else "project"
     entries = data["decisions"]
     if not isinstance(entries, list):
         raise LedgerError(f"decision ledger {path}: 'decisions' must be an array")
@@ -305,7 +315,7 @@ def load_merged(project_dir: Path) -> Tuple[LedgerDecision, ...]:
     Both files are optional; a missing one contributes nothing.
     """
     project = load_ledger(project_ledger_path(Path(project_dir)))
-    user = load_ledger(USER_LEDGER_PATH)
+    user = load_ledger(user_ledger_path())
     return project + user
 
 

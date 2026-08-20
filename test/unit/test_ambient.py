@@ -10,12 +10,17 @@ entry point calls it.
 
 import ast
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from toolguard import ambient
-from toolguard.path_utils import iter_dirs_upward
+from toolguard.path_utils import (
+    absolute_from_cwd,
+    iter_dirs_upward,
+    resolve_project_root,
+)
 
 _AMBIENT_SOURCE = Path(ambient.__file__)
 
@@ -162,18 +167,6 @@ class TestABindingLastsExactlyOneBlock(unittest.TestCase):
             self.assertEqual(ambient.cwd(), Path("/tmp/cwd-one"))
             self.assertEqual(ambient.env_var("WHICH"), "one")
 
-    def test_a_bound_home_governs_tilde_expansion(self):
-        """
-        Given facts bound for the block, and a process $HOME pointing elsewhere
-        When a '~' path is expanded through ambient
-        Then it lands under the BOUND home, where pathlib's own expanduser --
-             which reads $HOME, then the passwd entry -- lands elsewhere
-        """
-        with patch.dict(os.environ, {"HOME": "/from/env"}, clear=False):
-            with ambient.active(self.first):
-                self.assertEqual(ambient.expanduser("~/x"), Path("/tmp/home-one/x"))
-                self.assertEqual(Path("~/x").expanduser(), Path("/from/env/x"))
-
     def test_env_reports_the_bound_snapshot(self):
         """
         Given facts bound for the block
@@ -238,9 +231,9 @@ class TestABindingLastsExactlyOneBlock(unittest.TestCase):
 
 class TestDerivedAccessorsAnswerFromTheFactTheyReadFrom(unittest.TestCase):
     """
-    env_var answers from env(), and expanduser from home() for a leading bare
-    '~', so overriding a fact governs the accessors derived from it. A second
-    read point would be a seam a test patches and silently never reaches.
+    env_var answers from env(), so overriding a fact governs the accessors
+    derived from it. A second read point would be a seam a test patches and
+    silently never reaches.
     """
 
     def test_env_var_observes_a_patched_env(self):
@@ -267,34 +260,6 @@ class TestDerivedAccessorsAnswerFromTheFactTheyReadFrom(unittest.TestCase):
                     ambient.env_var("TOOLGUARD_TEST_MARKER", "fallback"), "fallback"
                 )
 
-    def test_expanduser_resolves_a_tilde_through_the_home_accessor(self):
-        """
-        Given ambient.home patched and nothing else
-        When expanduser() expands a path written with a leading '~'
-        Then it lands under the patched home, so a '~' in configuration cannot
-             route around a test that redirected home
-        """
-        with patch("toolguard.ambient.home", return_value=Path("/patched/home")):
-            self.assertEqual(
-                ambient.expanduser("~/.toolguard"), Path("/patched/home/.toolguard")
-            )
-
-    def test_expanduser_leaves_a_path_without_a_leading_tilde_alone(self):
-        """
-        Given a patched home
-        When expanduser() is given an absolute path, a relative one, and another
-             user's '~name' form
-        Then none of them is rewritten to the patched home
-        """
-        with patch("toolguard.ambient.home", return_value=Path("/patched/home")):
-            for raw, expected in (
-                ("/abs/path", Path("/abs/path")),
-                ("rel/path", Path("rel/path")),
-                ("~root/x", Path("~root/x").expanduser()),
-            ):
-                with self.subTest(raw=raw):
-                    self.assertEqual(ambient.expanduser(raw), expected)
-
 
 class TestPatchingAmbientHomeRedirectsPathUtils(unittest.TestCase):
     """
@@ -314,6 +279,72 @@ class TestPatchingAmbientHomeRedirectsPathUtils(unittest.TestCase):
             walked = list(iter_dirs_upward(start))
 
         self.assertEqual(walked[-1], fake_home)
+
+
+class TestPatchingAmbientCwdRedirectsPathUtils(unittest.TestCase):
+    """
+    A relative path is anchored to the bound current directory. ``Path.resolve``
+    and ``Path.absolute`` anchor to the real process working directory instead,
+    which no binding reaches.
+    """
+
+    def test_a_relative_path_is_anchored_to_the_bound_cwd(self):
+        """
+        Given a current directory supplied by patching ambient.cwd
+        When absolute_from_cwd is given a relative path
+        Then it lands under the patched directory, not under the process's own
+        """
+        with patch("toolguard.ambient.cwd", return_value=Path("/tmp/bound-cwd")):
+            self.assertEqual(
+                absolute_from_cwd("work/thing"), Path("/tmp/bound-cwd/work/thing")
+            )
+
+    def test_an_absolute_path_is_not_moved(self):
+        """
+        Given a patched current directory
+        When absolute_from_cwd is given an absolute path
+        Then the path comes back anchored where it already was
+        """
+        with patch("toolguard.ambient.cwd", return_value=Path("/tmp/bound-cwd")):
+            self.assertEqual(
+                absolute_from_cwd("/tmp/elsewhere"), Path("/tmp/elsewhere")
+            )
+
+    def test_a_relative_start_dir_resolves_under_the_bound_cwd(self):
+        """
+        Given a project tree inside a bound home and current directory, and a
+            RELATIVE start directory naming a subdirectory of it
+        When resolve_project_root climbs from there
+        Then it finds the marker inside the bound tree -- where anchoring to the
+             process working directory would have found whatever repository the
+             suite happens to be running in
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            project = home / "work" / "repo"
+            (project / ".git").mkdir(parents=True)
+            (project / "sub").mkdir()
+            facts = ambient.AmbientFacts(home=home, cwd=project, env={})
+            with ambient.active(facts):
+                resolution = resolve_project_root(
+                    Path("sub"), strict=True, indicators=(".git",)
+                )
+            self.assertEqual(resolution.root, project)
+
+    def test_a_relative_override_resolves_under_the_bound_cwd(self):
+        """
+        Given a bound current directory and a RELATIVE project-root override
+        When resolve_project_root honours the override
+        Then the returned root is anchored to the bound directory
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            project = home / "work"
+            project.mkdir(parents=True)
+            facts = ambient.AmbientFacts(home=home, cwd=project, env={})
+            with ambient.active(facts):
+                resolution = resolve_project_root(override=Path("repo"))
+            self.assertEqual(resolution.root, project / "repo")
 
 
 if __name__ == "__main__":

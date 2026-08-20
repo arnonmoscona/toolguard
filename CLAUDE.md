@@ -239,6 +239,9 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
 
 ## Pre-push, in addition to the global checklist
 
+* `uv run python tools/architecture_fitness.py --ambient` -- exit 0 means no module outside
+  `toolguard/ambient.py` reads home, cwd or the environment directly. The suite asserts this
+  too, so this is a second reading rather than the only one.
 * Do the code changes require updates to the maintenance skill or the security-audit skill?
 * Do they require updates to `install.md`?
 * Release notes?

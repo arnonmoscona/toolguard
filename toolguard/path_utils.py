@@ -1,6 +1,7 @@
 """
-Low-level filesystem path helpers: the bounded walk up the parent directories,
-the project-root marker sets, and project-root resolution.
+Low-level filesystem path helpers: anchoring a relative path, expanding a
+leading ``~``, the bounded walk up the parent directories, the project-root
+marker sets, and project-root resolution.
 
 Foundation layer: stdlib plus :mod:`toolguard.ambient`, which is where the home
 and current directories come from.
@@ -9,9 +10,43 @@ and current directories come from.
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, Iterator, List, Optional, Tuple
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 
 from toolguard import ambient
+
+
+def absolute_from_cwd(path: Union[str, Path]) -> Path:
+    """
+    *path* anchored to :func:`ambient.cwd` when it is relative, then normalised
+    through :meth:`pathlib.Path.resolve`.
+
+    ``resolve()`` and ``absolute()`` anchor a relative path to the real process
+    working directory, which no ambient binding governs; anchoring first names
+    the directory instead of inheriting one.
+
+    Args:
+        path: The path to make absolute.
+
+    Returns:
+        The absolute, symlink-resolved path.
+    """
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = ambient.cwd() / candidate
+    return candidate.resolve()
+
+
+def expanduser(path: Union[str, Path]) -> Path:
+    """
+    *path* with a leading ``~`` replaced by :func:`ambient.home`, so an override
+    there governs it. A ``~user`` form names somebody else's home and is left to
+    :meth:`pathlib.Path.expanduser`.
+    """
+    expanded = Path(path)
+    parts = expanded.parts
+    if parts and parts[0] == "~":
+        return ambient.home().joinpath(*parts[1:])
+    return expanded.expanduser()
 
 
 def iter_dirs_upward(start: Path) -> Iterator[Path]:
@@ -198,11 +233,12 @@ def resolve_project_root(
       ``RESOLVED_ANCHOR``; else ``NONE``. Never returns ``AMBIGUOUS``.
 
     Decides nothing and never prompts, but is not pure: it reads the
-    filesystem, and the current directory when ``start_dir`` is omitted.
+    filesystem, and the current directory when ``start_dir`` is omitted or
+    relative.
 
     Args:
         start_dir: Directory to resolve from; defaults to the current
-            directory. Passed through ``Path.resolve`` before the walk.
+            directory. Passed through :func:`absolute_from_cwd` before the walk.
         strict: Select the flat shape instead of the tiered one.
         override: An explicit project root, honoured unconditionally and
             regardless of ``strict``. Resolved but NOT checked for existence --
@@ -215,10 +251,10 @@ def resolve_project_root(
     Returns:
         A :class:`ProjectRootResolution` describing what was found.
     """
-    start = (start_dir or ambient.cwd()).resolve()
+    start = absolute_from_cwd(start_dir or ambient.cwd())
 
     if override is not None:
-        resolved = override.resolve()
+        resolved = absolute_from_cwd(override)
         return ProjectRootResolution(
             status=RootStatus.RESOLVED_OVERRIDE,
             root=resolved,
@@ -311,7 +347,7 @@ def require_project_root(start_dir: Optional[Path] = None) -> Path:
     )
     if resolution.root is None:
         raise RuntimeError(
-            f"Project root not found. Searched from {start.resolve()} upward, stopping "
+            f"Project root not found. Searched from {absolute_from_cwd(start)} upward, stopping "
             f"at {ambient.home()} or the filesystem root, for any of: "
             f"{', '.join(CONFIG_ROOT_INDICATORS)}. Something is badly wrong."
         )

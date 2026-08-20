@@ -1,19 +1,29 @@
 """
 Architectural invariant tests for toolguard's module layering: governed modules
-import only downward, and config.py re-exports the moved names rather than
-redefining them.
+import only downward, config.py re-exports the moved names rather than
+redefining them, and every read of machine state the ambient scan treats as
+fatal has a declared owner.
 
 Static-structure tests -- they parse the source rather than execute it.
 """
 
 import ast
 import importlib
+import io
+import sys
 import tempfile
 import tomllib
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from toolguard import config, config_types, issues, rule_entry
+
+# Repo-root ``tools/`` (dev-only, NOT ``toolguard/tools/``) is importable when the
+# suite runs with ``-t .``; mirror that so this file also runs standalone.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools import architecture_fitness as af
 
 TOOLGUARD_ROOT = Path(config.__file__).parent
 PYSCN_TOML = TOOLGUARD_ROOT.parent / ".pyscn.toml"
@@ -34,7 +44,7 @@ LAYERS = (
     ("toolguard._git", frozenset({"toolguard.constants"})),
     (
         "toolguard.install_provenance",
-        frozenset({"toolguard._git", "toolguard.constants"}),
+        frozenset({"toolguard._git", "toolguard.ambient", "toolguard.constants"}),
     ),
     (
         "toolguard.install_update",
@@ -94,6 +104,19 @@ RE_EXPORTED_TYPES = (
 
 #: Modules whose presence proves a source walk actually reached the package.
 WALK_ANCHORS = frozenset({"config.py", "hook.py", "permissions.py", "issues.py"})
+
+#: Reads of machine state the ambient scan must find, as ``(module, rule, member)``.
+#: Each exists today and has an owner entry, so a scan that reports none of them
+#: walked nothing and its clean verdict is vacuous. The subpackage entry is the only
+#: one that fails a walk which never descends past the package root.
+AMBIENT_ANCHORS = (
+    ("ambient", af.AMBIENT_RULE_OS_IMPORT, "os"),
+    ("file_lock", af.AMBIENT_RULE_OS_IMPORT, "os"),
+    ("ambient", af.AMBIENT_RULE_PATH_MEMBER, "cwd"),
+    ("ambient", af.AMBIENT_RULE_PATH_MEMBER, "home"),
+    ("path_utils", af.AMBIENT_RULE_PATH_MEMBER, "expanduser"),
+    ("testing.sandbox", af.AMBIENT_RULE_PATH_MEMBER, "home"),
+)
 
 
 def _module_path(module_name: str) -> Path:
@@ -643,6 +666,68 @@ class TestNoNewLocalImports(unittest.TestCase):
             "or -- if a genuine documented circular dependency -- mark the line "
             f"'# noqa: PLC0415'. Offenders: {sorted(found)}",
         )
+
+
+class TestAmbientRoutesOnTheRealTree(unittest.TestCase):
+    """
+    ``tools/architecture_fitness.py --ambient``'s verdict on the real package,
+    asserted here so it binds on a commit rather than on whoever remembers to run
+    the tool.
+    """
+
+    def test_every_fatal_read_of_machine_state_the_scan_detects_has_an_owner(self):
+        """
+        Given the ambient scan over the real toolguard package
+        When its findings are compared against the declared owner entries
+        Then the liveness anchors are present, the check could do its job, and no
+            read it treats as fatal lacks an owner entry
+        """
+        sites, _unseen, examined_files = af.scan_ambient_routes()
+        observed = {(site.module, site.rule, site.name) for site in sites}
+        missing = [anchor for anchor in AMBIENT_ANCHORS if anchor not in observed]
+        found = len(AMBIENT_ANCHORS) - len(missing)
+
+        self.assertNotEqual(AMBIENT_ANCHORS, (), "the liveness anchors are empty")
+        self.assertEqual(
+            missing,
+            [],
+            f"the scan read {examined_files} file(s) and found {found} of "
+            f"{len(AMBIENT_ANCHORS)} liveness anchors; missing {missing}. Found "
+            f"none points at a walk that never reached the package, so a clean "
+            f"verdict would prove nothing; found some points at those particular "
+            f"reads moving or going away.",
+        )
+
+        report = af.check_ambient_routes()
+        self.assertEqual(
+            report.failures,
+            [],
+            f"the --ambient check could not do its job: {report.failures}",
+        )
+        offenders = [
+            f"{site.module}.{site.name} [{site.rule}] at {site.file}:{site.line}"
+            for site in report.fatal_findings
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            f"Read(s) of machine state bypassing toolguard.ambient: {offenders}. "
+            f"Route the module through toolguard.ambient, or -- if it genuinely "
+            f"owns the fact -- add it to OS_IMPORT_OWNERS / PATH_AMBIENT_OWNERS in "
+            f"tools/architecture_fitness.py with the reason.",
+        )
+
+    def test_the_ambient_mode_exits_zero_on_this_tree(self):
+        """
+        Given --ambient, whose exit code is what the pre-push checklist reads
+        When it is run over this repo
+        Then it exits 0, so no verdict the report carries can fail the tool
+            while leaving the suite green
+        """
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = af.main(["--ambient"])
+        self.assertEqual(code, 0, output.getvalue())
 
 
 if __name__ == "__main__":

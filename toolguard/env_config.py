@@ -9,7 +9,12 @@ from typing import Dict, Optional
 
 from toolguard import ambient
 from toolguard.error_reporter import report_warning
-from toolguard.path_utils import CONFIG_ROOT_INDICATORS, resolve_project_root
+from toolguard.path_utils import (
+    CONFIG_ROOT_INDICATORS,
+    absolute_from_cwd,
+    expanduser,
+    resolve_project_root,
+)
 
 
 def find_project_root(start_dir: Optional[Path] = None) -> Optional[Path]:
@@ -146,19 +151,19 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
         - log_dir: Path -- absolute; ``TOOLGUARD_LOG_DIR`` if set (a relative
           value resolves against the project root), else ``{project_root}/logs``
         - extended_syntax: bool
-        - project_root: Path
+        - project_root: Path -- absolute; a relative ``TOOLGUARD_PROJECT_ROOT``
+          is anchored to the current directory
         - source_root: str
         - create_log_dir: bool
     """
     if start_dir is not None:
-        project_root = (
-            find_project_root(Path(start_dir))
-            or ambient.expanduser(start_dir).resolve()
+        project_root = find_project_root(Path(start_dir)) or absolute_from_cwd(
+            expanduser(start_dir)
         )
     else:
         project_root_str = ambient.env_var("TOOLGUARD_PROJECT_ROOT")
         if project_root_str:
-            project_root = ambient.expanduser(project_root_str).resolve()
+            project_root = absolute_from_cwd(expanduser(project_root_str))
         else:
             project_root = find_project_root()
             if project_root is None:
@@ -177,7 +182,7 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
         log_dir_str = env_vars.get("TOOLGUARD_LOG_DIR")
 
     if log_dir_str:
-        log_dir = ambient.expanduser(log_dir_str)
+        log_dir = expanduser(log_dir_str)
         if not log_dir.is_absolute():
             log_dir = project_root / log_dir
     else:
@@ -185,7 +190,7 @@ def get_env_config(start_dir: Optional[Path] = None) -> Dict[str, any]:
 
     return {
         "logging_enabled": logging_enabled,
-        "log_dir": log_dir.resolve(),
+        "log_dir": absolute_from_cwd(log_dir),
         "extended_syntax": extended_syntax,
         "project_root": project_root,
         "source_root": source_root,

@@ -1074,5 +1074,55 @@ class TestGetEnvConfig(unittest.TestCase):
             self.assertEqual(config["project_root"], fallback)
 
 
+class TestRelativeProjectRootAnchoring(unittest.TestCase):
+    """
+    ``TOOLGUARD_PROJECT_ROOT`` is user-settable and nothing requires it to be
+    absolute. A relative value is anchored to the bound current directory, where
+    ``Path.resolve`` would reach the real process one instead.
+    """
+
+    def test_a_relative_project_root_env_var_anchors_to_the_bound_cwd(self):
+        """
+        Given TOOLGUARD_PROJECT_ROOT set to a RELATIVE path, and ambient facts
+            binding home, cwd and the environment
+        When get_env_config is called
+        Then project_root lands under the bound current directory, not under the
+             directory the test process happens to be running in
+        """
+        with TemporaryDirectory() as tmpdir:
+            bound_cwd = Path(tmpdir).resolve()
+            facts = ambient.AmbientFacts(
+                home=bound_cwd,
+                cwd=bound_cwd,
+                env={"TOOLGUARD_PROJECT_ROOT": "nested/project"},
+            )
+            with clean_env():
+                with ambient.active(facts):
+                    config = get_env_config()
+
+            self.assertEqual(config["project_root"], bound_cwd / "nested" / "project")
+            self.assertEqual(
+                config["log_dir"], bound_cwd / "nested" / "project" / "logs"
+            )
+
+    def test_a_relative_start_dir_anchors_to_the_bound_cwd(self):
+        """
+        Given an explicit RELATIVE start_dir and no project marker above it
+        When get_env_config is called under bound ambient facts
+        Then project_root falls back to that directory anchored to the bound cwd
+        """
+        with TemporaryDirectory() as tmpdir:
+            bound_cwd = Path(tmpdir).resolve()
+            facts = ambient.AmbientFacts(home=bound_cwd, cwd=bound_cwd, env={})
+            with clean_env():
+                with ambient.active(facts):
+                    with patch(
+                        "toolguard.env_config.find_project_root", return_value=None
+                    ):
+                        config = get_env_config(start_dir=Path("nested/project"))
+
+            self.assertEqual(config["project_root"], bound_cwd / "nested" / "project")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -231,8 +231,8 @@ def security_audit(
             resolved once, here, so every finding reports the same resolved
             takeover state.
         env: Environment mapping for the environment analyser, which falls back
-            to ``os.environ``.  Exposed so a test need not mutate the real
-            environment.
+            to the ambient environment.  Exposed so a test need not mutate the
+            real one.
 
     Returns:
         A :class:`SecurityReport`; see it for the finding order.

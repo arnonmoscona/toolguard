@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
+from pathlib import Path, PurePath
 from unittest import mock
 
 # Repo-root ``tools/`` (dev-only, NOT ``toolguard/tools/``) is importable when the
@@ -4169,6 +4169,340 @@ class TestSmokeAgainstRealTree(unittest.TestCase):
         self.assertIn(code, (0, 1))
         payload = json.loads(buf.getvalue())
         self.assertIn("canary_results", payload["guard"])
+
+
+def _ambient_fixture(tmp: Path, package: dict) -> Path:
+    """Write *package* (relative path -> source) under ``tmp/pkg`` and return that root."""
+    root = tmp / "pkg"
+    for rel, source in package.items():
+        _write(root / rel, source)
+    return root
+
+
+class TestAmbientRouteCheck(unittest.TestCase):
+    """``--ambient``: reads of home, cwd and the environment that bypass toolguard.ambient."""
+
+    def test_an_os_import_outside_an_owner_module_is_a_fatal_finding(self):
+        """
+        Given a module that imports os and is in no OS_IMPORT_OWNERS entry
+        When check_ambient_routes runs over its tree
+        Then the import is reported as a fatal finding, because banning the
+             import is what makes os.environ and os.getcwd unreachable rather
+             than merely undetected
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp), {"reader.py": "import os\n\n\nX = os.sep\n"}
+            )
+            report = af.check_ambient_routes(
+                scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+            )
+            rules = [(f.module, f.rule, f.name) for f in report.fatal_findings]
+            self.assertIn(("reader", af.AMBIENT_RULE_OS_IMPORT, "os"), rules)
+            self.assertFalse(report.ok)
+
+    def test_an_os_import_inside_an_owner_module_is_not_a_finding(self):
+        """
+        Given the same module named in OS_IMPORT_OWNERS
+        When check_ambient_routes runs
+        Then nothing is reported against it
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp), {"reader.py": "import os\n\n\nX = os.sep\n"}
+            )
+            report = af.check_ambient_routes(
+                scan_root=root,
+                repo_root=Path(tmp),
+                os_owners={"reader": "genuine file operations"},
+                path_owners={},
+            )
+            self.assertEqual(report.findings, [])
+
+    def test_a_from_os_import_is_caught_as_well_as_a_plain_import(self):
+        """
+        Given a module using the ``from os.path import ...`` spelling
+        When check_ambient_routes runs
+        Then it is still reported -- the ban is on reaching os at all, not on
+             one spelling of the statement
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp),
+                {"reader.py": "from os.path import expanduser\n\n\nX = expanduser\n"},
+            )
+            report = af.check_ambient_routes(
+                scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+            )
+            self.assertEqual(
+                [f.rule for f in report.findings], [af.AMBIENT_RULE_OS_IMPORT]
+            )
+
+    def test_a_path_home_read_outside_an_owner_is_a_fatal_finding(self):
+        """
+        Given a module calling Path.home() and no matching PATH_AMBIENT_OWNERS entry
+        When check_ambient_routes runs
+        Then it is reported as fatal
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp),
+                {
+                    "ledger.py": (
+                        "from pathlib import Path\n\n\nP = Path.home() / 'decisions.json'\n"
+                    )
+                },
+            )
+            report = af.check_ambient_routes(
+                scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+            )
+            self.assertEqual(
+                [(f.module, f.name) for f in report.fatal_findings],
+                [("ledger", "home")],
+            )
+
+    def test_an_owner_entry_exempts_one_member_not_the_whole_module(self):
+        """
+        Given a module owning Path.home() that also calls Path.cwd()
+        When check_ambient_routes runs
+        Then only the cwd read is reported: ownership is keyed (module, member),
+             so an entry cannot exempt a fact it does not name
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp),
+                {
+                    "reader.py": (
+                        "from pathlib import Path\n\n\nH = Path.home()\nC = Path.cwd()\n"
+                    )
+                },
+            )
+            report = af.check_ambient_routes(
+                scan_root=root,
+                repo_root=Path(tmp),
+                os_owners={},
+                path_owners={("reader", "home"): "owns the home fact"},
+            )
+            self.assertEqual(
+                [(f.module, f.name) for f in report.fatal_findings],
+                [("reader", "cwd")],
+            )
+
+    def test_a_resolve_site_is_inventoried_rather_than_failed(self):
+        """
+        Given a module calling .resolve() and no matching owner entry
+        When check_ambient_routes runs
+        Then the site is reported but is not fatal: resolve() reads the working
+             directory only for a relative receiver, and this scan does not
+             evaluate receivers
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp),
+                {"walker.py": "def f(p):\n    return p.resolve()\n"},
+            )
+            report = af.check_ambient_routes(
+                scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+            )
+            self.assertEqual(
+                [(f.module, f.name) for f in report.findings], [("walker", "resolve")]
+            )
+            self.assertEqual(report.fatal_findings, [])
+
+    def test_a_read_through_an_imported_module_alias_is_not_a_path_read(self):
+        """
+        Given ``ambient.resolve()`` -- a repo module's own function that happens
+            to share a name with a Path member
+        When check_ambient_routes runs over a tree where ``ambient`` is a known module
+        Then it is counted as passed over, not reported
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(
+                Path(tmp),
+                {
+                    "ambient.py": "def resolve():\n    return 1\n",
+                    "caller.py": "from pkg import ambient\n\n\nX = ambient.resolve()\n",
+                },
+            )
+            modules = af.map_repo_modules({"pkg": root})
+            report = af.check_ambient_routes(
+                scan_root=root,
+                repo_root=Path(tmp),
+                os_owners={},
+                path_owners={},
+                modules=modules,
+            )
+            self.assertEqual(report.findings, [])
+            self.assertEqual(report.unseen.get(af.AMBIENT_UNSEEN_MODULE_ALIAS), 1)
+
+    def test_an_unclassified_path_member_fails_the_check(self):
+        """
+        Given a stored classification that omits a member dir(Path) reports --
+            the shape a Python upgrade produces
+        When check_ambient_routes runs
+        Then it fails and names the member, so a release cannot widen the hole
+             silently
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(Path(tmp), {"m.py": "import os\n"})
+            trimmed = af.PATH_FILESYSTEM_MEMBERS - {"glob"}
+            with mock.patch.object(af, "PATH_FILESYSTEM_MEMBERS", trimmed):
+                report = af.check_ambient_routes(
+                    scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+                )
+            self.assertIn("glob", report.surface.unclassified)
+            self.assertTrue(any("pathlib gained" in f for f in report.failures))
+            self.assertFalse(report.ok)
+
+    def test_a_classified_member_pathlib_no_longer_has_fails_the_check(self):
+        """
+        Given a stored classification naming a member dir(Path) does not report
+        When check_ambient_routes runs
+        Then it fails and names it, so the buckets cannot drift into fiction
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(Path(tmp), {"m.py": "import os\n"})
+            widened = af.PATH_FILESYSTEM_MEMBERS | {"telepath"}
+            with mock.patch.object(af, "PATH_FILESYSTEM_MEMBERS", widened):
+                report = af.check_ambient_routes(
+                    scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+                )
+            self.assertIn("telepath", report.surface.missing)
+            self.assertFalse(report.ok)
+
+    def test_an_owner_entry_matching_no_site_fails_the_check(self):
+        """
+        Given an owner entry for a module that reads nothing
+        When check_ambient_routes runs
+        Then it fails: nothing keeps a stale exemption's stated reason true
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(Path(tmp), {"m.py": "import os\n"})
+            report = af.check_ambient_routes(
+                scan_root=root,
+                repo_root=Path(tmp),
+                os_owners={"m": "genuine file operations", "gone": "nothing here"},
+                path_owners={},
+            )
+            self.assertEqual(report.stale_owners, ["os import: gone"])
+            self.assertFalse(report.ok)
+
+    def test_the_check_does_not_pass_over_an_empty_tree(self):
+        """
+        Given a directory with no python files at all
+        When check_ambient_routes runs
+        Then it must not report ok: nothing distinguishes "no bypass found"
+             from "nothing was examined"
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "empty"
+            root.mkdir()
+            report = af.check_ambient_routes(
+                scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+            )
+            self.assertEqual(report.examined_files, 0)
+            self.assertFalse(report.ok)
+
+    def test_the_check_does_not_pass_over_a_tree_holding_no_reads(self):
+        """
+        Given python files that name no os import and no Path ambient member
+        When check_ambient_routes runs
+        Then it must not report ok: a scan that resolved nothing is not a clean pass
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _ambient_fixture(Path(tmp), {"m.py": "X = 1\n"})
+            report = af.check_ambient_routes(
+                scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
+            )
+            self.assertEqual(report.examined_files, 1)
+            self.assertFalse(report.ok)
+
+    def test_render_distinguishes_a_failed_run_from_a_clean_one(self):
+        """
+        Given a report that examined nothing and one with no findings
+        When each is rendered
+        Then the headlines differ, so an empty run cannot read as a pass
+        """
+        empty = af.AmbientReport(surface=af.classify_path_surface())
+        empty.failures.append("examined zero python files")
+        clean = af.AmbientReport(
+            surface=af.classify_path_surface(), examined_files=3, examined_os_imports=1
+        )
+        self.assertIn("FAIL", af.render_ambient_text(empty))
+        self.assertIn("PASS", af.render_ambient_text(clean))
+
+    def test_main_ambient_flag_smoke(self):
+        """
+        Given the --ambient --json CLI flags
+        When main() is invoked
+        Then it returns an int exit code and prints an ambient payload carrying
+             the pathlib surface it classified
+        """
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = af.main(["--ambient", "--json"])
+        self.assertIn(code, (0, 1))
+        payload = json.loads(buf.getvalue())
+        self.assertIn("surface", payload["ambient"])
+        self.assertEqual(payload["ambient"]["surface"]["unclassified"], [])
+
+
+class TestPathlibClassificationVersionPin(unittest.TestCase):
+    """
+    Enumerating ``dir(Path)`` sees a member added or removed. It cannot see an
+    existing member start to consult the working or home directory, and only a
+    person reading the release notes can, so a feature-version move fails here.
+    """
+
+    def test_the_running_python_matches_the_classification_pin(self):
+        """
+        Given the pathlib classification, read against a specific feature version
+        When the running interpreter's version is compared with the pin
+        Then they match -- and where they do not, the message names the five
+             classified members and sends the reader to the release notes before
+             the pin is moved
+        """
+        self.assertEqual(
+            sys.version_info[:2],
+            af.AMBIENT_PYTHON_PIN,
+            af.AMBIENT_PIN_MESSAGE,
+        )
+
+    def test_the_pin_message_names_every_ambient_member_and_the_revalidation(self):
+        """
+        Given AMBIENT_PIN_MESSAGE, the only thing a reader of a failed pin sees
+        When it is inspected
+        Then it names each ambient-reading member and points at the release
+             notes, so a reader who bumps the pin has been told what to check
+             first
+        """
+        for member in af.PATH_AMBIENT_MEMBERS:
+            self.assertIn(member, af.AMBIENT_PIN_MESSAGE)
+        self.assertIn("release notes", af.AMBIENT_PIN_MESSAGE)
+
+    def test_every_ambient_member_is_absent_from_purepath(self):
+        """
+        Given the five members classified as reading machine state
+        When each is looked up on PurePath, whose members are pure string logic
+        Then none is there -- a member that were both would mean the split is wrong
+        """
+        for member in af.PATH_AMBIENT_MEMBERS:
+            self.assertFalse(
+                hasattr(PurePath, member),
+                f"{member} is on PurePath, so it cannot be reading machine state",
+            )
+
+    def test_the_stored_buckets_are_disjoint(self):
+        """
+        Given the three stored pathlib buckets
+        When they are intersected pairwise
+        Then each pair is empty, so no member can be classified two ways at once
+        """
+        self.assertEqual(af.PATH_AMBIENT_MEMBERS & af.PATH_PURE_MEMBERS, frozenset())
+        self.assertEqual(
+            af.PATH_AMBIENT_MEMBERS & af.PATH_FILESYSTEM_MEMBERS, frozenset()
+        )
+        self.assertEqual(af.PATH_PURE_MEMBERS & af.PATH_FILESYSTEM_MEMBERS, frozenset())
 
 
 if __name__ == "__main__":

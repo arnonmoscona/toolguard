@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
+from toolguard import ambient
 from toolguard._git import run_git
 from toolguard.constants import DIST_NAME as _DEFAULT_NAME
 
@@ -334,7 +335,7 @@ def pythonpath_shadow_entries(
 
     Args:
         env: Environment mapping to read ``PYTHONPATH`` from (defaults to
-            :data:`os.environ`). Exposed for testing without mutating the
+            :func:`ambient.env`). Exposed for testing without mutating the
             real environment.
 
     Returns:
@@ -343,7 +344,7 @@ def pythonpath_shadow_entries(
         empty when ``PYTHONPATH`` is unset, empty, or contains no such entry.
     """
     if env is None:
-        env = os.environ
+        env = ambient.env()
     raw = env.get("PYTHONPATH", "")
     if not raw:
         return ()

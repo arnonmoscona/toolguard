@@ -1600,18 +1600,16 @@ class TestLedgerMode(unittest.TestCase):
         """
         Redirect the USER ledger into this test's own temp dir.
 
-        ``decision_ledger.USER_LEDGER_PATH`` is a module-level constant built
-        from ``Path.home()`` at import, so patching ``Path.home`` does not move
-        it. ``--ledger-show`` merges it with the project ledger, so without
-        this every assertion on the merged result silently depends on the
-        developer not having a ``~/.toolguard/decisions.json`` -- measured: one
-        entry in that file fails two tests in this class.
+        ``--ledger-show`` merges the user ledger with the project one, so
+        without this every assertion on the merged result silently depends on
+        the developer not having a ``~/.toolguard/decisions.json`` -- measured:
+        one entry in that file fails two tests in this class.
         """
         self._user_ledger_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._user_ledger_dir.cleanup)
         self.user_ledger = Path(self._user_ledger_dir.name) / "decisions.json"
         patcher = mock.patch.object(
-            decision_ledger, "USER_LEDGER_PATH", self.user_ledger
+            decision_ledger, "user_ledger_path", return_value=self.user_ledger
         )
         patcher.start()
         self.addCleanup(patcher.stop)

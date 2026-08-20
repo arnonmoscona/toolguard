@@ -13,10 +13,9 @@ from unittest import mock
 
 from toolguard.tools import decision_ledger as dl
 
-#: The user ledger as built from the real ``Path.home()`` at import. Captured before any
-#: test redirects the constant, so the two tests that are *about* the real location still
-#: have it.
-REAL_USER_LEDGER_PATH = dl.USER_LEDGER_PATH
+#: The user ledger as it reads against the real home directory. Captured before any
+#: test redirects it.
+REAL_USER_LEDGER_PATH = dl.user_ledger_path()
 
 
 def _signature(path: Path):
@@ -34,9 +33,8 @@ REAL_USER_LEDGER_SIGNATURE = _signature(REAL_USER_LEDGER_PATH)
 class LedgerIsolationMixin:
     """Redirects the user ledger into a temp dir and proves the redirect took effect.
 
-    ``USER_LEDGER_PATH`` is a module constant built from ``Path.home()`` at **import**
-    time, so patching ``Path.home`` cannot move it: a user-level ``record_decision``
-    without this writes the developer's real ``~/.toolguard/decisions.json``.
+    A user-level ``record_decision`` without this writes the developer's real
+    ``~/.toolguard/decisions.json``.
     """
 
     def setUp(self):
@@ -44,7 +42,9 @@ class LedgerIsolationMixin:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.user_ledger = Path(tmp.name) / ".toolguard" / "decisions.json"
-        patcher = mock.patch.object(dl, "USER_LEDGER_PATH", self.user_ledger)
+        patcher = mock.patch.object(
+            dl, "user_ledger_path", return_value=self.user_ledger
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         self.assertNotEqual(self.user_ledger, REAL_USER_LEDGER_PATH)
@@ -239,7 +239,7 @@ class TestLevelPaths(LedgerIsolationMixin, unittest.TestCase):
 
     def test_user_ledger_sits_in_the_toolguard_namespace_under_home(self):
         """
-        Given the user-level ledger constant
+        Given the user-level ledger path
         When its location is inspected
         Then it is ~/.toolguard/decisions.json -- toolguard's own namespace, not ~/.claude
         """
