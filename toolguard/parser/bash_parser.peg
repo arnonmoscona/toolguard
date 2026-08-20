@@ -274,13 +274,45 @@ simple_command <- command_name (proc_subst / redirection / cmd_substitution / co
 # The tree-walker emits UndecidableSegment(ASK) when it finds one of these.
 proc_subst <- ("<" / ">") "(" spacing compound_command spacing ")" spacing
 
-# command_name: the FIRST token of a simple command.
-# Two forms:
-#   1. A cmd_substitution that is EXECUTED as a command (e.g. `$(which python) --version`).
-#      This must be tried FIRST so `$(` is not seen as an identifier by command_word.
-#   2. A !ctrl_keyword word -- an unquoted or quoted word that is not a reserved keyword.
-#      This gate prevents shell keywords from being consumed as command names.
-command_name <- cmd_sub_as_cmd / !ctrl_keyword word spacing
+# command_name: how a simple command starts.  Two forms, tried in order:
+#   1. Leading assignments, then the thing actually run
+#      (`FOO=1 rm -rf /tmp/x`).
+#   2. That thing on its own.
+#
+# Form 1 falls back to form 2 whenever no command follows, so a bare `FOO=1`
+# statement still parses exactly as it did before.  Spelling form 1 as an
+# optional prefix on form 2 would break that: PEG never retries an optional
+# as empty once it has matched.
+#
+# The prefix hangs off command_name, NOT simple_command: in the conventional
+# POSIX position it silently costs nested $(...) decomposition in command_model.
+command_name <- assigned_command / command_start
+
+assigned_command <- assignment_prefix command_start
+
+assignment_prefix <- assignment+
+
+# command_start: the word or substitution that is actually EXECUTED.
+# The order is free -- only cmd_sub_as_cmd can begin with `$(` or a backtick.
+# command_word's !ctrl_keyword gate stops a shell keyword being consumed as a
+# command name.
+command_start <- cmd_sub_as_cmd / command_word
+
+command_word <- !ctrl_keyword word spacing
+
+# NAME=value and bash's append form NAME+=value.  Quoted strings, escapes, var
+# refs and substitutions are part of the value; anything else ends it at the
+# first delimiter.
+assignment <- assignment_name ("+=" / "=") assignment_value spacing
+assignment_name <- identifier
+assignment_value <- (quoted_string / escaped_char / tight_cmd_sub / var_ref / !delimiter .)*
+
+# Command substitution inside an assignment value.  Mirrors dollar_paren_sub /
+# backtick_sub minus their trailing spacing; keep the three in step.  That
+# spacing separates the value from the command word, so consuming it hides the
+# command (`FOO=$(id) rm -rf /`).  Do not factor the shared body into a rule --
+# it nests .compound_command deeper, which command_model.node_kind classifies on.
+tight_cmd_sub <- "$(" spacing compound_command spacing ")" / "`" spacing compound_command spacing "`"
 
 # A command substitution that appears in the command-name position.
 # Note: spacing after the `)` is consumed here so the parser advances past it.
