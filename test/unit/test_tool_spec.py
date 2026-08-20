@@ -382,10 +382,6 @@ class TestPayloadKeyIsWhatConsumersRead(unittest.TestCase):
         When an allowed event carries its command under that key
         Then it is allowed -- the registry is the single description of where
             a tool's subject lives, for command tools as much as file tools
-
-        RED: hook._resolve_event consults payload_key() only on the file-path
-        branch and hardcodes 'command' on the other, so the registry's
-        description of a command tool's payload is ignored.
         """
         rebound = {
             "Bash": dataclasses.replace(
@@ -439,8 +435,9 @@ class TestKnownNamesDriveValidation(unittest.TestCase):
 
 
 class TestPopulationAndTheEmptyRegistry(unittest.TestCase):
-    """An empty registry is not a configuration with nothing to govern -- it is
-    a hook that governs nothing. Both halves are asserted."""
+    """An empty registry is not a configuration with nothing to govern -- it
+    is a broken installation, and the hook fails closed rather than
+    governing nothing. Both halves are asserted."""
 
     def test_every_derived_view_is_populated(self):
         """
@@ -485,26 +482,29 @@ class TestPopulationAndTheEmptyRegistry(unittest.TestCase):
         verdict = _resolve_event("Bash", {"command": COMMAND_TARGET}, config, True)
         self.assertEqual("deny", verdict.decision)
 
-    def test_an_empty_default_would_ungovern_every_tool_including_hard_deny(self):
+    def test_an_empty_default_governed_tools_fails_closed_not_open(self):
         """
         Given DEFAULT_GOVERNED_TOOLS rebound to empty at config.py's holder
         When a hard-denied command is resolved for Bash
-        Then it is allowed: nothing downstream reports 'governed nothing', so
-            the population assertions above are what stands between an empty
-            registry and a hook that permits everything
+        Then it is denied both before and after the rebind, but by different
+            mechanisms -- before, hard_deny matches the command directly;
+            after, the empty registry itself is treated as a corrupted
+            configuration and refused before any rule is consulted, so
+            hard_deny never runs, and no rule is left standing in for it
         """
         config = _deny_config(
             {"hard_deny": {"deny": [f"Bash({COMMAND_RULE_BODY})"], "allow": []}}
         )
-        self.assertEqual(
-            "deny", _resolve_event("Bash", _payload_for("Bash"), config, True).decision
-        )
+        before = _resolve_event("Bash", _payload_for("Bash"), config, True)
+        self.assertEqual("deny", before.decision)
+        self.assertEqual(COMMAND_RULE_BODY, before.matched_rule)
 
         with patch("toolguard.config.DEFAULT_GOVERNED_TOOLS", ()):
             self.assertEqual((), config.governed_tools())
             verdict = _resolve_event("Bash", _payload_for("Bash"), config, True)
-        self.assertEqual("allow", verdict.decision)
+        self.assertEqual("deny", verdict.decision)
         self.assertIsNone(verdict.matched_rule)
+        self.assertIn("no built-in tools are registered", verdict.reason)
 
 
 class TestRegistryIntegrity(unittest.TestCase):

@@ -646,6 +646,60 @@ def _build_hook_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+def _command_target_key(tool_name: str) -> str:
+    """
+    Return the ``tool_input`` key holding a command tool's target.
+
+    Delegates to :func:`~toolguard.tool_spec.payload_key`, falling back to
+    :data:`~toolguard.constants.DEFAULT_COMMAND_PAYLOAD_KEY` for a governed
+    tool with no registry entry -- ``governed_tools`` accepts any name.
+    """
+    if tool_name in KNOWN_TOOL_NAMES:
+        return _tool_payload_key(tool_name)
+    return DEFAULT_COMMAND_PAYLOAD_KEY
+
+
+def _governed_tool_verdict(
+    tool_name: str, governed_tools: List[str]
+) -> Optional[RuntimeVerdict]:
+    """
+    Return the short-circuit verdict for *tool_name* against *governed_tools*,
+    or ``None`` to continue resolving it normally.
+
+    An EMPTY *governed_tools* is not "nothing configured to govern" -- every
+    builtin tool populates :data:`~toolguard.tool_spec.DEFAULT_GOVERNED_TOOLS`
+    by construction, so empty means no built-in tool is registered: a
+    corrupted installation, or an edited-down
+    :data:`~toolguard.tool_spec._REGISTRY`. Denies every tool call in that
+    case -- fails closed with a stated reason -- rather than reading it the
+    same way as a genuinely ungoverned tool and auto-allowing everything,
+    hard-denied commands included.
+
+    Returns:
+        A synthetic 'deny' verdict when *governed_tools* is empty, a
+        synthetic 'allow' verdict when *tool_name* is absent from a
+        non-empty *governed_tools*, or ``None`` when *tool_name* is governed
+        and resolution should proceed.
+    """
+    if not governed_tools:
+        return RuntimeVerdict(
+            decision="deny",
+            reason=(
+                "No governed tools are configured: no built-in tools are "
+                "registered. This is not a valid 'govern nothing' "
+                "configuration -- it indicates a broken installation, so "
+                "every tool call is refused rather than silently allowed. "
+                "Reinstall toolguard or check the installed package."
+            ),
+        )
+    if tool_name not in governed_tools:
+        return RuntimeVerdict(
+            decision="allow",
+            reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
+        )
+    return None
+
+
 def _resolve_event(
     tool_name: str,
     tool_input: Dict[str, Any],
@@ -670,8 +724,10 @@ def _resolve_event(
     The returned verdict's ``additional_context`` carries the winning rule's
     ``additionalContext`` enrichment, so ``--eval`` (whose whole purpose is
     previewing what the live hook would do) doesn't silently omit a real
-    output field. The two synthetic guard verdicts below (ungoverned tool,
-    missing target) have no matched rule and leave every optional field at
+    output field. The three synthetic guard verdicts short-circuiting this
+    function -- empty registry and ungoverned tool, both from
+    :func:`_governed_tool_verdict`, and missing target below -- have no
+    matched rule and leave every optional field at
     :class:`~toolguard.config_types.RuntimeVerdict`'s defaults.
 
     Args:
@@ -685,30 +741,19 @@ def _resolve_event(
         ``decision`` is ``'allow'``, ``'deny'``, or ``'ask'``.
     """
     governed_tools = list(config.governed_tools())
-    if tool_name not in governed_tools:
-        return RuntimeVerdict(
-            decision="allow",
-            reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
-        )
+    verdict = _governed_tool_verdict(tool_name, governed_tools)
+    if verdict is not None:
+        return verdict
 
     if tool_name in FILE_PATH_TOOLS:
         key = _tool_payload_key(tool_name)
-        target = tool_input.get(key, "")
-        if not target:
-            return RuntimeVerdict(
-                decision="deny", reason=f"No {key} provided in tool input"
-            )
     else:
-        key = (
-            _tool_payload_key(tool_name)
-            if tool_name in KNOWN_TOOL_NAMES
-            else DEFAULT_COMMAND_PAYLOAD_KEY
+        key = _command_target_key(tool_name)
+    target = tool_input.get(key, "")
+    if not target:
+        return RuntimeVerdict(
+            decision="deny", reason=f"No {key} provided in tool input"
         )
-        target = tool_input.get(key, "")
-        if not target:
-            return RuntimeVerdict(
-                decision="deny", reason=f"No {key} provided in tool input"
-            )
 
     return decide(config, tool_name, target, extended_syntax)
 
@@ -1044,7 +1089,7 @@ def _handle_file_path_tool(
             LogRecord(
                 command_str=f"{tool_name}()",
                 status="refused",
-                violated_rules=["no file_path provided"],
+                violated_rules=[f"no {key} provided"],
                 extra_info=agent_info,
                 permission_mode=permission_mode,
             ),
@@ -1090,6 +1135,7 @@ def _handle_file_path_tool(
 
 
 def _handle_command_tool(
+    tool_name: str,
     tool_input: Dict[str, Any],
     config,
     env_config: Dict[str, Any],
@@ -1116,7 +1162,10 @@ def _handle_command_tool(
     sub-command is hard-denied.
 
     Args:
-        tool_input: The tool input dict (read for ``command``).
+        tool_name: The command tool being invoked -- names the ``tool_input``
+            key via :func:`_command_target_key`, since not every command tool
+            necessarily shares Bash's ``'command'`` key.
+        tool_input: The tool input dict.
         config: The resolved configuration.
         env_config: Environment configuration dict.
         agent_info: Agent identification string.
@@ -1126,20 +1175,21 @@ def _handle_command_tool(
     Returns:
         The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
     """
-    command = tool_input.get("command", "")
+    key = _command_target_key(tool_name)
+    command = tool_input.get(key, "")
     if not command:
         log_command(
             LogRecord(
                 command_str=command,
                 status="refused",
-                violated_rules=["no command provided"],
+                violated_rules=[f"no {key} provided"],
                 extra_info=agent_info,
                 permission_mode=permission_mode,
             ),
             config=env_config,
         )
         return RuntimeVerdict(
-            decision="deny", reason="No command provided in tool input"
+            decision="deny", reason=f"No {key} provided in tool input"
         )
 
     extended_syntax = env_config.get("extended_syntax", True)
@@ -1279,14 +1329,9 @@ def main() -> None:
 
             governed_tools = list(config.governed_tools())
 
-            if tool_name not in governed_tools:
-                output = _finalize_output(
-                    RuntimeVerdict(
-                        decision="allow",
-                        reason=f"Not a governed tool (governed: {', '.join(governed_tools)})",
-                    ),
-                    reporter,
-                )
+            governed_verdict = _governed_tool_verdict(tool_name, governed_tools)
+            if governed_verdict is not None:
+                output = _finalize_output(governed_verdict, reporter)
                 _emit_decision(output)
                 sys.exit(0)
 
@@ -1311,7 +1356,12 @@ def main() -> None:
                 )
             else:
                 verdict = _handle_command_tool(
-                    tool_input, config, env_config, agent_info, permission_mode
+                    tool_name,
+                    tool_input,
+                    config,
+                    env_config,
+                    agent_info,
+                    permission_mode,
                 )
 
             output = _finalize_output(verdict, reporter)

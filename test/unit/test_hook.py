@@ -1,5 +1,6 @@
 """Unit tests for toolguard.hook: the PreToolUse entry point for Bash and file-path tools."""
 
+import dataclasses
 import json
 import os
 import unittest
@@ -34,7 +35,7 @@ from toolguard.error_log import log_crash
 from toolguard.log_writer import LogRecord
 from toolguard.file_matching import decide_file_path_at_level_detailed
 from toolguard.resolve import resolve_bash_permission_detailed
-from toolguard.tool_spec import ToolKind, ToolSpec
+from toolguard.tool_spec import TOOLS_BY_NAME, ToolKind, ToolSpec
 from toolguard import ambient, once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
@@ -2622,7 +2623,9 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
                 "permissions": {"allow": ["Bash(ls)"], "deny": []},
             }
         )
-        verdict = _handle_command_tool({"command": "ls"}, config, {}, "main", None)
+        verdict = _handle_command_tool(
+            "Bash", {"command": "ls"}, config, {}, "main", None
+        )
         self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
         record = mock_log.call_args.args[0]
@@ -2646,7 +2649,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            {"command": "rm -rf /tmp/x"}, config, {}, "main", None
+            "Bash", {"command": "rm -rf /tmp/x"}, config, {}, "main", None
         )
         self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
@@ -2683,7 +2686,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            {"command": 'python -c "print(1)"'}, config, {}, "main", None
+            "Bash", {"command": 'python -c "print(1)"'}, config, {}, "main", None
         )
         self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
@@ -2722,13 +2725,113 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            {"command": 'python -c "print(1)" && rm foo'}, config, {}, "main", None
+            "Bash",
+            {"command": 'python -c "print(1)" && rm foo'},
+            config,
+            {},
+            "main",
+            None,
         )
         self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
         record = mock_log.call_args.args[0]
         self.assertEqual(record.violated_rules, [FALLBACK_DENY_PLACEHOLDER])
         self.assertIsNone(record.provenance)
+
+
+class TestHandleCommandToolReadsTargetFromRegisteredKey(unittest.TestCase):
+    """
+    _handle_command_tool is the function main() actually calls for Bash and
+    the MCP terminal -- _resolve_event (driven directly by
+    test_tool_spec.py) is a separate code path, used only by --eval and
+    tests, and was already fixed to consult the registry. This class proves
+    the live path does too.
+    """
+
+    @patch("toolguard.hook.log_command")
+    def test_bashs_target_is_read_from_a_rebound_payload_key(self, mock_log):
+        """
+        Given the registry rebound so Bash's payload key is 'shell_input'
+        When _handle_command_tool resolves an allowed event carrying its
+            command under that key
+        Then it is allowed -- the target came from payload_key(), not a
+            hardcoded 'command'
+        """
+        config = TestHandleCommandToolAuditWiring._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(ls:*)"], "deny": []},
+            }
+        )
+        rebound = {
+            "Bash": dataclasses.replace(
+                TOOLS_BY_NAME["Bash"], payload_key="shell_input"
+            )
+        }
+        with patch.dict("toolguard.tool_spec.TOOLS_BY_NAME", rebound):
+            verdict = _handle_command_tool(
+                "Bash", {"shell_input": "ls -la"}, config, {}, "main", None
+            )
+        self.assertEqual(verdict.decision, "allow")
+
+
+class TestEmptyGovernedToolsFailsClosedThroughMain(unittest.TestCase):
+    """
+    main() and _resolve_event both call the shared _governed_tool_verdict,
+    but each still resolves config.governed_tools() separately --
+    test_tool_spec.py's empty-registry test only exercises _resolve_event.
+    This proves the actual live entry point fails closed too.
+    """
+
+    @staticmethod
+    def _hard_deny_config():
+        """A project-level Configuration hard-denying 'rm -rf', nothing else configured."""
+        return Configuration(
+            layers=(
+                ConfigLayer(
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/p/toolguard_hook.toml"),
+                        0,
+                    ),
+                    MappingProxyType(
+                        {
+                            "hard_deny": {"deny": ["Bash(rm -rf *)"], "allow": []},
+                            "permissions": {"allow": [], "deny": []},
+                        }
+                    ),
+                ),
+            )
+        )
+
+    def test_a_hard_denied_command_is_still_denied_with_an_empty_default(self):
+        """
+        Given DEFAULT_GOVERNED_TOOLS rebound to empty and a hard-denied
+            'rm -rf' rule
+        When main() processes a Bash 'rm -rf /' invocation
+        Then the decision is 'deny', not the 'allow, not a governed tool'
+            main()'s own inline governed-tools check produced before the fix
+        """
+        hook_input = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+            "hook_event_name": "PreToolUse",
+        }
+        config = self._hard_deny_config()
+        with patch("toolguard.config.DEFAULT_GOVERNED_TOOLS", ()):
+            with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+                with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                    with patch(
+                        "toolguard.hook.load_configuration", return_value=config
+                    ):
+                        try:
+                            main()
+                        except SystemExit:
+                            pass
+                        output = json.loads(mock_stdout.getvalue())
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
 class TestHandleFilePathToolAuditWiring(unittest.TestCase):
