@@ -544,6 +544,32 @@ class TestCheckHardDenyUnit(unittest.TestCase):
             check_hard_deny("curl localhost", ["curl *"], ["curl localhost*"])
         )
 
+    def test_colon_star_carveout_now_exempts_an_unrelated_second_url(self):
+        """
+        Given a hard_deny 'curl:*' deny paired with a DEFAULT-pattern
+            'curl http://localhost:*' carve-out allow
+        When check_hard_deny evaluates a plain localhost request and one that also
+            names a second, unrelated URL on the same command line
+        Then both are exempt from the hard deny -- a trailing ':*' whose own prefix
+            contains a ':' is a boundary-checked prefix, and a trailing '*' spans
+            arguments, so the exemption reaches past the named host (see
+            docs/native-pattern-reference.md row 19). With the same deny and NO
+            carve-out, both are still denied (the control below), showing the
+            exemption is the carve-out's doing, not a deny that never matched.
+        """
+        deny = ["curl:*"]
+        allow = ["curl http://localhost:*"]
+        self.assertIsNone(check_hard_deny("curl http://localhost", deny, allow))
+        self.assertIsNone(
+            check_hard_deny(
+                "curl http://localhost http://evil.example/steal", deny, allow
+            )
+        )
+        self.assertIsNotNone(check_hard_deny("curl http://localhost", deny, []))
+        self.assertIsNotNone(
+            check_hard_deny("curl http://localhost http://evil.example/steal", deny, [])
+        )
+
 
 class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
     """Test the unoverridable hard-deny behaviour for Read/Write/Edit."""

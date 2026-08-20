@@ -15,24 +15,25 @@ def split_default_body(body: str) -> Tuple[List[str], str]:
     """
     Split a DEFAULT pattern body into ``(cmd_tokens, args_part)``.
 
-    The split is on the FIRST ``:``, which is not always the ``cmd:args``
-    separator: ``'curl http://ex.com/*'`` splits at the colon inside the URL,
-    giving ``(['curl', 'http'], '//ex.com/*')``.
-    :func:`toolguard.permissions.match_command` splits a DEFAULT pattern on the
-    first ``:`` too, so making this one smarter alone would put the two out of
-    step.
+    The ``:*``/``:**`` shorthand is recognised only when it is the pattern's literal
+    end, matching :func:`toolguard.permissions.match_command` and Claude Code's own
+    ``:*`` rule: a ``:`` anywhere else -- e.g. inside a URL like
+    ``'curl http://ex.com/*'`` -- is a literal character, not a separator. Only that
+    trailing ``**``/``*`` is normalized.
 
     Args:
         body: Wrapper-free DEFAULT pattern body (e.g. ``'git diff:*'``).
 
     Returns:
         ``(cmd_tokens, args_part)`` -- the command part split on whitespace, and
-        the stripped args part, empty when ``body`` holds no ``:``.
+        ``args_part`` either ``'*'`` or empty (no trailing ``:*``/``:**``).
     """
-    if ":" in body:
-        colon_idx = body.index(":")
-        cmd_part = body[:colon_idx].strip()
-        args_part = body[colon_idx + 1 :].strip()
+    if body.endswith(":**"):
+        cmd_part = body[: -len(":**")].strip()
+        args_part = "*"
+    elif body.endswith(":*"):
+        cmd_part = body[: -len(":*")].strip()
+        args_part = "*"
     else:
         cmd_part = body.strip()
         args_part = ""
@@ -48,14 +49,14 @@ def default_prefix_tokens(body: str) -> Optional[List[str]]:
 
     Returns:
         The command tokens (e.g. ``['uv', 'run', 'alembic']``), or ``None`` when
-        *body* is not DEFAULT or its args part is anything other than ``*`` or
-        ``**`` -- so ``'git commit:-m *'`` and a bare ``'ls'`` both give ``None``.
+        *body* is not DEFAULT or does not end in ``:*``/``:**`` -- so a bare ``'ls'``
+        gives ``None``.
     """
     ptype, inner = parse_pattern(body, extended_syntax=True)
     if ptype != PatternType.DEFAULT:
         return None
     cmd_tokens, args_part = split_default_body(inner)
-    if not cmd_tokens or args_part not in ("*", "**"):
+    if not cmd_tokens or args_part != "*":
         return None
     return cmd_tokens
 

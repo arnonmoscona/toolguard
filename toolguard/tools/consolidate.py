@@ -459,7 +459,7 @@ def _find_literal_alternations(
             continue
         # Prefix forms only.  A no-colon EXACT pattern cannot be folded into a
         # prefix regex without end-anchoring it, which the alternation does not do.
-        if args_part not in ("*", "**"):
+        if args_part != "*":
             continue
         default_entries.append((raw, cmd_tokens, args_part))
 
@@ -616,9 +616,9 @@ def _find_static_subsumptions(
     """
     Find static subsumption elimination opportunities in ``allow_patterns``.
 
-    Considers every ordered pair of DEFAULT patterns whose args part is ``*``,
-    ``**`` or absent, and proposes dropping the second when
-    :func:`_static_prefix_of` holds and :func:`_check_family2_safe` passes.
+    Considers every ordered pair of DEFAULT patterns whose args part is ``*``
+    or absent, and proposes dropping the second when :func:`_static_prefix_of`
+    holds and :func:`_check_family2_safe` passes.
     Pairs whose command parts are equal are skipped, so an exact duplicate is
     never reported as a subsumption.
 
@@ -641,7 +641,12 @@ def _find_static_subsumptions(
         cmd_tokens, args_part = split_default_body(body)
         if not cmd_tokens:
             continue
-        if args_part not in ("*", "**", ""):
+        # args_part == "" also covers a colon-bearing, non-trailing pattern like
+        # "git commit:-m *" (split_default_body no longer splits on a mid-pattern
+        # colon), whose cmd_tokens carry an fnmatch wildcard the "no args" cases
+        # below don't expect. _static_prefix_of/_check_family2_safe are token-based
+        # and still gate every proposal, so this hasn't produced a wrong one.
+        if args_part not in ("*", ""):
             continue
         cmd_str = " ".join(cmd_tokens)
         default_entries.append((raw, cmd_str, cmd_tokens, args_part))
@@ -860,7 +865,7 @@ def _find_prefix_broadenings(
         if ptype != PatternType.DEFAULT:
             continue
         cmd_tokens, args_part = split_default_body(body)
-        if args_part not in ("*", "**"):
+        if args_part != "*":
             continue
         if len(cmd_tokens) < 2:
             continue

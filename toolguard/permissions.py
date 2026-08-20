@@ -88,9 +88,9 @@ def contains_path_component(command_str: str, component: str) -> bool:
 
 def _matches_on_token_boundary(command_str: str, cmd_pattern: str) -> bool:
     """
-    Match *command_str* against a DEFAULT ``cmd:args`` pattern's command part when its
-    args part is a bare wildcard: the command must equal *cmd_pattern* or continue after
-    it with a space, so the prefix ends on a token boundary.
+    Match *command_str* against a DEFAULT ``cmd:*`` pattern's command part: the command
+    must equal *cmd_pattern* or continue after it with a space, so the prefix ends on a
+    token boundary.
 
     This is Claude Code's own ``Bash(x:*)`` == ``Bash(x *)`` semantics, where a trailing
     wildcard with a space before it requires a space or end-of-string -- ``git log:*``
@@ -144,10 +144,11 @@ def match_command(
     matching when a spelling contains that literal path component anywhere
     (via :func:`contains_path_component`). Otherwise it is matched via ``fnmatch``
     against every path-normalization :func:`_command_variants` produces from each
-    spelling -- as a ``cmd:args`` prefix-and-args split when the pattern contains a
-    ``:``, or as a whole-string match otherwise.
-    ``[regex]``/``[glob]``/``[native]`` patterns bypass all DEFAULT handling and match
-    the spellings directly via :func:`~toolguard.patterns.match_pattern`.
+    spelling -- as a boundary-checked ``cmd:*`` prefix when the pattern's ``**``-normalized
+    end is ``:*`` (Claude Code's own rule: the ``:*`` shorthand is recognised only there, so a
+    ``:`` anywhere else, e.g. inside a URL, is a literal character), or as a whole-string
+    match otherwise. ``[regex]``/``[glob]``/``[native]`` patterns bypass all DEFAULT
+    handling and match the spellings directly via :func:`~toolguard.patterns.match_pattern`.
 
     A leaf command that still contains a newline (should not normally happen after the
     multi-line pre-pass upstream) is excluded from DEFAULT matching, so a DEFAULT prefix
@@ -215,16 +216,21 @@ def match_command(
 
         pattern_normalized = actual_pattern.replace("**", "*")
 
-        if ":" in pattern_normalized:
-            # Any ':' triggers this branch, not only an intentional cmd:args
-            # separator -- e.g. 'curl http://ex.com/*' splits at the '//'-preceding
-            # colon and will not match as a whole-string pattern.
-            cmd_pattern, args_pattern = pattern_normalized.split(":", 1)
-            cmd_pattern = cmd_pattern.strip()
-            args_pattern = args_pattern.strip()
-
+        if pattern_normalized.endswith(":*"):
+            # ':*' is recognised as the trailing-wildcard shorthand only when it is
+            # this normalized pattern's end -- matching native's own rule. A ':'
+            # anywhere else (mid-pattern, or inside a URL like 'http://') is a
+            # literal character and falls through to the whole-string fnmatch below.
+            cmd_pattern = pattern_normalized[: -len(":*")].strip()
             pattern_parts = cmd_pattern.split(None, 1)
-            base_cmd = pattern_parts[0]
+            # pattern_parts is empty only for a bare ':*'/':**' pattern (cmd_pattern == ""
+            # after stripping), giving base_cmd = "". That MATCHES an empty command_str or
+            # one starting with a space (fnmatch("", "") is True) instead of raising
+            # IndexError -- a silent fail-open on those two shapes, not "matches nothing".
+            # It stays harmless because the command extractor upstream already strips
+            # leading whitespace and never emits an empty leaf, so no real Bash invocation
+            # reaches this branch that way; see docs/native-pattern-reference.md.
+            base_cmd = pattern_parts[0] if pattern_parts else ""
 
             # A pattern's base command is normalized the same way a real
             # command is, so e.g. 'bin/x:*' and './bin/x:*' both canonicalize
@@ -236,20 +242,15 @@ def match_command(
                     base_cmd_variants.append(normalized_base)
 
             for cmd_var in command_variants:
-                if args_pattern in ("*", "**", ""):
-                    matched_base = any(
-                        cmd_var.startswith(bc + " ") or cmd_var == bc
-                        for bc in base_cmd_variants
-                    )
-                    if matched_base:
-                        for bc in base_cmd_variants:
-                            full_cmd_pattern = bc + cmd_pattern[len(base_cmd) :]
-                            if _matches_on_token_boundary(cmd_var, full_cmd_pattern):
-                                return True, pattern
-                else:
-                    full_pattern = cmd_pattern + " " + args_pattern
-                    if fnmatch.fnmatch(cmd_var, full_pattern):
-                        return True, pattern
+                matched_base = any(
+                    cmd_var.startswith(bc + " ") or cmd_var == bc
+                    for bc in base_cmd_variants
+                )
+                if matched_base:
+                    for bc in base_cmd_variants:
+                        full_cmd_pattern = bc + cmd_pattern[len(base_cmd) :]
+                        if _matches_on_token_boundary(cmd_var, full_cmd_pattern):
+                            return True, pattern
         else:
             for cmd_var in command_variants:
                 if fnmatch.fnmatch(cmd_var, pattern_normalized):
