@@ -46,7 +46,10 @@ from toolguard.config_types import ToolPatternLayer as ToolPatternLayer
 from toolguard.config_types import (
     UnrecognizedFallbackSetting as UnrecognizedFallbackSetting,
 )
-from toolguard.config_validation import validate_permissions
+from toolguard.config_validation import (
+    find_wrong_shaped_permission_lists,
+    validate_permissions,
+)
 from toolguard.error_reporter import report_warning
 from toolguard.issues import Issue
 from toolguard.path_utils import require_project_root
@@ -709,9 +712,12 @@ class Configuration:
         layers: Discovered config layers, most-specific first.
         start_dir: Directory discovery started from (for :attr:`project_root`).
         parse_failures: ``(path, message)`` pairs for every governed config
-            file that EXISTED but failed to parse -- a missing file is not
-            recorded, only one that was found and was broken (unreadable, or
-            its top level was not an object/table). Non-empty is a severe
+            file that EXISTED but was broken -- either unreadable/unparseable,
+            or readable but with a ``[permissions]``/``[hard_deny]`` list the
+            wrong shape (e.g. ``deny = "Bash(rm:*)"`` where a list is
+            expected, or ``[[permissions]]`` where a table is expected; see
+            :func:`toolguard.config_validation.find_wrong_shaped_permission_lists`).
+            A missing file is never recorded. Non-empty is a severe
             safety-floor condition: every governed decision EXCEPT an
             already-``'deny'`` one is clamped to ``'ask'`` by
             :func:`~toolguard.permission_resolution.resolve_permission_cascade`
@@ -1571,9 +1577,11 @@ class Configuration:
 
         Detects:
 
-        - A governed config file that failed to parse entirely -- reported
-          FIRST, since it is the most severe class of issue: every decision
-          is clamped to 'ask' while it persists.
+        - A governed config file that failed to parse entirely, OR that
+          parsed but has a ``[permissions]``/``[hard_deny]`` list the wrong
+          shape (see :attr:`parse_failures`) -- reported FIRST, since it is
+          the most severe class of issue: every decision is clamped to
+          ``'ask'`` while it persists.
         - Both a TOML and a JSON config file present at the same level/base.
         - A rules-directory filename stem shadowed across the two candidate
           rules directories.
@@ -1805,6 +1813,14 @@ class Configuration:
             )
 
         # 4) Permission validation over the merged toolguard_hook content only.
+        # A layer whose permissions section (or an allow/deny/ask list within
+        # it) is the wrong shape contributes nothing here -- it was already
+        # recorded into parse_failures by load_configuration() (see
+        # Configuration.parse_failures) and reported once via issue (0)
+        # above. Iterating a bare string here instead of skipping it would
+        # merge it character-by-character (the bug this guard exists to
+        # avoid) and produce a second, differently-worded error for the same
+        # defect.
         merged_config: Dict = {
             "governed_tools": [],
             "additional_supported_tools": [],
@@ -1821,31 +1837,15 @@ class Configuration:
                 if tool not in merged_config["additional_supported_tools"]:
                     merged_config["additional_supported_tools"].append(tool)
             permissions = content.get("permissions", {})
-            if isinstance(permissions, dict):
-                for perm_type in ("allow", "deny", "ask"):
-                    for perm in permissions.get(perm_type, []):
-                        if perm not in merged_config["permissions"][perm_type]:
-                            merged_config["permissions"][perm_type].append(perm)
-            elif permissions:
-                # e.g. [[permissions]] (array of tables) instead of
-                # [permissions]: parses cleanly but every rule in the layer
-                # is unmergeable, so record the loss instead of silently
-                # dropping the layer's whole permissions section.
-                issues.append(
-                    Issue(
-                        level="error",
-                        message=(
-                            f"{layer.provenance.describe_brief()} permissions "
-                            f"section is not a table (found "
-                            f"{type(permissions).__name__}); every rule in it "
-                            f"was discarded"
-                        ),
-                        corrective_steps=(
-                            'Write it as "[permissions]" with allow/deny/ask '
-                            'arrays, not "[[permissions]]".'
-                        ),
-                    )
-                )
+            if not isinstance(permissions, dict):
+                continue
+            for perm_type in ("allow", "deny", "ask"):
+                perm_list = permissions.get(perm_type, [])
+                if not isinstance(perm_list, list):
+                    continue
+                for perm in perm_list:
+                    if perm not in merged_config["permissions"][perm_type]:
+                        merged_config["permissions"][perm_type].append(perm)
 
         issues.extend(validate_permissions(merged_config))
 
@@ -2010,6 +2010,25 @@ def _parse_source_recording_failures(
     return content
 
 
+def _record_shape_defects(
+    content: dict, path: Path, parse_failures: List[Tuple[Path, str]]
+) -> None:
+    """
+    Feed every wrong-shaped ``[permissions]``/``[hard_deny]`` list in
+    *content* into *parse_failures*.
+
+    A layer that parses cleanly but has a bare string where ``allow`` /
+    ``deny`` / ``ask`` (or the whole section) should be a list is otherwise
+    coerced to "no rules" with no signal at all (see
+    :meth:`Configuration._extract_tool_entries`) -- a deny/hard_deny rule can
+    vanish silently. Recording it here makes the TOO-19 ask-floor engage for
+    this class of defect exactly as it does for a syntax error, per
+    :func:`toolguard.config_validation.find_wrong_shaped_permission_lists`.
+    """
+    for message in find_wrong_shaped_permission_lists(content):
+        parse_failures.append((path, message))
+
+
 def load_configuration(
     start_dir: Path = None, ignore_env_override: bool = False
 ) -> Configuration:
@@ -2049,6 +2068,7 @@ def load_configuration(
         explicit = Path(settings_path)
         content = _parse_source_recording_failures(explicit, "json", parse_failures)
         if content is not None:
+            _record_shape_defects(content, explicit, parse_failures)
             layers.append(
                 ConfigLayer(
                     provenance=Provenance("explicit", "claude", "json", explicit),
@@ -2063,6 +2083,7 @@ def load_configuration(
                 hook_toml, "toml", parse_failures
             )
             if content is not None:
+                _record_shape_defects(content, hook_toml, parse_failures)
                 layers.append(
                     ConfigLayer(
                         provenance=Provenance(
@@ -2076,6 +2097,7 @@ def load_configuration(
                 hook_json, "json", parse_failures
             )
             if content is not None:
+                _record_shape_defects(content, hook_json, parse_failures)
                 layers.append(
                     ConfigLayer(
                         provenance=Provenance(
@@ -2102,6 +2124,7 @@ def load_configuration(
         content = _parse_source_recording_failures(path, file_format, parse_failures)
         if content is None:
             continue
+        _record_shape_defects(content, path, parse_failures)
         unexpected_keys: Tuple[str, ...] = ()
         duplicate_format = False
         shadowed_path: Optional[Path] = None

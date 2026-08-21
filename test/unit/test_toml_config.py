@@ -10,9 +10,11 @@ from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard import config as config_module
+from toolguard.api import decide
 from toolguard.config_validation import (
     KNOWN_SUPPORTED_TOOLS,
     extract_tool_name,
+    find_wrong_shaped_permission_lists,
     validate_permissions,
 )
 from toolguard.error_log import log_warning, log_error
@@ -515,6 +517,221 @@ class TestWrongShapedTomlSections(ConfigIsolationMixin, unittest.TestCase):
             "the [[permissions]] section was discarded with no parse failure, "
             "no validation issue and no surviving rule",
         )
+        self.assertTrue(
+            configuration.parse_failures,
+            "the [[permissions]] loss should trip the TOO-19 ask-floor via "
+            "parse_failures, not merely surface as a lesser-severity signal",
+        )
+
+
+class TestWrongShapedPermissionListsFailOpen(ConfigIsolationMixin, unittest.TestCase):
+    """
+    TOO-45 ticket 52: a permissions list written as a bare string is not
+    just discarded -- once ANY other rule makes the tool look configured,
+    the loss fails OPEN (decision becomes 'allow', not 'ask'), because
+    ``Configuration._extract_tool_entries`` silently coerces a non-list
+    value to "no rules". These tests assert the DECISION, not just that a
+    warning was logged, and cover every list key (not only the ``deny`` one
+    the fail-open case is easiest to see with).
+    """
+
+    def _write_project_config(self, text: str):
+        """Write *text* as the project's toolguard_hook.toml and load it."""
+        _home, project_dir = self.isolate_config_environment()
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "toolguard_hook.toml").write_text(text)
+        config_module._parse_config_file_cached.cache_clear()
+        self.addCleanup(config_module._parse_config_file_cached.cache_clear)
+        return load_configuration()
+
+    def test_bare_string_deny_fails_closed_via_the_ask_floor(self):
+        """
+        Given a project config with a valid allow list and deny written as a
+            bare string instead of a list, under a no_match_fallback that
+            would otherwise resolve an unmatched command to 'allow'
+        When a command only the (lost) deny rule would have covered is
+            evaluated
+        Then the decision is 'ask', not 'allow' -- the shape defect trips
+            the TOO-19 ask-floor instead of silently vanishing
+
+        Measured before the fix: decision was 'allow' with matched_rule=None
+        -- a one-character typo silently removed a deny rule with no signal
+        of any kind, under the same no_match_fallback this repo's own
+        toolguard_hook.toml sets.
+        """
+        configuration = self._write_project_config(
+            'no_match_fallback = "allow_with_no_warnings"\n'
+            "[permissions]\n"
+            'allow = ["Bash(ls:*)"]\n'
+            'deny = "Bash(rm:*)"\n'
+        )
+        verdict = decide(configuration, "Bash", "rm -rf /tmp/x")
+
+        self.assertEqual(verdict.decision, "ask")
+        self.assertIsNone(verdict.matched_rule)
+        self.assertTrue(configuration.parse_failures)
+
+    def test_control_deny_as_a_list_still_denies(self):
+        """
+        Given the same config with deny correctly written as a list
+        When the same command is evaluated
+        Then it is denied and matches the deny pattern -- proving the
+            bare-string case above is about the shape, not the pattern
+        """
+        configuration = self._write_project_config(
+            'no_match_fallback = "allow_with_no_warnings"\n'
+            "[permissions]\n"
+            'allow = ["Bash(ls:*)"]\n'
+            'deny = ["Bash(rm:*)"]\n'
+        )
+        verdict = decide(configuration, "Bash", "rm -rf /tmp/x")
+
+        self.assertEqual(verdict.decision, "deny")
+        self.assertEqual(verdict.matched_rule, "rm:*")
+        self.assertEqual(configuration.parse_failures, ())
+
+    def test_bare_string_deny_produces_no_character_level_garbage_issues(self):
+        """
+        Given permissions.deny written as a bare string
+        When validation_issues() merges permissions across layers
+        Then no issue names a single-character pseudo-tool (e.g. 'B', 'a') --
+            the merge step must skip the wrong-shaped value rather than
+            iterate its characters
+
+        Regression guard for the trap this ticket described: fixing the
+        per-key shape check alone left Configuration.validation_issues()'s
+        own merge loop iterating the bare string one character at a time.
+        """
+        configuration = self._write_project_config(
+            '[permissions]\nallow = ["Bash(ls:*)"]\ndeny = "Bash(rm:*)"\n'
+        )
+        messages = [issue.message for issue in configuration.validation_issues()]
+        self.assertFalse(
+            any('Tool "B"' in m or 'Tool "a"' in m for m in messages),
+            f"character-level garbage issue found: {messages!r}",
+        )
+
+    def test_bare_string_allow_is_reported_and_clamped(self):
+        """
+        Given the ticket's original example -- allow written as a bare
+            string
+        When the config loads
+        Then the loss is recorded as a parse failure (not merely a warning),
+            so the ask-floor engages for this shape too
+        """
+        configuration = self._write_project_config(
+            '[permissions]\nallow = "Bash(ls:*)"\n'
+        )
+        self.assertTrue(configuration.parse_failures)
+        self.assertTrue(
+            any(
+                issue.level == "error" and "allow" in issue.message
+                for issue in configuration.validation_issues()
+            )
+        )
+
+    def test_every_permissions_list_key_is_shape_checked(self):
+        """
+        Given permissions.allow / .deny / .ask each written as a bare string
+            in turn
+        When the config loads
+        Then every one of them trips parse_failures -- not just the key the
+            ticket happened to name
+        """
+        for key in ("allow", "deny", "ask"):
+            with self.subTest(key=key):
+                configuration = self._write_project_config(
+                    f'[permissions]\n{key} = "Bash(ls:*)"\n'
+                )
+                self.assertTrue(
+                    configuration.parse_failures,
+                    f"permissions.{key} as a bare string should be a parse failure",
+                )
+
+    def test_hard_deny_lists_are_also_shape_checked(self):
+        """
+        Given hard_deny.allow / .deny each written as a bare string
+        When the config loads
+        Then it trips parse_failures too -- hard_deny uses the same
+            coerce-to-empty extraction as [permissions] and is just as
+            capable of silently losing a deny rule
+        """
+        for key in ("allow", "deny"):
+            with self.subTest(key=key):
+                configuration = self._write_project_config(
+                    f'[hard_deny]\n{key} = "Bash(rm:*)"\n'
+                )
+                self.assertTrue(
+                    configuration.parse_failures,
+                    f"hard_deny.{key} as a bare string should be a parse failure",
+                )
+
+
+class TestFindWrongShapedPermissionLists(unittest.TestCase):
+    """Unit tests for the shared per-layer shape scanner, isolated from
+    parsing/discovery."""
+
+    def test_well_shaped_content_reports_nothing(self):
+        """
+        Given a layer whose permissions and hard_deny lists are all lists
+        When the content is scanned
+        Then no defects are found
+        """
+        content = {
+            "permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []},
+            "hard_deny": {"allow": [], "deny": ["Bash(curl:*)"]},
+        }
+        self.assertEqual(find_wrong_shaped_permission_lists(content), ())
+
+    def test_absent_sections_report_nothing(self):
+        """
+        Given a layer with neither a permissions nor a hard_deny section
+        When the content is scanned
+        Then no defects are found
+        """
+        self.assertEqual(find_wrong_shaped_permission_lists({}), ())
+
+    def test_permissions_section_not_a_table_is_named(self):
+        """
+        Given permissions written as [[permissions]] (a list, not a table)
+        When the content is scanned
+        Then one message names the permissions section
+        """
+        messages = find_wrong_shaped_permission_lists(
+            {"permissions": [{"allow": ["Bash(ls:*)"]}]}
+        )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("permissions", messages[0])
+        self.assertIn("not a table", messages[0])
+
+    def test_hard_deny_section_not_a_table_is_named(self):
+        """
+        Given hard_deny written as a list rather than a table
+        When the content is scanned
+        Then one message names the hard_deny section
+        """
+        messages = find_wrong_shaped_permission_lists({"hard_deny": ["oops"]})
+        self.assertEqual(len(messages), 1)
+        self.assertIn("hard_deny", messages[0])
+        self.assertIn("not a table", messages[0])
+
+    def test_each_bare_string_list_is_named_with_its_section(self):
+        """
+        Given permissions.deny and hard_deny.allow each written as a bare
+            string
+        When the content is scanned
+        Then both are reported, each naming its own section.key
+        """
+        messages = find_wrong_shaped_permission_lists(
+            {
+                "permissions": {"allow": ["Bash(ls:*)"], "deny": "Bash(rm:*)"},
+                "hard_deny": {"allow": "Bash(curl:*)"},
+            }
+        )
+        self.assertEqual(len(messages), 2)
+        self.assertTrue(any("permissions.deny" in m for m in messages))
+        self.assertTrue(any("hard_deny.allow" in m for m in messages))
 
 
 class TestExtractToolName(unittest.TestCase):

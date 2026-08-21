@@ -1,6 +1,6 @@
 """Content-level validation of a toolguard permissions section."""
 
-from typing import List, Tuple
+from typing import List, Mapping, Tuple
 
 from toolguard.issues import Issue
 from toolguard.rule_entry import normalize_entry
@@ -10,6 +10,73 @@ from toolguard.tool_spec import KNOWN_TOOL_NAMES
 #: recognized by adding it to ``additional_supported_tools`` in config, not by
 #: extending this.
 KNOWN_SUPPORTED_TOOLS = KNOWN_TOOL_NAMES
+
+#: Sections that must be tables, and the list-typed keys each must hold when
+#: present. Shared by :func:`find_wrong_shaped_permission_lists` (per-layer,
+#: raw content) and :func:`validate_permissions` (merged ``permissions`` only
+#: -- ``hard_deny`` is never merged across layers, so it is checked solely by
+#: the per-layer scan).
+_SHAPE_CHECKED_SECTIONS: Mapping[str, Tuple[str, ...]] = {
+    "permissions": ("allow", "deny", "ask"),
+    "hard_deny": ("allow", "deny"),
+}
+
+
+def describe_wrong_shaped_section(section_key: str, value: object) -> str:
+    """Message for a ``[section_key]`` section present but not a table."""
+    return (
+        f'"{section_key}" section is not a table (found {type(value).__name__}); '
+        "every rule in it was discarded"
+    )
+
+
+def describe_wrong_shaped_list(key: str, value: object) -> str:
+    """Message for a permissions list (``key``) present but not a list."""
+    return (
+        f'"{key}" is not a list (found {type(value).__name__}); every rule '
+        "in it was discarded"
+    )
+
+
+def find_wrong_shaped_permission_lists(
+    content: Mapping[str, object],
+) -> Tuple[str, ...]:
+    """
+    Find every wrong-shaped ``[permissions]``/``[hard_deny]`` list in one raw,
+    UN-merged config layer.
+
+    A ``str`` is neither a ``dict`` (for the section itself, e.g.
+    ``[[permissions]]``) nor safe to iterate as a ``list`` (for ``allow`` /
+    ``deny`` / ``ask`` written as a bare string) -- both shapes are silently
+    coerced to "no rules" by
+    :meth:`~toolguard.config.Configuration._extract_tool_entries`, which is
+    what makes this a fail-OPEN defect rather than a merely-stricter one: a
+    ``deny`` rule can vanish with nothing to show for it. Callers feed the
+    result into :attr:`~toolguard.config.Configuration.parse_failures` so the
+    TOO-19 ask-floor engages exactly as it does for a syntactically broken
+    file.
+
+    Args:
+        content: One layer's raw, un-merged parsed dict (TOML or JSON).
+
+    Returns:
+        One message per defect found, in section/key order.
+    """
+    messages: List[str] = []
+    for section_key, list_keys in _SHAPE_CHECKED_SECTIONS.items():
+        section = content.get(section_key)
+        if not section:
+            continue
+        if not isinstance(section, dict):
+            messages.append(describe_wrong_shaped_section(section_key, section))
+            continue
+        for list_key in list_keys:
+            value = section.get(list_key)
+            if value is not None and not isinstance(value, list):
+                messages.append(
+                    describe_wrong_shaped_list(f"{section_key}.{list_key}", value)
+                )
+    return tuple(messages)
 
 
 def extract_tool_name(permission: str) -> str:
@@ -71,10 +138,7 @@ def validate_permissions(config: dict) -> Tuple[Issue, ...]:
         add_issue(
             Issue(
                 level="error",
-                message=(
-                    f"permissions section is not a table (found "
-                    f"{type(permissions).__name__}); every rule in it was discarded"
-                ),
+                message=describe_wrong_shaped_section("permissions", permissions),
                 corrective_steps=(
                     'Write it as "[permissions]" with allow/deny/ask arrays, not '
                     '"[[permissions]]".'
@@ -93,10 +157,7 @@ def validate_permissions(config: dict) -> Tuple[Issue, ...]:
             add_issue(
                 Issue(
                     level="error",
-                    message=(
-                        f'"{permission_list}" is not a list (found '
-                        f"{type(perms).__name__}); every rule in it was discarded"
-                    ),
+                    message=describe_wrong_shaped_list(permission_list, perms),
                     corrective_steps=(
                         f'Write "{permission_list}" as an array of strings, e.g. '
                         f'{permission_list} = ["Bash(ls:*)"].'

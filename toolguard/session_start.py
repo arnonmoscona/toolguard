@@ -17,7 +17,8 @@ Checks performed, independent of each other:
    ``takeover_mode.enabled`` disagreements, which persist in the log after
    the configuration is fixed. The most recent file with recorded entries is
    surfaced.
-3. Any governed config file that failed to parse -- see
+3. Any governed config file that is broken -- unparseable, or parsed but
+   with a wrong-shaped ``[permissions]``/``[hard_deny]`` list -- see
    :func:`_detect_broken_config_files`.
 4. Any ``*_fallback`` setting written with an unrecognized value -- see
    :func:`_detect_unrecognized_fallbacks`.
@@ -138,7 +139,8 @@ def _format_summary(
         dynamic_conflict: A ``(path_str, count)`` tuple for the most recent
             conflict log file with recorded entries, or None.
         broken_files: ``(path, message)`` pairs for governed config files
-            that failed to parse.
+            that are broken (unparseable, or a wrong-shaped permissions
+            list).
         shadow_status: A :class:`ShadowStatus`, or ``None``.
         unrecognized_fallbacks:
             :class:`~toolguard.config_types.UnrecognizedFallbackSetting` records.
@@ -242,15 +244,17 @@ def _format_summary(
 
 def _detect_broken_config_files(config: Configuration):
     """
-    Return every governed config file that failed to parse.
+    Return every governed config file that is broken -- unparseable, or
+    parsed but with a wrong-shaped ``[permissions]``/``[hard_deny]`` list
+    (see :attr:`~toolguard.config.Configuration.parse_failures`).
 
     A non-empty result means toolguard is clamping every decision to ``'ask'``
     -- except one already resolved to ``'deny'``, which is never weakened --
     until the file(s) are fixed.
 
     Returns:
-        A tuple of ``(path, message)`` pairs, empty when every governed config
-        file parsed.
+        A tuple of ``(path, message)`` pairs, empty when every governed
+        config file is sound.
     """
     return tuple(config.parse_failures)
 
