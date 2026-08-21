@@ -2,7 +2,7 @@
 
 import unittest
 
-from toolguard.compound import decompose, resolve_compound_permission
+from toolguard.compound import ResolveOneResult, decompose, resolve_compound_permission
 from toolguard.parser.command_extractor import LeafCommand
 from toolguard.parser.multiline import extract_structured
 from toolguard.permissions import check_permission
@@ -32,7 +32,7 @@ def _parts(command: str) -> list[tuple]:
 def _resolve(command: str, allow: list[str], deny: list[str]) -> str:
     """Resolve a (possibly compound/multi-line) command to a bare decision string."""
     return resolve_compound_permission(
-        command, lambda c: (*check_permission(c, allow, deny), None)
+        command, lambda c: ResolveOneResult(*check_permission(c, allow, deny))
     ).decision
 
 

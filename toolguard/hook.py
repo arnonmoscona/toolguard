@@ -24,11 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from toolguard import ambient, error_reporter
 from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
-from toolguard.compound import (
-    FALLBACK_ALLOW_PLACEHOLDER,
-    FALLBACK_DENY_PLACEHOLDER,
-    fallback_kind_for_reason,
-)
+from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
@@ -448,39 +444,38 @@ def _log_takeover_enabled_conflict(conflict, log_dir) -> None:
 
 
 def _reason_suffix_or_placeholder(
-    decision: str, reason: str, placeholder: str, matched_rule: Optional[str]
+    fallback_kind: Optional[str], placeholder: str, matched_rule: Optional[str]
 ) -> Optional[str]:
     """
-    Return *matched_rule*, or *placeholder* when *reason* names a fallback escape hatch.
+    Return *matched_rule*, or *placeholder* when *fallback_kind* names a fallback escape hatch.
 
     A fallback escape-hatch reason ends in the same ``": <text>"`` shape as a
     genuine rule-match reason, but the text is a truncated display command,
-    not a pattern --
-    e.g. ``Denied by undecidable_fallback=deny (...): python -c``. Crediting
-    that text to a rule would fabricate an attribution for a rule that does
-    not exist in the config.
-    :func:`~toolguard.compound.fallback_kind_for_reason` is the mechanism
-    that tells the two shapes apart. Only the deny side of the audit log
-    still needs this reason-text classification; the allow side reads
-    :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` directly
+    not a pattern -- e.g. ``Denied by undecidable_fallback=deny (...): python
+    -c``. Crediting that text to a rule would fabricate an attribution for a
+    rule that does not exist in the config.
+    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_kind` is the
+    structural fact that tells the two shapes apart -- computed at the point
+    the outcome was decided, never re-derived from *reason* here. The allow
+    side reads the per-unit :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`
     instead (see :func:`_unit_matched_rule_for_log`).
 
     Args:
-        decision: The decision *reason* accompanies (``'allow'`` or
-            ``'deny'``).
-        reason: Consulted only for the escape-hatch classification above --
-            never parsed for a value.
-        placeholder: What to return when *reason* names a fallback escape
-            hatch instead of a genuine rule match.
+        fallback_kind: The verdict's own
+            :attr:`~toolguard.config_types.RuntimeVerdict.fallback_kind` --
+            ``'denied'`` for the ``undecidable_fallback=deny`` escape hatch,
+            else ``None``.
+        placeholder: What to return when *fallback_kind* names a fallback
+            escape hatch instead of a genuine rule match.
         matched_rule: The structured matched-rule value already resolved by
             the caller (``None`` when no rule matched).
 
     Returns:
-        *placeholder* when *reason* names a fallback escape hatch, otherwise
+        *placeholder* when *fallback_kind* is not ``None``, otherwise
         *matched_rule* unchanged (which may itself be ``None`` -- an absent
         record beats a false one either way).
     """
-    if fallback_kind_for_reason(decision, reason) is not None:
+    if fallback_kind is not None:
         return placeholder
     return matched_rule
 
@@ -505,9 +500,10 @@ def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
     """
     Derive the ``Matched Rule`` audit-log field for one sub-command's unit verdict.
 
-    Reads :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` directly
-    -- the structural counterpart to :func:`_reason_suffix_or_placeholder`'s
-    text-based classification.
+    Reads :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` directly,
+    at the UNIT altitude -- the counterpart to
+    :func:`_reason_suffix_or_placeholder`'s RUNTIME-altitude read of
+    :attr:`~toolguard.config_types.RuntimeVerdict.fallback_kind`.
 
     Args:
         unit: The sub-command's resolved :class:`~toolguard.config_types.UnitVerdict`.
@@ -985,23 +981,24 @@ def _log_non_allow_decision(
     'ask' is recorded under ``note`` (it is not a violation) with the full
     reason text -- never split, so it carries no fabrication risk regardless
     of the reason's shape. A deny records the violated rule from
-    ``verdict.matched_rule`` via :func:`_reason_suffix_or_placeholder` (see its
-    docstring for the escape-hatch/placeholder mechanism). Unlike the allow
-    side, when ``verdict.matched_rule`` is ``None`` and ``verdict.reason`` is
-    not a recognised escape hatch, the full reason is used (not ``None``) --
-    this covers reasons like ``"No commands to evaluate"`` that never named a
-    rule at all.
+    ``verdict.matched_rule`` via :func:`_reason_suffix_or_placeholder`, keyed
+    off ``verdict.fallback_kind`` (see that function's docstring for the
+    escape-hatch/placeholder mechanism). Unlike the allow side, when
+    ``verdict.matched_rule`` is ``None`` and ``verdict.fallback_kind`` is
+    also ``None``, the full reason is used (not ``None``) -- this covers
+    reasons like ``"No commands to evaluate"`` that never named a rule at
+    all.
 
     Args:
-        verdict: The resolved 'ask' or deny verdict. ``reason`` is consulted
-            only for :func:`_reason_suffix_or_placeholder`'s
-            fallback-escape-hatch classification (the 'ask' branch also uses
-            it verbatim as the log note). ``provenance`` is rendered via
-            :func:`_provenance_brief`, suppressed the same way as
-            ``matched_rule`` when ``reason`` names a fallback escape hatch
-            (never paired with a rule that did not actually decide the
-            verdict), and naturally absent for a hard deny (pooled across
-            levels, no single provenance).
+        verdict: The resolved 'ask' or deny verdict. ``fallback_kind`` drives
+            :func:`_reason_suffix_or_placeholder`'s classification (the
+            'ask' branch instead uses ``reason`` verbatim as the log note).
+            ``provenance`` is rendered via :func:`_provenance_brief`,
+            suppressed the same way as ``matched_rule`` when
+            ``fallback_kind`` names a fallback escape hatch (never paired
+            with a rule that did not actually decide the verdict), and
+            naturally absent for a hard deny (pooled across levels, no
+            single provenance).
         log_target: What is being logged -- a command, or ``Tool(path)``.
         agent_info: Agent identification string.
         env_config: Environment configuration dict.
@@ -1023,12 +1020,11 @@ def _log_non_allow_decision(
         return
 
     # Use the structured violated rule for logging -- an absent/generic
-    # record beats a false one when reason names a fallback escape hatch
-    # rather than a matched rule. Provenance is suppressed the same way
+    # record beats a false one when fallback_kind names a fallback escape
+    # hatch rather than a matched rule. Provenance is suppressed the same way
     # (see the Args docstring above).
     suffix = _reason_suffix_or_placeholder(
-        verdict.decision,
-        verdict.reason,
+        verdict.fallback_kind,
         FALLBACK_DENY_PLACEHOLDER,
         verdict.matched_rule,
     )

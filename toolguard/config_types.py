@@ -466,13 +466,15 @@ class UnitVerdict:
             hard-deny (pooled across levels, no single provenance), a
             fail-closed default deny, or an escape-hatch outcome (same
             reasoning as ``matched_rule`` above).
-        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- structural
-            counterpart of :func:`~toolguard.compound.fallback_kind_for_reason`, computed
-            once here rather than re-derived by parsing ``reason`` downstream.
-            ``'warned'``/``'silent'`` name the ``allow`` escape hatch (with/without a
-            warning); ``'denied'`` names the ``undecidable_fallback=deny`` escape hatch.
-            ``None`` whenever no allow/deny escape hatch produced this outcome -- including
-            the ASK floor itself, which is not an allow or deny escape hatch.
+        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- set once, here,
+            structurally, at the point this unit's outcome is decided; never re-derived by
+            parsing ``reason`` downstream. ``'warned'``/``'silent'`` name the ``allow`` escape
+            hatch (with/without a warning); ``'denied'`` names the ``undecidable_fallback=deny``
+            escape hatch. ``None`` whenever no allow/deny escape hatch produced this outcome --
+            including the ASK floor itself (not an allow or deny escape hatch) and a plain
+            ``no_match_fallback=deny`` (a real "no rule matched" outcome, but deliberately left
+            untagged the same as a genuine rule-matched deny -- see
+            :attr:`RuntimeVerdict.fallback_kind`).
         reason: Human-readable reason for THIS unit's own decision -- for an ask-floor leaf
             or an undecidable segment, it already names the escape hatch. Distinct from
             :attr:`RuntimeVerdict.reason`, which is the WHOLE compound's combined reason,
@@ -583,9 +585,7 @@ class RuntimeVerdict:
             (for Bash) ``undecidable_fallback``. ``False`` for every other
             decision, including an explicit rule match and an 'allow'
             produced by a no-warning fallback value. Structurally-known
-            data on the production path (never derived from *reason*
-            there); :mod:`toolguard.compound`'s own test-only legacy
-            driver still derives it from *reason* text.
+            data throughout -- never derived from *reason*.
         matched_rule: The deciding rule's pattern text (wrapper-free), or
             ``None`` when there is no single RULE to attribute -- a
             fail-closed default, a fallback/floor escape hatch (even when
@@ -594,11 +594,15 @@ class RuntimeVerdict:
             sub-command decided. Also deliberately ``None`` for a file-path
             hard-deny (unlike a Bash hard-deny, which does record its
             pattern here -- see :func:`~toolguard.resolve.resolve_file_path_permission_detailed`'s
-            own comment for why). Not derived from *reason*, though
-            ``hook.py``'s deny log entry still uses the reason-based
-            :func:`~toolguard.compound.fallback_kind_for_reason` for its own
-            rendering (the ask log entry uses the full ``reason`` text verbatim
-            and never reaches that classifier).
+            own comment for why). Not derived from *reason*.
+        fallback_kind: The deny-side counterpart of :attr:`UnitVerdict.fallback_kind`, at the
+            RUNTIME altitude: ``'denied'`` when this 'deny' came from the
+            ``undecidable_fallback=deny`` escape hatch (Bash-only), else ``None`` -- including
+            for a genuine rule/hard-deny match, a fail-closed default, and a plain
+            ``no_match_fallback=deny`` (deliberately left untagged, indistinguishable from a
+            genuine deny -- both mean "nothing here permits this"). Always ``None`` for a
+            non-``'deny'`` decision. ``hook.py``'s deny-side audit log reads this field
+            directly, never *reason*.
         tool: See "``tool``/``target``" above.
         target: As ``tool``, the command string (Bash) or file path
             (file-path tools) under evaluation.
@@ -617,6 +621,7 @@ class RuntimeVerdict:
     additional_context: Optional[str] = None
     fallback_warning: bool = False
     matched_rule: Optional[str] = None
+    fallback_kind: Optional[str] = None
     tool: Optional[str] = None
     target: Optional[str] = None
 

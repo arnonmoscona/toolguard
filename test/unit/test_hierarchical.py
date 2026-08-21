@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.compound import resolve_compound_permission
+from toolguard.compound import ResolveOneResult, resolve_compound_permission
 from toolguard.config import _discover_levels, load_configuration
 from toolguard.permission_resolution import resolve_command_permission
 
@@ -349,7 +349,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
 
         def _resolve_one(sub):
             resolved = resolve_command_permission(config, "Bash", sub)
-            return resolved.decision, resolved.reason, resolved.additional_context
+            return ResolveOneResult(
+                resolved.decision, resolved.reason, resolved.additional_context
+            )
 
         _verdict = resolve_compound_permission("git status && rm -rf /", _resolve_one)
         decision, _reason, _context = (
@@ -374,7 +376,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         def _resolve_one(sub):
             cascaded.append(sub)
             resolved = resolve_command_permission(config, "Bash", sub)
-            return resolved.decision, resolved.reason, resolved.additional_context
+            return ResolveOneResult(
+                resolved.decision, resolved.reason, resolved.additional_context
+            )
 
         _verdict = resolve_compound_permission("git status && ls -l", _resolve_one)
         decision, _reason, _context = (
@@ -645,7 +649,9 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
         When resolve_compound_permission runs
         Then it denies with a 'no valid commands' reason
         """
-        _verdict = resolve_compound_permission("", lambda _c: ("allow", "x", None))
+        _verdict = resolve_compound_permission(
+            "", lambda _c: ResolveOneResult("allow", "x", None)
+        )
         decision, reason, _context = (
             _verdict.decision,
             _verdict.reason,
@@ -663,8 +669,10 @@ class TestResolveCompoundEdgeCases(unittest.TestCase):
 
         def _resolve_one(sub):
             if sub.startswith("rm"):
-                return "ask", "Command requires approval: rm *", None
-            return "allow", "Command matches allow pattern: git *", None
+                return ResolveOneResult("ask", "Command requires approval: rm *", None)
+            return ResolveOneResult(
+                "allow", "Command matches allow pattern: git *", None
+            )
 
         _verdict = resolve_compound_permission("git status && rm x", _resolve_one)
         decision, reason, _context = (

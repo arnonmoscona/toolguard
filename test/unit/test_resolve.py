@@ -1749,6 +1749,7 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             reason=result.reason,
             matched_rule=result.matched_rule,
             additional_context=result.additional_context,
+            fallback_kind=result.fallback_kind,
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
@@ -2304,6 +2305,150 @@ class TestFallbackWarningField(unittest.TestCase):
                 else:
                     self.assertIn("no warning", result.reason)
                     self.assertNotIn("allow_with_warning", result.reason)
+
+
+class TestRuntimeVerdictFallbackKind(unittest.TestCase):
+    """RuntimeVerdict.fallback_kind, asserted at the point of decision -- not via the
+    audit log downstream. Only ``'denied'``/``None`` are reachable here (``'warned'``/
+    ``'silent'`` are UnitVerdict-only, see test_compound_resolve_seam.py)."""
+
+    def test_undecidable_fallback_deny_sets_denied(self):
+        """
+        Given undecidable_fallback='deny' and a single ASK-floor leaf with no
+            matching rule
+        When resolve_bash_permission_detailed resolves it
+        Then the decision is 'deny' and fallback_kind is 'denied' -- set
+            structurally at the point the escape hatch decided, not derived
+            from reason text
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "deny",
+                        "permissions": {"allow": ["Bash(ls)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "deny")
+        self.assertEqual(result.fallback_kind, "denied")
+
+    def test_genuine_deny_rule_match_leaves_fallback_kind_none(self):
+        """
+        Given a command that matches a configured deny rule directly (no
+            escape hatch involved at all)
+        When resolve_bash_permission_detailed resolves it
+        Then the decision is 'deny' and fallback_kind is None
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {"permissions": {"allow": ["Bash(*)"], "deny": ["Bash(rm -rf *)"]}},
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "rm -rf /tmp/x", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "deny")
+        self.assertIsNone(result.fallback_kind)
+
+    def test_hard_deny_leaves_fallback_kind_none(self):
+        """
+        Given a command matching the unoverridable [hard_deny] pool
+        When resolve_bash_permission_detailed resolves it
+        Then the decision is 'deny' and fallback_kind is None -- a hard deny
+            is always a genuine match, never an escape hatch
+        """
+        config = _make_config(
+            [("project", "toolguard_hook", {"hard_deny": {"deny": ["Bash(curl:*)"]}})]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "curl http://x", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "deny")
+        self.assertIsNone(result.fallback_kind)
+
+    def test_no_match_fallback_deny_leaves_fallback_kind_none_for_bash(self):
+        """
+        Given no_match_fallback='deny' and a command no rule covers at all
+        When resolve_bash_permission_detailed resolves it
+        Then the decision is 'deny' and fallback_kind is None -- deliberately
+            left untagged, the same as a genuine deny (both mean "nothing
+            here permits this"); this is NOT the undecidable_fallback=deny
+            escape hatch and must not be conflated with it
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {"allow": ["Bash(git:*)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            "ls -la", config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "deny")
+        self.assertIsNone(result.fallback_kind)
+
+    def test_no_match_fallback_deny_leaves_fallback_kind_none_for_file_path(self):
+        """
+        Given no_match_fallback='deny' and a file path no Read rule covers
+        When resolve_file_path_permission_detailed resolves it
+        Then the decision is 'deny' and fallback_kind is None -- file paths
+            have no undecidable_fallback concept, so this untagged case is
+            the only deny fallback shape they can produce
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "deny",
+                        "permissions": {"allow": ["Read(other.txt)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        result = resolve_file_path_permission_detailed("Read", "README.md", config)
+        self.assertEqual(result.decision, "deny")
+        self.assertIsNone(result.fallback_kind)
+
+    def test_ask_decision_leaves_fallback_kind_none(self):
+        """
+        Given the default undecidable_fallback='ask' and an ASK-floor leaf
+            with no matching rule
+        When resolve_bash_permission_detailed resolves it
+        Then the decision is 'ask' and fallback_kind is None -- the ASK
+            floor itself is not an allow/deny escape hatch
+        """
+        config = _make_config(
+            [("project", "toolguard_hook", {"permissions": {"allow": [], "deny": []}})]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        result = resolve_bash_permission_detailed(
+            'python -c "print(1)"', config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "ask")
+        self.assertIsNone(result.fallback_kind)
 
 
 class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):

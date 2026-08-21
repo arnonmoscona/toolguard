@@ -121,67 +121,6 @@ FALLBACK_ALLOW_PLACEHOLDER = "[fallback allow -- no rule matched]"
 #: comma-free shape.
 FALLBACK_DENY_PLACEHOLDER = "[fallback deny -- no rule matched]"
 
-#: Reason-text markers that identify a fallback-escape-hatch outcome, each
-#: mapped to the ``fallback_kind`` tag it implies and the single *decision*
-#: it is valid evidence for. Matching is decision-scoped, so an accidental
-#: substring collision in a hand-written ``pattern`` can only ever
-#: misclassify within its own decision, never cross an allow reason into a
-#: deny finding or vice versa. Ordered longest-marker-first WITHIN a
-#: decision: ``...=allow_with_warning`` has ``...=allow`` as a prefix, so a
-#: shorter marker must never shadow the longer one.
-#:
-#: Covers both fallback settings even though this module only ever
-#: receives ``undecidable_fallback`` as a parameter: the
-#: ``no_match_fallback`` wording is built upstream, in
-#: ``permission_resolution.py``, and arrives here through *reason* strings
-#: passed via ``resolve_one``; the ``undecidable_fallback`` wording is
-#: built by this module itself.
-#:
-#: No ``no_match_fallback=deny`` marker exists -- that reason
-#: (``"<subject> does not match any allow patterns"``) never contains a
-#: ``": "`` at all, so it carries no fabrication risk to catch.
-#: The one ``undecidable_fallback=deny`` marker covers both deny reason
-#: shapes this module builds (the ASK-floor leaf's and the
-#: ``UndecidableSegment``'s) with a single substring, since both contain it
-#: verbatim -- reword either reason string without keeping that substring
-#: and this stops classifying it, silently.
-_FALLBACK_REASON_MARKERS = (
-    ("no_match_fallback=allow_with_warning", "warned", "allow"),
-    ("undecidable_fallback=allow_with_warning", "warned", "allow"),
-    ("no_match_fallback=allow", "silent", "allow"),
-    ("undecidable_fallback=allow", "silent", "allow"),
-    ("undecidable_fallback=deny", "denied", "deny"),
-)
-
-
-def fallback_kind_for_reason(decision: str, reason: str) -> Optional[str]:
-    """Classify an ``allow``/``deny`` result as a fallback-escape-hatch outcome, from its reason text.
-
-    Structured detection (:attr:`~toolguard.config_types.UnitVerdict.fallback_kind`,
-    computed at the point a unit's outcome is decided) is preferred wherever
-    available. This text-based fallback exists for the two places that
-    cannot use it: an ordinary sub-command's ``resolve_one`` 3-tuple result,
-    whose contract has no room for a ``fallback_kind`` field; and
-    ``hook.py``'s deny-side audit-log path, which classifies from the final
-    reason string alone.
-
-    Args:
-        decision: The decision the *reason* accompanies.
-        reason: The reason text.
-
-    Returns:
-        The tag named by whichever :data:`_FALLBACK_REASON_MARKERS` entry
-        matches *reason* for *decision*, else ``None`` -- including for a
-        genuine rule match and for a plain ``no_match_fallback=deny``, which
-        has no marker (see that constant's own docstring for why).
-    """
-    if decision not in ("allow", "deny"):
-        return None
-    for marker, kind, applies_to in _FALLBACK_REASON_MARKERS:
-        if applies_to == decision and marker in reason:
-            return kind
-    return None
-
 
 @dataclass(frozen=True)
 class CommandUnit:
@@ -337,33 +276,58 @@ def decompose(command: str) -> List[CommandUnit]:
     return [_unit_for(element) for element in extract_structured(command)]
 
 
-def _unit_from_tuple(
-    sub_command: str, resolved: Tuple[str, str, Optional[str]]
-) -> UnitVerdict:
-    """Adapt a ``resolve_one``-shaped 3-tuple result into a :class:`UnitVerdict`.
+@dataclass(frozen=True)
+class ResolveOneResult:
+    """One command string's cascade resolution, as returned by a ``resolve_one`` callable.
 
-    ``resolve_one`` carries no ``matched_rule``/``provenance``, so
-    ``fallback_kind`` is computed from the text via
-    :func:`fallback_kind_for_reason` instead.
+    The ``resolve_one`` contract for this module's own test-only
+    compound-resolution driver (:func:`resolve_compound_permission_detailed`,
+    :func:`check_compound_permission`, :func:`_resolve_leaf`) -- not used on
+    the production hook path, which builds :class:`UnitVerdict` directly
+    (see :mod:`toolguard.resolve`).
+
+    A frozen dataclass rather than a positional tuple: it carries
+    ``fallback_kind`` as data supplied by the caller's own resolution,
+    rather than a downstream classifier having to guess it back from
+    *reason*.
+
+    Attributes:
+        decision: ``'allow'``, ``'ask'``, or ``'deny'``.
+        reason: Human-readable reason for this decision.
+        additional_context: This result's own ``additionalContext``
+            enrichment, or ``None``.
+        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or
+            ``None`` -- see :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`.
+    """
+
+    decision: str
+    reason: str
+    additional_context: Optional[str] = None
+    fallback_kind: Optional[str] = None
+
+
+def _unit_from_result(sub_command: str, resolved: ResolveOneResult) -> UnitVerdict:
+    """Adapt a ``resolve_one``-shaped :class:`ResolveOneResult` into a :class:`UnitVerdict`.
+
+    ``resolve_one`` carries no ``matched_rule``/``provenance``; ``fallback_kind``
+    is read from *resolved* directly, exactly as the caller resolved it.
 
     Args:
         sub_command: The command string that was resolved.
-        resolved: ``resolve_one``'s own ``(decision, reason,
-            additional_context)`` result for it.
+        resolved: ``resolve_one``'s own result for it.
 
     Returns:
         The corresponding :class:`UnitVerdict`, with ``matched_rule``/
         ``provenance`` both ``None``.
     """
-    decision, reason, additional_context = resolved
     return UnitVerdict(
         sub_command=sub_command,
-        decision=decision,
+        decision=resolved.decision,
         matched_rule=None,
         provenance=None,
-        reason=reason,
-        additional_context=additional_context,
-        fallback_kind=fallback_kind_for_reason(decision, reason),
+        reason=resolved.reason,
+        additional_context=resolved.additional_context,
+        fallback_kind=resolved.fallback_kind,
     )
 
 
@@ -781,7 +745,7 @@ def judge_unit(
 
 def _resolve_leaf(
     leaf: LeafCommand,
-    resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
+    resolve_one: Callable[[str], ResolveOneResult],
     undecidable_fallback: str = "ask",
 ) -> RuntimeVerdict:
     """Resolve a single leaf command -- thin wrapper dropping the structured detail.
@@ -790,14 +754,14 @@ def _resolve_leaf(
     used for every part regardless of *leaf*'s kind.
 
     Returns a :class:`~toolguard.config_types.RuntimeVerdict`, not a bare
-    3-tuple -- ``matched_rule``/``provenance``/etc. simply stay at their
-    defaults.
+    :class:`ResolveOneResult` -- ``matched_rule``/``provenance``/etc. simply
+    stay at their defaults.
 
     Args:
         leaf: A :class:`~toolguard.parser.command_extractor.LeafCommand` to
             resolve.
-        resolve_one: Callable mapping a single command string to
-            ``(decision, reason, additional_context)``.
+        resolve_one: Callable mapping a single command string to its
+            :class:`ResolveOneResult`.
         undecidable_fallback: The configured floor -- see :func:`judge_unit`.
 
     Returns:
@@ -805,7 +769,7 @@ def _resolve_leaf(
         the floor applied.
     """
     unit = _unit_for(leaf)
-    part_verdicts = [_unit_from_tuple(part, resolve_one(part)) for part in unit.parts]
+    part_verdicts = [_unit_from_result(part, resolve_one(part)) for part in unit.parts]
     outcome = judge_unit(unit, part_verdicts, undecidable_fallback)
     return RuntimeVerdict(
         decision=outcome.decision,
@@ -1070,8 +1034,11 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
         defaults: this function combines already-decided reason text for
         the verdict's own wording, never structured per-sub-command data --
         that lives on ``RuntimeVerdict.sub_matches``, populated
-        independently by :mod:`toolguard.resolve`'s own driver loop. An
-        empty *unit_verdicts* fails closed: ``deny``, "No commands to
+        independently by :mod:`toolguard.resolve`'s own driver loop. The
+        deny branch carries the deciding unit's own ``fallback_kind``
+        through to ``RuntimeVerdict.fallback_kind`` unchanged (``'denied'``
+        for the ``undecidable_fallback=deny`` escape hatch, else ``None``).
+        An empty *unit_verdicts* fails closed: ``deny``, "No commands to
         evaluate".
     """
     kind, deciding = _pick_strictest(unit_verdicts)
@@ -1080,6 +1047,7 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
             decision="deny",
             reason=deciding.reason,
             additional_context=deciding.additional_context,
+            fallback_kind=deciding.fallback_kind,
         )
     if kind == "ask":
         return RuntimeVerdict(
@@ -1163,8 +1131,9 @@ def check_compound_permission(
 
     Delegates to :func:`resolve_compound_permission` with a closure over
     :func:`toolguard.permissions.check_permission`, which returns a plain
-    ``(decision, reason)`` 2-tuple -- padded to the 3-tuple ``resolve_one``
-    contract with a trailing ``None``.
+    ``(decision, reason)`` 2-tuple -- wrapped as a :class:`ResolveOneResult`
+    with ``additional_context``/``fallback_kind`` at their defaults (``check_permission``
+    never produces a fallback outcome of its own).
 
     Args:
         command: The bash command line (may be compound or multi-line).
@@ -1186,9 +1155,8 @@ def check_compound_permission(
     """
     return resolve_compound_permission(
         command,
-        lambda c: (
-            *check_permission(c, allow_patterns, deny_patterns, extended_syntax),
-            None,
+        lambda c: ResolveOneResult(
+            *check_permission(c, allow_patterns, deny_patterns, extended_syntax)
         ),
         undecidable_fallback=undecidable_fallback,
     )
@@ -1196,7 +1164,7 @@ def check_compound_permission(
 
 def resolve_compound_permission_detailed(
     command: str,
-    resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
+    resolve_one: Callable[[str], ResolveOneResult],
     undecidable_fallback: str = "ask",
 ) -> RuntimeVerdict:
     """Resolve a compound command where each sub-command cascades independently.
@@ -1206,17 +1174,15 @@ def resolve_compound_permission_detailed(
     strictest outcome wins (any deny -> deny, then any ask -> ask).
 
     A convenience driver over :func:`decompose`/:func:`judge_unit`/
-    :func:`_combine_strictest` for callers with only a plain 3-tuple
-    ``resolve_one`` closure -- not on the production path (see
-    technical-notes.md for why).
+    :func:`_combine_strictest` for callers with only a plain ``resolve_one``
+    closure -- not on the production path (see technical-notes.md for why).
 
     Args:
         command: The bash command line (may be compound or multi-line).
         resolve_one: Callable mapping a single sub-command string to its
-            resolved ``(decision, reason, additional_context)`` (cascaded
-            across config levels). Used for every part of every unit,
-            including an ``'inline_code'`` unit's single outer-command-stub
-            part.
+            resolved :class:`ResolveOneResult` (cascaded across config
+            levels). Used for every part of every unit, including an
+            ``'inline_code'`` unit's single outer-command-stub part.
         undecidable_fallback: The configured floor for anything that cannot
             be safely decomposed -- one of ``'ask'`` (default), ``'deny'``,
             ``'allow_with_warning'``, or ``'allow'`` -- sourced from
@@ -1239,7 +1205,7 @@ def resolve_compound_permission_detailed(
     unit_verdicts = [
         judge_unit(
             unit,
-            [_unit_from_tuple(part, resolve_one(part)) for part in unit.parts],
+            [_unit_from_result(part, resolve_one(part)) for part in unit.parts],
             undecidable_fallback,
         )
         for unit in units
@@ -1249,7 +1215,7 @@ def resolve_compound_permission_detailed(
 
 def resolve_compound_permission(
     command: str,
-    resolve_one: Callable[[str], Tuple[str, str, Optional[str]]],
+    resolve_one: Callable[[str], ResolveOneResult],
     undecidable_fallback: str = "ask",
 ) -> RuntimeVerdict:
     """Resolve a compound command.
@@ -1260,7 +1226,7 @@ def resolve_compound_permission(
     Args:
         command: The bash command line (may be compound or multi-line).
         resolve_one: Callable mapping a single sub-command string to its
-            resolved ``(decision, reason, additional_context)``.
+            resolved :class:`ResolveOneResult`.
         undecidable_fallback: The configured floor -- see
             :func:`resolve_compound_permission_detailed`.
 

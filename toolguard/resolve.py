@@ -124,6 +124,10 @@ def resolve_file_path_permission_detailed(
         additional_context=cap_context_words(resolved.additional_context),
         fallback_warning=resolved.fallback_warning,
         matched_rule=resolved.matched_rule,
+        # File paths have no undecidable_fallback concept, so
+        # permission_resolution.py never sets this today -- threaded through
+        # regardless, rather than silently dropped, in case it ever does.
+        fallback_kind=resolved.fallback_kind,
         tool=tool_name,
         target=file_path,
     )
@@ -399,6 +403,10 @@ def resolve_bash_permission_detailed(
         additional_context=cap_context_words(additional_context),
         fallback_warning=fallback_warning,
         matched_rule=deciding.matched_rule if deciding is not None else None,
+        # combined.fallback_kind is already None whenever combined.decision
+        # != 'deny', and the parse-failure floor above never turns a 'deny'
+        # into anything else, so this survives the floor unchanged.
+        fallback_kind=combined.fallback_kind,
         tool="Bash",
         target=command,
     )

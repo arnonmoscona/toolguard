@@ -7,6 +7,7 @@ Tests the bash parser, command extraction, and compound permission logic.
 import unittest
 
 from toolguard.compound import (
+    ResolveOneResult,
     _accumulate_contexts,
     _apply_undecidable_floor,
     _extract_outer_command,
@@ -1793,8 +1794,8 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
         def resolve_one(cmd):
             if check_permission(cmd, [], ["python -c*"], True)[0] == "deny":
-                return "deny", "matched deny pattern", None
-            return "allow", "no match", None
+                return ResolveOneResult("deny", "matched deny pattern", None)
+            return ResolveOneResult("allow", "no match", None)
 
         _verdict = _resolve_leaf(self._leaf("python -cimport os"), resolve_one)
         decision, _reason, _context = (
@@ -1813,8 +1814,8 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
         def resolve_one(cmd):
             if check_permission(cmd, [], ["python -c*"], True)[0] == "deny":
-                return "deny", "matched deny pattern", None
-            return "allow", "no match", None
+                return ResolveOneResult("deny", "matched deny pattern", None)
+            return ResolveOneResult("allow", "no match", None)
 
         _verdict = _resolve_leaf(self._leaf('python -c "import os"'), resolve_one)
         decision, _reason, _context = (
@@ -1833,8 +1834,8 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
         def resolve_one(cmd):
             if check_permission(cmd, [], ["python -uc*"], True)[0] == "deny":
-                return "deny", "matched deny pattern", None
-            return "allow", "no match", None
+                return ResolveOneResult("deny", "matched deny pattern", None)
+            return ResolveOneResult("allow", "no match", None)
 
         _verdict = _resolve_leaf(self._leaf('python -uc "code"'), resolve_one)
         decision, _reason, _context = (
@@ -1852,7 +1853,7 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "allow", "no match", None
+            return ResolveOneResult("allow", "no match", None)
 
         _verdict = _resolve_leaf(self._leaf('python -c "import os"'), resolve_one)
         decision, _reason, _context = (
@@ -1880,7 +1881,7 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         )
 
         def resolve_one(_cmd):
-            return "allow", "no match", None
+            return ResolveOneResult("allow", "no match", None)
 
         reason = _resolve_leaf(self._leaf(leaf_text), resolve_one).reason
         self.assertIn("...", reason)
@@ -1895,7 +1896,7 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "allow", "no match", None
+            return ResolveOneResult("allow", "no match", None)
 
         reason = self._leaf_and_resolve('python -c "print(1)"', resolve_one).reason
         self.assertNotIn("...", reason)
@@ -1910,7 +1911,7 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         long_code = "import os\n" * 50
 
         def resolve_one(_cmd):
-            return "allow", "no match", None
+            return ResolveOneResult("allow", "no match", None)
 
         reason = self._leaf_and_resolve(f'python -c "{long_code}"', resolve_one).reason
         self.assertNotIn("\n", reason)
@@ -1923,10 +1924,10 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
 
 
 def _canned_resolver(mapping):
-    """Build a ``resolve_one`` closure returning *mapping*'s canned ``(decision, reason, additional_context)`` triple per command."""
+    """Build a ``resolve_one`` closure returning *mapping*'s canned ``(decision, reason, additional_context)`` triple per command, as a :class:`ResolveOneResult`."""
 
     def resolve_one(cmd):
-        return mapping[cmd]
+        return ResolveOneResult(*mapping[cmd])
 
     return resolve_one
 
@@ -2102,7 +2103,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "deny", "matched deny pattern", "python -c is never allowed here"
+            return ResolveOneResult(
+                "deny", "matched deny pattern", "python -c is never allowed here"
+            )
 
         leaf = LeafCommand('python -c "import os"', ask_floor=True)
         _verdict = _resolve_leaf(leaf, resolve_one)
@@ -2125,7 +2128,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "allow", "no match", "this context must not leak through"
+            return ResolveOneResult(
+                "allow", "no match", "this context must not leak through"
+            )
 
         leaf = LeafCommand('python -c "import os"', ask_floor=True)
         _verdict = _resolve_leaf(leaf, resolve_one)
@@ -2149,7 +2154,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "ask", "matched ask pattern: python -c:*", "confirm this is safe"
+            return ResolveOneResult(
+                "ask", "matched ask pattern: python -c:*", "confirm this is safe"
+            )
 
         leaf = LeafCommand('python -c "import os"', ask_floor=True)
         _verdict = _resolve_leaf(leaf, resolve_one, undecidable_fallback="ask")
@@ -2176,7 +2183,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "allow", "matched allow pattern: python -c:*", "trust this"
+            return ResolveOneResult(
+                "allow", "matched allow pattern: python -c:*", "trust this"
+            )
 
         leaf = LeafCommand('python -c "import os"', ask_floor=True)
         _verdict = _resolve_leaf(leaf, resolve_one, undecidable_fallback="ask")
@@ -2203,7 +2212,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "ask", "matched ask pattern: python -c:*", "confirm this is safe"
+            return ResolveOneResult(
+                "ask", "matched ask pattern: python -c:*", "confirm this is safe"
+            )
 
         leaf = LeafCommand('python -c "import os"', ask_floor=True)
         _verdict = _resolve_leaf(leaf, resolve_one, undecidable_fallback="deny")
@@ -2398,7 +2409,7 @@ def _resolve_with_fallback(
     """Resolve *command* to a bare decision string, threading *undecidable_fallback* through."""
     _verdict = resolve_compound_permission(
         command,
-        lambda c: (*check_permission(c, allow, deny), None),
+        lambda c: ResolveOneResult(*check_permission(c, allow, deny)),
         undecidable_fallback=undecidable_fallback,
     )
     decision, _reason, _context = (
@@ -2611,7 +2622,7 @@ class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
         cmd = 'python3 -c "import os"'
         _verdict = resolve_compound_permission(
             cmd,
-            lambda c: (*check_permission(c, ["python3 -c:*"], []), None),
+            lambda c: ResolveOneResult(*check_permission(c, ["python3 -c:*"], [])),
             undecidable_fallback="deny",
         )
         decision, reason, _context = (
@@ -2633,7 +2644,7 @@ class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
         cmd = 'python3 -c "import os"'
         _verdict = resolve_compound_permission(
             cmd,
-            lambda c: (*check_permission(c, ["python3 -c:*"], []), None),
+            lambda c: ResolveOneResult(*check_permission(c, ["python3 -c:*"], [])),
             undecidable_fallback="allow_with_warning",
         )
         decision, reason, _context = (
@@ -2670,7 +2681,7 @@ class TestUndecidableFallbackAskFloorLeaf(unittest.TestCase):
         cmd = 'python3 -c "import os"'
         _verdict = resolve_compound_permission(
             cmd,
-            lambda c: (*check_permission(c, ["python3 -c:*"], []), None),
+            lambda c: ResolveOneResult(*check_permission(c, ["python3 -c:*"], [])),
             undecidable_fallback="allow",
         )
         decision, reason, _context = (
@@ -2749,7 +2760,7 @@ class TestUndecidableFallbackSegment(unittest.TestCase):
         """
         _verdict = resolve_compound_permission(
             self._PROCSUB_CMD,
-            lambda c: (*check_permission(c, [], []), None),
+            lambda c: ResolveOneResult(*check_permission(c, [], [])),
             undecidable_fallback="deny",
         )
         decision, reason, _context = (
@@ -2768,7 +2779,7 @@ class TestUndecidableFallbackSegment(unittest.TestCase):
         """
         _verdict = resolve_compound_permission(
             self._PROCSUB_CMD,
-            lambda c: (*check_permission(c, [], []), None),
+            lambda c: ResolveOneResult(*check_permission(c, [], [])),
             undecidable_fallback="allow_with_warning",
         )
         decision, reason, _context = (
@@ -2801,7 +2812,7 @@ class TestUndecidableFallbackSegment(unittest.TestCase):
         """
         _verdict = resolve_compound_permission(
             self._PROCSUB_CMD,
-            lambda c: (*check_permission(c, [], []), None),
+            lambda c: ResolveOneResult(*check_permission(c, [], [])),
             undecidable_fallback="allow",
         )
         decision, reason, _context = (

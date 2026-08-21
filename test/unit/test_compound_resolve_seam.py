@@ -7,9 +7,10 @@ from types import MappingProxyType
 
 from toolguard.compound import (
     CommandUnit,
+    ResolveOneResult,
     _resolve_leaf,
     _unit_for,
-    _unit_from_tuple,
+    _unit_from_result,
     decompose,
     judge_unit,
 )
@@ -280,7 +281,7 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
         """
 
         def resolve_one(_cmd):
-            return "deny", "matched deny pattern", None
+            return ResolveOneResult("deny", "matched deny pattern", None)
 
         for fallback in self._FALLBACKS:
             with self.subTest(fallback=fallback):
@@ -307,7 +308,7 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
         }
 
         def resolve_one(_cmd):
-            return "ask", "matched ask pattern", None
+            return ResolveOneResult("ask", "matched ask pattern", None)
 
         for fallback, want in expected.items():
             with self.subTest(fallback=fallback):
@@ -336,7 +337,7 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
         }
 
         def resolve_one(_cmd):
-            return "allow", "matched allow pattern", None
+            return ResolveOneResult("allow", "matched allow pattern", None)
 
         for fallback, (want_decision, want_substring) in expected.items():
             with self.subTest(fallback=fallback):
@@ -390,19 +391,29 @@ class TestAskFloorStubOverrideNeverLeaks(unittest.TestCase):
         self.assertEqual(result.overrides, [])
 
 
-class TestUnitFromTuple(unittest.TestCase):
-    """``_unit_from_tuple``'s own unit tests."""
+class TestUnitFromResult(unittest.TestCase):
+    """``_unit_from_result``'s own unit tests.
+
+    Superseded ``TestUnitFromTuple`` (TOO-45 ticket 38): the old class pinned
+    ``_unit_from_tuple`` deriving ``fallback_kind`` by substring-matching
+    canned reason text via the now-deleted ``fallback_kind_for_reason`` --
+    exactly the prose-parsing anti-pattern the ticket removes. The
+    replacement pins the new contract instead: ``fallback_kind`` is read
+    from the caller-supplied :class:`ResolveOneResult` verbatim, never
+    derived from *reason*.
+    """
 
     def test_wraps_a_plain_allow_result(self):
         """
-        Given an allow (decision, reason, additional_context) 3-tuple
-        When _unit_from_tuple adapts it
+        Given an allow ResolveOneResult with no fallback_kind
+        When _unit_from_result adapts it
         Then the resulting UnitVerdict carries the sub_command, decision,
-             reason, and additional_context verbatim, with matched_rule and
-             provenance both None
+             reason, and additional_context verbatim, with matched_rule,
+             provenance, and fallback_kind all None
         """
-        unit = _unit_from_tuple(
-            "git status", ("allow", "Command matches allow pattern: git *", "note")
+        unit = _unit_from_result(
+            "git status",
+            ResolveOneResult("allow", "Command matches allow pattern: git *", "note"),
         )
         self.assertEqual(unit.sub_command, "git status")
         self.assertEqual(unit.decision, "allow")
@@ -412,53 +423,40 @@ class TestUnitFromTuple(unittest.TestCase):
         self.assertIsNone(unit.provenance)
         self.assertIsNone(unit.fallback_kind)
 
-    def test_classifies_a_no_match_fallback_allow_as_warned(self):
+    def test_fallback_kind_is_read_verbatim_never_derived_from_reason(self):
         """
-        Given an allow result whose reason names the
-            no_match_fallback=allow_with_warning escape hatch
-        When _unit_from_tuple adapts it
-        Then fallback_kind is 'warned' (via fallback_kind_for_reason)
+        Given a ResolveOneResult whose fallback_kind is explicitly 'warned',
+            but whose reason text names NO recognizable fallback wording at
+            all (a reason a substring classifier could never have matched)
+        When _unit_from_result adapts it
+        Then fallback_kind is still 'warned' -- proving the value is read
+            from the caller's own field, not re-derived from *reason*
         """
-        unit = _unit_from_tuple(
+        unit = _unit_from_result(
             "rm -rf /tmp/x",
-            (
-                "allow",
-                "No allow pattern matched; allowed anyway "
-                "(no_match_fallback=allow_with_warning)",
-                None,
-            ),
+            ResolveOneResult("allow", "some arbitrary reason text", None, "warned"),
         )
         self.assertEqual(unit.fallback_kind, "warned")
 
-    def test_classifies_a_no_match_fallback_allow_as_silent(self):
+    def test_fallback_kind_none_stays_none_even_with_matching_reason_text(self):
         """
-        Given an allow result whose reason names the no_match_fallback=allow
-            escape hatch
-        When _unit_from_tuple adapts it
-        Then fallback_kind is 'silent' -- and the 'allow_with_warning' reason
-            above is NOT also read as 'silent', even though
-            'no_match_fallback=allow' is a prefix of it: the markers are
-            ordered longest-first so the shorter never shadows the longer
+        Given a ResolveOneResult whose reason text happens to contain the
+            OLD marker substring the deleted classifier used to match, but
+            whose fallback_kind field is None
+        When _unit_from_result adapts it
+        Then fallback_kind is None -- the reason text is never consulted
         """
-        unit = _unit_from_tuple(
+        unit = _unit_from_result(
             "rm -rf /tmp/x",
-            (
-                "allow",
-                "No allow pattern matched; allowed anyway (no_match_fallback=allow)",
-                None,
-            ),
-        )
-        self.assertEqual(unit.fallback_kind, "silent")
-        shadowed = _unit_from_tuple(
-            "rm -rf /tmp/x",
-            (
+            ResolveOneResult(
                 "allow",
                 "No allow pattern matched; allowed anyway "
                 "(no_match_fallback=allow_with_warning)",
                 None,
+                None,
             ),
         )
-        self.assertEqual(shadowed.fallback_kind, "warned")
+        self.assertIsNone(unit.fallback_kind)
 
 
 class TestJudgeUnitInvariants(unittest.TestCase):
@@ -480,7 +478,7 @@ class TestJudgeUnitInvariants(unittest.TestCase):
             audits_as_one=False,
         )
         only_one = [
-            _unit_from_tuple("git status", ("allow", "matched", None)),
+            _unit_from_result("git status", ResolveOneResult("allow", "matched", None)),
         ]
         with self.assertRaises(ValueError):
             judge_unit(unit, only_one)
