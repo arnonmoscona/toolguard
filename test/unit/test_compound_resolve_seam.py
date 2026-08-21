@@ -2,12 +2,15 @@
 and order, the ask-floor fallback matrix, and ``judge_unit``'s invariants."""
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 from toolguard.compound import (
     CommandUnit,
     ResolveOneResult,
+    _audits_as_one,
     _resolve_leaf,
     _unit_for,
     _unit_from_result,
@@ -15,7 +18,7 @@ from toolguard.compound import (
     judge_unit,
 )
 from toolguard.config import ConfigLayer, Configuration, Provenance
-from toolguard.parser.command_extractor import LeafCommand
+from toolguard.parser.command_extractor import LeafCommand, UndecidableSegment
 from toolguard.resolve import resolve_bash_permission_detailed
 from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY
 
@@ -568,6 +571,77 @@ class TestJudgeUnitInvariants(unittest.TestCase):
         self.assertEqual(units[1].kind, "plain")
         self.assertFalse(units[1].audits_as_one)
         self.assertEqual(units[1].parts, ("ls -la",))
+
+
+class TestAuditsAsOneIndependentOfKind(unittest.TestCase):
+    """``_audits_as_one`` decides its flag from the element itself, not by
+    reading ``kind`` -- these pin that directly, then verify the combination
+    it makes constructible (``kind='inline_code'`` with
+    ``audits_as_one=False``) is handled correctly by the driver."""
+
+    def test_audits_as_one_true_for_undecidable_segment(self):
+        """
+        Given an UndecidableSegment
+        When _audits_as_one evaluates it
+        Then it is True -- no rule matched anything, only the floor decided
+        """
+        self.assertTrue(
+            _audits_as_one(UndecidableSegment("<(cat a)", "process substitution"))
+        )
+
+    def test_audits_as_one_true_for_ask_floor_leaf(self):
+        """
+        Given a LeafCommand with ask_floor=True
+        When _audits_as_one evaluates it
+        Then it is True -- the floor's outer-stub probe decided it, not a
+             real per-part match
+        """
+        self.assertTrue(_audits_as_one(LeafCommand("python -c 'x'", ask_floor=True)))
+
+    def test_audits_as_one_false_for_ordinary_leaf(self):
+        """
+        Given a LeafCommand with ask_floor=False
+        When _audits_as_one evaluates it
+        Then it is False -- genuine per-part rule matching decides this unit
+        """
+        self.assertFalse(_audits_as_one(LeafCommand("git status", ask_floor=False)))
+
+    def test_inline_code_unit_audits_as_one_true_vs_false_only_changes_sub_matches(
+        self,
+    ):
+        """
+        Given the same ask-floored CommandUnit built two ways -- once with
+            its real audits_as_one=True, once with it overridden to False
+            (the combination ticket 79 needed, made expressible by step 1)
+        When resolve_bash_permission_detailed resolves a command decompose()
+            is patched to yield each unit
+        Then the compound's decision/reason are identical either way
+            (judge_unit reads only unit.kind, never audits_as_one, so the
+            floor's policy is unaffected) while sub_matches differs: one
+            consolidated floor entry keyed to the leaf's full text (True)
+            versus the raw per-part stub resolution (False) -- proving
+            audits_as_one is read independently of kind at the consumption
+            point, not just constructible independently
+        """
+        leaf = LeafCommand('python3 -c "import os"', ask_floor=True)
+        floored_unit = _unit_for(leaf)
+        self.assertEqual(floored_unit.kind, "inline_code")
+        self.assertTrue(floored_unit.audits_as_one)
+        decomposed_unit = replace(floored_unit, audits_as_one=False)
+
+        config = _config(fallback="ask")
+
+        with patch("toolguard.resolve.decompose", return_value=[floored_unit]):
+            as_one = _resolve(config, leaf.text)
+        with patch("toolguard.resolve.decompose", return_value=[decomposed_unit]):
+            per_part = _resolve(config, leaf.text)
+
+        self.assertEqual(as_one.decision, per_part.decision)
+        self.assertEqual(as_one.reason, per_part.reason)
+        self.assertEqual(len(as_one.sub_matches), 1)
+        self.assertEqual(len(per_part.sub_matches), 1)
+        self.assertEqual(as_one.sub_matches[0].sub_command, floored_unit.text)
+        self.assertEqual(per_part.sub_matches[0].sub_command, floored_unit.parts[0])
 
 
 if __name__ == "__main__":

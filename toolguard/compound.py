@@ -160,7 +160,8 @@ class CommandUnit:
             whether its audit entries ARE its own parts' verdicts (``False``
             for ``'plain'``/``'unknown'`` -- a zero-part unit of either kind
             then contributes no audit entry at all, since there is nothing
-            in *parts* to record). Set in :func:`_unit_for`.
+            in *parts* to record). Decided by :func:`_audits_as_one`, called
+            from :func:`_unit_for`.
         audit_parts: Command strings recorded in the breakdown alongside this
             unit's own judged verdict and folded into its reason text when
             all-allow -- only ``'inline_code'`` populates this, with
@@ -203,6 +204,21 @@ class CommandUnit:
     note: Optional[str] = None
 
 
+def _audits_as_one(element: Union[LeafCommand, UndecidableSegment]) -> bool:
+    """Whether a floor decides *element*'s outcome rather than any part's own rule match.
+
+    True for an :class:`~toolguard.parser.multiline.UndecidableSegment` (no
+    rule matched anything) and for an ask-floored
+    :class:`~toolguard.parser.command_extractor.LeafCommand` (the floor's
+    outer-stub probe decides it, not real per-part matching); False for an
+    ordinary leaf. Decided from *element* directly, so a future
+    :func:`_unit_for` branch can set this independently of ``kind``.
+    """
+    if isinstance(element, UndecidableSegment):
+        return True
+    return isinstance(element, LeafCommand) and element.ask_floor
+
+
 def _unit_for(element: Union[LeafCommand, UndecidableSegment]) -> CommandUnit:
     """Map one :func:`~toolguard.parser.multiline.extract_structured` element to a :class:`CommandUnit`.
 
@@ -224,7 +240,7 @@ def _unit_for(element: Union[LeafCommand, UndecidableSegment]) -> CommandUnit:
             text=element.original,
             kind="undecidable",
             parts=(),
-            audits_as_one=True,
+            audits_as_one=_audits_as_one(element),
             note=element.reason,
         )
     if isinstance(element, LeafCommand):
@@ -244,7 +260,7 @@ def _unit_for(element: Union[LeafCommand, UndecidableSegment]) -> CommandUnit:
                 text=element.text,
                 kind="inline_code",
                 parts=(outer_cmd,),
-                audits_as_one=True,
+                audits_as_one=_audits_as_one(element),
                 audit_parts=audit_parts,
                 deny_check_parts=deny_check_parts,
             )
@@ -253,7 +269,7 @@ def _unit_for(element: Union[LeafCommand, UndecidableSegment]) -> CommandUnit:
             text=element.text,
             kind="plain",
             parts=tuple(sub_commands),
-            audits_as_one=False,
+            audits_as_one=_audits_as_one(element),
         )
     # Should not happen -- extract_structured only ever returns the two
     # types above. Logged here, where the actual unexpected type is still
