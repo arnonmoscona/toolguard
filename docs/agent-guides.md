@@ -18,6 +18,13 @@ question-and-pointer list for common lookups.
   or a bare `[regex]...`.
 - `deny` beats `allow` within a level; the most-specific level that matches decides across
   levels; `[hard_deny]` beats everything.
+- **`[hard_deny]` means no exceptions.** If a rule needs a carve-out, it does not belong in
+  `[hard_deny]` -- put it in the ordinary `deny`/`allow` level instead, where a more-specific
+  `allow` can legitimately override it (see "Recipe: block a command no matter what" below).
+- **TOML note**: write a `[regex]` pattern with backslashes as a literal (single-quoted)
+  string. A double-quoted string with an escape TOML doesn't recognise (`\s`, `\d`, ...) fails
+  to parse -- toolguard logs a named "config is BROKEN" banner and falls back to `ask`
+  everywhere, rather than silently mangling the pattern.
 - Prefer the narrowest pattern that satisfies the request. Do not widen an existing rule to
   cover a new case if a second specific rule will do.
 - **Task involves enabling Takeover Mode?** Read [Takeover Mode](takeover-mode.md) first --
@@ -188,11 +195,47 @@ deny = [
     "Read(**/.ssh/**)",
     "Read(**/.env)"
 ]
-# Only if a narrow exception is explicitly requested:
-allow = ["Bash(curl http://localhost:*)"]
+# allow: left empty. Every rule above is genuinely absolute -- none has a
+# legitimate exception. If a rule you're about to add here DOES need one
+# (e.g. "block curl, but allow it against localhost"), that's the sign it
+# belongs in the next recipe instead, not here with a carve-out bolted on.
+allow = []
 ```
 
 Remember `hard_deny.allow` is a carve-out from `hard_deny.deny`, **not** a forced allow.
+
+## Recipe: deny a command with a legitimate exception
+
+**Goal**: block a command by default, but permit one specific, real invocation of it.
+
+**Decision rule**: this is exactly the case `[hard_deny]` refuses to serve -- a rule you
+expect to except. Use an ordinary `deny` at a shared level (e.g. user), and add the
+exception as an `allow` at a more specific level (e.g. project); more-specific-wins lets it
+override the ancestor deny.
+
+```toml
+# ~/.claude/toolguard_hook.toml (user level -- curl blocked by default)
+[permissions]
+deny = ["Bash(curl:*)"]
+```
+
+```toml
+# .claude/toolguard_hook.toml (project level -- more specific, overrides the deny)
+[permissions]
+allow = ["Bash(curl -sS http://localhost:8080/health)"]
+```
+
+Verified with `toolguard.testing.sandbox`: with only the user-level deny in place, that exact
+health-check invocation is denied like any other curl call; adding the project-level allow
+overrides it, while a different port, an unrelated host, and an attack against the same host
+(`curl -o /etc/shadow http://localhost:8080/health`) all still deny. Widen the allow (a
+wildcard, or another line) only as far as real usage actually requires -- unlike a
+`[hard_deny]` carve-out, getting this wrong costs one more `allow` line, not an unoverridable
+hole.
+
+`Bash(curl:*)` blocks the literal spelling `curl`, not every way to invoke it (`/usr/bin/curl`,
+`command curl`, ...); that's an acceptable trade at the ordinary level, where the rule is
+expected to be narrowed and widened by hand as real usage turns up.
 
 ## Recipe: scope file access to a project
 

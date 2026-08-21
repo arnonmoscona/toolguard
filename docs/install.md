@@ -742,8 +742,8 @@ wrong (a near-miss on this happened during a real install), and `[hard_deny]` ca
 overridden by any level, so a mistake here is hard to walk back unnoticed. Use the fixed, curated
 set instead: `toolguard-install seed-hard-deny --scope <user|project> [--project-dir <path>]` --
 it reads the same canonical secret-file pattern list documented in [security.md](security.md)
-("Recommended deny patterns" -> "Sensitive files": `.env`/`.env.*`/`.aws/**`/`.ssh/**` reads and
-writes), adds exactly those to `[hard_deny]` idempotently, backs up the config first, and
+("Recommended deny patterns" -> "Sensitive files": `.env`/`.env.*`/`.aws/**`/`.ssh/**` reads,
+writes and edits), adds exactly those to `[hard_deny]` idempotently, backs up the config first, and
 journals the change with its reverse. **Offer it; do not add it silently.**
 
 **10.2 Enable takeover, defaulting to `ask` on anything unmatched.** Turn it on in one command:
