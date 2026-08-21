@@ -36,7 +36,7 @@ through whole.
 
 import logging
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -329,11 +329,33 @@ def _split_on_unquoted_pipe(text: str) -> List[str]:
     return segments
 
 
+#: Deliberately mirrors ``bash_parser.peg``'s ``control_op`` alternation --
+#: ``and_op / or_op / semicolon / background`` -- both in membership and in
+#: order, so a drift between the two grammars shows up as a missing or extra
+#: table entry rather than a missing ``elif`` branch. ``&&``/``||`` must
+#: precede their own single-character prefix, which this order satisfies.
+_CONTROL_OP_TABLE: Tuple[Tuple[str, int], ...] = (
+    ("&&", 2),
+    ("||", 2),
+    (";", 1),
+    ("&", 1),
+)
+
+
+def _match_control_op(text: str, i: int) -> Optional[int]:
+    """Return the width of the ``control_op`` token starting at *i*, or ``None``."""
+    for token, width in _CONTROL_OP_TABLE:
+        if text.startswith(token, i):
+            return width
+    return None
+
+
 def _statement_bounds_containing(text: str, pos: int) -> Tuple[int, int]:
     """Find the ``control_op``-delimited statement spanning offset *pos*.
 
-    Boundaries are ``&&``, ``||``, ``;`` and ``&`` -- the same four operators
-    as ``bash_parser.peg``'s ``control_op``.
+    Boundaries are ``&&``, ``||``, ``;`` and ``&`` -- see
+    :data:`_CONTROL_OP_TABLE`, the same four operators as ``bash_parser.peg``'s
+    ``control_op``.
 
     Unlike ``|``, these operators do not connect one command's output to the
     next one's input -- each runs with its own separate stdin. A heredoc's
@@ -389,28 +411,15 @@ def _statement_bounds_containing(text: str, pos: int) -> Tuple[int, int]:
             i += 1
         elif subst_stack:
             i += 1
-        elif ch == "&" and i + 1 < len(text) and text[i + 1] == "&":
-            if pos < i:
-                return start, i
-            i += 2
-            start = i
-        elif ch == "&":
-            if pos < i:
-                return start, i
-            i += 1
-            start = i
-        elif ch == "|" and i + 1 < len(text) and text[i + 1] == "|":
-            if pos < i:
-                return start, i
-            i += 2
-            start = i
-        elif ch == ";":
-            if pos < i:
-                return start, i
-            i += 1
-            start = i
         else:
-            i += 1
+            width = _match_control_op(text, i)
+            if width is None:
+                i += 1
+            else:
+                if pos < i:
+                    return start, i
+                i += width
+                start = i
     return start, len(text)
 
 
