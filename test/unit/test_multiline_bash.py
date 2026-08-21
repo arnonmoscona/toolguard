@@ -739,5 +739,236 @@ class TestForeignInterpreterVersionRobustness(unittest.TestCase):
         self.assertEqual(_resolve(cmd, ["python3.13:*"], []), "ask")
 
 
+class TestHeredocSinkStatementScoping(unittest.TestCase):
+    """Proposed ticket 19 P2: an earlier ``control_op``-joined clause (``&&``,
+    ``||``, ``;``, ``&``) must not steal a later heredoc's sink."""
+
+    def test_earlier_and_clause_does_not_steal_a_later_heredocs_sink(self):
+        """
+        Given allow `bash -c:*`,`true:*`,`python:*`
+        When an earlier `&&`-joined `bash -c "true"` precedes `python <<EOF` on
+            the same line
+        Then the python heredoc still gets its own ask_floor sentinel leaf --
+            unaffected by the earlier clause's `bash`/`true` tokens -- and the
+            compound resolves to ASK despite the broad allow
+        """
+        cmd = 'bash -c "true" && python <<EOF\nimport os\nEOF'
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "true", False), ("leaf", "python __HEREDOC_TO_python__", True)],
+        )
+        self.assertEqual(_resolve(cmd, ["bash -c:*", "true:*", "python:*"], []), "ask")
+
+    def test_bare_python_heredoc_control_matches_the_and_joined_form(self):
+        """
+        Given allow `python:*`
+        When a bare `python <<EOF` (no preceding clause) is extracted
+        Then it yields the identical sentinel leaf as the `&&`-preceded form,
+            confirming the earlier clause changes nothing about this heredoc
+        """
+        cmd = "python <<EOF\nimport os\nEOF"
+        self.assertEqual(
+            _extracted(cmd), [("leaf", "python __HEREDOC_TO_python__", True)]
+        )
+        self.assertEqual(_resolve(cmd, ["python:*"], []), "ask")
+
+    def test_semicolon_and_or_operator_also_do_not_steal_the_sink(self):
+        """
+        Given the same bash-family-then-heredoc shape, joined by `;`, `||`
+            and `&` instead of `&&`
+        When each is extracted
+        Then all three yield the identical two-leaf shape as the `&&` form --
+            the bypass was not specific to one operator
+        """
+        for op in [";", "||", "&"]:
+            cmd = f'bash -c "true" {op} python <<EOF\nimport os\nEOF'
+            with self.subTest(op=op):
+                self.assertEqual(
+                    _extracted(cmd),
+                    [
+                        ("leaf", "true", False),
+                        ("leaf", "python __HEREDOC_TO_python__", True),
+                    ],
+                )
+
+    def test_statement_scoping_finds_the_true_heredoc_bearer_not_an_earlier_command(
+        self,
+    ):
+        """
+        Given a `&&`-joined `cd /x && cat <<EOF`, where `cd` precedes the
+            heredoc's real bearer `cat`
+        When extracted
+        Then the sink is `cat` (the actual bearer), not `cd` (an earlier,
+            unrelated command) -- sink classification is scoped to the
+            heredoc's own statement, not the whole line
+        """
+        cmd = "cd /x && cat <<EOF\nhi\nEOF"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "cd /x", False), ("leaf", "cat __HEREDOC_TO_cat__", False)],
+        )
+
+
+class TestHeredocSinkSubstitutionBoundary(unittest.TestCase):
+    """TOO-45 ticket 19 F1: a `;`/`&&`/`||`/`&` inside an unquoted `$(...)`
+    or backtick substitution must not fracture the heredoc's own statement."""
+
+    def test_bare_heredoc_control_still_asks(self):
+        """
+        Given a bare `python <<HD` with no substitution at all
+        When extracted
+        Then it is the ordinary ask_floor sentinel leaf -- the control case
+            that must keep working alongside every substitution variant below
+        """
+        cmd = "python <<HD\nimport os\nHD"
+        self.assertEqual(
+            _extracted(cmd), [("leaf", "python __HEREDOC_TO_python__", True)]
+        )
+
+    def test_semicolon_inside_dollar_paren_does_not_steal_the_sink(self):
+        """
+        Given `python $(true; true) <<HD` -- a `;` inside an unquoted `$(...)`
+        When extracted
+        Then the statement is still scoped to the whole `python ...` clause,
+            the sink is `python`, and ask_floor is set (this was the regression:
+            HEAD and the guarded scanner agree; the unguarded scanner splits at
+            the inner `;` and loses the interpreter)
+        """
+        cmd = "python $(true; true) <<HD\nimport os\nHD"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "python $(true; true) __HEREDOC_TO_python__", True)],
+        )
+
+    def test_and_operator_inside_dollar_paren_does_not_steal_the_sink(self):
+        """
+        Given `python $(which x && echo y) <<HD` -- an `&&` inside `$(...)`
+        When extracted
+        Then the sink is still `python` with ask_floor set
+        """
+        cmd = "python $(which x && echo y) <<HD\nimport os\nHD"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "python $(which x && echo y) __HEREDOC_TO_python__", True)],
+        )
+
+    def test_semicolon_inside_backtick_does_not_steal_the_sink(self):
+        """
+        Given "python `true; echo -` <<HD" -- a `;` inside a backtick
+            substitution
+        When extracted
+        Then the sink is still `python` with ask_floor set
+        """
+        cmd = "python `true; echo -` <<HD\nimport os\nHD"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "python `true; echo -` __HEREDOC_TO_python__", True)],
+        )
+
+    def test_double_quoted_dollar_paren_was_already_unaffected(self):
+        """
+        Given `python "$(a; b)" <<HD` -- the same `;` shape, but double-quoted
+        When extracted
+        Then the sink is `python` with ask_floor set, matching every unquoted
+            variant above -- the quote model already protected this case
+        """
+        cmd = 'python "$(a; b)" <<HD\nimport os\nHD'
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", 'python "$(a; b)" __HEREDOC_TO_python__', True)],
+        )
+
+    def test_single_quoted_dollar_paren_is_literal_not_a_substitution(self):
+        """
+        Given `python '$(a; b)' <<HD` -- `$(` inside single quotes
+        When extracted
+        Then it is literal text, not a substitution: the sink is still
+            `python` with ask_floor set (quotes win over the depth guard)
+        """
+        cmd = "python '$(a; b)' <<HD\nimport os\nHD"
+        self.assertEqual(
+            _extracted(cmd),
+            [("leaf", "python '$(a; b)' __HEREDOC_TO_python__", True)],
+        )
+
+    def test_nested_dollar_paren_and_backtick_do_not_steal_the_sink(self):
+        """
+        Given `python $(echo `true; echo x`) <<HD` -- a backtick substitution
+            nested inside a `$(...)`, itself containing a `;`
+        When extracted
+        Then the depth guard tracks both nesting levels and the sink is still
+            `python` with ask_floor set
+        """
+        cmd = "python $(echo `true; echo x`) <<HD\nimport os\nHD"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                (
+                    "leaf",
+                    "python $(echo `true; echo x`) __HEREDOC_TO_python__",
+                    True,
+                )
+            ],
+        )
+
+    def test_unterminated_dollar_paren_does_not_hang_and_fails_safe(self):
+        """
+        Given `python $(true; echo x <<HD` -- an unclosed `$(` with no
+            matching `)` anywhere in the line
+        When extracted
+        Then extraction terminates (no hang) and, since the malformed
+            substitution also fails the grammar, the result is a single
+            UndecidableSegment -- which floors to ask, same as a lost sink
+            would have, but for the right reason
+        """
+        cmd = "python $(true; echo x <<HD\nimport os\nHD"
+        result = _extracted(cmd)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "undecidable")
+
+
+class TestMultipleHeredocsPerLine(unittest.TestCase):
+    """Proposed ticket 19 P3: two heredocs on one line must attach bodies to
+    the right delimiter, in order, with no terminator word leaking out."""
+
+    def test_two_heredocs_on_one_line_attach_bodies_in_order(self):
+        """
+        Given a bash-family bearer with two heredocs on one line (`bash <<A <<B`)
+        When the command is structured-extracted
+        Then each body attaches to its own delimiter in left-to-right order
+            and no terminator word (`A`) leaks out as a command of its own
+        """
+        cmd = "bash <<A <<B\necho from-A\nA\necho from-B\nB"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                ("leaf", "echo from-A", False),
+                ("leaf", "echo from-B", False),
+                ("leaf", "bash", False),
+            ],
+        )
+        self.assertEqual(_resolve(cmd, ["bash:*", "echo:*"], []), "allow")
+
+    def test_two_heredocs_dangerous_second_body_is_denied(self):
+        """
+        Given two heredocs on one line where the SECOND body contains
+            `rm -rf /`
+        When extracted and resolved with a deny on `rm -rf`
+        Then the second body's command is its own leaf -- correctly attached
+            to the second delimiter, not merged into the first or lost -- and
+            the compound is DENIED
+        """
+        cmd = "bash <<A <<B\necho ok\nA\nrm -rf /\nB"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                ("leaf", "echo ok", False),
+                ("leaf", "rm -rf /", False),
+                ("leaf", "bash", False),
+            ],
+        )
+        self.assertEqual(_resolve(cmd, ["bash:*", "echo:*"], ["rm -rf:*"]), "deny")
+
+
 if __name__ == "__main__":
     unittest.main()

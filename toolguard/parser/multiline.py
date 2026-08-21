@@ -8,10 +8,11 @@ control-structure recognition -- and hand-rolling any of it in this module is
 out of bounds.
 
 The one deviation is heredoc sink classification, which has to run before the
-grammar ever sees the text: :func:`_split_on_unquoted_pipe` segments the
-bearer line on ``|`` in Python, and the two sink readers tokenize that segment
-themselves. That ``|``-only model is why an earlier ``&&`` can steal a later
-heredoc's sink.
+grammar ever sees the text: :func:`_statement_bounds_containing` scopes a
+heredoc to its own statement in Python, delimited by the same four operators
+as ``bash_parser.peg``'s ``control_op`` -- ``&&``, ``||``, ``;``, ``&`` --
+then :func:`_split_on_unquoted_pipe` segments that statement on ``|`` and the
+two sink readers tokenize its last segment themselves.
 
 What is left is five lexical steps, applied in this order by
 :func:`extract_structured`:
@@ -35,7 +36,7 @@ through whole.
 
 import logging
 import re
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -176,31 +177,28 @@ def _find_heredocs_in_line(line: str) -> List[dict]:
     return specs
 
 
-def _classify_pipeline_sink(line: str) -> str:
-    """Classify what will receive a heredoc body written on *line*.
+def _classify_pipeline_sink(statement: str) -> str:
+    """Classify what will receive a heredoc body written in *statement*.
 
-    Looks at the last ``|``-separated segment, and at every one of its tokens
-    rather than just the first, so a wrapper like ``uv run python`` classifies
-    as its inner interpreter and not as ``uv``. Bash-family wins over foreign
-    when both appear, which decides in favour of decomposing the body.
+    *statement* must already be scoped to the clause bearing the heredoc --
+    see :func:`_statement_bounds_containing`.
+    Looks at the last ``|``-separated segment of it, and at every one of its
+    tokens rather than just the first, so a wrapper like ``uv run python``
+    classifies as its inner interpreter and not as ``uv``. Bash-family wins
+    over foreign when both appear, which decides in favour of decomposing the
+    body.
 
-    Two consequences worth knowing:
-
-    - The segmentation is by ``|`` alone. ``&&``, ``||`` and ``;`` do not end
-      a segment, so an executor named anywhere earlier in the line is taken
-      as the sink: ``bash -c "true" && python <<EOF`` classifies as ``bash``,
-      and the Python body is spliced in as bash source with no ASK floor.
-    - A segment of nothing but flags falls through to ``tokens[0]``, which
-      returns the flag itself -- ``'-x'``.
+    A segment of nothing but flags falls through to ``tokens[0]``, which
+    returns the flag itself -- ``'-x'``.
 
     Args:
-        line: A single-line (no embedded newlines) command text.
+        statement: A single-line, single-statement command text.
 
     Returns:
         ``'bash'``, ``'foreign'``, or the first token's basename for anything
         else; ``'unknown'`` when there is no token at all.
     """
-    segments = _split_on_unquoted_pipe(line)
+    segments = _split_on_unquoted_pipe(statement)
     if not segments:
         return "unknown"
     last = segments[-1].strip()
@@ -227,16 +225,16 @@ def _classify_pipeline_sink(line: str) -> str:
     return tokens[0].split("/")[-1]
 
 
-def _extract_pipeline_sink(line: str) -> str:
+def _extract_pipeline_sink(statement: str) -> str:
     """Name the sink for the ``__HEREDOC_TO_<sink>__`` sentinel.
 
-    Same segmentation and same wrapper handling as
+    Same scoping requirement, segmentation and wrapper handling as
     :func:`_classify_pipeline_sink`, but it returns the executor's own
     basename rather than a class -- ``python3.13``, not ``foreign``. The
     sentinel has to carry a name a foreign-executor test can still recognise.
 
     Args:
-        line: A single-line (no embedded newlines) command text.
+        statement: A single-line, single-statement command text.
 
     Returns:
         The basename of the first bash-family token, else of the first
@@ -244,7 +242,7 @@ def _extract_pipeline_sink(line: str) -> str:
         there is none -- including for a segment that is nothing but flags,
         where :func:`_classify_pipeline_sink` instead returns the flag.
     """
-    segments = _split_on_unquoted_pipe(line)
+    segments = _split_on_unquoted_pipe(statement)
     if not segments:
         return "unknown"
     last = segments[-1].strip()
@@ -331,6 +329,91 @@ def _split_on_unquoted_pipe(text: str) -> List[str]:
     return segments
 
 
+def _statement_bounds_containing(text: str, pos: int) -> Tuple[int, int]:
+    """Find the ``control_op``-delimited statement spanning offset *pos*.
+
+    Boundaries are ``&&``, ``||``, ``;`` and ``&`` -- the same four operators
+    as ``bash_parser.peg``'s ``control_op``.
+
+    Unlike ``|``, these operators do not connect one command's output to the
+    next one's input -- each runs with its own separate stdin. A heredoc's
+    sink is always the command bearing its own ``<<`` redirect, never a
+    command in an *earlier* clause, so sink classification must be scoped to
+    this span before :func:`_split_on_unquoted_pipe` and the sink readers run
+    on it. Quote and backslash handling matches :func:`_split_on_unquoted_pipe`.
+
+    A separator inside an unquoted ``$(...)`` or backtick substitution is not
+    a boundary -- tracked via a depth stack (``$(``/backtick, nestable in
+    either order) so a ``;`` used *inside* the substitution's own command
+    doesn't fracture the statement. An unterminated substitution (unclosed
+    ``$(`` or an unpaired backtick) leaves the stack non-empty for the rest
+    of *text*, so nothing after it is ever recognised as a boundary either --
+    the tail becomes part of one statement rather than risking a false split.
+
+    Args:
+        text: The line to scan.
+        pos: Character offset that must fall within the returned span.
+
+    Returns:
+        ``(start, end)`` offsets of the statement containing *pos*, with the
+        separator itself excluded from both ends.
+    """
+    start = 0
+    in_single = False
+    in_double = False
+    subst_stack: List[str] = []  # 'P' for an open $(, 'B' for an open backtick
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+        elif ch == "\\" and (in_double or (not in_single and not in_double)):
+            i += 2 if i + 1 < len(text) else 1
+        elif in_single or in_double:
+            i += 1
+        elif ch == "$" and i + 1 < len(text) and text[i + 1] == "(":
+            subst_stack.append("P")
+            i += 2
+        elif ch == ")" and subst_stack and subst_stack[-1] == "P":
+            subst_stack.pop()
+            i += 1
+        elif ch == "`":
+            if subst_stack and subst_stack[-1] == "B":
+                subst_stack.pop()
+            else:
+                subst_stack.append("B")
+            i += 1
+        elif subst_stack:
+            i += 1
+        elif ch == "&" and i + 1 < len(text) and text[i + 1] == "&":
+            if pos < i:
+                return start, i
+            i += 2
+            start = i
+        elif ch == "&":
+            if pos < i:
+                return start, i
+            i += 1
+            start = i
+        elif ch == "|" and i + 1 < len(text) and text[i + 1] == "|":
+            if pos < i:
+                return start, i
+            i += 2
+            start = i
+        elif ch == ";":
+            if pos < i:
+                return start, i
+            i += 1
+            start = i
+        else:
+            i += 1
+    return start, len(text)
+
+
 def _process_heredocs(lines: List[str]) -> List[str]:
     """Remove heredoc bodies, splicing bash-family ones back in as source.
 
@@ -350,13 +433,16 @@ def _process_heredocs(lines: List[str]) -> List[str]:
     simply gone: ``cat <<EOF > /etc/passwd`` becomes the leaf
     ``cat __HEREDOC_TO_cat__ > /etc/passwd`` with ``ask_floor`` unset.
 
-    ONE HEREDOC PER LINE IS THE SUPPORTED CASE, and the second one is worth
-    the paragraph because it fails quietly. The specs are walked right-to-left
-    so the replacement offsets stay valid, but each terminator scan starts
-    where the previous one stopped -- so the rightmost delimiter claims the
-    leftmost body. ``bash <<A <<B`` over bodies ``echo from-A`` / ``echo
-    from-B`` yields ``['echo from-A', 'A', 'echo from-B', 'bash']``: the
-    terminator word ``A`` becomes a command of its own.
+    The sink is classified from the heredoc's own statement
+    (:func:`_statement_bounds_containing`) -- an executor named in an earlier
+    clause is not this heredoc's sink.
+
+    Multiple heredocs on one line (``bash <<A <<B``) are supported: bodies
+    are read in left-to-right redirect order -- the order bash attaches them
+    in -- with one forward-advancing line cursor shared across every heredoc
+    on the line. The specs are then spliced into the bearer line right-to-left
+    so each one's recorded offset into the ORIGINAL line stays valid while an
+    earlier one is edited.
 
     Args:
         lines: Logical lines, already CRLF-normalised and backslash-joined.
@@ -374,34 +460,43 @@ def _process_heredocs(lines: List[str]) -> List[str]:
             i += 1
             continue
 
-        modified_line = line
-        extra_lines: List[str] = []
-
-        for spec in reversed(specs):
+        # Each spec is paired with its own body as soon as the body is read,
+        # so the two never become independently-indexed sequences.
+        paired: List[Tuple[dict, List[str]]] = []
+        cursor = i + 1
+        for spec in specs:
             delim = spec["delimiter"]
             strip_tabs = spec["strip_tabs"]
 
             body_lines = []
-            j = i + 1
-            while j < len(lines):
-                body_line = lines[j]
+            while cursor < len(lines):
+                body_line = lines[cursor]
                 check_line = body_line.lstrip("\t") if strip_tabs else body_line
                 if check_line == delim:
-                    j += 1
+                    cursor += 1
                     break
                 body_lines.append(body_line)
-                j += 1
+                cursor += 1
             # Running off the end without finding the terminator is not an
             # error here: the body is simply everything that was left.
+            paired.append((spec, body_lines))
 
-            sink_class = _classify_pipeline_sink(modified_line)
+        modified_line = line
+        extra_lines: List[str] = []
+
+        for spec, body_lines in reversed(paired):
+            stmt_start, stmt_end = _statement_bounds_containing(
+                modified_line, spec["start"]
+            )
+            statement = modified_line[stmt_start:stmt_end]
+            sink_class = _classify_pipeline_sink(statement)
             # The sentinel has to survive as one grammar word and stay
             # matchable by the ASK floor's `__HEREDOC_TO_(\w+)__`, so the
             # substitute must itself be a word character. `python3.13` becomes
             # `python3_13`, which the foreign-executor prefix test still
             # recognises.
             sink_label = re.sub(
-                r"[^A-Za-z0-9_]", "_", _extract_pipeline_sink(modified_line)
+                r"[^A-Za-z0-9_]", "_", _extract_pipeline_sink(statement)
             )
 
             if sink_class == "bash":
@@ -416,8 +511,8 @@ def _process_heredocs(lines: List[str]) -> List[str]:
                     + sentinel
                     + modified_line[spec["end"] :]
                 )
-            i = j
 
+        i = cursor
         result_lines.extend(extra_lines)
         stripped = modified_line.strip()
         if stripped:
