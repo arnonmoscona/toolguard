@@ -49,6 +49,12 @@ from unittest.mock import patch
 
 from toolguard import config as toolguard_config
 from toolguard.api import decide
+from toolguard.claude_code_contract import (
+    CWD_KEY,
+    HOOK_EVENT_NAME_KEY,
+    PRE_TOOL_USE_EVENT,
+    SESSION_ID_KEY,
+)
 
 __all__ = [
     "SandboxEscapeError",
@@ -477,9 +483,9 @@ class Sandbox:
             stdout was not JSON -- plus ``_stderr`` and ``_returncode``.
         """
         event = dict(payload)
-        event.setdefault("cwd", str(self.project))
-        event.setdefault("hook_event_name", "PreToolUse")
-        event.setdefault("session_id", "sandbox")
+        event.setdefault(CWD_KEY, str(self.project))
+        event.setdefault(HOOK_EVENT_NAME_KEY, PRE_TOOL_USE_EVENT)
+        event.setdefault(SESSION_ID_KEY, "sandbox")
         completed = subprocess.run(
             [sys.executable, "-m", "toolguard.hook"],
             input=json.dumps(event),

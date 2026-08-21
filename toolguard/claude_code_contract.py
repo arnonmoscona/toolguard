@@ -18,10 +18,10 @@ a checkable fact rather than a grep for a dozen strings that goes stale
 silently.
 
 Not in scope here: the tool-registry/payload-key material in
-:mod:`toolguard.tool_spec`, and the ``STRIPPED_WRAPPERS`` matching-semantics
-list in :mod:`toolguard.parser.command_extractor` -- both are Claude Code
-facts too, moved in a later pass.
+:mod:`toolguard.tool_spec`, moved in a later pass.
 """
+
+from typing import Tuple
 
 # --- PreToolUse / SessionStart input payload (stdin) ---
 SESSION_ID_KEY = "session_id"
@@ -51,3 +51,24 @@ ADDITIONAL_CONTEXT_KEY = "additionalContext"
 # Claude Code's own settings.json hooks-registration schema uses) ---
 PRE_TOOL_USE_EVENT = "PreToolUse"
 SESSION_START_EVENT = "SessionStart"
+
+# --- Bash rule matching: wrappers stripped before matching ---
+#: The wrappers Claude Code strips before matching a Bash rule, so a rule written for the
+#: inner command also matches the wrapped form. Verbatim, fetched 2026-08-21 from
+#: https://code.claude.com/docs/en/permissions.md: "The stripped wrappers are `timeout`,
+#: `time`, `nice`, `nohup`, and `stdbuf`, plus the shell builtins `command` and `builtin`,
+#: and zsh's `noglob`... Bare `xargs` is also stripped ... Stripping applies only when
+#: `xargs` has no flags." `command -v` (a lookup, not an execution) is deliberately not
+#: included; see :func:`toolguard.parser.command_extractor._strip_wrapper`. `sudo` and `env`
+#: are not on native's list at all and are deliberately not covered here either.
+STRIPPED_WRAPPERS: Tuple[str, ...] = (
+    "timeout",
+    "time",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "command",
+    "builtin",
+    "noglob",
+    "xargs",
+)

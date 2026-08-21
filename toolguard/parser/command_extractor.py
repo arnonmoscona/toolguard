@@ -19,8 +19,9 @@ floor -- lives here rather than in the grammar or the IR.
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set, Tuple, Union
+from typing import List, Optional, Sequence, Set, Union
 
+from toolguard.claude_code_contract import STRIPPED_WRAPPERS
 from toolguard.config_types import CommandSpellings
 from toolguard.parser import bash_parser
 from toolguard.parser.command_model import (
@@ -885,26 +886,6 @@ def _collect_commands_from_compound(
 # Wrapper stripping
 # ---------------------------------------------------------------------------
 
-#: The wrappers Claude Code strips before matching Bash rules, so a rule written for the
-#: inner command also matches the wrapped form. Verbatim, fetched 2026-08-21 from
-#: https://code.claude.com/docs/en/permissions.md: "The stripped wrappers are `timeout`,
-#: `time`, `nice`, `nohup`, and `stdbuf`, plus the shell builtins `command` and `builtin`,
-#: and zsh's `noglob`... Bare `xargs` is also stripped ... Stripping applies only when
-#: `xargs` has no flags." `command -v` (a lookup, not an execution) is deliberately not
-#: included; see :func:`_strip_wrapper`. `sudo` and `env` are not on native's list at all
-#: and are deliberately not covered here either.
-STRIPPED_WRAPPERS: Tuple[str, ...] = (
-    "timeout",
-    "time",
-    "nice",
-    "nohup",
-    "stdbuf",
-    "command",
-    "builtin",
-    "noglob",
-    "xargs",
-)
-
 _WRAPPER_NAME_RE = re.compile(r"[A-Za-z]+")
 _FLAG_TOKEN_RE = re.compile(r"\s+(-\S+)")
 _ANY_TOKEN_RE = re.compile(r"\s+\S+")
@@ -913,14 +894,14 @@ _ANY_TOKEN_RE = re.compile(r"\s+\S+")
 def _strip_wrapper(command_text: str) -> Optional[str]:
     """The inner command *command_text* runs, with one leading wrapper stripped.
 
-    Recognises :data:`STRIPPED_WRAPPERS` by string inspection rather than the grammar:
-    what follows a wrapper name is that program's OWN argument syntax, not bash syntax,
-    so this is not the bash-structure parsing ``bash_parser.peg`` exists for. Handles an
-    attached-value flag (``stdbuf -o0``) and a standalone one (``command -p``); a flag
-    whose value is a SEPARATE token (``nice -n 5``) is not recognised and the command is
-    reported as not wrapped -- a missed strip costs an extra ``ask``, never an extra grant.
-    Wrappers are stripped once, not recursively: a stacked wrapper (``nice nohup cmd``)
-    strips only the first.
+    Recognises :data:`toolguard.claude_code_contract.STRIPPED_WRAPPERS` by string
+    inspection rather than the grammar: what follows a wrapper name is that program's OWN
+    argument syntax, not bash syntax, so this is not the bash-structure parsing
+    ``bash_parser.peg`` exists for. Handles an attached-value flag (``stdbuf -o0``) and a
+    standalone one (``command -p``); a flag whose value is a SEPARATE token (``nice -n 5``)
+    is not recognised and the command is reported as not wrapped -- a missed strip costs an
+    extra ``ask``, never an extra grant. Wrappers are stripped once, not recursively: a
+    stacked wrapper (``nice nohup cmd``) strips only the first.
 
     Args:
         command_text: One leaf command, or the part of one after any leading assignment.
@@ -978,11 +959,11 @@ def command_spellings(
     - A leading ``NAME=value`` assignment (ticket 77): restricting sees past it
       unconditionally; granting sees past it only when every name in the prefix is in
       *looked_past_when_granting*.
-    - A stripped wrapper (:data:`STRIPPED_WRAPPERS`): both sides see past it whenever
-      one is found, since native's own worked example strips a wrapper for an ALLOW
-      rule -- wrapper stripping is not assignment-gated. A wrapper is looked for after
-      any assignment that was actually looked past on that side, so an unsafe
-      assignment still hides a wrapper (and the command under it) from granting.
+    - A stripped wrapper (:data:`toolguard.claude_code_contract.STRIPPED_WRAPPERS`): both
+      sides see past it whenever one is found, since native's own worked example strips
+      a wrapper for an ALLOW rule -- wrapper stripping is not assignment-gated. A wrapper
+      is looked for after any assignment that was actually looked past on that side, so
+      an unsafe assignment still hides a wrapper (and the command under it) from granting.
 
     Args:
         command_text: One leaf command, as handed to permission matching.

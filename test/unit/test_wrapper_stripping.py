@@ -3,7 +3,7 @@ TOO-45 ticket 82: a wrapper native strips before matching Bash rules must not hi
 command under it from either side -- unlike a leading ``NAME=value`` assignment
 (``test_assignment_prefix.py``), wrapper stripping is NOT gated: native's own worked
 example strips a wrapper for an ALLOW rule (``Bash(npm test *)`` matches
-``timeout 30 npm test``). See :data:`toolguard.parser.command_extractor.STRIPPED_WRAPPERS`
+``timeout 30 npm test``). See :data:`toolguard.claude_code_contract.STRIPPED_WRAPPERS`
 for the fetched, dated source quote.
 
 This file also proves the pre-existing assignment asymmetry (ticket 77) is unchanged by
@@ -13,8 +13,8 @@ pair -- the "one structure, two questions" hazard this ticket's brief calls out 
 
 import unittest
 
+from toolguard.claude_code_contract import STRIPPED_WRAPPERS
 from toolguard.parser.command_extractor import (
-    STRIPPED_WRAPPERS,
     _strip_wrapper,
     command_spellings,
 )
