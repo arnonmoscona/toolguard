@@ -144,6 +144,17 @@ class OncePer:
                 return None
         return action()
 
+    def release(self, project: Optional[Path], context: Any = None) -> None:
+        """
+        Give up this period's claim for *project* early, so a later attempt
+        this same period can retry.
+
+        For a caller whose action, after :meth:`run` already claimed the
+        slot, determined the attempt should not count against the throttle
+        after all. Fails soft, like the underlying store operation.
+        """
+        once_per_store.release(project, self._key, self._period._scope(context))
+
     def _claim(self, project: Optional[Path], context: Any):
         """Take this thing's claim for the current period, opportunistically sweeping after."""
         result = once_per_store.claim(

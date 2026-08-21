@@ -1590,10 +1590,50 @@ class TestMigrationLocking(ConfigIsolationMixin, unittest.TestCase):
             ) as mock_warning:
                 outcome = migrate(project_root, dry_run=False)
 
-        self.assertEqual(outcome, MigrationOutcome.DECLINED_LOCKED)
+        self.assertEqual(outcome, MigrationOutcome.DECLINED_UNAVAILABLE)
         message = mock_warning.call_args[0][0]
         self.assertNotIn("already in progress", message)
         self.assertIn(file_lock.REASON_NO_PRIMITIVE, message)
+
+    def test_every_non_timeout_reason_declines_as_unavailable_not_locked(self):
+        """
+        Given exclusive() raises LockUnavailable for each reason OTHER than
+            REASON_TIMEOUT in turn (no lock primitive, lock directory
+            unavailable, lock file unavailable)
+        When migrate runs (not a dry run)
+        Then every one of them returns DECLINED_UNAVAILABLE, never
+             DECLINED_LOCKED -- that member is reserved for REASON_TIMEOUT,
+             where another migration really is racing this one -- and
+             settings.local.json is left untouched
+        """
+        _home, project_root = self.isolate_config_environment()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.local.json"
+        original_settings = {
+            "permissions": {"allow": ["Bash(ls:*)"], "deny": [], "ask": []}
+        }
+        settings_path.write_text(json.dumps(original_settings))
+
+        non_timeout_reasons = (
+            file_lock.REASON_NO_PRIMITIVE,
+            file_lock.REASON_DIRECTORY_UNAVAILABLE,
+            file_lock.REASON_FILE_UNAVAILABLE,
+        )
+        for reason in non_timeout_reasons:
+            with self.subTest(reason=reason):
+                with patch.object(
+                    permission_migration_module.file_lock,
+                    "exclusive",
+                    side_effect=file_lock.LockUnavailable(Path("/some/lock"), reason),
+                ):
+                    with patch.object(permission_migration_module, "report_warning"):
+                        outcome = migrate(project_root, dry_run=False)
+
+                self.assertEqual(outcome, MigrationOutcome.DECLINED_UNAVAILABLE)
+
+        with open(settings_path) as f:
+            self.assertEqual(json.load(f), original_settings)
 
     def test_lock_key_is_based_on_the_resolved_project_root(self):
         """
@@ -1805,6 +1845,19 @@ class TestMigrationOutcomeExitCodes(unittest.TestCase):
         self.assertEqual(MigrationOutcome.SUCCEEDED.exit_code, 0)
         self.assertEqual(MigrationOutcome.FAILED.exit_code, 1)
         self.assertEqual(MigrationOutcome.DECLINED_LOCKED.exit_code, 3)
+        self.assertEqual(MigrationOutcome.DECLINED_UNAVAILABLE.exit_code, 4)
+
+    def test_every_member_has_an_exit_code(self):
+        """
+        Given every member currently defined on MigrationOutcome
+        When .exit_code is read
+        Then none raises KeyError -- a member added without a matching
+             _EXIT_CODES entry would blow up the first time a caller reads
+             it, rather than at definition time
+        """
+        for outcome in MigrationOutcome:
+            with self.subTest(outcome=outcome):
+                outcome.exit_code
 
 
 class TestMigratePermissionsMainExitCodes(unittest.TestCase):
@@ -1862,6 +1915,18 @@ class TestMigratePermissionsMainExitCodes(unittest.TestCase):
         """
         self.assertEqual(
             self._main_with_mocked_migrate(MigrationOutcome.DECLINED_LOCKED), 3
+        )
+
+    def test_declined_unavailable_exits_four(self):
+        """
+        Given migrate() returns MigrationOutcome.DECLINED_UNAVAILABLE
+        When main() runs
+        Then it returns the int 4 -- distinct from DECLINED_LOCKED's 3, since
+             a script branching on the exit code should be able to tell a
+             lock race apart from access being unavailable altogether
+        """
+        self.assertEqual(
+            self._main_with_mocked_migrate(MigrationOutcome.DECLINED_UNAVAILABLE), 4
         )
 
 

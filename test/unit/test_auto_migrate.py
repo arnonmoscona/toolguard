@@ -485,6 +485,39 @@ class TestRunAutoMigration(_AutoMigrationFixture, unittest.TestCase):
         self.assertNotIn("[WARNING]", stderr_text)
         self.assertEqual(self.claim_status_now(), ClaimStatus.HELD_BY_SOMEONE_ELSE)
 
+    def test_run_auto_migration_declined_unavailable_reports_a_notice_and_frees_the_slot(
+        self,
+    ):
+        """
+        Given migrate() returns MigrationOutcome.DECLINED_UNAVAILABLE
+            (exclusive access could not be guaranteed AT ALL -- no other
+            migration is racing this one, unlike DECLINED_LOCKED)
+        When run_auto_migration is invoked
+        Then a notice naming the real situation reaches stderr -- never
+             "already running" (that claim is only true for
+             DECLINED_LOCKED) and never "Migration failed" -- False is
+             returned, and the day's claim is RELEASED rather than spent:
+             a fresh claim attempt for today succeeds, unlike the locked
+             case where it would find the slot already held
+        """
+        self.write_settings(allow=["Bash(git status)"])
+
+        buf = io.StringIO()
+        with patch.object(auto_migrate, "migrate") as mock_migrate:
+            mock_migrate.return_value = MigrationOutcome.DECLINED_UNAVAILABLE
+            with redirect_stderr(buf):
+                result = run_auto_migration(
+                    self.project, self.config_sync, _TAKEOVER_OFF
+                )
+
+        self.assertFalse(result)
+        stderr_text = buf.getvalue()
+        self.assertIn("could not guarantee exclusive access", stderr_text.lower())
+        self.assertNotIn("already running", stderr_text)
+        self.assertNotIn("Migration failed", stderr_text)
+        self.assertNotIn("[WARNING]", stderr_text)
+        self.assertEqual(self.claim_status_now(), ClaimStatus.CLAIMED)
+
     def test_run_auto_migration_exception_reports_a_warning(self):
         """
         Given migrate() raises

@@ -548,6 +548,62 @@ class TestOncePerRun(_IsolatedStoreMixin, unittest.TestCase):
             self.assertEqual(_streams(mock_print), {sys.stderr})
 
 
+class TestOncePerRelease(_IsolatedStoreMixin, unittest.TestCase):
+    """release(): giving a claimed slot back early so this period can retry."""
+
+    def test_release_lets_a_later_call_this_period_claim_again(self):
+        """
+        Given a thing whose slot is claimed for a project
+        When release() is called
+        Then done() reports free again, and run() executes its action
+        """
+        thing = once_per.day("k", "a thing")
+        with TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            thing.run(project, lambda: "ran", repeating=once_per.Repeat.SAFE)
+            self.assertTrue(thing.done(project))
+
+            thing.release(project)
+
+            self.assertFalse(thing.done(project))
+            result = thing.run(
+                project, lambda: "ran again", repeating=once_per.Repeat.SAFE
+            )
+            self.assertEqual(result, "ran again")
+
+    def test_release_of_an_unclaimed_slot_is_a_no_op(self):
+        """
+        Given a thing never claimed for a project
+        When release() is called
+        Then nothing raises and the slot stays unclaimed
+        """
+        thing = once_per.day("k", "a thing")
+        with TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+
+            thing.release(project)
+
+            self.assertFalse(thing.done(project))
+
+    def test_release_does_not_affect_a_different_thing_same_project(self):
+        """
+        Given two different things both claimed for the same project
+        When release() is called on only one
+        Then the other thing's claim is untouched
+        """
+        thing_a = once_per.day("a", "thing a")
+        thing_b = once_per.day("b", "thing b")
+        with TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            thing_a.run(project, lambda: "a", repeating=once_per.Repeat.SAFE)
+            thing_b.run(project, lambda: "b", repeating=once_per.Repeat.SAFE)
+
+            thing_a.release(project)
+
+            self.assertFalse(thing_a.done(project))
+            self.assertTrue(thing_b.done(project))
+
+
 class TestOncePerInternalHousekeeping(_IsolatedStoreMixin, unittest.TestCase):
     """Housekeeping is internal to OncePer: a caller never asks for it."""
 

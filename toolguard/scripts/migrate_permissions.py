@@ -74,7 +74,8 @@ def main() -> int:
     Returns:
         1 if the project root itself cannot be resolved. Otherwise the
         outcome's ``.exit_code``: 0 on success, 1 on error, 3 if another
-        migration already holds this project's lock.
+        migration already holds this project's lock, 4 if exclusive access
+        could not be guaranteed for any other reason.
     """
     args = parse_args()
 

@@ -82,8 +82,14 @@ class MigrationOutcome(Enum):
     #: Migration raised while loading, computing, or writing.
     FAILED = "failed"
     #: Declined without attempting anything: another migration already
-    #: holds this project's lock.
+    #: holds this project's lock (a contended lock that timed out).
     DECLINED_LOCKED = "declined_locked"
+    #: Declined without attempting anything: exclusive access could not be
+    #: guaranteed for a reason OTHER than contention -- no OS lock primitive
+    #: on this platform, or the lock directory/file could not be opened.
+    #: Unlike DECLINED_LOCKED, no other process is doing the work, and
+    #: retrying immediately is exactly as likely to succeed as waiting.
+    DECLINED_UNAVAILABLE = "declined_unavailable"
 
     @property
     def exit_code(self) -> int:
@@ -101,6 +107,7 @@ _EXIT_CODES: Dict[MigrationOutcome, int] = {
     MigrationOutcome.SUCCEEDED: 0,
     MigrationOutcome.FAILED: 1,
     MigrationOutcome.DECLINED_LOCKED: 3,
+    MigrationOutcome.DECLINED_UNAVAILABLE: 4,
 }
 
 #: Subdirectory of ~/.toolguard/ holding per-project migration lockfiles.
@@ -1254,12 +1261,12 @@ def migrate(
                 "for this project.",
                 "Wait for the other migration to finish, then retry.",
             )
-        else:
-            report_warning(
-                f"Migration declined: exclusive access could not be guaranteed ({e.reason}).",
-                "Resolve the underlying condition, then retry; no files were modified.",
-            )
-        return MigrationOutcome.DECLINED_LOCKED
+            return MigrationOutcome.DECLINED_LOCKED
+        report_warning(
+            f"Migration declined: exclusive access could not be guaranteed ({e.reason}).",
+            "Resolve the underlying condition, then retry; no files were modified.",
+        )
+        return MigrationOutcome.DECLINED_UNAVAILABLE
 
 
 def _run_migration(

@@ -41,11 +41,15 @@ def run_auto_migration(
 
     The day's slot is claimed immediately before ``migrate()`` -- never
     before the analysis that decides whether there is anything to migrate --
-    so an exception during that analysis does not burn the day. Nothing
-    releases the claim afterwards, so a migration that fails or is declined
-    waits for the next day rather than retrying. When the once-per-day
-    guarantee itself cannot be verified, the migration is skipped rather
-    than run.
+    so an exception during that analysis does not burn the day. A migration
+    that fails, succeeds, or is declined because another migration holds the
+    lock waits for the next day rather than retrying: the claim is not
+    released. A migration declined because exclusive access could not be
+    guaranteed AT ALL (no lock primitive, or the lock file/directory
+    unavailable) releases the claim instead -- no other process is doing the
+    work in that case, and waiting for tomorrow buys nothing a retry now
+    would not. When the once-per-day guarantee itself cannot be verified,
+    the migration is skipped rather than run.
 
     Args:
         project_root: Project root.
@@ -118,11 +122,23 @@ def run_auto_migration(
             return False
         if outcome is MigrationOutcome.DECLINED_LOCKED:
             # migrate() attempted nothing and wrote nothing, so this is a
-            # notice rather than a failure.
+            # notice rather than a failure. Another process holds the lock
+            # and will do the work itself, so today's claim stays spent.
             report_notice(
                 "[TOOLGUARD AUTO-MIGRATION] Another migration is already "
                 "running for this project; skipping."
             )
+            return False
+        if outcome is MigrationOutcome.DECLINED_UNAVAILABLE:
+            # Also attempted and wrote nothing, but no other process is
+            # doing the work -- unlike DECLINED_LOCKED, waiting for tomorrow
+            # would not improve the odds, so give the slot back rather than
+            # silently disabling auto-migration on this project every day.
+            report_notice(
+                "[TOOLGUARD AUTO-MIGRATION] Could not guarantee exclusive "
+                "access to run the migration; skipping."
+            )
+            AUTO_MIGRATION.release(project_root)
             return False
         if outcome is not MigrationOutcome.SUCCEEDED:
             report_warning(
