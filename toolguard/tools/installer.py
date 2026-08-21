@@ -45,6 +45,7 @@ from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from toolguard import ambient
+from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT, SESSION_START_EVENT
 from toolguard.config import load_config_file
 from toolguard.config_write_guard import (
     ConfigWriteVerificationError,
@@ -616,7 +617,7 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
         data = {}
 
     hooks = data.setdefault("hooks", {})
-    pre_tool_use = hooks.setdefault("PreToolUse", [])
+    pre_tool_use = hooks.setdefault(PRE_TOOL_USE_EVENT, [])
     existing_matchers = {
         entry.get("matcher") for entry in pre_tool_use if isinstance(entry, dict)
     }
@@ -631,7 +632,7 @@ def cmd_register_hooks(args: argparse.Namespace) -> int:
         )
         added_matchers.append(tool)
 
-    session_start = hooks.setdefault("SessionStart", [])
+    session_start = hooks.setdefault(SESSION_START_EVENT, [])
     session_start_commands = {
         h.get("command")
         for entry in session_start
@@ -1974,7 +1975,7 @@ def _hook_registration_findings(settings_path: Path) -> List[dict]:
     except OSError, json.JSONDecodeError:
         return []
 
-    pre_tool_use = data.get("hooks", {}).get("PreToolUse", [])
+    pre_tool_use = data.get("hooks", {}).get(PRE_TOOL_USE_EVENT, [])
     if not isinstance(pre_tool_use, list):
         return []
 

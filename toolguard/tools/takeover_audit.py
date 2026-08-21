@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import List, Optional, Set, Tuple
 
+from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT
 from toolguard.config import Configuration, Provenance, TakeoverConfig
 from toolguard.rule_entry import strip_tool_wrapper
 
@@ -117,7 +118,7 @@ def _get_registered_toolguard_tools(config: Configuration) -> Set[str]:
         hooks_section = layer.content.get("hooks", {})
         if not isinstance(hooks_section, dict):
             continue
-        pre_tool_use = hooks_section.get("PreToolUse", [])
+        pre_tool_use = hooks_section.get(PRE_TOOL_USE_EVENT, [])
         if not isinstance(pre_tool_use, list):
             continue
 

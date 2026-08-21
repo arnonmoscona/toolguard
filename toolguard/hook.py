@@ -24,6 +24,20 @@ from typing import Any, Dict, List, Optional, Tuple
 from toolguard import ambient, error_reporter
 from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
+from toolguard.claude_code_contract import (
+    ADDITIONAL_CONTEXT_KEY,
+    CWD_KEY,
+    HOOK_EVENT_NAME_KEY,
+    HOOK_EVENT_NAME_RESPONSE_KEY,
+    HOOK_SPECIFIC_OUTPUT_KEY,
+    PERMISSION_DECISION_KEY,
+    PERMISSION_DECISION_REASON_KEY,
+    PERMISSION_MODE_KEY,
+    PRE_TOOL_USE_EVENT,
+    TOOL_INPUT_KEY,
+    TOOL_NAME_KEY,
+    TRANSCRIPT_PATH_KEY,
+)
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import load_configuration
 from toolguard.config_divergence import check_and_warn_divergence
@@ -134,7 +148,7 @@ def parse_hook_input() -> Dict[str, Any]:
 
         data = json.loads(input_data)
 
-        required_fields = ["tool_name", "tool_input", "hook_event_name"]
+        required_fields = [TOOL_NAME_KEY, TOOL_INPUT_KEY, HOOK_EVENT_NAME_KEY]
         for field in required_fields:
             if field not in data:
                 raise ValueError(f"Missing required field: {field}")
@@ -175,14 +189,16 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
         omitted entirely (not set to ``null``) otherwise.
     """
     output: Dict[str, Any] = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": verdict.decision,
-            "permissionDecisionReason": verdict.reason,
+        HOOK_SPECIFIC_OUTPUT_KEY: {
+            HOOK_EVENT_NAME_RESPONSE_KEY: PRE_TOOL_USE_EVENT,
+            PERMISSION_DECISION_KEY: verdict.decision,
+            PERMISSION_DECISION_REASON_KEY: verdict.reason,
         }
     }
     if verdict.additional_context:
-        output["hookSpecificOutput"]["additionalContext"] = verdict.additional_context
+        output[HOOK_SPECIFIC_OUTPUT_KEY][ADDITIONAL_CONTEXT_KEY] = (
+            verdict.additional_context
+        )
     return output
 
 
@@ -197,9 +213,9 @@ def _finalize_output(verdict: RuntimeVerdict, reporter: Reporter) -> Dict[str, A
     output = create_hook_output(verdict)
     fault_context = reporter.drain_claude_context()
     if fault_context:
-        hook_output = output["hookSpecificOutput"]
-        existing = hook_output.get("additionalContext")
-        hook_output["additionalContext"] = (
+        hook_output = output[HOOK_SPECIFIC_OUTPUT_KEY]
+        existing = hook_output.get(ADDITIONAL_CONTEXT_KEY)
+        hook_output[ADDITIONAL_CONTEXT_KEY] = (
             f"{existing}\n\n{fault_context}" if existing else fault_context
         )
     return output
@@ -282,7 +298,7 @@ def _build_crash_context(local_vars: Dict[str, Any]) -> Dict[str, Any]:
     """
     return {
         key: local_vars[key]
-        for key in ("tool_name", "tool_input", "cwd")
+        for key in (TOOL_NAME_KEY, TOOL_INPUT_KEY, CWD_KEY)
         if key in local_vars
     }
 
@@ -773,9 +789,9 @@ def _run_eval_mode() -> None:
     """
     try:
         hook_data = parse_hook_input()
-        tool_name = hook_data["tool_name"]
-        tool_input = hook_data["tool_input"]
-        cwd = hook_data.get("cwd", None)
+        tool_name = hook_data[TOOL_NAME_KEY]
+        tool_input = hook_data[TOOL_INPUT_KEY]
+        cwd = hook_data.get(CWD_KEY, None)
         # Anchor BOTH the rule hierarchy and the env/.env-derived settings
         # (extended_syntax) to the TARGET project's cwd, ignoring any stale
         # CLAUDE_SETTINGS_PATH / TOOLGUARD_PROJECT_ROOT override -- the same
@@ -959,7 +975,7 @@ def _agent_info_for(hook_data: Dict[str, Any]) -> str:
     Returns:
         The subagent's name when the call came from a subagent, else ``"main"``.
     """
-    agent_context = identify_current_agent(hook_data.get("transcript_path", ""))
+    agent_context = identify_current_agent(hook_data.get(TRANSCRIPT_PATH_KEY, ""))
     return (
         agent_context["subagent_name"]
         if agent_context["agent_type"] == "subagent"
@@ -1304,9 +1320,9 @@ def main() -> None:
             # Parse hook input first to get cwd
             hook_data = parse_hook_input()
 
-            tool_name = hook_data["tool_name"]
-            tool_input = hook_data["tool_input"]
-            cwd = hook_data.get("cwd", None)
+            tool_name = hook_data[TOOL_NAME_KEY]
+            tool_input = hook_data[TOOL_INPUT_KEY]
+            cwd = hook_data.get(CWD_KEY, None)
 
             # Obtain the resolved configuration once via the public abstraction.
             # All file discovery, parsing, and format/location decisions live in
@@ -1336,7 +1352,7 @@ def main() -> None:
             # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
             # mode) is recorded alongside the decision, purely for diagnosis --
             # it never affects the verdict itself.
-            permission_mode = hook_data.get("permission_mode")
+            permission_mode = hook_data.get(PERMISSION_MODE_KEY)
 
             # File path tools (Read, Write, Edit) and command tools (Bash, MCP
             # terminals) differ only in how the target is extracted and

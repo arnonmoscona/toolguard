@@ -34,6 +34,7 @@ PYSCN_TOML = TOOLGUARD_ROOT.parent / ".pyscn.toml"
 LAYERS = (
     ("toolguard.issues", frozenset()),
     ("toolguard.ambient", frozenset()),
+    ("toolguard.claude_code_contract", frozenset()),
     ("toolguard.path_utils", frozenset({"toolguard.ambient"})),
     ("toolguard.normalization", frozenset({"toolguard.ambient"})),
     ("toolguard.toml_scan", frozenset()),

@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from toolguard import ambient, env_config, install_provenance
+from toolguard.claude_code_contract import CWD_KEY
 from toolguard.config import Configuration, load_configuration
 
 
@@ -441,7 +442,7 @@ def main() -> None:
 
     try:
         payload = _parse_session_start_input()
-        cwd = payload.get("cwd") or str(ambient.cwd())
+        cwd = payload.get(CWD_KEY) or str(ambient.cwd())
 
         # Loaded once and shared by every _detect_* check below, so they see
         # a consistent snapshot.
