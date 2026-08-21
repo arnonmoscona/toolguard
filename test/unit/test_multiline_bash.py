@@ -969,6 +969,88 @@ class TestMultipleHeredocsPerLine(unittest.TestCase):
         )
         self.assertEqual(_resolve(cmd, ["bash:*", "echo:*"], ["rm -rf:*"]), "deny")
 
+    def test_heredocs_on_separate_bearer_lines_are_not_cross_indexed(self):
+        """
+        Given two heredocs on TWO SEPARATE bearer lines, one foreign (`cat`)
+            and one bash-family (`bash`)
+        When the command is structured-extracted
+        Then each keeps its own body -- the foreign one's body is dropped
+            behind its sentinel and the bash one's body is spliced in as its
+            own leaf, neither borrowing the other's body
+        """
+        cmd = "cat <<A\nsafe content\nA\nbash <<B\nls -la\nB"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                ("leaf", "cat __HEREDOC_TO_cat__", False),
+                ("leaf", "ls -la", False),
+                ("leaf", "bash", False),
+            ],
+        )
+
+    def test_heredocs_on_separate_bearer_lines_dangerous_second_body_is_denied(self):
+        """
+        Given a foreign heredoc followed by a bash-family heredoc whose body
+            is `rm -rf /`, on two separate bearer lines
+        When extracted and resolved with a deny on `rm -rf`
+        Then the second line's own body reaches its own leaf -- not the
+            first line's body body-swapped in by a placeholder mix-up -- and
+            the compound is DENIED
+        """
+        cmd = "cat <<A\nsafe content\nA\nbash <<B\nrm -rf /\nB"
+        self.assertEqual(
+            _extracted(cmd),
+            [
+                ("leaf", "cat __HEREDOC_TO_cat__", False),
+                ("leaf", "rm -rf /", False),
+                ("leaf", "bash", False),
+            ],
+        )
+        self.assertEqual(_resolve(cmd, ["cat:*", "bash:*"], ["rm -rf:*"]), "deny")
+
+
+class TestPlaceholderCannotBeForgedByCommandText(unittest.TestCase):
+    """
+    The heredoc pre-pass lifts each body behind an internal placeholder word. That
+    word is ordinary text, so a command may contain its spelling; the prefix is
+    therefore minted to be absent from the input.
+    """
+
+    def test_a_command_containing_the_placeholder_spelling_survives_intact(self):
+        """
+        Given 'echo __HD0__' -- the placeholder's own spelling, with no heredoc
+        When the command is extracted
+        Then the text passes through unchanged rather than being resolved against
+             an empty body table
+        """
+        leaves = extract_structured("echo __HD0__")
+        self.assertEqual([leaf.text for leaf in leaves], ["echo __HD0__"])
+
+    def test_a_forged_placeholder_does_not_steal_a_real_heredocs_body(self):
+        """
+        Given a forged placeholder word beside a genuine heredoc
+        When the command is extracted
+        Then the forged text is left alone and the real heredoc still gets its
+             sink sentinel
+        """
+        leaves = extract_structured("echo __HD0__; cat <<EOF\nbody\nEOF")
+        self.assertEqual(
+            [leaf.text for leaf in leaves],
+            ["echo __HD0__", "cat __HEREDOC_TO_cat__"],
+        )
+
+    def test_a_forged_placeholder_does_not_suppress_the_ask_floor(self):
+        """
+        Given a forged placeholder ahead of a heredoc feeding a foreign interpreter
+        When the command is extracted
+        Then the interpreter's leaf still carries its ASK floor
+        """
+        leaves = extract_structured("echo __HD0__; python <<EOF\nimport os\nEOF")
+        floored = [leaf for leaf in leaves if leaf.ask_floor]
+        self.assertEqual(
+            [leaf.text for leaf in floored], ["python __HEREDOC_TO_python__"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

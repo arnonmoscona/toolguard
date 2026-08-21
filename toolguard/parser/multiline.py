@@ -36,6 +36,7 @@ through whole.
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,117 @@ def _find_heredocs_in_line(line: str) -> List[dict]:
             }
         )
     return specs
+
+
+#: Base spelling of the internal, sink-blind stand-in for one lifted heredoc
+#: redirection. Never observable outside this module --
+#: :func:`_attribute_and_substitute` always resolves every one of these before
+#: returning.
+_PLACEHOLDER_BASE = "__HD"
+
+
+@dataclass(frozen=True)
+class _LiftedHeredocs:
+    """What :func:`_lift_heredocs` hands to :func:`_attribute_and_substitute`."""
+
+    lines: List[str]
+    bodies: List[List[str]]
+    prefix: str
+
+
+def _placeholder_prefix(lines: List[str]) -> str:
+    """A placeholder prefix that appears nowhere in *lines*, so input cannot forge one.
+
+    A command may legitimately carry the placeholder's own spelling --
+    ``echo __HD0__`` -- and a forged placeholder would otherwise be resolved
+    against the body table, crashing on an index that was never minted or
+    stealing a real heredoc's body.
+    """
+    joined = "\n".join(lines)
+    prefix = _PLACEHOLDER_BASE
+    while prefix in joined:
+        prefix += "X"
+    return prefix
+
+
+def _placeholder(prefix: str, idx: int) -> str:
+    return f"{prefix}{idx}__"
+
+
+def _lift_heredocs(lines: List[str]) -> _LiftedHeredocs:
+    """Replace each heredoc redirection with an opaque placeholder, blind to its sink.
+
+    For each line, finds its heredoc specs (:func:`_find_heredocs_in_line`),
+    reads each one's body off the following lines, and substitutes a
+    placeholder word for the WHOLE redirection -- not just the body. Makes no
+    decision about which command receives the heredoc; that is
+    :func:`_attribute_and_substitute`'s job, reading the placeholder back out
+    of the returned lines.
+
+    Multiple heredocs on one line share one forward-advancing line cursor, in
+    left-to-right redirect order -- the order bash attaches them in. Each
+    line's specs are substituted right-to-left so an earlier spec's recorded
+    offset into the line stays valid while a later one is edited.
+
+    Args:
+        lines: Logical lines, already CRLF-normalised and backslash-joined.
+
+    Returns:
+        The line list with each heredoc redirection replaced by a
+        placeholder, the raw body lines per placeholder in the placeholder's
+        own left-to-right, top-to-bottom order, and the prefix those
+        placeholders were minted with. Lines are otherwise untouched: no
+        stripping, no splicing -- that is the next step's job.
+    """
+    prefix = _placeholder_prefix(lines)
+    result_lines: List[str] = []
+    bodies: List[List[str]] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        specs = _find_heredocs_in_line(line)
+        if not specs:
+            result_lines.append(line)
+            i += 1
+            continue
+
+        # Each spec is paired with its own body as soon as the body is read,
+        # so the two never become independently-indexed sequences.
+        paired: List[Tuple[dict, List[str]]] = []
+        cursor = i + 1
+        for spec in specs:
+            delim = spec["delimiter"]
+            strip_tabs = spec["strip_tabs"]
+
+            body_lines: List[str] = []
+            while cursor < n:
+                body_line = lines[cursor]
+                check_line = body_line.lstrip("\t") if strip_tabs else body_line
+                if check_line == delim:
+                    cursor += 1
+                    break
+                body_lines.append(body_line)
+                cursor += 1
+            # Running off the end without finding the terminator is not an
+            # error here: the body is simply everything that was left.
+            paired.append((spec, body_lines))
+
+        base_idx = len(bodies)
+        modified_line = line
+        for offset in range(len(paired) - 1, -1, -1):
+            spec, _ = paired[offset]
+            modified_line = (
+                modified_line[: spec["start"]]
+                + _placeholder(prefix, base_idx + offset)
+                + modified_line[spec["end"] :]
+            )
+        bodies.extend(body_lines for _, body_lines in paired)
+
+        result_lines.append(modified_line)
+        i = cursor
+
+    return _LiftedHeredocs(lines=result_lines, bodies=bodies, prefix=prefix)
 
 
 def _classify_pipeline_sink(statement: str) -> str:
@@ -423,16 +535,19 @@ def _statement_bounds_containing(text: str, pos: int) -> Tuple[int, int]:
     return start, len(text)
 
 
-def _process_heredocs(lines: List[str]) -> List[str]:
-    """Remove heredoc bodies, splicing bash-family ones back in as source.
+def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
+    """Classify each lifted heredoc's sink and settle its placeholder.
 
-    For each line carrying a ``<<DELIM``: find the body up to its terminator,
-    classify the sink, then either
+    For each placeholder found (right-to-left within a line, so an earlier
+    one's offset stays valid while a later one is edited): classify the sink
+    from the heredoc's own statement (:func:`_statement_bounds_containing`,
+    :func:`_classify_pipeline_sink`) -- an executor named in an earlier clause
+    is not this heredoc's sink -- then either
 
     - **bash-family sink** -- emit the body lines ahead of the bearer, so they
-      go on to be split and matched as ordinary bash, and delete the ``<<DELIM``
-      from the bearer; or
-    - **anything else** -- replace the ``<<DELIM`` with a
+      go on to be split and matched as ordinary bash, and delete the
+      placeholder from the bearer; or
+    - **anything else** -- rewrite the placeholder into a
       ``__HEREDOC_TO_<sink>__`` word and discard the body unread. The bearer
       command and its other arguments survive either way.
 
@@ -442,60 +557,32 @@ def _process_heredocs(lines: List[str]) -> List[str]:
     simply gone: ``cat <<EOF > /etc/passwd`` becomes the leaf
     ``cat __HEREDOC_TO_cat__ > /etc/passwd`` with ``ask_floor`` unset.
 
-    The sink is classified from the heredoc's own statement
-    (:func:`_statement_bounds_containing`) -- an executor named in an earlier
-    clause is not this heredoc's sink.
-
-    Multiple heredocs on one line (``bash <<A <<B``) are supported: bodies
-    are read in left-to-right redirect order -- the order bash attaches them
-    in -- with one forward-advancing line cursor shared across every heredoc
-    on the line. The specs are then spliced into the bearer line right-to-left
-    so each one's recorded offset into the ORIGINAL line stays valid while an
-    earlier one is edited.
-
     Args:
-        lines: Logical lines, already CRLF-normalised and backslash-joined.
+        lifted: The lines, per-placeholder bodies and placeholder prefix
+            produced by :func:`_lift_heredocs`.
 
     Returns:
         New list of logical lines with heredoc bodies removed or spliced in.
     """
+    # TOO-45#98: still a statement-scoped, token-based guess -- unchanged
+    # from before the placeholder split. Chunk 2 replaces this with
+    # attribution read off the parse tree.
+    bodies = lifted.bodies
+    placeholder_re = re.compile(re.escape(lifted.prefix) + r"(\d+)__")
     result_lines: List[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        specs = _find_heredocs_in_line(line)
-        if not specs:
+    for line in lifted.lines:
+        placeholders = list(placeholder_re.finditer(line))
+        if not placeholders:
             result_lines.append(line)
-            i += 1
             continue
-
-        # Each spec is paired with its own body as soon as the body is read,
-        # so the two never become independently-indexed sequences.
-        paired: List[Tuple[dict, List[str]]] = []
-        cursor = i + 1
-        for spec in specs:
-            delim = spec["delimiter"]
-            strip_tabs = spec["strip_tabs"]
-
-            body_lines = []
-            while cursor < len(lines):
-                body_line = lines[cursor]
-                check_line = body_line.lstrip("\t") if strip_tabs else body_line
-                if check_line == delim:
-                    cursor += 1
-                    break
-                body_lines.append(body_line)
-                cursor += 1
-            # Running off the end without finding the terminator is not an
-            # error here: the body is simply everything that was left.
-            paired.append((spec, body_lines))
 
         modified_line = line
         extra_lines: List[str] = []
 
-        for spec, body_lines in reversed(paired):
+        for m in reversed(placeholders):
+            body_lines = bodies[int(m.group(1))]
             stmt_start, stmt_end = _statement_bounds_containing(
-                modified_line, spec["start"]
+                modified_line, m.start()
             )
             statement = modified_line[stmt_start:stmt_end]
             sink_class = _classify_pipeline_sink(statement)
@@ -510,24 +597,37 @@ def _process_heredocs(lines: List[str]) -> List[str]:
 
             if sink_class == "bash":
                 extra_lines = body_lines + extra_lines
-                modified_line = (
-                    modified_line[: spec["start"]] + modified_line[spec["end"] :]
-                )
+                modified_line = modified_line[: m.start()] + modified_line[m.end() :]
             else:
                 sentinel = f"__HEREDOC_TO_{sink_label}__"
                 modified_line = (
-                    modified_line[: spec["start"]]
-                    + sentinel
-                    + modified_line[spec["end"] :]
+                    modified_line[: m.start()] + sentinel + modified_line[m.end() :]
                 )
 
-        i = cursor
         result_lines.extend(extra_lines)
         stripped = modified_line.strip()
         if stripped:
             result_lines.append(stripped)
 
     return result_lines
+
+
+def _process_heredocs(lines: List[str]) -> List[str]:
+    """Remove heredoc bodies, splicing bash-family ones back in as source.
+
+    Two steps: :func:`_lift_heredocs` finds each heredoc lexically and lifts
+    its body to a side table behind an opaque placeholder, deciding nothing
+    about who receives it; :func:`_attribute_and_substitute` then classifies
+    each placeholder's sink and settles it. See each function's own docstring
+    for what it does and does not decide.
+
+    Args:
+        lines: Logical lines, already CRLF-normalised and backslash-joined.
+
+    Returns:
+        New list of logical lines with heredoc bodies removed or spliced in.
+    """
+    return _attribute_and_substitute(_lift_heredocs(lines))
 
 
 # ---------------------------------------------------------------------------
