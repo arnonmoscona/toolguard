@@ -28,7 +28,7 @@ from toolguard.tools.security_audit import (
     render,
     security_audit,
 )
-from toolguard.tools.edit_proposal import EditProposal
+from toolguard.tools.edit_proposal import ACTION_NARROW, EditProposal, RuleEdit
 from toolguard.tools.config_access import discover_tools, per_layer_rules
 from toolguard.tools.danger import DangerFinding, Severity
 from toolguard.tools.edit_proposal import apply_edits, edit_proposal_to_dict
@@ -2281,6 +2281,76 @@ class TestEditsReview(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2)
             self.assertIn("--edits", err.getvalue())
             self.assertIn(str(bad), err.getvalue())
+
+    def test_an_incoherent_caption_in_the_edits_file_errors_out(self):
+        """
+        Given an --edits file whose proposal is captioned for a tool none of its
+            edits touch
+        When main runs
+        Then argparse errors out with its usage code rather than silently applying
+            a change under a mismatched caption.
+        """
+        config = self._dangerous_config()
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/p/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        incoherent = EditProposal(
+            action=ACTION_NARROW,
+            tool="Bash",
+            rationale="tighten Bash",
+            edits=(RuleEdit("Read", "allow", prov, (), ("/**",)),),
+        )
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            edits_path = Path(tmp) / "edits.json"
+            edits_path.write_text(json.dumps([edit_proposal_to_dict(incoherent)]))
+            with patch(
+                "toolguard.tools.security_audit.load_config", return_value=config
+            ):
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as ctx:
+                        self._capture_main(["--dir", ".", "--edits", str(edits_path)])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("--edits", err.getvalue())
+
+    def test_a_double_wrapped_pattern_in_the_edits_file_errors_out(self):
+        """
+        Given an --edits file whose added_patterns already carries a Tool(...)
+            wrapper
+        When main runs
+        Then argparse errors out rather than silently applying an inert rule that
+            would report as a successful edit.
+        """
+        config = self._dangerous_config()
+        prov = Provenance(
+            level="project",
+            source_type="toolguard_hook",
+            file_format="toml",
+            path=Path("/p/.claude/toolguard_hook.toml"),
+            specificity=0,
+        )
+        double_wrapped = EditProposal(
+            action=ACTION_NARROW,
+            tool="Bash",
+            rationale="tighten Bash",
+            edits=(RuleEdit("Bash", "allow", prov, (), ("Bash(git:*)",)),),
+        )
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            edits_path = Path(tmp) / "edits.json"
+            edits_path.write_text(json.dumps([edit_proposal_to_dict(double_wrapped)]))
+            with patch(
+                "toolguard.tools.security_audit.load_config", return_value=config
+            ):
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as ctx:
+                        self._capture_main(["--dir", ".", "--edits", str(edits_path)])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("--edits", err.getvalue())
 
 
 class TestNoSecurityAcknowledgement(unittest.TestCase):

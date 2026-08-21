@@ -678,7 +678,17 @@ def wrap_tool_pattern(tool: str, body: str) -> str:
 
     Returns:
         The wrapped permission pattern string.
+
+    Raises:
+        ValueError: When ``body`` already carries a ``Tool(...)`` wrapper --
+            wrapping it again would produce a rule like ``Bash(Bash(git:*))``,
+            which matches nothing and reports no error.
     """
+    if is_tool_wrapper(body):
+        raise ValueError(
+            f"pattern body {body!r} is already wrapped in a Tool(...) envelope; "
+            "wrap_tool_pattern expects a wrapper-free body"
+        )
     return f"{tool}({body})"
 
 

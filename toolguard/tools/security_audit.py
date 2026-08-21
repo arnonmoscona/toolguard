@@ -34,6 +34,7 @@ from toolguard.tools.edit_proposal import (
     apply_edits,
     edit_proposal_from_dict,
     edit_proposal_to_dict,
+    validate_edit_proposal,
 )
 from toolguard.tools.environment_audit import audit_environment
 from toolguard.tools.takeover_audit import audit_takeover, effective_takeover_state
@@ -700,6 +701,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             with open(args.edits, "r") as handle:
                 raw_edits = json.load(handle)
             proposed_edits = [edit_proposal_from_dict(d) for d in raw_edits]
+            for proposal in proposed_edits:
+                validate_edit_proposal(proposal)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             parser.error(f"could not read --edits file {args.edits!r}: {exc}")
 
@@ -714,7 +717,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     edit_delta: Optional[Dict[str, object]] = None
     if proposed_edits is not None:
         base_report = report
-        config = apply_edits(config, proposed_edits)
+        try:
+            config = apply_edits(config, proposed_edits)
+        except ValueError as exc:
+            parser.error(f"could not apply --edits file {args.edits!r}: {exc}")
         report = security_audit(config)
         edit_delta = _finding_delta(base_report, report)
 

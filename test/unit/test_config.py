@@ -9,9 +9,41 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test.unit._config_isolation import ConfigIsolationMixin
-from toolguard.config import discover_config_files, find_project_root
+from toolguard.config import discover_config_files, find_project_root, wrap_tool_pattern
 from toolguard.env_config import find_project_root as env_find_project_root
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
+
+
+class TestWrapToolPattern(unittest.TestCase):
+    """wrap_tool_pattern's own contract, independent of any caller."""
+
+    def test_wraps_a_plain_body(self):
+        """
+        Given a wrapper-free pattern body
+        When wrap_tool_pattern wraps it
+        Then it returns the Tool(body) envelope
+        """
+        self.assertEqual(wrap_tool_pattern("Bash", "git diff:*"), "Bash(git diff:*)")
+
+    def test_an_already_wrapped_body_raises(self):
+        """
+        Given a body that already carries its own Tool(...) wrapper
+        When wrap_tool_pattern is asked to wrap it again
+        Then it raises ValueError naming the offending body, instead of silently
+            producing an inert Bash(Bash(git:*)) that matches nothing
+        """
+        with self.assertRaisesRegex(ValueError, "Bash\\(git:\\*\\)"):
+            wrap_tool_pattern("Bash", "Bash(git:*)")
+
+    def test_a_body_wrapped_in_a_different_tool_still_raises(self):
+        """
+        Given a body wrapped in a DIFFERENT tool's envelope than the one requested
+        When wrap_tool_pattern is asked to wrap it
+        Then it still raises -- the check is "already wrapped in anything", not
+            "wrapped in this specific tool"
+        """
+        with self.assertRaises(ValueError):
+            wrap_tool_pattern("Bash", "Read(/**)")
 
 
 class TestPatternParsing(unittest.TestCase):

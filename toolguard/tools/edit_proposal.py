@@ -11,7 +11,9 @@ The model is deliberately mechanical: :func:`apply_edits` composes the
 section-generic
 :func:`~toolguard.tools.config_access.with_layer_rules_replaced` primitive and
 performs NO judgement.  Deciding whether an edit is safe or desirable lives
-elsewhere.
+elsewhere.  :func:`validate_edit_proposal` is a separate, opt-in check that a
+proposal's caption is not self-contradicting -- it does not run inside
+:func:`apply_edits` and is not a safety judgement either.
 """
 
 from dataclasses import dataclass
@@ -22,8 +24,10 @@ from toolguard.config import Configuration, Provenance
 from toolguard.tools.config_access import with_layer_rules_replaced
 
 # The intent labels an EditProposal may carry, describing WHY the edit set exists.
-# Advisory: this module never validates a proposal's action against the tuple, and
-# the mechanics are entirely in the atomic RuleEdits.
+# Advisory: this module never validates a proposal's action against the tuple --
+# apply_edits' mechanics are entirely in the atomic RuleEdits, and
+# validate_edit_proposal only rejects one self-contradicting case (a 'remove'
+# whose edits add something), not an unrecognized action value.
 ACTION_REMOVE = "remove"
 ACTION_REPLACE = "replace"
 ACTION_NARROW = "narrow"
@@ -84,6 +88,43 @@ class EditProposal:
     edits: Tuple[RuleEdit, ...]
     origin: str = ""
     verification: Optional[str] = None
+
+
+def validate_edit_proposal(proposal: EditProposal) -> None:
+    """
+    Raise if ``proposal``'s caption cannot be reconciled with what its ``edits``
+    enact -- ``apply_edits`` never reads ``tool``/``action``/``rationale``, so
+    nothing else stops them disagreeing with the edits a reader is shown them
+    alongside.
+
+    Checked: ``tool`` must appear among the tools its ``edits`` touch (membership,
+    not equality -- ``tool`` is documented as a headline, not full coverage of a
+    possibly multi-tool proposal). ``action`` ``'remove'`` may not carry any edit
+    with non-empty ``added_patterns`` -- a removal that adds is incoherent on its
+    face. Deliberately NOT checked: ``action`` values other than ``'remove'``
+    (advisory otherwise), ``rationale`` (free prose), and ``verification``
+    (producer-derived, not something ``edits`` can confirm or contradict).
+
+    Args:
+        proposal: The proposal to check.
+
+    Raises:
+        ValueError: When the caption is incoherent with what ``edits`` enact.
+    """
+    if proposal.edits:
+        touched_tools = {edit.tool for edit in proposal.edits}
+        if proposal.tool not in touched_tools:
+            raise ValueError(
+                f"proposal tool {proposal.tool!r} names none of the tools its "
+                f"edits touch ({sorted(touched_tools)!r})"
+            )
+    if proposal.action == ACTION_REMOVE:
+        for edit in proposal.edits:
+            if edit.added_patterns:
+                raise ValueError(
+                    f"proposal action {ACTION_REMOVE!r} carries an edit with "
+                    f"added_patterns {edit.added_patterns!r}"
+                )
 
 
 def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configuration:

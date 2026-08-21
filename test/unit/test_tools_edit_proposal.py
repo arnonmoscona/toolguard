@@ -22,6 +22,7 @@ from toolguard.tools.edit_proposal import (
     edit_proposal_from_dict,
     edit_proposal_to_dict,
     rule_edit_from_dict,
+    validate_edit_proposal,
 )
 
 #: Every layer edit is matched by whole-``Provenance`` equality, so a fixture whose
@@ -447,26 +448,25 @@ class TestWithLayerRulesReplaced(unittest.TestCase):
 
         self.assertEqual(_raw(result), ["Bash(git status:*)"])
 
-    def test_an_already_wrapped_added_pattern_is_wrapped_again(self):
+    def test_an_already_wrapped_added_pattern_raises(self):
         """
         Given an added pattern that already carries its Tool(...) wrapper
         When with_layer_rules_replaced appends it
-        Then it is wrapped a SECOND time, producing an inert rule.
+        Then it raises ValueError instead of silently double-wrapping.
 
-        Characterization of a real hazard, not desired behaviour: added_patterns are
-        contracted to be wrapper-free, `wrap_tool_pattern` is unconditional, and
-        `edit_proposal_from_dict` builds these straight from hand-written JSON -- so a
-        hand-authored --edits file that includes the wrapper yields Bash(Bash(git:*)),
-        which matches nothing and reports no error.
+        added_patterns are contracted to be wrapper-free, and
+        `edit_proposal_from_dict` builds these straight from hand-written JSON -- a
+        hand-authored --edits file that includes the wrapper must fail loud rather
+        than silently yield Bash(Bash(git:*)), which matches nothing and reports no
+        error.
         """
         prov = _prov()
         config = _config(_layer(prov, allow=[]))
 
-        result = with_layer_rules_replaced(
-            config, "Bash", prov, "allow", set(), ["Bash(git:*)"]
-        )
-
-        self.assertEqual(_raw(result), ["Bash(Bash(git:*))"])
+        with self.assertRaisesRegex(ValueError, "already wrapped"):
+            with_layer_rules_replaced(
+                config, "Bash", prov, "allow", set(), ["Bash(git:*)"]
+            )
 
 
 class TestApplyEdits(unittest.TestCase):
@@ -727,6 +727,143 @@ class TestApplyEdits(unittest.TestCase):
 
         self.assertIsNot(result, config)
         self.assertEqual(_raw(result), ["Bash(git *)", "Bash(git status:*)"])
+
+
+class TestValidateEditProposal(unittest.TestCase):
+    """
+    validate_edit_proposal is a separate, opt-in caption-vs-edits check -- it is
+    NOT called by apply_edits (see TestApplyEdits.
+    test_the_description_can_contradict_the_edits_and_nothing_objects, which pins
+    apply_edits' own no-judgement behaviour unchanged).
+    """
+
+    def test_a_tool_matching_one_of_several_edited_tools_passes(self):
+        """
+        Given a proposal whose headline tool is the SECOND of two edits' tools
+        When validate_edit_proposal checks it
+        Then it does not raise -- tool is membership, not "matches the first edit".
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action=ACTION_REPLACE,
+            tool="Write",
+            rationale="two sections",
+            edits=(
+                RuleEdit("Bash", "allow", prov, (), ("git status:*",)),
+                RuleEdit("Write", "deny", prov, (), ("/etc/**",)),
+            ),
+        )
+        validate_edit_proposal(proposal)  # must not raise
+
+    def test_a_tool_naming_none_of_the_edited_tools_raises(self):
+        """
+        Given a proposal captioned Bash whose only edit touches Read
+        When validate_edit_proposal checks it
+        Then it raises ValueError naming the mismatched tool.
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action=ACTION_NARROW,
+            tool="Bash",
+            rationale="tighten Bash",
+            edits=(RuleEdit("Read", "allow", prov, (), ("/**",)),),
+        )
+        with self.assertRaisesRegex(ValueError, "'Bash'"):
+            validate_edit_proposal(proposal)
+
+    def test_an_empty_edits_proposal_never_raises_on_tool(self):
+        """
+        Given a proposal whose edits tuple is empty
+        When validate_edit_proposal checks it
+        Then it does not raise -- there is nothing for the headline tool to
+            disagree with.
+        """
+        proposal = EditProposal(
+            action=ACTION_REPLACE, tool="Bash", rationale="nothing yet", edits=()
+        )
+        validate_edit_proposal(proposal)  # must not raise
+
+    def test_a_remove_carrying_added_patterns_raises(self):
+        """
+        Given a 'remove' proposal whose one edit carries added_patterns
+        When validate_edit_proposal checks it
+        Then it raises ValueError -- a removal that adds is incoherent on its face.
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action=ACTION_REMOVE,
+            tool="Read",
+            rationale="delete a Read rule",
+            edits=(RuleEdit("Read", "allow", prov, (), ("/**",)),),
+        )
+        with self.assertRaisesRegex(ValueError, "added_patterns"):
+            validate_edit_proposal(proposal)
+
+    def test_a_remove_with_only_removed_patterns_passes(self):
+        """
+        Given a 'remove' proposal whose edit carries only removed_patterns
+        When validate_edit_proposal checks it
+        Then it does not raise.
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action=ACTION_REMOVE,
+            tool="Read",
+            rationale="delete a Read rule",
+            edits=(RuleEdit("Read", "allow", prov, ("/etc/**",), ()),),
+        )
+        validate_edit_proposal(proposal)  # must not raise
+
+    def test_an_unrecognized_action_with_coherent_tool_and_edits_passes(self):
+        """
+        Given a proposal whose action is not one of ACTIONS but whose tool and
+            edits agree
+        When validate_edit_proposal checks it
+        Then it does not raise -- action coherence is only enforced for the
+            recognized 'remove' label, per the module's advisory-action contract.
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action="obliterate",
+            tool="Write",
+            rationale="not a known action",
+            edits=(RuleEdit("Write", "deny", prov, (), ("/**",)),),
+        )
+        validate_edit_proposal(proposal)  # must not raise
+
+    def test_rationale_is_never_checked(self):
+        """
+        Given a proposal whose rationale text names a tool nothing in the edits
+            touches
+        When validate_edit_proposal checks it
+        Then it does not raise -- rationale is free prose, deliberately unchecked.
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action=ACTION_NARROW,
+            tool="Write",
+            rationale="this is actually about Bash, not Write at all",
+            edits=(RuleEdit("Write", "allow", prov, (), ("/**",)),),
+        )
+        validate_edit_proposal(proposal)  # must not raise
+
+    def test_verification_is_never_checked(self):
+        """
+        Given a coherent proposal carrying a verification value with no
+            counterpart in edits
+        When validate_edit_proposal checks it
+        Then it does not raise -- verification is producer-derived, not
+            something edits can confirm or contradict.
+        """
+        prov = _prov()
+        proposal = EditProposal(
+            action=ACTION_REPLACE,
+            tool="Write",
+            rationale="consolidated",
+            edits=(RuleEdit("Write", "allow", prov, ("/a/**",), ("/**",)),),
+            verification="unverified",
+        )
+        validate_edit_proposal(proposal)  # must not raise
 
 
 class TestEditProposalSerialization(unittest.TestCase):
