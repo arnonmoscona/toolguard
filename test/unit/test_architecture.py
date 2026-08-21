@@ -39,9 +39,12 @@ LAYERS = (
     ("toolguard.normalization", frozenset({"toolguard.ambient"})),
     ("toolguard.toml_scan", frozenset()),
     ("toolguard.file_lock", frozenset()),
-    ("toolguard.tool_spec", frozenset()),
+    ("toolguard.tool_spec", frozenset({"toolguard.claude_code_contract"})),
     ("toolguard.patterns", frozenset({"toolguard.normalization"})),
-    ("toolguard.constants", frozenset({"toolguard.tool_spec"})),
+    (
+        "toolguard.constants",
+        frozenset({"toolguard.claude_code_contract", "toolguard.tool_spec"}),
+    ),
     ("toolguard._git", frozenset({"toolguard.constants"})),
     (
         "toolguard.install_provenance",

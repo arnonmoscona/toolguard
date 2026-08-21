@@ -17,8 +17,10 @@ import is what makes "does this code touch Claude Code's external contract?"
 a checkable fact rather than a grep for a dozen strings that goes stale
 silently.
 
-Not in scope here: the tool-registry/payload-key material in
-:mod:`toolguard.tool_spec`, moved in a later pass.
+Not in scope here: :mod:`toolguard.tool_spec`'s registry -- which tools
+exist, whether each is governed by default, and which kind of matching
+applies to it are toolguard's own decisions, built out of the field names
+declared here.
 """
 
 from typing import Tuple
@@ -51,6 +53,16 @@ ADDITIONAL_CONTEXT_KEY = "additionalContext"
 # Claude Code's own settings.json hooks-registration schema uses) ---
 PRE_TOOL_USE_EVENT = "PreToolUse"
 SESSION_START_EVENT = "SessionStart"
+
+# --- Per-tool payload field names: the key inside tool_input holding a
+# given tool's subject. Fetched 2026-08-21 from
+# https://code.claude.com/docs/en/tools-reference.md: "Your PreToolUse hooks
+# receive the tool's command string in `tool_input.command`, with the same
+# fields as the Bash tool." Confirmed for file tools by
+# https://code.claude.com/docs/en/hooks.md's MCP-hook example for a
+# `Write|Edit` matcher: `"input": { "file_path": "${tool_input.file_path}" }`.
+COMMAND_PAYLOAD_KEY = "command"
+FILE_PATH_PAYLOAD_KEY = "file_path"
 
 # --- Bash rule matching: wrappers stripped before matching ---
 #: The wrappers Claude Code strips before matching a Bash rule, so a rule written for the

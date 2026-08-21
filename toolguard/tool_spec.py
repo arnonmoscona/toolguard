@@ -2,11 +2,17 @@
 Static registry of the tools toolguard knows how to govern.
 
 A user's ``additional_supported_tools`` config setting extends the
-recognized-tool set without changing anything here.
+recognized-tool set without changing anything here. Each entry's
+``payload_key`` value is a Claude Code field name, from
+:mod:`toolguard.claude_code_contract`; which tools are registered at all,
+which are governed by default, and how each is matched are toolguard's own
+decisions.
 """
 
 from dataclasses import dataclass
 from enum import Enum
+
+from toolguard.claude_code_contract import COMMAND_PAYLOAD_KEY, FILE_PATH_PAYLOAD_KEY
 
 
 class ToolKind(Enum):
@@ -34,31 +40,31 @@ _REGISTRY: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="Bash",
         kind=ToolKind.COMMAND,
-        payload_key="command",
+        payload_key=COMMAND_PAYLOAD_KEY,
         is_builtin=True,
     ),
     ToolSpec(
         name="Read",
         kind=ToolKind.FILE,
-        payload_key="file_path",
+        payload_key=FILE_PATH_PAYLOAD_KEY,
         is_builtin=True,
     ),
     ToolSpec(
         name="Write",
         kind=ToolKind.FILE,
-        payload_key="file_path",
+        payload_key=FILE_PATH_PAYLOAD_KEY,
         is_builtin=True,
     ),
     ToolSpec(
         name="Edit",
         kind=ToolKind.FILE,
-        payload_key="file_path",
+        payload_key=FILE_PATH_PAYLOAD_KEY,
         is_builtin=True,
     ),
     ToolSpec(
         name="mcp__jetbrains__execute_terminal_command",
         kind=ToolKind.COMMAND,
-        payload_key="command",
+        payload_key=COMMAND_PAYLOAD_KEY,
         is_builtin=False,
     ),
 )

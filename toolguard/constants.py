@@ -11,6 +11,7 @@ The ``STATUS_*`` values are the common ones for a harvested corpus entry
 (``LogEntry.status``); a status outside this set is preserved as-is.
 """
 
+from toolguard.claude_code_contract import COMMAND_PAYLOAD_KEY as _COMMAND_PAYLOAD_KEY
 from toolguard.tool_spec import BUILTIN_TOOLS as _BUILTIN_TOOLS
 from toolguard.tool_spec import FILE_KIND_TOOLS as _FILE_KIND_TOOLS
 
@@ -46,6 +47,6 @@ DIST_NAME = "toolguard"
 #: Fallback ``tool_input`` key for a command tool with no registered
 #: :class:`~toolguard.tool_spec.ToolSpec` (e.g. an unrecognized MCP tool
 #: added via ``additional_supported_tools``) -- every registered command
-#: tool's own ``payload_key`` is ``"command"`` too, so this only matters for
+#: tool's own ``payload_key`` is the same value too, so this only matters for
 #: names outside the registry.
-DEFAULT_COMMAND_PAYLOAD_KEY = "command"
+DEFAULT_COMMAND_PAYLOAD_KEY = _COMMAND_PAYLOAD_KEY
