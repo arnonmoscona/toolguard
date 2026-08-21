@@ -333,6 +333,11 @@ deny  = ["Bash(curl *)", "Read(**/.env)"]   # hard-denied (unoverridable)
 allow = ["Bash(curl localhost*)"]            # carve-out EXCEPTION to the deny
 ```
 
+Illustrating the shape only, not a recommended recipe: `allow` here is unoverridable too, so
+it only suits a rule with a genuine no-exception carve-out. A rule you expect to except later
+(curl-against-localhost is the running example) belongs at the ordinary deny/allow level
+instead -- see [agent-guides.md](docs/agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception).
+
 Semantics:
 
 - **Pooled across ALL levels** into one union (not per-level inward
@@ -745,6 +750,57 @@ silently fall through).
 remain as a convenience driver over the same three functions, for callers -- `check_compound_permission`
 and many existing tests -- with only a plain `resolve_one` 3-tuple closure and no
 `UnitVerdict`-producing resolver of their own. Neither is on the production path.
+
+An `'inline_code'` unit splits its own sub-commands (`extract_commands` over the leaf text, minus
+the leaf's own text) across two `CommandUnit` fields, not one. `audit_parts` is the subset that is
+itself foreign inline code -- itemised in `sub_matches` and, via `_combine_inline_code_reason`,
+folded into the unit's own reason text when everything allows. `deny_check_parts` is every other
+sub-command -- checked the same way but never itemised in `sub_matches` or folded into the reason
+unless it actually decides. Both still feed the unit's other aggregate fields when merely allowed:
+`fallback_kind`/`fallback_warning` and `additional_context` are each accumulated over the full set
+`judge_unit` names `all_parts` (the stub, `audit_parts`, `deny_check_parts`), not just the subset
+that appears in `sub_matches`/reason. In both `audit_parts` and `deny_check_parts`, only an `allow`
+is observation-only (never `decision`/`matched_rule`/`provenance`); a `deny`
+(ordinary or hard-deny) OR an `ask` still decides the unit outright, the same as it would for a
+`'plain'` leaf's own sub-command, and that attribution flows through the unit's own verdict, never
+through the raw audit-trail record: see `UnitVerdict.audit_only` and
+`toolguard.resolve._deciding_sub_match`. Both cases are routed through `_pick_strictest`, the same
+first-match-within-a-tier primitive `_combine_strictest` itself uses to combine a compound's
+units -- not a bespoke, deny-only scan, which would silently downgrade an `ask` reaching no
+branch at all to `allow`.
+
+The two-field split exists because a straight widening of `audit_parts` to every sub-command --
+needed to close a regression where re-classifying a leaf from `'plain'` to `'inline_code'` (TOO-45
+proposed ticket 79's ASK-floor gap) silently dropped a hard-denied or denied inner substitution
+from the decision entirely -- also changed what an unrelated, merely-allowed substitution (a
+`$(mktemp -d)` alongside a `python -c` one, say) itemises and folds into the reason, which
+`test/verdict_corpus/goldens.jsonl` pins for real harvested commands. Keeping that itemisation
+scoped to `audit_parts` alone reproduces the historical output exactly for commands the corpus
+already had pinned before this split existed. It does NOT for a leaf this fix newly floors: an
+unrelated, merely-allowed `deny_check_parts` entry (e.g. `mktemp -d` alongside a `python -c` one)
+is checked but never appears in `sub_matches` or the reason, a narrower-scoped recurrence of the
+under-logging this project has hit before (see the global CLAUDE.md's "Prose is output, not a
+data structure"). This is a disclosed, bounded trade-off, not an oversight: closing it means
+recording every `deny_check_parts` verdict in `sub_matches` regardless of decision, which would
+also change what `test_unrelated_substitution_is_not_itemised`
+(`test/unit/test_resolve.py`) asserts.
+
+That trade-off is scoped to itemisation and reason text only. `additional_context` is a
+separate field: an allowed `deny_check_parts` entry's own context was silently dropped instead
+of accumulated -- the same under-logging shape as the global CLAUDE.md's "Prose is output, not
+a data structure", not a consequence of the itemisation trade-off above. It now accumulates via
+`judge_unit`'s `all_parts`, the same as `fallback_kind`/`fallback_warning` already did, at no
+cost to `test_unrelated_substitution_is_not_itemised`.
+
+A related, separate trade-off: fixing `_combine_strictest`'s own fabrication guard so that a
+fallback-decided `'inline_code'` unit is never mistaken for a genuine match one level up changes
+the rendered `reason` text for TWO harvested corpus commands whose pinned `goldens.jsonl` entries
+were already bracket-unbalanced -- `verdict`/`sub_matches` unchanged, confirmed by
+`tools/corpus_build.py --verify`; only the TRACKED-tier prose differs. One of the two is now
+balanced; the other survives unbalanced for a different, pre-existing reason -- a `'plain'`
+unit's own summary is still re-parsed as prose one level up, tracked separately (proposed ticket
+90, `toolguard-memories/TOO-45/proposed-tickets/`). `goldens.jsonl` was regenerated to match, the
+corpus's own sanctioned remediation for a legitimate prose change.
 
 ### How deep we go -- and why not deeper
 

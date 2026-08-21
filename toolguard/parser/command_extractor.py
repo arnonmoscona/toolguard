@@ -630,18 +630,51 @@ def _extract_from_if_stmt_ir(ctrl: IRControlStructure) -> List[ExtractionResult]
 # ---------------------------------------------------------------------------
 
 
-def _apply_leaf_policy(cmd_text: str, seen: Set[str]) -> List[ExtractionResult]:
+def _substitution_carries_ask_floor(cmd_substs: Sequence["IRCompound"]) -> bool:
+    """Return True if any command inside *cmd_substs* would itself carry ``ask_floor``.
+
+    Probes each substitution's compound through the same structured walk
+    used for a whole command line (:func:`_structured_from_compound`), on a
+    throwaway result list and a throwaway ``seen`` set so this check can
+    never suppress a leaf the real walk still needs to emit. Nesting is
+    covered because that walk recurses into a nested ``cmd_substs`` the same
+    way.
+
+    Args:
+        cmd_substs: A simple command's :attr:`IRSimpleCmd.cmd_substs`.
+
+    Returns:
+        True if a foreign executor with inline code is reachable inside any
+        of *cmd_substs*, at any depth.
+    """
+    for subst_compound in cmd_substs:
+        probe: List[ExtractionResult] = []
+        _structured_from_compound(subst_compound, probe, set())
+        if any(isinstance(r, LeafCommand) and r.ask_floor for r in probe):
+            return True
+    return False
+
+
+def _apply_leaf_policy(
+    cmd_text: str, seen: Set[str], cmd_substs: Sequence["IRCompound"] = ()
+) -> List[ExtractionResult]:
     """Apply the module's leaf-level business policy to one leaf command's text.
 
     ``<bash-family> -c "<code>"`` recurses into the inner code and yields its
-    leaves instead of itself; foreign inline code and a heredoc bound for a
-    foreign sink get ``ask_floor``; anything else is a plain leaf. Text
-    already in *seen* yields nothing, which is why a line's result can be
-    shorter than its command count.
+    leaves instead of itself; foreign inline code -- directly on the leaf or
+    inside one of its *cmd_substs* -- and a heredoc bound for a foreign sink
+    get ``ask_floor``; anything else is a plain leaf. Text already in *seen*
+    yields nothing, which is why a line's result can be shorter than its
+    command count.
 
     Args:
         cmd_text: The cleaned command text for the leaf node.
         seen: Set of already-seen texts (mutated by this function).
+        cmd_substs: The leaf's ``$(...)``/backtick substitutions, if it is an
+            :class:`IRSimpleCmd`. Callers with no IR to hand -- a control
+            structure's condition text, and the ``bash -c`` recursion below --
+            pass none, so a substitution inside a condition is not yet
+            covered by this check.
 
     Returns:
         Zero or one :class:`ExtractionResult` items -- except on the
@@ -659,7 +692,9 @@ def _apply_leaf_policy(cmd_text: str, seen: Set[str]) -> List[ExtractionResult]:
 
         return extract_structured(inner_bash)
 
-    if _detect_foreign_inline_code(cmd_text):
+    if _detect_foreign_inline_code(cmd_text) or _substitution_carries_ask_floor(
+        cmd_substs
+    ):
         return [LeafCommand(text=cmd_text, ask_floor=True)]
 
     if "__HEREDOC_TO_" in cmd_text:
@@ -678,10 +713,12 @@ def _structured_from_ir_element(
     An element type not handled below contributes nothing at all, rather
     than an undecidable segment.
 
-    A simple command's ``cmd_substs`` are not walked here, so
-    ``echo $(rm -rf /)`` produces one leaf carrying the whole text and no
-    separate leaf for the substitution. The command-text projection below
-    does walk them; the two extractors differ on this point.
+    A simple command's ``cmd_substs`` are not emitted as their own leaves --
+    ``echo $(rm -rf /)`` still produces one leaf carrying the whole text, so
+    this stays in step with :func:`~toolguard.compound.decompose`, which
+    already gets the substitution's own sub-commands from
+    :func:`extract_commands`. What ``cmd_substs`` change here is whether that
+    one leaf carries ``ask_floor`` -- see :func:`_apply_leaf_policy`.
     """
     if isinstance(element, IRProcSubst):
         text = element.text
@@ -722,7 +759,7 @@ def _structured_from_ir_element(
                     )
                 )
             return
-        results.extend(_apply_leaf_policy(element.text, seen))
+        results.extend(_apply_leaf_policy(element.text, seen, element.cmd_substs))
         return
 
     if isinstance(element, IRSubshell):

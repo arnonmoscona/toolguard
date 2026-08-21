@@ -16,11 +16,14 @@ directly. See technical-notes.md for why the module is shaped this way.
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from toolguard.config_types import RuntimeVerdict, UnitVerdict
 from toolguard.parser.command_extractor import (
     INLINE_FLAG_TOKEN_RE as _INLINE_FLAG_TOKEN_RE,
+)
+from toolguard.parser.command_extractor import (
+    _detect_foreign_inline_code as _is_foreign_inline_code,
 )
 from toolguard.parser.command_extractor import extract_commands
 from toolguard.parser.multiline import (
@@ -219,6 +222,35 @@ class CommandUnit:
             for ``'plain'``/``'unknown'`` -- a zero-part unit of either kind
             then contributes no audit entry at all, since there is nothing
             in *parts* to record). Set in :func:`_unit_for`.
+        audit_parts: Command strings recorded in the breakdown alongside this
+            unit's own judged verdict and folded into its reason text when
+            all-allow -- only ``'inline_code'`` populates this, with
+            whichever of *text*'s own substitutions are themselves foreign
+            inline code (see
+            :func:`~toolguard.parser.command_extractor._detect_foreign_inline_code`).
+            A ``deny`` or ``ask`` here still decides the unit outright, the
+            same as :attr:`deny_check_parts` below -- see :func:`judge_unit`
+            and :func:`_pick_strictest`. Empty for every other kind.
+        deny_check_parts: Every OTHER substitution of *text* (via
+            :func:`~toolguard.parser.command_extractor.extract_commands`,
+            minus *text* itself and minus :attr:`audit_parts`) -- checked for
+            a deny (ordinary or hard-deny) or an ask the same as
+            :attr:`audit_parts`, but never itemised in the breakdown or
+            folded into the unit's reason text unless one of them actually
+            decides the unit. An allowed entry still contributes to the
+            unit's other aggregate fields, via :func:`judge_unit`'s
+            ``all_parts``: its
+            :attr:`~toolguard.config_types.UnitVerdict.fallback_kind` can
+            still set the compound's ``fallback_warning``, and its
+            :attr:`~toolguard.config_types.UnitVerdict.additional_context`
+            is still accumulated into the unit's own. Kept separate from
+            :attr:`audit_parts` so a merely-allowed candidate here (an
+            unrelated ``$(mktemp -d)`` alongside a ``python -c`` one, say)
+            cannot change what an all-allow leaf's reason/breakdown show --
+            only close the real gap this field exists for: an unrelated
+            substitution's own ``deny``/hard-deny/``ask`` match must still
+            decide, even though it was never itself foreign inline code.
+            Empty for every other kind.
         note: :attr:`~toolguard.parser.command_extractor.UndecidableSegment.reason`
             for an ``'undecidable'`` unit, else ``None``.
     """
@@ -227,6 +259,8 @@ class CommandUnit:
     kind: str
     parts: Tuple[str, ...]
     audits_as_one: bool
+    audit_parts: Tuple[str, ...] = ()
+    deny_check_parts: Tuple[str, ...] = ()
     note: Optional[str] = None
 
 
@@ -257,11 +291,23 @@ def _unit_for(element: Union[LeafCommand, UndecidableSegment]) -> CommandUnit:
     if isinstance(element, LeafCommand):
         if element.ask_floor:
             outer_cmd = _extract_outer_command(element.text)
+            leaf_text = element.text.strip()
+            other_commands = [
+                cmd for cmd in extract_commands(element.text) if cmd != leaf_text
+            ]
+            audit_parts = tuple(
+                cmd for cmd in other_commands if _is_foreign_inline_code(cmd)
+            )
+            deny_check_parts = tuple(
+                cmd for cmd in other_commands if cmd not in audit_parts
+            )
             return CommandUnit(
                 text=element.text,
                 kind="inline_code",
                 parts=(outer_cmd,),
                 audits_as_one=True,
+                audit_parts=audit_parts,
+                deny_check_parts=deny_check_parts,
             )
         sub_commands = extract_commands(element.text)
         return CommandUnit(
@@ -321,10 +367,47 @@ def _unit_from_tuple(
     )
 
 
+def _combine_inline_code_reason(
+    stub_verdict: UnitVerdict, audit_part_verdicts: Sequence[UnitVerdict]
+) -> Optional[Tuple[str, Optional[str]]]:
+    """Reason/additional_context an inline_code unit shows when it has audit_parts.
+
+    Delegates to :func:`_combine_strictest` over ``[stub_verdict,
+    *audit_part_verdicts]`` for the same "cmd -> pattern" aggregate wording a
+    ``'plain'`` unit with the same sub-commands would produce. This text
+    reaches the permission prompt and the audit log, not just a display
+    surface -- so the caller must pass *stub_verdict* with its
+    ``fallback_kind`` already set to reflect the escape hatch (see the
+    ``'inline_code'`` branch above), never the stub's own naturally-computed
+    value: a genuine-looking ``matched_rule`` on the truncated stub is not a
+    verified match, and combining it here as one would fabricate an
+    attribution. ``fallback_kind`` on the returned unit as a whole is still
+    the caller's own to derive -- this
+    function's combine only tracks whether one of *these* parts is genuinely
+    ``'warned'``, not the escape hatch itself.
+
+    Returns:
+        None (meaning: use the floor's own simpler wording instead) when
+        there are no *audit_part_verdicts*, or when any of them -- or
+        *stub_verdict* -- did not decide ``'allow'``. An audit part's own
+        deny/ask match must never leak into text describing a floor-decided
+        allow.
+    """
+    if not audit_part_verdicts:
+        return None
+    combine_over = [stub_verdict, *audit_part_verdicts]
+    if any(v.decision != "allow" for v in combine_over):
+        return None
+    combined = _combine_strictest(combine_over)
+    return (combined.reason, combined.additional_context)
+
+
 def judge_unit(
     unit: "CommandUnit",
     part_verdicts: List[UnitVerdict],
     undecidable_fallback: str = "ask",
+    audit_part_verdicts: Sequence[UnitVerdict] = (),
+    deny_check_verdicts: Sequence[UnitVerdict] = (),
 ) -> UnitVerdict:
     """Verdict for ONE :class:`CommandUnit`, given what the rules said about its parts.
 
@@ -341,6 +424,18 @@ def judge_unit(
             (default), ``'deny'``, ``'allow_with_warning'``, or ``'allow'``
             -- sourced from
             :meth:`~toolguard.config.Configuration.resolved_undecidable_fallback`.
+        audit_part_verdicts: The caller's own resolution of
+            ``unit.audit_parts``, in order. An ``allow`` entry only ever
+            folds into an ``'inline_code'`` unit's own reason text for
+            display (see :func:`_combine_inline_code_reason`); a ``deny`` or
+            ``ask`` entry decides the unit outright -- see the
+            ``'inline_code'`` branch below and :func:`_pick_strictest`.
+            Empty for every unit with no ``audit_parts``.
+        deny_check_verdicts: The caller's own resolution of
+            ``unit.deny_check_parts``, in order -- checked for a ``deny`` or
+            ``ask`` the same as *audit_part_verdicts*, but never folded into
+            the reason text and never itemised unless one of them decides.
+            Empty for every unit with no ``deny_check_parts``.
 
     Returns:
         A :class:`UnitVerdict` for *unit*, with ``sub_command`` always set to
@@ -348,9 +443,11 @@ def judge_unit(
         ``'inline_code'`` stub).
 
     Raises:
-        ValueError: If ``len(part_verdicts) != len(unit.parts)`` (a loud,
-            immediate failure rather than a silent misattribution), or if
-            ``unit.kind`` is not one of ``'plain'``, ``'inline_code'``,
+        ValueError: If ``len(part_verdicts) != len(unit.parts)``,
+            ``len(audit_part_verdicts) != len(unit.audit_parts)``, or
+            ``len(deny_check_verdicts) != len(unit.deny_check_parts)`` (a
+            loud, immediate failure rather than a silent misattribution), or
+            if ``unit.kind`` is not one of ``'plain'``, ``'inline_code'``,
             ``'undecidable'``, or ``'unknown'`` -- a fifth kind must be
             decided here, not silently fall through to a default.
     """
@@ -360,6 +457,22 @@ def judge_unit(
             f"unit.parts has {len(unit.parts)} for unit.text={unit.text!r} "
             f"(kind={unit.kind!r}) -- part_verdicts must be the caller's own "
             "resolution of unit.parts, in the same order and length."
+        )
+    if len(audit_part_verdicts) != len(unit.audit_parts):
+        raise ValueError(
+            f"judge_unit: audit_part_verdicts has {len(audit_part_verdicts)} "
+            f"entries but unit.audit_parts has {len(unit.audit_parts)} for "
+            f"unit.text={unit.text!r} (kind={unit.kind!r}) -- "
+            "audit_part_verdicts must be the caller's own resolution of "
+            "unit.audit_parts, in the same order and length."
+        )
+    if len(deny_check_verdicts) != len(unit.deny_check_parts):
+        raise ValueError(
+            f"judge_unit: deny_check_verdicts has {len(deny_check_verdicts)} "
+            f"entries but unit.deny_check_parts has {len(unit.deny_check_parts)} "
+            f"for unit.text={unit.text!r} (kind={unit.kind!r}) -- "
+            "deny_check_verdicts must be the caller's own resolution of "
+            "unit.deny_check_parts, in the same order and length."
         )
 
     if unit.kind == "undecidable":
@@ -426,18 +539,40 @@ def judge_unit(
         # not just a style regression.
         outer_cmd = unit.parts[0]
         stub = part_verdicts[0]
+        # Every part contributing to this unit's decision and, once the
+        # floor allows, its aggregate fields (fallback_kind/warned,
+        # additional_context): the stub itself, audit_parts, and
+        # deny_check_parts, checked in that order. Defined once and reused
+        # by every consumer below, so a further aggregate field is one more
+        # reader of all_parts rather than a fresh enumeration to get wrong.
+        # reason is the one deliberate exception -- only the stub and
+        # audit_parts fold into it, see _combine_inline_code_reason;
+        # sub_matches itemisation is narrower again, see
+        # CommandUnit.deny_check_parts.
+        all_parts = (stub, *audit_part_verdicts, *deny_check_verdicts)
+        # A substitution's own deny OR ask -- an ordinary rule, hard_deny, or
+        # ask match, on the stub itself, an audit_part, or a deny_check_part
+        # -- still decides the unit: none of the three is merely
+        # observational for a deny/ask, only for allow. Routed through
+        # _pick_strictest, the same first-match-within-a-tier primitive
+        # _combine_strictest itself uses to combine a compound's units --
+        # not a bespoke, deny-only scan, which would silently drop an ask
+        # reaching no branch at all.
+        strictest_kind, strictest_verdict = _pick_strictest(all_parts)
+        deciding = stub if strictest_kind == "allow" else strictest_verdict
         decision, reason, additional_context, matched_rule, provenance = (
-            stub.decision,
-            stub.reason,
-            stub.additional_context,
-            stub.matched_rule,
-            stub.provenance,
+            deciding.decision,
+            deciding.reason,
+            deciding.additional_context,
+            deciding.matched_rule,
+            deciding.provenance,
         )
         if decision == "deny":
-            # The stub's own deny IS the deciding match -- a real rule
-            # fired, so matched_rule/provenance are genuine attributions,
-            # not an escape hatch. Only the recorded sub_command text needs
-            # correcting, from the stub to the leaf's real, full text.
+            # Either the stub's own deny, or an audit part's -- either way a
+            # real rule fired, so matched_rule/provenance are genuine
+            # attributions, not an escape hatch. Only the recorded
+            # sub_command text needs correcting, to the leaf's real, full
+            # text.
             return UnitVerdict(
                 sub_command=unit.text,
                 decision="deny",
@@ -458,11 +593,13 @@ def judge_unit(
         if floored == "ask":
             if decision == "ask":
                 # The floor made no change -- an explicit ask rule already
-                # decided 'ask' before the floor was consulted. Preserve the
-                # rule's own reason/context rather than floor language that
-                # would misattribute the verdict's real cause; matched_rule/
-                # provenance are genuine attributions here too -- only the
-                # sub_command text needs correcting.
+                # decided 'ask' before the floor was consulted, whether on
+                # the stub itself or on a substitution _pick_strictest
+                # promoted above. Preserve that verdict's own reason/context
+                # rather than floor language that would misattribute the
+                # verdict's real cause; matched_rule/provenance are genuine
+                # attributions here too -- only the sub_command text needs
+                # correcting.
                 return UnitVerdict(
                     sub_command=unit.text,
                     decision="ask",
@@ -506,32 +643,63 @@ def judge_unit(
         # no-floor escape hatch, differing only in whether a warning is
         # logged. Branch on the actual configured value (not just "floored
         # == allow", which both share) so 'allow' never claims a warning was
-        # emitted. fallback_kind is known structurally here -- no text
-        # matching needed.
+        # emitted.
         if undecidable_fallback == "allow_with_warning":
-            return UnitVerdict(
-                sub_command=unit.text,
-                decision="allow",
-                matched_rule=None,
-                provenance=None,
-                reason=(
-                    "Allowed with a warning by undecidable_fallback=allow_with_warning "
-                    f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
-                ),
-                additional_context=None,
-                fallback_kind="warned",
+            floor_reason = (
+                "Allowed with a warning by undecidable_fallback=allow_with_warning "
+                f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
             )
+            floor_fallback_kind = "warned"
+        else:
+            floor_reason = (
+                "Allowed with no warning by undecidable_fallback=allow "
+                f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
+            )
+            floor_fallback_kind = "silent"
+        # With audit_parts, the breakdown should still show them, the same
+        # way a 'plain' unit over the same sub-commands would -- see
+        # _combine_inline_code_reason. That folded text only survives to
+        # RuntimeVerdict.reason when this is the compound's ONLY allowed
+        # unit; with two or more, _combine_strictest's own multi-unit
+        # summary replaces it with the fabrication-guard placeholder
+        # instead. Without audit_parts (the common case), the floor's own
+        # wording above is unchanged either way.
+        #
+        # The stub is fed in with fallback_kind FORCED to floor_fallback_kind
+        # rather than its own natural value: reaching this branch at all
+        # means the escape hatch decided (decision was already 'allow'
+        # before the floor, or _pick_strictest above found nothing
+        # stricter), so even a genuine-looking matched_rule on the stub is a
+        # coincidental glob match on the TRUNCATED stub text (see
+        # _extract_outer_command), never a verified read of the leaf's real
+        # content. Trusting that match would bypass _combine_strictest's own
+        # fabrication guard for exactly the leaves this branch exists to
+        # floor.
+        combined = _combine_inline_code_reason(
+            replace(stub, sub_command=unit.text, fallback_kind=floor_fallback_kind),
+            audit_part_verdicts,
+        )
+        combined_reason = combined[0] if combined else floor_reason
+        # additional_context: accumulated over all_parts in full (see its
+        # own comment above), not just the stub/audit_parts pair reason
+        # folds in.
+        combined_context = _accumulate_contexts(
+            [v.additional_context for v in all_parts]
+        )
+        # fallback_kind: 'warned' whenever the floor itself is, or any part
+        # in all_parts was genuinely warned by no_match_fallback.
+        warned = floor_fallback_kind == "warned" or any(
+            v.fallback_kind == "warned" for v in all_parts
+        )
+        fallback_kind = "warned" if warned else floor_fallback_kind
         return UnitVerdict(
             sub_command=unit.text,
             decision="allow",
             matched_rule=None,
             provenance=None,
-            reason=(
-                "Allowed with no warning by undecidable_fallback=allow "
-                f"(inline/heredoc foreign code, unable to safely verify): {display_cmd}"
-            ),
-            additional_context=None,
-            fallback_kind="silent",
+            reason=combined_reason,
+            additional_context=combined_context,
+            fallback_kind=fallback_kind,
         )
 
     if unit.kind == "plain":
@@ -831,6 +999,35 @@ def cap_context_words(
     )
 
 
+def _pick_strictest(
+    verdicts: Sequence[UnitVerdict],
+) -> Tuple[str, Optional[UnitVerdict]]:
+    """Pick the strictest decision among *verdicts* -- deny > ask > allow, first match per tier.
+
+    The one strictest-wins primitive this module uses everywhere a group of candidate
+    verdicts must collapse to a single decider: :func:`_combine_strictest` (combining several
+    already-judged units) and :func:`judge_unit`'s ``'inline_code'`` branch (deciding whether a
+    substitution's own verdict overrides the outer stub's) both route through this rather than
+    each scanning for their own decision type by hand -- a deny-only scan would silently drop an
+    ``ask``.
+
+    Args:
+        verdicts: Candidate verdicts, in the order a tie within one tier should prefer.
+
+    Returns:
+        ``('deny'|'ask', verdict)`` for the first deny, else the first ask. ``('allow', None)``
+        when every verdict allows, or *verdicts* is empty -- there is no single decider to name
+        for an all-allow group; each caller handles that case itself.
+    """
+    for v in verdicts:
+        if v.decision == "deny":
+            return "deny", v
+    for v in verdicts:
+        if v.decision == "ask":
+            return "ask", v
+    return "allow", None
+
+
 def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
     """Combine several already-judged UnitVerdicts into one, strictest-wins.
 
@@ -877,24 +1074,20 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
         empty *unit_verdicts* fails closed: ``deny``, "No commands to
         evaluate".
     """
-    denied = [uv for uv in unit_verdicts if uv.decision == "deny"]
-    asked = [uv for uv in unit_verdicts if uv.decision == "ask"]
-    allowed = [uv for uv in unit_verdicts if uv.decision == "allow"]
-
-    if denied:
-        deciding = denied[0]
+    kind, deciding = _pick_strictest(unit_verdicts)
+    if kind == "deny":
         return RuntimeVerdict(
             decision="deny",
             reason=deciding.reason,
             additional_context=deciding.additional_context,
         )
-    if asked:
-        deciding = asked[0]
+    if kind == "ask":
         return RuntimeVerdict(
             decision="ask",
             reason=deciding.reason,
             additional_context=deciding.additional_context,
         )
+    allowed = [uv for uv in unit_verdicts if uv.decision == "allow"]
     if allowed:
         accumulated_context = _accumulate_contexts(
             [uv.additional_context for uv in allowed]

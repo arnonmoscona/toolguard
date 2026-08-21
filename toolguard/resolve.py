@@ -15,6 +15,7 @@ No logging, no stdin/stdout, no ``sys.exit``, and never imports
 ``toolguard.hook`` (the reverse would be circular).
 """
 
+from dataclasses import replace
 from typing import List, Optional, Tuple
 
 from toolguard.compound import (
@@ -154,6 +155,15 @@ def _deciding_sub_match(
     allow plus one escape-hatch allow -- where without it the genuine
     match would lose its attribution.
 
+    An entry with ``audit_only`` set (one of an ``'inline_code'`` unit's
+    ``CommandUnit.audit_parts`` or ``deny_check_parts``, itemised for the
+    log but never the unit's own verdict -- see
+    :func:`toolguard.compound.judge_unit`) is skipped entirely, for every
+    *decision*: it never decided anything on its own, so it must never be
+    picked as the decider here either. When such an entry's own deny/ask
+    genuinely did decide its unit, that is reflected in the unit's own
+    (non-audit-only) verdict instead, which this still finds.
+
     Args:
         decision: The compound's final decision, after the parse-failure
             floor (:func:`~toolguard.permission_resolution.apply_parse_failure_floor`)
@@ -167,14 +177,16 @@ def _deciding_sub_match(
     """
     if decision in ("deny", "ask"):
         for sub_match in sub_matches:
-            if sub_match.decision == decision:
+            if not sub_match.audit_only and sub_match.decision == decision:
                 return sub_match
         return None
     if decision == "allow":
         genuine = [
             sub_match
             for sub_match in sub_matches
-            if sub_match.decision == "allow" and sub_match.matched_rule is not None
+            if not sub_match.audit_only
+            and sub_match.decision == "allow"
+            and sub_match.matched_rule is not None
         ]
         if len(genuine) == 1:
             return genuine[0]
@@ -282,19 +294,61 @@ def resolve_bash_permission_detailed(
                 # Gate on the same `audits_as_one` field that governs
                 # sub_matches below, so an inline-code unit's outer-stub
                 # probe (not a real per-sub-command decision) never
-                # contributes a conflict-log entry of its own.
+                # contributes a conflict-log entry of its own. Its
+                # audit_parts (handled below) are real sub-commands and do
+                # get this treatment.
                 overrides.append((part, override))
-        judged = judge_unit(unit, part_verdicts, config.resolved_undecidable_fallback())
+        # audit_parts (only ever non-empty for 'inline_code') are the
+        # sub-commands the floor's own outer-stub probe never resolves --
+        # resolved here, ahead of judge_unit, so a deny or ask among them
+        # can still decide the unit (see judge_unit's 'inline_code' branch)
+        # and an allow among them can fold into its reason text (see
+        # _combine_inline_code_reason). Marked audit_only so
+        # _deciding_sub_match never treats the raw record itself as a
+        # decider -- a genuine audit-part deny/ask reaches matched_rule/
+        # provenance only via the unit's own (judged) verdict below.
+        audit_part_verdicts: List[UnitVerdict] = []
+        for audit_part in unit.audit_parts:
+            audit_verdict, audit_override = _decide(audit_part)
+            audit_verdict = replace(audit_verdict, audit_only=True)
+            audit_part_verdicts.append(audit_verdict)
+            if audit_verdict.decision == "allow" and audit_override is not None:
+                overrides.append((audit_part, audit_override))
+        # deny_check_parts (only ever non-empty for 'inline_code') are every
+        # OTHER substitution -- resolved here too, so a genuine deny or ask
+        # among them can decide the unit the same as an audit_part's can
+        # (see judge_unit), even though it was never itself foreign inline
+        # code. Unlike audit_part_verdicts, an allow entry here is dropped
+        # entirely below rather than itemised -- see CommandUnit's own
+        # deny_check_parts docstring for why.
+        deny_check_verdicts: List[UnitVerdict] = []
+        for candidate in unit.deny_check_parts:
+            candidate_verdict, candidate_override = _decide(candidate)
+            candidate_verdict = replace(candidate_verdict, audit_only=True)
+            deny_check_verdicts.append(candidate_verdict)
+            if candidate_verdict.decision == "allow" and candidate_override is not None:
+                overrides.append((candidate, candidate_override))
+        judged = judge_unit(
+            unit,
+            part_verdicts,
+            config.resolved_undecidable_fallback(),
+            audit_part_verdicts=audit_part_verdicts,
+            deny_check_verdicts=deny_check_verdicts,
+        )
         unit_verdicts.append(judged)
         # A plain unit audits as its own sub-commands; a floored or
-        # undecidable unit audits as ONE entry, since the floor -- not any
-        # part's rule match -- decided it. Read from unit.audits_as_one (set
-        # by _unit_for) rather than unit.kind: a fifth CommandUnit.kind
-        # cannot be added without deciding audits_as_one, so this driver
-        # cannot silently under-audit it the way a `unit.kind == "plain"`
-        # check could.
+        # undecidable unit audits as ONE entry plus its audit_parts, since
+        # the floor -- not any part's rule match -- decided it. Read from
+        # unit.audits_as_one (set by _unit_for) rather than unit.kind: a
+        # fifth CommandUnit.kind cannot be added without deciding
+        # audits_as_one, so this driver cannot silently under-audit it the
+        # way a `unit.kind == "plain"` check could.
         if unit.audits_as_one:
             sub_matches.append(judged)
+            sub_matches.extend(audit_part_verdicts)
+            sub_matches.extend(
+                v for v in deny_check_verdicts if v.decision in ("deny", "ask")
+            )
         else:
             sub_matches.extend(part_verdicts)
 

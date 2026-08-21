@@ -431,15 +431,103 @@ class TestInlineCodeFloorReachesTheLeaf(unittest.TestCase):
         Given `if python -c "import os"; then :; fi` -- inline code in the
             condition of an if
         When extract_structured decomposes it
-        Then the condition leaf must carry ask_floor. It does not: the if path
-            builds its condition leaf directly instead of through the leaf
-            policy, so under a blanket allow the bare command asks and this one
-            is allowed. Do not weaken this test
+        Then the condition leaf carries ask_floor, same as the bare command
         """
         self.assertEqual(
             extract_structured('if python -c "import os"; then :; fi'),
             [
                 LeafCommand(text='python -c "import os"', ask_floor=True),
+                LeafCommand(text=":", ask_floor=False),
+            ],
+        )
+
+
+class TestInlineCodeInsideSubstitution(unittest.TestCase):
+    """Foreign inline code inside ``$(...)``/backtick substitution must also floor.
+
+    The floor is a whole-leaf property: the OUTER leaf (``echo $(python -c
+    ...)``) carries ``ask_floor``, not a separate leaf for the substitution --
+    the substitution's own sub-commands still come from
+    :func:`~toolguard.compound.decompose` via ``extract_commands``, which
+    already walked ``$(...)``/backticks before this fix. See
+    :mod:`toolguard.parser.command_extractor`'s ``_substitution_carries_ask_floor``.
+    """
+
+    def test_dollar_paren_substitution_carries_the_floor(self):
+        """
+        Given `echo $(python -c "import os")` -- foreign inline code reachable
+            only through a `$(...)` substitution
+        When extract_structured decomposes it
+        Then the single outer leaf carries ask_floor
+        """
+        self.assertEqual(
+            extract_structured('echo $(python -c "import os")'),
+            [LeafCommand(text='echo $(python -c "import os")', ask_floor=True)],
+        )
+
+    def test_backtick_substitution_carries_the_floor(self):
+        """
+        Given `` echo `python -c "import os"` `` -- the same shape spelled
+            with backticks
+        When extract_structured decomposes it
+        Then the single outer leaf carries ask_floor
+        """
+        self.assertEqual(
+            extract_structured('echo `python -c "import os"`'),
+            [LeafCommand(text='echo `python -c "import os"`', ask_floor=True)],
+        )
+
+    def test_benign_substitution_does_not_carry_the_floor(self):
+        """
+        Given `echo $(ls -la)` -- a substitution with no foreign executor
+        When extract_structured decomposes it
+        Then the leaf is NOT floored: the floor follows the substitution's
+            content, not merely the presence of `$(...)`
+        """
+        self.assertEqual(
+            extract_structured("echo $(ls -la)"),
+            [LeafCommand(text="echo $(ls -la)", ask_floor=False)],
+        )
+
+    def test_nested_substitution_foreign_code_carries_the_floor(self):
+        """
+        Given `echo $(echo $(python -c "import os"))` -- foreign inline code
+            two substitution levels deep
+        When extract_structured decomposes it
+        Then the outer leaf still carries ask_floor -- descent is not capped
+            at one level
+        """
+        self.assertEqual(
+            extract_structured('echo $(echo $(python -c "import os"))'),
+            [LeafCommand(text='echo $(echo $(python -c "import os"))', ask_floor=True)],
+        )
+
+    def test_leading_assignment_inside_substitution_still_carries_the_floor(self):
+        """
+        Given `echo $(FOO=1 python -c "import os")` -- the interpreter reached
+            through a leading `NAME=value` assignment inside the substitution
+        When extract_structured decomposes it
+        Then the outer leaf still carries ask_floor
+        """
+        self.assertEqual(
+            extract_structured('echo $(FOO=1 python -c "import os")'),
+            [LeafCommand(text='echo $(FOO=1 python -c "import os")', ask_floor=True)],
+        )
+
+    def test_substitution_in_an_if_condition_is_a_known_residual_gap(self):
+        """
+        Given `if echo $(python -c "import os"); then :; fi` -- foreign inline
+            code inside a substitution that is itself an if condition
+        When extract_structured decomposes it
+        Then the condition leaf is NOT floored. Known limitation: a control
+            structure's condition is matched from flattened text
+            (`ctrl_condition_text`), which carries no `cmd_substs`, so this
+            case is not covered by this fix
+        """
+        self.assertEqual(
+            extract_structured('if echo $(python -c "import os"); then :; fi'),
+            [
+                LeafCommand(text='echo $(python -c "import os")', ask_floor=False),
                 LeafCommand(text=":", ask_floor=False),
             ],
         )

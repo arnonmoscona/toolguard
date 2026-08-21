@@ -1131,6 +1131,399 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         self.assertIn("ls -> ls", result.reason)
 
 
+class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
+    """A leaf floored because foreign inline code sits inside its own $(...) still names that inner command in sub_matches/reason."""
+
+    def _repro_config(self, undecidable_fallback="allow"):
+        """Build a config with an unrelated Bash(ls) rule, no_match_fallback='allow', and the given undecidable_fallback."""
+        return _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": undecidable_fallback,
+                        "no_match_fallback": "allow",
+                        "permissions": {"allow": ["Bash(ls)"], "deny": []},
+                    },
+                )
+            ]
+        )
+
+    def test_substitution_inline_code_is_itemised_in_sub_matches(self):
+        """
+        Given a leaf floored because its $(...) substitution runs foreign
+            inline code -- 'PKG=$(uv run python -c "print(1)")'
+        When resolving it
+        Then sub_matches has an entry for the leaf's own full text AND a
+            separate entry for the substitution's inner command -- the
+            breakdown is not collapsed down to the floored leaf alone
+        """
+        config = self._repro_config()
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'PKG=$(uv run python -c "print(1)")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        sub_commands = {sm.sub_command for sm in result.sub_matches}
+        self.assertIn(cmd, sub_commands)
+        self.assertIn('uv run python -c "print(1)"', sub_commands)
+
+    def test_substitution_inline_code_is_folded_into_the_reason(self):
+        """
+        Given the same floored leaf with an inner substitution command
+        When resolving it
+        Then the reason text also names the inner command, not just the
+            floored leaf's own text
+        """
+        config = self._repro_config()
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'PKG=$(uv run python -c "print(1)")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertIn('uv run python -c "print(1)"', result.reason)
+
+    def test_unrelated_substitution_is_not_itemised(self):
+        """
+        Given a floored leaf with TWO substitutions, only one of which runs
+            foreign inline code -- 'X=$(mktemp -d) PKG=$(uv run python -c
+            "print(1)")'
+        When resolving it
+        Then sub_matches names the inline-code substitution but not the
+            unrelated 'mktemp -d' one
+        """
+        config = self._repro_config()
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'X=$(mktemp -d) PKG=$(uv run python -c "print(1)")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        sub_commands = {sm.sub_command for sm in result.sub_matches}
+        self.assertIn('uv run python -c "print(1)"', sub_commands)
+        self.assertNotIn("mktemp -d", sub_commands)
+
+    def test_unrelated_substitutions_warning_still_sets_fallback_warning(self):
+        """
+        Given a floored leaf whose stub and audit_part both match explicit
+            allow rules (so neither is itself tagged 'warned'), an
+            unrelated sibling substitution that matches no rule under
+            no_match_fallback='allow_with_warning', and
+            undecidable_fallback='allow' (so the escape hatch itself is
+            silent)
+        When resolving it
+        Then the compound still allows with fallback_warning True -- an
+            unrelated deny_check_part's own warned fallback must survive
+            even though it is never itemised in sub_matches
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow",
+                        "no_match_fallback": "allow_with_warning",
+                        "permissions": {
+                            "allow": ["Bash(echo *)", "Bash(python:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "p") $(some_unmatched_tool --x)'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(result.fallback_warning)
+        sub_commands = {sm.sub_command for sm in result.sub_matches}
+        self.assertNotIn("some_unmatched_tool --x", sub_commands)
+
+    def test_unrelated_substitution_context_still_accumulates(self):
+        """
+        Given a floored leaf whose audit_part and an unrelated
+            deny_check_part sibling both match allow rules carrying their
+            own additionalContext, under undecidable_fallback='allow' (so
+            the escape hatch itself adds no context of its own)
+        When resolving it
+        Then the compound still allows with both contexts joined as
+            paragraphs, in match order -- an unrelated deny_check_part's
+            own additionalContext must survive even though it is never
+            itemised in sub_matches or folded into the reason text
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow",
+                        "no_match_fallback": "allow",
+                        "permissions": {
+                            "allow": [
+                                "Bash(echo *)",
+                                {
+                                    "match": "Bash(python:*)",
+                                    "additionalContext": "CTX-AUDITPART",
+                                },
+                                {
+                                    "match": "Bash(mktemp:*)",
+                                    "additionalContext": "CTX-SIBLING",
+                                },
+                            ],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "p") $(mktemp -d)'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.additional_context, "CTX-AUDITPART\n\nCTX-SIBLING")
+        sub_commands = {sm.sub_command for sm in result.sub_matches}
+        self.assertNotIn("mktemp -d", sub_commands)
+
+    def test_foreign_inline_code_leaf_resolves_to_ask_under_default_floor(self):
+        """
+        Given no undecidable_fallback override (default 'ask'),
+            no_match_fallback='allow' (so the substitution's own inner
+            command would itself resolve 'allow', not 'ask'), and an allow
+            rule that only covers the outer 'echo' command
+        When resolving a leaf whose $(...) substitution runs foreign inline
+            code
+        Then the compound resolves to 'ask', not 'allow' -- the ASK-floor
+            gain this ticket adds, isolated from the pre-existing "an
+            unmatched sub-command asks by default" behaviour that would
+            otherwise also explain an 'ask' result
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "no_match_fallback": "allow",
+                        "permissions": {"allow": ["Bash(echo *)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "ask")
+
+    def test_unrelated_substitution_deny_raises_over_the_ask_floor(self):
+        """
+        Given a deny rule matching an unrelated substitution ('rm -rf
+            /tmp/x') that sits alongside a foreign-inline-code one inside
+            the same leaf
+        When resolving it
+        Then the compound denies, attributed to that deny rule -- an
+            unrelated substitution's own deny still decides the unit even
+            though it is not itself foreign inline code
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {
+                            "allow": ["Bash(echo *)"],
+                            "deny": ["Bash(rm:*)"],
+                        }
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os") $(rm -rf /tmp/x)'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "deny")
+        self.assertEqual(result.matched_rule, "rm:*")
+
+    def test_unrelated_substitution_hard_deny_raises_over_the_ask_floor(self):
+        """
+        Given a hard_deny rule matching an unrelated substitution inside a
+            foreign-inline-code leaf, with no ordinary deny rule at all
+        When resolving it
+        Then the compound denies via the hard_deny match -- unoverridable,
+            even though the substitution is wrapped inside a leaf the ASK
+            floor would otherwise merely ask about
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "permissions": {"allow": ["Bash(echo *)"], "deny": []},
+                        "hard_deny": {"deny": ["Bash(rm:*)"], "allow": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os") $(rm -rf /tmp/x)'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "deny")
+        self.assertEqual(result.matched_rule, "rm:*")
+
+    def test_audit_part_allow_never_attributed_as_the_deciding_match(self):
+        """
+        Given undecidable_fallback='allow_with_warning' and an allow rule
+            that happens to ALSO match the substitution inside a
+            foreign-inline-code leaf
+        When resolving it
+        Then the compound allows via the floor, and matched_rule stays None
+            -- an audit-only substitution's own genuine rule match must
+            never be attributed as the compound's deciding match
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow_with_warning",
+                        "permissions": {
+                            "allow": ["Bash(echo *)", "Bash(python:*)"],
+                            "deny": [],
+                        },
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        self.assertIsNone(result.matched_rule)
+
+    def test_escape_hatch_warning_survives_when_no_part_is_individually_warned(self):
+        """
+        Given undecidable_fallback='allow_with_warning', a non-matching
+            allow rule (so the "no rules configured" floor never applies),
+            and no_match_fallback='allow_with_no_warnings' (so neither the
+            outer stub nor the substitution individually carries a
+            'warned' tag of its own)
+        When resolving a leaf with an audit part
+        Then the compound's own fallback_warning is still True -- the
+            escape hatch's own warning must not be lost just because the
+            individual parts happen to be tagged 'silent' rather than
+            'warned'
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow_with_warning",
+                        "no_match_fallback": "allow_with_no_warnings",
+                        "permissions": {"allow": ["Bash(ls:*)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        self.assertTrue(result.fallback_warning)
+
+    def test_unrelated_substitution_ask_raises_over_the_allow_fallback(self):
+        """
+        Given an ask rule matching an unrelated substitution ('curl
+            http://evil') that sits alongside a foreign-inline-code one
+            inside the same leaf, with undecidable_fallback and
+            no_match_fallback both set to allow
+        When resolving it
+        Then the compound asks, attributed to that ask rule -- an ask on an
+            unrelated substitution must decide the unit the same as a deny
+            does, not be silently downgraded to the allow escape hatch
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow_with_no_warnings",
+                        "no_match_fallback": "allow_with_no_warnings",
+                        "permissions": {"allow": [], "ask": ["Bash(curl:*)"]},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os") $(curl http://evil)'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.matched_rule, "curl:*")
+
+    def test_audit_part_ask_raises_over_the_allow_fallback(self):
+        """
+        Given an ask rule matching the audit_part itself (the foreign
+            inline code substitution), with undecidable_fallback=allow
+        When resolving it
+        Then the compound asks, attributed to that ask rule -- the same
+            promotion as a deny_check_part's ask, but for a substitution
+            that IS itself foreign inline code
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow",
+                        "permissions": {
+                            "allow": ["Bash(echo *)"],
+                            "ask": ["Bash(python:*)"],
+                        },
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'echo $(python -c "import os")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.matched_rule, "python:*")
+
+    def test_outer_summary_stays_balanced_when_a_floored_leaf_has_a_sibling(self):
+        """
+        Given a floored leaf with an unrelated allowed substitution
+            ('X=$(mktemp -d) PKG=$(uv run python -c "print(1)")') alongside
+            a sibling leaf ('ls') in the same compound, both allowed
+        When resolving it
+        Then the compound's reason names exactly 2 top-level sub-commands
+            and the bracket count is balanced -- the outer combine must not
+            re-parse the floored leaf's own already-rendered breakdown as
+            if it were a single genuine "cmd -> pattern" match
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow",
+                        "no_match_fallback": "allow",
+                        "permissions": {"allow": ["Bash(ls)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        cmd = 'ls && X=$(mktemp -d) PKG=$(uv run python -c "print(1)")'
+        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        self.assertEqual(result.decision, "allow")
+        self.assertIn("All 2 sub-commands allowed", result.reason)
+        self.assertEqual(result.reason.count("["), result.reason.count("]"))
+
+
 class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
     """The audit log must never name a rule that does not exist for an escape-hatch allow; single-leaf and compound must share one convention."""
 
@@ -1279,6 +1672,49 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
             mock_log.call_args_list[0].args[0].matched_rule,
             FALLBACK_ALLOW_PLACEHOLDER,
         )
+
+    def test_escape_hatch_leaf_with_an_audit_part_still_logs_the_placeholder(self):
+        """
+        Given undecidable_fallback='allow' (the no-warning value -- neither
+            the outer 'echo' stub nor the audit_part is itself tagged
+            'warned', so a naive combine would look identical to a genuine
+            match), no_match_fallback='allow', and a leaf that ALSO carries
+            an audit_part (a foreign inline-code substitution)
+        When the compound is allowed and logged
+        Then the escape-hatch leaf still records the placeholder, not a
+            blank matched_rule -- an itemised breakdown must not defeat the
+            structural fallback_kind tag the log reads
+        """
+        config = _make_config(
+            [
+                (
+                    "project",
+                    "toolguard_hook",
+                    {
+                        "undecidable_fallback": "allow",
+                        "no_match_fallback": "allow",
+                        "permissions": {"allow": ["Bash(ls)"], "deny": []},
+                    },
+                )
+            ]
+        )
+        hd_deny, hd_allow = config.hard_deny("Bash")
+        command = 'ls && echo $(python -c "print(1)")'
+        result = resolve_bash_permission_detailed(
+            command, config, True, hd_deny, hd_allow
+        )
+        self.assertEqual(result.decision, "allow")
+        with patch("toolguard.hook.log_command") as mock_log:
+            _log_allowed_command(result, command, "main", {"logging_enabled": True})
+        logged = {
+            call.args[0].command_str: call.args[0].matched_rule
+            for call in mock_log.call_args_list
+        }
+        self.assertEqual(
+            logged['echo $(python -c "print(1)")'],
+            FALLBACK_ALLOW_PLACEHOLDER,
+        )
+        self.assertIn("ls", logged["ls"])
 
 
 class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):

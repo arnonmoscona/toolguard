@@ -472,6 +472,18 @@ class UnitVerdict:
             when the floor (not a rule match) decided. Distinct from
             :attr:`RuntimeVerdict.additional_context`, the compound-wide accumulation
             across every contributing unit.
+        audit_only: ``True`` for a raw record itemising one of an ``'inline_code'``
+            unit's ``CommandUnit.audit_parts`` OR ``deny_check_parts`` (see
+            :mod:`toolguard.compound`) -- present in ``RuntimeVerdict.sub_matches``
+            for the audit trail (a ``deny_check_parts`` entry only when its own
+            decision is ``'deny'`` or ``'ask'``, regardless of which entry actually
+            decided the unit; an ``audit_parts`` entry always), but excluded from
+            :func:`~toolguard.resolve._deciding_sub_match`'s search for the
+            sub-command that decided the compound. When such an entry's own
+            ``deny``/``ask`` genuinely decided its unit, that decision reaches
+            ``matched_rule``/``provenance`` through the unit's own (non-audit-only)
+            verdict instead -- never through this record directly. ``False`` for
+            every other ``UnitVerdict``.
     """
 
     sub_command: str
@@ -481,6 +493,7 @@ class UnitVerdict:
     reason: str
     additional_context: Optional[str]
     fallback_kind: Optional[str] = None
+    audit_only: bool = False
 
 
 @dataclass(frozen=True)
