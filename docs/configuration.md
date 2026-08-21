@@ -971,10 +971,10 @@ ask = [
 # declared at the user level so no project can weaken them.
 #
 # If a rule needs a carve-out, it does not belong here: hard_deny means never,
-# no exceptions. A rule you expect to except later (e.g. "block curl, but
-# allow it against localhost") belongs at the ordinary deny/allow level below,
-# where a more-specific allow CAN legitimately override it -- see "Overriding
-# a deny at a more specific level" further down.
+# no exceptions. A rule you expect to except later (e.g. "block find, but
+# allow the read-only invocations") belongs at the ordinary deny/allow level
+# below, where a more-specific allow CAN legitimately override it -- see
+# "Overriding a deny at a more specific level" further down.
 [hard_deny]
 # deny: if a command/path matches one of these (and no `allow` carve-out below),
 # it is DENIED, and that decision cannot be overridden by an allow at any level.
@@ -1004,33 +1004,35 @@ allow = []
 
 ### Overriding a deny at a more specific level
 
-The `Bash(curl:*)` deny above is an ordinary deny, not a hard deny, so it CAN be overridden
-by a more-specific `allow` at a deeper hierarchy level. This is the right layer for a rule
-you expect to except -- put the broad deny where it should default to blocking, then permit
-one real invocation where it's actually needed:
+An ordinary deny CAN be overridden by a more-specific `allow` at a deeper hierarchy level, unlike `[hard_deny]`. That makes it the right layer for a rule you expect to except: put the broad deny where it should default to blocking, then permit the safe uses where they are actually needed.
+
+**Before writing the pattern, ask whether either set is enumerable.** A deny-with-exception recipe only works when one of them is:
+
+| tool | which set is closed and enumerable | verdict |
+|---|---|---|
+| `find` | the **dangerous** set -- `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprintf`, `-fprint`, `-fls` | one negative lookahead; the example below |
+| `git` | the **safe** set -- the read-only verbs | works, but global-flag prefixes make it long |
+| `curl` | **neither** -- `-o` writes a file, `-L` redirects anywhere, a second bare URL exfiltrates, all in the same syntax as ordinary use | **use `ask`**, not this recipe |
+
+When neither set is enumerable, a pattern loose enough for real work admits the dangerous forms and a pattern tight enough to exclude them excludes real work. That is a property of the tool's own CLI, not something toolguard can pattern its way around.
 
 ```toml
-# ~/.claude/toolguard_hook.toml (user level -- baseline: curl is blocked by default)
+# ~/.claude/toolguard_hook.toml (user level -- baseline: find is blocked by default)
 [permissions]
-deny = ["Bash(curl:*)"]
+deny = ['Bash(find:*)']
 ```
 
 ```toml
 # .claude/toolguard_hook.toml (project level -- more specific, permitted to override)
 [permissions]
-allow = ["Bash(curl -sS http://localhost:8080/health)"]
+allow = ['Bash([regex]^find\b(?!.*\s-(exec|execdir|ok|okdir|delete|fprintf|fprint|fls)\b))']
 ```
 
-Verified with `toolguard.testing.sandbox`: with only the user-level deny, the health-check
-invocation is denied like any other curl call. Adding the project-level allow overrides it
-for that exact invocation only -- a different port, an unrelated host, or an attack against
-the same host (`curl -o /etc/shadow http://localhost:8080/health`) all still deny. The
-`Bash(...)` DEFAULT wrapper with no wildcard matches only that literal command line; broaden
-it (a wildcard, another allow line) only as far as real usage requires.
+**Both are TOML literal strings (single quotes), and that is load-bearing.** In a double-quoted TOML string `\b` is a valid escape for backspace, so the pattern would silently become a regex matching a control character -- it would load cleanly, warn nothing, and match no command at all.
 
-`Bash(curl:*)` blocks the literal spelling `curl`, not every way to invoke it (`/usr/bin/curl`,
-`command curl`, ...) -- an ordinary deny is fine with that, since it's expected to be narrowed
-and widened by hand as real usage turns up; a `[hard_deny]` rule needs the stronger claim.
+Verified with `toolguard.testing.sandbox` in both directions, with the permitted list written from realistic usage *before* the pattern was consulted: **7/7 ordinary invocations allowed** (`-name`, `-type`, `-mtime`, `-maxdepth`, `-size`, `-ls`, `-print`, absolute and relative paths), **6/6 destructive ones excluded**, and an unrelated `rm -rf` unaffected.
+
+`Bash(find:*)` blocks the literal spelling `find`, not every way to invoke it (`/usr/bin/find`, `command find`, ...) -- acceptable for an ordinary deny, which is expected to be narrowed and widened by hand as real usage turns up; a `[hard_deny]` rule needs the stronger claim.
 
 > **Upgrade note: the default `governed_tools` set grew.** Before this release, an unconfigured
 > `governed_tools` defaulted to `Bash` only; it now defaults to `Bash`, `Read`, `Write`, `Edit`

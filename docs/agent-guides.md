@@ -206,36 +206,33 @@ Remember `hard_deny.allow` is a carve-out from `hard_deny.deny`, **not** a force
 
 ## Recipe: deny a command with a legitimate exception
 
-**Goal**: block a command by default, but permit one specific, real invocation of it.
+**Goal**: block a command by default, but permit its ordinary, safe uses.
 
-**Decision rule**: this is exactly the case `[hard_deny]` refuses to serve -- a rule you
-expect to except. Use an ordinary `deny` at a shared level (e.g. user), and add the
-exception as an `allow` at a more specific level (e.g. project); more-specific-wins lets it
-override the ancestor deny.
+**Ask this first, before writing any pattern**: *is either the safe set or the dangerous set closed and enumerable?*
+
+- **The dangerous set is enumerable** (e.g. `find`: the flags that execute or delete are a fixed, short list) -- write one negative lookahead. This is the case below.
+- **The safe set is enumerable** (e.g. `git`: the read-only verbs) -- allow those and deny the rest. Workable, but global-flag prefixes make it verbose.
+- **Neither is enumerable** (e.g. `curl`: `-o` writes a file, `-L` redirects anywhere, a second bare URL exfiltrates, all in the same syntax as ordinary use) -- **do not write this recipe. Use `ask`.** A pattern loose enough for real work admits the dangerous forms; a pattern tight enough to exclude them excludes real work. That is a property of the tool's CLI, not of toolguard. For `curl` specifically, Claude's built-in WebFetch covers almost every legitimate need.
+
+**Mechanics**: `[hard_deny]` refuses to serve this case, since it is a rule you expect to except. Put an ordinary `deny` at a shared level (e.g. user) and the exception as an `allow` at a more specific level (e.g. project); more-specific-wins lets it override the ancestor deny.
 
 ```toml
-# ~/.claude/toolguard_hook.toml (user level -- curl blocked by default)
+# ~/.claude/toolguard_hook.toml (user level -- find blocked by default)
 [permissions]
-deny = ["Bash(curl:*)"]
+deny = ['Bash(find:*)']
 ```
 
 ```toml
 # .claude/toolguard_hook.toml (project level -- more specific, overrides the deny)
 [permissions]
-allow = ["Bash(curl -sS http://localhost:8080/health)"]
+allow = ['Bash([regex]^find\b(?!.*\s-(exec|execdir|ok|okdir|delete|fprintf|fprint|fls)\b))']
 ```
 
-Verified with `toolguard.testing.sandbox`: with only the user-level deny in place, that exact
-health-check invocation is denied like any other curl call; adding the project-level allow
-overrides it, while a different port, an unrelated host, and an attack against the same host
-(`curl -o /etc/shadow http://localhost:8080/health`) all still deny. Widen the allow (a
-wildcard, or another line) only as far as real usage actually requires -- unlike a
-`[hard_deny]` carve-out, getting this wrong costs one more `allow` line, not an unoverridable
-hole.
+**Note the single quotes.** A `[regex]` pattern carrying backslashes must be a TOML *literal* string. In a double-quoted string `\b` is a valid TOML escape for backspace, so the pattern silently becomes a regex matching a control character and the rule matches nothing.
 
-`Bash(curl:*)` blocks the literal spelling `curl`, not every way to invoke it (`/usr/bin/curl`,
-`command curl`, ...); that's an acceptable trade at the ordinary level, where the rule is
-expected to be narrowed and widened by hand as real usage turns up.
+Verified with `toolguard.testing.sandbox`, both directions, with the permitted list written from real usage before the pattern was consulted: **7/7 ordinary invocations allowed** (`-name`, `-type`, `-mtime`, `-maxdepth`, `-size`, `-ls`, `-print`, absolute and relative paths); **6/6 destructive ones excluded**; `find . -name '*.py' -delete` still denied, and an unrelated `rm -rf` unaffected.
+
+One measured caveat worth knowing: toolguard's grammar does not currently parse a bare `{}` word, so `find ... -exec ... {} \;` and `xargs -I{}` become undecidable and take the ASK floor. They are excluded either way, but today the floor is doing that work rather than the lookahead -- so the `exec`/`execdir`/`ok`/`okdir` terms above are insurance, not what is currently blocking those commands.
 
 ## Recipe: scope file access to a project
 
