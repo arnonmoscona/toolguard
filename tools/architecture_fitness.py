@@ -56,8 +56,11 @@ Generated code
     imported only by the modules in :data:`OS_IMPORT_OWNERS`, and a ``pathlib``
     ambient member only where :data:`PATH_AMBIENT_OWNERS` has an entry for that
     ``(module, member)`` pair. An unowned ``os`` import or
-    :data:`PATH_AMBIENT_FATAL_MEMBERS` read fails the check; an unowned
-    ``resolve`` is inventoried instead and does not fail the run. The
+    :data:`PATH_AMBIENT_FATAL_MEMBERS` read fails the check -- every ambient
+    member is fatal when unowned; ownership is per module, not per site, so a
+    new or mutated relative-receiver ``resolve()``/``absolute()`` call INSIDE
+    an already-owned module is invisible here and is instead the job of the
+    runtime sentinel in ``test/unit/_relative_receiver_resolve_guard.py``. The
     classification of ``dir(Path)`` is re-derived on every run, so a Python
     release that adds a member fails the check instead of widening it silently.
 
@@ -3870,12 +3873,15 @@ PATH_AMBIENT_MEMBERS = frozenset({"absolute", "cwd", "expanduser", "home", "reso
 
 #: Ambient members a module may not name without a :data:`PATH_AMBIENT_OWNERS`
 #: entry for that ``(module, member)`` pair -- an entry for one member exempts
-#: only that member. ``resolve``'s absence is pragmatic, not principled: it and
-#: ``absolute`` both read the working directory only for a relative receiver,
-#: which this scan does not evaluate, so no rule tells the two apart.
-#: ``absolute`` has no site in this tree; ``resolve``'s sites are inventoried
-#: rather than failed.
-PATH_AMBIENT_FATAL_MEMBERS = frozenset({"absolute", "cwd", "expanduser", "home"})
+#: only that member. ``resolve`` and ``absolute`` both read the working
+#: directory only for a relative receiver, which this scan does not evaluate;
+#: fatality here is per-module ownership, not per-site relativity. A relative
+#: receiver inside an already-owned module is a separate, narrower gap this
+#: scan cannot close -- see test/unit/_relative_receiver_resolve_guard.py for
+#: the runtime sentinel that does.
+PATH_AMBIENT_FATAL_MEMBERS = frozenset(
+    {"absolute", "cwd", "expanduser", "home", "resolve"}
+)
 
 #: ``Path`` members inherited from ``PurePath``.
 PATH_PURE_MEMBERS = frozenset(

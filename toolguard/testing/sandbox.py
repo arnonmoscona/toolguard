@@ -122,13 +122,20 @@ class _Tripwire:
         self._root = root.resolve()
         self._stack = contextlib.ExitStack()
 
-    def _check(self, target: Any, operation: str) -> None:
+    def _check(
+        self, target: Any, operation: str, *, dir_fd: Optional[int] = None
+    ) -> None:
         """
         Raise :class:`SandboxEscapeError` if ``target`` lies outside the sandbox.
 
         Args:
             target: The path being written to (any os.PathLike or str).
             operation: Name of the attempted operation, for the error message.
+            dir_fd: When given and ``target`` is relative, the directory it is
+                relative to -- e.g. Python 3.14's ``shutil.rmtree``, which descends
+                via ``os.rmdir(name, dir_fd=...)``. That is relative to the open
+                directory, not to cwd, so resolving a bare name against cwd here
+                would compare a path the call never named.
 
         Raises:
             SandboxEscapeError: If the resolved target is outside the sandbox.
@@ -143,10 +150,25 @@ class _Tripwire:
             path_str = path_str.decode("utf-8", "replace")
         if _is_benign_write(path_str):
             return
-        try:
-            resolved = Path(path_str).resolve()
-        except OSError, ValueError:
-            resolved = Path(os.path.abspath(path_str))
+        if dir_fd is not None and not os.path.isabs(path_str):
+            try:
+                base = os.readlink(f"/proc/self/fd/{dir_fd}")
+            except OSError:
+                # No /proc (non-Linux) or the fd no longer resolves. A bare name
+                # is meaningless without its directory, so fail closed rather
+                # than fall back to a cwd-relative guess that could be wrong in
+                # either direction.
+                raise SandboxEscapeError(
+                    f"Sandbox escape check: {operation} targeted {path_str!r} "
+                    f"relative to dir_fd={dir_fd}, whose real directory could "
+                    "not be resolved on this platform."
+                )
+            resolved = Path(base, path_str).resolve()
+        else:
+            try:
+                resolved = Path(path_str).resolve()
+            except OSError, ValueError:
+                resolved = Path(os.path.abspath(path_str))
         if resolved == self._root or self._root in resolved.parents:
             return
         raise SandboxEscapeError(
@@ -166,10 +188,16 @@ class _Tripwire:
         return guarded
 
     def _guarded_unary(self, real_func, name: str):
-        """Wrap a function whose FIRST positional argument is the write target."""
+        """
+        Wrap a function whose FIRST positional argument is the write target.
+
+        Forwards a ``dir_fd`` keyword to :meth:`_check` unexamined -- several of the
+        wrapped functions (``os.rmdir``, ``os.unlink``, ``os.mkdir``, ...) accept one,
+        and a relative target under it is not relative to cwd.
+        """
 
         def guarded(target, *args, **kwargs):
-            self._check(target, name)
+            self._check(target, name, dir_fd=kwargs.get("dir_fd"))
             return real_func(target, *args, **kwargs)
 
         return guarded

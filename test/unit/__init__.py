@@ -16,6 +16,10 @@ from test.unit._real_once_per_home_guard import (
     get_leak_events as get_once_per_home_leak_events,
     install as install_once_per_home_guard,
 )
+from test.unit._relative_receiver_resolve_guard import (
+    get_leak_events as get_relative_receiver_leak_events,
+    install as install_relative_receiver_guard,
+)
 
 # Install the real-logs-dir write guard before any test_*.py module in this
 # package is imported. Python guarantees a package's __init__.py runs before
@@ -26,6 +30,10 @@ install()
 # Same guarantee, for the shared ~/.toolguard/once_per.db -- see
 # test/unit/_real_once_per_home_guard.py's module docstring.
 install_once_per_home_guard()
+# Same guarantee, for a Path.resolve()/Path.absolute() call on a relative
+# receiver -- see test/unit/_relative_receiver_resolve_guard.py's module
+# docstring.
+install_relative_receiver_guard()
 
 # toolguard.once_per_store._STORE_PATH is a fixed module-level constant
 # (~/.toolguard/once_per.db), unlike logs_dir, which almost every test
@@ -61,12 +69,14 @@ def _fail_hard_on_real_log_dir_leak_at_exit() -> None:
     process immediately at the C level, so stdout/stderr are flushed
     explicitly first since os._exit() skips normal buffered-stream flushing.
 
-    Checks both the real-logs-dir registry and the real-once-per-home
-    registry, so a leak in either fails the whole run the same way.
+    Checks the real-logs-dir registry, the real-once-per-home registry, and
+    the relative-receiver resolve()/absolute() registry, so a leak in any of
+    them fails the whole run the same way.
     """
     log_dir_events = get_leak_events()
     once_per_events = get_once_per_home_leak_events()
-    if not log_dir_events and not once_per_events:
+    relative_receiver_events = get_relative_receiver_leak_events()
+    if not log_dir_events and not once_per_events and not relative_receiver_events:
         return
     if log_dir_events:
         sys.stderr.write(
@@ -89,6 +99,16 @@ def _fail_hard_on_real_log_dir_leak_at_exit() -> None:
             + "\n\n"
         )
         for event in once_per_events:
+            sys.stderr.write(event + "\n")
+    if relative_receiver_events:
+        sys.stderr.write(
+            "\n\n"
+            "=" * 70 + "\nTOO-45 RELATIVE-RECEIVER RESOLVE GUARD: a Path.resolve()\n"
+            "or Path.absolute() call read the working directory because its\n"
+            "receiver was relative -- see\n"
+            "test/unit/_relative_receiver_resolve_guard.py.\n" + "=" * 70 + "\n\n"
+        )
+        for event in relative_receiver_events:
             sys.stderr.write(event + "\n")
     # Flush BEFORE os._exit(): os._exit() terminates at the C level and skips
     # Python's normal buffered-stream teardown, so anything not flushed here

@@ -1,6 +1,7 @@
 """
 Regression tests for the guards against writes to the real repo ``logs/``
-directory and the real ``~/.toolguard/once_per.db``.
+directory, the real ``~/.toolguard/once_per.db``, and a relative-receiver
+``Path.resolve()``/``Path.absolute()`` call anywhere in the run.
 
 Named ``test_zz_...`` so it sorts last under ``unittest discover``, and so
 normally runs after the tests it checks -- a convenience only; the ordering
@@ -17,7 +18,11 @@ from unittest.mock import patch
 
 import toolguard.error_log as error_log
 import toolguard.log_writer as log_writer
-from test.unit import _real_log_dir_guard, _real_once_per_home_guard
+from test.unit import (
+    _real_log_dir_guard,
+    _real_once_per_home_guard,
+    _relative_receiver_resolve_guard,
+)
 from toolguard import once_per_store
 from toolguard.env_config import get_env_config
 from toolguard.once_per_store import ClaimStatus
@@ -535,6 +540,120 @@ class TestRealSuppressionHomeGuardAnswersReadsItself(unittest.TestCase):
             len(events), 1, f"expected exactly one leak event, got {events}"
         )
         self.assertIn("is_claimed", events[0])
+
+
+class TestRelativeReceiverResolveGuardHasNoRecordedLeaks(unittest.TestCase):
+    """Asserts nothing in this run called Path.resolve()/Path.absolute() on a relative receiver."""
+
+    def test_no_relative_receiver_calls_were_recorded(self):
+        """
+        Given the TOO-45 relative-receiver resolve guard installed for this whole run
+        When every test that ran before this one is taken into account
+        Then no Path.resolve()/Path.absolute() call read the working
+            directory because its receiver was relative
+        """
+        events = _relative_receiver_resolve_guard.get_leak_events()
+        self.assertEqual(
+            events,
+            [],
+            "One or more calls to Path.resolve()/Path.absolute() used a "
+            "relative receiver, reading the working directory -- see "
+            "test/unit/_relative_receiver_resolve_guard.py:\n\n" + "\n".join(events),
+        )
+
+
+class TestRelativeReceiverResolveGuardSanctionedSitesAllFired(unittest.TestCase):
+    """
+    Asserts every declared SANCTIONED_SITES entry was actually hit this run.
+
+    A sanctioned site is not an exemption: unlike get_leak_events()'s registry
+    (checked empty above), this one must be checked NON-empty -- absence here
+    means the relative-receiver call it names has been removed or the test
+    exercising it stopped running, and the sanction has gone stale.
+    """
+
+    def test_every_sanctioned_relative_receiver_site_fired(self):
+        """
+        Given TOO-45's SANCTIONED_SITES declarations for this run
+        When every test that ran before this one is taken into account
+        Then every declared site was hit at least once, so a sanction cannot
+            silently outlive the call it excuses
+        """
+        unhit = _relative_receiver_resolve_guard.get_unhit_sanctioned_sites()
+        self.assertEqual(
+            unhit,
+            {},
+            "One or more SANCTIONED_SITES entries in "
+            "test/unit/_relative_receiver_resolve_guard.py were never hit this "
+            f"run: {unhit}. Either the call they excuse no longer exists (drop "
+            "the entry) or the test exercising it did not run.",
+        )
+
+
+class TestRelativeReceiverResolveGuardActuallyFires(unittest.TestCase):
+    """
+    Self-verification: calls Path.resolve()/Path.absolute() on a deliberately
+    relative receiver and asserts the guard records it (and still resolves
+    it), and that an absolute receiver records nothing; registry restored
+    afterwards.
+    """
+
+    def setUp(self):
+        """Start from a clean leak registry regardless of what ran earlier."""
+        self._pre_existing = _relative_receiver_resolve_guard.get_leak_events()
+        _relative_receiver_resolve_guard.clear_leak_events()
+
+    def tearDown(self):
+        """Restore whatever was already recorded before this test ran."""
+        _relative_receiver_resolve_guard.replace_leak_events(self._pre_existing)
+
+    def test_relative_receiver_resolve_is_recorded_and_still_resolves(self):
+        """
+        Given the guard installed and an empty leak registry
+        When Path("relative-receiver-fixture").resolve() is called
+        Then it is recorded as a leak event naming resolve() and the
+            receiver, and it still returns a resolved, absolute path -- the
+            guard observes, it does not suppress
+        """
+        result = Path("relative-receiver-fixture").resolve()
+
+        events = _relative_receiver_resolve_guard.get_leak_events()
+        self.assertEqual(len(events), 1, f"expected exactly one event, got {events}")
+        self.assertIn("resolve", events[0])
+        self.assertIn("relative-receiver-fixture", events[0])
+        self.assertTrue(result.is_absolute())
+
+    def test_absolute_receiver_resolve_is_not_recorded(self):
+        """
+        Given the guard installed and an empty leak registry
+        When an already-absolute Path's resolve() is called
+        Then nothing is recorded
+        """
+        Path.cwd().resolve()
+
+        self.assertEqual(_relative_receiver_resolve_guard.get_leak_events(), [])
+
+    def test_relative_receiver_absolute_is_recorded(self):
+        """
+        Given the guard installed and an empty leak registry
+        When Path("relative-receiver-fixture").absolute() is called
+        Then it is recorded as a leak event naming absolute()
+        """
+        Path("relative-receiver-fixture").absolute()
+
+        events = _relative_receiver_resolve_guard.get_leak_events()
+        self.assertEqual(len(events), 1, f"expected exactly one event, got {events}")
+        self.assertIn("absolute", events[0])
+
+    def test_absolute_receiver_absolute_is_not_recorded(self):
+        """
+        Given the guard installed and an empty leak registry
+        When an already-absolute Path's absolute() is called
+        Then nothing is recorded
+        """
+        Path.cwd().absolute()
+
+        self.assertEqual(_relative_receiver_resolve_guard.get_leak_events(), [])
 
 
 if __name__ == "__main__":

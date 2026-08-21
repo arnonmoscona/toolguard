@@ -455,13 +455,27 @@ class TestSandboxTripwire(unittest.TestCase):
 
     def test_tripwire_covers_shutil_rmtree(self):
         """
-        Given a sandbox experiment
-        When code attempts to delete a tree outside the sandbox
-        Then SandboxEscapeError is raised
+        Given a real directory created outside the sandbox
+        When code inside an experiment attempts to delete it
+        Then SandboxEscapeError is raised and the directory survives
+
+        The target is a throwaway directory rather than a real protected path:
+        this test only proves anything if the delete would otherwise succeed,
+        so a regression here destroys whatever it points at.  It also has to be
+        created BEFORE the experiment -- inside, Path.home() answers with the
+        sandbox's own fake home, which is not outside the sandbox at all.
         """
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "canary.txt").write_text("intact", encoding="utf-8")
+
         with experiment():
             with self.assertRaises(SandboxEscapeError):
-                shutil.rmtree(Path.home() / ".toolguard")
+                shutil.rmtree(outside)
+
+        self.assertTrue(
+            (outside / "canary.txt").exists(), "the tripwire let the delete through"
+        )
 
     def test_tripwire_is_disarmed_after_the_context(self):
         """
@@ -558,6 +572,51 @@ class TestSandboxTripwire(unittest.TestCase):
             guard._check(outside / "mod.pyc", "probe")
             with self.assertRaises(SandboxEscapeError):
                 guard._check(outside / "mod.toml", "probe")
+
+    def test_guard_logic_dir_fd_relative_target_is_checked_against_the_directory_not_cwd(
+        self,
+    ):
+        """
+        Given a bare relative name and a dir_fd for a REAL directory outside the sandbox,
+            with cwd pointing INSIDE the sandbox root
+        When the guard checks that name with dir_fd given
+        Then it raises, proving the check resolves against the fd's directory -- a cwd-based
+            resolution would land the same bare name inside the sandbox and stay silent,
+            masking the escape shutil.rmtree's fd-relative descent (os.rmdir(name,
+            dir_fd=...), Python 3.14) performs
+        """
+        with tempfile.TemporaryDirectory() as sandbox_root:
+            outside = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+            guard = _Tripwire(Path(sandbox_root))
+            fd = os.open(outside, os.O_RDONLY)
+            self.addCleanup(os.close, fd)
+            original_cwd = os.getcwd()
+            self.addCleanup(os.chdir, original_cwd)
+            os.chdir(sandbox_root)
+
+            with self.assertRaises(SandboxEscapeError):
+                guard._check("victim", "probe", dir_fd=fd)
+
+    def test_guard_logic_dir_fd_relative_target_inside_the_sandbox_is_permitted(self):
+        """
+        Given a bare relative name and a dir_fd for a directory INSIDE the sandbox root,
+            with cwd pointing OUTSIDE the sandbox
+        When the guard checks that name with dir_fd given
+        Then it permits it, proving the check is not "any dir_fd raises" but genuinely
+            follows the fd to its real directory
+        """
+        with tempfile.TemporaryDirectory() as sandbox_root:
+            outside = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+            guard = _Tripwire(Path(sandbox_root))
+            fd = os.open(sandbox_root, os.O_RDONLY)
+            self.addCleanup(os.close, fd)
+            original_cwd = os.getcwd()
+            self.addCleanup(os.chdir, original_cwd)
+            os.chdir(outside)
+
+            guard._check("victim", "probe", dir_fd=fd)
 
     def _fail_if_created(self, victim: Path) -> None:
         """Fail loudly (and clean up) if a tripwire probe file actually got created."""

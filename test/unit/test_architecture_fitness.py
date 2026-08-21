@@ -4288,13 +4288,16 @@ class TestAmbientRouteCheck(unittest.TestCase):
                 [("reader", "cwd")],
             )
 
-    def test_a_resolve_site_is_inventoried_rather_than_failed(self):
+    def test_a_resolve_site_outside_an_owner_is_a_fatal_finding(self):
         """
         Given a module calling .resolve() and no matching owner entry
         When check_ambient_routes runs
-        Then the site is reported but is not fatal: resolve() reads the working
-             directory only for a relative receiver, and this scan does not
-             evaluate receivers
+        Then it is reported as fatal: ownership is per (module, member), not
+             per site, so an unowned resolve() is closed the same way as the
+             other four ambient members. A relative-receiver resolve() call
+             INSIDE an already-owned module is a separate, narrower gap this
+             scan cannot see -- that is the runtime sentinel's job (see
+             test/unit/_relative_receiver_resolve_guard.py)
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = _ambient_fixture(
@@ -4305,9 +4308,9 @@ class TestAmbientRouteCheck(unittest.TestCase):
                 scan_root=root, repo_root=Path(tmp), os_owners={}, path_owners={}
             )
             self.assertEqual(
-                [(f.module, f.name) for f in report.findings], [("walker", "resolve")]
+                [(f.module, f.name) for f in report.fatal_findings],
+                [("walker", "resolve")],
             )
-            self.assertEqual(report.fatal_findings, [])
 
     def test_a_read_through_an_imported_module_alias_is_not_a_path_read(self):
         """

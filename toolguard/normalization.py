@@ -26,14 +26,15 @@ from toolguard import ambient
 def _involves_a_symlink(path_obj: Path) -> bool:
     """Whether path_obj is a symlink, or is absolute with a symlinked ancestor directory.
 
-    The ancestors of a RELATIVE path are deliberately not examined: they would be
-    interpreted against the hook process's own working directory, which is not the
-    shell's, so resolving them would rewrite a token against a directory the command
-    never named.
+    Examined only when path_obj is ABSOLUTE, receiver included: ``is_symlink()`` and
+    ``resolve()`` on a RELATIVE receiver both stat against the hook process's own
+    working directory, which is not the shell's, so treating a relative path as
+    symlink-free leaves its token unrewritten rather than rewriting it against a
+    directory the command never named.
     """
-    if path_obj.is_symlink():
-        return True
-    return path_obj.is_absolute() and any(
+    if not path_obj.is_absolute():
+        return False
+    return path_obj.is_symlink() or any(
         parent.is_symlink() for parent in path_obj.parents
     )
 
@@ -60,12 +61,14 @@ def normalize_path(
 ) -> str:
     """Normalize a path to canonical form for pattern matching.
 
-    In order: collapses repeated leading slashes, resolves any symlink in the path
-    (the path itself or an ancestor directory, dangling or not), collapses a path under
-    the user's home directory to a '~/...' prefix -- home itself becoming plain '~' --
-    then, for a bare relative path with no leading '/', '~', or '.', adds a './' prefix.
-    That last step is unconditional when no project_root is given, but only fires when
-    project_root is given AND the path exists under it.
+    In order: collapses repeated leading slashes, resolves any symlink in an ABSOLUTE
+    path (the path itself or an ancestor directory, dangling or not) -- a relative path
+    is left exactly as written, since resolving it would stat against the hook
+    process's cwd rather than the shell's -- collapses a path under the user's home
+    directory to a '~/...' prefix -- home itself becoming plain '~' -- then, for a bare
+    relative path with no leading '/', '~', or '.', adds a './' prefix. That last step
+    is unconditional when no project_root is given, but only fires when project_root is
+    given AND the path exists under it.
 
     Args:
         path: The path to normalize.
