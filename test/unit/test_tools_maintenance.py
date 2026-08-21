@@ -152,26 +152,25 @@ class TestRunMaintenance(unittest.TestCase):
 
     def test_consolidations_receive_the_corpus(self):
         """
-        Given a static-subsumption candidate that only tightens a corpus
-              command outside its two synthetic probes ('uv run python -m
-              pytest' loses coverage once 'uv run python:*' is dropped)
+        Given a literal-alternation candidate that only tightens a corpus
+              command outside its probes -- 'git d*ff a:*'/'git d*ff b:*'
+              wildcard the fixed 'd*ff' token, so the generated regex escapes
+              it and 'git diff a' loses coverage once the originals are
+              replaced (the ticket's own worked example for this shape)
         When run_maintenance is called WITHOUT a corpus, then WITH one
         Then the proposal is present in the first report and absent from the
              second -- run_maintenance must pass its corpus argument through
              to propose_consolidations, not just to redundancy/broadening/mining.
         """
         config = _make_config(
-            _make_layer(
-                "Bash",
-                allow=["uv run", "uv run python:*", "[regex]^uv run python( --x)?$"],
-            )
+            _make_layer("Bash", allow=["git d*ff a:*", "git d*ff b:*"])
         )
-        corpus = [_make_log_entry("Bash", "uv run python -m pytest")]
+        corpus = [_make_log_entry("Bash", "git diff a")]
 
         report_no_corpus = run_maintenance(config, tools=["Bash"])
         self.assertTrue(
             any(
-                p.kind == "static-subsumption"
+                p.kind == "literal-alternation"
                 for p in report_no_corpus.tools[0].consolidations
             )
         )
@@ -179,7 +178,7 @@ class TestRunMaintenance(unittest.TestCase):
         report_with_corpus = run_maintenance(config, tools=["Bash"], corpus=corpus)
         self.assertFalse(
             any(
-                p.kind == "static-subsumption"
+                p.kind == "literal-alternation"
                 for p in report_with_corpus.tools[0].consolidations
             )
         )

@@ -8,10 +8,12 @@ Two families, each scoped to one tool's allow list within a single config layer:
    literal, wildcard-free values -- is collapsed into one ``[regex]`` rule.
    No-colon (exact) patterns are excluded.
 
-2. **Static subsumption.** A DEFAULT pattern whose command part extends
-   another's at a word or path boundary is proposed for removal. Only the word
-   boundary actually makes the wider pattern cover the narrower one; the path
-   boundary is a candidate the probe gate is expected to reject.
+2. **Static subsumption.** A pattern whose command text extends another's
+   ``:*``/``:**`` prefix at a word (space) boundary is proposed for removal.
+   Only a genuine ``:*``/``:**`` prefix on the wider rule covers the narrower
+   one this way -- an EXACT (no-colon) wider pattern matches nothing but
+   itself and is never treated as the covering rule -- and only a space
+   boundary is one ``match_command`` honours; a ``/`` is not.
 
 A family-1 candidate is emitted only when every probe -- and every corpus
 entry, when a corpus is supplied -- yields the identical verdict before and
@@ -21,10 +23,10 @@ candidate is dropped silently.  With no corpus, neither gate can rule out a
 tightening or broadening a real command would show; see
 :class:`SafetyResult`.
 
-Neither gate proves match-set equality; each checks only the commands it runs.
-Family 2's structural argument is not sound in every shape either.
-:func:`_check_family1_safe` and :func:`_static_prefix_of` name the specific
-gaps.
+Neither gate proves match-set equality by running match_command; each checks
+only the commands it actually runs, or trusts a narrower structural argument
+in family 2's case.  :func:`_check_family1_safe` and :func:`_static_prefix_of`
+name the specific gaps that argument does and does not cover.
 
 The module's other half, :func:`propose_broadening_consolidations`, is not part
 of that scheme: it enumerates rewrites that DELIBERATELY admit more, gates
@@ -227,35 +229,36 @@ def _build_alternation_regex(
 
 def _static_prefix_of(large_cmd: str, small_cmd: str) -> bool:
     """
-    Return True when ``large_cmd`` is a structural prefix of ``small_cmd``.
+    Return True when ``large_cmd`` is a structural prefix of ``small_cmd`` at
+    the same word boundary :func:`~toolguard.permissions.match_command` uses
+    for a DEFAULT ``:*`` prefix: equality, or ``small_cmd`` continuing after
+    ``large_cmd`` with a space. A ``/`` is not a boundary here -- ``/usr/bin``
+    does not structurally prefix ``/usr/bin/env``, matching
+    ``/usr/bin:*``'s real match-set (it does not match ``/usr/bin/env``).
 
-    Accepted forms: equality; ``small_cmd`` extending ``large_cmd`` at a space
-    or ``/`` boundary; and ``large_cmd`` already ending in a separator.
-
-    Meant to establish that ``small_cmd:*``'s match-set is a subset of
-    ``large_cmd:*``'s.  Only the space boundary establishes it.  Two shapes
-    break it, leaving the caller's probe check as the only guard:
-
-    - Any ``/`` boundary.  A DEFAULT prefix must end on a token boundary, and
-      ``/`` is not one: ``/usr/bin:*`` does not match ``/usr/bin/env python``,
-      and ``mkdir -p /tmp/:*`` does not match ``mkdir -p /tmp/claude-code``.
-    - The args part is never looked at.  The caller also passes no-colon (exact)
-      bodies, and an exact ``uv run`` matches nothing but ``uv run`` -- so it
-      subsumes ``uv run python:*`` in this function's terms and not in fact.
+    This assumes ``large_cmd`` names a genuine ``large_cmd:*``/``:**``
+    pattern -- the only shape this boundary rule actually covers
+    ``small_cmd``'s match-set within. It says nothing about whether
+    ``large_cmd`` was really written that way; the caller must not pass an
+    EXACT (no-colon) pattern's command text here, since such a pattern
+    matches only itself and this text-only comparison could not tell the
+    difference. Given a genuine ``large_cmd:*`` on the caller's side, this is
+    a real subset guarantee, not just a heuristic screen -- it does not run
+    ``match_command`` to confirm it.
 
     Args:
         large_cmd: The command portion (before ``:``) of the larger pattern.
         small_cmd: The command portion of the potentially-subsumed pattern.
 
     Returns:
-        True when ``large_cmd`` is a structural prefix of ``small_cmd``.
+        True when ``large_cmd`` is a structural, word-boundary prefix of
+        ``small_cmd``.
     """
     if small_cmd == large_cmd:
         return True
-    for sep in (" ", "/"):
-        if small_cmd.startswith(large_cmd + sep):
-            return True
-    if large_cmd.endswith(("/", " ")) and small_cmd.startswith(large_cmd):
+    if small_cmd.startswith(large_cmd + " "):
+        return True
+    if large_cmd.endswith(" ") and small_cmd.startswith(large_cmd):
         return True
     return False
 
@@ -693,10 +696,13 @@ def _find_static_subsumptions(
     Find static subsumption elimination opportunities in ``allow_patterns``.
 
     Considers every ordered pair of DEFAULT patterns whose args part is ``*``
-    or absent, and proposes dropping the second when :func:`_static_prefix_of`
-    holds and :func:`_check_family2_safe` passes.
-    Pairs whose command parts are equal are skipped, so an exact duplicate is
-    never reported as a subsumption.
+    or absent, and proposes dropping the second when the first is a genuine
+    ``:*``/``:**`` prefix (an EXACT, no-colon pattern only ever matches
+    itself and can never cover another pattern's extension, so it is never
+    tried as the covering side), :func:`_static_prefix_of` holds on their
+    command text, and :func:`_check_family2_safe` passes. Pairs whose command
+    parts are equal are skipped, so an exact duplicate is never reported as a
+    subsumption.
 
     Args:
         config: The full configuration (for probe decisions).
@@ -732,7 +738,11 @@ def _find_static_subsumptions(
 
     n = len(default_entries)
     for i in range(n):
-        raw_large, large_cmd, _, _ = default_entries[i]
+        raw_large, large_cmd, _, large_args_part = default_entries[i]
+        if large_args_part != "*":
+            # EXACT (no ':*'/':**') -- matches only itself, so it can never
+            # structurally cover another pattern's extension.
+            continue
         for j in range(n):
             if i == j:
                 continue
@@ -763,8 +773,9 @@ def _find_static_subsumptions(
                     removed_patterns=(raw_small,),
                     added_pattern=None,
                     rationale=(
-                        f"'{raw_small}' is statically subsumed by '{raw_large}': "
-                        f"every command matched by the former is also matched by the latter"
+                        f"'{raw_small}' is a structural (word-boundary) text "
+                        f"prefix match under '{raw_large}'; see replay_summary "
+                        f"for what was actually verified"
                     ),
                     replay_summary=evidence,
                     verification=result,

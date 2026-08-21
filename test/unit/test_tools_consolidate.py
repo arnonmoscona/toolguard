@@ -754,13 +754,21 @@ class TestSafetyResultThreeState(unittest.TestCase):
         self.assertEqual(result, SafetyResult.UNSAFE, evidence)
         self.assertIn("1 tightened", evidence)
 
-    def test_propose_consolidations_drops_the_tightening_subsumption_with_corpus(self):
+    def test_propose_consolidations_never_proposes_exact_as_covering_rule(self):
         """
-        Given the same 'uv run python' subsumption scenario as a real allow list
-        When propose_consolidations is called WITHOUT the corpus, then WITH it
-        Then the static-subsumption proposal is emitted without a corpus (probe
-             evidence only) and dropped once the tightening corpus entry is
-             supplied -- reproducing the ticket's own worked example end to end.
+        Given the ticket's own worked example -- allow=['uv run',
+              'uv run python:*', '[regex]^uv run python( --x)?$'] -- where the
+              EXACT 'uv run' shares command text with 'uv run python:*' but,
+              being EXACT, matches only itself and never covers the prefix
+              rule's extensions (e.g. 'uv run python -m pytest')
+        When propose_consolidations is called for Bash, with and without a
+             corpus
+        Then no static-subsumption proposal is returned either way -- the
+             EXACT pattern is never tried as the covering rule, so the
+             tightening this scenario used to demonstrate is no longer even
+             proposed, let alone applied. Direct coverage of the corpus-side
+             tightened_count catch (for a genuine ':*'-vs-':*' pair) is
+             test_family2_safe_rejects_a_tightening_corpus_entry above.
         """
         prov = _make_provenance()
         config = _make_config(
@@ -777,7 +785,9 @@ class TestSafetyResultThreeState(unittest.TestCase):
             for p in propose_consolidations(config, "Bash")
             if p.kind == "static-subsumption"
         ]
-        self.assertEqual(len(without_corpus), 1, without_corpus)
+        self.assertEqual(
+            without_corpus, [], f"Expected rejection; got: {without_corpus}"
+        )
 
         with_corpus = [
             p
@@ -785,6 +795,10 @@ class TestSafetyResultThreeState(unittest.TestCase):
             if p.kind == "static-subsumption"
         ]
         self.assertEqual(with_corpus, [], f"Expected rejection; got: {with_corpus}")
+
+        self.assertEqual(
+            decide(config, "Bash", "uv run python -m pytest").decision, "allow"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1012,24 @@ class TestFamily2MkdirSubsumption(unittest.TestCase):
         self.assertEqual(p.kind, "static-subsumption")
         self.assertEqual(p.list_type, "allow")
 
+    def test_subsumption_rationale_does_not_claim_unchecked_match_set_equality(self):
+        """
+        Given the mkdir subsumption scenario
+        When the family-2 proposal is accepted
+        Then rationale states only the structural text-prefix fact that was
+             actually checked, and does not claim "every command matched by
+             the former is also matched by the latter" -- a match-set claim
+             _static_prefix_of never verifies.
+        """
+        config, _ = self._make_mkdir_config()
+        proposals = propose_consolidations(config, "Bash")
+        family2 = [p for p in proposals if p.kind == "static-subsumption"]
+        self.assertEqual(len(family2), 1)
+        rationale = family2[0].rationale
+        self.assertNotIn("every command matched", rationale)
+        self.assertIn("mkdir -p /tmp/claude-code:*", rationale)
+        self.assertIn("mkdir -p:*", rationale)
+
     def test_subsumption_with_corpus(self):
         """
         Given the mkdir subsumption scenario and a corpus entry for the subsumed pattern
@@ -1072,14 +1104,14 @@ class TestFamily2ConservativeNonClaim(unittest.TestCase):
             f"git-annex:* must not be reported as subsumed by git:*; got: {family2}",
         )
 
-    def test_probe_gate_rejects_unsound_path_boundary_subsumption(self):
+    def test_static_prefix_of_rejects_path_boundary_subsumption(self):
         """
-        Given '/usr/bin:*' and '/usr/bin/env:*', a pair _static_prefix_of
-              accepts (the '/' boundary) but match_command does not honour --
-              '/usr/bin:*' matches nothing under '/usr/bin/env'
+        Given '/usr/bin:*' and '/usr/bin/env:*', a pair match_command does not
+              subsume -- '/usr/bin:*' matches nothing under '/usr/bin/env'
         When propose_consolidations is called for Bash
-        Then no static-subsumption proposal is returned: the positive-probe gate
-             rejects it, which is the only guard here.
+        Then no static-subsumption proposal is returned: _static_prefix_of's
+             fixed word-boundary rule rejects the pair itself, before the
+             probe gate ever runs.
         """
         prov = _make_provenance()
         config = _make_config(
@@ -1316,12 +1348,14 @@ class TestPrefixBroadening(unittest.TestCase):
 class TestStaticPrefixOf(unittest.TestCase):
     """
     _static_prefix_of's own contract: which command strings it treats as
-    structural prefixes of which.
+    structural prefixes of which, at match_command's real word (space)
+    boundary.
 
-    It is a text test, not a proof about match-sets. Where the two diverge is
-    documented on the function; the caller's probe gate is what stands between
-    a divergence and an emitted proposal -- see
-    test_probe_gate_rejects_unsound_path_boundary_subsumption.
+    It is a pure text comparison: given a genuine ``large_cmd:*`` pattern on
+    the caller's side, the boundary check it makes is a real subset
+    guarantee, but the function has no way to know whether the caller's
+    ``large_cmd`` really was one -- an EXACT pattern's text looks identical.
+    See the function's own docstring for the residual gap that leaves.
     """
 
     def test_identical_commands_subsume(self):
@@ -1340,19 +1374,24 @@ class TestStaticPrefixOf(unittest.TestCase):
         """
         self.assertTrue(_static_prefix_of("git", "git push"))
 
-    def test_path_boundary_prefix_subsumes(self):
+    def test_path_boundary_prefix_does_not_subsume(self):
         """
-        Given a small command that extends the large one at a path boundary
+        Given a small command that extends the large one only at a '/'
+              boundary, which match_command's DEFAULT ':*' prefix does not
+              honour ('/usr/bin:*' does not match '/usr/bin/env')
         When static subsumption is checked
-        Then it holds
+        Then it does NOT hold -- a '/' is not a word boundary here, matching
+             the real match-set instead of over-claiming it
         """
-        self.assertTrue(_static_prefix_of("/usr/bin", "/usr/bin/env"))
+        self.assertFalse(_static_prefix_of("/usr/bin", "/usr/bin/env"))
 
     def test_bare_textual_prefix_does_not_subsume(self):
         """
         Given a small command that shares only a bare textual prefix (no boundary)
         When static subsumption is checked
-        Then it does NOT hold (git-crypt is not under git)
+        Then it does NOT hold (git-crypt is not under git) -- the same "no
+             boundary, no subsumption" rule that rejects the '/' case above,
+             not a special case for hyphens
         """
         self.assertFalse(_static_prefix_of("git", "git-crypt"))
 
