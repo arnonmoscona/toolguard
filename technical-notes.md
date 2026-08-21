@@ -828,11 +828,15 @@ lexically before parsing.
 
 ### Heredocs, the sink sentinel, and executor classification
 
-A heredoc body is data for whatever consumes it, not shell to parse. The pre-pass removes the
-body and replaces the `<<DELIM` redirection with an all-letters sentinel
-**`__HEREDOC_TO_<sink>__`** on the bearer command, where `<sink>` is the basename of the
-ultimate pipe consumer (the pre-pass follows the pipeline, so `cat <<EOF | bash` resolves to
-`bash`, not `cat`). The bearer keeps its other arguments so a dangerous bearer
+A heredoc body is data for whatever consumes it, not shell to parse. `multiline.py` lifts the
+body lexically behind an opaque placeholder; `command_extractor.py` then reads the parse tree
+for which command owns the placeholder and replaces it with an all-letters sentinel
+**`__HEREDOC_TO_<sink>__`**. The bearer's own class decides the sink first: a bearer that is
+itself bash-family or foreign wins outright, even mid-pipeline (`python <<HD | bash` is
+python's heredoc, not bash's). Only a non-executor bearer (`cat`, `tee`) falls through to the
+pipeline's last stage, so `cat <<EOF | bash` still resolves to `bash`. See
+[docs/heredoc-parsing-design.md](docs/heredoc-parsing-design.md) for why attribution comes off
+the tree rather than a token scan. The bearer keeps its other arguments so a dangerous bearer
 (`tee /etc/passwd <<EOF`) is still catchable. The sentinel is all `[A-Za-z0-9_]` deliberately,
 so regex rules stay clean.
 

@@ -275,6 +275,12 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Configuration reference](configuration.md#configuration-reference)
 - [Keeping toolguard up to date](configuration.md#keeping-toolguard-up-to-date)
 
+**`docs/heredoc-parsing-design.md`**
+- [What is forced](heredoc-parsing-design.md#what-is-forced)
+- [Why this needed rework](heredoc-parsing-design.md#why-this-needed-rework)
+- [Rejected alternatives](heredoc-parsing-design.md#rejected-alternatives)
+- [Reader's guide](heredoc-parsing-design.md#readers-guide)
+
 **`docs/install.md`**
   - [Set expectations up front (say this before you start)](install.md#set-expectations-up-front-say-this-before-you-start)
 - [Phase map](install.md#phase-map)

@@ -1,0 +1,16 @@
+---
+title: Heredoc lift, parse, then ask the tree
+---
+flowchart TB
+    A["raw text<br/>python &lt;&lt;HD | bash"] --> B["multiline.py: _lift_heredocs<br/>lexical only, blind to sink<br/>body -&gt; side table, redirection -&gt; __HD0__"]
+    B --> C["bash_parser.py (generated)<br/>__HD0__ parses as an ordinary word"]
+    C --> D["command_model.py IR"]
+    D --> E["command_extractor.py<br/>_record_placeholder_owners + _resolve_sink<br/>reads the tree for who owns __HD0__"]
+    E -->|"bearer is bash-family"| F["body spliced back,<br/>re-parsed as bash"]
+    E -->|"bearer is foreign, or non-executor<br/>bearer's pipeline last stage"| G["__HEREDOC_TO_&lt;sink&gt;__ sentinel,<br/>body discarded"]
+    E -->|"no owning simple_command found"| H["_UnattributableHeredocError<br/>-&gt; UndecidableSegment -&gt; ASK floor"]
+
+    classDef step fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef clamp fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    class A,B,C,D,E,F,G step
+    class H clamp

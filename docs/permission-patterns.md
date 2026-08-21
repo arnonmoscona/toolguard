@@ -318,8 +318,11 @@ Nested substitutions are supported (e.g. `echo $(ls $(pwd))` validates `echo`, `
 
 A heredoc body (`cmd <<EOF ... EOF`) is **data fed to a command**, not shell to parse. Before
 matching, toolguard removes the body and presents the heredoc-bearing command with an
-all-letters sentinel argument, **`__HEREDOC_TO_<sink>__`**, where `<sink>` is the ultimate
-consumer of the body (it follows the pipe). What happens next depends on that sink:
+all-letters sentinel argument, **`__HEREDOC_TO_<sink>__`**. `<sink>` is the bearer itself when
+the bearer is bash-family or a foreign interpreter -- that wins even mid-pipeline, so
+`python <<EOF | bash` sentinels as python's heredoc, not bash's. Only a non-executor bearer
+(`cat`, `tee`) falls through to the pipeline's last consumer, so `cat <<EOF | bash` still
+resolves to `bash`. What happens next depends on that sink:
 
 | Sink kind | Examples | Handling |
 |-----------|----------|----------|
