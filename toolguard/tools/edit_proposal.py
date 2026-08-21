@@ -16,7 +16,7 @@ elsewhere.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from toolguard.config import Configuration, Provenance
 from toolguard.tools.config_access import with_layer_rules_replaced
@@ -72,6 +72,10 @@ class EditProposal:
         edits: The atomic edits that make up the proposal, applied in order.
         origin: Optional free-form tag identifying the producer, so a consumer can
             trace where the proposal came from.  Never interpreted here.
+        verification: Producer-specific verification state, e.g. a
+            :class:`~toolguard.tools.consolidate.SafetyResult` value string
+            (``'safe'``, ``'unsafe'``, ``'unverified'``) for a consolidation.
+            ``None`` when the producer has no such concept.
     """
 
     action: str
@@ -79,6 +83,7 @@ class EditProposal:
     rationale: str
     edits: Tuple[RuleEdit, ...]
     origin: str = ""
+    verification: Optional[str] = None
 
 
 def apply_edits(config: Configuration, proposals: List[EditProposal]) -> Configuration:
@@ -175,6 +180,7 @@ def edit_proposal_to_dict(proposal: EditProposal) -> Dict[str, Any]:
         "rationale": proposal.rationale,
         "origin": proposal.origin,
         "edits": [rule_edit_to_dict(edit) for edit in proposal.edits],
+        "verification": proposal.verification,
     }
 
 
@@ -182,7 +188,8 @@ def edit_proposal_from_dict(data: Dict[str, Any]) -> EditProposal:
     """
     Reconstruct an :class:`EditProposal` from :func:`edit_proposal_to_dict`.
 
-    ``action`` and ``tool`` are required; the other three keys default to empty.
+    ``action`` and ``tool`` are required; the other keys default to empty
+    (``None`` for ``verification``).
     """
     return EditProposal(
         action=data["action"],
@@ -190,4 +197,5 @@ def edit_proposal_from_dict(data: Dict[str, Any]) -> EditProposal:
         rationale=data.get("rationale", ""),
         edits=tuple(rule_edit_from_dict(e) for e in data.get("edits", ())),
         origin=data.get("origin", ""),
+        verification=data.get("verification"),
     )

@@ -9,8 +9,8 @@ Per governed tool it collects:
 * **redundancies** -- exact/normalised duplicate rules and, with a corpus,
   allow rules whose removal changes no observed decision
   (:mod:`toolguard.tools.redundancy`).
-* **consolidations** -- strict, probe-checked merges, families 1-2
-  (:mod:`toolguard.tools.consolidate`).
+* **consolidations** -- strict, probe-checked merges, families 1-2, corpus-replay
+  verified when a corpus is supplied (:mod:`toolguard.tools.consolidate`).
 * **broadenings** -- deliberately-widening merges carrying evidence, families
   3-4, for an agent to judge (:mod:`toolguard.tools.consolidate` again).
 * **cross-layer redundancies** -- a specific rule already covered by a broader
@@ -190,8 +190,9 @@ def run_maintenance(
             :data:`toolguard.constants.BUILTIN_TOOLS`, sorted -- that constant
             is an unordered frozenset and report order is part of the output.
         corpus: Optional harvested command corpus.  When supplied it enables
-            corpus-backed redundancy, broadening evidence, and mining; when
-            ``None`` those fall back to static-only / empty results.
+            corpus-backed redundancy, strict-consolidation replay verification,
+            broadening evidence, and mining; when ``None`` those fall back to
+            static-only / empty results.
 
     Returns:
         A :class:`MaintenanceReport` aggregating all findings.  Nothing is applied.
@@ -204,7 +205,7 @@ def run_maintenance(
             ToolMaintenance(
                 tool=tool,
                 redundancies=tuple(find_redundancy(config, tool, corpus)),
-                consolidations=tuple(propose_consolidations(config, tool)),
+                consolidations=tuple(propose_consolidations(config, tool, corpus)),
                 broadenings=tuple(
                     propose_broadening_consolidations(config, tool, corpus)
                 ),
@@ -268,7 +269,8 @@ def render(report: MaintenanceReport, fmt: str = "markdown") -> str:
         for proposal in tool_report.consolidations:
             lines.append(
                 f"{bullet}consolidate ({proposal.kind}): "
-                f"{list(proposal.removed_patterns)} -> `{proposal.added_pattern}`"
+                f"{list(proposal.removed_patterns)} -> `{proposal.added_pattern}` "
+                f"[{proposal.verification.value.upper()}]"
             )
         for proposal in tool_report.broadenings:
             lines.append(
@@ -341,6 +343,7 @@ def _tool_to_dict(tool_report: ToolMaintenance) -> Dict[str, Any]:
                 "added_pattern": c.added_pattern,
                 "rationale": c.rationale,
                 "replay_summary": c.replay_summary,
+                "verification": c.verification.value,
             }
             for c in tool_report.consolidations
         ],
@@ -454,6 +457,7 @@ def consolidation_to_edit_proposal(prop: ConsolidationProposal) -> EditProposal:
 
     The shared model lets the maintenance skill hand its proposed changes to
     ``toolguard-audit --edits`` for an as-if-enacted security review before writing.
+    ``prop.verification`` carries through as ``EditProposal.verification``.
 
     Args:
         prop: The consolidation proposal to convert.
@@ -475,6 +479,7 @@ def consolidation_to_edit_proposal(prop: ConsolidationProposal) -> EditProposal:
             ),
         ),
         origin=f"consolidation:{prop.kind}",
+        verification=prop.verification.value,
     )
 
 
@@ -505,6 +510,7 @@ def change_report_to_dict(change: ChangeReport) -> Dict[str, Any]:
                         "removed_patterns": list(p.removed_patterns),
                         "added_pattern": p.added_pattern,
                         "rationale": p.rationale,
+                        "verification": p.verification.value,
                     }
                     for p in f.applied
                 ],
@@ -1182,11 +1188,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         default=False,
         help=(
-            "Switch to apply mode: enact the replay-verified consolidation "
-            "proposals the user has approved. Replay-verification is evidence, "
-            "not consent -- these are never applied automatically. PREVIEW by "
-            "default (dry run, shows the diffs, writes nothing); add --write to "
-            "modify the config."
+            "Switch to apply mode: enact the consolidation proposals the user "
+            "has approved. Each carries a verification state (SAFE/UNSAFE/"
+            "UNVERIFIED) shown in the preview; without --corpus every proposal "
+            "is UNVERIFIED -- probe-checked but never replayed against a real "
+            "command. Verification is evidence, not consent -- these are never "
+            "applied automatically. PREVIEW by default (dry run, shows the "
+            "diffs, writes nothing); add --write to modify the config."
         ),
     )
     parser.add_argument(

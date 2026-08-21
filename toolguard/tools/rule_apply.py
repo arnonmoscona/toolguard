@@ -478,12 +478,12 @@ def render_change_report(report: ChangeReport, fmt: str = "text") -> str:
             removed = ", ".join(
                 wrap_tool_pattern(prop.tool, b) for b in prop.removed_patterns
             )
+            verification = prop.verification.value.upper()
             if prop.added_pattern is not None:
-                lines.append(
-                    f"  + {prop.kind}: {removed} -> {wrap_tool_pattern(prop.tool, prop.added_pattern)}"
-                )
+                added = wrap_tool_pattern(prop.tool, prop.added_pattern)
+                lines.append(f"  + {prop.kind}: {removed} -> {added} [{verification}]")
             else:
-                lines.append(f"  + {prop.kind}: drop {removed}")
+                lines.append(f"  + {prop.kind}: drop {removed} [{verification}]")
 
         for prop, reason in fchange.skipped:
             removed = ", ".join(

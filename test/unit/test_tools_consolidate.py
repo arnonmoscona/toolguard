@@ -11,7 +11,10 @@ from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.tools.config_access import with_layer_allow_replaced
 from toolguard.tools.consolidate import (
     BroadeningProposal,
+    SafetyResult,
     _check_family1_safe,
+    _check_family2_safe,
+    _corpus_verdict,
     _static_prefix_of,
     propose_broadening_consolidations,
     propose_consolidations,
@@ -586,14 +589,15 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
         Given a git diff/status allow group and a deliberately OVER-BROAD
               consolidated body ('[regex]^git ') that matches ALL git commands
         When _check_family1_safe evaluates it (no corpus)
-        Then it returns (False, ...): the synthetic absent-token probe flips from
-             deny to allow, so the gate rejects the candidate before emission.
+        Then it returns (SafetyResult.UNSAFE, ...): the synthetic absent-token
+             probe flips from deny to allow, so the gate rejects the candidate
+             before emission.
         """
         prov = _make_provenance()
         config = _make_config(
             _make_layer("Bash", allow=["git diff:*", "git status:*"], provenance=prov)
         )
-        passed, evidence = _check_family1_safe(
+        result, evidence = _check_family1_safe(
             config,
             "Bash",
             prov,
@@ -604,7 +608,325 @@ class TestFamily1EquivalenceAndLandmine(unittest.TestCase):
             [],
             None,
         )
-        self.assertFalse(passed, f"Expected rejection; evidence: {evidence}")
+        self.assertEqual(
+            result, SafetyResult.UNSAFE, f"Expected rejection; evidence: {evidence}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Both gates: the three-state SafetyResult distinguishes "checked and clean"
+# from "never looked"
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyResultThreeState(unittest.TestCase):
+    """
+    Both gates must stop collapsing UNVERIFIED into SAFE. A boolean cannot
+    tell "no corpus was supplied" apart from "a corpus was replayed clean" --
+    these tests read the SafetyResult value directly, which is the whole
+    point of the three-state change.
+    """
+
+    def test_family1_safe_is_unverified_without_corpus(self):
+        """
+        Given a family-1 consolidation whose probes all pass
+        When _check_family1_safe evaluates it with corpus=None
+        Then it returns SafetyResult.UNVERIFIED, not SAFE.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*"], provenance=prov)
+        )
+        result, evidence = _check_family1_safe(
+            config,
+            "Bash",
+            prov,
+            ["git diff:*", "git status:*"],
+            r"[regex]^git (diff|status)(?=\s|$)",
+            ["git"],
+            ["diff", "status"],
+            [],
+            None,
+        )
+        self.assertEqual(result, SafetyResult.UNVERIFIED, evidence)
+
+    def test_family1_safe_is_safe_with_a_clean_corpus(self):
+        """
+        Given the same family-1 consolidation and a corpus whose commands
+              keep the identical verdict under both configs
+        When _check_family1_safe evaluates it
+        Then it returns SafetyResult.SAFE.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*"], provenance=prov)
+        )
+        corpus = [
+            _make_log_entry("Bash", "git diff HEAD"),
+            _make_log_entry("Bash", "git status"),
+        ]
+        result, evidence = _check_family1_safe(
+            config,
+            "Bash",
+            prov,
+            ["git diff:*", "git status:*"],
+            r"[regex]^git (diff|status)(?=\s|$)",
+            ["git"],
+            ["diff", "status"],
+            [],
+            corpus,
+        )
+        self.assertEqual(result, SafetyResult.SAFE, evidence)
+
+    def test_family2_safe_is_unverified_without_corpus(self):
+        """
+        Given a family-2 subsumption whose two positive probes both pass
+        When _check_family2_safe evaluates it with corpus=None
+        Then it returns SafetyResult.UNVERIFIED, not SAFE.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["mkdir -p:*", "mkdir -p /tmp/claude-code:*"],
+                provenance=prov,
+            )
+        )
+        result, evidence = _check_family2_safe(
+            config,
+            "Bash",
+            prov,
+            "mkdir -p /tmp/claude-code:*",
+            "mkdir -p /tmp/claude-code",
+            None,
+        )
+        self.assertEqual(result, SafetyResult.UNVERIFIED, evidence)
+
+    def test_family2_safe_is_safe_with_a_clean_corpus(self):
+        """
+        Given the same family-2 subsumption and a corpus entry the removal
+              does not affect
+        When _check_family2_safe evaluates it
+        Then it returns SafetyResult.SAFE.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["mkdir -p:*", "mkdir -p /tmp/claude-code:*"],
+                provenance=prov,
+            )
+        )
+        corpus = [_make_log_entry("Bash", "mkdir -p /tmp/claude-code/sub")]
+        result, evidence = _check_family2_safe(
+            config,
+            "Bash",
+            prov,
+            "mkdir -p /tmp/claude-code:*",
+            "mkdir -p /tmp/claude-code",
+            corpus,
+        )
+        self.assertEqual(result, SafetyResult.SAFE, evidence)
+
+    def test_family2_safe_rejects_a_tightening_corpus_entry(self):
+        """
+        Given allow=['uv run', 'uv run python:*', '[regex]^uv run python( --x)?$'],
+              where the two synthetic probes ('uv run python', 'uv run python --x')
+              stay allow before and after removing 'uv run python:*', but a corpus
+              command outside that probe set ('uv run python -m pytest') goes from
+              allow to ask once the pattern is removed
+        When _check_family2_safe evaluates the removal with that corpus
+        Then it returns SafetyResult.UNSAFE -- tightened_count catches what the
+             probes and a broadened_count-only check would both miss.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["uv run", "uv run python:*", "[regex]^uv run python( --x)?$"],
+                provenance=prov,
+            )
+        )
+        corpus = [_make_log_entry("Bash", "uv run python -m pytest")]
+        result, evidence = _check_family2_safe(
+            config, "Bash", prov, "uv run python:*", "uv run python", corpus
+        )
+        self.assertEqual(result, SafetyResult.UNSAFE, evidence)
+        self.assertIn("1 tightened", evidence)
+
+    def test_propose_consolidations_drops_the_tightening_subsumption_with_corpus(self):
+        """
+        Given the same 'uv run python' subsumption scenario as a real allow list
+        When propose_consolidations is called WITHOUT the corpus, then WITH it
+        Then the static-subsumption proposal is emitted without a corpus (probe
+             evidence only) and dropped once the tightening corpus entry is
+             supplied -- reproducing the ticket's own worked example end to end.
+        """
+        prov = _make_provenance()
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["uv run", "uv run python:*", "[regex]^uv run python( --x)?$"],
+                provenance=prov,
+            )
+        )
+        corpus = [_make_log_entry("Bash", "uv run python -m pytest")]
+
+        without_corpus = [
+            p
+            for p in propose_consolidations(config, "Bash")
+            if p.kind == "static-subsumption"
+        ]
+        self.assertEqual(len(without_corpus), 1, without_corpus)
+
+        with_corpus = [
+            p
+            for p in propose_consolidations(config, "Bash", corpus=corpus)
+            if p.kind == "static-subsumption"
+        ]
+        self.assertEqual(with_corpus, [], f"Expected rejection; got: {with_corpus}")
+
+
+# ---------------------------------------------------------------------------
+# ConsolidationProposal.verification: the SafetyResult must reach the proposal
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationOnProposal(unittest.TestCase):
+    """
+    A proposal's ``verification`` field must equal the gate's SafetyResult --
+    the ticket's own defect one level out: the state used to be discarded
+    after the gate returned it.
+    """
+
+    def test_family1_proposal_carries_unverified_without_corpus(self):
+        """
+        Given a family-1 consolidation with no corpus supplied
+        When propose_consolidations returns the proposal
+        Then proposal.verification is SafetyResult.UNVERIFIED, not just
+             embedded as a substring of replay_summary.
+        """
+        config = _make_config(_make_layer("Bash", allow=["git diff:*", "git status:*"]))
+        proposals = [
+            p
+            for p in propose_consolidations(config, "Bash")
+            if p.kind == "literal-alternation"
+        ]
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].verification, SafetyResult.UNVERIFIED)
+
+    def test_family1_proposal_carries_safe_with_a_clean_corpus(self):
+        """
+        Given a family-1 consolidation with a clean corpus supplied
+        When propose_consolidations returns the proposal
+        Then proposal.verification is SafetyResult.SAFE.
+        """
+        config = _make_config(_make_layer("Bash", allow=["git diff:*", "git status:*"]))
+        corpus = [_make_log_entry("Bash", "git diff HEAD")]
+        proposals = [
+            p
+            for p in propose_consolidations(config, "Bash", corpus=corpus)
+            if p.kind == "literal-alternation"
+        ]
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].verification, SafetyResult.SAFE)
+
+    def test_family2_proposal_carries_unverified_without_corpus(self):
+        """
+        Given a family-2 subsumption with no corpus supplied
+        When propose_consolidations returns the proposal
+        Then proposal.verification is SafetyResult.UNVERIFIED.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["mkdir -p:*", "mkdir -p /tmp/claude-code:*"])
+        )
+        proposals = [
+            p
+            for p in propose_consolidations(config, "Bash")
+            if p.kind == "static-subsumption"
+        ]
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].verification, SafetyResult.UNVERIFIED)
+
+
+# ---------------------------------------------------------------------------
+# _corpus_verdict: the shared corpus tail, tool-filtering, and vacuous wording
+# ---------------------------------------------------------------------------
+
+
+class TestCorpusVerdict(unittest.TestCase):
+    """
+    Both gates route their corpus check through :func:`_corpus_verdict`, which
+    must (a) distinguish "no corpus supplied" from "a corpus was supplied but
+    has nothing for this tool", using the same "vacuous" wording
+    ``_render_replay`` already uses for the analogous case, and (b) count only
+    the corpus entries for the tool actually being changed.
+    """
+
+    def _configs(self):
+        """
+        Identical A/B Configurations, so every Bash corpus entry this class
+        uses decides the same either way -- these tests are about corpus
+        selection and wording, not about the replay diff itself.
+        """
+        prov = _make_provenance()
+        config = _make_config(_make_layer("Bash", allow=["git:*"], provenance=prov))
+        return config, config
+
+    def test_corpus_none_says_no_corpus(self):
+        """
+        Given corpus=None
+        When _corpus_verdict evaluates it
+        Then it returns UNVERIFIED with evidence naming "no corpus", not the
+             "vacuous" wording reserved for a supplied-but-empty corpus.
+        """
+        config_a, config_b = self._configs()
+        result, evidence = _corpus_verdict(
+            None, config_a, config_b, "Bash", "2 probes unchanged", "0 changed"
+        )
+        self.assertEqual(result, SafetyResult.UNVERIFIED)
+        self.assertIn("no corpus", evidence)
+        self.assertNotIn("vacuous", evidence)
+
+    def test_corpus_with_no_matching_tool_is_vacuous_not_no_corpus(self):
+        """
+        Given a non-empty corpus whose entries are ALL for a different tool
+              than the one being changed
+        When _corpus_verdict evaluates it
+        Then it returns UNVERIFIED, but with the "vacuous, not a clean pass"
+             wording _render_replay uses for an empty corpus -- distinct from
+             "no corpus", because a corpus WAS supplied.
+        """
+        config_a, config_b = self._configs()
+        corpus = [_make_log_entry("Read", "some/path")]
+        result, evidence = _corpus_verdict(
+            corpus, config_a, config_b, "Bash", "2 probes unchanged", "0 changed"
+        )
+        self.assertEqual(result, SafetyResult.UNVERIFIED)
+        self.assertIn("vacuous, not a clean pass", evidence)
+        self.assertNotIn("no corpus", evidence)
+
+    def test_corpus_size_reported_is_filtered_to_the_tool(self):
+        """
+        Given a corpus mixing 3 Read entries and 2 Bash entries
+        When _corpus_verdict evaluates a Bash change
+        Then the evidence reports 2 entries replayed, not 5 -- an entry for a
+             different tool cannot exercise the change and must not inflate
+             the count.
+        """
+        config_a, config_b = self._configs()
+        corpus = [
+            _make_log_entry("Read", "a"),
+            _make_log_entry("Read", "b"),
+            _make_log_entry("Read", "c"),
+            _make_log_entry("Bash", "git diff HEAD"),
+            _make_log_entry("Bash", "git status"),
+        ]
+        result, evidence = _corpus_verdict(
+            corpus, config_a, config_b, "Bash", "2 probes unchanged", "0 changed"
+        )
+        self.assertEqual(result, SafetyResult.SAFE)
+        self.assertIn("corpus replay 2 entries", evidence)
 
 
 # ---------------------------------------------------------------------------

@@ -16,8 +16,10 @@ Two families, each scoped to one tool's allow list within a single config layer:
 A family-1 candidate is emitted only when every probe -- and every corpus
 entry, when a corpus is supplied -- yields the identical verdict before and
 after.  Family 2 asks less: its two probes must be ``allow`` before and after,
-and a corpus may only forbid broadening.  Either way a failing candidate is
-dropped silently.
+and a corpus forbids both broadening and tightening.  Either way a failing
+candidate is dropped silently.  With no corpus, neither gate can rule out a
+tightening or broadening a real command would show; see
+:class:`SafetyResult`.
 
 Neither gate proves match-set equality; each checks only the commands it runs.
 Family 2's structural argument is not sound in every shape either.
@@ -32,6 +34,7 @@ nothing, and attaches evidence for a human to judge.
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from toolguard.api import decide
@@ -56,6 +59,23 @@ from toolguard.tools.replay import replay
 # ---------------------------------------------------------------------------
 
 
+class SafetyResult(Enum):
+    """
+    Outcome of a family-1/family-2 safety gate.
+
+    ``UNVERIFIED`` is distinct from ``SAFE``: either no corpus was supplied at
+    all, or the corpus had no entries for the tool being changed, so only
+    synthetic probes ran -- the gate did not check a real command. A caller
+    may still accept it (that is current policy, so a fresh install with no
+    logs still gets consolidations), but it must branch on the value
+    explicitly rather than treat it as an alias for ``SAFE``.
+    """
+
+    SAFE = "safe"
+    UNSAFE = "unsafe"
+    UNVERIFIED = "unverified"
+
+
 @dataclass(frozen=True)
 class ConsolidationProposal:
     """
@@ -74,6 +94,10 @@ class ConsolidationProposal:
             valid (which token varies, which rule subsumes which).
         replay_summary: Short evidence string summarising the probe/replay
             outcome (e.g. ``"10 probes unchanged; no corpus"``).
+        verification: The :class:`SafetyResult` the gate returned alongside
+            ``replay_summary``.  Defaults to ``UNVERIFIED`` so fixtures built
+            without a real gate run still construct; every proposal the gates
+            emit sets it explicitly.
     """
 
     kind: str
@@ -84,6 +108,7 @@ class ConsolidationProposal:
     added_pattern: Optional[str]
     rationale: str
     replay_summary: str
+    verification: SafetyResult = SafetyResult.UNVERIFIED
 
 
 @dataclass(frozen=True)
@@ -321,6 +346,63 @@ def _generate_extension_probes(
     return probes
 
 
+def _corpus_verdict(
+    corpus: Optional[List[LogEntry]],
+    config_a: Configuration,
+    config_b: Configuration,
+    tool: str,
+    probe_note: str,
+    changed_word: str,
+) -> Tuple[SafetyResult, str]:
+    """
+    Classify the corpus-replay half of a family-1/family-2 safety gate.
+
+    Filters ``corpus`` to entries for ``tool`` before replaying and counting,
+    so the reported entry count reflects commands that could actually
+    exercise the change -- an entry for a different tool can never move its
+    decision.  Distinguishes "no corpus was supplied" (``corpus`` is
+    ``None``) from "a corpus was supplied but has none of this tool's
+    commands" (filtered to empty): both are ``UNVERIFIED``, but only the
+    empty case reuses :func:`~toolguard.tools.maintenance._render_replay`'s
+    "vacuous, not a clean pass" wording for the analogous situation.
+
+    Args:
+        corpus: Harvested corpus, or ``None`` when ``--corpus`` was not passed.
+        config_a: Configuration before the proposed change.
+        config_b: Configuration after the proposed change.
+        tool: Tool the change applies to; only matching corpus entries count.
+        probe_note: Evidence prefix describing the probes that already
+            passed, e.g. ``"4 probes unchanged"``.
+        changed_word: Family-specific suffix reporting a clean replay, e.g.
+            ``"0 changed"`` or ``"0 broadened, 0 tightened"``.
+
+    Returns:
+        ``(SafetyResult.SAFE, evidence)`` when a non-empty tool-filtered
+        corpus replayed with no broadening or tightening,
+        ``(SafetyResult.UNSAFE, evidence)`` when it changed a decision, or
+        ``(SafetyResult.UNVERIFIED, evidence)`` when there was no
+        tool-matching corpus to replay.
+    """
+    if corpus is None:
+        return SafetyResult.UNVERIFIED, f"{probe_note}; no corpus"
+
+    tool_corpus = [entry for entry in corpus if entry.tool == tool]
+    if not tool_corpus:
+        return SafetyResult.UNVERIFIED, (
+            f"{probe_note}; corpus supplied but empty for {tool} -- "
+            "vacuous, not a clean pass"
+        )
+
+    diff = replay(tool_corpus, config_a, config_b)
+    if diff.broadened_count or diff.tightened_count:
+        return SafetyResult.UNSAFE, (
+            f"corpus replay changed decisions: {diff.broadened_count} broadened, "
+            f"{diff.tightened_count} tightened"
+        )
+    evidence = f"{probe_note}; corpus replay {len(tool_corpus)} entries, {changed_word}"
+    return SafetyResult.SAFE, evidence
+
+
 def _check_family1_safe(  # noqa: PLR0913 -- 9 args
     config: Configuration,
     tool: str,
@@ -331,10 +413,10 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args
     varying_tokens: List[str],
     suffix_tokens: List[str],
     corpus: Optional[List[LogEntry]],
-) -> Tuple[bool, str]:
+) -> Tuple[SafetyResult, str]:
     """
     Check whether replacing ``original_patterns`` with ``consolidated_body``
-    changes any decision.  Both conditions are required:
+    changes any decision.  Both conditions are required for ``SAFE``:
 
     1. Every probe command has an IDENTICAL verdict under the original config
        and the consolidated config.  The probe set is the literal member
@@ -342,7 +424,8 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args
        near-misses of :func:`_generate_extension_probes`, and the absent-token
        near-misses of :func:`_generate_negative_probes`.
     2. When ``corpus`` is supplied, ``replay`` reports ZERO broadened AND ZERO
-       tightened entries.
+       tightened entries.  With no corpus this check cannot run at all, so the
+       result is ``UNVERIFIED`` rather than ``SAFE``.
 
     Passing is evidence about the commands that were run, not a proof of
     match-set equality.  Two shapes are known to pass and still TIGHTEN:
@@ -368,9 +451,10 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args
         corpus: Optional harvested command corpus for historical replay check.
 
     Returns:
-        Tuple of ``(passed, evidence_string)``.  ``passed`` is True only when no
-        probe and no corpus entry changes verdict; ``evidence_string`` summarises
-        what was checked.
+        Tuple of ``(result, evidence_string)``.  ``result`` is ``UNSAFE`` when a
+        probe or a corpus entry changed verdict, ``UNVERIFIED`` when every probe
+        held but no corpus was supplied, and ``SAFE`` only when a corpus was
+        also replayed clean.  ``evidence_string`` summarises what was checked.
     """
     config_b = with_layer_allow_replaced(
         config, tool, provenance, set(original_patterns), [consolidated_body]
@@ -397,25 +481,13 @@ def _check_family1_safe(  # noqa: PLR0913 -- 9 args
             changed += 1
     if changed:
         return (
-            False,
+            SafetyResult.UNSAFE,
             f"probe decision changes: {changed}/{len(probes)} (not equivalence-preserving)",
         )
 
-    if corpus:
-        diff = replay(corpus, config, config_b)
-        if diff.broadened_count or diff.tightened_count:
-            return False, (
-                f"corpus replay changed decisions: {diff.broadened_count} broadened, "
-                f"{diff.tightened_count} tightened"
-            )
-        evidence = (
-            f"{len(probes)} probes unchanged; "
-            f"corpus replay {len(corpus)} entries, 0 changed"
-        )
-    else:
-        evidence = f"{len(probes)} probes unchanged; no corpus"
-
-    return True, evidence
+    return _corpus_verdict(
+        corpus, config, config_b, tool, f"{len(probes)} probes unchanged", "0 changed"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +586,7 @@ def _find_literal_alternations(
             prefix_tokens, varying_tokens, suffix_tokens
         )
 
-        safe, evidence = _check_family1_safe(
+        result, evidence = _check_family1_safe(
             config,
             tool,
             provenance,
@@ -525,8 +597,10 @@ def _find_literal_alternations(
             suffix_tokens,
             corpus,
         )
-        if not safe:
+        if result is SafetyResult.UNSAFE:
             continue
+        # UNVERIFIED (no corpus) is accepted on probe evidence alone, same as
+        # SAFE -- refusing outright would break a fresh install with no logs.
 
         emitted_sets.add(group_set)
         proposals.append(
@@ -542,6 +616,7 @@ def _find_literal_alternations(
                     f"position {pos}: {sorted(varying_tokens)}"
                 ),
                 replay_summary=evidence,
+                verification=result,
             )
         )
 
@@ -560,12 +635,14 @@ def _check_family2_safe(
     small_body: str,
     small_cmd: str,
     corpus: Optional[List[LogEntry]],
-) -> Tuple[bool, str]:
+) -> Tuple[SafetyResult, str]:
     """
     Check whether removing ``small_body`` leaves its own commands allowed.
 
     Two probes derived from ``small_cmd`` must be ``allow`` both before AND
-    after removal.  With a corpus, replay must also report no broadening.
+    after removal.  With a corpus, replay must also report no broadening AND
+    no tightening.  With no corpus this replay check cannot run at all, so
+    the result is ``UNVERIFIED`` rather than ``SAFE``.
 
     Args:
         config: The full original configuration.
@@ -577,7 +654,10 @@ def _check_family2_safe(
         corpus: Optional corpus for the replay check.
 
     Returns:
-        Tuple of ``(passed, evidence_string)``.
+        Tuple of ``(result, evidence_string)``.  ``result`` is ``UNSAFE`` when a
+        probe or a corpus entry changed verdict, ``UNVERIFIED`` when both probes
+        held but no corpus was supplied, and ``SAFE`` only when a corpus was
+        also replayed clean.
     """
     config_b = with_layer_allow_replaced(config, tool, provenance, {small_body}, [])
 
@@ -590,20 +670,16 @@ def _check_family2_safe(
             pos_fail += 1
 
     if pos_fail:
-        return False, f"positive probe failures: {pos_fail}/{len(probes)}"
+        return SafetyResult.UNSAFE, f"positive probe failures: {pos_fail}/{len(probes)}"
 
-    if corpus:
-        diff = replay(corpus, config, config_b)
-        if diff.broadened_count > 0:
-            return False, f"corpus replay: {diff.broadened_count} broadened"
-        evidence = (
-            f"{len(probes)} positive probes pass; "
-            f"corpus replay {len(corpus)} entries, 0 broadened"
-        )
-    else:
-        evidence = f"{len(probes)} positive probes pass; no corpus"
-
-    return True, evidence
+    return _corpus_verdict(
+        corpus,
+        config,
+        config_b,
+        tool,
+        f"{len(probes)} positive probes pass",
+        "0 broadened, 0 tightened",
+    )
 
 
 def _find_static_subsumptions(
@@ -669,11 +745,13 @@ def _find_static_subsumptions(
             if not _static_prefix_of(large_cmd, small_cmd):
                 continue
 
-            safe, evidence = _check_family2_safe(
+            result, evidence = _check_family2_safe(
                 config, tool, provenance, raw_small, small_cmd, corpus
             )
-            if not safe:
+            if result is SafetyResult.UNSAFE:
                 continue
+            # UNVERIFIED (no corpus) is accepted on probe evidence alone, same as
+            # SAFE -- refusing outright would break a fresh install with no logs.
 
             proposed_removals.add(raw_small)
             proposals.append(
@@ -689,6 +767,7 @@ def _find_static_subsumptions(
                         f"every command matched by the former is also matched by the latter"
                     ),
                     replay_summary=evidence,
+                    verification=result,
                 )
             )
 

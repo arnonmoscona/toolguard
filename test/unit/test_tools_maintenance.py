@@ -150,6 +150,40 @@ class TestRunMaintenance(unittest.TestCase):
         report = run_maintenance(config, tools=["Bash"], corpus=corpus)
         self.assertTrue(report.mining.groups)
 
+    def test_consolidations_receive_the_corpus(self):
+        """
+        Given a static-subsumption candidate that only tightens a corpus
+              command outside its two synthetic probes ('uv run python -m
+              pytest' loses coverage once 'uv run python:*' is dropped)
+        When run_maintenance is called WITHOUT a corpus, then WITH one
+        Then the proposal is present in the first report and absent from the
+             second -- run_maintenance must pass its corpus argument through
+             to propose_consolidations, not just to redundancy/broadening/mining.
+        """
+        config = _make_config(
+            _make_layer(
+                "Bash",
+                allow=["uv run", "uv run python:*", "[regex]^uv run python( --x)?$"],
+            )
+        )
+        corpus = [_make_log_entry("Bash", "uv run python -m pytest")]
+
+        report_no_corpus = run_maintenance(config, tools=["Bash"])
+        self.assertTrue(
+            any(
+                p.kind == "static-subsumption"
+                for p in report_no_corpus.tools[0].consolidations
+            )
+        )
+
+        report_with_corpus = run_maintenance(config, tools=["Bash"], corpus=corpus)
+        self.assertFalse(
+            any(
+                p.kind == "static-subsumption"
+                for p in report_with_corpus.tools[0].consolidations
+            )
+        )
+
     def test_clarity_interactions_surface_in_report(self):
         """
         Given a Bash config with a same-file allow overlapped by a broader deny
@@ -401,7 +435,7 @@ class TestRenderMaintenance(unittest.TestCase):
         self.assertIn("redundant: `git diff:*` -- duplicate of 'git:*'", out)
         self.assertIn(
             "consolidate (literal-alternation): ['git log:*', 'git status:*'] "
-            "-> `[regex]^git (log|status)`",
+            "-> `[regex]^git (log|status)` [UNVERIFIED]",
             out,
         )
         self.assertIn("broaden (prefix-broadening, AGENT-JUDGED): -> `git :*`", out)
@@ -495,6 +529,22 @@ class TestReportToDict(unittest.TestCase):
         self.assertFalse(payload["has_any_findings"])
         self.assertEqual(payload["tools"][0]["broadenings"], [])
         self.assertEqual(payload["mining"]["groups"], [])
+
+    def test_consolidation_verification_serializes_alongside_replay_summary(self):
+        """
+        Given a report with a consolidation built WITHOUT a corpus
+        When report_to_dict serializes it
+        Then the consolidation carries a 'verification' key equal to
+             'unverified' -- not just embedded, unreachably, inside the
+             'replay_summary' prose string.
+        """
+        config = _make_config(
+            _make_layer("Bash", allow=["git diff:*", "git status:*", "git log:*"])
+        )
+        report = run_maintenance(config, tools=["Bash"])
+        payload = report_to_dict(report)
+        consolidation = payload["tools"][0]["consolidations"][0]
+        self.assertEqual(consolidation["verification"], "unverified")
 
 
 class TestMaintenanceCLI(unittest.TestCase):
@@ -751,6 +801,135 @@ class TestApplyMode(unittest.TestCase):
             "git :*",
             [pat for e in edits for pat in e["added_patterns"]],
         )
+
+    def test_apply_json_edit_proposal_carries_verification(self):
+        """
+        Given --apply --format json, built without a corpus
+        When main runs
+        Then each edit_proposals[] entry carries verification='unverified' --
+             the SafetyResult the gate returned, not silently dropped when the
+             consolidation crosses into the general EditProposal shape.
+        """
+        buffer = io.StringIO()
+        with (
+            mock.patch(
+                "toolguard.tools.maintenance.load_config",
+                return_value=self._git_config(),
+            ),
+            mock.patch(
+                "toolguard.tools.maintenance.apply_proposals",
+                return_value=ChangeReport(files=()),
+            ),
+        ):
+            with redirect_stdout(buffer):
+                code = main(["--tool", "Bash", "--apply", "--format", "json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["edit_proposals"][0]["verification"], "unverified")
+
+    def test_apply_json_applied_change_carries_verification(self):
+        """
+        Given --apply --write --format json where a proposal actually applies
+        When main runs
+        Then payload["files"][*]["applied"][*]["verification"] carries the
+             SafetyResult, alongside removed_patterns/added_pattern/rationale.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "toolguard_hook.toml"
+            cfg_path.write_text(
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(git diff:*)",\n'
+                '  "Bash(git status:*)",\n'
+                '  "Bash(git log:*)",\n'
+                "]\n"
+            )
+            provenance = Provenance(
+                level="project",
+                source_type="toolguard_hook",
+                file_format="toml",
+                path=cfg_path,
+                specificity=0,
+            )
+            config = _make_config(
+                _make_layer(
+                    "Bash",
+                    allow=["git diff:*", "git status:*", "git log:*"],
+                    provenance=provenance,
+                )
+            )
+            buffer = io.StringIO()
+            with (
+                mock.patch(
+                    "toolguard.tools.maintenance.load_config", return_value=config
+                ),
+                mock.patch(
+                    "toolguard.tools.maintenance.migration_preflight"
+                ) as mock_preflight,
+            ):
+                mock_preflight.return_value = mock.Mock(blockers=[])
+                with redirect_stdout(buffer):
+                    code = main(
+                        [
+                            "--tool",
+                            "Bash",
+                            "--apply",
+                            "--write",
+                            "--format",
+                            "json",
+                            "--dir",
+                            tmp,
+                        ]
+                    )
+            self.assertEqual(code, 0)
+            payload = json.loads(buffer.getvalue())
+            applied = payload["files"][0]["applied"]
+            self.assertEqual(len(applied), 1)
+            self.assertEqual(applied[0]["verification"], "unverified")
+
+    def test_default_apply_preview_shows_verification_tag(self):
+        """
+        Given --apply with no --write, no --format (defaults to markdown) and
+             no --corpus, against a REAL config file (so apply_proposals runs
+             for real, unmocked, and actually applies the proposal in memory)
+        When main runs
+        Then the default preview -- the screen an operator reads before adding
+             --write -- names the proposal's verification state, not just JSON.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "toolguard_hook.toml"
+            cfg_path.write_text(
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(git diff:*)",\n'
+                '  "Bash(git status:*)",\n'
+                '  "Bash(git log:*)",\n'
+                "]\n"
+            )
+            provenance = Provenance(
+                level="project",
+                source_type="toolguard_hook",
+                file_format="toml",
+                path=cfg_path,
+                specificity=0,
+            )
+            config = _make_config(
+                _make_layer(
+                    "Bash",
+                    allow=["git diff:*", "git status:*", "git log:*"],
+                    provenance=provenance,
+                )
+            )
+            buffer = io.StringIO()
+            with mock.patch(
+                "toolguard.tools.maintenance.load_config", return_value=config
+            ):
+                with redirect_stdout(buffer):
+                    code = main(["--tool", "Bash", "--apply"])
+        self.assertEqual(code, 0)
+        out = buffer.getvalue()
+        self.assertIn("[UNVERIFIED]", out)
+        self.assertIn("DRY RUN", out)
 
     def test_change_report_to_dict_includes_diff_and_outcome(self):
         """

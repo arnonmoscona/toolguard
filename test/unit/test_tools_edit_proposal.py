@@ -768,6 +768,42 @@ class TestEditProposalSerialization(unittest.TestCase):
         restored = edit_proposal_from_dict(edit_proposal_to_dict(proposal))
         self.assertEqual(restored, proposal)
 
+    def test_verification_round_trips_when_set(self):
+        """
+        Given a proposal with a non-default verification value
+        When it is serialized and reconstructed
+        Then the reconstructed proposal's verification survives, and the
+            serialized dict carries it as a plain, branchable string --
+            not folded into rationale prose.
+        """
+        base = self._distinctive_proposal()
+        proposal = EditProposal(
+            action=base.action,
+            tool=base.tool,
+            rationale=base.rationale,
+            edits=base.edits,
+            origin=base.origin,
+            verification="safe",
+        )
+        data = edit_proposal_to_dict(proposal)
+        self.assertEqual(data["verification"], "safe")
+        restored = edit_proposal_from_dict(data)
+        self.assertEqual(restored.verification, "safe")
+
+    def test_verification_defaults_to_none(self):
+        """
+        Given a proposal built with no verification argument (e.g. a
+            security-audit-produced EditProposal, which has no such concept)
+        When it is serialized
+        Then verification is None -- present in the dict, not omitted, so a
+            consumer can rely on the key existing.
+        """
+        proposal = self._distinctive_proposal()
+        self.assertIsNone(proposal.verification)
+        data = edit_proposal_to_dict(proposal)
+        self.assertIn("verification", data)
+        self.assertIsNone(data["verification"])
+
     def test_the_serialized_form_survives_real_json(self):
         """
         Given the same proposal

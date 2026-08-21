@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from toolguard.config import Provenance
 from toolguard.config_write_guard import ConfigWriteVerificationError
-from toolguard.tools.consolidate import ConsolidationProposal
+from toolguard.tools.consolidate import ConsolidationProposal, SafetyResult
 from toolguard.tools.rule_apply import (
     _read_raw_permissions,
     apply_proposals,
@@ -985,6 +985,51 @@ class TestRenderChangeReport(_TempConfigMixin, unittest.TestCase):
 
         self.assertIn("static-subsumption: drop Bash(mkdir -p /tmp/claude-code:*)", out)
         self.assertNotIn("->", out)
+
+    def test_applied_line_names_the_proposal_verification_state(self):
+        """
+        Given two applied proposals with DIFFERENT verification states -- one
+             default (UNVERIFIED) and one explicitly SAFE
+        When render_change_report(fmt='text') is called
+        Then each applied line carries its own state -- the operator can tell
+             a probe-only pass from a corpus-replayed one at a glance, without
+             cross-referencing JSON.
+        """
+        cfg = self._write(
+            "toolguard_hook.toml",
+            (
+                "[permissions]\n"
+                "allow = [\n"
+                '  "Bash(git diff:*)",\n'
+                '  "Bash(git status:*)",\n'
+                '  "Bash(mkdir -p /tmp/:*)",\n'
+                '  "Bash(mkdir -p /tmp/claude-code:*)",\n'
+                "]\n"
+            ),
+        )
+        unverified = _git_family_proposal(_prov(cfg))
+        safe_drop = ConsolidationProposal(
+            kind="static-subsumption",
+            tool="Bash",
+            list_type="allow",
+            layer_provenance=_prov(cfg),
+            removed_patterns=("mkdir -p /tmp/claude-code:*",),
+            added_pattern=None,
+            rationale="subsumed by mkdir -p /tmp/:*",
+            replay_summary="2 positive probes pass; corpus replay 1 entries, "
+            "0 broadened, 0 tightened",
+            verification=SafetyResult.SAFE,
+        )
+        out = render_change_report(apply_proposals([unverified, safe_drop]), fmt="text")
+
+        self.assertIn(
+            "literal-alternation: Bash(git diff:*), Bash(git status:*) -> "
+            "Bash([regex]^git (diff|status)) [UNVERIFIED]",
+            out,
+        )
+        self.assertIn(
+            "static-subsumption: drop Bash(mkdir -p /tmp/claude-code:*) [SAFE]", out
+        )
 
     def test_an_unwritten_file_is_reported_as_not_written(self):
         """
