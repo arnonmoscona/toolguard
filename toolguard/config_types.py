@@ -369,12 +369,21 @@ class CommandSpellings:
     :mod:`toolguard.permissions`, whose per-module import allow-list in
     ``test/unit/test_architecture.py`` excludes the parser.
 
+    Each side pools TWO independent sources, built by
+    :func:`~toolguard.parser.command_extractor.command_spellings`, that differ in
+    whether they are gated:
+
+    - A leading ``NAME=value`` assignment (ticket 77) IS gated: restricting sees past
+      it unconditionally; granting only for names configured safe to look past. Making
+      an unsafe assignment ungrantable is the reason this pair has two sides at all.
+    - A stripped wrapper, e.g. ``timeout``/``nice``/bare ``xargs`` (ticket 82), is NOT
+      gated: both sides see past one whenever found, because native strips wrappers
+      before matching an ALLOW rule too (its own worked example is
+      ``Bash(npm test *)`` matching ``timeout 30 npm test``).
+
     Attributes:
-        restricting: What a deny, ask or hard_deny list may also match. A leading
-            ``NAME=value`` assignment is looked past here unconditionally.
-        granting: What an allow list, or a hard-deny carve-out, may also match. An
-            assignment prefix is looked past only for names configured safe to look
-            past, and that asymmetry is the whole point of the pair.
+        restricting: What a deny, ask or hard_deny list may also match.
+        granting: What an allow list, or a hard-deny carve-out, may also match.
     """
 
     restricting: Tuple[str, ...] = ()

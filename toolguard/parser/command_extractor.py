@@ -19,7 +19,7 @@ floor -- lives here rather than in the grammar or the IR.
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set, Union
+from typing import List, Optional, Sequence, Set, Tuple, Union
 
 from toolguard.config_types import CommandSpellings
 from toolguard.parser import bash_parser
@@ -882,6 +882,87 @@ def _collect_commands_from_compound(
 
 
 # ---------------------------------------------------------------------------
+# Wrapper stripping
+# ---------------------------------------------------------------------------
+
+#: The wrappers Claude Code strips before matching Bash rules, so a rule written for the
+#: inner command also matches the wrapped form. Verbatim, fetched 2026-08-21 from
+#: https://code.claude.com/docs/en/permissions.md: "The stripped wrappers are `timeout`,
+#: `time`, `nice`, `nohup`, and `stdbuf`, plus the shell builtins `command` and `builtin`,
+#: and zsh's `noglob`... Bare `xargs` is also stripped ... Stripping applies only when
+#: `xargs` has no flags." `command -v` (a lookup, not an execution) is deliberately not
+#: included; see :func:`_strip_wrapper`. `sudo` and `env` are not on native's list at all
+#: and are deliberately not covered here either.
+STRIPPED_WRAPPERS: Tuple[str, ...] = (
+    "timeout",
+    "time",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "command",
+    "builtin",
+    "noglob",
+    "xargs",
+)
+
+_WRAPPER_NAME_RE = re.compile(r"[A-Za-z]+")
+_FLAG_TOKEN_RE = re.compile(r"\s+(-\S+)")
+_ANY_TOKEN_RE = re.compile(r"\s+\S+")
+
+
+def _strip_wrapper(command_text: str) -> Optional[str]:
+    """The inner command *command_text* runs, with one leading wrapper stripped.
+
+    Recognises :data:`STRIPPED_WRAPPERS` by string inspection rather than the grammar:
+    what follows a wrapper name is that program's OWN argument syntax, not bash syntax,
+    so this is not the bash-structure parsing ``bash_parser.peg`` exists for. Handles an
+    attached-value flag (``stdbuf -o0``) and a standalone one (``command -p``); a flag
+    whose value is a SEPARATE token (``nice -n 5``) is not recognised and the command is
+    reported as not wrapped -- a missed strip costs an extra ``ask``, never an extra grant.
+    Wrappers are stripped once, not recursively: a stacked wrapper (``nice nohup cmd``)
+    strips only the first.
+
+    Args:
+        command_text: One leaf command, or the part of one after any leading assignment.
+
+    Returns:
+        The text with the wrapper (and its own flags/required argument) removed, or None
+        when *command_text* does not start with an applicable, recognised wrapper.
+    """
+    name_match = _WRAPPER_NAME_RE.match(command_text)
+    if name_match is None or name_match.group(0) not in STRIPPED_WRAPPERS:
+        return None
+    name = name_match.group(0)
+    rest = command_text[name_match.end() :]
+    if rest and not rest[0].isspace():
+        # The alphabetic run continues past the wrapper name itself (e.g. "nice5 x"
+        # or "timeoutx y") -- not the wrapper word, so not one of ours.
+        return None
+
+    if name == "xargs":
+        stripped = rest.lstrip()
+        return None if not stripped or stripped.startswith("-") else stripped
+
+    if name == "command" and re.match(r"\s+-v(\s|$)", rest):
+        return None  # the query form, which looks a command up rather than running it
+
+    while True:
+        flag_match = _FLAG_TOKEN_RE.match(rest)
+        if flag_match is None:
+            break
+        rest = rest[flag_match.end() :]
+
+    if name == "timeout":
+        duration_match = _ANY_TOKEN_RE.match(rest)
+        if duration_match is None:
+            return None  # no DURATION -- not a well-formed timeout invocation
+        rest = rest[duration_match.end() :]
+
+    inner = rest.strip()
+    return inner or None
+
+
+# ---------------------------------------------------------------------------
 # Public API: extract_commands and parse_command_line
 # ---------------------------------------------------------------------------
 
@@ -891,10 +972,17 @@ def command_spellings(
 ) -> CommandSpellings:
     """How *command_text* may be spelled for permission matching.
 
-    A granting list gets the stripped spelling only when EVERY leading
-    assignment's name is in *looked_past_when_granting*: one unlisted name in the
-    prefix and the grant sees the raw command only, so ``TG_INTENT=1 LD_PRELOAD=x
-    ls`` is not granted by ``allow Bash(ls:*)``.
+    Combines two independent sources, with different symmetry rules -- see
+    :class:`~toolguard.config_types.CommandSpellings` for what each side means:
+
+    - A leading ``NAME=value`` assignment (ticket 77): restricting sees past it
+      unconditionally; granting sees past it only when every name in the prefix is in
+      *looked_past_when_granting*.
+    - A stripped wrapper (:data:`STRIPPED_WRAPPERS`): both sides see past it whenever
+      one is found, since native's own worked example strips a wrapper for an ALLOW
+      rule -- wrapper stripping is not assignment-gated. A wrapper is looked for after
+      any assignment that was actually looked past on that side, so an unsafe
+      assignment still hides a wrapper (and the command under it) from granting.
 
     Args:
         command_text: One leaf command, as handed to permission matching.
@@ -903,17 +991,37 @@ def command_spellings(
 
     Returns:
         A :class:`~toolguard.config_types.CommandSpellings`. Both fields are empty
-        when *command_text* carries no leading assignment, which leaves matching
-        exactly as it was.
+        when *command_text* carries neither a leading assignment nor a stripped
+        wrapper, which leaves matching exactly as it was.
     """
     prefix = leading_assignments(command_text)
-    if prefix is None or prefix.without_prefix == command_text:
-        return CommandSpellings()
-    granted = all(name in looked_past_when_granting for name in prefix.names)
-    return CommandSpellings(
-        restricting=(prefix.without_prefix,),
-        granting=(prefix.without_prefix,) if granted else (),
+    has_assignment = prefix is not None and prefix.without_prefix != command_text
+    assignment_granted = has_assignment and all(
+        name in looked_past_when_granting for name in prefix.names
     )
+
+    restrict_base = prefix.without_prefix if has_assignment else command_text
+    grant_base = (
+        restrict_base if (not has_assignment or assignment_granted) else command_text
+    )
+
+    restricting: List[str] = []
+    granting: List[str] = []
+
+    if has_assignment:
+        restricting.append(prefix.without_prefix)
+        if assignment_granted:
+            granting.append(prefix.without_prefix)
+
+    restrict_wrapper = _strip_wrapper(restrict_base)
+    if restrict_wrapper is not None:
+        restricting.append(restrict_wrapper)
+
+    grant_wrapper = _strip_wrapper(grant_base)
+    if grant_wrapper is not None:
+        granting.append(grant_wrapper)
+
+    return CommandSpellings(restricting=tuple(restricting), granting=tuple(granting))
 
 
 def leading_assignments(command_text: str) -> Optional[IRAssignmentPrefix]:
