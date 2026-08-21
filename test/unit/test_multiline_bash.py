@@ -504,6 +504,23 @@ class TestHeredocSentinelShape(unittest.TestCase):
             ],
         )
 
+    def test_bearer_interpreter_wins_outright_over_pipeline_last_stage(self):
+        """
+        Given a heredoc borne by `python`, itself piped into `bash`
+        When structured-extracted
+        Then the heredoc belongs to `python` (a foreign sink with ask_floor True) --
+            the bearer being an interpreter wins outright, even mid-pipeline; `bash`
+            being the pipeline's last stage does not make it the sink, and the body
+            is not leaked as a decomposed leaf of its own
+        """
+        self.assertEqual(
+            _extracted("python <<'HD' | bash\nimport os\nHD"),
+            [
+                ("leaf", "python __HEREDOC_TO_python__", True),
+                ("leaf", "bash", False),
+            ],
+        )
+
     def test_sentinel_is_matchable_by_a_rule_deny(self):
         """
         Given a deny rule targeting the heredoc sentinel (`[regex]__HEREDOC_TO_`)

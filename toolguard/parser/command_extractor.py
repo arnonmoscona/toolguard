@@ -13,13 +13,17 @@ Nothing here reads a raw Canopy node's attributes.
   pre-pass.
 
 Business policy -- what counts as foreign inline code, what earns the ASK
-floor -- lives here rather than in the grammar or the IR.
+floor, and who receives a lifted heredoc's body -- lives here rather than in
+the grammar or the IR. The heredoc sink attribution just past the executor
+classification below is read off the parse tree that
+:mod:`toolguard.parser.multiline` hands over after lexically lifting each
+heredoc's body to a side table.
 """
 
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set, Union
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from toolguard.claude_code_contract import STRIPPED_WRAPPERS
 from toolguard.config_types import CommandSpellings
@@ -29,6 +33,7 @@ from toolguard.parser.command_model import (
     IRCompound,
     IRControlStructure,
     IRPipeline,
+    IRPipelineElement,
     IRProcSubst,
     IRSimpleCmd,
     IRSubshell,
@@ -304,6 +309,297 @@ def _is_foreign_executor(name: str) -> bool:
         ):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Heredoc sink attribution
+#
+# toolguard.parser.multiline lifts a heredoc's body to a side table behind
+# an opaque, sink-blind placeholder (:func:`~toolguard.parser.multiline._lift_heredocs`)
+# before the grammar ever sees the text -- that lift is lexical, since a
+# heredoc's body lives on the lines AFTER its bearer, which a PEG grammar
+# cannot express. WHO RECEIVES it is answered here instead: by parsing the
+# lifted text and reading which ``simple_command`` owns the placeholder off
+# the parse tree, rather than modelling statement/pipe boundaries by hand.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _LiftedHeredocs:
+    """What :func:`~toolguard.parser.multiline._lift_heredocs` hands to :func:`_attribute_and_substitute`."""
+
+    lines: List[str]
+    bodies: List[List[str]]
+    prefix: str
+
+
+class _UnattributableHeredocError(Exception):
+    """A lifted placeholder could not be traced to any command in the parse tree.
+
+    Raised rather than guessed at -- see :func:`_record_placeholder_owners`.
+    The caller floors this to the ASK-inducing :class:`UndecidableSegment`,
+    the same as a genuine grammar :class:`~toolguard.parser.bash_parser.ParseError`.
+    """
+
+
+def _sink_tokens(element: IRSimpleCmd) -> List[str]:
+    """The tokens a heredoc's sink is classified from: command word onward.
+
+    Strips a leading assignment prefix (``NAME=value python ...``), which
+    names a variable, not an executor.
+    """
+    text = (
+        element.assignment_prefix.without_prefix
+        if element.assignment_prefix
+        else element.text
+    )
+    return text.split()
+
+
+def _classify_sink(tokens: List[str]) -> Tuple[bool, bool, str]:
+    """Classify a command's tokens as an interpreter, or not.
+
+    Every token is checked, not just the first, so a wrapper like ``uv run
+    python`` classifies as its inner interpreter and not as ``uv``.
+    Bash-family wins over foreign wherever either appears.
+
+    Args:
+        tokens: A command's tokens (:func:`_sink_tokens`).
+
+    Returns:
+        ``(is_bash_family, is_foreign, sink_label)``. *sink_label* names the
+        ``__HEREDOC_TO_<sink_label>__`` sentinel when the sink is not
+        bash-family: the first bash-family token if any, else the first
+        foreign one, else the first non-flag token, else ``'unknown'``.
+    """
+    first_bash: Optional[str] = None
+    first_foreign: Optional[str] = None
+    first_plain: Optional[str] = None
+    for tok in tokens:
+        bn = tok.split("/")[-1]
+        if bn.startswith("-"):
+            continue
+        if first_plain is None:
+            first_plain = bn
+        if first_bash is None and _is_bash_family(bn):
+            first_bash = bn
+        if first_foreign is None and _is_foreign_executor(bn):
+            first_foreign = bn
+
+    if first_bash is not None:
+        return True, False, first_bash
+    if first_foreign is not None:
+        return False, True, first_foreign
+    return False, False, first_plain or "unknown"
+
+
+def _resolve_sink(
+    tokens: List[str], pipeline_elements: List[IRPipelineElement]
+) -> Tuple[bool, str]:
+    """Resolve a heredoc's effective sink from its bearer and its pipeline.
+
+    A bearer that is itself bash-family or foreign consumes its own heredoc
+    directly as code, and wins outright even mid-pipeline: ``python <<HD |
+    bash`` belongs to python, not bash (the pipe only governs python's
+    stdout). A bearer that is neither, like ``cat``, merely streams the body
+    on unchanged, so the pipeline's LAST element -- whoever actually
+    consumes that stream -- is the real sink: ``cat <<HD | bash`` decomposes
+    the body as bash, ``cat <<HD | pbcopy`` sentinels it as data.
+
+    Args:
+        tokens: The bearer's own tokens (:func:`_sink_tokens`).
+        pipeline_elements: The elements of the pipeline the bearer sits in.
+
+    Returns:
+        ``(is_bash_family, sink_label)``.
+    """
+    is_bash, is_foreign, label = _classify_sink(tokens)
+    if is_bash or is_foreign:
+        return is_bash, label
+
+    last = pipeline_elements[-1] if pipeline_elements else None
+    if isinstance(last, IRSimpleCmd):
+        is_bash, _, label = _classify_sink(_sink_tokens(last))
+    return is_bash, label
+
+
+def _record_placeholder_owners(
+    element: IRPipelineElement,
+    pipeline_elements: List[IRPipelineElement],
+    placeholder_re: re.Pattern,
+    found: Dict[int, Tuple[List[str], List[IRPipelineElement]]],
+) -> None:
+    """Record *element*'s tokens and pipeline against every placeholder its text contains.
+
+    Only :class:`IRSimpleCmd` and :class:`IRSubshell` are followed. A
+    placeholder inside a control structure's body (``if true; then cat
+    <<HD``) or a process substitution is deliberately left unrecorded, so it
+    reaches :func:`_attribute_sinks`'s caller as undecidable instead of being
+    guessed at.
+    """
+    if isinstance(element, IRSimpleCmd):
+        tokens = _sink_tokens(element)
+        for m in placeholder_re.finditer(element.text):
+            found[int(m.group(1))] = (tokens, pipeline_elements)
+        return
+    if isinstance(element, IRSubshell):
+        for pipeline in element.inner.pipelines:
+            for inner_element in pipeline.elements:
+                _record_placeholder_owners(
+                    inner_element, pipeline.elements, placeholder_re, found
+                )
+
+
+def _record_placeholders_in_text(
+    text: str,
+    placeholder_re: re.Pattern,
+    found: Dict[int, Tuple[List[str], List[IRPipelineElement]]],
+) -> None:
+    """Parse *text* and record every placeholder's owner into *found*.
+
+    Raises:
+        bash_parser.ParseError: *text* does not parse.
+    """
+    tree = bash_parser.parse(text)
+    ir = build_ir(tree)
+    for statement in ir.statements:
+        for pipeline in statement.pipelines:
+            for element in pipeline.elements:
+                _record_placeholder_owners(
+                    element, pipeline.elements, placeholder_re, found
+                )
+
+
+def _attribute_sinks(
+    text: str, placeholder_re: re.Pattern, count: int
+) -> List[Tuple[bool, str]]:
+    """Classify every lifted heredoc's sink by parsing *text* and reading its tree.
+
+    Whichever ``simple_command`` a placeholder's text lands in owns that
+    heredoc, by construction of the grammar's own pipe, control-op and
+    substitution rules -- not a Python model of any of them
+    (:func:`_record_placeholder_owners`); :func:`_resolve_sink` then decides
+    whether that bearer or its pipeline's last stage is the effective sink.
+
+    Requiring the WHOLE text to parse is too strong a precondition -- one
+    construct the grammar does not cover, anywhere in a multi-statement blob,
+    would otherwise block attribution for every heredoc in it. So a
+    whole-text parse failure falls back to parsing each line on its own
+    (still only ``bash_parser.parse``, never a hand-rolled boundary check);
+    this is sound because :func:`~toolguard.parser.multiline._lift_heredocs`
+    already removed every heredoc's body and terminator before this function
+    ever runs, so a bearer line is self-contained with respect to ITS OWN
+    heredoc syntax. A line that still does not parse alone -- including one
+    that is only a *fragment* of a real multi-line construct, like an ``if``
+    missing its ``fi`` -- contributes no owner, which is the correct
+    outcome: unresolved, not guessed.
+
+    Args:
+        text: The lifted lines, joined by newline.
+        placeholder_re: Matches one placeholder, capturing its index.
+        count: Total number of placeholders (``len(bodies)``).
+
+    Returns:
+        One ``(is_bash_family, sink_label)`` per placeholder index, in order.
+
+    Raises:
+        _UnattributableHeredocError: a placeholder's owning command was not
+            found, even line-by-line.
+    """
+    found: Dict[int, Tuple[List[str], List[IRPipelineElement]]] = {}
+    try:
+        _record_placeholders_in_text(text, placeholder_re, found)
+    except bash_parser.ParseError:
+        for line in text.split("\n"):
+            try:
+                _record_placeholders_in_text(line, placeholder_re, found)
+            except bash_parser.ParseError:
+                continue
+
+    sinks: List[Tuple[bool, str]] = []
+    for idx in range(count):
+        owner = found.get(idx)
+        if owner is None:
+            raise _UnattributableHeredocError(
+                f"heredoc placeholder {idx} is not owned by any command"
+            )
+        sinks.append(_resolve_sink(*owner))
+    return sinks
+
+
+def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
+    """Classify each lifted heredoc's sink and settle its placeholder.
+
+    The sink is read off the parse tree (:func:`_attribute_sinks`), then for
+    each placeholder (right-to-left within a line, so an earlier one's offset
+    stays valid while a later one is edited):
+
+    - **bash-family sink** -- emit the body lines ahead of the bearer, so they
+      go on to be split and matched as ordinary bash, and delete the
+      placeholder from the bearer; or
+    - **anything else** -- rewrite the placeholder into a
+      ``__HEREDOC_TO_<sink>__`` word and discard the body unread. The bearer
+      command and its other arguments survive either way.
+
+    That sentinel is the only trace the discarded body leaves. Where the sink
+    is a foreign executor, an ASK floor keyed on the sentinel stands in for
+    reading it. Where it is anything else there is no floor and the body is
+    simply gone: ``cat <<EOF > /etc/passwd`` becomes the leaf
+    ``cat __HEREDOC_TO_cat__ > /etc/passwd`` with ``ask_floor`` unset.
+
+    Args:
+        lifted: The lines, per-placeholder bodies and placeholder prefix
+            produced by :func:`~toolguard.parser.multiline._lift_heredocs`.
+
+    Returns:
+        New list of logical lines with heredoc bodies removed or spliced in.
+
+    Raises:
+        _UnattributableHeredocError: a placeholder cannot be traced to any
+            command -- the caller floors this to ASK rather than guessing.
+    """
+    bodies = lifted.bodies
+    if not bodies:
+        return lifted.lines
+
+    placeholder_re = re.compile(re.escape(lifted.prefix) + r"(\d+)__")
+    sinks = _attribute_sinks("\n".join(lifted.lines), placeholder_re, len(bodies))
+
+    result_lines: List[str] = []
+    for line in lifted.lines:
+        placeholders = list(placeholder_re.finditer(line))
+        if not placeholders:
+            result_lines.append(line)
+            continue
+
+        modified_line = line
+        extra_lines: List[str] = []
+
+        for m in reversed(placeholders):
+            idx = int(m.group(1))
+            is_bash, sink_label = sinks[idx]
+
+            if is_bash:
+                extra_lines = bodies[idx] + extra_lines
+                modified_line = modified_line[: m.start()] + modified_line[m.end() :]
+            else:
+                # The sentinel has to survive as one grammar word and stay
+                # matchable by the ASK floor's `__HEREDOC_TO_(\w+)__`, so the
+                # substitute must itself be a word character. `python3.13`
+                # becomes `python3_13`, which the foreign-executor prefix
+                # test still recognises.
+                sink_word = re.sub(r"[^A-Za-z0-9_]", "_", sink_label)
+                sentinel = f"__HEREDOC_TO_{sink_word}__"
+                modified_line = (
+                    modified_line[: m.start()] + sentinel + modified_line[m.end() :]
+                )
+
+        result_lines.extend(extra_lines)
+        stripped = modified_line.strip()
+        if stripped:
+            result_lines.append(stripped)
+
+    return result_lines
 
 
 # ---------------------------------------------------------------------------
