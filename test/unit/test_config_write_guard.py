@@ -18,10 +18,14 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 from unittest.mock import patch
 
+from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.config_write_guard import (
     ConfigWriteVerificationError,
+    _ALLOW_LIST_TYPES,
+    _HARD_DENY_RESTRICTING_LIST_TYPES,
     patterns_in_config_text,
     verified_write_config,
     verify_config_text,
@@ -157,8 +161,8 @@ class TestVerifiedWriteConfigSyntaxGuard(unittest.TestCase):
         Then it is refused by the syntax guard and the file is unchanged
 
         This is the on-disk shape a writer that fails to escape a newline
-        inside additionalContext produces (proposed ticket 24), so it is the
-        case the guard is the last line of defence for.
+        inside additionalContext produces, so it is the case the guard is
+        the last line of defence for.
         """
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "toolguard_hook.toml"
@@ -302,13 +306,12 @@ class TestVerifiedWriteConfigContentLossGuard(unittest.TestCase):
         Then both writes succeed, including the one that leaves a zero-byte
             config file behind
 
-        PINS SHIPPED BEHAVIOUR, and it is proposed ticket 29's family: the
-        check reports success having verified nothing, and its caller cannot
-        distinguish "12 patterns confirmed present" from "0 patterns checked".
-        Refusing an empty set outright would be wrong -- a genuinely rule-free
-        original yields an empty set legitimately -- so the fix is a signal the
-        caller can see, not a refusal. Change this test when that lands; do not
-        read it as a specification.
+        PINS SHIPPED BEHAVIOUR: the check reports success having verified
+        nothing, and its caller cannot distinguish "12 patterns confirmed
+        present" from "0 patterns checked". Refusing an empty set outright
+        would be wrong -- a genuinely rule-free original yields an empty set
+        legitimately -- so a fix here is a signal the caller can see, not a
+        refusal. Do not read this test as a specification.
         """
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "toolguard_hook.toml"
@@ -332,14 +335,6 @@ class TestVerifiedWriteConfigContentLossGuard(unittest.TestCase):
         Then the write is REFUSED and the file keeps its original bytes -- a
             hard deny inverted into an allow is a loss, even though the pattern
             string is still somewhere in the file
-
-        RED until proposed ticket 39 lands. The check compares a flat set of
-        pattern strings and never records which list a pattern came from, so
-        the one edit that most needs catching -- a deny becoming an allow -- is
-        the one it cannot see today. Asserted as a refusal rather than against
-        a particular signature so either fix direction in the ticket
-        (list-aware expected_patterns, or a hard_deny-specific membership
-        check) satisfies it.
         """
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "toolguard_hook.toml"
@@ -357,6 +352,471 @@ class TestVerifiedWriteConfigContentLossGuard(unittest.TestCase):
                     path, inverted, "toml", expected_patterns=expected
                 )
             self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_hard_deny_deny_into_hard_deny_allow_is_refused(self):
+        """
+        Given a config whose hard_deny.deny list holds "Bash(rm -rf /)" and
+            replacement text that moves that same pattern into
+            hard_deny.allow, leaving hard_deny.deny empty
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED -- the pattern string never left the
+            hard_deny table, but hard_deny.allow is a carve-out that exempts
+            an otherwise-matched deny, so this is the same inversion as
+            moving it out to permissions.allow, one level up
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[hard_deny]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            carved_out = '[hard_deny]\ndeny = []\nallow = ["Bash(rm -rf /)"]\n'
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(
+                    path, carved_out, "toml", expected_patterns=expected
+                )
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_kept_in_hard_deny_deny_while_also_added_to_hard_deny_allow_is_refused(
+        self,
+    ):
+        """
+        Given a config whose hard_deny.deny list holds "Bash(rm -rf /)" and
+            replacement text that ADDS that same pattern to hard_deny.allow
+            too, while leaving it in hard_deny.deny
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED -- unlike permissions, where deny wins over
+            allow at the same level, a hard_deny.allow carve-out wins over a
+            same-pattern hard_deny.deny at match time, so the pattern string
+            staying in deny does not mean protection was kept
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[hard_deny]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            redundant = (
+                '[hard_deny]\ndeny = ["Bash(rm -rf /)"]\nallow = ["Bash(rm -rf /)"]\n'
+            )
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(
+                    path, redundant, "toml", expected_patterns=expected
+                )
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_permissions_deny_into_allow_is_refused(self):
+        """
+        Given a config whose permissions.deny list holds "Bash(rm -rf /)" and
+            replacement text that moves that same pattern into
+            permissions.allow, with permissions.deny left empty
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED, naming the moved pattern, and the file
+            keeps its original bytes
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            inverted = '[permissions]\nallow = ["Bash(rm -rf /)"]\ndeny = []\n'
+            with self.assertRaises(ConfigWriteVerificationError) as ctx:
+                verified_write_config(
+                    path, inverted, "toml", expected_patterns=expected
+                )
+            self.assertIn("Bash(rm -rf /)", ctx.exception.message)
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_permissions_ask_into_allow_is_refused(self):
+        """
+        Given a config whose permissions.ask list holds "Bash(git push:*)" and
+            replacement text that moves that same pattern into
+            permissions.allow, with permissions.ask left empty
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED and the file keeps its original bytes
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\nask = ["Bash(git push:*)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            inverted = '[permissions]\nallow = ["Bash(git push:*)"]\nask = []\n'
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(
+                    path, inverted, "toml", expected_patterns=expected
+                )
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_permissions_deny_into_hard_deny_allow_is_refused(self):
+        """
+        Given a config whose permissions.deny list holds "Bash(rm -rf /)" and
+            replacement text that removes it from permissions entirely and
+            adds the same pattern to hard_deny.allow instead
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED -- hard_deny.allow is a carve-out, not a
+            restriction, so the pattern ends up restricted nowhere even
+            though its string is still present in the file
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            moved = '[hard_deny]\nallow = ["Bash(rm -rf /)"]\n'
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(path, moved, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_permissions_ask_into_hard_deny_allow_is_refused(self):
+        """
+        Given a config whose permissions.ask list holds "Bash(git push:*)" and
+            replacement text that removes it from permissions entirely and
+            adds the same pattern to hard_deny.allow instead
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED, the same class of loss as the
+            permissions.deny case above
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\nask = ["Bash(git push:*)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            moved = '[hard_deny]\nallow = ["Bash(git push:*)"]\n'
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(path, moved, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_permissions_deny_into_unrecognised_hard_deny_sublist_is_refused(
+        self,
+    ):
+        """
+        Given a config whose permissions.deny list holds "Bash(rm -rf /)" and
+            replacement text that removes it from permissions entirely and
+            adds the same pattern to a hard_deny sub-list the runtime does
+            not read (e.g. "quarantine")
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED -- the pattern's string survives somewhere
+            in the file, but nowhere the runtime actually enforces it
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            moved = '[hard_deny]\nquarantine = ["Bash(rm -rf /)"]\n'
+            with self.assertRaises(ConfigWriteVerificationError):
+                verified_write_config(path, moved, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), original)
+
+    def test_pattern_moved_from_permissions_deny_into_hard_deny_deny_is_not_refused(
+        self,
+    ):
+        """
+        Given a config whose permissions.deny list holds "Bash(rm -rf /)" and
+            replacement text that removes it from permissions entirely and
+            adds the same pattern to hard_deny.deny instead
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write SUCCEEDS -- hard_deny.deny is a strictly stronger
+            restriction than permissions.deny, not a loss
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            moved = '[hard_deny]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            verified_write_config(path, moved, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), moved)
+
+    def test_pattern_dropped_from_expected_patterns_and_removed_entirely_is_not_refused(
+        self,
+    ):
+        """
+        Given a config whose permissions.deny list holds two patterns, and
+            replacement text that removes ONE of them from the file entirely
+        When verified_write_config() is called with expected_patterns that
+            deliberately excludes the removed pattern (the caller does not
+            require it to survive this write -- e.g. because a migration
+            moved it to a different file)
+        Then the write SUCCEEDS -- the placement checks are scoped to
+            expected_patterns, the same set step 2 enforces, so a pattern
+            the caller never asked this write to keep is not flagged just
+            because it can no longer be found in this file
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = (
+                '[permissions]\ndeny = ["Bash(rm -rf /)", "Bash(x)"]\nallow = []\n'
+            )
+            path.write_text(original)
+
+            dropped = '[permissions]\ndeny = ["Bash(x)"]\nallow = []\n'
+            verified_write_config(path, dropped, "toml", expected_patterns=["Bash(x)"])
+            self.assertEqual(path.read_text(), dropped)
+
+    def test_pattern_moved_between_deny_and_ask_is_not_refused(self):
+        """
+        Given a config whose permissions.deny list holds "Bash(rm -rf /)" and
+            replacement text that moves that same pattern into permissions.ask
+            instead, with no permissions.allow entry added
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write SUCCEEDS -- deny -> ask is a deliberately accepted
+            weakening (ask is still an enforced gate under toolguard); only
+            arrival in permissions.allow, where enforcement disappears
+            entirely, is refused
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            moved = '[permissions]\nask = ["Bash(rm -rf /)"]\nallow = []\ndeny = []\n'
+            verified_write_config(path, moved, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), moved)
+
+    def test_pattern_kept_in_deny_while_also_added_to_allow_is_not_refused(self):
+        """
+        Given a config whose permissions.deny list holds "Bash(rm -rf /)"
+        When verified_write_config() is called with replacement text that adds
+            the SAME pattern to permissions.allow too, while leaving it in
+            permissions.deny
+        Then the write SUCCEEDS -- deny still wins over allow at the same
+            level, so the pattern remains just as restricted as before
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            redundant = (
+                '[permissions]\ndeny = ["Bash(rm -rf /)"]\nallow = ["Bash(rm -rf /)"]\n'
+            )
+            verified_write_config(path, redundant, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), redundant)
+
+    def test_pattern_moved_from_hard_deny_deny_into_an_unrecognised_sublist_is_refused(
+        self,
+    ):
+        """
+        Given a config whose hard_deny.deny list holds "Bash(rm -rf /)" and
+            replacement text that renames that list to a key the runtime does
+            not read (e.g. "quarantine"), leaving the pattern's string still
+            present somewhere under hard_deny
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write is REFUSED -- Configuration._pool_hard_deny_entries
+            reads only hard_deny.deny/hard_deny.allow, so a pattern under any
+            other key is no longer actually enforced, even though its string
+            has not left the hard_deny table
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[hard_deny]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            renamed = '[hard_deny]\nquarantine = ["Bash(rm -rf /)"]\nallow = []\n'
+            with self.assertRaises(ConfigWriteVerificationError) as ctx:
+                verified_write_config(path, renamed, "toml", expected_patterns=expected)
+            self.assertIn("Bash(rm -rf /)", ctx.exception.message)
+            self.assertEqual(path.read_text(), original)
+
+    def test_hard_deny_allow_non_list_value_does_not_crash_the_guard(self):
+        """
+        Given an on-disk config whose hard_deny.allow is a scalar rather than
+            a list, and replacement text adding a second hard_deny.deny
+            pattern while leaving hard_deny.allow as the same scalar
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write SUCCEEDS -- the malformed allow value contributes no
+            carve-out patterns rather than crashing the guard
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[hard_deny]\ndeny = ["Bash(x)"]\nallow = 5\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            new_text = '[hard_deny]\ndeny = ["Bash(x)", "Bash(y)"]\nallow = 5\n'
+            verified_write_config(path, new_text, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), new_text)
+
+    def test_permissions_deny_non_list_value_does_not_crash_the_guard(self):
+        """
+        Given an on-disk config whose permissions.deny is a scalar rather
+            than a list, and replacement text adding a permissions.allow
+            pattern while leaving permissions.deny as the same scalar
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write SUCCEEDS -- the malformed deny value contributes no
+            patterns rather than crashing the guard
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = "[permissions]\ndeny = 5\nallow = []\n"
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            new_text = '[permissions]\ndeny = 5\nallow = ["Bash(ls *)"]\n'
+            verified_write_config(path, new_text, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), new_text)
+
+    def test_broader_hard_deny_allow_carve_out_is_not_caught(self):
+        """
+        Given a config whose hard_deny.deny list holds
+            "Bash(curl http://evil:*)", and replacement text that keeps that
+            exact pattern in hard_deny.deny but adds a DIFFERENT, broader
+            hard_deny.allow entry ("Bash(curl:*)") that also matches it
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write SUCCEEDS
+
+        RECORDS AN ACCEPTED LIMITATION, not a bug: the placement check
+        compares pattern STRINGS, so a same-string carve-out is caught (see
+        test_pattern_kept_in_hard_deny_deny_while_also_added_to_hard_deny_allow_is_refused)
+        but a broader carve-out that neutralises the same command through
+        different rule syntax is not -- detecting that needs the matcher,
+        which this module deliberately does not invoke.
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[hard_deny]\ndeny = ["Bash(curl http://evil:*)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            broadened = (
+                '[hard_deny]\ndeny = ["Bash(curl http://evil:*)"]\n'
+                'allow = ["Bash(curl:*)"]\n'
+            )
+            verified_write_config(path, broadened, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), broadened)
+
+    def test_broader_permissions_allow_for_an_ask_pattern_is_not_caught(self):
+        """
+        Given a config whose permissions.ask list holds "Bash(git push:*)",
+            and replacement text that keeps that exact pattern in
+            permissions.ask but adds a DIFFERENT, more specific
+            permissions.allow entry ("Bash(git push origin:*)")
+        When verified_write_config() is called with expected_patterns computed
+            from the original file
+        Then the write SUCCEEDS
+
+        RECORDS AN ACCEPTED LIMITATION, the same class as the hard_deny one
+        above: the ask pattern's string never left permissions.ask, so the
+        placement check sees no downgrade, even though the more specific
+        allow entry shadows it at match time for the commands it covers.
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[permissions]\nask = ["Bash(git push:*)"]\nallow = []\n'
+            path.write_text(original)
+
+            expected = patterns_in_config_text(original, "toml")
+
+            narrowed = (
+                '[permissions]\nask = ["Bash(git push:*)"]\n'
+                'allow = ["Bash(git push origin:*)"]\n'
+            )
+            verified_write_config(path, narrowed, "toml", expected_patterns=expected)
+            self.assertEqual(path.read_text(), narrowed)
+
+    def test_expected_patterns_none_skips_placement_checks_even_over_a_parseable_original(
+        self,
+    ):
+        """
+        Given an on-disk config whose hard_deny.deny list holds
+            "Bash(rm -rf /)" -- valid, parseable TOML
+        When verified_write_config() is called with replacement text that
+            drops hard_deny.deny entirely and expected_patterns=None
+        Then the write SUCCEEDS -- expected_patterns=None opts out of BOTH
+            the content-loss check and the placement checks, not just the
+            former; a parseable, existing original does not put the
+            placement checks back on their own
+
+        tools/installer.py's cmd_write_config relies on exactly this: it
+        always writes a fresh, rule-free file, even over an existing one
+        under --force, and takes its own backup before doing so rather than
+        asking this guard to preserve the old rule set.
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            original = '[hard_deny]\ndeny = ["Bash(rm -rf /)"]\nallow = []\n'
+            path.write_text(original)
+
+            dropped = "[hard_deny]\ndeny = []\nallow = []\n"
+            verified_write_config(path, dropped, "toml", expected_patterns=None)
+            self.assertEqual(path.read_text(), dropped)
+
+    def test_write_over_unparseable_original_skips_placement_checks(self):
+        """
+        Given an on-disk config file that is not valid TOML
+        When verified_write_config() is called with valid replacement text
+            that moves a pattern from permissions.deny to permissions.allow,
+            and expected_patterns that happens to include that pattern
+        Then the write SUCCEEDS -- an original the guard cannot parse cannot
+            be compared against, so a broken file must stay writable rather
+            than becoming permanently stuck
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            path.write_text("[permissions\ndeny = [\n")
+
+            new_text = '[permissions]\nallow = ["Bash(rm -rf /)"]\n'
+            verified_write_config(
+                path, new_text, "toml", expected_patterns=["Bash(rm -rf /)"]
+            )
+            self.assertEqual(path.read_text(), new_text)
+
+    def test_write_over_non_utf8_original_skips_placement_checks(self):
+        """
+        Given an on-disk config file whose bytes are not valid UTF-8
+        When verified_write_config() is called with valid replacement text
+            that moves a pattern from permissions.deny to permissions.allow,
+            and expected_patterns that happens to include that pattern
+        Then the write SUCCEEDS rather than raising UnicodeDecodeError -- a
+            non-UTF-8 original is exactly as broken as an unparseable one and
+            must stay writable for the same reason
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "toolguard_hook.toml"
+            path.write_bytes(b"\xff\xfe not valid utf-8")
+
+            new_text = '[permissions]\nallow = ["Bash(rm -rf /)"]\n'
+            verified_write_config(
+                path, new_text, "toml", expected_patterns=["Bash(rm -rf /)"]
+            )
+            self.assertEqual(path.read_text(), new_text)
 
     def test_expected_pattern_no_text_can_contain_blocks_every_write(self):
         """
@@ -715,6 +1175,42 @@ class TestPatternsInConfigText(unittest.TestCase):
             patterns_in_config_text("[permissions\n", "toml")
         with self.assertRaises(json.JSONDecodeError):
             patterns_in_config_text("{not valid json", "json")
+
+
+class TestHardDenyListTypeConstantsMatchRuntime(unittest.TestCase):
+    """
+    Pins _HARD_DENY_RESTRICTING_LIST_TYPES / _ALLOW_LIST_TYPES against the
+    literal keys Configuration._pool_hard_deny_entries actually reads --
+    nothing else in the codebase catches the two drifting independently.
+    """
+
+    def test_restricting_and_allow_list_types_match_configuration_pooling(self):
+        """
+        Given a hard_deny table whose sub-lists are named exactly the values
+            in _HARD_DENY_RESTRICTING_LIST_TYPES and _ALLOW_LIST_TYPES
+        When Configuration.hard_deny() pools that table
+        Then the restricting sub-list's pattern lands in the pooled DENY
+            tuple and the allow sub-list's pattern lands in the pooled
+            ALLOW tuple
+        """
+        (restricting_key,) = _HARD_DENY_RESTRICTING_LIST_TYPES
+        (allow_key,) = _ALLOW_LIST_TYPES
+        prov = Provenance("project", "toolguard_hook", "toml", Path("/fake/0.toml"), 0)
+        layer = ConfigLayer(
+            provenance=prov,
+            content=MappingProxyType(
+                {
+                    "hard_deny": {
+                        restricting_key: ["Bash(rm -rf /)"],
+                        allow_key: ["Bash(rm -rf /tmp)"],
+                    }
+                }
+            ),
+        )
+        config = Configuration(layers=(layer,))
+        deny, allow = config.hard_deny("Bash")
+        self.assertIn("rm -rf /", deny)
+        self.assertIn("rm -rf /tmp", allow)
 
 
 if __name__ == "__main__":

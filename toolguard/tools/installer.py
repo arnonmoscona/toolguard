@@ -432,9 +432,10 @@ def cmd_write_config(args: argparse.Namespace) -> int:
         backup_path = create_backup(config_path, _backups_dir())
 
     content = _render_config_toml(governed_tools, additional)
-    # No expected_patterns: this renders a fresh, minimal file with no
-    # [permissions]/[hard_deny] rules at all, even on a --force overwrite, so
-    # there is no pre-existing rule set the write is supposed to preserve.
+    # No expected_patterns: this always renders a fresh, rule-free file, even
+    # on a --force overwrite, so there is no pre-existing rule set for the
+    # write guard to preserve. create_backup() above -- not this check -- is
+    # the safety net for an existing file's rules on that path.
     verified_write_config(config_path, content, "toml")
 
     reverse = (
