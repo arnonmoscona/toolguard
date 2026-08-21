@@ -537,13 +537,13 @@ def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
 
 def _log_allowed_command(
     verdict: RuntimeVerdict,
-    command: str,
+    log_target: str,
     agent_info: str,
     env_config: dict,
     permission_mode: Optional[str] = None,
 ) -> None:
     """
-    Log an allowed command, one entry per sub-command in ``verdict.sub_matches``.
+    Log an allowed governed-tool verdict, one entry per unit in ``verdict.sub_matches``.
 
     Reads ``verdict.sub_matches`` (one :class:`~toolguard.config_types.UnitVerdict`
     per extracted sub-command, covering every case the combined reason string
@@ -553,23 +553,26 @@ def _log_allowed_command(
     no ``" -> "`` marker in its raw reason, so a parser looking for that shape
     silently drops it from the audit log instead -- measured at 83% of
     compound-allow decisions under-logged this way before this function read
-    ``sub_matches`` structurally. A simple command has exactly one
+    ``sub_matches`` structurally. A simple Bash command has exactly one
     ``UnitVerdict`` in ``sub_matches``, so the single-leaf and compound cases
-    share this one loop.
+    share this one loop. A file-path verdict's ``sub_matches`` is always
+    empty (file paths are never compound -- see
+    :attr:`~toolguard.config_types.RuntimeVerdict.sub_matches`), so every
+    file-path call takes the single-record branch below.
 
     Args:
-        verdict: The resolved 'allow' verdict for *command*.
+        verdict: The resolved 'allow' verdict for *log_target*.
             ``additional_context`` is the accumulated ``additionalContext``
-            enrichment for the whole compound command; it is not attributable
-            to a single sub-command (it may combine several sub-commands'
-            contexts), so it is recorded on every logged sub-command entry the
-            same way the hook injects one accumulated block for the whole
-            command.
-        command: The original command string -- used only as a defensive
-            fallback (see below) when ``sub_matches`` is empty, which should
-            not happen for a real 'allow' verdict produced by
-            :func:`~toolguard.resolve.resolve_bash_permission_detailed`
-            (every 'allow' path populates at least one entry).
+            enrichment for the whole verdict; for a compound command it is
+            not attributable to a single sub-command (it may combine several
+            sub-commands' contexts), so it is recorded on every logged
+            sub-command entry the same way the hook injects one accumulated
+            block for the whole command.
+        log_target: The identifier to log when ``sub_matches`` is empty --
+            the original command string for a Bash verdict, or
+            ``f"{tool_name}({file_path})"`` for a file-path verdict. Also the
+            defensive fallback for a synthetic/hand-built Bash verdict with
+            no populated ``sub_matches``.
         agent_info: Agent identification string.
         env_config: Environment configuration dict.
         permission_mode: Claude Code's own ``permission_mode`` from the hook
@@ -577,13 +580,13 @@ def _log_allowed_command(
             (see :func:`main`).
     """
     if not verdict.sub_matches:
-        # Defensive fallback for a synthetic/hand-built verdict with no
-        # sub_matches (should not occur for a real resolver result) -- log
-        # what is in hand without the placeholder guard below, since there is
-        # no per-unit fallback_kind to consult.
+        # The normal path for a file-path verdict (sub_matches is always
+        # empty there) and a defensive fallback for a synthetic/hand-built
+        # Bash verdict -- log what is in hand without the placeholder guard
+        # below, since there is no per-unit fallback_kind to consult.
         log_command(
             LogRecord(
-                command_str=command,
+                command_str=log_target,
                 status="executed",
                 matched_rule=verdict.matched_rule,
                 provenance=_provenance_brief(verdict.provenance),
@@ -1126,17 +1129,8 @@ def _handle_file_path_tool(
         _log_fallback_allow_warning(
             result.fallback_warning, result.reason, env_config.get("log_dir")
         )
-        log_command(
-            LogRecord(
-                command_str=log_target,
-                status="executed",
-                matched_rule=result.matched_rule,
-                provenance=_provenance_brief(result.provenance),
-                extra_info=agent_info,
-                permission_mode=permission_mode,
-                additional_context=result.additional_context,
-            ),
-            config=env_config,
+        _log_allowed_command(
+            result, log_target, agent_info, env_config, permission_mode
         )
     else:
         _log_non_allow_decision(
