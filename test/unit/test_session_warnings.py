@@ -59,53 +59,53 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         reporter = _RecordingReporter()
         with error_reporter.active(reporter):
             with patch("sys.stderr", new_callable=StringIO):
-                issue_takeover_warning(to_stdout=True)
+                issue_takeover_warning(enabled=True)
 
         self.assertEqual(len(reporter.notices), 1)
         self.assertIn(ACTIVE_CLAIM, reporter.notices[0])
 
-    def test_to_stdout_false_reports_nothing_to_the_reporter(self):
+    def test_enabled_false_reports_nothing_to_the_reporter(self):
         """
-        Given to_stdout=False and a Reporter registered via error_reporter.active()
+        Given enabled=False and a Reporter registered via error_reporter.active()
         When issue_takeover_warning runs
         Then the Reporter receives no call at all -- the gate short-circuits
              before the reporter is reached
         """
         reporter = _RecordingReporter()
         with error_reporter.active(reporter):
-            issue_takeover_warning(to_stdout=False)
+            issue_takeover_warning(enabled=False)
 
         self.assertEqual(reporter.notices, [])
 
     def test_notice_goes_to_stderr(self):
         """
-        Given to_stdout=True
+        Given enabled=True
         When issue_takeover_warning runs
         Then the notice is written to stderr -- notice severity's stderr
              fallback, since it has no log stream (error_reporter._ROUTING)
         """
         with patch("sys.stderr", new_callable=StringIO) as err:
-            issue_takeover_warning(to_stdout=True)
+            issue_takeover_warning(enabled=True)
 
         self.assertIn(ACTIVE_CLAIM, err.getvalue())
 
     def test_nothing_reaches_stdout(self):
         """
-        Given to_stdout=True
+        Given enabled=True
         When issue_takeover_warning runs
         Then stdout stays empty -- stdout is the hook's JSON response channel, so
              a copy of the notice there would corrupt the permission decision
         """
         with patch("sys.stderr", new_callable=StringIO) as err:
             with patch("sys.stdout", new_callable=StringIO) as out:
-                issue_takeover_warning(to_stdout=True)
+                issue_takeover_warning(enabled=True)
 
         self.assertIn(ACTIVE_CLAIM, err.getvalue())
         self.assertEqual(out.getvalue(), "")
 
-    def test_silent_when_to_stdout_false_and_that_silence_is_the_flag(self):
+    def test_silent_when_enabled_false_and_that_silence_is_the_flag(self):
         """
-        Given a call with to_stdout=True, then one with False, then True again
+        Given a call with enabled=True, then one with False, then True again
         When each call's streams are captured separately
         Then only the False call is silent -- the third call emitting again rules
              out silence caused by throttling or by the notice never being
@@ -113,17 +113,17 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         """
         first = StringIO()
         with patch("sys.stderr", first):
-            issue_takeover_warning(to_stdout=True)
+            issue_takeover_warning(enabled=True)
         self.assertIn(ACTIVE_CLAIM, first.getvalue())
 
         quiet_err, quiet_out = StringIO(), StringIO()
         with patch("sys.stderr", quiet_err):
             with patch("sys.stdout", quiet_out):
-                issue_takeover_warning(to_stdout=False)
+                issue_takeover_warning(enabled=False)
 
         third = StringIO()
         with patch("sys.stderr", third):
-            issue_takeover_warning(to_stdout=True)
+            issue_takeover_warning(enabled=True)
 
         self.assertEqual(quiet_err.getvalue(), "")
         self.assertEqual(quiet_out.getvalue(), "")
@@ -131,7 +131,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
 
     def test_default_argument_writes_the_notice(self):
         """
-        Given no explicit to_stdout argument
+        Given no explicit enabled argument
         When issue_takeover_warning runs
         Then the notice is still written (the default is True)
         """
@@ -153,7 +153,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         branch too, where it is false; see TestTakeoverAnnouncementPerBranch.
         """
         with patch("sys.stderr", new_callable=StringIO) as err:
-            issue_takeover_warning(to_stdout=True)
+            issue_takeover_warning(enabled=True)
 
         printed = err.getvalue()
 
@@ -164,7 +164,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
 
     def test_not_throttled_across_repeated_calls(self):
         """
-        Given three consecutive calls with to_stdout=True
+        Given three consecutive calls with enabled=True
         When a Reporter registered via error_reporter.active() collects all three
         Then notice() was called three times -- it is a live reminder, so any
              once-per-process or once-per-session suppression is a regression
@@ -173,7 +173,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
         with error_reporter.active(reporter):
             with patch("sys.stderr", new_callable=StringIO):
                 for _ in range(3):
-                    issue_takeover_warning(to_stdout=True)
+                    issue_takeover_warning(enabled=True)
 
         self.assertEqual(len(reporter.notices), 3)
 
@@ -201,7 +201,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                     with patch.dict(os.environ, env, clear=True):
                         with error_reporter.active(reporter):
                             with patch("sys.stderr", new_callable=StringIO) as err:
-                                issue_takeover_warning(to_stdout=True)
+                                issue_takeover_warning(enabled=True)
 
                 self.assertIn(ACTIVE_CLAIM, err.getvalue())
                 self.assertEqual(_tree(home, logs, project), before)
@@ -227,7 +227,7 @@ class TestIssueTakeoverWarning(unittest.TestCase):
                 with patch("toolguard.error_log.log_crash") as crash:
                     with error_reporter.active(reporter):
                         with patch("sys.stderr", new_callable=StringIO) as err:
-                            issue_takeover_warning(to_stdout=True)
+                            issue_takeover_warning(enabled=True)
 
         self.assertIn(ACTIVE_CLAIM, err.getvalue())
         entry.assert_not_called()

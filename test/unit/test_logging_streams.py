@@ -173,7 +173,7 @@ class TestTakeoverNoticeNotPersisted(unittest.TestCase):
         self.assertEqual(resolve_log_dir(None, None), log_dir)
 
         with patch("sys.stderr", new_callable=StringIO) as err:
-            issue_takeover_warning(to_stdout=True)
+            issue_takeover_warning(enabled=True)
 
         self.assertEqual(list(log_dir.glob("toolguard-*")), [])
         self.assertIn("Takeover mode is active", err.getvalue())

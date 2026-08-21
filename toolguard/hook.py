@@ -897,14 +897,14 @@ def _announce_takeover_state(takeover, log_dir) -> None:
     if not log_dir:
         return
     if takeover.enabled:
-        issue_takeover_warning(to_stdout=True)
+        issue_takeover_warning(enabled=True)
         return
 
     if takeover.conflict is None:
         return
     _log_takeover_enabled_conflict(takeover.conflict, log_dir)
     message, _corrective = describe_takeover_conflict(takeover.conflict)
-    issue_takeover_warning(to_stdout=True, conflict_message=message)
+    issue_takeover_warning(enabled=True, conflict_message=message)
 
 
 def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]:

@@ -495,7 +495,7 @@ class TestOrdinaryInvocationStderr(unittest.TestCase):
 
         expected_buf = StringIO()
         with patch("sys.stderr", expected_buf):
-            issue_takeover_warning(to_stdout=True)
+            issue_takeover_warning(enabled=True)
         expected = expected_buf.getvalue()
         # Without this the comparison below holds for two empty strings, and
         # a notice that emitted nothing would read as a match.

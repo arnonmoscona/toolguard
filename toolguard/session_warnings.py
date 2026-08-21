@@ -6,7 +6,7 @@ from toolguard import error_reporter
 
 
 def issue_takeover_warning(
-    to_stdout: bool = True, conflict_message: Optional[str] = None
+    enabled: bool = True, conflict_message: Optional[str] = None
 ) -> None:
     """
     Report the takeover-mode notice via the active error reporter.
@@ -17,16 +17,14 @@ def issue_takeover_warning(
     table). Not throttled: a live reminder of the current state.
 
     Args:
-        to_stdout: Whether to report the notice at all. Nothing is
-            reported when False. The name predates routing through the
-            error reporter and is kept for hook.py's call-site
-            compatibility; it no longer refers to any stream directly.
+        enabled: Whether to report the notice at all. Nothing is reported
+            when False.
         conflict_message: When given, this text is reported instead of the
             enabled/bypassed claim -- used when a cross-level conflict
             fail-safed takeover OFF, where nothing was actually bypassed
             (see :func:`toolguard.hook.describe_takeover_conflict`).
     """
-    if not to_stdout:
+    if not enabled:
         return
     if conflict_message is not None:
         error_reporter.report_notice(conflict_message)
