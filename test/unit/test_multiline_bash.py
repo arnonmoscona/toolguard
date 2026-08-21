@@ -3,7 +3,7 @@
 import unittest
 
 from toolguard.compound import ResolveOneResult, decompose, resolve_compound_permission
-from toolguard.parser.command_extractor import LeafCommand
+from toolguard.parser.command_extractor import LeafCommand, UndecidableSegment
 from toolguard.parser.multiline import extract_structured
 from toolguard.permissions import check_permission
 
@@ -1049,6 +1049,41 @@ class TestPlaceholderCannotBeForgedByCommandText(unittest.TestCase):
         floored = [leaf for leaf in leaves if leaf.ask_floor]
         self.assertEqual(
             [leaf.text for leaf in floored], ["python __HEREDOC_TO_python__"]
+        )
+
+
+class TestUnattributableHeredocAsksRatherThanGuesses(unittest.TestCase):
+    """TOO-45 ticket 98: a heredoc the parse tree cannot attribute to any
+    command must reach ASK, never a guessed concrete sink."""
+
+    def test_heredoc_on_a_control_structure_keyword_line_is_undecidable(self):
+        """
+        Given a heredoc on the SAME line as an `if`/`then` clause -- the bearer
+            is `cat`, but the placeholder lands on the `if ...; then cat <<HD`
+            line, inside a control structure the attribution walk deliberately
+            does not follow into
+        When the command is extracted
+        Then the whole command is ONE undecidable segment -- not a leaf naming
+            `then`, `if`, or any other guessed sink -- and it resolves to ASK
+        """
+        cmd = "if true; then cat <<HD\nbody\nHD\nfi"
+        leaves = extract_structured(cmd)
+        self.assertEqual(len(leaves), 1)
+        self.assertIsInstance(leaves[0], UndecidableSegment)
+        self.assertEqual(_resolve(cmd, ["cat:*", "if:*", "then:*"], []), "ask")
+
+    def test_the_same_heredoc_outside_a_control_structure_still_resolves(self):
+        """
+        Given the SAME heredoc-on-`cat` shape, but with no enclosing control
+            structure
+        When the command is extracted
+        Then it resolves normally to a `cat` sentinel leaf -- confirming the
+            previous test's ASK comes from the control-structure boundary,
+            not from `cat` itself being unrecognisable
+        """
+        self.assertEqual(
+            _extracted("cat <<HD\nbody\nHD"),
+            [("leaf", "cat __HEREDOC_TO_cat__", False)],
         )
 
 

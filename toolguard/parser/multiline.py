@@ -7,12 +7,13 @@ accept, then hands it over. **Structural parsing is the grammar's job**
 control-structure recognition -- and hand-rolling any of it in this module is
 out of bounds.
 
-The one deviation is heredoc sink classification, which has to run before the
-grammar ever sees the text: :func:`_statement_bounds_containing` scopes a
-heredoc to its own statement in Python, delimited by the same four operators
-as ``bash_parser.peg``'s ``control_op`` -- ``&&``, ``||``, ``;``, ``&`` --
-then :func:`_split_on_unquoted_pipe` segments that statement on ``|`` and the
-two sink readers tokenize its last segment themselves.
+The one deviation is heredoc handling. A heredoc's body is context-sensitive
+-- it lives on the lines AFTER its bearer, which a PEG grammar cannot express
+-- so it has to be lifted out lexically before the grammar ever sees the
+text (:func:`_lift_heredocs`). But WHO RECEIVES a lifted heredoc is not
+lexical: :func:`_attribute_and_substitute` answers it by parsing the lifted
+text with the grammar and reading which ``simple_command`` owns the
+placeholder, rather than modelling statement/pipe boundaries by hand.
 
 What is left is five lexical steps, applied in this order by
 :func:`extract_structured`:
@@ -20,9 +21,10 @@ What is left is five lexical steps, applied in this order by
   1. CRLF / lone-CR -> LF.
   2. Backslash-continuation join -- ``\``+LF removed, except inside single
      quotes, where ``\`` is literal.
-  3. Heredocs: find each ``<<``/``<<-`` and its body, classify the sink, and
-     either splice the body back in as bash or replace the redirection with a
-     ``__HEREDOC_TO_<sink>__`` sentinel and drop the body.
+  3. Heredocs: find each ``<<``/``<<-`` and its body, classify the sink by
+     parsing the lifted text and reading which command owns the placeholder,
+     then either splice the body back in as bash or replace the redirection
+     with a ``__HEREDOC_TO_<sink>__`` sentinel and drop the body.
   4. Comment strip: ``#``-to-EOL at a word boundary, outside quotes.
   5. Whitespace: collapse horizontal runs, trim each line, drop blank lines.
 
@@ -37,22 +39,26 @@ through whole.
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Part re-export, part use: the F401 suppression covers the names imported
-# purely so callers can take the result types from here, next to
-# extract_structured.
+# Re-export: the F401 suppression covers names imported purely so callers can
+# take the result types from here, next to extract_structured.
 from toolguard.parser.command_extractor import (  # noqa: E402, F401
-    BASH_FAMILY,
-    FOREIGN_EXECUTORS,
     LeafCommand,
     UndecidableSegment,
     ExtractionResult,
     extract_structured_from_grammar,
     _is_foreign_executor,
     _is_bash_family,
+)
+from toolguard.parser import bash_parser  # noqa: E402
+from toolguard.parser.command_model import (  # noqa: E402
+    IRPipelineElement,
+    IRSimpleCmd,
+    IRSubshell,
+    build_ir,
 )
 
 
@@ -140,15 +146,63 @@ _HEREDOC_RE = re.compile(
 )
 
 
+def _unescaped_count(line: str, quote_char: str) -> int:
+    """Count occurrences of *quote_char* in *line* not preceded by a ``\\``."""
+    count = 0
+    i = 0
+    n = len(line)
+    while i < n:
+        if line[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if line[i] == quote_char:
+            count += 1
+        i += 1
+    return count
+
+
+def _line_quote_states(line: str) -> List[bool]:
+    """Per-character quote state for one line (True = inside ``'`` or ``"``).
+
+    This function has no memory of any OTHER line, so it cannot tell a ``"``
+    that opens a double-quoted string from one that closes a string opened on
+    a previous physical line. Tracking double quotes is therefore trusted
+    only when they are locally balanced (an even, unescaped count on this
+    line) -- an apostrophe embedded in a double-quoted string that opens and
+    closes on the SAME line, ``echo "it's"``, is then correctly left alone,
+    while a line-leading ``"`` that really closes a multi-line string (seen
+    on real traffic) does not wrongly poison the rest of the line. When
+    double quotes are not trusted, a ``"`` is inert and only single-quote
+    state is tracked -- escape-aware, so a ``\\'`` does not flip it either.
+    """
+    trust_double_quotes = _unescaped_count(line, '"') % 2 == 0
+
+    states: List[bool] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(line)
+    while i < n:
+        cur = in_single or in_double
+        states.append(cur)
+        ch = line[i]
+        if ch == "\\" and not in_single and i + 1 < n:
+            states.append(cur)
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif trust_double_quotes and ch == '"' and not in_single:
+            in_double = not in_double
+        i += 1
+    return states
+
+
 def _find_heredocs_in_line(line: str) -> List[dict]:
     """Find every heredoc redirection in a single logical line.
 
-    A match preceded by an odd number of ``'`` characters is skipped as
-    quoted. That parity count does not exclude ESCAPED quotes, so a ``\\'``
-    earlier on the line flips the parity and hides every heredoc after it:
-    ``echo it\\'s && cat <<EOF`` returns no specs at all, and the body lines
-    then reach the grammar as ordinary statements with the terminator word
-    among them.
+    A match starting inside a quoted region (:func:`_line_quote_states`) is
+    skipped.
 
     Args:
         line: A single-line (no embedded newlines) command text.
@@ -158,15 +212,15 @@ def _find_heredocs_in_line(line: str) -> List[dict]:
         ``end`` (offsets spanning the whole redirection), ``delimiter`` and
         ``strip_tabs``.
     """
+    quoted = _line_quote_states(line)
     specs = []
     for m in _HEREDOC_RE.finditer(line):
         delim = m.group("sq_delim") or m.group("dq_delim") or m.group("uq_delim")
         if delim is None:
             continue
-        strip_tabs = m.group("strip") == "-"
-        before = line[: m.start()]
-        if before.count("'") % 2 == 1:
+        if quoted[m.start()]:
             continue
+        strip_tabs = m.group("strip") == "-"
         specs.append(
             {
                 "start": m.start(),
@@ -289,260 +343,206 @@ def _lift_heredocs(lines: List[str]) -> _LiftedHeredocs:
     return _LiftedHeredocs(lines=result_lines, bodies=bodies, prefix=prefix)
 
 
-def _classify_pipeline_sink(statement: str) -> str:
-    """Classify what will receive a heredoc body written in *statement*.
+class _UnattributableHeredocError(Exception):
+    """A lifted placeholder could not be traced to any command in the parse tree.
 
-    *statement* must already be scoped to the clause bearing the heredoc --
-    see :func:`_statement_bounds_containing`.
-    Looks at the last ``|``-separated segment of it, and at every one of its
-    tokens rather than just the first, so a wrapper like ``uv run python``
-    classifies as its inner interpreter and not as ``uv``. Bash-family wins
-    over foreign when both appear, which decides in favour of decomposing the
-    body.
+    Raised rather than guessed at -- see :func:`_record_placeholder_owners`.
+    The caller floors this to the ASK-inducing :class:`UndecidableSegment`,
+    the same as a genuine grammar :class:`~toolguard.parser.bash_parser.ParseError`.
+    """
 
-    A segment of nothing but flags falls through to ``tokens[0]``, which
-    returns the flag itself -- ``'-x'``.
+
+def _sink_tokens(element: IRSimpleCmd) -> List[str]:
+    """The tokens a heredoc's sink is classified from: command word onward.
+
+    Strips a leading assignment prefix (``NAME=value python ...``), which
+    names a variable, not an executor.
+    """
+    text = (
+        element.assignment_prefix.without_prefix
+        if element.assignment_prefix
+        else element.text
+    )
+    return text.split()
+
+
+def _classify_sink(tokens: List[str]) -> Tuple[bool, bool, str]:
+    """Classify a command's tokens as an interpreter, or not.
+
+    Every token is checked, not just the first, so a wrapper like ``uv run
+    python`` classifies as its inner interpreter and not as ``uv``.
+    Bash-family wins over foreign wherever either appears.
 
     Args:
-        statement: A single-line, single-statement command text.
+        tokens: A command's tokens (:func:`_sink_tokens`).
 
     Returns:
-        ``'bash'``, ``'foreign'``, or the first token's basename for anything
-        else; ``'unknown'`` when there is no token at all.
+        ``(is_bash_family, is_foreign, sink_label)``. *sink_label* names the
+        ``__HEREDOC_TO_<sink_label>__`` sentinel when the sink is not
+        bash-family: the first bash-family token if any, else the first
+        foreign one, else the first non-flag token, else ``'unknown'``.
     """
-    segments = _split_on_unquoted_pipe(statement)
-    if not segments:
-        return "unknown"
-    last = segments[-1].strip()
-    if not last:
-        return "unknown"
-
-    tokens = last.split()
-    if not tokens:
-        return "unknown"
-
-    has_foreign = False
-    for tok in tokens:
-        basename = tok.split("/")[-1]
-        if basename.startswith("-"):
-            continue
-        if _is_bash_family(basename):
-            return "bash"
-        if _is_foreign_executor(basename):
-            has_foreign = True
-
-    if has_foreign:
-        return "foreign"
-
-    return tokens[0].split("/")[-1]
-
-
-def _extract_pipeline_sink(statement: str) -> str:
-    """Name the sink for the ``__HEREDOC_TO_<sink>__`` sentinel.
-
-    Same scoping requirement, segmentation and wrapper handling as
-    :func:`_classify_pipeline_sink`, but it returns the executor's own
-    basename rather than a class -- ``python3.13``, not ``foreign``. The
-    sentinel has to carry a name a foreign-executor test can still recognise.
-
-    Args:
-        statement: A single-line, single-statement command text.
-
-    Returns:
-        The basename of the first bash-family token, else of the first
-        foreign one, else of the first non-flag token; ``'unknown'`` when
-        there is none -- including for a segment that is nothing but flags,
-        where :func:`_classify_pipeline_sink` instead returns the flag.
-    """
-    segments = _split_on_unquoted_pipe(statement)
-    if not segments:
-        return "unknown"
-    last = segments[-1].strip()
-    if not last:
-        return "unknown"
-    tokens = last.split()
-    if not tokens:
-        return "unknown"
-
-    first_bash = None
-    first_foreign = None
+    first_bash: Optional[str] = None
+    first_foreign: Optional[str] = None
+    first_plain: Optional[str] = None
     for tok in tokens:
         bn = tok.split("/")[-1]
         if bn.startswith("-"):
             continue
+        if first_plain is None:
+            first_plain = bn
         if first_bash is None and _is_bash_family(bn):
             first_bash = bn
         if first_foreign is None and _is_foreign_executor(bn):
             first_foreign = bn
 
     if first_bash is not None:
-        return first_bash
+        return True, False, first_bash
     if first_foreign is not None:
-        return first_foreign
-
-    for tok in tokens:
-        bn = tok.split("/")[-1]
-        if not bn.startswith("-"):
-            return bn
-    return "unknown"
+        return False, True, first_foreign
+    return False, False, first_plain or "unknown"
 
 
-def _split_on_unquoted_pipe(text: str) -> List[str]:
-    """Split *text* on unquoted ``|`` characters, treating ``||`` as one operator.
+def _resolve_sink(
+    tokens: List[str], pipeline_elements: List[IRPipelineElement]
+) -> Tuple[bool, str]:
+    """Resolve a heredoc's effective sink from its bearer and its pipeline.
 
-    Single and double quotes protect their content, and a ``\\`` escapes the
-    next character everywhere except inside single quotes -- a stricter and
-    more correct quote model than :func:`_find_heredocs_in_line`'s parity
-    count.
-
-    Args:
-        text: Text to split on unquoted pipes.
-
-    Returns:
-        The segments, with their quoting and spacing intact; empty list for
-        empty input.
-    """
-    segments = []
-    current = []
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            current.append(ch)
-            i += 1
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-            current.append(ch)
-            i += 1
-        elif ch == "\\" and (in_double or (not in_single and not in_double)):
-            current.append(ch)
-            if i + 1 < len(text):
-                current.append(text[i + 1])
-                i += 2
-            else:
-                i += 1
-        elif ch == "|" and not in_single and not in_double:
-            if i + 1 < len(text) and text[i + 1] == "|":
-                current.append(ch)
-                current.append(text[i + 1])
-                i += 2
-            else:
-                segments.append("".join(current))
-                current = []
-                i += 1
-        else:
-            current.append(ch)
-            i += 1
-    if current or segments:
-        segments.append("".join(current))
-    return segments
-
-
-#: Deliberately mirrors ``bash_parser.peg``'s ``control_op`` alternation --
-#: ``and_op / or_op / semicolon / background`` -- both in membership and in
-#: order, so a drift between the two grammars shows up as a missing or extra
-#: table entry rather than a missing ``elif`` branch. ``&&``/``||`` must
-#: precede their own single-character prefix, which this order satisfies.
-_CONTROL_OP_TABLE: Tuple[Tuple[str, int], ...] = (
-    ("&&", 2),
-    ("||", 2),
-    (";", 1),
-    ("&", 1),
-)
-
-
-def _match_control_op(text: str, i: int) -> Optional[int]:
-    """Return the width of the ``control_op`` token starting at *i*, or ``None``."""
-    for token, width in _CONTROL_OP_TABLE:
-        if text.startswith(token, i):
-            return width
-    return None
-
-
-def _statement_bounds_containing(text: str, pos: int) -> Tuple[int, int]:
-    """Find the ``control_op``-delimited statement spanning offset *pos*.
-
-    Boundaries are ``&&``, ``||``, ``;`` and ``&`` -- see
-    :data:`_CONTROL_OP_TABLE`, the same four operators as ``bash_parser.peg``'s
-    ``control_op``.
-
-    Unlike ``|``, these operators do not connect one command's output to the
-    next one's input -- each runs with its own separate stdin. A heredoc's
-    sink is always the command bearing its own ``<<`` redirect, never a
-    command in an *earlier* clause, so sink classification must be scoped to
-    this span before :func:`_split_on_unquoted_pipe` and the sink readers run
-    on it. Quote and backslash handling matches :func:`_split_on_unquoted_pipe`.
-
-    A separator inside an unquoted ``$(...)`` or backtick substitution is not
-    a boundary -- tracked via a depth stack (``$(``/backtick, nestable in
-    either order) so a ``;`` used *inside* the substitution's own command
-    doesn't fracture the statement. An unterminated substitution (unclosed
-    ``$(`` or an unpaired backtick) leaves the stack non-empty for the rest
-    of *text*, so nothing after it is ever recognised as a boundary either --
-    the tail becomes part of one statement rather than risking a false split.
+    A bearer that is itself bash-family or foreign consumes its own heredoc
+    directly as code, and wins outright even mid-pipeline: ``python <<HD |
+    bash`` belongs to python, not bash (the pipe only governs python's
+    stdout). A bearer that is neither, like ``cat``, merely streams the body
+    on unchanged, so the pipeline's LAST element -- whoever actually
+    consumes that stream -- is the real sink: ``cat <<HD | bash`` decomposes
+    the body as bash, ``cat <<HD | pbcopy`` sentinels it as data.
 
     Args:
-        text: The line to scan.
-        pos: Character offset that must fall within the returned span.
+        tokens: The bearer's own tokens (:func:`_sink_tokens`).
+        pipeline_elements: The elements of the pipeline the bearer sits in.
 
     Returns:
-        ``(start, end)`` offsets of the statement containing *pos*, with the
-        separator itself excluded from both ends.
+        ``(is_bash_family, sink_label)``.
     """
-    start = 0
-    in_single = False
-    in_double = False
-    subst_stack: List[str] = []  # 'P' for an open $(, 'B' for an open backtick
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            i += 1
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-            i += 1
-        elif ch == "\\" and (in_double or (not in_single and not in_double)):
-            i += 2 if i + 1 < len(text) else 1
-        elif in_single or in_double:
-            i += 1
-        elif ch == "$" and i + 1 < len(text) and text[i + 1] == "(":
-            subst_stack.append("P")
-            i += 2
-        elif ch == ")" and subst_stack and subst_stack[-1] == "P":
-            subst_stack.pop()
-            i += 1
-        elif ch == "`":
-            if subst_stack and subst_stack[-1] == "B":
-                subst_stack.pop()
-            else:
-                subst_stack.append("B")
-            i += 1
-        elif subst_stack:
-            i += 1
-        else:
-            width = _match_control_op(text, i)
-            if width is None:
-                i += 1
-            else:
-                if pos < i:
-                    return start, i
-                i += width
-                start = i
-    return start, len(text)
+    is_bash, is_foreign, label = _classify_sink(tokens)
+    if is_bash or is_foreign:
+        return is_bash, label
+
+    last = pipeline_elements[-1] if pipeline_elements else None
+    if isinstance(last, IRSimpleCmd):
+        is_bash, _, label = _classify_sink(_sink_tokens(last))
+    return is_bash, label
+
+
+def _record_placeholder_owners(
+    element: IRPipelineElement,
+    pipeline_elements: List[IRPipelineElement],
+    placeholder_re: re.Pattern,
+    found: Dict[int, Tuple[List[str], List[IRPipelineElement]]],
+) -> None:
+    """Record *element*'s tokens and pipeline against every placeholder its text contains.
+
+    Only :class:`IRSimpleCmd` and :class:`IRSubshell` are followed. A
+    placeholder inside a control structure's body (``if true; then cat
+    <<HD``) or a process substitution is deliberately left unrecorded, so it
+    reaches :func:`_attribute_sinks`'s caller as undecidable instead of being
+    guessed at.
+    """
+    if isinstance(element, IRSimpleCmd):
+        tokens = _sink_tokens(element)
+        for m in placeholder_re.finditer(element.text):
+            found[int(m.group(1))] = (tokens, pipeline_elements)
+        return
+    if isinstance(element, IRSubshell):
+        for pipeline in element.inner.pipelines:
+            for inner_element in pipeline.elements:
+                _record_placeholder_owners(
+                    inner_element, pipeline.elements, placeholder_re, found
+                )
+
+
+def _record_placeholders_in_text(
+    text: str,
+    placeholder_re: re.Pattern,
+    found: Dict[int, Tuple[List[str], List[IRPipelineElement]]],
+) -> None:
+    """Parse *text* and record every placeholder's owner into *found*.
+
+    Raises:
+        bash_parser.ParseError: *text* does not parse.
+    """
+    tree = bash_parser.parse(text)
+    ir = build_ir(tree)
+    for statement in ir.statements:
+        for pipeline in statement.pipelines:
+            for element in pipeline.elements:
+                _record_placeholder_owners(
+                    element, pipeline.elements, placeholder_re, found
+                )
+
+
+def _attribute_sinks(
+    text: str, placeholder_re: re.Pattern, count: int
+) -> List[Tuple[bool, str]]:
+    """Classify every lifted heredoc's sink by parsing *text* and reading its tree.
+
+    Whichever ``simple_command`` a placeholder's text lands in owns that
+    heredoc, by construction of the grammar's own pipe, control-op and
+    substitution rules -- not a Python model of any of them
+    (:func:`_record_placeholder_owners`); :func:`_resolve_sink` then decides
+    whether that bearer or its pipeline's last stage is the effective sink.
+
+    Requiring the WHOLE text to parse is too strong a precondition -- one
+    construct the grammar does not cover, anywhere in a multi-statement blob,
+    would otherwise block attribution for every heredoc in it. So a
+    whole-text parse failure falls back to parsing each line on its own
+    (still only ``bash_parser.parse``, never a hand-rolled boundary check);
+    this is sound because :func:`_lift_heredocs` already removed every
+    heredoc's body and terminator before this function ever runs, so a
+    bearer line is self-contained with respect to ITS OWN heredoc syntax. A
+    line that still does not parse alone -- including one that is only a
+    *fragment* of a real multi-line construct, like an ``if`` missing its
+    ``fi`` -- contributes no owner, which is the correct outcome: unresolved,
+    not guessed.
+
+    Args:
+        text: The lifted lines, joined by newline.
+        placeholder_re: Matches one placeholder, capturing its index.
+        count: Total number of placeholders (``len(bodies)``).
+
+    Returns:
+        One ``(is_bash_family, sink_label)`` per placeholder index, in order.
+
+    Raises:
+        _UnattributableHeredocError: a placeholder's owning command was not
+            found, even line-by-line.
+    """
+    found: Dict[int, Tuple[List[str], List[IRPipelineElement]]] = {}
+    try:
+        _record_placeholders_in_text(text, placeholder_re, found)
+    except bash_parser.ParseError:
+        for line in text.split("\n"):
+            try:
+                _record_placeholders_in_text(line, placeholder_re, found)
+            except bash_parser.ParseError:
+                continue
+
+    sinks: List[Tuple[bool, str]] = []
+    for idx in range(count):
+        owner = found.get(idx)
+        if owner is None:
+            raise _UnattributableHeredocError(
+                f"heredoc placeholder {idx} is not owned by any command"
+            )
+        sinks.append(_resolve_sink(*owner))
+    return sinks
 
 
 def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
     """Classify each lifted heredoc's sink and settle its placeholder.
 
-    For each placeholder found (right-to-left within a line, so an earlier
-    one's offset stays valid while a later one is edited): classify the sink
-    from the heredoc's own statement (:func:`_statement_bounds_containing`,
-    :func:`_classify_pipeline_sink`) -- an executor named in an earlier clause
-    is not this heredoc's sink -- then either
+    The sink is read off the parse tree (:func:`_attribute_sinks`), then for
+    each placeholder (right-to-left within a line, so an earlier one's offset
+    stays valid while a later one is edited):
 
     - **bash-family sink** -- emit the body lines ahead of the bearer, so they
       go on to be split and matched as ordinary bash, and delete the
@@ -563,12 +563,18 @@ def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
 
     Returns:
         New list of logical lines with heredoc bodies removed or spliced in.
+
+    Raises:
+        _UnattributableHeredocError: a placeholder cannot be traced to any
+            command -- the caller floors this to ASK rather than guessing.
     """
-    # TOO-45#98: still a statement-scoped, token-based guess -- unchanged
-    # from before the placeholder split. Chunk 2 replaces this with
-    # attribution read off the parse tree.
     bodies = lifted.bodies
+    if not bodies:
+        return lifted.lines
+
     placeholder_re = re.compile(re.escape(lifted.prefix) + r"(\d+)__")
+    sinks = _attribute_sinks("\n".join(lifted.lines), placeholder_re, len(bodies))
+
     result_lines: List[str] = []
     for line in lifted.lines:
         placeholders = list(placeholder_re.finditer(line))
@@ -580,26 +586,20 @@ def _attribute_and_substitute(lifted: _LiftedHeredocs) -> List[str]:
         extra_lines: List[str] = []
 
         for m in reversed(placeholders):
-            body_lines = bodies[int(m.group(1))]
-            stmt_start, stmt_end = _statement_bounds_containing(
-                modified_line, m.start()
-            )
-            statement = modified_line[stmt_start:stmt_end]
-            sink_class = _classify_pipeline_sink(statement)
-            # The sentinel has to survive as one grammar word and stay
-            # matchable by the ASK floor's `__HEREDOC_TO_(\w+)__`, so the
-            # substitute must itself be a word character. `python3.13` becomes
-            # `python3_13`, which the foreign-executor prefix test still
-            # recognises.
-            sink_label = re.sub(
-                r"[^A-Za-z0-9_]", "_", _extract_pipeline_sink(statement)
-            )
+            idx = int(m.group(1))
+            is_bash, sink_label = sinks[idx]
 
-            if sink_class == "bash":
-                extra_lines = body_lines + extra_lines
+            if is_bash:
+                extra_lines = bodies[idx] + extra_lines
                 modified_line = modified_line[: m.start()] + modified_line[m.end() :]
             else:
-                sentinel = f"__HEREDOC_TO_{sink_label}__"
+                # The sentinel has to survive as one grammar word and stay
+                # matchable by the ASK floor's `__HEREDOC_TO_(\w+)__`, so the
+                # substitute must itself be a word character. `python3.13`
+                # becomes `python3_13`, which the foreign-executor prefix
+                # test still recognises.
+                sink_word = re.sub(r"[^A-Za-z0-9_]", "_", sink_label)
+                sentinel = f"__HEREDOC_TO_{sink_word}__"
                 modified_line = (
                     modified_line[: m.start()] + sentinel + modified_line[m.end() :]
                 )
@@ -747,7 +747,20 @@ def extract_structured(command_text: str) -> List[ExtractionResult]:
     # Heredoc handling is the one step that needs whole lines rather than a
     # character stream: a heredoc's body lives on the lines AFTER its bearer.
     lines = text.split("\n")
-    lines = _process_heredocs(lines)
+    try:
+        lines = _process_heredocs(lines)
+    except _UnattributableHeredocError as e:
+        logger.warning(
+            "Heredoc sink attribution failed for command (after pre-pass): %s - %s",
+            text[:100],
+            e,
+        )
+        return [
+            UndecidableSegment(
+                original=text.strip(),
+                reason=f"heredoc sink could not be attributed: {e}",
+            )
+        ]
     text = "\n".join(lines)
 
     text = _strip_comments(text)
@@ -757,8 +770,6 @@ def extract_structured(command_text: str) -> List[ExtractionResult]:
         return []
 
     try:
-        from toolguard.parser import bash_parser  # noqa: PLC0415
-
         tree = bash_parser.parse(text)
         return extract_structured_from_grammar(tree)
     except bash_parser.ParseError as e:
