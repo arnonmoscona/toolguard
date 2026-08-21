@@ -18,6 +18,7 @@ import argparse
 import io
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,15 +26,10 @@ from toolguard import ambient, error_reporter
 from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
 from toolguard.claude_code_contract import (
-    ADDITIONAL_CONTEXT_KEY,
     CWD_KEY,
     HOOK_EVENT_NAME_KEY,
-    HOOK_EVENT_NAME_RESPONSE_KEY,
-    HOOK_SPECIFIC_OUTPUT_KEY,
-    PERMISSION_DECISION_KEY,
-    PERMISSION_DECISION_REASON_KEY,
     PERMISSION_MODE_KEY,
-    PRE_TOOL_USE_EVENT,
+    PreToolUseResponse,
     TOOL_INPUT_KEY,
     TOOL_NAME_KEY,
     TRANSCRIPT_PATH_KEY,
@@ -167,58 +163,36 @@ def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
     the error/guard paths in this module that build a synthetic verdict inline
     (e.g. ``RuntimeVerdict(decision="deny", reason=...)``) -- so every call site
     goes through the same construction shape. Only ``decision``, ``reason``, and
-    ``additional_context`` are consumed here: the hook's JSON response is a
-    projection of the verdict, not the whole of it (the audit-log functions in
-    this module read ``provenance``, ``matched_rule``, ``sub_matches``,
-    ``overrides`` and ``fallback_warning`` as well).
-
-    Args:
-        verdict: The resolved permission verdict. ``verdict.decision`` becomes
-            ``permissionDecision``; ``verdict.reason`` becomes
-            ``permissionDecisionReason``; ``verdict.additional_context`` (see
-            below) becomes ``additionalContext``. Every OTHER field
-            (``provenance``, ``matched_rule``, ``sub_matches``, ``overrides``,
-            ``fallback_warning``, ``tool``, ``target``) is intentionally
-            ignored here -- those drive the audit log, not the hook's JSON
-            response to Claude.
+    ``additional_context`` are consumed here: which verdict fields Claude sees
+    is this module's policy call; :class:`~toolguard.claude_code_contract.PreToolUseResponse`
+    owns only the resulting wire shape (the audit-log functions in this module
+    read ``provenance``, ``matched_rule``, ``sub_matches``, ``overrides`` and
+    ``fallback_warning`` as well, none of which reach Claude).
 
     Returns:
-        Dictionary formatted for JSON output to Claude Code. The
-        ``"additionalContext"`` key is present inside ``hookSpecificOutput``
-        only when ``verdict.additional_context`` is a non-empty string --
-        omitted entirely (not set to ``null``) otherwise.
+        Dictionary formatted for JSON output to Claude Code.
     """
-    output: Dict[str, Any] = {
-        HOOK_SPECIFIC_OUTPUT_KEY: {
-            HOOK_EVENT_NAME_RESPONSE_KEY: PRE_TOOL_USE_EVENT,
-            PERMISSION_DECISION_KEY: verdict.decision,
-            PERMISSION_DECISION_REASON_KEY: verdict.reason,
-        }
-    }
-    if verdict.additional_context:
-        output[HOOK_SPECIFIC_OUTPUT_KEY][ADDITIONAL_CONTEXT_KEY] = (
-            verdict.additional_context
-        )
-    return output
+    return PreToolUseResponse(
+        decision=verdict.decision,
+        reason=verdict.reason,
+        additional_context=verdict.additional_context,
+    ).to_json_dict()
 
 
 def _finalize_output(verdict: RuntimeVerdict, reporter: Reporter) -> Dict[str, Any]:
     """
     Build the hook's JSON response for *verdict*, merging in any faults
     *reporter* accumulated so far this invocation -- appended to
-    ``additionalContext``, alongside the rule's own enrichment rather than
+    ``additional_context``, alongside the rule's own enrichment rather than
     replacing it. Used on both the success path and inside :func:`main`'s
     ``except`` handlers, which drain the same *reporter*.
     """
-    output = create_hook_output(verdict)
     fault_context = reporter.drain_claude_context()
     if fault_context:
-        hook_output = output[HOOK_SPECIFIC_OUTPUT_KEY]
-        existing = hook_output.get(ADDITIONAL_CONTEXT_KEY)
-        hook_output[ADDITIONAL_CONTEXT_KEY] = (
-            f"{existing}\n\n{fault_context}" if existing else fault_context
-        )
-    return output
+        existing = verdict.additional_context
+        merged_context = f"{existing}\n\n{fault_context}" if existing else fault_context
+        verdict = replace(verdict, additional_context=merged_context)
+    return create_hook_output(verdict)
 
 
 def _emit_decision(output: Dict[str, Any]) -> None:

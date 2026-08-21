@@ -49,12 +49,7 @@ from unittest.mock import patch
 
 from toolguard import config as toolguard_config
 from toolguard.api import decide
-from toolguard.claude_code_contract import (
-    CWD_KEY,
-    HOOK_EVENT_NAME_KEY,
-    PRE_TOOL_USE_EVENT,
-    SESSION_ID_KEY,
-)
+from toolguard.claude_code_contract import PRE_TOOL_USE_EVENT, PreToolUseEvent
 
 __all__ = [
     "SandboxEscapeError",
@@ -474,18 +469,24 @@ class Sandbox:
         guarantee, so prefer :meth:`evaluate` unless you need the full path.
 
         Args:
-            payload: The hook event dict. ``cwd``, ``hook_event_name`` and
-                ``session_id`` are defaulted when absent, so the common case is
-                just ``tool_name`` and ``tool_input``.
+            payload: The hook event dict, overlaid onto a sandbox-default
+                :class:`~toolguard.claude_code_contract.PreToolUseEvent`, so the
+                common case is just ``tool_name`` and ``tool_input``.
 
         Returns:
             The hook's parsed JSON output -- or ``{'_raw_stdout': ...}`` when
             stdout was not JSON -- plus ``_stderr`` and ``_returncode``.
         """
-        event = dict(payload)
-        event.setdefault(CWD_KEY, str(self.project))
-        event.setdefault(HOOK_EVENT_NAME_KEY, PRE_TOOL_USE_EVENT)
-        event.setdefault(SESSION_ID_KEY, "sandbox")
+        default_event = PreToolUseEvent(
+            session_id="sandbox",
+            transcript_path="",
+            cwd=str(self.project),
+            permission_mode=None,
+            hook_event_name=PRE_TOOL_USE_EVENT,
+            tool_name="",
+            tool_input={},
+        )
+        event = {**default_event.to_json_dict(), **payload}
         completed = subprocess.run(
             [sys.executable, "-m", "toolguard.hook"],
             input=json.dumps(event),
