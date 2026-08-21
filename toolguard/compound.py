@@ -142,17 +142,23 @@ class CommandUnit:
             grammar-level
             :class:`~toolguard.parser.command_extractor.UndecidableSegment`),
             or ``'unknown'`` (the defensive, currently-unreachable fallback
-            for an extraction result of neither type).
+            for an extraction result of neither type). Decides only WHICH
+            POLICY :func:`judge_unit` applies -- not whether *parts* holds
+            anything to resolve; that is :attr:`parts`'s own contract, and a
+            ``'plain'`` unit is not guaranteed non-empty (see
+            :attr:`parts`).
         parts: Command strings a rule engine must decide on this unit's
-            behalf, in order. ``'plain'`` -> zero or more PEG sub-commands of
-            *text*
-            (via :func:`~toolguard.parser.command_extractor.extract_commands`);
+            behalf, in order. Emptiness is the sole, reliable signal for
+            "nothing to resolve" -- test ``not unit.parts``, never *kind*:
+            ``'plain'`` -> zero or more PEG sub-commands of *text*
+            (via :func:`~toolguard.parser.command_extractor.extract_commands`
+            -- can itself be empty, e.g. ``$(:)``, handled by that
+            emptiness rather than by a distinct kind);
             ``'inline_code'`` -> exactly one element, the untruncated
             outer-command stub (see :func:`_extract_outer_command` --
             deliberately not length-truncated, since truncating here would
             risk weakening explicit-deny detection); ``'undecidable'``/
-            ``'unknown'`` -> empty, since there is nothing to resolve against
-            a rule.
+            ``'unknown'`` -> always empty, by construction.
         audits_as_one: Whether this unit contributes exactly one audit-log
             entry (``True`` for ``'inline_code'``/``'undecidable'`` -- a
             floor decided the outcome, not any part's own rule match, so the
