@@ -32,7 +32,7 @@ also reconcile by hand. Expect to do this occasionally for the life of the proje
 Lean on the provided automation to ease this, but remember its purpose is your own security
 and policy enforcement, not mere tidiness. As in any security workflow, review what changes
 before you trust it: use the dry-run preview, check the backup diff, and watch the
-[conflict and resolution logs](architecture.md#logging). That caution holds **even with
+[conflict and resolution logs](architecture-as-built.md#13-logging). That caution holds **even with
 [auto-migration](#auto-migration) enabled** -- automation should speed the mechanical move,
 never replace your judgment.
 
@@ -211,74 +211,21 @@ Similar patterns (top 3 by similarity):
 - Up to 3 similar matches are shown per pattern. This is currently a fixed constant, not a
   `toolguard_hook.toml` setting -- there is no `[config_sync]` key that controls it.
 
-## Session warnings
+## Warning throttling
 
-Toolguard includes a session-based warning system to alert you about configuration issues
-without flooding your terminal.
+Configuration warnings go to stderr and to `logs/toolguard-warning-YYYY-MM-DD.md`. Most are not throttled: they are re-emitted on every hook invocation until you fix the config that causes them.
 
-### How warnings work
+| Warning | Throttling |
+|---------|------------|
+| Ungoverned tools -- in permissions but not in `governed_tools` | none; every invocation |
+| Unsupported tools -- not recognized by toolguard | none; every invocation |
+| TOML/JSON conflict -- both `.toml` and `.json` at one level | none; every invocation |
+| Takeover mode is active | none; every invocation, deliberately |
+| Migration available -- patterns in `settings.local.json` have diverged | once per calendar day, per project |
+| Automatic migration (`auto_migrate`) | once per calendar day, per project |
 
-**Warning frequency**:
+The two throttled items claim a slot in `~/.toolguard/once_per.db`. A calendar day is the only period available, and there is no per-session throttle: the hook is a fresh process for every tool call, so it has no session to scope one to.
 
-- **Once per session** (default): the warning appears only once per Claude Code session.
-- **Once per day**: the warning appears once per calendar day.
-
-**Warning persistence**: warnings are tracked using marker files in
-`/tmp/toolguard-warnings/`.
-
-**Example workflow**:
-
-1. A configuration issue is detected (e.g., an ungoverned tool in permissions).
-2. A warning is printed to stderr and logged to `logs/toolguard-warning-YYYY-MM-DD.md`.
-3. A marker file is created at `/tmp/toolguard-warnings/<warning-hash>.marker`.
-4. Subsequent occurrences of the same warning are suppressed until the marker expires.
-
-### Marker files location
-
-**Directory**: `/tmp/toolguard-warnings/`.
-
-**Naming**: each warning type gets a unique hash-based filename:
-
-```
-/tmp/toolguard-warnings/
-|-- a3f2e1d9c8b7a6f5.marker  # Ungoverned tool warning
-|-- b4e3d2c1f0e9d8c7.marker  # TOML/JSON conflict warning
-`-- c5d4e3f2a1b0c9d8.marker  # Unsupported tool warning
-```
-
-**Content**: marker files contain the timestamp when the warning was first issued.
-
-### Marker cleanup
-
-**Automatic cleanup**: marker files in `/tmp/` are typically cleared on system reboot.
-
-**Manual cleanup** (to see warnings again):
-
-```bash
-# Clear all toolguard warning markers
-rm -rf /tmp/toolguard-warnings/
-
-# Clear a specific warning (find the hash in logs/toolguard-warning-YYYY-MM-DD.md)
-rm /tmp/toolguard-warnings/a3f2e1d9c8b7a6f5.marker
-```
-
-**When to clear markers**:
-
-- You have fixed a configuration issue and want to verify it is resolved.
-- You want to see all warnings again for debugging.
-- You are testing warning behavior.
-
-### Warning types
-
-Common warnings that use the session warning system:
-
-| Warning type | Description |
-|--------------|-------------|
-| Ungoverned tools | Tools in permissions but not in the `governed_tools` list |
-| Unsupported tools | Tools not recognized by toolguard |
-| TOML/JSON conflict | Both `.toml` and `.json` config files exist at one level |
-| Migration available | Patterns in `settings.local.json` can be migrated |
-
-All warnings are logged regardless of marker status. See
-[Technical Architecture: logging](architecture.md#logging) for how the warning, error, and
+All warnings are logged regardless of throttling. See
+[Architecture, as built: logging](architecture-as-built.md#13-logging) for how the warning, error, and
 conflict streams are separated.

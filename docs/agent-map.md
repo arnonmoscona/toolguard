@@ -84,8 +84,13 @@ entry over letting it silently go stale.
   relying on equivalence.**
 - **Q: How do I write a deny rule that nothing (no more-specific level, no explicit allow)
   can override?**
-  A: `[hard_deny]`, ideally at the user level. See
+  A: `[hard_deny]`, ideally at the user level -- but only for a rule with NO legitimate
+  exception. See
   [agent-guides.md#recipe-block-a-command-no-matter-what](agent-guides.md#recipe-block-a-command-no-matter-what).
+- **Q: How do I deny a command by default but permit one specific real invocation of it?**
+  A: An ordinary `deny` at a shared level plus a more-specific `allow` at a deeper one --
+  `[hard_deny]` refuses this case on purpose, since it means no exceptions. See
+  [agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception](agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception).
 - **Q: How do I share the same rules across many projects without copying them into each
   one?**
   A: Put them in an ancestor `.claude/` (commonly `~/.claude/`) -- discovery walks up
@@ -194,6 +199,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Recipe: install and register toolguard from scratch](agent-guides.md#recipe-install-and-register-toolguard-from-scratch)
 - [Recipe: allow a specific command](agent-guides.md#recipe-allow-a-specific-command)
 - [Recipe: block a command no matter what](agent-guides.md#recipe-block-a-command-no-matter-what)
+- [Recipe: deny a command with a legitimate exception](agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception)
 - [Recipe: scope file access to a project](agent-guides.md#recipe-scope-file-access-to-a-project)
 - [Recipe: share rules across many projects](agent-guides.md#recipe-share-rules-across-many-projects)
 - [Recipe: diagnose "my command was denied"](agent-guides.md#recipe-diagnose-my-command-was-denied)
@@ -208,20 +214,24 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [The written rule exists because this has regressed](architecture-as-built.md#the-written-rule-exists-because-this-has-regressed)
 - [4. Two halves: the core runtime and the operator tooling](architecture-as-built.md#4-two-halves-the-core-runtime-and-the-operator-tooling)
   - [Why the split matters more than the line count suggests](architecture-as-built.md#why-the-split-matters-more-than-the-line-count-suggests)
-- [5. The layer model](architecture-as-built.md#5-the-layer-model)
+- [5. What Claude Code owns lives in one leaf](architecture-as-built.md#5-what-claude-code-owns-lives-in-one-leaf)
+  - [The rule, and the case built to test it](architecture-as-built.md#the-rule-and-the-case-built-to-test-it)
+  - [What the import edge buys, and what it does not](architecture-as-built.md#what-the-import-edge-buys-and-what-it-does-not)
+  - [Why drift detection stays weak on purpose](architecture-as-built.md#why-drift-detection-stays-weak-on-purpose)
+- [6. The layer model](architecture-as-built.md#6-the-layer-model)
   - [Which module sits where](architecture-as-built.md#which-module-sits-where)
   - [Why `observability` sits below `config`](architecture-as-built.md#why-observability-sits-below-config)
   - [Why `api` exists](architecture-as-built.md#why-api-exists)
   - [What is checked, and what is not](architecture-as-built.md#what-is-checked-and-what-is-not)
-- [6. The verdict altitudes: `LevelMatch`, `UnitVerdict`, `RuntimeVerdict`](architecture-as-built.md#6-the-verdict-altitudes-levelmatch-unitverdict-runtimeverdict)
-- [7. The decision path, end to end](architecture-as-built.md#7-the-decision-path-end-to-end)
+- [7. The verdict altitudes: `LevelMatch`, `UnitVerdict`, `RuntimeVerdict`](architecture-as-built.md#7-the-verdict-altitudes-levelmatch-unitverdict-runtimeverdict)
+- [8. The decision path, end to end](architecture-as-built.md#8-the-decision-path-end-to-end)
   - [A compound Bash command: what runs around the cascade](architecture-as-built.md#a-compound-bash-command-what-runs-around-the-cascade)
   - [Four public entry points that are not on this path](architecture-as-built.md#four-public-entry-points-that-are-not-on-this-path)
-- [8. The runtime dependency no import graph shows](architecture-as-built.md#8-the-runtime-dependency-no-import-graph-shows)
-- [9. The configuration hierarchy](architecture-as-built.md#9-the-configuration-hierarchy)
-- [10. Pattern matching](architecture-as-built.md#10-pattern-matching)
-- [11. Writing configuration](architecture-as-built.md#11-writing-configuration)
-- [12. Logging](architecture-as-built.md#12-logging)
+- [9. The runtime dependency no import graph shows](architecture-as-built.md#9-the-runtime-dependency-no-import-graph-shows)
+- [10. The configuration hierarchy](architecture-as-built.md#10-the-configuration-hierarchy)
+- [11. Pattern matching](architecture-as-built.md#11-pattern-matching)
+- [12. Writing configuration](architecture-as-built.md#12-writing-configuration)
+- [13. Logging](architecture-as-built.md#13-logging)
 - [Sources](architecture-as-built.md#sources)
 
 **`docs/auto-mode.md`**

@@ -390,6 +390,14 @@ Extended pattern types:
 - `[glob]` -- true glob patterns with proper `**` globstar support
 - `[native]` -- Claude Code's own word-level wildcard matching
 
+> **TOML note: prefer a literal (single-quoted) string for a `[regex]` pattern with
+> backslashes.** A double-quoted string containing an escape TOML doesn't recognise
+> (`\s`, `\d`, `\.`, ...) fails to *parse* -- toolguard logs "toolguard config is BROKEN --
+> falling back to ask for every tool call", naming the file, and nothing in it is enforced
+> until it's fixed. Only a *valid* TOML escape (`\b`, `\t`, `\n`, ...) used on its own is
+> silently reinterpreted rather than rejected. A literal string sidesteps the whole class
+> of mistake.
+
 All three prefixes work for both command tools (`Bash(...)`,
 `mcp__jetbrains__execute_terminal_command(...)`) and file-path tools (`Read(...)`,
 `Write(...)`, `Edit(...)`). See [Permission Patterns](permission-patterns.md) for detailed syntax
@@ -797,7 +805,7 @@ cp docs/gh-cli-rules-example.toml ~/.config/toolguard/rules/gh.toml
 
 It is then discovered automatically as a user-level source, and a matched rule from it is
 logged with its own provenance, e.g. `[user: ~/.config/toolguard/rules/gh.toml]` -- see
-[architecture-as-built.md](architecture-as-built.md#12-logging) for the provenance format.
+[architecture-as-built.md](architecture-as-built.md#13-logging) for the provenance format.
 
 **Single-file override**: Setting the `CLAUDE_SETTINGS_PATH` environment variable forces
 toolguard to read only that one settings file and bypass the hierarchy entirely -- including
@@ -936,6 +944,7 @@ deny = [
     "Bash(rm -rf:*)",
     "Bash(sudo:*)",
     "Bash([regex]rm\\s+-rf\\s+/)",
+    "Bash(curl:*)",
 
     # Sensitive files
     "Read(**/.env)",
@@ -960,21 +969,23 @@ ask = [
 # settings.json). Pooled across ALL hierarchy levels and checked BEFORE normal
 # allow/deny resolution. Use it for rules that must always hold -- typically
 # declared at the user level so no project can weaken them.
+#
+# If a rule needs a carve-out, it does not belong here: hard_deny means never,
+# no exceptions. A rule you expect to except later (e.g. "block curl, but
+# allow it against localhost") belongs at the ordinary deny/allow level below,
+# where a more-specific allow CAN legitimately override it -- see "Overriding
+# a deny at a more specific level" further down.
 [hard_deny]
 # deny: if a command/path matches one of these (and no `allow` carve-out below),
 # it is DENIED, and that decision cannot be overridden by an allow at any level.
+# Both entries below are genuinely absolute -- neither has a legitimate exception.
 deny = [
     "Bash([regex]rm\\s+-rf\\s+/)",
-    "Bash(curl:*)",
     "Read(**/.ssh/**)"
 ]
-# allow: carve-out EXCEPTIONS to hard_deny.deny (NOT forced allows). A command
-# matching one of these is exempted from the hard deny above; everything else
-# still falls through to normal resolution.
-allow = [
-    "Bash(curl http://localhost:*)",
-    "Bash(curl http://127.0.0.1:*)"
-]
+# allow: carve-out EXCEPTIONS to hard_deny.deny (NOT forced allows). Empty
+# here on purpose -- see the note above.
+allow = []
 ```
 
 **Configuration notes**:
@@ -990,6 +1001,36 @@ allow = [
   only a carve-out exception to its own `deny`, not a forced allow. `[hard_deny]` is a
   toolguard extension (read from `toolguard_hook` files only) and is pooled across all levels
   of the configuration hierarchy.
+
+### Overriding a deny at a more specific level
+
+The `Bash(curl:*)` deny above is an ordinary deny, not a hard deny, so it CAN be overridden
+by a more-specific `allow` at a deeper hierarchy level. This is the right layer for a rule
+you expect to except -- put the broad deny where it should default to blocking, then permit
+one real invocation where it's actually needed:
+
+```toml
+# ~/.claude/toolguard_hook.toml (user level -- baseline: curl is blocked by default)
+[permissions]
+deny = ["Bash(curl:*)"]
+```
+
+```toml
+# .claude/toolguard_hook.toml (project level -- more specific, permitted to override)
+[permissions]
+allow = ["Bash(curl -sS http://localhost:8080/health)"]
+```
+
+Verified with `toolguard.testing.sandbox`: with only the user-level deny, the health-check
+invocation is denied like any other curl call. Adding the project-level allow overrides it
+for that exact invocation only -- a different port, an unrelated host, or an attack against
+the same host (`curl -o /etc/shadow http://localhost:8080/health`) all still deny. The
+`Bash(...)` DEFAULT wrapper with no wildcard matches only that literal command line; broaden
+it (a wildcard, another allow line) only as far as real usage requires.
+
+`Bash(curl:*)` blocks the literal spelling `curl`, not every way to invoke it (`/usr/bin/curl`,
+`command curl`, ...) -- an ordinary deny is fine with that, since it's expected to be narrowed
+and widened by hand as real usage turns up; a `[hard_deny]` rule needs the stronger claim.
 
 > **Upgrade note: the default `governed_tools` set grew.** Before this release, an unconfigured
 > `governed_tools` defaulted to `Bash` only; it now defaults to `Bash`, `Read`, `Write`, `Edit`

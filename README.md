@@ -34,7 +34,7 @@ Key advantages over the native Claude Code permission system:
   interpreter-fed payloads that the native system treats as one opaque blob are each governed
   on their own.
 - **Richer permission syntax** -- a strict superset of Claude's pattern syntax for the
-  governed tools (adds regex, true globstar, and Claude 2.10 native word matching), and it
+  governed tools (adds regex, true globstar, and Claude's own native word matching), and it
   extends to additional tools (JetBrains terminal, custom MCP command tools, and more).
 - **Auditability** -- a full, structured log of every permission decision, with provenance:
   which rule, at which configuration level, made the call.
@@ -84,11 +84,11 @@ New to toolguard? Start with the quick-start, then dip into the topic guides as 
 | [Permission Patterns](docs/permission-patterns.md) | Pattern types (DEFAULT/REGEX/GLOB/NATIVE), file-path patterns, path normalization, and compound / multi-line / heredoc handling (incl. the `__HEREDOC_TO_<sink>__` sentinel). |
 | [Takeover Mode](docs/takeover-mode.md) | The "blanket-allow + toolguard-enforces" mode, its risks, and a complete example. |
 | [Auto-mode with toolguard](docs/auto-mode.md) | Running toolguard underneath Claude Code's own auto-accept / bypass-permissions modes: what still gets enforced, the `allow_with_warning` fallback tradeoff, and how this differs from Takeover Mode. |
-| [Config Sync & Migration](docs/config-sync.md) | Detecting config divergence, migrating patterns into `toolguard_hook.toml`, backups, and session warnings. |
+| [Config Sync & Migration](docs/config-sync.md) | Detecting config divergence, migrating patterns into `toolguard_hook.toml`, backups, and warning throttling. |
 | [Security Best Practices](docs/security.md) | Blanket-allow risks, recommended deny patterns, backups, and verifying toolguard is actually running. |
 | [Maintenance & Audit Skills](docs/skills.md) | The `toolguard-security-audit` and `toolguard-maintenance` skills: audit your config for risk, and clean up / consolidate / promote rules with per-item consent. |
 | [Agent Guides](docs/agent-guides.md) | Task-oriented, few-shot recipes aimed at AI coding agents configuring toolguard. |
-| [Technical Architecture](docs/architecture.md) | Package structure, hook flow, pattern-matching implementation, and logging streams. |
+| [Architecture, as built](docs/architecture-as-built.md) | The constraints the design answers to, the external contract module, the layer model, the decision path, the config hierarchy, pattern-matching implementation, the guarded write path, and logging streams. |
 
 Developer-facing internals (subagent identification, the TOO-8 hierarchy/resolution design,
 logging streams, hard-deny semantics, and the maintenance/audit skill CLIs, passes, and JSON
@@ -106,7 +106,7 @@ granted -- which can stall an unattended session. Toolguard addresses these gaps
 - **Unified configuration**: a single permission system across multiple tools (`Bash`,
   JetBrains terminal, custom MCP command tools, etc.).
 - **Compound command security**: parse and validate each sub-command separately.
-- **Extended pattern types**: regex, glob with globstar, and Claude Code 2.10 native syntax.
+- **Extended pattern types**: regex, glob with globstar, and Claude Code's own native syntax.
 - **Hierarchical configuration**: share rules from an ancestor `.claude/` directory instead
   of copying them into every project, with more-specific-level-wins resolution and an
   unoverridable `[hard_deny]` safety valve.
@@ -153,7 +153,7 @@ uv run python -m unittest discover -s test -t .
 uv run python -m unittest discover -s test/unit -p "test_patterns.py" -v
 ```
 
-The suite (724 tests as of this writing) covers all pattern types, compound commands,
+The suite (3,628 tests as of 2026-08-14) covers all pattern types, compound commands,
 multi-line commands / heredocs / control structures and their decomposition,
 command/subshell/brace-group extraction, file-path permissions, hierarchical resolution,
 hard-deny, configuration loading (TOML + JSON), config validation and divergence,

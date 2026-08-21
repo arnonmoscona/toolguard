@@ -44,15 +44,16 @@ below plus a question-and-pointer list for common lookups, see
   own auto-accept / bypass-permissions modes -- what still gets enforced, the
   `allow_with_warning` fallback tradeoff, and how this differs from takeover mode.
 - [Config sync & migration](docs/config-sync.md): divergence detection, migrating patterns,
-  backups, and session warnings.
+  backups, and warning throttling.
 - [Security best practices](docs/security.md): blanket-allow risks, recommended deny
   patterns, and verifying toolguard is actually running.
 
 ## Reference
 
 - [README](README.md): project overview, requirements, installation, testing.
-- [Technical architecture](docs/architecture.md): package structure, hook flow, pattern
-  matching, logging streams.
+- [Architecture, as built](docs/architecture-as-built.md): design constraints, the external
+  contract module, layer model, verdict altitudes, decision path, config hierarchy, pattern
+  matching, the guarded config write path, logging streams.
 - [Technical notes](technical-notes.md): deep design internals (hierarchy/resolution,
   hard-deny semantics, logging streams, subagent identification).
 

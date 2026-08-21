@@ -1,0 +1,24 @@
+---
+title: The boundary - Claude Code's fact vs toolguard's decision, one worked example each
+---
+flowchart LR
+    Q["Does Claude Code's documentation<br/>define this, or did toolguard decide it?"]
+
+    subgraph EXT["CLAUDE CODE'S FACT - moves into the contract module"]
+        E1["COMMAND_PAYLOAD_KEY = 'command'<br/>their wire field name,<br/>hooks.md, VERIFIED 2026-08-21"]
+    end
+
+    subgraph TG["TOOLGUARD'S DECISION - stays, imports the fact"]
+        T1["create_hook_output(verdict)<br/>picks 3 of RuntimeVerdict's 8 fields<br/>for the wire - that projection<br/>is our policy, spelled in their keys"]
+    end
+
+    Q --> EXT
+    Q --> TG
+    E1 -.->|"imported by"| T1
+
+    classDef ext fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    classDef tg fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef q fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    class E1 ext
+    class T1 tg
+    class Q q

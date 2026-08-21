@@ -1,0 +1,22 @@
+---
+title: claude_code_contract.py - a foundation leaf, and which layers reach down to it
+---
+flowchart BT
+    CONTRACT["claude_code_contract.py<br/><b>foundation</b><br/>wire field names, event names,<br/>STRIPPED_WRAPPERS - dated, cited"]
+
+    FOUND["tool_spec, constants<br/><b>foundation</b>"]
+    ENGINE["parser/command_extractor<br/><b>engine</b>"]
+    RUNTIME["hook, session_start<br/><b>runtime</b>"]
+    TOOLING["tools/installer,<br/>tools/takeover_audit<br/><b>tooling</b>"]
+    SUPPORT["testing/sandbox<br/><b>support</b>"]
+
+    FOUND -->|"imports"| CONTRACT
+    ENGINE -->|"imports"| CONTRACT
+    RUNTIME -->|"imports"| CONTRACT
+    TOOLING -->|"imports"| CONTRACT
+    SUPPORT -->|"imports"| CONTRACT
+
+    classDef leaf fill:#e8f0fb,stroke:#4a6ab5,color:#12203a
+    classDef layer fill:#eef4fb,stroke:#4a7ab5,color:#12263a
+    class CONTRACT leaf
+    class FOUND,ENGINE,RUNTIME,TOOLING,SUPPORT layer

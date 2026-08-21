@@ -7,8 +7,8 @@ This document explains the shape of toolguard as it stands today, not how it got
 It is organised in three parts.
 
 - **Sections 1-4, the constraints the architecture answers to**: the job, the standard-library rule, the grammar rule, and the split between the core runtime and the operator tooling.
-- **Sections 5-8, the architecture itself**: the layer model, the three altitudes a verdict passes through, the decision path end to end, and the one relationship no import graph can show you.
-- **Sections 9-12, the mechanisms that path runs on**: the config hierarchy, pattern matching, the write chokepoint, and the logs. Sections 9 and 10 zoom into two steps of section 7; 11 and 12 cover what happens off the decision path.
+- **Sections 5-9, the architecture itself**: what Claude Code owns versus what toolguard decided, the layer model, the three altitudes a verdict passes through, the decision path end to end, and the one relationship no import graph can show you.
+- **Sections 10-13, the mechanisms that path runs on**: the config hierarchy, pattern matching, the write chokepoint, and the logs. Sections 10 and 11 zoom into two steps of section 8; 12 and 13 cover what happens off the decision path.
 
 It complements [technical-notes.md](../technical-notes.md), on phase-by-phase design rationale.
 
@@ -18,7 +18,7 @@ A note on how to read the claims below. This document states what the code does.
 
 toolguard replaces Claude Code's native permission system for `Bash`, `Read`, `Write` and `Edit`. Everything downstream follows from that job plus four constraints.
 
-![Four constraints, and the structure each one forces](diagrams/design-constraints.png)
+<img src="diagrams/design-constraints.png" alt="Four constraints, and the structure each one forces" width="50%">
 
 <sub>[diagram source](diagrams/design-constraints.mmd)</sub>
 
@@ -46,7 +46,7 @@ So every *governed* path through `hook.py` prints JSON, including the three top-
 
 The hook is not a daemon. Claude Code spawns it, pipes it one event, reads one decision, and the process exits.
 
-![One process per tool call](diagrams/process-model.png)
+<img src="diagrams/process-model.png" alt="One process per tool call" width="50%">
 
 <sub>[diagram source](diagrams/process-model.mmd)</sub>
 
@@ -79,7 +79,7 @@ The gap is not theoretical. The dev dependency group installs `code-review-graph
 
 `toolguard/parser/bash_parser.peg` is the single source of truth for bash structure. Hand-rolled parsing in Python is prohibited -- no regex, no tokenizer, no tree-walking that recovers structure the grammar should have produced.
 
-![How one compound command becomes rule-matchable leaves](diagrams/peg-decomposition.png)
+<img src="diagrams/peg-decomposition.png" alt="How one compound command becomes rule-matchable leaves" width="50%">
 
 <sub>[diagram source](diagrams/peg-decomposition.mmd)</sub>
 
@@ -122,7 +122,7 @@ Sections 5-8 describe the hook. The hook is the smaller half.
 | dependencies | standard library only | standard library only (it ships in the wheel) |
 | time budget | tens of milliseconds | as long as it needs |
 
-![Core runtime vs operator tooling](diagrams/core-vs-tooling.png)
+<img src="diagrams/core-vs-tooling.png" alt="Core runtime vs operator tooling" width="50%">
 
 <sub>[diagram source](diagrams/core-vs-tooling.mmd)</sub>
 
@@ -130,7 +130,7 @@ Tooling is 33% of those two halves taken together. It holds the installer, the m
 
 **`toolguard/tools/` is not the dev-only tree.** `pyproject.toml` packages all of `toolguard`, so operator tooling ships to users and section 2's rule binds it too. The dev-only tree is the *top-level* `tools/`, outside the package, where the fitness functions live.
 
-**The two halves meet at one decision seam.** `toolguard/api.py` exposes `decide()`. `hook.py` calls it on the `--eval` path only, reaching `resolve.py`'s two resolvers directly on the live path (section 7); `tools/replay.py` and the audit path call `decide()`. Neither half imports the other, which is what the `api` layer exists to prevent -- section 5 has that history.
+**The two halves meet at one decision seam.** `toolguard/api.py` exposes `decide()`. `hook.py` calls it on the `--eval` path only, reaching `resolve.py`'s two resolvers directly on the live path (section 8); `tools/replay.py` and the audit path call `decide()`. Neither half imports the other, which is what the `api` layer exists to prevent -- section 6 has that history.
 
 **The write direction is the other seam, and it is less clean.** `config_write_guard.py` is where every toolguard config write is meant to happen: parse the candidate text, optionally verify no existing rule pattern is being dropped, then write atomically.
 
@@ -151,11 +151,51 @@ The recent verification sweep logged seventeen defects (`00-INDEX.md` rows 17-33
 
 Each one changes a permission config in a direction the operator did not ask for. That is the same class of harm the hook exists to prevent, arrived at by a different road. None of it is derivable from what the documentation currently says about `tools/`.
 
-## 5. The layer model
+## 5. What Claude Code owns lives in one leaf
+
+toolguard mirrors part of somebody else's specification: the PreToolUse/SessionStart wire protocol, and the wrapper names Claude Code strips before matching a Bash rule. Before this ticket, those facts were spelled as bare string literals -- twelve wire-protocol field names, measured at 45 sites across 6 package modules and roughly 696 across the test suite, with `additionalContext` alone accounting for 7 package sites and 188 test sites. Nothing anywhere *stated* the contract; the tests encoded it by repetition, which is not the same thing -- an upstream rename would change hundreds of lines, and no single one of them would ever have said what the field was, who owns it, or when it was last checked.
+
+`toolguard/claude_code_contract.py` is now that one place. Every constant carries a citation -- module-wide for the wire-protocol block, per-constant-group for the payload keys and `STRIPPED_WRAPPERS` -- naming the doc URL, the section, and a `VERIFIED` date. `.claude/rules/native-fidelity-claims.md` requires exactly that beside any claim about Claude Code's own behaviour; this module is where the requirement gets a permanent home instead of being re-satisfied ad hoc at each call site.
+
+<img src="diagrams/external-contract-leaf.png" alt="claude_code_contract.py as a foundation leaf, and which layers import it" width="55%">
+
+<sub>[diagram source](diagrams/external-contract-leaf.mmd)</sub>
+
+It sits in `foundation`, the same layer as `constants.py` -- but it is not a second `constants.py`. The facts in it differ in kind from everything else that layer holds: toolguard does not own them, they can change with no commit to this repository at all, and their correctness is asserted *as of a date*, never permanently. Nothing else in `constants.py` -- `STATUS_EXECUTED`, `GIT_TIMEOUT_SECONDS`, `DIST_NAME` -- has that property. Folding the two together would have buried a dated, externally-owned fact inside a module whose other contents are stable by construction.
+
+### The rule, and the case built to test it
+
+The criterion is one question, applied per function rather than per module: **does Claude Code's documentation define this, or did toolguard decide it?** With a corollary that stops it being over-applied -- a function that references an external-contract structure but carries toolguard-specific logic stays where it is.
+
+<img src="diagrams/external-contract-boundary.png" alt="The boundary between what moved and what stayed, with one worked example each" width="60%">
+
+<sub>[diagram source](diagrams/external-contract-boundary.mmd)</sub>
+
+`hook.create_hook_output` is the case a future reader is most likely to try to reverse. Every key it writes is Claude Code's -- `permissionDecision`, `permissionDecisionReason`, `additionalContext`, all imported from the contract module. But it takes a `RuntimeVerdict` and *projects* it: of eight fields, it consumes three (`decision`, `reason`, `additional_context`) and deliberately drops the other five, because those drive the audit log instead. Naive single-responsibility reasoning argues for moving it into the contract module, since it is "the function that builds the wire response." That argument is wrong here: *which* fields of toolguard's own verdict reach Claude Code is toolguard's policy, not Claude Code's, merely spelled in Claude Code's vocabulary. So the function stays in `hook.py` and imports the key names -- it *references* the contract instead of *expressing* it.
+
+Three more near-misses are worth recording, because each looks like a contract fact until you check what it excludes:
+
+- **`ToolKind` (`COMMAND`/`FILE`) stays.** Claude Code publishes no kind taxonomy -- it just has tools with different `tool_input` schemas. The two-member enum is toolguard's own dispatch abstraction, built so `hook.py` and `file_matching.py` can route to the right engine.
+- **`BUILTIN_TOOLS` stays.** It answers "governed by default", a question Claude Code has no opinion on. The tool *names* it is built from are contract facts, already captured once in the registry; the *membership decision* is toolguard's.
+- **`FILE_TOOLS` stays**, for a sharper reason than the other two: it is *narrower* than Claude Code's own set of path-taking tools. `Glob` and `Grep` also take a path and are not in it, because they are not registered. It is toolguard's registered subset, not a survey of Claude Code's tool surface.
+
+### What the import edge buys, and what it does not
+
+The value is the dependency itself: the whole point of moving a literal is that the function referencing it ends up with a real import edge to the contract module, and that edge alone is useful for static analysis and review. Before this module existed, "does this code touch the external contract?" could only be answered by grepping for a dozen strings someone had to already know. Now it is an import edge, enumerable by AST -- the diagram above *is* that enumeration, for every module that currently has one.
+
+It is fragile in one specific way, and this ticket's own history demonstrates it. A name imported into another module for that module's own use is *re-exported* from there whether anyone intends it or not, so a downstream consumer can keep importing from the old location and lose the edge entirely. This ticket's own chunk C hit it: `parser/command_extractor.py` imports `STRIPPED_WRAPPERS` from the contract module for its own internal use, which puts the name in `command_extractor`'s namespace too -- so `test_wrapper_stripping.py`'s existing `from toolguard.parser.command_extractor import STRIPPED_WRAPPERS` kept resolving with zero edit, and kept pointing at the old module. Nothing broke, nothing warned, and the edge that "does this touch the contract?" is supposed to answer simply did not exist for that consumer. A move that leaves a consumer importing from the old location has done nothing that matters, and a passing test suite does not reveal that it happened.
+
+A `--contract` check in `tools/architecture_fitness.py`, scoped the way `--ambient` scopes `pathlib`, is proposed but not yet built (`toolguard-memories/TOO-45/proposed-tickets/85-consolidate-the-external-contract-into-one-module.md`). Say plainly what it could and could not do if it existed: it would find a *known* contract string spelled outside the module -- exactly the class of leak the chunk-C case shows is possible even after a clean move. It could not find a field Claude Code adds upstream that toolguard has never heard of, because the vocabulary it would check against is the thing that would be incomplete. A green `--contract` would mean "no known key leaked out of the module," never "the contract is current" -- a distinction this project has been misled by before, when an instrument's silence was read as coverage of something it never examined.
+
+### Why drift detection stays weak on purpose
+
+The mitigation is a dated constant plus a periodic re-read of Claude Code's documentation, not a version-pinned test. Arnon accepted this explicitly as the weak option: *"A weak option is fine for now. At least we have a good way to periodically review."* The stronger alternative -- pin `claude --version` and fail the suite on a change -- is recorded and available (`DECISIONS-PENDING.md`, decision A16) if the weak one is ever seen to drift silently enough to justify the cost.
+
+## 6. The layer model
 
 `.pyscn.toml` declares eight layers. A module may import its own layer and any layer below it.
 
-![The eight-layer stack](diagrams/layer-stack.png)
+<img src="diagrams/layer-stack.png" alt="The eight-layer stack" width="50%">
 
 <sub>[diagram source](diagrams/layer-stack.mmd)</sub>
 
@@ -167,7 +207,7 @@ This is the layer map itself, from `.pyscn.toml`. Completeness is machine-checke
 
 | layer | modules |
 |---|---|
-| `foundation` | `constants`, `issues`, `path_utils`, `normalization`, `patterns`, `toml_scan`, `_git`, `install_provenance`, `install_update`, `file_lock`, `tool_spec` |
+| `foundation` | `ambient`, `claude_code_contract`, `constants`, `issues`, `path_utils`, `normalization`, `patterns`, `toml_scan`, `_git`, `install_provenance`, `install_update`, `file_lock`, `tool_spec` |
 | `observability` | `log_writer`, `error_log`, `session_warnings`, `update_check`, `once_per_store`, `once_per`, `error_reporter` |
 | `config` | `rule_entry`, `config_types`, `config`, `config_validation`, `config_write_guard`, `env_config`, `rule_sort`, `auto_migrate`, `config_divergence`, `permission_migration` |
 | `engine` | `permissions`, `compound`, `resolve`, `permission_resolution`, `file_matching`, `parser/` |
@@ -198,7 +238,7 @@ Before `api` existed, `hook.py` reached `tools.decision` directly. That was an u
 
 `toolguard/api.py` sits directly above `engine` and exposes exactly one function, `decide()`. Both layers now import it downward.
 
-![Why the api layer exists](diagrams/api-seam.png)
+<img src="diagrams/api-seam.png" alt="Why the api layer exists" width="50%">
 
 <sub>[diagram source](diagrams/api-seam.mmd)</sub>
 
@@ -230,13 +270,13 @@ Four gaps remain, and they are worth naming:
 - **Layer membership is only half-pinned.** A module moved up is caught only where something that stays below still imports it -- 19 of 40 one-layer-up moves, measured. `api`'s layer alone is asserted by name in a test.
 - `--guard`, the pre-push safety gate, does not run `--layers`: the check is opt-in, run by hand or by a reviewer.
 
-A second, narrower check sits on the type story (section 6). `--predicates` verifies structurally -- by asking "can this class carry a `Provenance`?", from a field so named or one typed as one, and never from the winning-pattern field -- that exactly one class qualifies as the RUNTIME verdict type. It is its own test, separate from the layer map.
+A second, narrower check sits on the type story (section 7). `--predicates` verifies structurally -- by asking "can this class carry a `Provenance`?", from a field so named or one typed as one, and never from the winning-pattern field -- that exactly one class qualifies as the RUNTIME verdict type. It is its own test, separate from the layer map.
 
-## 6. The verdict altitudes: `LevelMatch`, `UnitVerdict`, `RuntimeVerdict`
+## 7. The verdict altitudes: `LevelMatch`, `UnitVerdict`, `RuntimeVerdict`
 
 A permission decision is not one value. `toolguard/config_types.py` defines three classes, each describing a decision at a different altitude.
 
-![The three verdict altitudes](diagrams/verdict-altitudes.png)
+<img src="diagrams/verdict-altitudes.png" alt="The three verdict altitudes" width="50%">
 
 <sub>[diagram source](diagrams/verdict-altitudes.mmd)</sub>
 
@@ -266,20 +306,20 @@ Why three and not one. The tempting predicate -- "exactly one type represents a 
 
 The three types describe three different amounts of information, available at three different points in resolution.
 
-## 7. The decision path, end to end
+## 8. The decision path, end to end
 
 Two production entry points converge on the same pair of resolver functions in `resolve.py`:
 
 - The live `PreToolUse` path (`hook.main()`) calls them directly, so it can log inline -- conflict overrides, fallback-allow warnings, the audit trail.
 - The `--eval` path and every tooling caller (replay, mining, audits) go through `toolguard.api.decide()`, which writes nothing -- no log, no stdout, no exit -- and calls the identical functions.
 
-![Hook lifecycle, stdin to stdout](diagrams/hook-lifecycle.png)
+<img src="diagrams/hook-lifecycle.png" alt="Hook lifecycle, stdin to stdout" width="50%">
 
 <sub>[diagram source](diagrams/hook-lifecycle.mmd)</sub>
 
 The resolution step expands into the cascade itself. That is where the two tool shapes diverge, and where they converge again on a single verdict type.
 
-![The resolution cascade](diagrams/resolution-cascade.png)
+<img src="diagrams/resolution-cascade.png" alt="The resolution cascade" width="50%">
 
 <sub>[diagram source](diagrams/resolution-cascade.mmd)</sub>
 
@@ -293,7 +333,7 @@ The floor (`apply_parse_failure_floor`) is unconditional and takes no settings-d
 
 So a broken, unparseable config file clamps every *other* decision to `'ask'` while it persists. A decision that was already going to deny stays denied. A parse failure must never turn a genuine deny into something laxer.
 
-![The parse-failure ASK floor and its one exemption](diagrams/parse-failure-floor.png)
+<img src="diagrams/parse-failure-floor.png" alt="The parse-failure ASK floor and its one exemption" width="50%">
 
 <sub>[diagram source](diagrams/parse-failure-floor.mmd)</sub>
 
@@ -310,7 +350,7 @@ The clamp lives in one function with two callers: the per-sub-command chokepoint
 
 The hard-deny pool does not resolve most-specific-wins. Every level's entries are unioned and de-duplicated on pattern.
 
-![The hard_deny pool and the one thing that exempts it](diagrams/hard-deny-pool.png)
+<img src="diagrams/hard-deny-pool.png" alt="The hard_deny pool and the one thing that exempts it" width="50%">
 
 <sub>[diagram source](diagrams/hard-deny-pool.mmd)</sub>
 
@@ -318,7 +358,7 @@ A normal `allow` never overrides a hard deny, at any level. A `[hard_deny]` carv
 
 Combination is strictest-wins. One denied leaf denies the whole command.
 
-![Strictest-wins across leaves](diagrams/strictest-wins.png)
+<img src="diagrams/strictest-wins.png" alt="Strictest-wins across leaves" width="50%">
 
 <sub>[diagram source](diagrams/strictest-wins.mmd)</sub>
 
@@ -341,11 +381,11 @@ A reader looking for the live compound logic finds these four in `compound.py` f
 
 None of the four has a production caller. `resolve.py` drives `decompose`, `judge_unit` and `_combine_strictest` directly. They are retained for their tests.
 
-## 8. The runtime dependency no import graph shows
+## 9. The runtime dependency no import graph shows
 
 `permission_resolution.py`'s own module docstring states it "never imports `toolguard.config` or `toolguard.resolve`" -- and that is true; its only toolguard imports are `config_types`, `permissions`, and `file_matching`. But at runtime, every call to `resolve_command_permission` or `resolve_file_path_permission` is handed a real `Configuration` object (from `toolguard.config`, the `config` layer) through a `config` parameter, and calls four of its methods to build the cascade. **The import graph shows no edge to `toolguard.config` here at all** -- the coupling exists only in what the object handed through that parameter is expected to support.
 
-![The coupling no import graph shows](diagrams/protocol-seam.png)
+<img src="diagrams/protocol-seam.png" alt="The coupling no import graph shows" width="50%">
 
 <sub>[diagram source](diagrams/protocol-seam.mmd)</sub>
 
@@ -398,11 +438,11 @@ All four are declared on `ResolveConfig`, so none is undocumented. All four are 
 
 The `Protocol` typing is the mitigation that exists today. It makes the surface checkable by pyright. It does not make it checkable by anything that runs at `--layers` time.
 
-## 9. The configuration hierarchy
+## 10. The configuration hierarchy
 
 toolguard walks `.claude/` directories from the project root upward, and resolves conflicts by most-specific-level-wins.
 
-![Config levels, most specific wins](diagrams/config-hierarchy.png)
+<img src="diagrams/config-hierarchy.png" alt="Config levels, most specific wins" width="50%">
 
 <sub>[diagram source](diagrams/config-hierarchy.mmd)</sub>
 
@@ -416,11 +456,11 @@ Three details are easy to get wrong:
 
 The user-facing summary is in [Configuration: hierarchy](configuration.md#configuration-hierarchy). The full resolution algorithm, project-root-relative path anchoring, and the `CLAUDE_SETTINGS_PATH` single-file override are in [technical-notes.md](../technical-notes.md).
 
-## 10. Pattern matching
+## 11. Pattern matching
 
 A pattern carries its own matching semantics in an optional prefix.
 
-![Which matcher runs](diagrams/pattern-dispatch.png)
+<img src="diagrams/pattern-dispatch.png" alt="Which matcher runs" width="50%">
 
 <sub>[diagram source](diagrams/pattern-dispatch.mmd)</sub>
 
@@ -428,13 +468,13 @@ Two things about this dispatch surprise people.
 
 **DEFAULT means different things for a command and for a file path.** For a file path it is promoted to GLOB. For a Bash command it is `fnmatch`, plus accommodations GLOB does not have:
 
-- A `**/<component>/**` pattern matches when the raw command contains that literal path component anywhere.
-- Otherwise the command is matched both raw and normalized (`normalize_path_in_command`).
-- A pattern containing `:` is split into `cmd:args`. Any colon triggers this, not only an intended separator -- `curl http://ex.com/*` splits at the colon before the `//`.
+- A `**/<component>/**` pattern matches when an argument of the command, or of its tilde-expanded spelling, contains that literal path component. `cat ~/x` therefore answers to `**/home/**`; the command name itself is never searched, so a bare `~/x` does not.
+- Otherwise the command -- and its tilde-expanded spelling, so a rule naming an absolute path under home still sees a `~`-spelled command -- is each matched as three deduplicated path-normalizations of itself: raw, normalized (`normalize_path_in_command`), and normalized with symlinks resolved.
+- A pattern ending in `:*`/`:**` is split into a boundary-checked `cmd:*` prefix -- matching Claude Code's own rule that `:*` is recognised only at the pattern's literal end. A `:` anywhere else, e.g. inside a URL like `curl http://ex.com/*`, is a literal character and does not split the pattern.
 - A pattern's base command is normalized like a real one, so `bin/x:*` and `./bin/x:*` both match either spelling.
 - A leaf that still contains a newline is excluded from DEFAULT matching, so a prefix allow cannot match a multi-statement blob.
 
-`[regex]`, `[glob]` and `[native]` bypass all of that and match the raw command.
+`[regex]`, `[glob]` and `[native]` bypass all of that, matching the command as written and with a leading `~` in each token expanded. `[glob]` also expands a leading `~` on the *pattern*, which is the one route among the three by which a `~`-spelled rule reaches an absolutely-spelled command: `[glob]~/bin/*` matches `<home>/bin/x -v`, where the same rule written `[regex]` or `[native]` would not. It fires only when the whole pattern begins with `~`, so `[glob]cat ~/.ssh/*` does not.
 
 **NATIVE's segment search never backtracks.** A pattern ending in `*` always matches correctly. One that does not can fail when its final segment is found short of the command's end: `*id_rsa` does not match `cat id_rsa.pub id_rsa`. Every deviation is a false negative -- on a deny rule, a bypass.
 
@@ -442,11 +482,11 @@ Two rules hold for commands and file paths alike. Deny patterns are checked befo
 
 File patterns get one extra step: `_anchor_file_pattern` anchors a relative pattern to the project root before matching, and both pattern and path have doubled slashes collapsed -- for GLOB only, since regex and native treat the exact characters as significant.
 
-## 11. Writing configuration
+## 12. Writing configuration
 
 Every toolguard config write is *meant* to go through one function.
 
-![The guarded write chokepoint](diagrams/write-chokepoint.png)
+<img src="diagrams/write-chokepoint.png" alt="The guarded write chokepoint" width="50%">
 
 <sub>[diagram source](diagrams/write-chokepoint.mmd)</sub>
 
@@ -464,11 +504,11 @@ Serialization is guarded differently. `rule_sort`'s section-reassembly writer re
 
 The user-facing guarantees are in [Security: how toolguard protects its own writes](security.md#how-toolguard-protects-its-own-writes).
 
-## 12. Logging
+## 13. Logging
 
 Four daily log files, one per concern -- and a fifth that is neither daily nor rotated.
 
-![Four daily log files](diagrams/log-streams.png)
+<img src="diagrams/log-streams.png" alt="Four daily log files" width="50%">
 
 <sub>[diagram source](diagrams/log-streams.mmd)</sub>
 
@@ -510,6 +550,8 @@ Two streams are read back. `toolguard-session-start` surfaces the conflict log a
 
 For sections 1-4: `pyproject.toml`, `toolguard/hook.py`, `toolguard/once_per.py`, `toolguard/auto_migrate.py`, `toolguard/config_write_guard.py`, `toolguard/parser/bash_parser.peg`, `toolguard/parser/multiline.py`, `toolguard/tools/mining.py`, `.claude/rules/bash-grammar.md`, `technical-notes.md` ("Grammar-first, with a light AST"), and `toolguard-memories/TOO-45/proposed-tickets/00-INDEX.md` for the sweep's defect tally.
 
-For sections 9-12: `toolguard/config.py` (`_discover_levels`, `permission_levels_with_provenance`), `toolguard/patterns.py`, `toolguard/permissions.py` (`match_command`), `toolguard/file_matching.py`, `toolguard/config_write_guard.py`, `toolguard/rule_sort.py`, `toolguard/log_writer.py`, `toolguard/error_log.py`, `toolguard/session_start.py`. This material was merged in from the former `docs/architecture.md`, which this document replaces.
+For section 5: `toolguard/claude_code_contract.py`, `toolguard/hook.py` (`create_hook_output`), `toolguard/tool_spec.py`, `toolguard/constants.py`, `.pyscn.toml`, `.claude/rules/native-fidelity-claims.md`, `toolguard-memories/TOO-45/DECISIONS-PENDING.md` (decision A16), `toolguard-memories/TOO-45/proposed-tickets/85-consolidate-the-external-contract-into-one-module.md`, and the basic-memory implementation reports for ticket 85's chunks A-C.
+
+For sections 10-13: `toolguard/config.py` (`_discover_levels`, `permission_levels_with_provenance`), `toolguard/patterns.py`, `toolguard/permissions.py` (`match_command`), `toolguard/file_matching.py`, `toolguard/config_write_guard.py`, `toolguard/rule_sort.py`, `toolguard/log_writer.py`, `toolguard/error_log.py`, `toolguard/session_start.py`. This material was merged in from the former `docs/architecture.md`, which this document replaces.
 
 Primary: `toolguard/config_types.py`, `toolguard/resolve.py`, `toolguard/permission_resolution.py`, `toolguard/permissions.py`, `toolguard/file_matching.py`, `toolguard/compound.py`, `toolguard/api.py`, `toolguard/hook.py`, `.pyscn.toml`, `tools/architecture_fitness.py`, `test/unit/test_architecture_fitness.py`. Behavioural claims about hard deny and strictest-wins were re-checked by running them through `toolguard/testing/sandbox.py`'s `experiment()`. Secondary, for historical numbers and rationale that predate the current tree: `toolguard-memories/TOO-45/reports/dependencies-before-after.md`, `core-types-and-clarity.md`, `layer-separation-before-after.md`; `technical-notes.md`; git log for TOO-45 item commits (03, 05, 10).
