@@ -72,10 +72,10 @@ class _Routing:
 #: to match `warning`/`fault`.
 #:
 #: It is also the line to edit if the standing goal of nothing-on-stderr-under-
-#: normal-conditions is ever acted on: the takeover-mode notice is unthrottled
-#: and stderr-only (`session_warnings.issue_takeover_warning`), so in a
-#: takeover-mode project it prints on every tool call. Where the user sees it
-#: is a reserved decision.
+#: normal-conditions is ever acted on: the takeover-mode notice
+#: (`session_warnings.issue_takeover_warning`) is reported here at `notice`
+#: severity, unthrottled, so in a takeover-mode project it prints on every
+#: tool call. Where the user sees it is a reserved decision.
 _ROUTING: Dict[str, _Routing] = {
     SEVERITY_NOTICE: _Routing(
         stderr_fallback=True, log_fn_name=None, stderr_label=None, reaches_claude=False
