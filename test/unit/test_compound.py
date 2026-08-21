@@ -32,9 +32,13 @@ class TestBashParser(unittest.TestCase):
         """
         Given a simple command with no operators ('git status')
         When parse_command_line splits it
-        Then a single-element list containing the command is returned
+        Then a single-element list containing the command is returned, via the
+            real parse (no warning logged -- extract_commands' fail-open
+            path returns the same singleton for a rejected input, so that
+            path must be ruled out, not just the shape of the result)
         """
-        result = parse_command_line("git status")
+        with self.assertNoLogs("toolguard.parser.command_extractor", level="WARNING"):
+            result = parse_command_line("git status")
         self.assertEqual(result, ["git status"])
 
     def test_and_operator(self):
@@ -104,18 +108,26 @@ class TestBashParser(unittest.TestCase):
         """
         Given a command with && inside single quotes ("echo 'hello && world'")
         When parse_command_line splits it
-        Then the quoted && is not treated as an operator and the command stays intact
+        Then the quoted && is not treated as an operator and the command stays
+            intact, via the real parse (no warning logged -- a rejected
+            input's fail-open path returns this same singleton, so that path
+            must be ruled out too)
         """
-        result = parse_command_line("echo 'hello && world'")
+        with self.assertNoLogs("toolguard.parser.command_extractor", level="WARNING"):
+            result = parse_command_line("echo 'hello && world'")
         self.assertEqual(result, ["echo 'hello && world'"])
 
     def test_double_quotes(self):
         """
         Given a command with && inside double quotes ('echo "hello && world"')
         When parse_command_line splits it
-        Then the quoted && is not treated as an operator and the command stays intact
+        Then the quoted && is not treated as an operator and the command stays
+            intact, via the real parse (no warning logged -- a rejected
+            input's fail-open path returns this same singleton, so that path
+            must be ruled out too)
         """
-        result = parse_command_line('echo "hello && world"')
+        with self.assertNoLogs("toolguard.parser.command_extractor", level="WARNING"):
+            result = parse_command_line('echo "hello && world"')
         self.assertEqual(result, ['echo "hello && world"'])
 
     def test_empty_command(self):
@@ -144,9 +156,13 @@ class TestCommandExtractor(unittest.TestCase):
         """
         Given a simple command with no operators ('ls -la')
         When extract_commands processes it
-        Then a single-element list containing the command is returned
+        Then a single-element list containing the command is returned, via
+            the real parse (no warning logged -- a rejected input's fail-open
+            path returns this same singleton, so that path must be ruled out
+            too)
         """
-        result = extract_commands("ls -la")
+        with self.assertNoLogs("toolguard.parser.command_extractor", level="WARNING"):
+            result = extract_commands("ls -la")
         self.assertEqual(result, ["ls -la"])
 
     def test_extract_and_operator(self):
@@ -944,18 +960,24 @@ class TestEdgeCases(unittest.TestCase):
         """
         Given a command with an '=' in a quoted argument ('grep "test=value" file')
         When parse_command_line splits it
-        Then the command is returned intact as a single element
+        Then the command is returned intact as a single element, via the real
+            parse (no warning logged -- a rejected input's fail-open path
+            returns this same singleton, so that path must be ruled out too)
         """
-        result = parse_command_line('grep "test=value" file')
+        with self.assertNoLogs("toolguard.parser.command_extractor", level="WARNING"):
+            result = parse_command_line('grep "test=value" file')
         self.assertEqual(result, ['grep "test=value" file'])
 
     def test_escaped_quotes(self):
         """
         Given a command containing an escaped double quote (r'echo "test\\"value"')
         When parse_command_line splits it
-        Then the command is returned intact as a single element
+        Then the command is returned intact as a single element, via the real
+            parse (no warning logged -- a rejected input's fail-open path
+            returns this same singleton, so that path must be ruled out too)
         """
-        result = parse_command_line(r'echo "test\"value"')
+        with self.assertNoLogs("toolguard.parser.command_extractor", level="WARNING"):
+            result = parse_command_line(r'echo "test\"value"')
         self.assertEqual(result, [r'echo "test\"value"'])
 
 
@@ -1068,10 +1090,22 @@ class TestCombinedConstructs(unittest.TestCase):
         """
         Given three levels of mixed nesting with arithmetic expansion ('($(echo $((1+1))))')
         When extract_commands processes it
-        Then it does not crash and the full original string is present in the result
+        Then every level is extracted down through the arithmetic expansion:
+            the subshell wrapper, the $(...) substitution, 'echo $((1+1))',
+            '(1+1)', and '1+1' -- not merely a survival check, since a total
+            parse failure would also leave the wrapper alone in the result
         """
         result = extract_commands("($(echo $((1+1))))")
-        self.assertIn("($(echo $((1+1))))", result)
+        self.assertEqual(
+            result,
+            [
+                "($(echo $((1+1))))",
+                "$(echo $((1+1)))",
+                "echo $((1+1))",
+                "(1+1)",
+                "1+1",
+            ],
+        )
 
     def test_subshell_in_substitution_in_subshell(self):
         """
