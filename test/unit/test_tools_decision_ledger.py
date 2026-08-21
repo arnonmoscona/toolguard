@@ -380,6 +380,35 @@ class TestRecordAndLoad(LedgerIsolationMixin, unittest.TestCase):
             self.assertEqual(json.loads(path.read_text())["level"], "user")
 
 
+class TestRecordAtomicity(LedgerIsolationMixin, unittest.TestCase):
+    """record_decision writes atomically: an interrupted write cannot corrupt the ledger."""
+
+    def test_a_write_interrupted_before_commit_leaves_the_prior_ledger_intact(self):
+        """
+        Given a ledger already holding one recorded decision
+        When a second record_decision call is interrupted before the atomic
+            replace commits (simulating a crash between the temp-file write and
+            the rename)
+        Then the interruption propagates, and load_ledger still returns only the
+            original decision -- unmodified, readable, and not merged with the
+            interrupted write
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            first = dl.new_decision("custom", "a", "t", "reject", "first", "project")
+            path = dl.record_decision(root, first)
+
+            second = dl.new_decision("custom", "b", "t", "reject", "second", "project")
+            with mock.patch.object(
+                dl.os, "replace", side_effect=OSError("simulated interruption")
+            ):
+                with self.assertRaises(OSError):
+                    dl.record_decision(root, second)
+
+            self.assertEqual(dl.load_ledger(path), (first,))
+
+
 class TestQuery(LedgerIsolationMixin, unittest.TestCase):
     """The suppression query only silences a matching ``reject``."""
 

@@ -3988,6 +3988,7 @@ OS_IMPORT_OWNERS: Dict[str, str] = {
     "install_provenance": "os.pathsep to split PYTHONPATH",
     "log_writer": "os.SEEK_END for the tail read",
     "testing.sandbox": "builds a child process environment and guards real writes",
+    "tools.decision_ledger": "atomic write: os.fdopen, os.fsync, os.replace",
     "tools.installer": "os.access and os.X_OK to test an executable",
 }
 

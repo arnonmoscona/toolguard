@@ -18,6 +18,8 @@ Design rationale: technical-notes.md, "Prior-decision ledger".
 """
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import metadata
@@ -347,11 +349,41 @@ def is_suppressed(
     return match is not None and match.decision == "reject"
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a same-directory temp file, then :func:`os.replace`.
+
+    A crash or interruption mid-write leaves ``path`` holding its prior complete
+    content rather than a truncated one -- :func:`load_ledger` raises on malformed
+    JSON, so a torn write would otherwise make the ledger unreadable from then on.
+    ``path``'s parent must already exist. Near-identical to
+    :func:`toolguard.config_write_guard._atomic_write`; kept local rather than
+    imported because a decision ledger has no business depending on the config
+    layer (a later consolidation is a separate concern).
+
+    Raises:
+        OSError: The temp file could not be written or renamed.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def record_decision(project_dir: Path, decision: LedgerDecision) -> Path:
     """Write ``decision`` into its level's ledger file, creating the file if needed.
 
     Idempotent by :attr:`LedgerDecision.id`: a same-id entry is replaced rather than
-    duplicated, and the replacement is written last.
+    duplicated, and the replacement is written last. Written atomically (see
+    :func:`_atomic_write`), so an interruption cannot leave a torn, unreadable ledger.
 
     Args:
         project_dir: Directory used to resolve a project-level ledger path.
@@ -369,8 +401,6 @@ def record_decision(project_dir: Path, decision: LedgerDecision) -> Path:
     ]
     existing.append(decision)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(ledger_to_dict(existing, decision.level), indent=2) + "\n",
-        encoding="utf-8",
-    )
+    text = json.dumps(ledger_to_dict(existing, decision.level), indent=2) + "\n"
+    _atomic_write(path, text)
     return path
