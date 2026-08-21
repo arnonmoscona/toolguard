@@ -48,6 +48,7 @@ from toolguard.config_types import (
 )
 from toolguard.config_validation import (
     find_hard_deny_entry_issues,
+    find_regex_control_char_issues,
     find_wrong_shaped_permission_lists,
     validate_permissions,
 )
@@ -1584,7 +1585,8 @@ class Configuration:
         :meth:`_takeover_enabled_shape_issues`,
         :meth:`_looked_past_assignment_issues`,
         :meth:`_rules_dir_unexpected_key_issues`,
-        :meth:`_hard_deny_layer_issues`, :meth:`_merged_permission_issues`.
+        :meth:`_hard_deny_layer_issues`, :meth:`_regex_control_char_issues`,
+        :meth:`_merged_permission_issues`.
 
         The config module only RETURNS issues; logging is the hook's job.
 
@@ -1601,6 +1603,7 @@ class Configuration:
             + self._looked_past_assignment_issues()
             + self._rules_dir_unexpected_key_issues()
             + self._hard_deny_layer_issues()
+            + self._regex_control_char_issues()
             + self._merged_permission_issues()
         )
 
@@ -1856,6 +1859,21 @@ class Configuration:
             if layer.is_native:
                 continue
             issues.extend(find_hard_deny_entry_issues(layer.content))
+        return tuple(issues)
+
+    def _regex_control_char_issues(self) -> Tuple[Issue, ...]:
+        """
+        ``[regex]`` control-character issues, per layer -- delegates to
+        :func:`~toolguard.config_validation.find_regex_control_char_issues`.
+        Catches ``deny = ["Bash([regex]\\bcurl\\b)"]``, whose ``\\b`` TOML
+        decodes to a literal backspace before the regex ever sees it, so the
+        rule parses cleanly and silently matches nothing.
+        """
+        issues: List[Issue] = []
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            issues.extend(find_regex_control_char_issues(layer.content))
         return tuple(issues)
 
     def _merged_permission_issues(self) -> Tuple[Issue, ...]:

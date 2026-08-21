@@ -508,7 +508,9 @@ read are rules you cannot confidently audit.
   edit.
 - **Consolidate similar rules into fewer regex/glob rules.** A long run of near-identical
   entries (`Bash(git status:*)`, `Bash(git log:*)`, `Bash(git diff:*)`, ...) is better
-  expressed as one anchored pattern, e.g. `Bash([regex]^git (status|log|diff|branch)\b)`. Ask
+  expressed as one anchored pattern, e.g. `'Bash([regex]^git (status|log|diff|branch)\b)'`
+  (single-quoted -- see [Extended patterns](configuration.md#extended-patterns-in-toolguard_hooktoml-or-toolguard_hookjson)
+  for why a double-quoted `\b` here would silently match nothing). Ask
   Claude to run the **[maintenance skill](skills.md#maintenance)** for this -- it groups rules
   into command families, proposes consolidations with a plain before/after, and certifies each
   proposal (parses, passes the audit, replays cleanly against your own history) before you

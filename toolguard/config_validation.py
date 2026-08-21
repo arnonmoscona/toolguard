@@ -1,10 +1,17 @@
 """Content-level validation of a toolguard permissions section."""
 
+import re
 from typing import List, Mapping, Tuple
 
 from toolguard.issues import Issue
+from toolguard.patterns import PatternType, parse_pattern
 from toolguard.rule_entry import normalize_entry
 from toolguard.tool_spec import KNOWN_TOOL_NAMES
+
+#: A raw ASCII control character (0x00-0x1F, or DEL 0x7F) in a [regex] body.
+#: TOML's double-quoted strings decode \b/\t/\n/\r/\f to these before the
+#: regex ever sees them (see find_regex_control_char_issues).
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 #: Tool names toolguard recognizes out of the box. A tool outside this set is
 #: recognized by adding it to ``additional_supported_tools`` in config, not by
@@ -228,4 +235,71 @@ def find_hard_deny_entry_issues(content: Mapping[str, object]) -> Tuple[Issue, .
         for element in value:
             _entry, entry_issues = normalize_entry(element, is_native=False)
             issues.extend(entry_issues)
+    return tuple(issues)
+
+
+def find_regex_control_char_issues(content: Mapping[str, object]) -> Tuple[Issue, ...]:
+    """
+    Report a ``[regex]`` pattern whose body contains a raw ASCII control character.
+
+    TOML's double-quoted strings decode ``\\b``/``\\t``/``\\n``/``\\r``/``\\f`` to
+    the literal control character before toolguard ever sees the pattern, so
+    ``"Bash([regex]\\bcurl\\b)"`` parses cleanly to a regex matching literal
+    backspace bytes -- a rule no command ever satisfies. Unlike an invalid
+    escape (``\\s``, ``\\d``, ...), which ``tomllib`` rejects loudly, this
+    parses without complaint and fails open. Scans both ``[permissions]`` and
+    ``[hard_deny]`` allow/deny/ask lists in one layer's raw content.
+
+    Never rewrites the pattern -- the fix is the user's to make (see
+    corrective_steps): guessing back to the intended escape could fabricate a
+    rule nobody wrote.
+
+    Checks :func:`~toolguard.patterns.parse_pattern`'s already-stripped body,
+    matching what actually gets compiled -- so a ``\\t``/``\\n``/``\\r``/``\\f``
+    landing exactly at the pattern's first or last character is invisible
+    here too, since ``parse_pattern`` strips it as edge whitespace before
+    either sees it. ``\\b`` (not whitespace) is unaffected.
+
+    Args:
+        content: One layer's raw, un-merged parsed dict.
+
+    Returns:
+        A tuple of :class:`Issue`, one per offending entry.
+    """
+    issues: List[Issue] = []
+    for section_key, list_keys in _SHAPE_CHECKED_SECTIONS.items():
+        section = content.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for list_key in list_keys:
+            value = section.get(list_key)
+            if not isinstance(value, list):
+                continue
+            for raw in value:
+                entry, _issues = normalize_entry(raw, is_native=False)
+                if entry is None:
+                    continue
+                pattern_type, body = parse_pattern(entry.stripped_pattern)
+                if pattern_type != PatternType.REGEX:
+                    continue
+                if not _CONTROL_CHAR_RE.search(body):
+                    continue
+                issues.append(
+                    Issue(
+                        level="warning",
+                        message=(
+                            f"[regex] pattern {entry.pattern!r} contains a raw "
+                            "control character -- almost certainly a "
+                            "double-quoted TOML string that decoded "
+                            "\\b/\\t/\\n/\\r/\\f before the regex ever saw it, "
+                            "so this rule silently matches nothing"
+                        ),
+                        corrective_steps=(
+                            "Write the pattern as a single-quoted TOML "
+                            "literal string so the backslash reaches the "
+                            "regex unchanged, e.g. "
+                            "deny = ['Bash([regex]\\bcurl\\b)']."
+                        ),
+                    )
+                )
     return tuple(issues)

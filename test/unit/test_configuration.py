@@ -1109,6 +1109,134 @@ class TestValidationIssues(unittest.TestCase):
         config = Configuration(layers=layers)
         self.assertEqual(config.validation_issues(), ())
 
+    def test_regex_backspace_from_double_quoted_toml_reported_as_warning(self):
+        """
+        Given a [permissions].deny entry whose [regex] body is a literal
+            backspace character (what "Bash([regex]\\bcurl\\b)" decodes to
+            when written as a double-quoted TOML string)
+        When validation_issues() runs
+        Then a warning Issue names the pattern and suggests the single-quoted
+            TOML literal form -- the rule itself is left untouched (TOO-45 #89)
+        """
+        dead_pattern = "Bash([regex]\x08curl\x08)"
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"deny": [dead_pattern]},
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        issues = config.validation_issues()
+        matching = [i for i in issues if repr(dead_pattern) in i.message]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].level, "warning")
+        self.assertIn("single-quoted", matching[0].corrective_steps)
+
+    def test_regex_control_char_in_hard_deny_reported_as_warning(self):
+        """
+        Given a [hard_deny].deny entry whose [regex] body contains a raw
+            form-feed character in the middle of the pattern
+        When validation_issues() runs
+        Then a warning Issue is reported -- the check covers hard_deny, not
+            just [permissions]
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType(
+                    {
+                        "governed_tools": ["Bash"],
+                        "hard_deny": {"deny": ["Bash([regex]rm\x0c-rf)"]},
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        issues = config.validation_issues()
+        self.assertTrue(
+            any(
+                i.level == "warning" and "raw control character" in i.message
+                for i in issues
+            )
+        )
+
+    def test_regex_valid_escaped_backslash_b_not_reported(self):
+        """
+        Given a [regex] deny entry whose body is the two-character sequence
+            backslash-b (the correct single-quoted-TOML spelling of a
+            word-boundary regex, not a decoded control character)
+        When validation_issues() runs
+        Then no control-character Issue is reported
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"deny": ["Bash([regex]\\bcurl\\b)"]},
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertFalse(
+            any(
+                "raw control character" in i.message for i in config.validation_issues()
+            )
+        )
+
+    def test_non_regex_pattern_with_control_char_not_reported(self):
+        """
+        Given a DEFAULT-syntax (non-[regex]) deny entry that happens to
+            contain a raw control character
+        When validation_issues() runs
+        Then no control-character Issue is reported -- the check is scoped to
+            [regex] patterns, where the character changes matching semantics
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType(
+                    {
+                        "governed_tools": ["Bash"],
+                        "permissions": {"deny": ["Bash(curl\x08:*)"]},
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertFalse(
+            any(
+                "raw control character" in i.message for i in config.validation_issues()
+            )
+        )
+
     def test_non_bool_takeover_enabled_reported_as_error(self):
         """
         Given a hook layer whose takeover_mode.enabled is the string "false" (not a bool)
