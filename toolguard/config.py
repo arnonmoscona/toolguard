@@ -1576,65 +1576,68 @@ class Configuration:
         """
         Return structured content-level configuration issues.
 
-        Detects:
-
-        - A governed config file that failed to parse entirely, OR that
-          parsed but has a ``[permissions]``/``[hard_deny]`` list the wrong
-          shape (see :attr:`parse_failures`) -- reported FIRST, since it is
-          the most severe class of issue: every decision is clamped to
-          ``'ask'`` while it persists.
-        - Both a TOML and a JSON config file present at the same level/base.
-        - A rules-directory filename stem shadowed across the two candidate
-          rules directories.
-        - A ``no_match_fallback``/``undecidable_fallback`` value toolguard
-          does not recognize.
-        - A non-boolean ``takeover_mode.enabled``.
-        - An ``assignments_looked_past_when_granting`` value that is not a list,
-          or an entry of one that is not a string.
-        - A rules-directory file defining a top-level key outside
-          ``[permissions]``/``[hard_deny]``.
-        - A ``[hard_deny]`` entry that :func:`~toolguard.rule_entry.normalize_entry`
-          rejects (per layer -- ``[hard_deny]`` is never merged, unlike
-          ``[permissions]`` below).
-        - Unsupported tools referenced in toolguard_hook permissions.
-        - Tools referenced in permissions but absent from governed_tools.
+        A composition of independent checkers, each asking one question
+        about one part of the config -- see each for its detection rule:
+        :meth:`_parse_failure_issues`, :meth:`_duplicate_format_issues`,
+        :meth:`_shadowed_rules_issues`,
+        :meth:`_unrecognized_fallback_setting_issues`,
+        :meth:`_takeover_enabled_shape_issues`,
+        :meth:`_looked_past_assignment_issues`,
+        :meth:`_rules_dir_unexpected_key_issues`,
+        :meth:`_hard_deny_layer_issues`, :meth:`_merged_permission_issues`.
 
         The config module only RETURNS issues; logging is the hook's job.
 
         Returns:
-            Tuple of :class:`Issue`, in the detection order shown above --
+            Tuple of :class:`Issue`, in the checker order above --
             parse-failure issues first, permission-validation issues last.
         """
-        issues: List[Issue] = []
+        return (
+            self._parse_failure_issues()
+            + self._duplicate_format_issues()
+            + self._shadowed_rules_issues()
+            + self._unrecognized_fallback_setting_issues()
+            + self._takeover_enabled_shape_issues()
+            + self._looked_past_assignment_issues()
+            + self._rules_dir_unexpected_key_issues()
+            + self._hard_deny_layer_issues()
+            + self._merged_permission_issues()
+        )
 
-        # 0) A governed config file failed to parse entirely. This is
-        #    an 'error', not a 'warning': permission_resolution's ASK floor
-        #    clamps every decision except an already-'deny' one to 'ask'
-        #    while any entry remains (see Configuration.parse_failures's
-        #    docstring), so a rule in this file -- possibly a deny or
-        #    hard_deny -- may be silently unenforced.
-        for path, message in self.parse_failures:
-            issues.append(
-                Issue(
-                    level="error",
-                    message=f"{path} failed to parse and was skipped: {message}",
-                    corrective_steps=(
-                        "Fix the file's syntax. Until it parses, EVERY toolguard "
-                        "permission decision is clamped to 'ask' (see "
-                        "toolguard.permission_resolution.resolve_permission_cascade) "
-                        "so no rule -- including deny/hard_deny -- in this file is "
-                        "silently lost."
-                    ),
-                )
+    def _parse_failure_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'error' Issue per :attr:`parse_failures` entry -- a governed file
+        that failed to parse entirely, or parsed but had a wrong-shaped
+        ``[permissions]``/``[hard_deny]`` list. The most severe class: the
+        ASK floor clamps every decision but an already-'deny' one to 'ask'
+        while any entry remains (see :attr:`parse_failures`'s docstring), so
+        a rule in this file -- possibly a deny or hard_deny -- may be
+        silently unenforced.
+        """
+        return tuple(
+            Issue(
+                level="error",
+                message=f"{path} failed to parse and was skipped: {message}",
+                corrective_steps=(
+                    "Fix the file's syntax. Until it parses, EVERY toolguard "
+                    "permission decision is clamped to 'ask' (see "
+                    "toolguard.permission_resolution.resolve_permission_cascade) "
+                    "so no rule -- including deny/hard_deny -- in this file is "
+                    "silently lost."
+                ),
             )
+            for path, message in self.parse_failures
+        )
 
-        # 1) Both a TOML and a JSON config file present for the same base in the
-        #    same directory -> warn (the tool is using TOML). This is the single
-        #    source of truth for the warning: discovery itself is side-effect-free
-        #    and the hook routes these Issues to the WARNING stream. A duplicate
-        #    is recognised either by two discovered layers of differing format at
-        #    the same base, OR -- since real discovery keeps only the TOML -- by
-        #    both files existing on disk.
+    def _duplicate_format_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'warning' Issue per level/base where both a ``.toml`` and a
+        ``.json`` config file exist (the tool uses the TOML). Recognized
+        either by two discovered layers of differing format at the same
+        base, OR -- since real discovery keeps only the TOML -- by both
+        files existing on disk.
+        """
+        issues: List[Issue] = []
         seen_formats: Dict[Tuple[str, str], set] = {}
         order: List[Tuple[str, str]] = []
         for layer in self.layers:
@@ -1669,11 +1672,17 @@ class Configuration:
                         ),
                     )
                 )
+        return tuple(issues)
 
-        # 1b) A rules-directory filename stem shadowed across the two candidate
-        #     rules directories -- see _shadowed_rules_stems for why this must
-        #     warn. Recorded on the winning layer at discovery time (see
-        #     load_configuration), same pattern as duplicate_format above.
+    def _shadowed_rules_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'warning' Issue per layer whose ``shadowed_path`` is set -- a
+        rules-directory filename stem present in both candidate rules
+        directories (see :func:`_shadowed_rules_stems`); the shadowed file's
+        rules are not enforced. Recorded on the winning layer at discovery
+        time, same pattern as :meth:`_duplicate_format_issues`.
+        """
+        issues: List[Issue] = []
         for layer in self.layers:
             if layer.shadowed_path is None:
                 continue
@@ -1695,31 +1704,36 @@ class Configuration:
                     ),
                 )
             )
+        return tuple(issues)
 
-        # 1c) A *_fallback setting written with a value toolguard does not
-        #     recognize. Resolution silently falls back to 'ask',
-        #     which is the safe direction but is indistinguishable from a
-        #     broken feature when nothing says so. A 'warning', not an 'error':
-        #     the effective behaviour is the SAFE one, unlike the fail-open
-        #     classes above. Also surfaced at session start (see
-        #     toolguard/session_start.py) -- the log alone is not loud enough
-        #     for something that presents as maximum friction with no cause.
-        for bad in self.unrecognized_fallback_settings():
-            issues.append(
-                Issue(
-                    level="warning",
-                    message=bad.describe(),
-                    corrective_steps=(
-                        f"Set {bad.key} to one of: {', '.join(bad.accepted)}. "
-                        f"Until then it resolves to 'ask', which prompts for "
-                        f"everything the setting was meant to decide."
-                    ),
-                )
+    def _unrecognized_fallback_setting_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'warning' Issue per :meth:`unrecognized_fallback_settings` entry
+        -- a ``*_fallback`` value toolguard does not recognize. A 'warning',
+        not an 'error': resolution falls back to 'ask', the safe direction,
+        but that is indistinguishable from a broken feature without this.
+        """
+        return tuple(
+            Issue(
+                level="warning",
+                message=bad.describe(),
+                corrective_steps=(
+                    f"Set {bad.key} to one of: {', '.join(bad.accepted)}. "
+                    f"Until then it resolves to 'ask', which prompts for "
+                    f"everything the setting was meant to decide."
+                ),
             )
+            for bad in self.unrecognized_fallback_settings()
+        )
 
-        # 2) takeover_mode.enabled is a fail-safe security toggle: a non-bool
-        #    value is not coerced (see takeover_mode); flag it as an error so the
-        #    misconfiguration is visible rather than silently ignored.
+    def _takeover_enabled_shape_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'error' Issue per layer with a non-boolean
+        ``takeover_mode.enabled``. It is a fail-safe security toggle and is
+        never coerced (see :meth:`takeover_mode`), so a wrong-typed value
+        silently drops that level's vote with no other trace.
+        """
+        issues: List[Issue] = []
         for layer in self.layers:
             if layer.is_native:
                 continue
@@ -1741,11 +1755,17 @@ class Configuration:
                         ),
                     )
                 )
+        return tuple(issues)
 
-        # 2b) A malformed assignments_looked_past_when_granting contributes no
-        #     names, which presents as an allow rule that mysteriously stops
-        #     covering a marked command. A 'warning': the effective behaviour is
-        #     the strict one.
+    def _looked_past_assignment_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'warning' Issue per layer with a malformed
+        ``assignments_looked_past_when_granting`` -- a non-list value, or a
+        non-string entry within an otherwise valid list. A malformed setting
+        contributes no names, which presents as an allow rule that
+        mysteriously stops covering a marked command.
+        """
+        issues: List[Issue] = []
         for layer in self.layers:
             if layer.is_native or _LOOKED_PAST_KEY not in layer.content:
                 continue
@@ -1786,14 +1806,17 @@ class Configuration:
                         ),
                     )
                 )
+        return tuple(issues)
 
-        # 3) Rules-directory layers may only define [permissions] and
-        #    [hard_deny]. Any other top-level key found in the raw file was
-        #    stripped before the layer's content was built (load_configuration)
-        #    and recorded on unexpected_keys -- surface it here as an error so
-        #    the misconfiguration is visible (fail loud) rather than silently
-        #    dropped. This does NOT block the layer's valid permissions/hard_deny
-        #    content, which still resolves normally.
+    def _rules_dir_unexpected_key_issues(self) -> Tuple[Issue, ...]:
+        """
+        One 'error' Issue per layer with :attr:`ConfigLayer.unexpected_keys`
+        set -- a rules-directory file defining a top-level key outside
+        ``[permissions]``/``[hard_deny]``. Fails loud rather than silently
+        dropping the key; does not block the layer's valid content, which
+        still resolves normally.
+        """
+        issues: List[Issue] = []
         for layer in self.layers:
             if not layer.unexpected_keys:
                 continue
@@ -1815,28 +1838,38 @@ class Configuration:
                     ),
                 )
             )
+        return tuple(issues)
 
-        # 3.5) [hard_deny] entries, per layer -- never merged across layers
-        #    (see config_validation._SHAPE_CHECKED_SECTIONS), so unlike
-        #    [permissions] below there is no merged view to validate once.
-        #    Without this, a malformed hard_deny entry (e.g. a structured
-        #    table missing its pattern key) is silently dropped by
-        #    _extract_tool_entries with NO record anywhere -- not even a
-        #    warning, since validate_permissions only ever sees [permissions].
+    def _hard_deny_layer_issues(self) -> Tuple[Issue, ...]:
+        """
+        ``[hard_deny]`` entry issues, per layer -- delegates to
+        :func:`~toolguard.config_validation.find_hard_deny_entry_issues`.
+        ``[hard_deny]`` is never merged across layers (see
+        :data:`~toolguard.config_validation._SHAPE_CHECKED_SECTIONS`), so
+        unlike :meth:`_merged_permission_issues` there is no merged view to
+        validate once. Without this, a malformed hard_deny entry (e.g. a
+        structured table missing its pattern key) is silently dropped by
+        :meth:`_extract_tool_entries` with no record anywhere.
+        """
+        issues: List[Issue] = []
         for layer in self.layers:
             if layer.is_native:
                 continue
             issues.extend(find_hard_deny_entry_issues(layer.content))
+        return tuple(issues)
 
-        # 4) Permission validation over the merged toolguard_hook content only.
-        # A layer whose permissions section (or an allow/deny/ask list within
-        # it) is the wrong shape contributes nothing here -- it was already
-        # recorded into parse_failures by load_configuration() (see
-        # Configuration.parse_failures) and reported once via issue (0)
-        # above. Iterating a bare string here instead of skipping it would
-        # merge it character-by-character (the bug this guard exists to
-        # avoid) and produce a second, differently-worded error for the same
-        # defect.
+    def _merged_permission_issues(self) -> Tuple[Issue, ...]:
+        """
+        Permission validation over ``[permissions]`` merged across all
+        non-native layers -- delegates to
+        :func:`~toolguard.config_validation.validate_permissions`. A layer
+        whose permissions section (or an allow/deny/ask list within it) is
+        the wrong shape contributes nothing here -- it was already recorded
+        into :attr:`parse_failures` and reported by
+        :meth:`_parse_failure_issues`; iterating a bare string here instead
+        of skipping it would merge it character-by-character (the bug this
+        guard exists to avoid).
+        """
         merged_config: Dict = {
             "governed_tools": [],
             "additional_supported_tools": [],
@@ -1863,9 +1896,7 @@ class Configuration:
                     if perm not in merged_config["permissions"][perm_type]:
                         merged_config["permissions"][perm_type].append(perm)
 
-        issues.extend(validate_permissions(merged_config))
-
-        return tuple(issues)
+        return tuple(validate_permissions(merged_config))
 
     # -- provenance / introspection ---------------------------------------
 
