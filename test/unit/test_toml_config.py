@@ -14,6 +14,7 @@ from toolguard.api import decide
 from toolguard.config_validation import (
     KNOWN_SUPPORTED_TOOLS,
     extract_tool_name,
+    find_hard_deny_entry_issues,
     find_wrong_shaped_permission_lists,
     validate_permissions,
 )
@@ -732,6 +733,66 @@ class TestFindWrongShapedPermissionLists(unittest.TestCase):
         self.assertEqual(len(messages), 2)
         self.assertTrue(any("permissions.deny" in m for m in messages))
         self.assertTrue(any("hard_deny.allow" in m for m in messages))
+
+
+class TestFindHardDenyEntryIssues(unittest.TestCase):
+    """Unit tests for the per-layer hard_deny entry scanner, isolated from
+    Configuration/discovery."""
+
+    def test_well_formed_entries_report_nothing(self):
+        """
+        Given hard_deny.allow and .deny both holding valid patterns
+        When the content is scanned
+        Then no issues are found
+        """
+        content = {
+            "hard_deny": {
+                "deny": ["Bash(rm -rf /)"],
+                "allow": ["Bash(rm -rf /tmp/scratch)"],
+            }
+        }
+        self.assertEqual(find_hard_deny_entry_issues(content), ())
+
+    def test_absent_section_reports_nothing(self):
+        """
+        Given a layer with no hard_deny section
+        When the content is scanned
+        Then no issues are found
+        """
+        self.assertEqual(find_hard_deny_entry_issues({}), ())
+
+    def test_malformed_deny_entry_is_reported(self):
+        """
+        Given hard_deny.deny holding a structured entry missing its pattern key
+        When the content is scanned
+        Then normalize_entry's rejection Issue is returned
+        """
+        content = {"hard_deny": {"deny": [{"oops": "no pattern key"}]}}
+        issues = find_hard_deny_entry_issues(content)
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].level, "error")
+        self.assertIn("missing required key", issues[0].message)
+
+    def test_malformed_allow_entry_is_reported(self):
+        """
+        Given hard_deny.allow holding an entry of an unsupported type
+        When the content is scanned
+        Then normalize_entry's rejection Issue is returned
+        """
+        content = {"hard_deny": {"allow": [None]}}
+        issues = find_hard_deny_entry_issues(content)
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].level, "error")
+
+    def test_wrong_shaped_list_reports_nothing_here(self):
+        """
+        Given hard_deny.deny written as a bare string, not a list
+        When the content is scanned
+        Then this function reports nothing -- that shape defect is
+            find_wrong_shaped_permission_lists's job, not this one's
+        """
+        content = {"hard_deny": {"deny": "Bash(rm:*)"}}
+        self.assertEqual(find_hard_deny_entry_issues(content), ())
 
 
 class TestExtractToolName(unittest.TestCase):

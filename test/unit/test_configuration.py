@@ -1004,6 +1004,111 @@ class TestValidationIssues(unittest.TestCase):
         config = Configuration(layers=layers)
         self.assertEqual(config.validation_issues(), ())
 
+    def test_hard_deny_malformed_entry_reported_as_error(self):
+        """
+        Given a hook layer whose [hard_deny].deny holds a structured entry
+            missing its required pattern key
+        When validation_issues() runs
+        Then an error Issue names the defect -- previously this entry was
+            silently dropped by hard_deny() with NO record anywhere, unlike
+            the same mistake in [permissions] (TOO-45 #42)
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType(
+                    {
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf /)", {"oops": "no pattern key"}]
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        issues = config.validation_issues()
+        self.assertTrue(
+            any(
+                i.level == "error" and "missing required key" in i.message
+                for i in issues
+            )
+        )
+
+    def test_hard_deny_malformed_entry_does_not_trip_parse_failures(self):
+        """
+        Given the same malformed [hard_deny].deny entry as above
+        When parse_failures is inspected
+        Then it stays empty -- a single bad entry among otherwise-good ones
+            is reported as a visible Issue, not escalated to the ask-floor
+            reserved for a whole section/list being unreadable (TOO-45 #42
+            design decision, distinct from ticket #52's shape-level fix)
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType({"hard_deny": {"deny": [{"oops": "no pattern key"}]}}),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.parse_failures, ())
+
+    def test_hard_deny_well_formed_entries_report_nothing(self):
+        """
+        Given a hook layer with well-formed [hard_deny] allow and deny lists
+        When validation_issues() runs
+        Then no hard_deny-entry issue is reported
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project",
+                    "toolguard_hook",
+                    "toml",
+                    Path("/p/.claude/toolguard_hook.toml"),
+                ),
+                MappingProxyType(
+                    {
+                        "hard_deny": {
+                            "deny": ["Bash(rm -rf /)"],
+                            "allow": ["Bash(rm -rf /tmp/scratch)"],
+                        }
+                    }
+                ),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.validation_issues(), ())
+
+    def test_hard_deny_native_layer_entries_not_validated(self):
+        """
+        Given only a native settings.json layer carrying a malformed
+            [hard_deny] entry
+        When validation_issues() runs
+        Then nothing is reported -- [hard_deny] is a toolguard extension
+            never read from native layers, matching hard_deny()'s own
+            is_native skip
+        """
+        layers = (
+            ConfigLayer(
+                Provenance(
+                    "project", "claude", "json", Path("/p/.claude/settings.local.json")
+                ),
+                MappingProxyType({"hard_deny": {"deny": [{"oops": "no pattern key"}]}}),
+            ),
+        )
+        config = Configuration(layers=layers)
+        self.assertEqual(config.validation_issues(), ())
+
     def test_non_bool_takeover_enabled_reported_as_error(self):
         """
         Given a hook layer whose takeover_mode.enabled is the string "false" (not a bool)

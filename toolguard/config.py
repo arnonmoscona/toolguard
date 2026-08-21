@@ -47,6 +47,7 @@ from toolguard.config_types import (
     UnrecognizedFallbackSetting as UnrecognizedFallbackSetting,
 )
 from toolguard.config_validation import (
+    find_hard_deny_entry_issues,
     find_wrong_shaped_permission_lists,
     validate_permissions,
 )
@@ -1592,6 +1593,9 @@ class Configuration:
           or an entry of one that is not a string.
         - A rules-directory file defining a top-level key outside
           ``[permissions]``/``[hard_deny]``.
+        - A ``[hard_deny]`` entry that :func:`~toolguard.rule_entry.normalize_entry`
+          rejects (per layer -- ``[hard_deny]`` is never merged, unlike
+          ``[permissions]`` below).
         - Unsupported tools referenced in toolguard_hook permissions.
         - Tools referenced in permissions but absent from governed_tools.
 
@@ -1811,6 +1815,18 @@ class Configuration:
                     ),
                 )
             )
+
+        # 3.5) [hard_deny] entries, per layer -- never merged across layers
+        #    (see config_validation._SHAPE_CHECKED_SECTIONS), so unlike
+        #    [permissions] below there is no merged view to validate once.
+        #    Without this, a malformed hard_deny entry (e.g. a structured
+        #    table missing its pattern key) is silently dropped by
+        #    _extract_tool_entries with NO record anywhere -- not even a
+        #    warning, since validate_permissions only ever sees [permissions].
+        for layer in self.layers:
+            if layer.is_native:
+                continue
+            issues.extend(find_hard_deny_entry_issues(layer.content))
 
         # 4) Permission validation over the merged toolguard_hook content only.
         # A layer whose permissions section (or an allow/deny/ask list within

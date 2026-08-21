@@ -198,3 +198,34 @@ def validate_permissions(config: dict) -> Tuple[Issue, ...]:
             )
 
     return tuple(issues)
+
+
+def find_hard_deny_entry_issues(content: Mapping[str, object]) -> Tuple[Issue, ...]:
+    """
+    Report ``normalize_entry`` rejections in one layer's raw ``[hard_deny]`` lists.
+
+    ``[hard_deny]`` is never merged across layers (see
+    :data:`_SHAPE_CHECKED_SECTIONS`), so unlike ``[permissions]`` -- validated
+    once over :func:`validate_permissions`'s merged view -- its entries are
+    checked per layer. A wrong-shaped list is a distinct issue, already
+    reported by :func:`find_wrong_shaped_permission_lists`; this only looks at
+    entries within an already list-shaped ``allow``/``deny``.
+
+    Args:
+        content: One layer's raw, un-merged parsed dict.
+
+    Returns:
+        A tuple of :class:`Issue`, one per rejected entry, in list order.
+    """
+    section = content.get("hard_deny")
+    if not isinstance(section, dict):
+        return ()
+    issues: List[Issue] = []
+    for list_key in ("allow", "deny"):
+        value = section.get(list_key)
+        if not isinstance(value, list):
+            continue
+        for element in value:
+            _entry, entry_issues = normalize_entry(element, is_native=False)
+            issues.extend(entry_issues)
+    return tuple(issues)

@@ -496,6 +496,44 @@ class TestEnrichmentGuard(_TempConfigMixin, unittest.TestCase):
         self.assertIn("would lose rule enrichment", out)
 
 
+class TestAddedPatternNormalizeRejection(_TempConfigMixin, unittest.TestCase):
+    """
+    A proposal whose added_pattern normalize_entry rejects is refused,
+    not silently written with the rejected pattern (TOO-45 #42).
+    """
+
+    def test_newline_in_added_pattern_is_skipped_not_written(self):
+        """
+        Given a TOML allow list and a proposal whose added_pattern embeds a
+            newline (defeating the Tool(...) wrapper strip -- the same
+            condition normalize_entry rejects everywhere else)
+        When apply_proposals runs the proposal
+        Then it is skipped, with normalize_entry's own rejection message as
+            the reason, and the file is byte-for-byte unchanged
+        """
+        toml_content = '[permissions]\nallow = [\n  "Bash(git diff:*)",\n  "Bash(git status:*)",\n]\n'
+        cfg = self._write("toolguard_hook.toml", toml_content)
+        before = cfg.read_text()
+
+        proposal = ConsolidationProposal(
+            kind="literal-alternation",
+            tool="Bash",
+            list_type="allow",
+            layer_provenance=_prov(cfg),
+            removed_patterns=("git diff:*", "git status:*"),
+            added_pattern="evil\npattern",
+            rationale="alternation at token 1",
+            replay_summary="probes unchanged; no corpus",
+        )
+        report = apply_proposals([proposal])
+
+        self.assertEqual(report.total_applied, 0)
+        self.assertEqual(report.total_skipped, 1)
+        self.assertIn("newline", report.files[0].skipped[0][1])
+        self.assertEqual(cfg.read_text(), before)
+        self.assertFalse(report.files[0].written)
+
+
 class TestApplyJson(_TempConfigMixin, unittest.TestCase):
     """Applying an allow-list consolidation to a JSON config."""
 

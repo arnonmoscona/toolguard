@@ -197,14 +197,17 @@ def _resolve_added_entry(
         ``skip_reason`` is ``None`` and ``resolved_entries`` holds the single
         entry that should replace every existing ``allow`` entry for
         ``added_wrapped`` -- one entry, because every input shares one
-        pattern. When :func:`merge_entries` reports a metadata conflict among
-        them the proposal is refused instead: ``skip_reason`` names the
-        contended key and contains the literal phrase "would lose rule
-        enrichment", and ``resolved_entries`` is empty.
+        pattern. The proposal is refused instead (``skip_reason`` set,
+        ``resolved_entries`` empty) when :func:`merge_entries` reports a
+        metadata conflict -- ``skip_reason`` then names the contended key and
+        contains the literal phrase "would lose rule enrichment" -- or when
+        :func:`~toolguard.rule_entry.normalize_entry` rejects ``added_wrapped``
+        itself (e.g. an embedded newline), in which case ``skip_reason`` is
+        that rejection's message.
     """
-    new_entry, _issues = normalize_entry(added_wrapped, is_native=False)
+    new_entry, issues = normalize_entry(added_wrapped, is_native=False)
     if new_entry is None:
-        new_entry = RuleEntry(pattern=added_wrapped, raw=added_wrapped)
+        return issues[0].message, ()
 
     existing = [entry for entry in allow if entry.pattern == added_wrapped]
     outcome = merge_entries(existing + [new_entry])
