@@ -138,6 +138,16 @@ def find_static_duplicates(
         key = _normalised_body(pat)
         if key in seen:
             canonical = seen[key]
+            if pat == canonical:
+                note = f"Exact duplicate of '{canonical}'."
+            else:
+                note = (
+                    f"Spelling duplicate of '{canonical}': both normalise to "
+                    f"the same key (type={key[0]}, body='{key[1]}'), which is "
+                    f"coarser than the real matcher -- e.g. it folds case and "
+                    f"collapses whitespace runs the matcher does not. Review "
+                    f"before treating them as one rule."
+                )
             findings.append(
                 RedundancyFinding(
                     redundant_pattern=pat,
@@ -146,10 +156,7 @@ def find_static_duplicates(
                     list_type=list_type,
                     tool=tool,
                     covered_by=canonical,
-                    note=(
-                        f"Duplicate of '{canonical}': normalises to the same "
-                        f"pattern (type={key[0]}, body='{key[1]}')"
-                    ),
+                    note=note,
                 )
             )
         else:
@@ -198,26 +205,43 @@ def _config_without_allow(
     config: Configuration,
     tool: str,
     pattern_to_remove: str,
+    provenance: Optional[Provenance] = None,
 ) -> Configuration:
     """
     Return a synthetic :class:`Configuration` with one allow pattern removed.
 
-    Only the FIRST layer holding ``pattern_to_remove`` is edited, and every
-    occurrence in that layer goes.
+    When ``provenance`` is given, only that layer is searched and edited. When
+    it is omitted, every layer is searched in order and the FIRST one holding
+    ``pattern_to_remove`` is edited, and every occurrence in that layer goes --
+    the caller-agnostic default, kept for callers with no known owning layer.
+
+    A caller that already knows the owning layer (e.g. from
+    :func:`~toolguard.tools.config_access.per_layer_rules`) should always pass
+    ``provenance``: searching every layer's raw content instead can find and
+    strip a DIFFERENT layer's occurrence of the same pattern -- one takeover
+    mode has already neutralised on a native layer, say -- making the removal
+    a no-op that trivially replays as "changed nothing" while the layer the
+    caller actually means to test goes untouched.
 
     Args:
         config: The original configuration.
         tool: The tool whose allow list is modified (e.g. ``'Bash'``).
         pattern_to_remove: The wrapper-free pattern body to remove.
+        provenance: Restrict the search to this one layer.
 
     Returns:
         A new :class:`Configuration`, or the ``config`` object itself -- not a
-        copy of it -- when no layer holds the pattern, so a caller can tell
-        "nothing to remove" from "removed" by identity.
+        copy of it -- when no matching layer holds the pattern, so a caller can
+        tell "nothing to remove" from "removed" by identity.
     """
     wrapped_target = wrap_tool_pattern(tool, pattern_to_remove)
+    layers = (
+        config.layers
+        if provenance is None
+        else (layer for layer in config.layers if layer.provenance == provenance)
+    )
 
-    for layer in config.layers:
+    for layer in layers:
         permissions = layer.content.get("permissions", {})
         if not isinstance(permissions, dict):
             continue
@@ -250,10 +274,13 @@ def find_corpus_redundant_allows(
     """
     Find allow rules for ``tool`` whose removal changes no decision over ``corpus``.
 
-    Each allow pattern is removed in turn and the corpus replayed against the
-    config with and without it; the pattern is reported when the diff has zero
-    broadened and zero tightened entries.  A pattern occurring in more than one
-    layer is tested once.  Deny and ask rules are not tested at all.
+    Each allow pattern is removed from its owning layer in turn and the corpus
+    replayed against the config with and without it; the pattern is reported
+    when the diff has zero broadened and zero tightened entries.  A pattern
+    occurring in more than one layer is tested once, against the first layer
+    :func:`~toolguard.tools.config_access.per_layer_rules` reports it in --
+    the same layer the finding's ``provenance`` names, so what was removed and
+    what is reported never diverge.  Deny and ask rules are not tested at all.
 
     A corpus that never exercises a rule yields the same zero diff as a rule
     another rule genuinely covers, so a finding is a candidate for review whose
@@ -282,7 +309,9 @@ def find_corpus_redundant_allows(
                 continue
             tested.add(pattern)
 
-            config_without = _config_without_allow(config, tool, pattern)
+            config_without = _config_without_allow(
+                config, tool, pattern, provenance=lr.provenance
+            )
             if config_without is config:
                 # Nothing was removed, so the replay below would trivially show
                 # no change and report the pattern redundant.

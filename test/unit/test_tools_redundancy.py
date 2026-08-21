@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import List, Optional
 
 from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.permissions import match_command
 from toolguard.tools.log_harvest import LogEntry
 from toolguard.tools.redundancy import (
     _config_without_allow,
@@ -40,8 +41,13 @@ def _make_layer(
     ask: Optional[List[str]] = None,
     is_native: bool = False,
     specificity: int = 0,
+    takeover: Optional[dict] = None,
 ) -> ConfigLayer:
-    """Build a ConfigLayer whose allow/deny/ask hold the given patterns, wrapped as ``Tool(inner)``."""
+    """
+    Build a ConfigLayer whose allow/deny/ask hold the given patterns, wrapped
+    as ``Tool(inner)``.  ``takeover``, when given, becomes the layer's
+    ``[takeover_mode]`` section.
+    """
     prefix = f"{tool}("
     wrapped_allow = [f"{prefix}{p})" for p in (allow or [])]
     wrapped_deny = [f"{prefix}{p})" for p in (deny or [])]
@@ -57,16 +63,16 @@ def _make_layer(
         ),
         specificity=specificity,
     )
-    content = MappingProxyType(
-        {
-            "permissions": {
-                "allow": wrapped_allow,
-                "deny": wrapped_deny,
-                "ask": wrapped_ask,
-            }
+    raw_content = {
+        "permissions": {
+            "allow": wrapped_allow,
+            "deny": wrapped_deny,
+            "ask": wrapped_ask,
         }
-    )
-    return ConfigLayer(provenance=prov, content=content)
+    }
+    if takeover is not None:
+        raw_content["takeover_mode"] = takeover
+    return ConfigLayer(provenance=prov, content=MappingProxyType(raw_content))
 
 
 def _make_config(*layers: ConfigLayer) -> Configuration:
@@ -180,6 +186,49 @@ class TestFindStaticDuplicates(unittest.TestCase):
         patterns = ["[regex]git *", "git *"]
         findings = find_static_duplicates(patterns, _make_provenance(), "Bash", "allow")
         self.assertEqual(findings, [])
+
+
+class TestStaticDuplicateNoteWording(unittest.TestCase):
+    """
+    RD1: a shared normalisation key does not mean the matcher treats the two
+    patterns alike, so the note must not claim they are one rule.
+    """
+
+    def test_a_space_collapsed_pair_is_worded_as_a_spelling_duplicate(self):
+        """
+        Given 'a  b:*' (double space) and 'a b:*' (single space) -- the same
+              normalised key, but the matcher tells them apart: 'a  b x'
+              matches only the double-spaced pattern
+        When find_static_duplicates() is called
+        Then the finding calls it a spelling duplicate needing review, and
+             never says the two are the same rule or safe to drop.
+        """
+        matches_left, _ = match_command("a  b x", ["a  b:*"])
+        matches_right, _ = match_command("a  b x", ["a b:*"])
+        self.assertTrue(matches_left)
+        self.assertFalse(matches_right)
+
+        findings = find_static_duplicates(
+            ["a  b:*", "a b:*"], _make_provenance(), "Bash", "allow"
+        )
+        self.assertEqual(len(findings), 1)
+        note = findings[0].note
+        self.assertIn("Spelling duplicate", note)
+        self.assertNotIn("redundant and can be dropped", note)
+        self.assertNotIn("is the same rule", note)
+
+    def test_a_byte_identical_pair_is_worded_as_an_exact_duplicate(self):
+        """
+        Given the same literal pattern string twice
+        When find_static_duplicates() is called
+        Then the note calls it an exact duplicate, not hedged as merely a
+             spelling match -- an identical string is not a coarser claim.
+        """
+        findings = find_static_duplicates(
+            ["git status:*", "git status:*"], _make_provenance(), "Bash", "allow"
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("Exact duplicate", findings[0].note)
 
 
 class TestFindStaticDuplicatesAcrossLayers(unittest.TestCase):
@@ -450,3 +499,126 @@ class TestCorpusRedundancy(unittest.TestCase):
         corpus_findings = [f for f in findings if f.kind == "corpus"]
         redundant_patterns = [f.redundant_pattern for f in corpus_findings]
         self.assertNotIn("git push:*", redundant_patterns)
+
+
+# ---------------------------------------------------------------------------
+# RD2 -- the rule tested is the rule reported
+# ---------------------------------------------------------------------------
+
+
+class TestConfigWithoutAllowProvenance(unittest.TestCase):
+    """_config_without_allow(provenance=...) targets one specific layer."""
+
+    def test_provenance_none_preserves_first_match_search(self):
+        """
+        Given the same pattern present in two layers
+        When _config_without_allow is called with no provenance
+        Then the FIRST layer (in config.layers order) is the one edited --
+             unchanged legacy behaviour for callers with no known owner.
+        """
+        first = _make_layer("Bash", allow=["git status:*"], specificity=1)
+        second = _make_layer("Bash", allow=["git status:*"], specificity=0)
+        config = _make_config(first, second)
+
+        result = _config_without_allow(config, "Bash", "git status:*")
+
+        self.assertEqual(result.layers[0].content["permissions"]["allow"], [])
+        self.assertEqual(
+            result.layers[1].content["permissions"]["allow"], ["Bash(git status:*)"]
+        )
+
+    def test_provenance_given_restricts_the_search_to_that_layer(self):
+        """
+        Given the same pattern present in two layers
+        When _config_without_allow is called with the SECOND layer's provenance
+        Then that layer is edited and the first is left untouched, even though
+             the first layer is also a match and would win an unscoped search.
+        """
+        first = _make_layer("Bash", allow=["git status:*"], specificity=1)
+        second = _make_layer("Bash", allow=["git status:*"], specificity=0)
+        config = _make_config(first, second)
+
+        result = _config_without_allow(
+            config, "Bash", "git status:*", provenance=second.provenance
+        )
+
+        self.assertEqual(
+            result.layers[0].content["permissions"]["allow"], ["Bash(git status:*)"]
+        )
+        self.assertEqual(result.layers[1].content["permissions"]["allow"], [])
+
+    def test_provenance_given_but_absent_from_that_layer_is_a_no_op(self):
+        """
+        Given a pattern present in one layer only
+        When _config_without_allow is called with a DIFFERENT layer's provenance
+        Then the original config object is returned unchanged, even though the
+             pattern does exist somewhere in the config.
+        """
+        holder = _make_layer("Bash", allow=["git status:*"], specificity=1)
+        other = _make_layer("Bash", allow=["ls:*"], specificity=0)
+        config = _make_config(holder, other)
+
+        result = _config_without_allow(
+            config, "Bash", "git status:*", provenance=other.provenance
+        )
+
+        self.assertIs(result, config)
+
+
+class TestCorpusRedundancyProvenanceAttribution(unittest.TestCase):
+    """
+    The replay that backs a corpus finding must remove the SAME copy the
+    finding is attributed to -- not a different layer's occurrence of the
+    same pattern.
+    """
+
+    def test_a_takeover_neutralised_native_copy_does_not_launder_the_live_hook_copy(
+        self,
+    ):
+        """
+        Given a native layer allowing 'Bash(*)' neutralised by takeover, and a
+              toolguard_hook layer allowing both 'Bash(*)' (live) and
+              'Bash(ls:*)', with a corpus command only the live '*' admits
+        When find_corpus_redundant_allows runs
+        Then '*' is NOT reported redundant -- removing the hook's live copy
+             does change a decision, even though the native layer's already-
+             dead copy of the same pattern would replay as a no-op.
+        """
+        native = _make_layer("Bash", allow=["*"], is_native=True, specificity=1)
+        hook = _make_layer(
+            "Bash",
+            allow=["*", "ls:*"],
+            specificity=0,
+            takeover={"enabled": True, "ignored_allow_patterns": ["Bash(*)"]},
+        )
+        config = _make_config(native, hook)
+        corpus = [_make_log_entry("Bash", "npm publish")]
+
+        findings = find_corpus_redundant_allows(config, "Bash", corpus)
+
+        self.assertNotIn("*", [f.redundant_pattern for f in findings])
+
+    def test_a_pattern_only_the_dead_native_copy_holds_is_never_tested(self):
+        """
+        Given the same neutralised-native / live-hook shape, and a corpus
+              command 'ls -la' that 'ls:*' alone admits
+        When find_corpus_redundant_allows runs
+        Then 'ls:*' -- not reachable through the neutralised native copy at
+             all -- can still be correctly reported, showing the fix does not
+             suppress genuine findings alongside the false one.
+        """
+        native = _make_layer("Bash", allow=["*"], is_native=True, specificity=1)
+        hook = _make_layer(
+            "Bash",
+            allow=["*", "ls:*"],
+            specificity=0,
+            takeover={"enabled": True, "ignored_allow_patterns": ["Bash(*)"]},
+        )
+        config = _make_config(native, hook)
+        corpus = [_make_log_entry("Bash", "ls -la")]
+
+        findings = find_corpus_redundant_allows(config, "Bash", corpus)
+
+        # 'ls -la' is admitted by both '*' and 'ls:*', so removing either alone
+        # changes nothing over this one-entry corpus -- both are candidates.
+        self.assertIn("ls:*", [f.redundant_pattern for f in findings])

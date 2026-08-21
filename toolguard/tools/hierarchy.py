@@ -396,8 +396,10 @@ def find_cross_layer_redundancies(
                     covered_by_provenance=cover_prov,
                     note=(
                         f"'{pattern}' at {lr.provenance.describe()} is also present "
-                        f"at {cover_prov.describe()}, which decides in its place; "
-                        f"this copy is redundant and can be dropped."
+                        f"at {cover_prov.describe()}, which would decide in its "
+                        f"place if this copy were removed. No deny/ask rule with "
+                        f"the same normalised body sits between them, but that is "
+                        f"not a full safety check -- review before removing."
                     ),
                 )
             )

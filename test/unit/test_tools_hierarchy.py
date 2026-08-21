@@ -549,14 +549,15 @@ class TestCrossLayerRedundancy(unittest.TestCase):
         """
         Given project allow 'git push:*', an intermediate deny of the same body, and a
               user allow of it -- an ordinary project/directory/user hierarchy
-        When each reported redundancy is dropped and the command re-decided
-        Then the decision does not change.
+        When find_cross_layer_redundancies runs
+        Then the project copy is not reported, and any finding that IS reported
+             survives being dropped.
 
-        The scan reads allow lists only, so it cannot see the intervening deny
-        that takes the decision over; the finding's own note tells the operator
-        the copy "can be dropped".  Measured: allow (project) becomes deny
-        (intermediate).  Any fix that stops reporting this, or gates it on a
-        replay, satisfies the test.
+        Dropping the project copy makes the intermediate deny decide, turning
+        'git push' from allow into deny.  The scan suppresses the finding
+        because a deny with the same normalised body sits between the two
+        allows.  The empty-list assertion is what makes this test falsifiable:
+        without it the loop below passes vacuously whenever nothing is found.
         """
         proj, mid, user = _prov(0, PROJ), _prov(1, MID), _prov(2, USER)
         config = _config(
@@ -566,6 +567,8 @@ class TestCrossLayerRedundancy(unittest.TestCase):
         )
         before = _verdict(config, "git push")
         self.assertEqual(before, ("allow", PROJ, "git push:*"))
+
+        self.assertEqual(_findings(config), [])
 
         for finding in find_cross_layer_redundancies(config, TOOL):
             dropped = _without(config, finding.redundant_provenance, finding.pattern)
@@ -655,6 +658,32 @@ class TestCrossLayerRedundancy(unittest.TestCase):
             examined_nothing,
             "a scan that examined nothing reports exactly what a clean scan reports",
         )
+
+
+class TestCrossLayerRedundancyNoteWording(unittest.TestCase):
+    """
+    HR2: a finding's note must not claim a safe deletion the scan never
+    verified -- it may only describe what was actually checked (a covering
+    layer exists; no same-key deny/ask sits between them).
+    """
+
+    def test_note_never_claims_the_copy_can_be_dropped(self):
+        """
+        Given 'git status:*' present in both the project and the user layer
+        When find_cross_layer_redundancies runs
+        Then the finding's note does not claim the copy "can be dropped" and
+             explicitly disclaims being a full safety check -- only that a
+             broader layer would take over.
+        """
+        proj, user = _prov(0, PROJ), _prov(2, USER)
+        config = _config(
+            _layer(proj, allow=["git status:*"]),
+            _layer(user, allow=["git status:*"]),
+        )
+        note = find_cross_layer_redundancies(config, TOOL)[0].note
+        self.assertNotIn("can be dropped", note)
+        self.assertIn("not a full safety check", note)
+        self.assertIn("review", note)
 
 
 class TestMigrationSerialization(unittest.TestCase):
