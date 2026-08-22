@@ -412,5 +412,62 @@ class TestMixedConstructs(unittest.TestCase):
         self.assertEqual(name(sole_command(inner)), "cat")
 
 
+def _is_comment(node):
+    """A comment node's only identity: the `hash`/`body` labels the grammar gives it."""
+    return hasattr(node, "hash") and hasattr(node, "body")
+
+
+class TestCommentParsing(unittest.TestCase):
+    """The grammar's own `comment` rule (TOO-45 item 105) -- not a lexical pre-pass."""
+
+    def test_trailing_comment_is_its_own_labelled_node(self):
+        """
+        Given a command followed by a trailing comment ('echo hi # note')
+        When it is parsed by the PEG bash parser
+        Then the argument list's last token is a comment node carrying the
+            full '# note' text, and it is the only comment-labelled token
+        """
+        element = sole_command(statement(bash_parser.parse("echo hi # note")))
+        arg_tokens = element.elements[1].elements
+        comments = [t for t in arg_tokens if _is_comment(t)]
+        self.assertEqual([c.text for c in comments], ["# note"])
+
+    def test_comment_only_input_parses(self):
+        """
+        Given an input consisting only of a comment ('# only a comment')
+        When it is parsed by the PEG bash parser
+        Then parsing succeeds (comment_only_program) instead of raising ParseError
+        """
+        bash_parser.parse("# only a comment")
+
+    def test_quoted_hash_is_not_a_comment_node(self):
+        """
+        Given a '#' inside a single-quoted argument ("echo '# quoted'")
+        When it is parsed by the PEG bash parser
+        Then no comment-labelled node appears anywhere in the tree
+        """
+        tree = bash_parser.parse("echo '# quoted'")
+
+        def has_comment(node):
+            if node is None:
+                return False
+            if _is_comment(node):
+                return True
+            return any(has_comment(c) for c in getattr(node, "elements", None) or [])
+
+        self.assertFalse(has_comment(tree))
+
+    def test_mid_word_hash_is_not_a_comment_node(self):
+        """
+        Given a '#' embedded mid-word, not at a word boundary ('echo a#b')
+        When it is parsed by the PEG bash parser
+        Then the argument is a single token 'a#b' and carries no comment node
+        """
+        element = sole_command(statement(bash_parser.parse("echo a#b")))
+        arg_tokens = element.elements[1].elements
+        self.assertEqual([t.text.strip() for t in arg_tokens], ["a#b"])
+        self.assertFalse(any(_is_comment(t) for t in arg_tokens))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,10 +7,12 @@ Nothing here reads a raw Canopy node's attributes.
 
 - :func:`extract_structured_from_grammar` takes an already-parsed tree and
   returns :class:`LeafCommand` / :class:`UndecidableSegment` objects, so a
-  segment that cannot be decomposed says so instead of vanishing.
+  segment that cannot be decomposed says so instead of vanishing. A trailing
+  ``#`` comment never reaches a leaf's ``text``; pass ``include_comments=True``
+  to see it on :attr:`LeafCommand.trailing_comment` instead of discarding it.
 - :func:`extract_commands` parses the string itself and returns plain command
-  strings. It never reports an undecidable segment, and it runs no lexical
-  pre-pass.
+  strings. It never reports an undecidable segment, runs no lexical pre-pass,
+  and has no comment-surfacing hook of its own.
 
 Business policy -- what counts as foreign inline code, what earns the ASK
 floor, and who receives a lifted heredoc's body -- lives here rather than in
@@ -55,18 +57,30 @@ class LeafCommand(object):
     Also indexes and iterates as the 2-tuple ``(text, ask_floor)``.
 
     Attributes:
-        text: The command string.
+        text: The command string. Never includes a trailing comment.
         ask_floor: Set for foreign inline code and for a heredoc bound for a
             foreign sink. Nothing here decomposes such a payload: an inline
             one stays whole in *text*, while a heredoc body is already gone by
             this point, leaving only a ``__HEREDOC_TO_<sink>__`` sentinel.
+        trailing_comment: The leaf's own trailing ``# ...`` comment text, or
+            None. Only populated when the caller passes
+            ``include_comments=True`` to :func:`extract_structured_from_grammar`
+            -- default is None, matching prior behaviour. Not part of
+            equality or hashing, which stay the documented ``(text,
+            ask_floor)`` pair.
     """
 
-    __slots__ = ("text", "ask_floor")
+    __slots__ = ("text", "ask_floor", "trailing_comment")
 
-    def __init__(self, text: str, ask_floor: bool = False) -> None:
+    def __init__(
+        self,
+        text: str,
+        ask_floor: bool = False,
+        trailing_comment: Optional[str] = None,
+    ) -> None:
         self.text = text
         self.ask_floor = ask_floor
+        self.trailing_comment = trailing_comment
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, LeafCommand):
@@ -74,7 +88,10 @@ class LeafCommand(object):
         return NotImplemented
 
     def __repr__(self) -> str:
-        return f"LeafCommand(text={self.text!r}, ask_floor={self.ask_floor!r})"
+        return (
+            f"LeafCommand(text={self.text!r}, ask_floor={self.ask_floor!r}, "
+            f"trailing_comment={self.trailing_comment!r})"
+        )
 
     def __hash__(self) -> int:
         return hash((self.text, self.ask_floor))
@@ -953,7 +970,10 @@ def _substitution_carries_ask_floor(cmd_substs: Sequence["IRCompound"]) -> bool:
 
 
 def _apply_leaf_policy(
-    cmd_text: str, seen: Set[str], cmd_substs: Sequence["IRCompound"] = ()
+    cmd_text: str,
+    seen: Set[str],
+    cmd_substs: Sequence["IRCompound"] = (),
+    trailing_comment: Optional[str] = None,
 ) -> List[ExtractionResult]:
     """Apply the module's leaf-level business policy to one leaf command's text.
 
@@ -972,6 +992,10 @@ def _apply_leaf_policy(
             structure's condition text, and the ``bash -c`` recursion below --
             pass none, so a substitution inside a condition is not yet
             covered by this check.
+        trailing_comment: The leaf's own trailing comment text, to attach to
+            the :class:`LeafCommand` this call produces -- not propagated
+            into the ``bash -c`` recursion, whose leaves belong to different
+            (inner) text.
 
     Returns:
         Zero or one :class:`ExtractionResult` items -- except on the
@@ -992,18 +1016,31 @@ def _apply_leaf_policy(
     if _detect_foreign_inline_code(cmd_text) or _substitution_carries_ask_floor(
         cmd_substs
     ):
-        return [LeafCommand(text=cmd_text, ask_floor=True)]
+        return [
+            LeafCommand(
+                text=cmd_text, ask_floor=True, trailing_comment=trailing_comment
+            )
+        ]
 
     if "__HEREDOC_TO_" in cmd_text:
         m = re.search(r"__HEREDOC_TO_(\w+)__", cmd_text)
         if m and _is_foreign_executor(m.group(1)):
-            return [LeafCommand(text=cmd_text, ask_floor=True)]
+            return [
+                LeafCommand(
+                    text=cmd_text, ask_floor=True, trailing_comment=trailing_comment
+                )
+            ]
 
-    return [LeafCommand(text=cmd_text, ask_floor=False)]
+    return [
+        LeafCommand(text=cmd_text, ask_floor=False, trailing_comment=trailing_comment)
+    ]
 
 
 def _structured_from_ir_element(
-    element, results: List[ExtractionResult], seen: Set[str]
+    element,
+    results: List[ExtractionResult],
+    seen: Set[str],
+    include_comments: bool = False,
 ) -> None:
     """Append one IR pipeline element's structured results to *results*.
 
@@ -1056,28 +1093,41 @@ def _structured_from_ir_element(
                     )
                 )
             return
-        results.extend(_apply_leaf_policy(element.text, seen, element.cmd_substs))
+        comment_text = (
+            element.trailing_comment.text
+            if include_comments and element.trailing_comment is not None
+            else None
+        )
+        results.extend(
+            _apply_leaf_policy(element.text, seen, element.cmd_substs, comment_text)
+        )
         return
 
     if isinstance(element, IRSubshell):
         # Only the inner commands: the `(...)`/`{...}` wrapper text is not
         # itself a leaf here, unlike in the extract_commands projection.
-        _structured_from_compound(element.inner, results, seen)
+        _structured_from_compound(element.inner, results, seen, include_comments)
         return
 
 
 def _structured_from_pipeline(
-    pipeline: IRPipeline, results: List[ExtractionResult], seen: Set[str]
+    pipeline: IRPipeline,
+    results: List[ExtractionResult],
+    seen: Set[str],
+    include_comments: bool = False,
 ) -> None:
     for element in pipeline.elements:
-        _structured_from_ir_element(element, results, seen)
+        _structured_from_ir_element(element, results, seen, include_comments)
 
 
 def _structured_from_compound(
-    compound: IRCompound, results: List[ExtractionResult], seen: Set[str]
+    compound: IRCompound,
+    results: List[ExtractionResult],
+    seen: Set[str],
+    include_comments: bool = False,
 ) -> None:
     for pipeline in compound.pipelines:
-        _structured_from_pipeline(pipeline, results, seen)
+        _structured_from_pipeline(pipeline, results, seen, include_comments)
 
 
 # ---------------------------------------------------------------------------
@@ -1087,11 +1137,22 @@ def _structured_from_compound(
 
 def extract_structured_from_grammar(
     tree,
+    include_comments: bool = False,
 ) -> List[ExtractionResult]:
     """Extract structured results from an already-parsed grammar tree.
 
+    A comment is always represented on the IR
+    (:attr:`~toolguard.parser.command_model.IRSimpleCmd.trailing_comment`)
+    regardless of *include_comments* -- it is never part of a leaf's
+    ``text``. Whether it also reaches the caller is this function's own
+    choice, not command_model's.
+
     Args:
         tree: The canopy parse tree root node (program or compound_command).
+        include_comments: When True, a leaf's trailing ``#`` comment (if any)
+            is attached to :attr:`LeafCommand.trailing_comment`. Default
+            False, matching prior behaviour, where a comment was simply
+            absent.
 
     Returns:
         Ordered list of :class:`LeafCommand` and :class:`UndecidableSegment`
@@ -1102,7 +1163,7 @@ def extract_structured_from_grammar(
     seen: Set[str] = set()
     ir = build_ir(tree)
     for statement in ir.statements:
-        _structured_from_compound(statement, results, seen)
+        _structured_from_compound(statement, results, seen, include_comments)
     return results
 
 
@@ -1341,11 +1402,14 @@ def extract_commands(command_line: str) -> List[str]:
     A control structure contributes only its own whole text -- nothing from
     inside it.
 
-    NO LEXICAL PRE-PASS: heredocs, comments and line continuations are not
-    handled, so a multi-line blob belongs in
+    NO LEXICAL PRE-PASS: heredocs and line continuations are not handled, so
+    a multi-line blob belongs in
     :func:`toolguard.parser.multiline.extract_structured` instead. Here a
-    heredoc's body lines and its terminator word each come back as commands of
-    their own.
+    heredoc's body lines and its terminator word each come back as commands
+    of their own. A trailing comment IS excluded from each command's text --
+    the grammar recognises it (:mod:`command_model`) independently of any
+    pre-pass -- but this function has no hook to surface its content, unlike
+    :func:`extract_structured_from_grammar`'s ``include_comments``.
 
     FAILS OPEN, unlike the structured extractor: when the grammar rejects
     *command_line*, or extraction raises anything else, the whole line comes

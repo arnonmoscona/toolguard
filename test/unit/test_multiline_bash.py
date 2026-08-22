@@ -426,13 +426,38 @@ class TestMultilineRegressionGuards(unittest.TestCase):
         When a leading full-line comment `# rm -rf /` precedes `git status`
         Then the comment yields no leaf at all and the compound is ALLOWED
 
-        Two mechanisms strip comments -- `multiline._strip_comments` and the grammar's
-        own `comment` rule -- and each alone is invisible here (shape 19). Disabling
-        only one leaves this test green; that is measured, not assumed.
+        A leading comment is invisible to the IR builder by construction: it sits in
+        the top-level `line_ws` the grammar consumes ahead of the first statement,
+        which `command_model.build_ir` never descends into (TOO-45 item 105).
         """
         cmd = "# rm -rf /\ngit status"
         self.assertEqual(_extracted(cmd), [("leaf", "git status", False)])
         self.assertEqual(_resolve(cmd, ["git status:*"], ["rm -rf:*"]), "allow")
+
+    def test_trailing_comment_never_reaches_leaf_text(self):
+        """
+        Given allow `echo hi` and a command with a trailing disclosure-style comment
+        When `echo hi # note` is structured-extracted (default: comments discarded)
+        Then the leaf text is exactly `echo hi` -- the comment is not appended --
+            so the rule matches and the command is ALLOWED
+        """
+        cmd = "echo hi # note"
+        self.assertEqual(_extracted(cmd), [("leaf", "echo hi", False)])
+        self.assertEqual(_resolve(cmd, ["echo hi"], []), "allow")
+
+    def test_include_comments_attaches_without_changing_leaf_text(self):
+        """
+        Given a command with a trailing comment
+        When `extract_structured` is called with `include_comments=True`
+        Then the leaf text is unchanged and the comment is attached to
+            `LeafCommand.trailing_comment`; the default call still leaves it None
+        """
+        cmd = "echo hi # note"
+        [default_leaf] = extract_structured(cmd)
+        [included_leaf] = extract_structured(cmd, include_comments=True)
+        self.assertIsNone(default_leaf.trailing_comment)
+        self.assertEqual(included_leaf.text, "echo hi")
+        self.assertEqual(included_leaf.trailing_comment, "# note")
 
     def test_blank_lines_and_padding_are_trimmed(self):
         """

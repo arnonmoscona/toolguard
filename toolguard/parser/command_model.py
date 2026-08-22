@@ -38,7 +38,9 @@ class NodeKind(Enum):
     # Most of these name a bash_parser.peg rule. The two that do not:
     # CONTROL_OP_PAIR is the anonymous `(control_op pipeline)` repetition
     # inside compound_command, and SUBSHELL_OR_BRACE covers subshell,
-    # brace_group AND cmd_substitution -- see node_kind.
+    # brace_group AND cmd_substitution -- see node_kind. COMMENT is
+    # identified by its `hash`/`body` labels rather than by grammar rule
+    # name, same as every other kind here.
     PROGRAM = auto()
     FOR_LOOP = auto()
     WHILE_LOOP = auto()
@@ -51,6 +53,7 @@ class NodeKind(Enum):
     COMPOUND_CMD = auto()
     CONTROL_OP_PAIR = auto()
     PIPELINE = auto()
+    COMMENT = auto()
     GENERIC = auto()
 
 
@@ -73,6 +76,9 @@ def node_kind(node) -> NodeKind:
     """
     if node is None:
         return NodeKind.GENERIC
+
+    if hasattr(node, "hash") and hasattr(node, "body"):
+        return NodeKind.COMMENT
 
     if hasattr(node, "rest_stmts"):
         return NodeKind.PROGRAM
@@ -128,6 +134,17 @@ def node_kind(node) -> NodeKind:
 
 
 @dataclass(frozen=True)
+class IRComment:
+    """A ``#``-to-end-of-line comment (``bash_parser.peg``'s ``comment`` rule).
+
+    Attributes:
+        text: The comment's own text, including the leading ``#``.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True)
 class IRAssignmentPrefix:
     """The ``NAME=value`` assignments a simple command runs its command word with.
 
@@ -135,7 +152,8 @@ class IRAssignmentPrefix:
         names: Each assignment's variable name, in source order. The ``+`` of
             bash's ``NAME+=value`` is the operator, not part of the name.
         without_prefix: The command text from the executed word onward, cleaned
-            the same way :attr:`IRSimpleCmd.text` is.
+            the same way :attr:`IRSimpleCmd.text` is -- including exclusion of
+            a trailing comment.
     """
 
     names: Tuple[str, ...]
@@ -147,7 +165,8 @@ class IRSimpleCmd:
     """A leaf simple command from a pipeline_element node.
 
     Attributes:
-        text: The command text, per :func:`_clean_simple_cmd_text`.
+        text: The command text, per :func:`_clean_simple_cmd_text`. Never
+            includes a trailing comment -- see *trailing_comment*.
         has_proc_subst: True if any descendant is a process substitution
             (``<(...)`` or ``>(...)``), however deeply nested.
         cmd_substs: Ordered list of :class:`IRCompound` nodes for the
@@ -159,12 +178,17 @@ class IRSimpleCmd:
             none. Broken out because *text* names the assignment rather than
             the command under it, so a rule written against the command would
             not match.
+        trailing_comment: The command's own trailing ``# ...`` comment, or
+            None. Always populated when the grammar found one -- discarding
+            it is a choice made by :mod:`command_extractor`'s callers, not by
+            this module.
     """
 
     text: str
     has_proc_subst: bool = False
     cmd_substs: List["IRCompound"] = field(default_factory=list)
     assignment_prefix: Optional[IRAssignmentPrefix] = None
+    trailing_comment: Optional[IRComment] = None
 
 
 @dataclass
@@ -314,11 +338,13 @@ def _clean_simple_cmd_text(text: str) -> str:
     return text
 
 
-def _assignment_prefix(node) -> Optional[IRAssignmentPrefix]:
+def _assignment_prefix(node, text_end: int) -> Optional[IRAssignmentPrefix]:
     """Read a simple command's leading assignments off raw *node*, or None if it has none.
 
     Args:
         node: A raw Canopy simple_command TreeNode.
+        text_end: End offset, relative to *node*, of the command text --
+            i.e. excluding a trailing comment. See :func:`_build_simple_cmd`.
 
     Returns:
         An :class:`IRAssignmentPrefix`, or None when the grammar matched no
@@ -338,7 +364,7 @@ def _assignment_prefix(node) -> Optional[IRAssignmentPrefix]:
     # Offsets are into the whole input, so the executed part is found by
     # rebasing the command word's offset onto this node's own text.
     node_text = node.text if hasattr(node, "text") and node.text else ""
-    without_prefix = node_text[command_start.offset - node.offset :]
+    without_prefix = node_text[command_start.offset - node.offset : text_end]
     return IRAssignmentPrefix(
         names=names, without_prefix=_clean_simple_cmd_text(without_prefix)
     )
@@ -547,22 +573,35 @@ def _collect_cmd_substs(node, depth: int = 0) -> List["IRCompound"]:
 def _build_simple_cmd(node) -> IRSimpleCmd:
     """Build an :class:`IRSimpleCmd` from a raw simple_command *node*."""
     # simple_command <- command_name (proc_subst / redirection /
-    # cmd_substitution / command_arg)* -- so elements[1] is the argument
-    # repetition. Both halves can hold a substitution: `$(which python) -V`
-    # puts one in the command name, `echo $(id)` in the arguments.
+    # cmd_substitution / comment / command_arg)* -- so elements[1] is the
+    # argument repetition. Both command_name and the argument list can hold a
+    # substitution: `$(which python) -V` puts one in the command name, `echo
+    # $(id)` in the arguments. At most one comment can appear, and only as
+    # the LAST item -- it consumes to end-of-line, so nothing in this loop
+    # can follow it.
     elems = _get_elements(node)
     cmd_substs: List[IRCompound] = []
     cmd_name = getattr(node, "command_name", None)
     if cmd_name is not None:
         cmd_substs.extend(_collect_cmd_substs(cmd_name))
+
+    node_text = node.text if hasattr(node, "text") and node.text else ""
+    text_end = len(node_text)
+    trailing_comment: Optional[IRComment] = None
     if len(elems) > 1:
         for arg_item in _get_elements(elems[1]):
+            if node_kind(arg_item) == NodeKind.COMMENT:
+                trailing_comment = IRComment(text=_get_text(arg_item))
+                text_end = arg_item.offset - node.offset
+                continue
             cmd_substs.extend(_collect_cmd_substs(arg_item))
+
     return IRSimpleCmd(
-        text=_clean_simple_cmd_text(_get_text(node)),
+        text=_clean_simple_cmd_text(node_text[:text_end]),
         has_proc_subst=_tree_has_proc_subst(node),
         cmd_substs=cmd_substs,
-        assignment_prefix=_assignment_prefix(node),
+        assignment_prefix=_assignment_prefix(node, text_end),
+        trailing_comment=trailing_comment,
     )
 
 

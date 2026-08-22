@@ -16,7 +16,7 @@ bodies, to :mod:`toolguard.parser.command_extractor`, which reads which
 ``simple_command`` owns each placeholder off the parse tree and settles it
 -- structural work, done where the module already interprets the tree.
 
-What is left here is five lexical steps, applied in this order by
+What is left here is four lexical steps, applied in this order by
 :func:`extract_structured`:
 
   1. CRLF / lone-CR -> LF.
@@ -26,11 +26,16 @@ What is left here is five lexical steps, applied in this order by
      side table behind an opaque placeholder (:func:`_lift_heredocs`) --
      :mod:`~toolguard.parser.command_extractor` then resolves each
      placeholder and hands back the settled lines.
-  4. Comment strip: ``#``-to-EOL at a word boundary, outside quotes.
-  5. Whitespace: collapse horizontal runs, trim each line, drop blank lines.
+  4. Whitespace: collapse horizontal runs, trim each line, drop blank lines.
 
-The quote scanners across steps 2-4 do not agree; each documents its own
-model. Step 5 ignores quoting altogether.
+The quote scanners in steps 2 and 3 do not agree; each documents its own
+model. Step 4 ignores quoting altogether.
+
+A ``#``-to-EOL comment is no longer stripped here: the grammar recognises it
+directly (``bash_parser.peg``'s ``comment`` rule). :func:`extract_structured`
+discards it by default, matching the old pre-pass behaviour; pass
+``include_comments=True`` to see it instead
+(:attr:`~toolguard.parser.command_extractor.LeafCommand.trailing_comment`).
 
 Design principle: **when in doubt, ASK**. A blob that cannot be safely
 decomposed becomes an :class:`UndecidableSegment` rather than being passed
@@ -359,63 +364,7 @@ def _process_heredocs(lines: List[str]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Comment stripping
-# ---------------------------------------------------------------------------
-
-
-def _strip_comments(text: str) -> str:
-    """Remove ``#``-to-EOL comments at word boundaries, outside quotes.
-
-    A ``#`` starts a comment only when preceded by whitespace or at the start
-    of the string. A ``#`` mid-word -- a URL fragment, ``http://x#frag`` --
-    is not a comment, and neither is one inside single or double quotes.
-
-    Args:
-        text: Text to strip comments from.
-
-    Returns:
-        Text with comment runs removed. Newlines are preserved, so line
-        structure survives; the whitespace a comment left behind does not get
-        trimmed here.
-    """
-    result = []
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            result.append(ch)
-            i += 1
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-            result.append(ch)
-            i += 1
-        elif ch == "\\" and in_double:
-            result.append(ch)
-            if i + 1 < len(text):
-                result.append(text[i + 1])
-                i += 2
-            else:
-                i += 1
-        elif ch == "#" and not in_single and not in_double:
-            if i == 0 or text[i - 1] in " \t\n":
-                while i < len(text) and text[i] != "\n":
-                    i += 1
-                # The newline is left for the caller: it is a statement
-                # separator, not part of the comment.
-            else:
-                result.append(ch)
-                i += 1
-        else:
-            result.append(ch)
-            i += 1
-    return "".join(result)
-
-
-# ---------------------------------------------------------------------------
-# Step 5: Whitespace collapse
+# Step 4: Whitespace collapse
 # ---------------------------------------------------------------------------
 
 
@@ -446,10 +395,12 @@ def _collapse_whitespace(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def extract_structured(command_text: str) -> List[ExtractionResult]:
+def extract_structured(
+    command_text: str, include_comments: bool = False
+) -> List[ExtractionResult]:
     """Pre-process a raw command blob and extract its structured results.
 
-    The module's entry point: runs the five pre-pass steps in the module
+    The module's entry point: runs the four pre-pass steps in the module
     docstring, then hands the cleaned text to the grammar.
 
     Note what the caller receives on failure. A grammar ParseError -- or any
@@ -461,6 +412,10 @@ def extract_structured(command_text: str) -> List[ExtractionResult]:
     Args:
         command_text: Raw bash command text, possibly multi-line, CRLF, with
             heredocs and comments.
+        include_comments: Forwarded to
+            :func:`~toolguard.parser.command_extractor.extract_structured_from_grammar`.
+            Default False: a trailing comment is discarded, matching prior
+            behaviour.
 
     Returns:
         Ordered list of structured extraction results; empty for blank input
@@ -491,7 +446,6 @@ def extract_structured(command_text: str) -> List[ExtractionResult]:
         ]
     text = "\n".join(lines)
 
-    text = _strip_comments(text)
     text = _collapse_whitespace(text)
 
     if not text.strip():
@@ -499,7 +453,7 @@ def extract_structured(command_text: str) -> List[ExtractionResult]:
 
     try:
         tree = bash_parser.parse(text)
-        return extract_structured_from_grammar(tree)
+        return extract_structured_from_grammar(tree, include_comments=include_comments)
     except bash_parser.ParseError as e:
         logger.warning(
             "Grammar parse failed for command (after pre-pass): %s - %s",
