@@ -6041,54 +6041,75 @@ class Grammar(object):
                 address1 = self._read_var_ref()
                 if address1 is FAILURE:
                     self._offset = index2
-                    index3, elements1 = self._offset, []
-                    address2 = FAILURE
-                    index4 = self._offset
-                    address2 = self._read_delimiter()
-                    self._offset = index4
-                    if address2 is FAILURE:
-                        address2 = TreeNode(
-                            self._input[self._offset : self._offset], self._offset, []
+                    chunk0, max0 = None, self._offset + 2
+                    if max0 <= self._input_size:
+                        chunk0 = self._input[self._offset : max0]
+                    if chunk0 == "{}":
+                        address1 = TreeNode(
+                            self._input[self._offset : self._offset + 2],
+                            self._offset,
+                            [],
                         )
-                        self._offset = self._offset
+                        self._offset = self._offset + 2
                     else:
+                        address1 = FAILURE
+                        if self._offset > self._failure:
+                            self._failure = self._offset
+                            self._expected = []
+                        if self._offset == self._failure:
+                            self._expected.append(("BashParser::unquoted_word", '"{}"'))
+                    if address1 is FAILURE:
+                        self._offset = index2
+                        index3, elements1 = self._offset, []
                         address2 = FAILURE
-                    if address2 is not FAILURE:
-                        elements1.append(address2)
-                        address3 = FAILURE
-                        if self._offset < self._input_size:
-                            address3 = TreeNode(
-                                self._input[self._offset : self._offset + 1],
+                        index4 = self._offset
+                        address2 = self._read_delimiter()
+                        self._offset = index4
+                        if address2 is FAILURE:
+                            address2 = TreeNode(
+                                self._input[self._offset : self._offset],
                                 self._offset,
                                 [],
                             )
-                            self._offset = self._offset + 1
+                            self._offset = self._offset
                         else:
+                            address2 = FAILURE
+                        if address2 is not FAILURE:
+                            elements1.append(address2)
                             address3 = FAILURE
-                            if self._offset > self._failure:
-                                self._failure = self._offset
-                                self._expected = []
-                            if self._offset == self._failure:
-                                self._expected.append(
-                                    ("BashParser::unquoted_word", "<any char>")
+                            if self._offset < self._input_size:
+                                address3 = TreeNode(
+                                    self._input[self._offset : self._offset + 1],
+                                    self._offset,
+                                    [],
                                 )
-                        if address3 is not FAILURE:
-                            elements1.append(address3)
+                                self._offset = self._offset + 1
+                            else:
+                                address3 = FAILURE
+                                if self._offset > self._failure:
+                                    self._failure = self._offset
+                                    self._expected = []
+                                if self._offset == self._failure:
+                                    self._expected.append(
+                                        ("BashParser::unquoted_word", "<any char>")
+                                    )
+                            if address3 is not FAILURE:
+                                elements1.append(address3)
+                            else:
+                                elements1 = None
+                                self._offset = index3
                         else:
                             elements1 = None
                             self._offset = index3
-                    else:
-                        elements1 = None
-                        self._offset = index3
-                    if elements1 is None:
-                        address1 = FAILURE
-                    else:
-                        address1 = TreeNode(
-                            self._input[index3 : self._offset], index3, elements1
-                        )
-                        self._offset = self._offset
-                    if address1 is FAILURE:
-                        self._offset = index2
+                        if elements1 is None:
+                            address1 = FAILURE
+                        else:
+                            address1 = TreeNode(
+                                self._input[index3 : self._offset], index3, elements1
+                            )
+                            self._offset = self._offset
+                        if address1 is FAILURE:
+                            self._offset = index2
             if address1 is not FAILURE:
                 elements0.append(address1)
             else:

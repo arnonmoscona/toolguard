@@ -415,7 +415,11 @@ dollar_content <- (escaped_char / !"'" .)*
 
 # Unquoted words: everything that is not a delimiter.
 # Includes escaped chars, variable references, and bare characters.
-unquoted_word <- (escaped_char / var_ref / !delimiter .)+
+# `{}` is admitted as a two-character UNIT, ahead of the delimiter check, so it
+# can sit inside a word: `echo {}`, `xargs -I{}`, `find ... -exec cat {} +`. A
+# LONE `{` or `}` stays a delimiter, which brace_group depends on: its closing
+# "}" only matches if compound_command has not swallowed the brace as a word.
+unquoted_word <- (escaped_char / var_ref / "{}" / !delimiter .)+
 
 var_ref <- "$" identifier / "${" identifier var_modifier? "}" / "$" special_var
 

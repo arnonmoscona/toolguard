@@ -345,7 +345,10 @@ _MIN_E2E_CASES = 61
 #: regression net over nothing. Keys are ``"<kind>/<verdict>"`` plus the two
 #: structural regions; values are the counts committed alongside _MIN_CASES.
 _MIN_BY_REGION = {
-    "bash/allow": 5351,
+    # 5351 -> 5350 under TOO-45 #101: a command carrying a bare `{}` stopped
+    # being unparseable, decomposed, and its `python3 -c` sub-command matched
+    # an existing deny rule. A silent allow became a correct deny.
+    "bash/allow": 5350,
     "bash/ask": 129,
     "bash/deny": 151,
     "file_path/allow": 731,
