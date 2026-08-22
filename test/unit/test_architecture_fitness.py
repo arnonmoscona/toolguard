@@ -4547,5 +4547,189 @@ class TestStdlibOnlyCheck(unittest.TestCase):
         self.assertEqual(sorted(roots), ["numpy", "sentence_transformers"])
 
 
+class TestUndeclaredTypesCheck(unittest.TestCase):
+    """
+    check_undeclared_types()'s declaration is the return annotation (or an
+    unannotated dict literal) -- see the function's own docstring for why
+    "crosses a module boundary" is a separate, heuristic half.
+    """
+
+    def _check(self, files):
+        """Build *files* (``{relative_path: source}``) under a temp dir and run the check over it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel_path, content in files.items():
+                _write(root / rel_path, content)
+            return af.check_undeclared_types(root)
+
+    def test_dict_str_any_return_crossing_a_module_boundary_is_flagged(self):
+        """
+        Given a public function annotated -> Dict[str, Any] and called from another module
+        When the check runs
+        Then it is reported as an 'annotated' finding
+        """
+        report = self._check(
+            {
+                "producer.py": (
+                    "from typing import Any, Dict\n\n"
+                    "def make_payload() -> Dict[str, Any]:\n"
+                    "    return {}\n"
+                ),
+                "consumer.py": (
+                    "from producer import make_payload\n\n"
+                    "def use_it():\n"
+                    "    return make_payload()\n"
+                ),
+            }
+        )
+        finding = next(f for f in report.findings if f.qualname == "make_payload")
+        self.assertEqual(finding.kind, "annotated")
+
+    def test_a_narrower_dict_annotation_is_not_flagged(self):
+        """
+        Given a public function annotated -> Dict[str, int] (not Any) and called elsewhere
+        When the check runs
+        Then it is not reported -- only the exact Dict[str, Any]/dict shape counts as undeclared
+        """
+        report = self._check(
+            {
+                "producer.py": (
+                    "from typing import Dict\n\ndef counts() -> Dict[str, int]:\n    return {}\n"
+                ),
+                "consumer.py": "from producer import counts\n\ndef use_it():\n    return counts()\n",
+            }
+        )
+        self.assertNotIn("counts", {f.qualname for f in report.findings})
+
+    def test_same_module_call_is_not_a_boundary_crossing(self):
+        """
+        Given a public Dict[str, Any]-returning function called only from within its own module
+        When the check runs
+        Then it is excluded from findings and counted as same_module_only
+        """
+        report = self._check(
+            {
+                "solo.py": (
+                    "from typing import Any, Dict\n\n"
+                    "def build() -> Dict[str, Any]:\n"
+                    "    return {}\n\n"
+                    "def caller():\n"
+                    "    return build()\n"
+                ),
+            }
+        )
+        self.assertNotIn("build", {f.qualname for f in report.findings})
+        self.assertEqual(report.same_module_only, 1)
+
+    def test_serializer_named_function_is_exempt(self):
+        """
+        Given a to_json_dict-style public function crossing a module boundary
+        When the check runs
+        Then it is exempt by naming convention and never appears in findings
+        """
+        report = self._check(
+            {
+                "shapes.py": (
+                    "from typing import Any, Dict\n\n"
+                    "def to_json_dict() -> Dict[str, Any]:\n"
+                    "    return {}\n"
+                ),
+                "writer.py": (
+                    "from shapes import to_json_dict\n\ndef write():\n    return to_json_dict()\n"
+                ),
+            }
+        )
+        self.assertEqual(report.findings, [])
+        self.assertEqual(report.exempt_serializers, 1)
+
+    def test_unannotated_dict_literal_return_crossing_a_boundary_is_flagged_as_literal(
+        self,
+    ):
+        """
+        Given a public function with no return annotation that returns a dict literal, called elsewhere
+        When the check runs
+        Then it is reported with kind 'literal'
+        """
+        report = self._check(
+            {
+                "producer.py": "def build_options():\n    return {'a': 1}\n",
+                "consumer.py": (
+                    "from producer import build_options\n\n"
+                    "def use_it():\n"
+                    "    return build_options()\n"
+                ),
+            }
+        )
+        finding = next(f for f in report.findings if f.qualname == "build_options")
+        self.assertEqual(finding.kind, "literal")
+
+    def test_private_function_is_never_examined(self):
+        """
+        Given a leading-underscore function annotated -> Dict[str, Any] and called elsewhere
+        When the check runs
+        Then it is skipped entirely, not counted among the examined public functions
+        """
+        report = self._check(
+            {
+                "producer.py": (
+                    "from typing import Any, Dict\n\ndef _make() -> Dict[str, Any]:\n    return {}\n"
+                ),
+                "consumer.py": "from producer import _make\n\ndef use_it():\n    return _make()\n",
+            }
+        )
+        self.assertEqual(report.findings, [])
+        # Only 'use_it' is public; '_make' never enters the examined count.
+        self.assertEqual(report.examined_functions, 1)
+
+    def test_open_ended_allowlist_exempts_an_explicit_entry(self):
+        """
+        Given a Dict[str, Any]-returning function named in the open-ended exemption allowlist
+        When the check runs
+        Then it is exempt and counted, not reported as a finding
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root / "producer.py",
+                "from typing import Any, Dict\n\ndef parse_table() -> Dict[str, Any]:\n    return {}\n",
+            )
+            _write(
+                root / "consumer.py",
+                "from producer import parse_table\n\ndef use_it():\n    return parse_table()\n",
+            )
+            with mock.patch.object(
+                af,
+                "UNDECLARED_TYPES_OPEN_ENDED_EXEMPTIONS",
+                frozenset({"producer:parse_table"}),
+            ):
+                report = af.check_undeclared_types(root)
+        self.assertEqual(report.findings, [])
+        self.assertEqual(report.exempt_open_ended, 1)
+
+
+class TestUndeclaredTypesOnTheRealTree(unittest.TestCase):
+    """The concrete instance this check was built to catch: TOO-45 #104's own fix."""
+
+    def test_parse_hook_input_no_longer_appears(self):
+        """
+        Given the real toolguard/hook.py after TOO-45 #104's fix
+        When the undeclared-types check runs over the real tree
+        Then parse_hook_input is no longer reported (it now returns PreToolUseEvent)
+        """
+        report = af.check_undeclared_types()
+        self.assertNotIn("parse_hook_input", {f.qualname for f in report.findings})
+
+    def test_the_undeclared_types_mode_exits_zero_on_this_tree(self):
+        """
+        Given --undeclared-types, a report-only mode
+        When it runs against the real tree via main()
+        Then it exits 0 regardless of how many findings it reports
+        """
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = af.main(["--undeclared-types", "--json"])
+        self.assertEqual(code, 0, stdout.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

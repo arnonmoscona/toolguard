@@ -73,6 +73,20 @@ Generated code
     ``--guard-canaries-only`` runs just the canary check, skipping the
     diff/test-count/dependency/lint checks.
 
+``--orphans``
+    Report module-private (``_name``) functions with no reference anywhere
+    under ``toolguard/`` -- see :func:`find_orphaned_private_functions` for
+    the declaration this checks against and its known blind spots.
+    Report-only: never fails the build.
+
+``--undeclared-types``
+    Report a public function/method returning an undeclared dict shape (``->
+    Dict[str, Any]``/``-> dict``, or an unannotated dict literal) and called
+    from outside the module that defines it -- see
+    :func:`check_undeclared_types` for the declaration this checks against,
+    its exemptions, and its one heuristic half. Report-only: never fails the
+    build.
+
 Usage::
 
     uv run python tools/architecture_fitness.py --layers
@@ -80,6 +94,8 @@ Usage::
     uv run python tools/architecture_fitness.py --metrics
     uv run python tools/architecture_fitness.py --mocks
     uv run python tools/architecture_fitness.py --ambient
+    uv run python tools/architecture_fitness.py --orphans
+    uv run python tools/architecture_fitness.py --undeclared-types
     uv run python tools/architecture_fitness.py --guard --since HEAD
 """
 
@@ -96,7 +112,7 @@ import sys
 import tokenize
 import tomllib
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -4005,6 +4021,10 @@ PATH_AMBIENT_OWNERS: Dict[Tuple[str, str], str] = {
     ("path_utils", "expanduser"): "pathlib's own expanduser, for the ~user form",
     ("config", "resolve"): "compares discovered config directories",
     (
+        "hook",
+        "cwd",
+    ): "PreToolUseEvent.cwd, a wire field parsed from stdin JSON -- not Path.cwd()",
+    (
         "install_provenance",
         "resolve",
     ): "install-location paths: __file__, git rev-parse output, a checkout root",
@@ -4382,6 +4402,324 @@ def render_stdlib_text(findings: Sequence[Tuple[str, int, str]]) -> str:
 
 
 # =============================================================================
+# --orphans: module-private functions never referenced under toolguard/
+# =============================================================================
+
+
+def find_orphaned_private_functions(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> List[Dict[str, object]]:
+    """
+    Module-level, module-private (leading-underscore, non-dunder --
+    :func:`_is_private_name`) functions with no reference anywhere under
+    *toolguard_dir*.
+
+    The declaration this checks against is the leading underscore itself: a
+    developer writing ``_name`` declares "internal to this package", and this
+    tests conformance to that declaration alone -- never whether the function
+    deserves to exist (see ``.claude/rules/evidence-before-fixing.md``'s
+    "name the declaration" rule). The canopy-generated parser is already
+    excluded by :func:`iter_source_files`'s generated-banner detection.
+
+    "Referenced" means named as a ``Load``-context ``ast.Name``/``ast.Attribute``
+    anywhere in the scanned files (including the defining file itself, and
+    including a module's own ``__all__`` list), so a call, a decorator, an
+    import, or a re-export all count.
+
+    KNOWN BLIND SPOT, deliberately unhandled: a function reached only via
+    ``getattr`` with a computed (non-literal) name, a string-keyed dispatch
+    table, or a plugin registry has no such reference and reads as a false
+    orphan. None of those exist in this package today. This is exactly why
+    the check reports rather than fails the build.
+
+    Returns:
+        One entry per orphan, sorted by file then line:
+        ``{"name": str, "file": <toolguard-relative dotted path>, "line": int}``.
+    """
+    files = iter_source_files(toolguard_dir)
+    trees: Dict[Path, ast.Module] = {}
+    for path in files:
+        try:
+            trees[path] = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+        except SyntaxError, OSError:
+            continue
+
+    definitions: List[Tuple[str, Path, int]] = []
+    for path, tree in trees.items():
+        for node in tree.body:
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and _is_private_name(node.name):
+                definitions.append((node.name, path, node.lineno))
+
+    referenced: Set[str] = set()
+    for tree in trees.values():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                referenced.add(node.id)
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                referenced.add(node.attr)
+            elif (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
+                )
+                and isinstance(node.value, (ast.List, ast.Tuple))
+            ):
+                referenced.update(
+                    elt.value
+                    for elt in node.value.elts
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                )
+
+    orphans = [
+        {
+            "name": name,
+            "file": relative_module_path(path, toolguard_dir),
+            "line": lineno,
+        }
+        for name, path, lineno in definitions
+        if name not in referenced
+    ]
+    return sorted(orphans, key=lambda o: (o["file"], o["line"]))
+
+
+def render_orphans_text(orphans: Sequence[Dict[str, object]]) -> str:
+    """Render :func:`find_orphaned_private_functions`'s findings as the ``--orphans`` section."""
+    headline = "OK" if not orphans else f"{len(orphans)} orphan(s)"
+    lines = [f"=== --orphans: {headline} ==="]
+    for orphan in orphans:
+        lines.append(f"  - {orphan['file']}:{orphan['line']} {orphan['name']}")
+    return "\n".join(lines)
+
+
+# =============================================================================
+# --undeclared-types: a dict crossing a module boundary is a type nobody
+# declared (TOO-45 #104)
+# =============================================================================
+
+
+def _is_serializer_name(name: str) -> bool:
+    """
+    True for a ``to_...dict``/``..._to_dict``-named function or method -- the
+    pattern this codebase already uses for a JSON/wire-format serialiser,
+    where a dict IS the declared contract (e.g. ``to_json_dict``,
+    ``report_to_dict``). Exempted by naming convention rather than an
+    explicit list, since the convention is already consistent across the
+    package.
+    """
+    return name.endswith("_to_dict") or (
+        name.startswith("to_") and name.endswith("dict")
+    )
+
+
+#: Explicit allowlist for a genuinely open-ended mapping (e.g. a parsed TOML
+#: table) with no narrower type to declare. Entries are
+#: ``"<toolguard-relative module>:<qualname>"``. Empty until a real case is
+#: found -- add one with a one-line reason in a comment beside it.
+UNDECLARED_TYPES_OPEN_ENDED_EXEMPTIONS: FrozenSet[str] = frozenset()
+
+
+@dataclass
+class UndeclaredTypeFinding:
+    """One public function/method returning a dict with no declared shape, called from outside its own module."""
+
+    file: str
+    line: int
+    qualname: str
+    kind: str  # "annotated" (-> Dict[str, Any] / -> dict) or "literal" (unannotated dict-literal return)
+
+
+@dataclass
+class UndeclaredTypesReport:
+    """Result of :func:`check_undeclared_types`."""
+
+    findings: List[UndeclaredTypeFinding] = field(default_factory=list)
+    examined_functions: int = 0
+    exempt_serializers: int = 0
+    exempt_open_ended: int = 0
+    same_module_only: int = 0
+
+
+def _is_public_function_name(name: str) -> bool:
+    """True for a name this check treats as public API: not leading-underscore, not a dunder."""
+    return not name.startswith("_")
+
+
+def _is_bare_dict_annotation(node: Optional[ast.expr]) -> bool:
+    """
+    True when *node* is exactly the declaration this check flags: bare
+    ``dict``/``Dict``/``typing.Dict``, or a ``Dict[str, Any]``/``dict[str,
+    Any]`` subscript. Any other parameterisation (``Dict[str, int]``, a real
+    type) is left alone -- the point is a completely undeclared value type,
+    not "returns a mapping".
+    """
+    if node is None:
+        return False
+    if isinstance(node, ast.Name):
+        return node.id in ("dict", "Dict")
+    if isinstance(node, ast.Attribute):
+        return node.attr == "Dict"
+    if isinstance(node, ast.Subscript):
+        base = node.value
+        if isinstance(base, ast.Name):
+            base_name = base.id
+        elif isinstance(base, ast.Attribute):
+            base_name = base.attr
+        else:
+            return False
+        if base_name not in ("dict", "Dict"):
+            return False
+        value_type = node.slice.elts[1] if isinstance(node.slice, ast.Tuple) else None
+        if value_type is None or len(node.slice.elts) != 2:
+            return False
+        if isinstance(value_type, ast.Name):
+            return value_type.id == "Any"
+        if isinstance(value_type, ast.Attribute):
+            return value_type.attr == "Any"
+        return False
+    return False
+
+
+def _own_return_statements(func: ast.AST) -> List[ast.Return]:
+    """*func*'s own ``return`` statements, at any depth, but not a nested def/class's."""
+    results: List[ast.Return] = []
+    for child in ast.iter_child_nodes(func):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(child, ast.Return):
+            results.append(child)
+        results.extend(_own_return_statements(child))
+    return results
+
+
+def _returns_dict_literal(func) -> bool:
+    """True when *func* has no return annotation and returns a dict literal somewhere in its own body."""
+    if func.returns is not None:
+        return False
+    return any(isinstance(ret.value, ast.Dict) for ret in _own_return_statements(func))
+
+
+def _iter_functions_with_class(
+    tree: ast.Module,
+) -> Iterable[Tuple[Optional[str], "ast.FunctionDef | ast.AsyncFunctionDef"]]:
+    """Yield ``(class_name_or_None, func)`` for every module-level function and direct class method."""
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield None, node
+        elif isinstance(node, ast.ClassDef):
+            for member in ast.iter_child_nodes(node):
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    yield node.name, member
+
+
+def _collect_called_names(tree: ast.Module) -> Set[str]:
+    """Every name called anywhere in *tree*, as a bare call or a ``.attr(...)`` call."""
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            names.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return names
+
+
+def check_undeclared_types(
+    toolguard_dir: Path = TOOLGUARD_DIR,
+) -> UndeclaredTypesReport:
+    """
+    Flag a public function or method in *toolguard_dir* that returns an
+    undeclared dict shape -- an explicit ``-> Dict[str, Any]``/``-> dict``
+    annotation, or no annotation at all with a ``return {...}`` literal --
+    AND is called from outside the module that defines it.
+
+    Per ``.claude/rules/evidence-before-fixing.md``'s "name the declaration,
+    or label it a heuristic": the annotation/literal detection is the STRONG
+    half -- it never judges whether a dataclass would be the right shape,
+    only that a type was declared where the return annotation already owes
+    one. "Called from outside the defining module" is a HEURISTIC on top of
+    that: a name/attribute call-site scan with no import resolution, so it
+    can both over-report (an unrelated function sharing the name) and
+    under-report (a call reached only through an alias this scan does not
+    trace). Only the annotation/literal half is exact.
+
+    Two exemptions, matched up front rather than discovered:
+    :func:`_is_serializer_name` (a ``to_json_dict()``-style function,
+    where a dict IS the wire format) and
+    :data:`UNDECLARED_TYPES_OPEN_ENDED_EXEMPTIONS` (an explicit allowlist for
+    a genuinely open-ended mapping, e.g. a parsed TOML table).
+    """
+    calls_by_file: Dict[str, Set[str]] = {}
+    parsed: Dict[str, ast.Module] = {}
+    for py_file in iter_source_files(toolguard_dir):
+        rel = relative_module_path(py_file, toolguard_dir)
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        parsed[rel] = tree
+        calls_by_file[rel] = _collect_called_names(tree)
+
+    report = UndeclaredTypesReport()
+    for rel, tree in parsed.items():
+        for class_name, func in _iter_functions_with_class(tree):
+            if not _is_public_function_name(func.name):
+                continue
+            report.examined_functions += 1
+
+            if _is_serializer_name(func.name):
+                report.exempt_serializers += 1
+                continue
+
+            qualname = f"{class_name}.{func.name}" if class_name else func.name
+            if f"{rel}:{qualname}" in UNDECLARED_TYPES_OPEN_ENDED_EXEMPTIONS:
+                report.exempt_open_ended += 1
+                continue
+
+            if _is_bare_dict_annotation(func.returns):
+                kind = "annotated"
+            elif _returns_dict_literal(func):
+                kind = "literal"
+            else:
+                continue
+
+            crosses_boundary = any(
+                func.name in names
+                for other_rel, names in calls_by_file.items()
+                if other_rel != rel
+            )
+            if not crosses_boundary:
+                report.same_module_only += 1
+                continue
+
+            report.findings.append(
+                UndeclaredTypeFinding(
+                    file=rel, line=func.lineno, qualname=qualname, kind=kind
+                )
+            )
+
+    report.findings.sort(key=lambda f: (f.file, f.line))
+    return report
+
+
+def render_undeclared_types_text(report: UndeclaredTypesReport) -> str:
+    """Render :func:`check_undeclared_types`'s findings as the ``--undeclared-types`` section."""
+    lines = [
+        f"=== --undeclared-types: {len(report.findings)} finding(s) "
+        "(report-only -- does not fail the build) ===",
+        f"examined {report.examined_functions} public function(s)/method(s); "
+        f"{report.exempt_serializers} exempt by serialiser-name convention, "
+        f"{report.exempt_open_ended} exempt via explicit allowlist, "
+        f"{report.same_module_only} return an undeclared dict but are never "
+        "called outside their own module",
+    ]
+    for f in report.findings:
+        lines.append(f"  - {f.file}:{f.line} {f.qualname} ({f.kind})")
+    return "\n".join(lines)
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -4423,6 +4761,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Report runtime imports whose root is outside the standard library.",
     )
     parser.add_argument(
+        "--orphans",
+        action="store_true",
+        help="Report module-private functions never referenced under toolguard/.",
+    )
+    parser.add_argument(
+        "--undeclared-types",
+        action="store_true",
+        help=(
+            "Report a public function/method returning an undeclared dict "
+            "shape, called from outside its own module."
+        ),
+    )
+    parser.add_argument(
         "--guard",
         action="store_true",
         help="Run the deterministic safety-inspector checks.",
@@ -4461,13 +4812,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.mocks,
             args.ambient,
             args.stdlib,
+            args.orphans,
+            args.undeclared_types,
             args.guard,
             args.guard_canaries_only,
         ]
     ):
         parser.error(
             "at least one of --layers, --predicates, --metrics, --mocks, --ambient, "
-            "--stdlib, --guard, --guard-canaries-only is required"
+            "--stdlib, --orphans, --undeclared-types, --guard, --guard-canaries-only "
+            "is required"
         )
 
     exit_code = 0
@@ -4495,6 +4849,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print()
         if findings:
             exit_code = 1
+
+    if args.orphans:
+        orphans = find_orphaned_private_functions()
+        payload["orphans"] = orphans
+        if not args.json:
+            print(render_orphans_text(orphans))
+            print()
+        # Report-only, per TOO-45 #100: a false orphan (getattr/dispatch-table
+        # reference this scan cannot see) must never fail the build.
+
+    if args.undeclared_types:
+        ut_report = check_undeclared_types()
+        payload["undeclared_types"] = {
+            "findings": [asdict(f) for f in ut_report.findings],
+            "examined_functions": ut_report.examined_functions,
+            "exempt_serializers": ut_report.exempt_serializers,
+            "exempt_open_ended": ut_report.exempt_open_ended,
+            "same_module_only": ut_report.same_module_only,
+        }
+        if not args.json:
+            print(render_undeclared_types_text(ut_report))
+            print()
+        # Report-only, per TOO-45 #104: "crosses a module boundary" is a
+        # name-based heuristic (see check_undeclared_types's docstring), so
+        # this must never fail the build.
 
     if args.predicates:
         predicates = compute_predicates()
