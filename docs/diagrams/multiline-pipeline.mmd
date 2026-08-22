@@ -1,0 +1,19 @@
+---
+title: multiline.py's five-step lexical pre-pass, then the grammar
+---
+flowchart TB
+    A["raw command_text"] --> B["1. _normalize_line_endings<br/>CRLF / lone CR -&gt; LF"]
+    B --> C["2. _join_backslash_continuations<br/>own single-quote scan"]
+    C --> D["3. _process_heredocs<br/>lift body -&gt; side table behind __HD0__<br/>owner resolved by command_extractor.py"]
+    D -->|"placeholder owner not found"| X["_UnattributableHeredocError<br/>-&gt; UndecidableSegment"]
+    D --> E["4. _strip_comments<br/>own quote scanner, # to EOL"]
+    E --> F["5. _collapse_whitespace<br/>no quote awareness"]
+    F --> G["bash_parser.parse (grammar)"]
+    G -->|"ParseError or other exception"| Y["UndecidableSegment<br/>over the cleaned text"]
+    G --> H["command_extractor.py<br/>extract_structured_from_grammar"]
+    H --> Z["List[LeafCommand | UndecidableSegment]"]
+
+    classDef step fill:#e8f5e9,stroke:#3f8f47,color:#12331a
+    classDef clamp fill:#fff3e0,stroke:#c07a1e,color:#3a2708
+    class A,B,C,D,E,F,G,H,Z step
+    class X,Y clamp

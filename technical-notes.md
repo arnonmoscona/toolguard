@@ -818,6 +818,9 @@ the simple, common constructs observed in real usage and ASK on the rest:
 
 ### Lexical pre-pass vs. grammar
 
+See [docs/multiline-parsing-flow.md](docs/multiline-parsing-flow.md) for a diagram of the
+five-step pipeline this section describes.
+
 A few things genuinely cannot (or should not) live in the PEG grammar and are done as a
 deterministic, quote-aware lexical pre-pass in `multiline.py`: CRLF/CR -> LF; backslash-newline
 continuation join; heredoc body extraction/removal; `#` comment stripping; whitespace

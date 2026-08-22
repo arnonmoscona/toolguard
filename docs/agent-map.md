@@ -306,6 +306,11 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
 - [Phase R -- Rollback during install (if the user changes their mind)](install.md#phase-r----rollback-during-install-if-the-user-changes-their-mind)
 - [Phase T -- Trace dump and issue reporting (offer this)](install.md#phase-t----trace-dump-and-issue-reporting-offer-this)
 
+**`docs/multiline-parsing-flow.md`**
+- [The pipeline](multiline-parsing-flow.md#the-pipeline)
+- [Two failure floors, same destination](multiline-parsing-flow.md#two-failure-floors-same-destination)
+- [Why three quote scanners, not one](multiline-parsing-flow.md#why-three-quote-scanners-not-one)
+
 **`docs/native-pattern-reference.md`**
 - [Quoted verbatim from Claude Code's documentation](native-pattern-reference.md#quoted-verbatim-from-claude-codes-documentation)
 - [Known divergences between toolguard and the above](native-pattern-reference.md#known-divergences-between-toolguard-and-the-above)
