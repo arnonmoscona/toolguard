@@ -28,11 +28,10 @@ from toolguard.auto_migrate import run_auto_migration
 from toolguard.claude_code_contract import (
     CWD_KEY,
     HOOK_EVENT_NAME_KEY,
-    PERMISSION_MODE_KEY,
+    PreToolUseEvent,
     PreToolUseResponse,
     TOOL_INPUT_KEY,
     TOOL_NAME_KEY,
-    TRANSCRIPT_PATH_KEY,
 )
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import load_configuration
@@ -111,31 +110,19 @@ class EmptyStdinError(ValueError):
     """
 
 
-def parse_hook_input() -> Dict[str, Any]:
+def parse_hook_input() -> PreToolUseEvent:
     """
-    Parse hook input from stdin.
+    Parse one hook event from stdin.
 
-    Expected JSON format from Claude Code:
-    {
-        "session_id": "abc123",
-        "transcript_path": "/path/to/transcript.jsonl",
-        "cwd": "/current/working/dir",
-        "permission_mode": "default",
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": "git status"
-        },
-        "tool_use_id": "toolu_01ABC123..."
-    }
-
-    Returns:
-        Parsed JSON data as dictionary
+    See :class:`~toolguard.claude_code_contract.PreToolUseEvent` for the wire
+    shape. Validating that the required fields are present is this module's
+    policy call (the contract only describes shape); everything else defaults
+    per :meth:`~toolguard.claude_code_contract.PreToolUseEvent.from_json_dict`.
 
     Raises:
         json.JSONDecodeError: If input is not valid JSON
         EmptyStdinError: If stdin was read but contained no data.
-        ValueError: If required fields are missing.
+        ValueError: If a required field is missing.
     """
     try:
         input_data = sys.stdin.read()
@@ -149,7 +136,7 @@ def parse_hook_input() -> Dict[str, Any]:
             if field not in data:
                 raise ValueError(f"Missing required field: {field}")
 
-        return data
+        return PreToolUseEvent.from_json_dict(data)
 
     except json.JSONDecodeError as e:
         raise json.JSONDecodeError(f"Invalid JSON from stdin: {e.msg}", e.doc, e.pos)
@@ -766,9 +753,9 @@ def _run_eval_mode() -> None:
     """
     try:
         hook_data = parse_hook_input()
-        tool_name = hook_data[TOOL_NAME_KEY]
-        tool_input = hook_data[TOOL_INPUT_KEY]
-        cwd = hook_data.get(CWD_KEY, None)
+        tool_name = hook_data.tool_name
+        tool_input = hook_data.tool_input
+        cwd = hook_data.cwd
         # Anchor BOTH the rule hierarchy and the env/.env-derived settings
         # (extended_syntax) to the TARGET project's cwd, ignoring any stale
         # CLAUDE_SETTINGS_PATH / TOOLGUARD_PROJECT_ROOT override -- the same
@@ -942,17 +929,17 @@ def _run_divergence_check(
         run_auto_migration(project_root, dict(config_sync), takeover_dict)
 
 
-def _agent_info_for(hook_data: Dict[str, Any]) -> str:
+def _agent_info_for(transcript_path: str) -> str:
     """
     Identify the invoking agent for logging purposes.
 
     Args:
-        hook_data: The parsed hook event (read for ``transcript_path``).
+        transcript_path: The hook event's ``transcript_path``.
 
     Returns:
         The subagent's name when the call came from a subagent, else ``"main"``.
     """
-    agent_context = identify_current_agent(hook_data.get(TRANSCRIPT_PATH_KEY, ""))
+    agent_context = identify_current_agent(transcript_path)
     return (
         agent_context["subagent_name"]
         if agent_context["agent_type"] == "subagent"
@@ -1288,9 +1275,9 @@ def main() -> None:
             # Parse hook input first to get cwd
             hook_data = parse_hook_input()
 
-            tool_name = hook_data[TOOL_NAME_KEY]
-            tool_input = hook_data[TOOL_INPUT_KEY]
-            cwd = hook_data.get(CWD_KEY, None)
+            tool_name = hook_data.tool_name
+            tool_input = hook_data.tool_input
+            cwd = hook_data.cwd
 
             # Obtain the resolved configuration once via the public abstraction.
             # All file discovery, parsing, and format/location decisions live in
@@ -1315,12 +1302,12 @@ def main() -> None:
                 _emit_decision(output)
                 sys.exit(0)
 
-            agent_info = _agent_info_for(hook_data)
+            agent_info = _agent_info_for(hook_data.transcript_path)
 
             # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
             # mode) is recorded alongside the decision, purely for diagnosis --
             # it never affects the verdict itself.
-            permission_mode = hook_data.get(PERMISSION_MODE_KEY)
+            permission_mode = hook_data.permission_mode
 
             # File path tools (Read, Write, Edit) and command tools (Bash, MCP
             # terminals) differ only in how the target is extracted and

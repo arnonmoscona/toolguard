@@ -18,6 +18,7 @@ from toolguard.config import (
     TakeoverConfig,
     TakeoverEnabledConflict,
 )
+from toolguard.claude_code_contract import PreToolUseEvent
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import (
@@ -393,7 +394,7 @@ class TestHookInputParsing(unittest.TestCase):
         """
         Given valid hook JSON on stdin
         When parse_hook_input() reads it
-        Then the parsed dict exposes the tool_name and tool_input command
+        Then the parsed event exposes the tool_name and tool_input command
         """
         hook_input = {
             "tool_name": "Bash",
@@ -403,8 +404,34 @@ class TestHookInputParsing(unittest.TestCase):
 
         with patch("sys.stdin", StringIO(json.dumps(hook_input))):
             result = parse_hook_input()
-            self.assertEqual(result["tool_name"], "Bash")
-            self.assertEqual(result["tool_input"]["command"], "git status")
+            self.assertEqual(result.tool_name, "Bash")
+            self.assertEqual(result.tool_input["command"], "git status")
+
+    def test_parse_returns_a_pretooluseevent_with_every_field_populated(self):
+        """
+        Given hook JSON on stdin carrying every PreToolUseEvent field
+        When parse_hook_input() reads it
+        Then it returns a PreToolUseEvent with each field parsed from the payload
+        """
+        hook_input = {
+            "session_id": "abc123",
+            "transcript_path": "/path/to/transcript.jsonl",
+            "cwd": "/some/project",
+            "permission_mode": "default",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+        }
+
+        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
+            result = parse_hook_input()
+
+        self.assertIsInstance(result, PreToolUseEvent)
+        self.assertEqual(result.session_id, "abc123")
+        self.assertEqual(result.transcript_path, "/path/to/transcript.jsonl")
+        self.assertEqual(result.cwd, "/some/project")
+        self.assertEqual(result.permission_mode, "default")
+        self.assertEqual(result.hook_event_name, "PreToolUse")
 
     def test_parse_missing_required_field(self):
         """
