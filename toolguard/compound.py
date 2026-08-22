@@ -304,9 +304,9 @@ class ResolveOneResult:
 
     The ``resolve_one`` contract for this module's own test-only
     compound-resolution driver (:func:`resolve_compound_permission_detailed`,
-    :func:`check_compound_permission`, :func:`_resolve_leaf`) -- not used on
-    the production hook path, which builds :class:`UnitVerdict` directly
-    (see :mod:`toolguard.resolve`).
+    :func:`check_compound_permission`) -- not used on the production hook
+    path, which builds :class:`UnitVerdict` directly (see
+    :mod:`toolguard.resolve`).
 
     A frozen dataclass rather than a positional tuple: it carries
     ``fallback_kind`` as data supplied by the caller's own resolution,
@@ -805,41 +805,6 @@ def judge_unit(
     raise ValueError(f"judge_unit: unrecognized CommandUnit.kind {unit.kind!r}")
 
 
-def _resolve_leaf(
-    leaf: LeafCommand,
-    resolve_one: Callable[[str], ResolveOneResult],
-    undecidable_fallback: str = "ask",
-) -> RuntimeVerdict:
-    """Resolve a single leaf command -- thin wrapper dropping the structured detail.
-
-    Drives :func:`_unit_for` + :func:`judge_unit` directly. *resolve_one* is
-    used for every part regardless of *leaf*'s kind.
-
-    Returns a :class:`~toolguard.config_types.RuntimeVerdict`, not a bare
-    :class:`ResolveOneResult` -- ``matched_rule``/``provenance``/etc. simply
-    stay at their defaults.
-
-    Args:
-        leaf: A :class:`~toolguard.parser.command_extractor.LeafCommand` to
-            resolve.
-        resolve_one: Callable mapping a single command string to its
-            :class:`ResolveOneResult`.
-        undecidable_fallback: The configured floor -- see :func:`judge_unit`.
-
-    Returns:
-        A :class:`~toolguard.config_types.RuntimeVerdict` for the leaf, with
-        the floor applied.
-    """
-    unit = _unit_for(leaf)
-    part_verdicts = [_unit_from_result(part, resolve_one(part)) for part in unit.parts]
-    outcome = judge_unit(unit, part_verdicts, undecidable_fallback)
-    return RuntimeVerdict(
-        decision=outcome.decision,
-        reason=outcome.reason,
-        additional_context=outcome.additional_context,
-    )
-
-
 def _extract_outer_command(leaf_text: str) -> str:
     """Extract the outer command from a leaf that may contain inline code.
 
@@ -1148,7 +1113,9 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
             # Extract the pattern from the unit's own reason. It may be in
             # one of two forms:
             #   "Command matches allow pattern: <pat>"  (from check_permission)
-            #   "cmd -> <pat>"  (already formatted by _resolve_leaf)
+            #   "cmd -> <pat>"  (a 'plain' unit's own multi-part summary,
+            #                    already formatted by _judge_plain_unit's
+            #                    nested _combine_strictest call)
             r = uv.reason
             if " -> " in r:
                 # Already in "cmd -> pattern" format: reformat using

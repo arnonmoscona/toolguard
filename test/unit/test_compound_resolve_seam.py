@@ -11,11 +11,11 @@ from toolguard.compound import (
     CommandUnit,
     ResolveOneResult,
     _audits_as_one,
-    _resolve_leaf,
     _unit_for,
     _unit_from_result,
     decompose,
     judge_unit,
+    resolve_compound_permission_detailed,
 )
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.parser.command_extractor import LeafCommand, UndecidableSegment
@@ -269,16 +269,14 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
     leaf, against :func:`~toolguard.compound._apply_undecidable_floor`'s table."""
 
     _FALLBACKS = ("ask", "deny", "allow_with_warning", "allow")
-
-    def _leaf(self, text='python -c "import os"'):
-        """Return an ASK-floor LeafCommand for *text*."""
-        return LeafCommand(text, ask_floor=True)
+    _LEAF_TEXT = 'python -c "import os"'
 
     def test_stub_deny_always_wins_regardless_of_fallback(self):
         """
         Given an ASK-floor leaf whose outer-command stub matches an explicit
             deny rule
-        When _resolve_leaf resolves it under each undecidable_fallback value
+        When resolve_compound_permission_detailed resolves it under each
+            undecidable_fallback value
         Then the decision is always 'deny', with the stub's own reason
              passed through unchanged (a genuine rule match, not floored)
         """
@@ -288,7 +286,9 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
 
         for fallback in self._FALLBACKS:
             with self.subTest(fallback=fallback):
-                verdict = _resolve_leaf(self._leaf(), resolve_one, fallback)
+                verdict = resolve_compound_permission_detailed(
+                    self._LEAF_TEXT, resolve_one, fallback
+                )
                 self.assertEqual(verdict.decision, "deny")
                 self.assertEqual(verdict.reason, "matched deny pattern")
 
@@ -296,7 +296,8 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
         """
         Given an ASK-floor leaf whose outer-command stub matches an explicit
             ask rule
-        When _resolve_leaf resolves it under each undecidable_fallback value
+        When resolve_compound_permission_detailed resolves it under each
+            undecidable_fallback value
         Then the decision follows _apply_undecidable_floor("ask", fallback)
              exactly -- 'ask' floors to 'deny' only under
              undecidable_fallback='deny'; every other value leaves the
@@ -315,7 +316,9 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
 
         for fallback, want in expected.items():
             with self.subTest(fallback=fallback):
-                verdict = _resolve_leaf(self._leaf(), resolve_one, fallback)
+                verdict = resolve_compound_permission_detailed(
+                    self._LEAF_TEXT, resolve_one, fallback
+                )
                 self.assertEqual(verdict.decision, want)
                 if want == "ask":
                     self.assertEqual(verdict.reason, "matched ask pattern")
@@ -326,7 +329,8 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
         """
         Given an ASK-floor leaf whose outer-command stub matches an explicit
             allow rule (or matches nothing)
-        When _resolve_leaf resolves it under each undecidable_fallback value
+        When resolve_compound_permission_detailed resolves it under each
+            undecidable_fallback value
         Then the decision follows _apply_undecidable_floor("allow", fallback)
              exactly, and the reason names the floor/escape-hatch that
              decided (never the stub's own rule match, which never verified
@@ -344,7 +348,9 @@ class TestAskFloorFallbackMatrix(unittest.TestCase):
 
         for fallback, (want_decision, want_substring) in expected.items():
             with self.subTest(fallback=fallback):
-                verdict = _resolve_leaf(self._leaf(), resolve_one, fallback)
+                verdict = resolve_compound_permission_detailed(
+                    self._LEAF_TEXT, resolve_one, fallback
+                )
                 self.assertEqual(verdict.decision, want_decision)
                 self.assertIn(want_substring, verdict.reason)
 

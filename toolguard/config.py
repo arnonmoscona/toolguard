@@ -395,26 +395,6 @@ def _resolve_stem_formats(
     return result
 
 
-def _discover_rules_files(rules_dir: Path) -> List[Tuple[Path, str]]:
-    """
-    Flat, non-recursive scan of a rules directory for ``*.toml``/``*.json`` files.
-
-    A missing or empty directory is a no-op (returns an empty list, never an
-    error). Subdirectories and files with other extensions are ignored --
-    scanning is intentionally flat. When both ``<stem>.toml``
-    and ``<stem>.json`` exist for the same stem, only the TOML entry is
-    returned (see :func:`_resolve_stem_formats`).
-
-    Args:
-        rules_dir: The directory to scan.
-
-    Returns:
-        List of ``(path, format)`` pairs, ``format`` being ``'toml'`` or
-        ``'json'``, sorted ascending by filename stem.
-    """
-    return _resolve_stem_formats(_group_rules_files_by_stem(rules_dir))
-
-
 def _merged_rules_by_stem(
     rules_dirs: Tuple[Path, ...],
 ) -> Dict[str, Dict[str, Path]]:

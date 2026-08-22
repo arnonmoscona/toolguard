@@ -2476,7 +2476,10 @@ def _toml_permissions_block(allow=(), deny=(), ask=()):
 
 
 class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
-    """_rules_dirs(), _discover_rules_files(), and end-to-end discovery via
+    """_rules_dirs(), _discover_rules_files_multi() (single-directory scan
+    behavior, exercised with a one-element tuple -- equivalent to scanning
+    that directory alone, since :func:`toolguard.config._merged_rules_by_stem`
+    only merges across MULTIPLE directories), and end-to-end discovery via
     load_configuration() into the user level."""
 
     # Path.home() is impure (reads $HOME, falls back to the pwd database when
@@ -2538,33 +2541,34 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             ),
         )
 
-    def test_discover_rules_files_missing_directory_returns_empty(self):
+    def test_discover_rules_files_multi_missing_directory_returns_empty(self):
         """
         Given a rules directory path that does not exist on disk
-        When _discover_rules_files() scans it
+        When _discover_rules_files_multi() scans it (as the sole directory)
         Then it returns an empty list, not an error
         """
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "does-not-exist"
-            result = config_module._discover_rules_files(missing)
+            result = config_module._discover_rules_files_multi((missing,))
         self.assertEqual(result, [])
 
-    def test_discover_rules_files_empty_directory_returns_empty(self):
+    def test_discover_rules_files_multi_empty_directory_returns_empty(self):
         """
         Given a rules directory that exists but contains no files
-        When _discover_rules_files() scans it
+        When _discover_rules_files_multi() scans it (as the sole directory)
         Then it returns an empty list
         """
         with tempfile.TemporaryDirectory() as tmp:
             rules_dir = Path(tmp) / "rules"
             rules_dir.mkdir()
-            result = config_module._discover_rules_files(rules_dir)
+            result = config_module._discover_rules_files_multi((rules_dir,))
         self.assertEqual(result, [])
 
-    def test_discover_rules_files_sorted_lexicographically_by_stem(self):
+    def test_discover_rules_files_multi_sorted_lexicographically_by_stem(self):
         """
         Given three rules files named 'zeta.toml', 'alpha.json', 'mid.toml'
-        When _discover_rules_files() scans the directory
+        When _discover_rules_files_multi() scans the directory (as the sole
+            directory)
         Then the results are ordered lexicographically by filename stem
         """
         with tempfile.TemporaryDirectory() as tmp:
@@ -2573,13 +2577,14 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             (rules_dir / "zeta.toml").write_text("[permissions]\n")
             (rules_dir / "alpha.json").write_text("{}")
             (rules_dir / "mid.toml").write_text("[permissions]\n")
-            result = config_module._discover_rules_files(rules_dir)
+            result = config_module._discover_rules_files_multi((rules_dir,))
         self.assertEqual([path.stem for path, _fmt in result], ["alpha", "mid", "zeta"])
 
-    def test_discover_rules_files_same_stem_toml_wins_over_json(self):
+    def test_discover_rules_files_multi_same_stem_toml_wins_over_json(self):
         """
         Given both gh.toml and gh.json present for the same stem
-        When _discover_rules_files() scans the directory
+        When _discover_rules_files_multi() scans the directory (as the sole
+            directory)
         Then only the TOML entry is returned (format 'toml'); the JSON sibling
         is dropped from the result
         """
@@ -2588,16 +2593,19 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             rules_dir.mkdir()
             (rules_dir / "gh.toml").write_text("[permissions]\n")
             (rules_dir / "gh.json").write_text("{}")
-            result = config_module._discover_rules_files(rules_dir)
+            result = config_module._discover_rules_files_multi((rules_dir,))
         self.assertEqual(len(result), 1)
         path, fmt = result[0]
         self.assertEqual(path.name, "gh.toml")
         self.assertEqual(fmt, "toml")
 
-    def test_discover_rules_files_ignores_other_extensions_and_subdirectories(self):
+    def test_discover_rules_files_multi_ignores_other_extensions_and_subdirectories(
+        self,
+    ):
         """
         Given a .txt file and a subdirectory alongside a valid gh.toml
-        When _discover_rules_files() scans the directory (flat, non-recursive)
+        When _discover_rules_files_multi() scans the directory (flat,
+            non-recursive, as the sole directory)
         Then only gh.toml is returned; the .txt file and the subdirectory
         (including a .toml file nested inside it) are ignored
         """
@@ -2609,7 +2617,7 @@ class TestRulesDirectoryDiscovery(ConfigIsolationMixin, unittest.TestCase):
             nested.mkdir()
             (nested / "sneaky.toml").write_text("[permissions]\n")
             (rules_dir / "gh.toml").write_text("[permissions]\n")
-            result = config_module._discover_rules_files(rules_dir)
+            result = config_module._discover_rules_files_multi((rules_dir,))
         self.assertEqual([path.name for path, _fmt in result], ["gh.toml"])
 
     def test_shadowed_rules_stems_reports_distinct_real_files(self):

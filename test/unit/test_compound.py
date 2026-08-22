@@ -11,11 +11,14 @@ from toolguard.compound import (
     _accumulate_contexts,
     _apply_undecidable_floor,
     _extract_outer_command,
-    _resolve_leaf,
+    _unit_for,
+    _unit_from_result,
     cap_context_words,
     check_compound_permission,
     get_command_breakdown,
+    judge_unit,
     resolve_compound_permission,
+    resolve_compound_permission_detailed,
 )
 from toolguard.parser.command_extractor import (
     LeafCommand,
@@ -1815,13 +1818,11 @@ class TestExtractOuterCommand(unittest.TestCase):
 class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
     """Confirms shortening ``_extract_outer_command``'s stub for display does not weaken deny-pattern matching on ASK-floor leaves."""
 
-    def _leaf(self, text, ask_floor=True):
-        return LeafCommand(text, ask_floor=ask_floor)
-
     def test_deny_fires_for_attached_flag_form(self):
         """
-        Given an ASK-floor leaf 'python -cimport os' and a deny rule on 'python -c*'
-        When _resolve_leaf resolves the leaf
+        Given an ASK-floor leaf 'python -cimport os' (real extraction sets
+            ask_floor from the attached-flag form) and a deny rule on 'python -c*'
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'deny' (the attached-flag fix must not blind the
              deny matcher to this form)
         """
@@ -1831,7 +1832,9 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
                 return ResolveOneResult("deny", "matched deny pattern", None)
             return ResolveOneResult("allow", "no match", None)
 
-        _verdict = _resolve_leaf(self._leaf("python -cimport os"), resolve_one)
+        _verdict = resolve_compound_permission_detailed(
+            "python -cimport os", resolve_one
+        )
         decision, _reason, _context = (
             _verdict.decision,
             _verdict.reason,
@@ -1842,7 +1845,7 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
     def test_deny_fires_for_space_separated_form(self):
         """
         Given an ASK-floor leaf 'python -c "import os"' and a deny rule on 'python -c*'
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'deny'
         """
 
@@ -1851,7 +1854,9 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
                 return ResolveOneResult("deny", "matched deny pattern", None)
             return ResolveOneResult("allow", "no match", None)
 
-        _verdict = _resolve_leaf(self._leaf('python -c "import os"'), resolve_one)
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one
+        )
         decision, _reason, _context = (
             _verdict.decision,
             _verdict.reason,
@@ -1861,8 +1866,9 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
 
     def test_deny_fires_for_combined_short_flags(self):
         """
-        Given an ASK-floor leaf 'python -uc "code"' and a deny rule on 'python -uc*'
-        When _resolve_leaf resolves the leaf
+        Given an ASK-floor leaf 'python -uc "code"' (combined short flags)
+            and a deny rule on 'python -uc*'
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'deny'
         """
 
@@ -1871,7 +1877,9 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
                 return ResolveOneResult("deny", "matched deny pattern", None)
             return ResolveOneResult("allow", "no match", None)
 
-        _verdict = _resolve_leaf(self._leaf('python -uc "code"'), resolve_one)
+        _verdict = resolve_compound_permission_detailed(
+            'python -uc "code"', resolve_one
+        )
         decision, _reason, _context = (
             _verdict.decision,
             _verdict.reason,
@@ -1882,14 +1890,16 @@ class TestExtractOuterCommandDenyStillFires(unittest.TestCase):
     def test_allow_still_clamped_to_ask(self):
         """
         Given an ASK-floor leaf with no matching deny pattern
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'ask' (ASK floor clamps allow, not deny)
         """
 
         def resolve_one(_cmd):
             return ResolveOneResult("allow", "no match", None)
 
-        _verdict = _resolve_leaf(self._leaf('python -c "import os"'), resolve_one)
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one
+        )
         decision, _reason, _context = (
             _verdict.decision,
             _verdict.reason,
@@ -1903,10 +1913,14 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
 
     def test_long_inline_code_is_truncated_with_marker(self):
         """
-        Given an ASK-floor leaf with NO recognizable inline flag or heredoc
-        sentinel (the unbounded-fallback case), where _extract_outer_command
-        returns the whole (very long) leaf text
-        When _resolve_leaf builds the ASK-floor reason (allow clamped to ask)
+        Given a CommandUnit built directly via _unit_for from a LeafCommand
+            with ask_floor=True but NO recognizable inline flag or heredoc
+            sentinel -- real decompose() never sets ask_floor for this text
+            (verified: it classifies as a 'plain' unit), so this drives
+            _unit_for/judge_unit directly rather than through
+            resolve_compound_permission_detailed, to still reach
+            _extract_outer_command's unbounded-fallback branch
+        When judge_unit builds the ASK-floor reason (allow clamped to ask)
         Then the reason is truncated with a visible ellipsis marker and the
              executor remains visible, instead of dumping the full blob
         """
@@ -1917,7 +1931,9 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         def resolve_one(_cmd):
             return ResolveOneResult("allow", "no match", None)
 
-        reason = _resolve_leaf(self._leaf(leaf_text), resolve_one).reason
+        unit = _unit_for(LeafCommand(leaf_text, ask_floor=True))
+        part_verdicts = [_unit_from_result(p, resolve_one(p)) for p in unit.parts]
+        reason = judge_unit(unit, part_verdicts).reason
         self.assertIn("...", reason)
         self.assertIn("someforeigninterpreter", reason)
         self.assertLess(len(reason), 300)
@@ -1925,21 +1941,23 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
     def test_short_command_reason_is_unchanged(self):
         """
         Given an ASK-floor leaf with a short inline command
-        When _resolve_leaf builds the ASK-floor reason
+        When resolve_compound_permission_detailed builds the ASK-floor reason
         Then the full outer command is shown without an ellipsis marker
         """
 
         def resolve_one(_cmd):
             return ResolveOneResult("allow", "no match", None)
 
-        reason = self._leaf_and_resolve('python -c "print(1)"', resolve_one).reason
+        reason = resolve_compound_permission_detailed(
+            'python -c "print(1)"', resolve_one
+        ).reason
         self.assertNotIn("...", reason)
         self.assertIn("python -c", reason)
 
     def test_truncated_reason_has_no_newline(self):
         """
         Given an ASK-floor leaf with a long multi-line inline code payload
-        When _resolve_leaf builds the ASK-floor reason
+        When resolve_compound_permission_detailed builds the ASK-floor reason
         Then the reason string contains no embedded newline
         """
         long_code = "import os\n" * 50
@@ -1947,14 +1965,10 @@ class TestAskFloorReasonTruncation(unittest.TestCase):
         def resolve_one(_cmd):
             return ResolveOneResult("allow", "no match", None)
 
-        reason = self._leaf_and_resolve(f'python -c "{long_code}"', resolve_one).reason
+        reason = resolve_compound_permission_detailed(
+            f'python -c "{long_code}"', resolve_one
+        ).reason
         self.assertNotIn("\n", reason)
-
-    def _leaf(self, text, ask_floor=True):
-        return LeafCommand(text, ask_floor=ask_floor)
-
-    def _leaf_and_resolve(self, text, resolve_one):
-        return _resolve_leaf(self._leaf(text), resolve_one)
 
 
 def _canned_resolver(mapping):
@@ -1967,7 +1981,7 @@ def _canned_resolver(mapping):
 
 
 class TestAdditionalContextThreading(unittest.TestCase):
-    """``additionalContext`` threading through ``_resolve_leaf``, ``_combine_strictest``, and ``resolve_compound_permission``."""
+    """``additionalContext`` threading through ``resolve_compound_permission``/``resolve_compound_permission_detailed`` and ``_combine_strictest``."""
 
     def test_single_allowed_leaf_surfaces_its_context(self):
         """
@@ -2131,7 +2145,7 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
         Given an ASK-floor leaf (foreign inline code) whose outer command
             matches an explicit deny rule carrying additionalContext
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'deny' and the context is passed through
             unchanged -- the deny IS the deciding match
         """
@@ -2141,8 +2155,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
                 "deny", "matched deny pattern", "python -c is never allowed here"
             )
 
-        leaf = LeafCommand('python -c "import os"', ask_floor=True)
-        _verdict = _resolve_leaf(leaf, resolve_one)
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one
+        )
         decision, _reason, context = (
             _verdict.decision,
             _verdict.reason,
@@ -2155,7 +2170,7 @@ class TestAdditionalContextThreading(unittest.TestCase):
         """
         Given an ASK-floor leaf whose outer command matches an ALLOW rule
             carrying additionalContext (no explicit deny)
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is clamped to 'ask' and the context is None -- the
             floor, not the rule match, decides the verdict, mirroring
             permission_resolution._apply_ask_floor's clearing behaviour
@@ -2166,8 +2181,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
                 "allow", "no match", "this context must not leak through"
             )
 
-        leaf = LeafCommand('python -c "import os"', ask_floor=True)
-        _verdict = _resolve_leaf(leaf, resolve_one)
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one
+        )
         decision, _reason, context = (
             _verdict.decision,
             _verdict.reason,
@@ -2181,7 +2197,7 @@ class TestAdditionalContextThreading(unittest.TestCase):
         Given an ASK-floor leaf whose outer command matches an explicit ASK
             rule carrying additionalContext, and undecidable_fallback='ask'
             (the default, so the floor makes NO change)
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'ask' and BOTH the rule's own reason and its
             context pass through unchanged -- the floor decided nothing, so
             it must not be misattributed as the cause (TOO-19 code review m1)
@@ -2192,8 +2208,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
                 "ask", "matched ask pattern: python -c:*", "confirm this is safe"
             )
 
-        leaf = LeafCommand('python -c "import os"', ask_floor=True)
-        _verdict = _resolve_leaf(leaf, resolve_one, undecidable_fallback="ask")
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one, undecidable_fallback="ask"
+        )
         decision, reason, context = (
             _verdict.decision,
             _verdict.reason,
@@ -2209,7 +2226,7 @@ class TestAdditionalContextThreading(unittest.TestCase):
         Given an ASK-floor leaf whose outer command matches an ALLOW rule
             carrying additionalContext, and undecidable_fallback='ask' (the
             default), so the floor RAISES 'allow' to 'ask'
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'ask', the reason names the ASK floor (not the
             rule), and the context is dropped -- this is the genuine floor
             case, distinct from an explicit ask rule (contrast with
@@ -2221,8 +2238,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
                 "allow", "matched allow pattern: python -c:*", "trust this"
             )
 
-        leaf = LeafCommand('python -c "import os"', ask_floor=True)
-        _verdict = _resolve_leaf(leaf, resolve_one, undecidable_fallback="ask")
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one, undecidable_fallback="ask"
+        )
         decision, reason, context = (
             _verdict.decision,
             _verdict.reason,
@@ -2237,7 +2255,7 @@ class TestAdditionalContextThreading(unittest.TestCase):
         Given an ASK-floor leaf whose outer command matches an explicit ASK
             rule, and undecidable_fallback='deny' (so the floor RAISES 'ask'
             to 'deny')
-        When _resolve_leaf resolves the leaf
+        When resolve_compound_permission_detailed resolves it
         Then the decision is 'deny' and the reason names
             undecidable_fallback=deny -- floored != decision here too, so
             this is a genuine floor case even though the underlying decision
@@ -2250,8 +2268,9 @@ class TestAdditionalContextThreading(unittest.TestCase):
                 "ask", "matched ask pattern: python -c:*", "confirm this is safe"
             )
 
-        leaf = LeafCommand('python -c "import os"', ask_floor=True)
-        _verdict = _resolve_leaf(leaf, resolve_one, undecidable_fallback="deny")
+        _verdict = resolve_compound_permission_detailed(
+            'python -c "import os"', resolve_one, undecidable_fallback="deny"
+        )
         decision, reason, context = (
             _verdict.decision,
             _verdict.reason,
