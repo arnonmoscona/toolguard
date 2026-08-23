@@ -22,11 +22,16 @@ package: a caller uses the class, not the individual keys.
 Not in scope here: :mod:`toolguard.tool_spec`'s registry -- which tools
 exist, whether each is governed by default, and which kind of matching
 applies to it are toolguard's own decisions, built out of the field names
-declared here.
+declared here. Likewise, :func:`read_pre_tool_use_event` and
+:class:`EmptyHookInputError` are toolguard's own reading mechanics built atop
+the vocabulary above, not part of it -- Claude Code's spec doesn't say how a
+caller should read its own transport.
 """
 
+import json
+import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, TextIO, Tuple
 
 # --- PreToolUse / SessionStart input payload (stdin) ---
 SESSION_ID_KEY = "session_id"
@@ -86,6 +91,65 @@ class PreToolUseEvent:
             TOOL_NAME_KEY: self.tool_name,
             TOOL_INPUT_KEY: self.tool_input,
         }
+
+
+class EmptyHookInputError(ValueError):
+    """
+    Raised when a hook event source was read but contained no data.
+
+    A distinct subclass, not a bare ``ValueError``, so a caller can treat it
+    like a stray manual/probing invocation (e.g. a `toolguard --version` an
+    agent ran to check the installed version) rather than a real malformed
+    event -- see :func:`toolguard.hook.main`'s own handling. A real install
+    hit this twice, and the crash report it produced looked like a hook
+    defect while being nothing but a manual probe.
+    """
+
+
+#: The fields :func:`read_pre_tool_use_event` treats as required. This is
+#: toolguard's own choice of what it needs to make a decision -- not a
+#: mandate from Claude Code's own wire contract, which the fields above this
+#: point document without saying which are load-bearing for a consumer.
+_REQUIRED_EVENT_FIELDS = (TOOL_NAME_KEY, TOOL_INPUT_KEY, HOOK_EVENT_NAME_KEY)
+
+
+def read_pre_tool_use_event(source: Optional[TextIO] = None) -> PreToolUseEvent:
+    """
+    Read one PreToolUse hook event from *source* (default: ``sys.stdin``,
+    Claude Code's actual transport for a live hook invocation).
+
+    *source* defaults via a ``None`` sentinel resolved inside the function,
+    not a literal ``sys.stdin`` default value -- a default bound at function-
+    definition time captures whatever object ``sys.stdin`` was at import
+    time, so it stops tracking later reassignment of ``sys.stdin`` (e.g.
+    ``unittest.mock.patch("sys.stdin", ...)``, which every existing caller of
+    this reading path relies on).
+
+    A payload missing one of :data:`_REQUIRED_EVENT_FIELDS` fails here rather
+    than silently defaulting through :meth:`PreToolUseEvent.from_json_dict`;
+    every other field defaults per that method.
+
+    Raises:
+        EmptyHookInputError: If *source* was read but contained no data.
+        json.JSONDecodeError: If *source*'s contents are not valid JSON.
+        ValueError: If a required field is missing.
+    """
+    if source is None:
+        source = sys.stdin
+    input_data = source.read()
+    if not input_data.strip():
+        raise EmptyHookInputError("Empty input from stdin")
+
+    try:
+        data = json.loads(input_data)
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(f"Invalid JSON from stdin: {e.msg}", e.doc, e.pos)
+
+    for field in _REQUIRED_EVENT_FIELDS:
+        if field not in data:
+            raise ValueError(f"Missing required field: {field}")
+
+    return PreToolUseEvent.from_json_dict(data)
 
 
 # --- Event names (values of hook_event_name / hookEventName, and the keys

@@ -18,7 +18,7 @@ from toolguard.config import (
     TakeoverConfig,
     TakeoverEnabledConflict,
 )
-from toolguard.claude_code_contract import PreToolUseEvent
+from toolguard.claude_code_contract import PreToolUseEvent, read_pre_tool_use_event
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import (
@@ -30,7 +30,6 @@ from toolguard.hook import (
     create_hook_output,
     load_file_path_patterns,
     main,
-    parse_hook_input,
 )
 from toolguard.error_log import log_crash
 from toolguard.log_writer import LogRecord
@@ -392,8 +391,8 @@ class TestHookInputParsing(unittest.TestCase):
 
     def test_parse_valid_input(self):
         """
-        Given valid hook JSON on stdin
-        When parse_hook_input() reads it
+        Given valid hook JSON as a source
+        When read_pre_tool_use_event() reads it
         Then the parsed event exposes the tool_name and tool_input command
         """
         hook_input = {
@@ -402,15 +401,14 @@ class TestHookInputParsing(unittest.TestCase):
             "hook_event_name": "PreToolUse",
         }
 
-        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
-            result = parse_hook_input()
-            self.assertEqual(result.tool_name, "Bash")
-            self.assertEqual(result.tool_input["command"], "git status")
+        result = read_pre_tool_use_event(StringIO(json.dumps(hook_input)))
+        self.assertEqual(result.tool_name, "Bash")
+        self.assertEqual(result.tool_input["command"], "git status")
 
     def test_parse_returns_a_pretooluseevent_with_every_field_populated(self):
         """
-        Given hook JSON on stdin carrying every PreToolUseEvent field
-        When parse_hook_input() reads it
+        Given hook JSON as a source carrying every PreToolUseEvent field
+        When read_pre_tool_use_event() reads it
         Then it returns a PreToolUseEvent with each field parsed from the payload
         """
         hook_input = {
@@ -423,8 +421,7 @@ class TestHookInputParsing(unittest.TestCase):
             "tool_input": {"command": "git status"},
         }
 
-        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
-            result = parse_hook_input()
+        result = read_pre_tool_use_event(StringIO(json.dumps(hook_input)))
 
         self.assertIsInstance(result, PreToolUseEvent)
         self.assertEqual(result.session_id, "abc123")
@@ -435,8 +432,8 @@ class TestHookInputParsing(unittest.TestCase):
 
     def test_parse_missing_required_field(self):
         """
-        Given hook JSON on stdin missing the tool_input field
-        When parse_hook_input() reads it
+        Given hook JSON as a source missing the tool_input field
+        When read_pre_tool_use_event() reads it
         Then a ValueError mentioning tool_input is raised
         """
         hook_input = {
@@ -444,21 +441,19 @@ class TestHookInputParsing(unittest.TestCase):
             "hook_event_name": "PreToolUse",
         }
 
-        with patch("sys.stdin", StringIO(json.dumps(hook_input))):
-            with self.assertRaises(ValueError) as ctx:
-                parse_hook_input()
-            self.assertIn("tool_input", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            read_pre_tool_use_event(StringIO(json.dumps(hook_input)))
+        self.assertIn("tool_input", str(ctx.exception))
 
     def test_parse_empty_input(self):
         """
-        Given empty stdin
-        When parse_hook_input() reads it
+        Given an empty source
+        When read_pre_tool_use_event() reads it
         Then a ValueError mentioning 'Empty input' is raised
         """
-        with patch("sys.stdin", StringIO("")):
-            with self.assertRaises(ValueError) as ctx:
-                parse_hook_input()
-            self.assertIn("Empty input", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            read_pre_tool_use_event(StringIO(""))
+        self.assertIn("Empty input", str(ctx.exception))
 
 
 class TestHookOutput(unittest.TestCase):
@@ -3150,8 +3145,8 @@ class TestHookCrashCapture(unittest.TestCase):
     def test_json_decode_error_writes_crash_report(self):
         """
         Given stdin contains text that is not valid JSON
-        When main() runs and parse_hook_input's json.JSONDecodeError falls
-        through to the `except json.JSONDecodeError` clause
+        When main() runs and read_pre_tool_use_event's json.JSONDecodeError
+        falls through to the `except json.JSONDecodeError` clause
         Then main() still denies and exits 0, the decision lands on STDOUT
         and is non-empty (previously this went to stderr with exit 0,
         silently falling through to native permission handling instead of
@@ -3201,8 +3196,8 @@ class TestHookCrashCapture(unittest.TestCase):
         """
         Given valid JSON on stdin that is missing a required field
         (hook_event_name)
-        When main() runs and parse_hook_input's ValueError falls through to the
-        `except ValueError` clause
+        When main() runs and read_pre_tool_use_event's ValueError falls
+        through to the `except ValueError` clause
         Then main() still denies and exits 0, the decision lands on STDOUT
         and is non-empty (previously this went to stderr with exit 0,
         silently falling through to native permission handling instead of

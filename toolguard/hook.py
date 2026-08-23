@@ -27,11 +27,11 @@ from toolguard.api import decide
 from toolguard.auto_migrate import run_auto_migration
 from toolguard.claude_code_contract import (
     CWD_KEY,
-    HOOK_EVENT_NAME_KEY,
-    PreToolUseEvent,
+    EmptyHookInputError,
     PreToolUseResponse,
     TOOL_INPUT_KEY,
     TOOL_NAME_KEY,
+    read_pre_tool_use_event,
 )
 from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHOLDER
 from toolguard.config import load_configuration
@@ -94,52 +94,6 @@ def _run_startup_validation(
             log_error(issue.message, issue.corrective_steps, log_dir)
         else:
             log_warning(issue.message, issue.corrective_steps, log_dir)
-
-
-class EmptyStdinError(ValueError):
-    """
-    Raised when stdin was read but contained no data.
-
-    A distinct subclass, not a bare ``ValueError``, so :func:`main` can treat it
-    like the TTY guard -- a stray manual/probing invocation (e.g. a `toolguard
-    --version` an agent ran to check the installed version, an unrecognized
-    flag silently discarded by argparse, or any other non-hook invocation),
-    not an unexpected internal error worth a crash report. A real install hit
-    this twice, and the crash report it produced looked like a hook defect
-    while being nothing but a manual probe.
-    """
-
-
-def parse_hook_input() -> PreToolUseEvent:
-    """
-    Parse one hook event from stdin.
-
-    See :class:`~toolguard.claude_code_contract.PreToolUseEvent` for the wire
-    shape. Validating that the required fields are present is this module's
-    policy call (the contract only describes shape); everything else defaults
-    per :meth:`~toolguard.claude_code_contract.PreToolUseEvent.from_json_dict`.
-
-    Raises:
-        json.JSONDecodeError: If input is not valid JSON
-        EmptyStdinError: If stdin was read but contained no data.
-        ValueError: If a required field is missing.
-    """
-    try:
-        input_data = sys.stdin.read()
-        if not input_data.strip():
-            raise EmptyStdinError("Empty input from stdin")
-
-        data = json.loads(input_data)
-
-        required_fields = [TOOL_NAME_KEY, TOOL_INPUT_KEY, HOOK_EVENT_NAME_KEY]
-        for field in required_fields:
-            if field not in data:
-                raise ValueError(f"Missing required field: {field}")
-
-        return PreToolUseEvent.from_json_dict(data)
-
-    except json.JSONDecodeError as e:
-        raise json.JSONDecodeError(f"Invalid JSON from stdin: {e.msg}", e.doc, e.pos)
 
 
 def create_hook_output(verdict: RuntimeVerdict) -> Dict[str, Any]:
@@ -752,7 +706,7 @@ def _run_eval_mode() -> None:
     :func:`_finalize_output`, so no fault buffer is drained or implied.
     """
     try:
-        hook_data = parse_hook_input()
+        hook_data = read_pre_tool_use_event()
         tool_name = hook_data.tool_name
         tool_input = hook_data.tool_input
         cwd = hook_data.cwd
@@ -1209,11 +1163,13 @@ def main() -> None:
       stdout first, including from every internal error this function catches.
       The exceptions are the stray-invocation paths -- ``--help`` (argparse
       exits 0), a TTY stdin, and, on the non-``--eval`` path,
-      :class:`EmptyStdinError` -- which print an explanation instead and exit
-      0 with no JSON decision at all, since none of these is a real hook call
-      from Claude Code. Under ``--eval``, an empty piped stdin still exits 0
-      but with a JSON deny decision, via ``_run_eval_mode``'s own ``except
-      ValueError`` (:class:`EmptyStdinError` is a ``ValueError`` subclass).
+      :class:`~toolguard.claude_code_contract.EmptyHookInputError` -- which
+      print an explanation instead and exit 0 with no JSON decision at all,
+      since none of these is a real hook call from Claude Code. Under
+      ``--eval``, an empty piped stdin still exits 0 but with a JSON deny
+      decision, via ``_run_eval_mode``'s own ``except ValueError``
+      (:class:`~toolguard.claude_code_contract.EmptyHookInputError` is a
+      ``ValueError`` subclass).
     - 2 if writing that JSON to stdout itself raises (see :func:`_emit_decision`)
       -- the one case with no decision left to deliver, so the host's own
       blocking signal is what's left -- or from argparse's own usage-error
@@ -1273,7 +1229,7 @@ def main() -> None:
             reporter.log_dir = _resolve_reporter_log_dir(env_config)
 
             # Parse hook input first to get cwd
-            hook_data = parse_hook_input()
+            hook_data = read_pre_tool_use_event()
 
             tool_name = hook_data.tool_name
             tool_input = hook_data.tool_input
@@ -1335,8 +1291,8 @@ def main() -> None:
             _emit_decision(output)
             sys.exit(0)
 
-        except EmptyStdinError:
-            # A stray manual/probing invocation (see EmptyStdinError's own
+        except EmptyHookInputError:
+            # A stray manual/probing invocation (see EmptyHookInputError's own
             # docstring) -- treat it exactly like the TTY guard: a friendly
             # explanation, no crash report.
             _print_not_a_standalone_command_message(reporter)
