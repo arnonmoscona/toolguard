@@ -422,7 +422,7 @@ Few-shot examples (style, not a fixed catalogue):
      is a valid TOML escape for backspace and the rule silently matches nothing.
      Verified 7/7 ordinary invocations allowed and 6/6 destructive ones excluded.
      See
-     [agent-guides.md](../../../docs/agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception).
+     [agent-guides.md](../../docs/agent-guides.md#recipe-deny-a-command-with-a-legitimate-exception).
 
 ### Proposed edits (ONLY when `context.proposed_edits` is present -- otherwise skip entirely)
 
