@@ -1,0 +1,575 @@
+ticket	task_label	phase	minutes	dollars	model	provenance	source_file
+TOO-19	corrective change	planning	16	0.4	Sonnet 5	E	TOO-19/TOO-19 Corrective Change Implementation Report.md
+TOO-19	corrective change	implementation	9	0.5	Sonnet 5	E	TOO-19/TOO-19 Corrective Change Implementation Report.md
+TOO-19	corrective change	self_review	3	0.175	Sonnet 5	E	TOO-19/TOO-19 Corrective Change Implementation Report.md
+TOO-19	corrective change	report	2	0.1	Sonnet 5	E	TOO-19/TOO-19 Corrective Change Implementation Report.md
+TOO-19	corrective change	TOTAL	29	1.175	Sonnet 5	E	TOO-19/TOO-19 Corrective Change Implementation Report.md
+TOO-19	fail-open config parse failure ASK floor	planning	19	0.675	Sonnet 5	E	TOO-19/TOO-19 Fail-Open Config Parse Failure ASK-Floor Implementation Report.md
+TOO-19	fail-open config parse failure ASK floor	implementation	13	0.625	Sonnet 5	E	TOO-19/TOO-19 Fail-Open Config Parse Failure ASK-Floor Implementation Report.md
+TOO-19	fail-open config parse failure ASK floor	self_review	6	0.275	Sonnet 5	E	TOO-19/TOO-19 Fail-Open Config Parse Failure ASK-Floor Implementation Report.md
+TOO-19	fail-open config parse failure ASK floor	report	3	0.125	Sonnet 5	E	TOO-19/TOO-19 Fail-Open Config Parse Failure ASK-Floor Implementation Report.md
+TOO-19	fail-open config parse failure ASK floor	TOTAL	41	1.7	Sonnet 5	E	TOO-19/TOO-19 Fail-Open Config Parse Failure ASK-Floor Implementation Report.md
+TOO-19	Phase 0a RuleEntry.raw sentinel fix + coverage	planning	4		Sonnet 5	M	TOO-19/TOO-19 Phase 0a - RuleEntry.raw sentinel fix + coverage - Implementation Report.md
+TOO-19	Phase 0a RuleEntry.raw sentinel fix + coverage	implementation	2		Sonnet 5	M	TOO-19/TOO-19 Phase 0a - RuleEntry.raw sentinel fix + coverage - Implementation Report.md
+TOO-19	Phase 0a RuleEntry.raw sentinel fix + coverage	self_review	1		Sonnet 5	M	TOO-19/TOO-19 Phase 0a - RuleEntry.raw sentinel fix + coverage - Implementation Report.md
+TOO-19	Phase 0a RuleEntry.raw sentinel fix + coverage	report	1		Sonnet 5	E	TOO-19/TOO-19 Phase 0a - RuleEntry.raw sentinel fix + coverage - Implementation Report.md
+TOO-19	Phase 0a RuleEntry.raw sentinel fix + coverage	TOTAL	8		Sonnet 5	M	TOO-19/TOO-19 Phase 0a - RuleEntry.raw sentinel fix + coverage - Implementation Report.md
+TOO-19	Phase 0a increment 0	planning	15		Sonnet-class	E	TOO-19/TOO-19 Phase 0a increment 0 - Coder Implementation Report.md
+TOO-19	Phase 0a increment 0	implementation	35		Sonnet-class	E	TOO-19/TOO-19 Phase 0a increment 0 - Coder Implementation Report.md
+TOO-19	Phase 0a increment 0	self_review	10		Sonnet-class	E	TOO-19/TOO-19 Phase 0a increment 0 - Coder Implementation Report.md
+TOO-19	Phase 0a increment 0	report	5		Sonnet-class	E	TOO-19/TOO-19 Phase 0a increment 0 - Coder Implementation Report.md
+TOO-19	Phase 0a increment 0	TOTAL	65	3.0	Sonnet-class	E	TOO-19/TOO-19 Phase 0a increment 0 - Coder Implementation Report.md
+TOO-19	Phase 0a increment 1	planning	2	0.05	Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 1 - implementation report.md
+TOO-19	Phase 0a increment 1	implementation	4	0.15	Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 1 - implementation report.md
+TOO-19	Phase 0a increment 1	self_review	2	0.05	Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 1 - implementation report.md
+TOO-19	Phase 0a increment 1	report	1	0.02	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 1 - implementation report.md
+TOO-19	Phase 0a increment 1	TOTAL	9	0.275	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 1 - implementation report.md
+TOO-19	Phase 0a increment 2	planning	4		Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 2 implementation report.md
+TOO-19	Phase 0a increment 2	implementation	2		Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 2 implementation report.md
+TOO-19	Phase 0a increment 2	self_review	1		Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 2 implementation report.md
+TOO-19	Phase 0a increment 2 -- 18:02:47 -> ~18:09; phase 4 report still in progress, unquantified	TOTAL	6.5		Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 2 implementation report.md
+TOO-19	Phase 0a increment 4	planning	7	0.35	Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 4 implementation report.md
+TOO-19	Phase 0a increment 4	implementation	2	0.2	Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 4 implementation report.md
+TOO-19	Phase 0a increment 4	self_review	1	0.1	Sonnet 5	M	TOO-19/TOO-19 Phase 0a increment 4 implementation report.md
+TOO-19	Phase 0a increment 4	report	1	0.1	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 4 implementation report.md
+TOO-19	Phase 0a increment 4	TOTAL	11	0.75	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 4 implementation report.md
+TOO-19	Phase 0a increment 6	planning	10	0.35	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 6 implementation report.md
+TOO-19	Phase 0a increment 6	implementation	35	1.2	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 6 implementation report.md
+TOO-19	Phase 0a increment 6	self_review	8	0.25	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 6 implementation report.md
+TOO-19	Phase 0a increment 6	report	5	0.15	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 6 implementation report.md
+TOO-19	Phase 0a increment 6	TOTAL	58	1.95	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 6 implementation report.md
+TOO-19	Phase 0a increment 8 (active effort, not wall-clock)	planning	45	2.0	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 8 implementation report.md
+TOO-19	Phase 0a increment 8 (active effort, not wall-clock)	implementation	50	2.2	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 8 implementation report.md
+TOO-19	Phase 0a increment 8 (active effort, not wall-clock)	self_review	10	0.35	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 8 implementation report.md
+TOO-19	Phase 0a increment 8 (active effort, not wall-clock)	report	8	0.25	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 8 implementation report.md
+TOO-19	Phase 0a increment 8 (active effort, not wall-clock)	TOTAL	112.5	4.85	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increment 8 implementation report.md
+TOO-19	Phase 0a increments 7 and 9	planning	10	0.35	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increments 7 and 9 implementation report.md
+TOO-19	Phase 0a increments 7 and 9 -- phase 2 part A	implementation	8	0.2	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increments 7 and 9 implementation report.md
+TOO-19	Phase 0a increments 7 and 9 -- phase 2 part B	implementation	15	0.45	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increments 7 and 9 implementation report.md
+TOO-19	Phase 0a increments 7 and 9	self_review	5	0.1	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increments 7 and 9 implementation report.md
+TOO-19	Phase 0a increments 7 and 9	report	3	0.05	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increments 7 and 9 implementation report.md
+TOO-19	Phase 0a increments 7 and 9	TOTAL	41	1.15	Sonnet 5	E	TOO-19/TOO-19 Phase 0a increments 7 and 9 implementation report.md
+TOO-19	Phase 0b increments 3-4	planning	45		Sonnet-class	E	TOO-19/TOO-19 Phase 0b Increments 3-4 Implementation Report.md
+TOO-19	Phase 0b increments 3-4	implementation	50		Sonnet-class	E	TOO-19/TOO-19 Phase 0b Increments 3-4 Implementation Report.md
+TOO-19	Phase 0b increments 3-4	self_review	15		Sonnet-class	E	TOO-19/TOO-19 Phase 0b Increments 3-4 Implementation Report.md
+TOO-19	Phase 0b increments 3-4	report	5		Sonnet-class	E	TOO-19/TOO-19 Phase 0b Increments 3-4 Implementation Report.md
+TOO-19	Phase 0b increments 3-4	TOTAL	115	4.0	Sonnet-class	E	TOO-19/TOO-19 Phase 0b Increments 3-4 Implementation Report.md
+TOO-19	Phase 0b increments 5-6	planning	12	0.35	Sonnet 5	E	TOO-19/TOO-19 Phase 0b Increments 5-6 Implementation Report.md
+TOO-19	Phase 0b increments 5-6	implementation	10	0.3	Sonnet 5	E	TOO-19/TOO-19 Phase 0b Increments 5-6 Implementation Report.md
+TOO-19	Phase 0b increments 5-6	self_review	4	0.1	Sonnet 5	E	TOO-19/TOO-19 Phase 0b Increments 5-6 Implementation Report.md
+TOO-19	Phase 0b increments 5-6	TOTAL	26	0.75	Sonnet 5	E	TOO-19/TOO-19 Phase 0b Increments 5-6 Implementation Report.md
+TOO-19	Phase 0b increments 1-2	planning	10		Sonnet	E	TOO-19/TOO-19 Phase 0b increments 1-2 implementation report.md
+TOO-19	Phase 0b increments 1-2	implementation	20		Sonnet	E	TOO-19/TOO-19 Phase 0b increments 1-2 implementation report.md
+TOO-19	Phase 0b increments 1-2	self_review	8		Sonnet	E	TOO-19/TOO-19 Phase 0b increments 1-2 implementation report.md
+TOO-19	Phase 0b increments 1-2	report	5		Sonnet	E	TOO-19/TOO-19 Phase 0b increments 1-2 implementation report.md
+TOO-19	Phase 0b increments 1-2	TOTAL	43	1.5	Sonnet	E	TOO-19/TOO-19 Phase 0b increments 1-2 implementation report.md
+TOO-19	Phase 1 increment 9 (documentation)	planning	20	0.4	Sonnet	E	TOO-19/TOO-19 Phase 1 increment 9 documentation report.md
+TOO-19	Phase 1 increment 9 (documentation)	implementation	15	0.25	Sonnet	E	TOO-19/TOO-19 Phase 1 increment 9 documentation report.md
+TOO-19	Phase 1 increment 9 (documentation)	verification	5	0.075	Sonnet	E	TOO-19/TOO-19 Phase 1 increment 9 documentation report.md
+TOO-19	Phase 1 increment 9 (documentation)	report	5	0.075	Sonnet	E	TOO-19/TOO-19 Phase 1 increment 9 documentation report.md
+TOO-19	Phase 1 increment 9 (documentation)	TOTAL	45	0.8	Sonnet	E	TOO-19/TOO-19 Phase 1 increment 9 documentation report.md
+TOO-19	Phase 1 increments 3 and 5	planning	10	0.3	Sonnet 5	E	TOO-19/TOO-19 Phase 1 increments 3 and 5 implementation report.md
+TOO-19	Phase 1 increments 3 and 5	implementation	10	0.3	Sonnet 5	E	TOO-19/TOO-19 Phase 1 increments 3 and 5 implementation report.md
+TOO-19	Phase 1 increments 3 and 5 -- combined: new test authoring + verification runs	other	8	0.25	Sonnet 5	E	TOO-19/TOO-19 Phase 1 increments 3 and 5 implementation report.md
+TOO-19	Phase 1 increments 3 and 5	report	3	0.05	Sonnet 5	E	TOO-19/TOO-19 Phase 1 increments 3 and 5 implementation report.md
+TOO-19	Phase 1 increments 3 and 5	TOTAL	30	0.9	Sonnet 5	E	TOO-19/TOO-19 Phase 1 increments 3 and 5 implementation report.md
+TOO-19	review fixes: complexity and minors	planning	2		Sonnet 5	M	TOO-19/TOO-19 Review Fixes - Complexity and Minors Implementation Report.md
+TOO-19	review fixes: complexity and minors	implementation	31		Sonnet 5	M	TOO-19/TOO-19 Review Fixes - Complexity and Minors Implementation Report.md
+TOO-19	review fixes: complexity and minors -- combined: self-review + report	other	8		Sonnet 5	M	TOO-19/TOO-19 Review Fixes - Complexity and Minors Implementation Report.md
+TOO-19	review fixes: complexity and minors	TOTAL	41	4.5	Sonnet 5	M	TOO-19/TOO-19 Review Fixes - Complexity and Minors Implementation Report.md
+TOO-19	review fixes: correctness, round 1	planning	5		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 1	implementation	20		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 1	self_review	5		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 1	TOTAL	30	3.0	Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 2	planning	15		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 2	implementation	20		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 2 -- combined: test authoring + self-review + verification	other	20		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes: correctness, round 2	TOTAL	55	4.0	Sonnet-class	E	TOO-19/TOO-19 Review Fixes - Correctness Implementation Report.md
+TOO-19	review fixes M1 and M2	planning	20		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - M1 and M2 Implementation Report.md
+TOO-19	review fixes M1 and M2	implementation	25		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - M1 and M2 Implementation Report.md
+TOO-19	review fixes M1 and M2	self_review	10		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - M1 and M2 Implementation Report.md
+TOO-19	review fixes M1 and M2	report	5		Sonnet-class	E	TOO-19/TOO-19 Review Fixes - M1 and M2 Implementation Report.md
+TOO-19	review fixes M1 and M2	TOTAL	60	3.0	Sonnet-class	E	TOO-19/TOO-19 Review Fixes - M1 and M2 Implementation Report.md
+TOO-19	code review 2026-08-02 majors M1-M3	planning	48	3.5	Opus 5	E	TOO-19/TOO-19 code review 2026-08-02 majors M1-M3.md
+TOO-19	code review 2026-08-02 majors M1-M3 -- M1	implementation	50	4.0	Opus 5	E	TOO-19/TOO-19 code review 2026-08-02 majors M1-M3.md
+TOO-19	code review 2026-08-02 majors M1-M3 -- combined: M2 implementation + verification	other	15	1.0	Opus 5	E	TOO-19/TOO-19 code review 2026-08-02 majors M1-M3.md
+TOO-19	code review 2026-08-02 majors M1-M3 -- combined: M3 implementation + verification	other	20	1.5	Opus 5	E	TOO-19/TOO-19 code review 2026-08-02 majors M1-M3.md
+TOO-19	code review 2026-08-02 majors M1-M3 -- combined: self-review + report writing	other	15	1.0	Opus 5	E	TOO-19/TOO-19 code review 2026-08-02 majors M1-M3.md
+TOO-19	code review 2026-08-02 majors M1-M3	TOTAL	108	11.0	Opus 5	E	TOO-19/TOO-19 code review 2026-08-02 majors M1-M3.md
+TOO-19	code review majors M1-M3 fix report	planning	35	0.9	Sonnet 5	E	TOO-19/TOO-19 code review Majors M1-M3 - fix report.md
+TOO-19	code review majors M1-M3 fix report	implementation	70	2.0	Sonnet 5	E	TOO-19/TOO-19 code review Majors M1-M3 - fix report.md
+TOO-19	code review majors M1-M3 fix report	verification	25	0.5	Sonnet 5	E	TOO-19/TOO-19 code review Majors M1-M3 - fix report.md
+TOO-19	code review majors M1-M3 fix report	TOTAL	130	3.4	Sonnet 5	E	TOO-19/TOO-19 code review Majors M1-M3 - fix report.md
+TOO-19	code review minors m1-m4, m6	planning	15	0.6	Sonnet 5	E	TOO-19/TOO-19 code review minors m1-m4 m6 - fix report.md
+TOO-19	code review minors m1-m4, m6	implementation	75	3.5	Sonnet 5	E	TOO-19/TOO-19 code review minors m1-m4 m6 - fix report.md
+TOO-19	code review minors m1-m4, m6	self_review	20	0.8	Sonnet 5	E	TOO-19/TOO-19 code review minors m1-m4 m6 - fix report.md
+TOO-19	code review minors m1-m4, m6	report	5	0.2	Sonnet 5	E	TOO-19/TOO-19 code review minors m1-m4 m6 - fix report.md
+TOO-19	code review minors m1-m4, m6	TOTAL	115	5.1	Sonnet 5	E	TOO-19/TOO-19 code review minors m1-m4 m6 - fix report.md
+TOO-19	compound.py _extract_outer_command tests and fixes	planning	3	0.05	Sonnet-class	E	TOO-19/TOO-19 compound.py _extract_outer_command Tests and Fixes.md
+TOO-19	compound.py _extract_outer_command tests and fixes	implementation	9	0.2	Sonnet-class	E	TOO-19/TOO-19 compound.py _extract_outer_command Tests and Fixes.md
+TOO-19	compound.py _extract_outer_command tests and fixes	self_review	3	0.05	Sonnet-class	E	TOO-19/TOO-19 compound.py _extract_outer_command Tests and Fixes.md
+TOO-19	compound.py _extract_outer_command tests and fixes	report	2	0.03	Sonnet-class	E	TOO-19/TOO-19 compound.py _extract_outer_command Tests and Fixes.md
+TOO-19	compound.py _extract_outer_command tests and fixes	TOTAL	17	0.33	Sonnet-class	E	TOO-19/TOO-19 compound.py _extract_outer_command Tests and Fixes.md
+TOO-19	config_types.py extraction	planning	4		Sonnet	E	TOO-19/TOO-19 config_types.py extraction implementation report.md
+TOO-19	config_types.py extraction	implementation	2		Sonnet	E	TOO-19/TOO-19 config_types.py extraction implementation report.md
+TOO-19	config_types.py extraction	self_review	3		Sonnet	E	TOO-19/TOO-19 config_types.py extraction implementation report.md
+TOO-19	config_types.py extraction	report	1		Sonnet	E	TOO-19/TOO-19 config_types.py extraction implementation report.md
+TOO-19	config_types.py extraction	TOTAL	10		Sonnet	E	TOO-19/TOO-19 config_types.py extraction implementation report.md
+TOO-19	discovery log change-detection	planning	7	0.35	Sonnet 5	E	TOO-19/TOO-19 discovery log change-detection implementation report.md
+TOO-19	discovery log change-detection	implementation	13	0.65	Sonnet 5	E	TOO-19/TOO-19 discovery log change-detection implementation report.md
+TOO-19	discovery log change-detection	self_review	8	0.4	Sonnet 5	E	TOO-19/TOO-19 discovery log change-detection implementation report.md
+TOO-19	discovery log change-detection	report	3	0.15	Sonnet 5	E	TOO-19/TOO-19 discovery log change-detection implementation report.md
+TOO-19	discovery log change-detection	TOTAL	31	1.55	Sonnet 5	E	TOO-19/TOO-19 discovery log change-detection implementation report.md
+TOO-19	increment 3 hard_deny entries	planning	10		Sonnet-class	E	TOO-19/TOO-19 increment 3 - hard_deny entries - implementation report.md
+TOO-19	increment 3 hard_deny entries	implementation	12		Sonnet-class	E	TOO-19/TOO-19 increment 3 - hard_deny entries - implementation report.md
+TOO-19	increment 3 hard_deny entries	self_review	5		Sonnet-class	E	TOO-19/TOO-19 increment 3 - hard_deny entries - implementation report.md
+TOO-19	increment 3 hard_deny entries	report	5		Sonnet-class	E	TOO-19/TOO-19 increment 3 - hard_deny entries - implementation report.md
+TOO-19	increment 3 hard_deny entries	TOTAL	32	0.45	Sonnet-class	E	TOO-19/TOO-19 increment 3 - hard_deny entries - implementation report.md
+TOO-19	s1 SessionStart invariant + m3 wrapper false-positive	planning	15		Sonnet 5	E	TOO-19/TOO-19 s1 SessionStart invariant and m3 wrapper false-positive.md
+TOO-19	s1 SessionStart invariant + m3 wrapper false-positive	implementation	9		Sonnet 5	E	TOO-19/TOO-19 s1 SessionStart invariant and m3 wrapper false-positive.md
+TOO-19	s1 SessionStart invariant + m3 wrapper false-positive	verification	11		Sonnet 5	E	TOO-19/TOO-19 s1 SessionStart invariant and m3 wrapper false-positive.md
+TOO-19	s1 SessionStart invariant + m3 wrapper false-positive	report	5		Sonnet 5	E	TOO-19/TOO-19 s1 SessionStart invariant and m3 wrapper false-positive.md
+TOO-19	s1 SessionStart invariant + m3 wrapper false-positive	TOTAL	40	1.5	Sonnet 5	E	TOO-19/TOO-19 s1 SessionStart invariant and m3 wrapper false-positive.md
+TOO-19	shadowing detection + install hardening	planning	37		Sonnet 5	M	TOO-19/TOO-19 shadowing detection and install hardening.md
+TOO-19	shadowing detection + install hardening	implementation	36		Sonnet 5	M	TOO-19/TOO-19 shadowing detection and install hardening.md
+TOO-19	shadowing detection + install hardening	implementation	7	phase 2b docs	Sonnet 5	M	TOO-19/TOO-19 shadowing detection and install hardening.md
+TOO-19	shadowing detection + install hardening	self_review	6		Sonnet 5	M	TOO-19/TOO-19 shadowing detection and install hardening.md
+TOO-19	shadowing detection + install hardening -- phase 4 stated as 'a few more minutes', unquantified	report			Sonnet 5	E	TOO-19/TOO-19 shadowing detection and install hardening.md
+TOO-19	shadowing detection + install hardening	TOTAL	90	4.5	Sonnet 5	M	TOO-19/TOO-19 shadowing detection and install hardening.md
+TOO-19	undecidable_fallback config + threading	planning	2		Sonnet-class	M	TOO-19/TOO-19 undecidable_fallback - config and threading implementation report.md
+TOO-19	undecidable_fallback config + threading	implementation	8		Sonnet-class	M	TOO-19/TOO-19 undecidable_fallback - config and threading implementation report.md
+TOO-19	undecidable_fallback config + threading -- combined: self-review + report	other	4		Sonnet-class	M	TOO-19/TOO-19 undecidable_fallback - config and threading implementation report.md
+TOO-19	undecidable_fallback config + threading	TOTAL	14	0.45	Sonnet-class	M	TOO-19/TOO-19 undecidable_fallback - config and threading implementation report.md
+TOO-19	deny-side rule fabrication fix	planning	10		Sonnet 5	E	TOO-19/TOO-19 deny-side rule fabrication fix.md
+TOO-19	deny-side rule fabrication fix	implementation	8		Sonnet 5	E	TOO-19/TOO-19 deny-side rule fabrication fix.md
+TOO-19	deny-side rule fabrication fix	verification	11		Sonnet 5	E	TOO-19/TOO-19 deny-side rule fabrication fix.md
+TOO-19	deny-side rule fabrication fix	TOTAL	27.5		Sonnet 5	E	TOO-19/TOO-19 deny-side rule fabrication fix.md
+TOO-15	P0 analyzers	planning	12		claude-sonnet-4-6	E	implementation/TOO-15 P0 Analyzers Implementation Report.md
+TOO-15	P0 analyzers	implementation	35		claude-sonnet-4-6	E	implementation/TOO-15 P0 Analyzers Implementation Report.md
+TOO-15	P0 analyzers -- combined: self-review + bug fixes	other	8		claude-sonnet-4-6	E	implementation/TOO-15 P0 Analyzers Implementation Report.md
+TOO-15	P0 analyzers	report	5		claude-sonnet-4-6	E	implementation/TOO-15 P0 Analyzers Implementation Report.md
+TOO-15	P0 analyzers	TOTAL	60	0.95	claude-sonnet-4-6	E	implementation/TOO-15 P0 Analyzers Implementation Report.md
+TOO-15	P0 keystone	planning	8		claude-sonnet-4-6	E	implementation/TOO-15 P0 Keystone Implementation Report.md
+TOO-15	P0 keystone	implementation	18		claude-sonnet-4-6	E	implementation/TOO-15 P0 Keystone Implementation Report.md
+TOO-15	P0 keystone -- combined: self-review + test fixes	other	4		claude-sonnet-4-6	E	implementation/TOO-15 P0 Keystone Implementation Report.md
+TOO-15	P0 keystone	report	2		claude-sonnet-4-6	E	implementation/TOO-15 P0 Keystone Implementation Report.md
+TOO-15	P0 keystone	TOTAL	32	0.625	claude-sonnet-4-6	E	implementation/TOO-15 P0 Keystone Implementation Report.md
+TOO-15	P1 audit context export	planning	5	0.08		E	implementation/TOO-15 P1 Audit Context Export Implementation Report.md
+TOO-15	P1 audit context export	implementation	12	0.25		E	implementation/TOO-15 P1 Audit Context Export Implementation Report.md
+TOO-15	P1 audit context export -- combined: self-review + fixes	other	5	0.1		E	implementation/TOO-15 P1 Audit Context Export Implementation Report.md
+TOO-15	P1 audit context export	report	3	0.05		E	implementation/TOO-15 P1 Audit Context Export Implementation Report.md
+TOO-15	P1 audit context export -- source states a total cost but no total time	TOTAL		0.48		E	implementation/TOO-15 P1 Audit Context Export Implementation Report.md
+TOO-15	P2-A.1 consolidation core	planning	15			E	implementation/TOO-15 P2-A.1 Consolidation Core Implementation Report.md
+TOO-15	P2-A.1 consolidation core -- split across two sessions	implementation	35			E	implementation/TOO-15 P2-A.1 Consolidation Core Implementation Report.md
+TOO-15	P2-A.1 consolidation core	self_review	10			E	implementation/TOO-15 P2-A.1 Consolidation Core Implementation Report.md
+TOO-15	P2-A.1 consolidation core	TOTAL	60	0.65		E	implementation/TOO-15 P2-A.1 Consolidation Core Implementation Report.md
+TOO-15	project root consolidation	planning	10		Sonnet 5	E	implementation/TOO-15 Project Root Consolidation Implementation Report.md
+TOO-15	project root consolidation -- RED phase	implementation	10		Sonnet 5	E	implementation/TOO-15 Project Root Consolidation Implementation Report.md
+TOO-15	project root consolidation -- coordinator gap-fix	implementation	3		Sonnet 5	E	implementation/TOO-15 Project Root Consolidation Implementation Report.md
+TOO-15	project root consolidation -- combined: GREEN implementation + full suite/ruff/coverage + self-review	other	7		Sonnet 5	E	implementation/TOO-15 Project Root Consolidation Implementation Report.md
+TOO-15	project root consolidation	TOTAL	30	2.0	Sonnet 5	E	implementation/TOO-15 Project Root Consolidation Implementation Report.md
+TOO-15	P1 security audit aggregator	planning	3		Sonnet 4.6	M	TOO-15/TOO-15 P1 Security Audit Aggregator Implementation Report.md
+TOO-15	P1 security audit aggregator	implementation	3		Sonnet 4.6	M	TOO-15/TOO-15 P1 Security Audit Aggregator Implementation Report.md
+TOO-15	P1 security audit aggregator -- combined: self-review + verification	other	2		Sonnet 4.6	M	TOO-15/TOO-15 P1 Security Audit Aggregator Implementation Report.md
+TOO-15	P1 security audit aggregator -- handoff	report	1		Sonnet 4.6	M	TOO-15/TOO-15 P1 Security Audit Aggregator Implementation Report.md
+TOO-15	P1 security audit aggregator	TOTAL	9	0.1	Sonnet 4.6	M	TOO-15/TOO-15 P1 Security Audit Aggregator Implementation Report.md
+TOO-16	distribution tooling enhancement	planning	8		claude-sonnet-4-6	E	implementation/TOO-16 Distribution Tooling Enhancement Implementation Report.md
+TOO-16	distribution tooling enhancement	implementation	18		claude-sonnet-4-6	E	implementation/TOO-16 Distribution Tooling Enhancement Implementation Report.md
+TOO-16	distribution tooling enhancement -- combined: self-review + test runs	other	4		claude-sonnet-4-6	E	implementation/TOO-16 Distribution Tooling Enhancement Implementation Report.md
+TOO-16	distribution tooling enhancement	TOTAL	30	0.625	claude-sonnet-4-6	E	implementation/TOO-16 Distribution Tooling Enhancement Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, IR design pass	planning	20	0.15		E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, IR design pass -- IR design + initial implementation	implementation	30	0.3		E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, IR design pass -- debugging + test fixes	implementation	25	0.25		E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, IR design pass -- combined: self-review + hasattr cleanup	other	15	0.15		E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, IR design pass	TOTAL	90	0.85		E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, continuation session -- setup from compaction summary / context recovery	other	2			E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, continuation session -- fix test_simple_allowed_command	implementation	5			E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, continuation session -- fix test_adjacent_subshells	implementation	3			E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, continuation session -- combined: final validation + report	other	5			E	implementation/TOO-17 Implementation Report.md
+TOO-17	grammar-first multi-line bash parsing, continuation session	TOTAL	15	0.08		E	implementation/TOO-17 Implementation Report.md
+TOO-8	follow-up: loader deletion + Bash takeover coverage	planning	6		Sonnet 4.6	E	implementation/TOO-8 Follow-up- Loader Deletion and Bash Takeover Coverage Implementation Report.md
+TOO-8	follow-up: loader deletion + Bash takeover coverage	implementation	10		Sonnet 4.6	E	implementation/TOO-8 Follow-up- Loader Deletion and Bash Takeover Coverage Implementation Report.md
+TOO-8	follow-up: loader deletion + Bash takeover coverage	self_review	3		Sonnet 4.6	E	implementation/TOO-8 Follow-up- Loader Deletion and Bash Takeover Coverage Implementation Report.md
+TOO-8	follow-up: loader deletion + Bash takeover coverage	report	3		Sonnet 4.6	E	implementation/TOO-8 Follow-up- Loader Deletion and Bash Takeover Coverage Implementation Report.md
+TOO-8	follow-up: loader deletion + Bash takeover coverage	TOTAL	22	0.8	Sonnet 4.6	E	implementation/TOO-8 Follow-up- Loader Deletion and Bash Takeover Coverage Implementation Report.md
+TOO-30	GREEN phase -- setup: ticket/memory read, baseline test run	planning	7		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	GREEN phase -- reading config.py + test file, understanding contract	planning	10		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	GREEN phase -- items 1-7 + first full test run	implementation	10		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	GREEN phase -- debugging + fixing the duplicate_format failure	implementation	10		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	GREEN phase -- documentation updates	implementation	8		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	GREEN phase -- combined: self-review + ruff/compile + report writing	other	8		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	GREEN phase	TOTAL	53	2.5	Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - GREEN Phase.md
+TOO-30	RED phase tests	planning	4		Sonnet 5	M	TOO-30/TOO-30 Coder Implementation Report - RED Phase Tests.md
+TOO-30	RED phase tests	implementation	15		Sonnet 5	M	TOO-30/TOO-30 Coder Implementation Report - RED Phase Tests.md
+TOO-30	RED phase tests	self_review	8		Sonnet 5	M	TOO-30/TOO-30 Coder Implementation Report - RED Phase Tests.md
+TOO-30	RED phase tests	report	2		Sonnet 5	E	TOO-30/TOO-30 Coder Implementation Report - RED Phase Tests.md
+TOO-30	RED phase tests	TOTAL	29	0.85	Sonnet 5	M	TOO-30/TOO-30 Coder Implementation Report - RED Phase Tests.md
+TOO-30	test isolation cleanup	planning	35	1.2	Sonnet 5	E	TOO-30/TOO-30 Test Isolation Cleanup - Implementation Report.md
+TOO-30	test isolation cleanup	implementation	70	3.5	Sonnet 5	E	TOO-30/TOO-30 Test Isolation Cleanup - Implementation Report.md
+TOO-30	test isolation cleanup	self_review	10	0.3	Sonnet 5	E	TOO-30/TOO-30 Test Isolation Cleanup - Implementation Report.md
+TOO-30	test isolation cleanup	report	5	0.15	Sonnet 5	E	TOO-30/TOO-30 Test Isolation Cleanup - Implementation Report.md
+TOO-30	test isolation cleanup	TOTAL	120	5.15	Sonnet 5	E	TOO-30/TOO-30 Test Isolation Cleanup - Implementation Report.md
+TOO-44	re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails	planning	10	0.05	Sonnet 5	E	implementation/TOO-44 follow-up - re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails - coder-latest-implementation-report.md
+TOO-44	re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails	implementation	5	0.02	Sonnet 5	E	implementation/TOO-44 follow-up - re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails - coder-latest-implementation-report.md
+TOO-44	re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails	self_review	20	0.1	Sonnet 5	E	implementation/TOO-44 follow-up - re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails - coder-latest-implementation-report.md
+TOO-44	re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails	report	5	0.02	Sonnet 5	E	implementation/TOO-44 follow-up - re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails - coder-latest-implementation-report.md
+TOO-44	re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails -- cost stated only as a bound, 'under $0.20'	TOTAL	40		Sonnet 5	E	implementation/TOO-44 follow-up - re-drift guard for TestDecisionReachesStdoutWhenCrashLoggingFails - coder-latest-implementation-report.md
+TOO-44	ambient prose repair pass 2	planning	12	1.1		E	TOO-45/reports/TOO-44 ambient prose repair pass 2 - coder implementation report.md
+TOO-44	ambient prose repair pass 2	implementation	8	0.55		E	TOO-45/reports/TOO-44 ambient prose repair pass 2 - coder implementation report.md
+TOO-44	ambient prose repair pass 2	self_review	7	0.6		E	TOO-45/reports/TOO-44 ambient prose repair pass 2 - coder implementation report.md
+TOO-44	ambient prose repair pass 2	TOTAL	27	2.25		E	TOO-45/reports/TOO-44 ambient prose repair pass 2 - coder implementation report.md
+TOO-44	ticket 44 round 6 prose repair	planning	28	11		E	TOO-45/reports/TOO-45 ticket 44 round6 prose repair - implementation report.md
+TOO-44	ticket 44 round 6 prose repair	implementation	12	4		E	TOO-45/reports/TOO-45 ticket 44 round6 prose repair - implementation report.md
+TOO-44	ticket 44 round 6 prose repair	self_review	16	5		E	TOO-45/reports/TOO-45 ticket 44 round6 prose repair - implementation report.md
+TOO-44	ticket 44 round 6 prose repair	report	6	2		E	TOO-45/reports/TOO-45 ticket 44 round6 prose repair - implementation report.md
+TOO-44	ticket 44 round 6 prose repair	TOTAL	62	22		E	TOO-45/reports/TOO-45 ticket 44 round6 prose repair - implementation report.md
+TOO-44	review-44 round 5 repair -- 'proportions estimated'; source says the phases do not sum to wall clock	planning	15		Opus 5	E	TOO-45/reports/TOO-45 review-44 round5 repair - coder implementation report.md
+TOO-44	review-44 round 5 repair	implementation	20		Opus 5	E	TOO-45/reports/TOO-45 review-44 round5 repair - coder implementation report.md
+TOO-44	review-44 round 5 repair	verification	15		Opus 5	E	TOO-45/reports/TOO-45 review-44 round5 repair - coder implementation report.md
+TOO-44	review-44 round 5 repair -- measured 18:31-18:49 local	TOTAL	18	3.5	Opus 5	M	TOO-45/reports/TOO-45 review-44 round5 repair - coder implementation report.md
+TOO-45	--mocks four-finding repair pass (architecture_fitness)	planning	15		Sonnet-class	E	implementation/TOO-45 coder-latest-implementation-report.md
+TOO-45	--mocks four-finding repair pass (architecture_fitness)	implementation	5		Sonnet-class	E	implementation/TOO-45 coder-latest-implementation-report.md
+TOO-45	--mocks four-finding repair pass (architecture_fitness)	verification	10		Sonnet-class	E	implementation/TOO-45 coder-latest-implementation-report.md
+TOO-45	--mocks four-finding repair pass (architecture_fitness) -- report + memory writes	report	5		Sonnet-class	E	implementation/TOO-45 coder-latest-implementation-report.md
+TOO-45	--mocks four-finding repair pass (architecture_fitness)	TOTAL	35		Sonnet-class	E	implementation/TOO-45 coder-latest-implementation-report.md
+TOO-45	F1 dollar-paren depth guard	planning	20	0.9	Sonnet 5	E	implementation/TOO-45 F1 dollar-paren depth guard - coder implementation report.md
+TOO-45	F1 dollar-paren depth guard	implementation	20	0.8	Sonnet 5	E	implementation/TOO-45 F1 dollar-paren depth guard - coder implementation report.md
+TOO-45	F1 dollar-paren depth guard	verification	15	0.5	Sonnet 5	E	implementation/TOO-45 F1 dollar-paren depth guard - coder implementation report.md
+TOO-45	F1 dollar-paren depth guard	report	5	0.2	Sonnet 5	E	implementation/TOO-45 F1 dollar-paren depth guard - coder implementation report.md
+TOO-45	F1 dollar-paren depth guard	TOTAL	60	2.4	Sonnet 5	E	implementation/TOO-45 F1 dollar-paren depth guard - coder implementation report.md
+TOO-45	statement_bounds_containing table refactor -- stated '~10 min' but the timestamps beside it read 11:44-11:46	planning	10		Sonnet 5	E	implementation/TOO-45 statement_bounds_containing table refactor - coder implementation report.md
+TOO-45	statement_bounds_containing table refactor	implementation	6		Sonnet 5	M	implementation/TOO-45 statement_bounds_containing table refactor - coder implementation report.md
+TOO-45	statement_bounds_containing table refactor	self_review	6		Sonnet 5	M	implementation/TOO-45 statement_bounds_containing table refactor - coder implementation report.md
+TOO-45	statement_bounds_containing table refactor	report	4		Sonnet 5	M	implementation/TOO-45 statement_bounds_containing table refactor - coder implementation report.md
+TOO-45	statement_bounds_containing table refactor	TOTAL	26	3.0	Sonnet 5	M	implementation/TOO-45 statement_bounds_containing table refactor - coder implementation report.md
+TOO-45	resolution seam protocols	planning	25		Sonnet 5	E	TOO-45/reports/resolution-seam-protocols-report.md
+TOO-45	resolution seam protocols	implementation	70		Sonnet 5	E	TOO-45/reports/resolution-seam-protocols-report.md
+TOO-45	resolution seam protocols	self_review	25		Sonnet 5	E	TOO-45/reports/resolution-seam-protocols-report.md
+TOO-45	resolution seam protocols	report	10		Sonnet 5	E	TOO-45/reports/resolution-seam-protocols-report.md
+TOO-45	resolution seam protocols	TOTAL	130	4.0	Sonnet 5	E	TOO-45/reports/resolution-seam-protocols-report.md
+TOO-45	revert redirect-glued tilde extension	planning	15		Sonnet	E	TOO-45/reports/TOO-45 revert redirect-glued tilde extension - coder implementation report.md
+TOO-45	revert redirect-glued tilde extension	implementation	15		Sonnet	E	TOO-45/reports/TOO-45 revert redirect-glued tilde extension - coder implementation report.md
+TOO-45	revert redirect-glued tilde extension	verification	15		Sonnet	E	TOO-45/reports/TOO-45 revert redirect-glued tilde extension - coder implementation report.md
+TOO-45	revert redirect-glued tilde extension	report	10		Sonnet	E	TOO-45/reports/TOO-45 revert redirect-glued tilde extension - coder implementation report.md
+TOO-45	revert redirect-glued tilde extension	TOTAL	50		Sonnet	E	TOO-45/reports/TOO-45 revert redirect-glued tilde extension - coder implementation report.md
+TOO-45	phase 2 tools-hierarchy / tools-mining	planning	50		Sonnet-class	E	TOO-45/TOO-45 phase 2 tools-hierarchy tools-mining - coder report.md
+TOO-45	phase 2 tools-hierarchy / tools-mining	implementation	17.5		Sonnet-class	E	TOO-45/TOO-45 phase 2 tools-hierarchy tools-mining - coder report.md
+TOO-45	phase 2 tools-hierarchy / tools-mining	verification	17.5		Sonnet-class	E	TOO-45/TOO-45 phase 2 tools-hierarchy tools-mining - coder report.md
+TOO-45	phase 2 tools-hierarchy / tools-mining -- stated as 'a few minutes', unquantified	report			Sonnet-class	E	TOO-45/TOO-45 phase 2 tools-hierarchy tools-mining - coder report.md
+TOO-45	R3 review-fix	planning	12	0.6	Sonnet 5	M	implementation/TOO-45 R3 review-fix implementation report.md
+TOO-45	R3 review-fix	implementation	13	0.9	Sonnet 5	M	implementation/TOO-45 R3 review-fix implementation report.md
+TOO-45	R3 review-fix -- source folds phase 3 into phase 2's figure; no separate number	self_review			Sonnet 5	M	implementation/TOO-45 R3 review-fix implementation report.md
+TOO-45	R3 review-fix	report	3	0.2	Sonnet 5	M	implementation/TOO-45 R3 review-fix implementation report.md
+TOO-45	R3 review-fix	TOTAL	30	1.7	Sonnet 5	M	implementation/TOO-45 R3 review-fix implementation report.md
+TOO-45	R3 second review-fix	planning	17	0.9	Sonnet 5	M	implementation/TOO-45 R3 second review-fix implementation report.md
+TOO-45	R3 second review-fix -- combined: phases 2 and 3 interleaved (implementation + self-review)	other	19	1.0	Sonnet 5	M	implementation/TOO-45 R3 second review-fix implementation report.md
+TOO-45	R3 second review-fix	report	4	0.2	Sonnet 5	M	implementation/TOO-45 R3 second review-fix implementation report.md
+TOO-45	R3 second review-fix	TOTAL	40	2.1	Sonnet 5	M	implementation/TOO-45 R3 second review-fix implementation report.md
+TOO-45-14	ticket 14 residual: takeover notice routing	planning	10		Sonnet	E	implementation/TOO-45 ticket 14 residual - takeover notice routing - coder implementation report.md
+TOO-45-14	ticket 14 residual: takeover notice routing	implementation	15		Sonnet	E	implementation/TOO-45 ticket 14 residual - takeover notice routing - coder implementation report.md
+TOO-45-14	ticket 14 residual: takeover notice routing	self_review	15		Sonnet	E	implementation/TOO-45 ticket 14 residual - takeover notice routing - coder implementation report.md
+TOO-45-14	ticket 14 residual: takeover notice routing	report	5		Sonnet	E	implementation/TOO-45 ticket 14 residual - takeover notice routing - coder implementation report.md
+TOO-45-14	ticket 14 residual: takeover notice routing	TOTAL	45		Sonnet	E	implementation/TOO-45 ticket 14 residual - takeover notice routing - coder implementation report.md
+TOO-45-18	proposed ticket 18: default multitoken prefix over-match	planning	13		Sonnet-class	M	TOO-45/reports/TOO-45 proposed ticket 18 - default multitoken prefix over-match - coder implementation report.md
+TOO-45-18	proposed ticket 18: default multitoken prefix over-match	implementation	15		Sonnet-class	M	TOO-45/reports/TOO-45 proposed ticket 18 - default multitoken prefix over-match - coder implementation report.md
+TOO-45-18	proposed ticket 18: default multitoken prefix over-match -- phase 3/4: report + IDE handoff	report	5		Sonnet-class	M	TOO-45/reports/TOO-45 proposed ticket 18 - default multitoken prefix over-match - coder implementation report.md
+TOO-45-18	proposed ticket 18: default multitoken prefix over-match	TOTAL	33	2.25	Sonnet-class	M	TOO-45/reports/TOO-45 proposed ticket 18 - default multitoken prefix over-match - coder implementation report.md
+TOO-45-18	review-18 round 1 repair	planning	19	1.4	Sonnet-class	M	TOO-45/reports/TOO-45 review-18 round1 repair - coder implementation report.md
+TOO-45-18	review-18 round 1 repair	implementation	6	0.5	Sonnet-class	M	TOO-45/reports/TOO-45 review-18 round1 repair - coder implementation report.md
+TOO-45-18	review-18 round 1 repair	self_review	3	0.3	Sonnet-class	M	TOO-45/reports/TOO-45 review-18 round1 repair - coder implementation report.md
+TOO-45-18	review-18 round 1 repair -- in progress at writing; no elapsed given	report		0.2	Sonnet-class	E	TOO-45/reports/TOO-45 review-18 round1 repair - coder implementation report.md
+TOO-45-18	review-18 round 1 repair	TOTAL	28	2.4	Sonnet-class	M	TOO-45/reports/TOO-45 review-18 round1 repair - coder implementation report.md
+TOO-45-18	review-18 round 2 repair	planning	13		Sonnet 5	E	TOO-45/reports/review-18-round2 repair - coder implementation report.md
+TOO-45-18	review-18 round 2 repair	implementation	30		Sonnet 5	E	TOO-45/reports/review-18-round2 repair - coder implementation report.md
+TOO-45-18	review-18 round 2 repair -- combined: non-blocking fixes + full-suite/ruff/fitness + diff review	other	10		Sonnet 5	E	TOO-45/reports/review-18-round2 repair - coder implementation report.md
+TOO-45-18	review-18 round 2 repair	report	5		Sonnet 5	E	TOO-45/reports/review-18-round2 repair - coder implementation report.md
+TOO-45-18	review-18 round 2 repair	TOTAL	58	3.0	Sonnet 5	E	TOO-45/reports/review-18-round2 repair - coder implementation report.md
+TOO-45-18	review-18 round 3 repair	planning	37.5		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round3 repair - coder implementation report.md
+TOO-45-18	review-18 round 3 repair	implementation	90		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round3 repair - coder implementation report.md
+TOO-45-18	review-18 round 3 repair -- combined: self-review + suite runs + report writing	other	35		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round3 repair - coder implementation report.md
+TOO-45-18	review-18 round 3 repair	TOTAL	130	3.5	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round3 repair - coder implementation report.md
+TOO-45-18	review-18 round 4 repair	planning	10	0.6	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round4 repair - coder implementation report.md
+TOO-45-18	review-18 round 4 repair	implementation	30	2.2	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round4 repair - coder implementation report.md
+TOO-45-18	review-18 round 4 repair	self_review	8	0.3	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round4 repair - coder implementation report.md
+TOO-45-18	review-18 round 4 repair	report	5	0.2	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round4 repair - coder implementation report.md
+TOO-45-18	review-18 round 4 repair	TOTAL	53	3.3	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round4 repair - coder implementation report.md
+TOO-45-18	review-18 round 5 repair	planning	10		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round5 repair - coder implementation report.md
+TOO-45-18	review-18 round 5 repair	implementation	55		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round5 repair - coder implementation report.md
+TOO-45-18	review-18 round 5 repair	self_review	10		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round5 repair - coder implementation report.md
+TOO-45-18	review-18 round 5 repair	report	10		Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round5 repair - coder implementation report.md
+TOO-45-18	review-18 round 5 repair	TOTAL	85	3.0	Sonnet 5	E	TOO-45/reports/TOO-45 review-18-round5 repair - coder implementation report.md
+TOO-45-19	ticket 19 repair round	planning	2		Sonnet 5	E	implementation/TOO-45 ticket 19 repair round - coder implementation report.md
+TOO-45-19	ticket 19 repair round -- independent F1 re-measurement, isolated HEAD copy	verification	7		Sonnet 5	E	implementation/TOO-45 ticket 19 repair round - coder implementation report.md
+TOO-45-19	ticket 19 repair round	implementation	2		Sonnet 5	E	implementation/TOO-45 ticket 19 repair round - coder implementation report.md
+TOO-45-19	ticket 19 repair round	self_review	3		Sonnet 5	E	implementation/TOO-45 ticket 19 repair round - coder implementation report.md
+TOO-45-19	ticket 19 repair round	TOTAL	13.5		Sonnet 5	E	implementation/TOO-45 ticket 19 repair round - coder implementation report.md
+TOO-45-20a	ticket 20a repair round	planning	20	0.6	Sonnet	E	implementation/TOO-45 ticket 20a repair round - coder implementation report.md
+TOO-45-20a	ticket 20a repair round	implementation	65	1.8	Sonnet	E	implementation/TOO-45 ticket 20a repair round - coder implementation report.md
+TOO-45-20a	ticket 20a repair round	self_review	25	0.7	Sonnet	E	implementation/TOO-45 ticket 20a repair round - coder implementation report.md
+TOO-45-20a	ticket 20a repair round	TOTAL	110	3.1	Sonnet	E	implementation/TOO-45 ticket 20a repair round - coder implementation report.md
+TOO-45-32	ticket 32 item 1: MigrationOutcome reason carrying -- investigation + design	planning	25		Sonnet-class	E	TOO-45/TOO-45 ticket 32 item 1 - MigrationOutcome reason carrying - coder implementation report.md
+TOO-45-32	ticket 32 item 1: MigrationOutcome reason carrying	implementation	10		Sonnet-class	E	TOO-45/TOO-45 ticket 32 item 1 - MigrationOutcome reason carrying - coder implementation report.md
+TOO-45-32	ticket 32 item 1: MigrationOutcome reason carrying -- tests	implementation	15		Sonnet-class	E	TOO-45/TOO-45 ticket 32 item 1 - MigrationOutcome reason carrying - coder implementation report.md
+TOO-45-32	ticket 32 item 1: MigrationOutcome reason carrying -- gates + mutation verification	verification	15		Sonnet-class	E	TOO-45/TOO-45 ticket 32 item 1 - MigrationOutcome reason carrying - coder implementation report.md
+TOO-45-32	ticket 32 item 1: MigrationOutcome reason carrying	report	5		Sonnet-class	E	TOO-45/TOO-45 ticket 32 item 1 - MigrationOutcome reason carrying - coder implementation report.md
+TOO-45-32	ticket 32 item 1: MigrationOutcome reason carrying	TOTAL	70	1.5	Sonnet-class	E	TOO-45/TOO-45 ticket 32 item 1 - MigrationOutcome reason carrying - coder implementation report.md
+TOO-45-38	ticket 38 fallback_kind prose-parsing fix	planning	36		Sonnet	E	implementation/TOO-45 ticket 38 fallback_kind prose-parsing fix - coder implementation report.md
+TOO-45-38	ticket 38 fallback_kind prose-parsing fix -- combined: phases 2+3, implementation + test fixes + mutation verification + gates	other	26		Sonnet	E	implementation/TOO-45 ticket 38 fallback_kind prose-parsing fix - coder implementation report.md
+TOO-45-38	ticket 38 fallback_kind prose-parsing fix	TOTAL	62	4.0	Sonnet	E	implementation/TOO-45 ticket 38 fallback_kind prose-parsing fix - coder implementation report.md
+TOO-45-39	proposed ticket 39: write guard ordinary-tier check	planning	4		Sonnet	M	TOO-45/reports/TOO-45 proposed ticket 39 - write guard ordinary-tier check.md
+TOO-45-39	proposed ticket 39: write guard ordinary-tier check	implementation	5		Sonnet	M	TOO-45/reports/TOO-45 proposed ticket 39 - write guard ordinary-tier check.md
+TOO-45-39	proposed ticket 39: write guard ordinary-tier check	self_review	6		Sonnet	M	TOO-45/reports/TOO-45 proposed ticket 39 - write guard ordinary-tier check.md
+TOO-45-39	proposed ticket 39: write guard ordinary-tier check	report	2		Sonnet	E	TOO-45/reports/TOO-45 proposed ticket 39 - write guard ordinary-tier check.md
+TOO-45-39	proposed ticket 39: write guard ordinary-tier check	TOTAL	16	0.45	Sonnet	E	TOO-45/reports/TOO-45 proposed ticket 39 - write guard ordinary-tier check.md
+TOO-45-39	punch-list 39 round 4	planning	25		Sonnet 5	E	TOO-45/reports/TOO-45 punch-list 39 round 4 - coder implementation report.md
+TOO-45-39	punch-list 39 round 4	implementation	55		Sonnet 5	E	TOO-45/reports/TOO-45 punch-list 39 round 4 - coder implementation report.md
+TOO-45-39	punch-list 39 round 4 -- combined: phase 3/4 self-review + report	other	10		Sonnet 5	E	TOO-45/reports/TOO-45 punch-list 39 round 4 - coder implementation report.md
+TOO-45-39	punch-list 39 round 4	TOTAL	90	2.5	Sonnet 5	E	TOO-45/reports/TOO-45 punch-list 39 round 4 - coder implementation report.md
+TOO-45-39	review-39 round 1 repair	planning	20		Sonnet-class	E	TOO-45/reports/TOO-45 review-39-round1 repair - coder implementation report.md
+TOO-45-39	review-39 round 1 repair	implementation	15		Sonnet-class	E	TOO-45/reports/TOO-45 review-39-round1 repair - coder implementation report.md
+TOO-45-39	review-39 round 1 repair	verification	10		Sonnet-class	E	TOO-45/reports/TOO-45 review-39-round1 repair - coder implementation report.md
+TOO-45-39	review-39 round 1 repair	report	5		Sonnet-class	E	TOO-45/reports/TOO-45 review-39-round1 repair - coder implementation report.md
+TOO-45-39	review-39 round 1 repair	TOTAL	50	1.25	Sonnet-class	E	TOO-45/reports/TOO-45 review-39-round1 repair - coder implementation report.md
+TOO-45-42-47	tickets 42 and 47	planning	30	2.5	Sonnet	E	TOO-45/TOO-45 tickets 42 and 47 - coder implementation report.md
+TOO-45-42-47	tickets 42 and 47	implementation	12	1.0	Sonnet	E	TOO-45/TOO-45 tickets 42 and 47 - coder implementation report.md
+TOO-45-42-47	tickets 42 and 47	self_review	15	1.3	Sonnet	E	TOO-45/TOO-45 tickets 42 and 47 - coder implementation report.md
+TOO-45-42-47	tickets 42 and 47	report	5	0.4	Sonnet	E	TOO-45/TOO-45 tickets 42 and 47 - coder implementation report.md
+TOO-45-42-47	tickets 42 and 47	TOTAL	62	5.2	Sonnet	E	TOO-45/TOO-45 tickets 42 and 47 - coder implementation report.md
+TOO-45-44	ticket 44 broken isolation seam	planning	8	1.2		E	implementation/TOO-45 ticket 44 broken isolation seam - coder implementation report.md
+TOO-45-44	ticket 44 broken isolation seam	implementation	11	1.6		E	implementation/TOO-45 ticket 44 broken isolation seam - coder implementation report.md
+TOO-45-44	ticket 44 broken isolation seam -- combined: phases 3/4 full-suite verification + lint + report	other	8	1.0		E	implementation/TOO-45 ticket 44 broken isolation seam - coder implementation report.md
+TOO-45-44	ticket 44 broken isolation seam	TOTAL	27	3.8		E	implementation/TOO-45 ticket 44 broken isolation seam - coder implementation report.md
+TOO-45-45	proposed ticket 45: inert-mock static check -- planning + measuring the real data	planning	15	2.5		E	implementation/TOO-45 proposed ticket 45 inert-mock static check - implementation report.md
+TOO-45-45	proposed ticket 45: inert-mock static check	implementation	20	4		E	implementation/TOO-45 proposed ticket 45 inert-mock static check - implementation report.md
+TOO-45-45	proposed ticket 45: inert-mock static check	self_review	25	5		E	implementation/TOO-45 proposed ticket 45 inert-mock static check - implementation report.md
+TOO-45-45	proposed ticket 45: inert-mock static check	TOTAL	60	11.5		E	implementation/TOO-45 proposed ticket 45 inert-mock static check - implementation report.md
+TOO-45-74	ticket 74: hook payload-key + empty-registry fail-open	planning	18		Sonnet	E	TOO-45/reports/TOO-45 ticket 74 (hook payload-key + empty-registry fail-open) - coder implementation report.md
+TOO-45-74	ticket 74: hook payload-key + empty-registry fail-open	implementation	10		Sonnet	E	TOO-45/reports/TOO-45 ticket 74 (hook payload-key + empty-registry fail-open) - coder implementation report.md
+TOO-45-74	ticket 74: hook payload-key + empty-registry fail-open	verification	8		Sonnet	E	TOO-45/reports/TOO-45 ticket 74 (hook payload-key + empty-registry fail-open) - coder implementation report.md
+TOO-45-74	ticket 74: hook payload-key + empty-registry fail-open	report	4		Sonnet	E	TOO-45/reports/TOO-45 ticket 74 (hook payload-key + empty-registry fail-open) - coder implementation report.md
+TOO-45-74	ticket 74: hook payload-key + empty-registry fail-open	TOTAL	40	2.0	Sonnet	E	TOO-45/reports/TOO-45 ticket 74 (hook payload-key + empty-registry fail-open) - coder implementation report.md
+TOO-45-74	review-74 round 1 repair	planning	10	1.75	Sonnet 5	E	TOO-45/reports/review-74-round1-repair.md
+TOO-45-74	review-74 round 1 repair	implementation	25	6.0	Sonnet 5	E	TOO-45/reports/review-74-round1-repair.md
+TOO-45-74	review-74 round 1 repair	self_review	10	2.5	Sonnet 5	E	TOO-45/reports/review-74-round1-repair.md
+TOO-45-74	review-74 round 1 repair	report	5	1.0	Sonnet 5	E	TOO-45/reports/review-74-round1-repair.md
+TOO-45-74	review-74 round 1 repair	TOTAL	50	11.5	Sonnet 5	E	TOO-45/reports/review-74-round1-repair.md
+TOO-45-77	ticket 77 leading env assignment, phase 1 grammar	planning	18	1.9		E	TOO-45/reports/TOO-45 ticket 77 leading env assignment - phase 1 grammar - coder report.md
+TOO-45-77	ticket 77 leading env assignment, phase 1 grammar	implementation	15	1.2		E	TOO-45/reports/TOO-45 ticket 77 leading env assignment - phase 1 grammar - coder report.md
+TOO-45-77	ticket 77 leading env assignment, phase 1 grammar -- combined: self-review and verification	other	7	0.55		E	TOO-45/reports/TOO-45 ticket 77 leading env assignment - phase 1 grammar - coder report.md
+TOO-45-77	ticket 77 leading env assignment, phase 1 grammar	report	4	0.35		E	TOO-45/reports/TOO-45 ticket 77 leading env assignment - phase 1 grammar - coder report.md
+TOO-45-77	ticket 77 leading env assignment, phase 1 grammar	TOTAL	44	4.0		E	TOO-45/reports/TOO-45 ticket 77 leading env assignment - phase 1 grammar - coder report.md
+TOO-45-77	ticket 77 grammar phase 1, M1+L1	planning	10		Opus	E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 M1+L1 - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1, M1+L1	implementation	24		Opus	E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 M1+L1 - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1, M1+L1	self_review	12		Opus	E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 M1+L1 - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1, M1+L1	TOTAL	46	8.0	Opus	E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 M1+L1 - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1 delta fold-in	planning	8	1.2		E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 delta fold-in (M1 +=, L1, L2, L3) - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1 delta fold-in	implementation	18	2.6		E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 delta fold-in (M1 +=, L1, L2, L3) - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1 delta fold-in	self_review	6	1.1		E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 delta fold-in (M1 +=, L1, L2, L3) - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1 delta fold-in -- handoff	report	2	0.4		E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 delta fold-in (M1 +=, L1, L2, L3) - coder implementation report.md
+TOO-45-77	ticket 77 grammar phase 1 delta fold-in	TOTAL	34	5.3		E	TOO-45/reports/TOO-45 ticket 77 grammar phase 1 delta fold-in (M1 +=, L1, L2, L3) - coder implementation report.md
+TOO-45-77	ticket 77 phase 2 matcher	planning	55	4.2		E	TOO-45/reports/TOO-45 ticket 77 phase 2 matcher - coder implementation report.md
+TOO-45-77	ticket 77 phase 2 matcher	implementation	75	5.6		E	TOO-45/reports/TOO-45 ticket 77 phase 2 matcher - coder implementation report.md
+TOO-45-77	ticket 77 phase 2 matcher -- tests and red-before-green	implementation	25	1.8		E	TOO-45/reports/TOO-45 ticket 77 phase 2 matcher - coder implementation report.md
+TOO-45-77	ticket 77 phase 2 matcher	verification	30	2.3		E	TOO-45/reports/TOO-45 ticket 77 phase 2 matcher - coder implementation report.md
+TOO-45-77	ticket 77 phase 2 matcher -- docs and reporting	report	20	1.4		E	TOO-45/reports/TOO-45 ticket 77 phase 2 matcher - coder implementation report.md
+TOO-45-77	ticket 77 phase 2 matcher	TOTAL	185	15.3		E	TOO-45/reports/TOO-45 ticket 77 phase 2 matcher - coder implementation report.md
+TOO-45-78	ticket 78 tilde-expanded variant	planning	20	1.6		E	TOO-45/reports/TOO-45 ticket 78 tilde-expanded variant - coder implementation report.md
+TOO-45-78	ticket 78 tilde-expanded variant	implementation	15	1.1		E	TOO-45/reports/TOO-45 ticket 78 tilde-expanded variant - coder implementation report.md
+TOO-45-78	ticket 78 tilde-expanded variant	verification	20	1.8		E	TOO-45/reports/TOO-45 ticket 78 tilde-expanded variant - coder implementation report.md
+TOO-45-78	ticket 78 tilde-expanded variant -- doc sweep and reporting	report	10	0.9		E	TOO-45/reports/TOO-45 ticket 78 tilde-expanded variant - coder implementation report.md
+TOO-45-78	ticket 78 tilde-expanded variant	TOTAL	65	5.4		E	TOO-45/reports/TOO-45 ticket 78 tilde-expanded variant - coder implementation report.md
+TOO-45-78	ticket 78 follow-up: three remaining pattern types	planning	26	2.1		E	TOO-45/reports/TOO-45 ticket 78 follow-up (three remaining pattern types) - coder implementation report.md
+TOO-45-78	ticket 78 follow-up: three remaining pattern types	implementation	20	1.5		E	TOO-45/reports/TOO-45 ticket 78 follow-up (three remaining pattern types) - coder implementation report.md
+TOO-45-78	ticket 78 follow-up: three remaining pattern types	verification	40	3.2		E	TOO-45/reports/TOO-45 ticket 78 follow-up (three remaining pattern types) - coder implementation report.md
+TOO-45-78	ticket 78 follow-up: three remaining pattern types -- combined: doc sweep + except-parens false alarm + reporting	other	14	1.1		E	TOO-45/reports/TOO-45 ticket 78 follow-up (three remaining pattern types) - coder implementation report.md
+TOO-45-78	ticket 78 follow-up: three remaining pattern types	TOTAL	100	7.9		E	TOO-45/reports/TOO-45 ticket 78 follow-up (three remaining pattern types) - coder implementation report.md
+TOO-45-78	review-78 round 1 repair	planning	11	1.0		E	TOO-45/reports/TOO-45 review-78 round1 repair - coder implementation report.md
+TOO-45-78	review-78 round 1 repair	implementation	24	2.6		E	TOO-45/reports/TOO-45 review-78 round1 repair - coder implementation report.md
+TOO-45-78	review-78 round 1 repair	verification	44	4.2		E	TOO-45/reports/TOO-45 review-78 round1 repair - coder implementation report.md
+TOO-45-78	review-78 round 1 repair -- combined: self-review and report	other	10	1.2		E	TOO-45/reports/TOO-45 review-78 round1 repair - coder implementation report.md
+TOO-45-78	review-78 round 1 repair	TOTAL	89	9.0		E	TOO-45/reports/TOO-45 review-78 round1 repair - coder implementation report.md
+TOO-45-78	review-78 round 2 repair -- reading the review, brief and affected source	planning	12		Sonnet 5	E	TOO-45/reports/TOO-45 review-78 round2 repair - coder implementation report.md
+TOO-45-78	review-78 round 2 repair -- planning the fix	planning	8		Sonnet 5	E	TOO-45/reports/TOO-45 review-78 round2 repair - coder implementation report.md
+TOO-45-78	review-78 round 2 repair	implementation	20		Sonnet 5	E	TOO-45/reports/TOO-45 review-78 round2 repair - coder implementation report.md
+TOO-45-78	review-78 round 2 repair	self_review	15		Sonnet 5	E	TOO-45/reports/TOO-45 review-78 round2 repair - coder implementation report.md
+TOO-45-78	review-78 round 2 repair	TOTAL	55	1.4	Sonnet 5	E	TOO-45/reports/TOO-45 review-78 round2 repair - coder implementation report.md
+TOO-45-78	review-78 round 3 repair	planning	7		Sonnet 5	M	TOO-45/reports/TOO-45 review-78 round3 repair - coder implementation report.md
+TOO-45-78	review-78 round 3 repair	implementation	12		Sonnet 5	M	TOO-45/reports/TOO-45 review-78 round3 repair - coder implementation report.md
+TOO-45-78	review-78 round 3 repair	self_review	11		Sonnet 5	M	TOO-45/reports/TOO-45 review-78 round3 repair - coder implementation report.md
+TOO-45-78	review-78 round 3 repair	report	4		Sonnet 5	M	TOO-45/reports/TOO-45 review-78 round3 repair - coder implementation report.md
+TOO-45-78	review-78 round 3 repair	TOTAL	34	3.0	Sonnet 5	M	TOO-45/reports/TOO-45 review-78 round3 repair - coder implementation report.md
+TOO-45-79	proposed ticket 79: command substitution ASK floor	planning	25		Sonnet 5	E	TOO-45/reports/TOO-45 proposed ticket 79 - command substitution ASK floor - coder implementation report.md
+TOO-45-79	proposed ticket 79: command substitution ASK floor	implementation	75		Sonnet 5	E	TOO-45/reports/TOO-45 proposed ticket 79 - command substitution ASK floor - coder implementation report.md
+TOO-45-79	proposed ticket 79: command substitution ASK floor	self_review	10		Sonnet 5	E	TOO-45/reports/TOO-45 proposed ticket 79 - command substitution ASK floor - coder implementation report.md
+TOO-45-79	proposed ticket 79: command substitution ASK floor	report	10		Sonnet 5	E	TOO-45/reports/TOO-45 proposed ticket 79 - command substitution ASK floor - coder implementation report.md
+TOO-45-79	proposed ticket 79: command substitution ASK floor	TOTAL	120	4.0	Sonnet 5	E	TOO-45/reports/TOO-45 proposed ticket 79 - command substitution ASK floor - coder implementation report.md
+TOO-45-79	review-79 round 1 repair -- reading review + affected source, planning the fix	planning	25	3	Sonnet 5	E	TOO-45/reports/review-79-round1 repair - coder implementation report.md
+TOO-45-79	review-79 round 1 repair -- B1-B4, iterating against the corpus invariant	implementation	55	9	Sonnet 5	E	TOO-45/reports/review-79-round1 repair - coder implementation report.md
+TOO-45-79	review-79 round 1 repair -- combined: B5 test additions + discrimination verification + doc fixes	other	30	4	Sonnet 5	E	TOO-45/reports/review-79-round1 repair - coder implementation report.md
+TOO-45-79	review-79 round 1 repair -- combined: final verification sweep + report	other	10	1	Sonnet 5	E	TOO-45/reports/review-79-round1 repair - coder implementation report.md
+TOO-45-79	review-79 round 1 repair	TOTAL	120	17	Sonnet 5	E	TOO-45/reports/review-79-round1 repair - coder implementation report.md
+TOO-45-79	review-79 round 2 fix	planning	45	9	Opus 5	E	TOO-45/reports/review-79-round2 fix - implementation report.md
+TOO-45-79	review-79 round 2 fix	implementation	15	3	Opus 5	E	TOO-45/reports/review-79-round2 fix - implementation report.md
+TOO-45-79	review-79 round 2 fix	self_review	20	4	Opus 5	E	TOO-45/reports/review-79-round2 fix - implementation report.md
+TOO-45-79	review-79 round 2 fix	TOTAL	80	16	Opus 5	E	TOO-45/reports/review-79-round2 fix - implementation report.md
+TOO-45-79	review-79 round 3 repair	planning	15		Sonnet-class	E	TOO-45/reports/TOO-45 review-79-round3 repair - coder implementation report.md
+TOO-45-79	review-79 round 3 repair	implementation	25		Sonnet-class	E	TOO-45/reports/TOO-45 review-79-round3 repair - coder implementation report.md
+TOO-45-79	review-79 round 3 repair	self_review	15		Sonnet-class	E	TOO-45/reports/TOO-45 review-79-round3 repair - coder implementation report.md
+TOO-45-79	review-79 round 3 repair	TOTAL	55		Sonnet-class	E	TOO-45/reports/TOO-45 review-79-round3 repair - coder implementation report.md
+TOO-45-80	review-80 round 1 prose repair -- planning + fact verification	planning	8	0.9		E	TOO-45/reports/TOO-45 review-80 round1 prose repair - implementation report.md
+TOO-45-80	review-80 round 1 prose repair	implementation	4	0.5		E	TOO-45/reports/TOO-45 review-80 round1 prose repair - implementation report.md
+TOO-45-80	review-80 round 1 prose repair	self_review	6	0.55		E	TOO-45/reports/TOO-45 review-80 round1 prose repair - implementation report.md
+TOO-45-80	review-80 round 1 prose repair -- handoff	report	2	0.25		E	TOO-45/reports/TOO-45 review-80 round1 prose repair - implementation report.md
+TOO-45-80	review-80 round 1 prose repair	TOTAL	20	2.2		E	TOO-45/reports/TOO-45 review-80 round1 prose repair - implementation report.md
+TOO-45-80	review-80 round 3 prose repair	planning	8	0.5		E	TOO-45/reports/TOO-45 review-80 round3 prose repair - implementation report.md
+TOO-45-80	review-80 round 3 prose repair	implementation	9	0.7		E	TOO-45/reports/TOO-45 review-80 round3 prose repair - implementation report.md
+TOO-45-80	review-80 round 3 prose repair -- combined: verification and self-review	other	9	0.6		E	TOO-45/reports/TOO-45 review-80 round3 prose repair - implementation report.md
+TOO-45-80	review-80 round 3 prose repair	TOTAL	26	1.8		E	TOO-45/reports/TOO-45 review-80 round3 prose repair - implementation report.md
+TOO-45-85	ticket 85 chunk A -- planning/code-reading/doc-fetch	planning	25		Sonnet	E	implementation/TOO-45 ticket 85 chunk A - coder implementation report.md
+TOO-45-85	ticket 85 chunk A	implementation	10		Sonnet	E	implementation/TOO-45 ticket 85 chunk A - coder implementation report.md
+TOO-45-85	ticket 85 chunk A -- combined: gates + self-review + report	other	20		Sonnet	E	implementation/TOO-45 ticket 85 chunk A - coder implementation report.md
+TOO-45-85	ticket 85 chunk A	TOTAL	55		Sonnet	E	implementation/TOO-45 ticket 85 chunk A - coder implementation report.md
+TOO-45-85	ticket 85 chunk B	planning	13		Sonnet 5	E	implementation/TOO-45 ticket 85 chunk B - coder implementation report.md
+TOO-45-85	ticket 85 chunk B	implementation	13		Sonnet 5	E	implementation/TOO-45 ticket 85 chunk B - coder implementation report.md
+TOO-45-85	ticket 85 chunk B	self_review	5		Sonnet 5	E	implementation/TOO-45 ticket 85 chunk B - coder implementation report.md
+TOO-45-85	ticket 85 chunk B	report	3		Sonnet 5	E	implementation/TOO-45 ticket 85 chunk B - coder implementation report.md
+TOO-45-85	ticket 85 chunk B	TOTAL	34		Sonnet 5	E	implementation/TOO-45 ticket 85 chunk B - coder implementation report.md
+TOO-45-85	ticket 85 chunk C	planning	5		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk C - coder implementation report.md
+TOO-45-85	ticket 85 chunk C	implementation	10		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk C - coder implementation report.md
+TOO-45-85	ticket 85 chunk C	self_review	8		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk C - coder implementation report.md
+TOO-45-85	ticket 85 chunk C	report	3		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk C - coder implementation report.md
+TOO-45-85	ticket 85 chunk C	TOTAL	22.5		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk C - coder implementation report.md
+TOO-45-85	ticket 85 chunk D	planning	20		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk D - coder implementation report.md
+TOO-45-85	ticket 85 chunk D	implementation	25		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk D - coder implementation report.md
+TOO-45-85	ticket 85 chunk D	self_review	8		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk D - coder implementation report.md
+TOO-45-85	ticket 85 chunk D	report	4		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk D - coder implementation report.md
+TOO-45-85	ticket 85 chunk D	TOTAL	55		Sonnet-class	E	implementation/TOO-45 ticket 85 chunk D - coder implementation report.md
+TOO-45-94	punch-list 94: validation_issues split	planning	12		Sonnet 5	E	TOO-45/TOO-45 punch-list 94 validation_issues split - coder implementation report.md
+TOO-45-94	punch-list 94: validation_issues split	implementation	20		Sonnet 5	E	TOO-45/TOO-45 punch-list 94 validation_issues split - coder implementation report.md
+TOO-45-94	punch-list 94: validation_issues split -- combined: phase 3/4 self-review + report + memory writes	other	8		Sonnet 5	E	TOO-45/TOO-45 punch-list 94 validation_issues split - coder implementation report.md
+TOO-45-94	punch-list 94: validation_issues split -- cost stated only as a bound, 'under $2'	TOTAL	40		Sonnet 5	E	TOO-45/TOO-45 punch-list 94 validation_issues split - coder implementation report.md
+TOO-45-95	Item 95: split judge_unit	planning	20	0.35	Sonnet 5	E	implementation/TOO-45 Item 95 - split judge_unit - coder implementation report.md
+TOO-45-95	Item 95: split judge_unit	implementation	15	0.25	Sonnet 5	E	implementation/TOO-45 Item 95 - split judge_unit - coder implementation report.md
+TOO-45-95	Item 95: split judge_unit	self_review	30	0.45	Sonnet 5	E	implementation/TOO-45 Item 95 - split judge_unit - coder implementation report.md
+TOO-45-95	Item 95: split judge_unit	report	5	0.05	Sonnet 5	E	implementation/TOO-45 Item 95 - split judge_unit - coder implementation report.md
+TOO-45-95	Item 95: split judge_unit	TOTAL	70	1.1	Sonnet 5	E	implementation/TOO-45 Item 95 - split judge_unit - coder implementation report.md
+TOO-45-96	proposed ticket 96	planning	4		Sonnet 5	E	implementation/TOO-45 proposed ticket 96 - coder implementation report.md
+TOO-45-96	proposed ticket 96	implementation	2		Sonnet 5	E	implementation/TOO-45 proposed ticket 96 - coder implementation report.md
+TOO-45-96	proposed ticket 96 -- combined: self-review + gates + before/after/mutation verification	other	30		Sonnet 5	E	implementation/TOO-45 proposed ticket 96 - coder implementation report.md
+TOO-45-96	proposed ticket 96	TOTAL	36	0.8	Sonnet 5	E	implementation/TOO-45 proposed ticket 96 - coder implementation report.md
+TOO-45-97	Item 97 step 3: kind means only fact 1	planning	20	0.35	Sonnet 5	E	TOO-45/TOO-45 Item 97 Step 3 - kind means only fact 1 - coder implementation report.md
+TOO-45-97	Item 97 step 3: kind means only fact 1	implementation	5	0.05	Sonnet 5	E	TOO-45/TOO-45 Item 97 Step 3 - kind means only fact 1 - coder implementation report.md
+TOO-45-97	Item 97 step 3: kind means only fact 1	self_review	15	0.25	Sonnet 5	E	TOO-45/TOO-45 Item 97 Step 3 - kind means only fact 1 - coder implementation report.md
+TOO-45-97	Item 97 step 3: kind means only fact 1	report	5	0.05	Sonnet 5	E	TOO-45/TOO-45 Item 97 Step 3 - kind means only fact 1 - coder implementation report.md
+TOO-45-97	Item 97 step 3: kind means only fact 1	TOTAL	45	0.7	Sonnet 5	E	TOO-45/TOO-45 Item 97 Step 3 - kind means only fact 1 - coder implementation report.md
+TOO-45-98	ticket 98 chunk 3: module boundary move	planning	15	0.35	Sonnet 5	E	implementation/TOO-45 ticket 98 chunk 3 - module boundary move - coder implementation report.md
+TOO-45-98	ticket 98 chunk 3: module boundary move	implementation	20	0.55	Sonnet 5	E	implementation/TOO-45 ticket 98 chunk 3 - module boundary move - coder implementation report.md
+TOO-45-98	ticket 98 chunk 3: module boundary move	self_review	25	0.6	Sonnet 5	E	implementation/TOO-45 ticket 98 chunk 3 - module boundary move - coder implementation report.md
+TOO-45-98	ticket 98 chunk 3: module boundary move	report	5	0.1	Sonnet 5	E	implementation/TOO-45 ticket 98 chunk 3 - module boundary move - coder implementation report.md
+TOO-45-98	ticket 98 chunk 3: module boundary move	TOTAL	65	1.6	Sonnet 5	E	implementation/TOO-45 ticket 98 chunk 3 - module boundary move - coder implementation report.md
+TOO-45-99	ticket 99	planning	8		Sonnet	M	implementation/TOO-45 ticket 99 - coder implementation report.md
+TOO-45-99	ticket 99	implementation	7		Sonnet	M	implementation/TOO-45 ticket 99 - coder implementation report.md
+TOO-45-99	ticket 99 -- gates	verification	5		Sonnet	M	implementation/TOO-45 ticket 99 - coder implementation report.md
+TOO-45-99	ticket 99	report	2		Sonnet	E	implementation/TOO-45 ticket 99 - coder implementation report.md
+TOO-45-99	ticket 99	TOTAL	22	2.0	Sonnet	M	implementation/TOO-45 ticket 99 - coder implementation report.md
+TOO-45-100	ticket 100	planning	25		Sonnet-class	E	implementation/TOO-45 ticket 100 - coder implementation report.md
+TOO-45-100	ticket 100	implementation	20		Sonnet-class	E	implementation/TOO-45 ticket 100 - coder implementation report.md
+TOO-45-100	ticket 100	self_review	15		Sonnet-class	E	implementation/TOO-45 ticket 100 - coder implementation report.md
+TOO-45-100	ticket 100	report	5		Sonnet-class	E	implementation/TOO-45 ticket 100 - coder implementation report.md
+TOO-45-100	ticket 100	TOTAL	65	3.0	Sonnet-class	E	implementation/TOO-45 ticket 100 - coder implementation report.md
+TOO-45-101	ticket 101 bare-brace grammar fix (stood down mid-task) -- planning/exploration	planning	25		Sonnet	E	implementation/TOO-45 ticket 101 bare-brace grammar fix - coder implementation report.md
+TOO-45-101	ticket 101 bare-brace grammar fix (stood down mid-task)	implementation	30		Sonnet	E	implementation/TOO-45 ticket 101 bare-brace grammar fix - coder implementation report.md
+TOO-45-101	ticket 101 bare-brace grammar fix (stood down mid-task)	TOTAL	55	1.5	Sonnet	E	implementation/TOO-45 ticket 101 bare-brace grammar fix - coder implementation report.md
+TOO-45-104	ticket 104: dicts are undeclared types	planning	15		Sonnet 5	E	toolguard-memories/TOO-45/TOO-45 ticket 104 - dicts are undeclared types - coder implementation report.md
+TOO-45-104	ticket 104: dicts are undeclared types	implementation	25		Sonnet 5	E	toolguard-memories/TOO-45/TOO-45 ticket 104 - dicts are undeclared types - coder implementation report.md
+TOO-45-104	ticket 104: dicts are undeclared types -- combined: tests + gates + self-review	other	10		Sonnet 5	E	toolguard-memories/TOO-45/TOO-45 ticket 104 - dicts are undeclared types - coder implementation report.md
+TOO-45-104	ticket 104: dicts are undeclared types	TOTAL	50		Sonnet 5	E	toolguard-memories/TOO-45/TOO-45 ticket 104 - dicts are undeclared types - coder implementation report.md
+TOO-45-105	ticket 105 -- reading rules/ticket + reproducing the grammar behaviour	planning	22.5		Sonnet	E	implementation/TOO-45 ticket 105 - coder implementation report.md
+TOO-45-105	ticket 105 -- writing the doc + diagram + cross-links	implementation	9		Sonnet	E	implementation/TOO-45 ticket 105 - coder implementation report.md
+TOO-45-105	ticket 105 -- combined: gates + report	other	5		Sonnet	E	implementation/TOO-45 ticket 105 - coder implementation report.md
+TOO-45-105	ticket 105	TOTAL	37.5	1.5	Sonnet	E	implementation/TOO-45 ticket 105 - coder implementation report.md
+TOO-45-105	item 105 phase 2 (Python side)	planning	37.5		Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-105	item 105 phase 2 (Python side)	implementation	15		Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-105	item 105 phase 2 (Python side)	verification	22.5		Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-105	item 105 phase 2 (Python side)	TOTAL	75	2.25	Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-108	ticket 108: parse_hook_input belongs to the contract	planning	18	0.35	Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-108	ticket 108: parse_hook_input belongs to the contract	implementation	28	0.55	Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-108	ticket 108: parse_hook_input belongs to the contract	self_review	8	0.2	Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-108	ticket 108: parse_hook_input belongs to the contract	report	3	0.05	Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-108	ticket 108: parse_hook_input belongs to the contract	TOTAL	57	1.15	Sonnet 5	E	implementation/Coder Latest Implementation Report.md
+TOO-45-punch-01	punch-list #01 suppression store	planning	45	1.2	Sonnet 5	E	implementation/TOO-45 punch-list #01 suppression store - implementation report.md
+TOO-45-punch-01	punch-list #01 suppression store	implementation	70	2.0	Sonnet 5	E	implementation/TOO-45 punch-list #01 suppression store - implementation report.md
+TOO-45-punch-01	punch-list #01 suppression store	self_review	35	0.9	Sonnet 5	E	implementation/TOO-45 punch-list #01 suppression store - implementation report.md
+TOO-45-punch-01	punch-list #01 suppression store	TOTAL	150	4.1	Sonnet 5	E	implementation/TOO-45 punch-list #01 suppression store - implementation report.md
+TOO-45-punch-01	punch-list #01 suppression store, pass 4	planning	20	1.1	Sonnet-class	E	implementation/TOO-45 punch-list #01 suppression store — implementation report (pass 4).md
+TOO-45-punch-01	punch-list #01 suppression store, pass 4	implementation	50	3.3	Sonnet-class	E	implementation/TOO-45 punch-list #01 suppression store — implementation report (pass 4).md
+TOO-45-punch-01	punch-list #01 suppression store, pass 4 -- combined: phases 3/4 verification + proofs + report	other	15	0.8	Sonnet-class	E	implementation/TOO-45 punch-list #01 suppression store — implementation report (pass 4).md
+TOO-45-punch-01	punch-list #01 suppression store, pass 4	TOTAL	85	5.2	Sonnet-class	E	implementation/TOO-45 punch-list #01 suppression store — implementation report (pass 4).md
+TOO-45-punch-03	punch-list 03 stages 2+4	planning	25	0.9	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4	implementation	55	2.6	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4	self_review	15	0.6	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4	report	5	0.2	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4	TOTAL	100	4.3	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4, code-review fix pass	planning	7	0.35	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4, code-review fix pass	implementation	8	0.5	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4, code-review fix pass	self_review	5	0.3	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4, code-review fix pass	report	3	0.15	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-03	punch-list 03 stages 2+4, code-review fix pass	TOTAL	23	1.3	Sonnet 5	E	implementation/TOO-45 punch-list 03 stages 2+4 - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, initial pass	planning	15		Sonnet	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, initial pass	implementation	30		Sonnet	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, initial pass -- combined: phase 3/4 self-review + report	other	10		Sonnet	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, initial pass	TOTAL	55		Sonnet	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, code-review fix pass	planning	20		Opus 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, code-review fix pass	implementation	45		Opus 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, code-review fix pass -- combined: phase 3/4 self-review + report	other	15		Opus 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, code-review fix pass	TOTAL	80	3.0	Opus 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, hook.py fail-open pass	planning	15		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, hook.py fail-open pass	implementation	40		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, hook.py fail-open pass -- combined: phase 3/4 self-review + doc-drift sweep + report	other	10		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, hook.py fail-open pass	TOTAL	65	2.0	Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, second fix pass (M1-M3)	planning	20		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, second fix pass (M1-M3)	implementation	40		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, second fix pass (M1-M3) -- combined: phase 3/4 self-review + doc-drift sweep + report	other	10		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, second fix pass (M1-M3)	TOTAL	70	2.5	Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, Reporter-class follow-up	planning	12		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, Reporter-class follow-up	implementation	20		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, Reporter-class follow-up	verification	5		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, Reporter-class follow-up	report	4		Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-04	punch-list 04 error reporter, Reporter-class follow-up	TOTAL	41	2.5	Sonnet 5	E	implementation/TOO-45 punch-list 04 error reporter - coder implementation report.md
+TOO-45-punch-07	punch-list 07 test tier	planning	10	0.3	Sonnet 5	E	implementation/TOO-45 punch-list 07 test tier - coder implementation report.md
+TOO-45-punch-07	punch-list 07 test tier	implementation	15	0.45	Sonnet 5	E	implementation/TOO-45 punch-list 07 test tier - coder implementation report.md
+TOO-45-punch-07	punch-list 07 test tier	self_review	8	0.2	Sonnet 5	E	implementation/TOO-45 punch-list 07 test tier - coder implementation report.md
+TOO-45-punch-07	punch-list 07 test tier	report	5	0.15	Sonnet 5	E	implementation/TOO-45 punch-list 07 test tier - coder implementation report.md
+TOO-45-punch-07	punch-list 07 test tier	TOTAL	38	1.1	Sonnet 5	E	implementation/TOO-45 punch-list 07 test tier - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock	planning	25		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock	implementation	20		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock -- phase 2b test writing	implementation	25		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock -- combined: self-review + gates + doc-drift sweep + report writing	other	15		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock	TOTAL	85	2.5	Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, review fix pass	planning	20		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, review fix pass	implementation	30		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, review fix pass -- combined: verification gates + doc-drift sweep + report writing	other	15		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, review fix pass	TOTAL	65	2.0	Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, outcome-enum pass	planning	20		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, outcome-enum pass	implementation	25		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, outcome-enum pass -- combined: self-review + gates + doc-drift sweep + report writing	other	15		Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-punch-15	punch-list 15 migrate lock, outcome-enum pass	TOTAL	60	1.5	Sonnet 5	E	implementation/TOO-45 punch-list 15 migrate lock - coder implementation report.md
+TOO-45-spike-B	spike B	planning	12		Sonnet	E	implementation/TOO-45 spike B - coder implementation report.md
+TOO-45-spike-B	spike B	implementation	15		Sonnet	E	implementation/TOO-45 spike B - coder implementation report.md
+TOO-45-spike-B	spike B -- combined: robustness probing + ruff/py_compile + README	other	13		Sonnet	E	implementation/TOO-45 spike B - coder implementation report.md
+TOO-45-spike-B	spike B	report	3		Sonnet	E	implementation/TOO-45 spike B - coder implementation report.md
+TOO-45-spike-B	spike B	TOTAL	43	1.5	Sonnet	E	implementation/TOO-45 spike B - coder implementation report.md
+TOO-45-spike-C	spike C -- reading multiline.py/command_model.py/command_extractor.py + the grammar	planning	15			E	implementation/TOO-45 spike C - coder implementation report.md
+TOO-45-spike-C	spike C -- implementation + fixing two syntax slips	implementation	10			E	implementation/TOO-45 spike C - coder implementation report.md
+TOO-45-spike-C	spike C -- verification probes	verification	5			E	implementation/TOO-45 spike C - coder implementation report.md
+TOO-45-spike-C	spike C -- README writeup	report	10			E	implementation/TOO-45 spike C - coder implementation report.md
+TOO-45-81	ticket 81 follow-up -- planning + investigation	planning	35	1.3	Sonnet 5	E	TOO-45/TOO-45 ticket 81 follow-up - coder implementation report.md
+TOO-45-81	ticket 81 follow-up	implementation	25	1.0	Sonnet 5	E	TOO-45/TOO-45 ticket 81 follow-up - coder implementation report.md
+TOO-45-81	ticket 81 follow-up -- gates + mutation verification	verification	30	0.9	Sonnet 5	E	TOO-45/TOO-45 ticket 81 follow-up - coder implementation report.md
+TOO-45-81	ticket 81 follow-up	report	10	0.25	Sonnet 5	E	TOO-45/TOO-45 ticket 81 follow-up - coder implementation report.md
+TOO-45-81	ticket 81 follow-up	TOTAL	100	3.45	Sonnet 5	E	TOO-45/TOO-45 ticket 81 follow-up - coder implementation report.md
+TOO-45-77	review-77 round 1 repair	planning	35	2.6		E	TOO-45/reports/TOO-45 review-77 round1 repair - coder implementation report.md
+TOO-45-77	review-77 round 1 repair	implementation	20	1.5		E	TOO-45/reports/TOO-45 review-77 round1 repair - coder implementation report.md
+TOO-45-77	review-77 round 1 repair -- combined: self-review and verification	other	25	2.1		E	TOO-45/reports/TOO-45 review-77 round1 repair - coder implementation report.md
+TOO-45-77	review-77 round 1 repair	report	8	0.6		E	TOO-45/reports/TOO-45 review-77 round1 repair - coder implementation report.md
+TOO-45-77	review-77 round 1 repair	TOTAL	88	6.8		E	TOO-45/reports/TOO-45 review-77 round1 repair - coder implementation report.md
