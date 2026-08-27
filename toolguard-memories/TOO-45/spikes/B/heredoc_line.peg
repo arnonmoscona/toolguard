@@ -1,0 +1,109 @@
+# Canopy PEG grammar -- LINE-SCOPED bash skeleton, for heredoc sink attribution only.
+#
+# Spike B for TOO-45: a small, separate grammar from toolguard/parser/bash_parser.peg.
+# Parses exactly ONE physical line (never a heredoc body -- that is lifted by line-oriented
+# Python before this grammar ever runs) into enough structure to answer one question: which
+# command does a given `<<`/`<<-` belong to?
+#
+# Deliberately NOT a bash grammar:
+#   - No control structures (for/while/if/case) -- out of scope for line-level attribution.
+#   - No leading-assignment recognition (FOO=1 cmd).
+#   - $(...) and `...` are OPAQUE balanced/paired spans, not recursively parsed into their
+#     own command structure -- a heredoc can never be attributed to something written INSIDE
+#     a substitution, so there is nothing to gain from parsing inside one.
+#
+# Usage: canopy heredoc_line.peg --lang python
+
+grammar HeredocLine
+
+# ============================================================================
+# A line is a pipeline of commands, chained by control operators.
+# ============================================================================
+
+line <- spacing compound:pipeline (control_op pipeline)* trailing_op? spacing
+
+control_op <- and_op / or_op / semicolon_op / background_op
+
+and_op        <- spacing "&&" spacing
+or_op         <- spacing "||" spacing
+semicolon_op  <- spacing ";" !";" spacing
+background_op <- spacing "&" !"&" spacing
+
+# A trailing `&` or `;` with no pipeline after it (end of line).
+trailing_op <- spacing ("&" !"&" / ";") spacing
+
+# ============================================================================
+# Pipeline: commands connected by `|` (not `||`, which is a control_op).
+# ============================================================================
+
+pipeline <- command (pipe command)*
+
+pipe <- spacing "|" !"|" spacing
+
+# ============================================================================
+# A command: a name, then any number of redirections and plain argument words,
+# in the order they appear -- order matters, because it is what lets multiple
+# heredocs on one line (`bash <<A <<B`) come out left-to-right.
+# ============================================================================
+
+command <- head:word tail:(spacing (redirection / word))*
+
+# ============================================================================
+# Redirections. `heredoc` must be tried before `input_redirect` since both
+# start with "<". Only `heredoc` carries information sinks() needs; the rest
+# exist so their target word isn't mistaken for a new command/argument.
+# ============================================================================
+
+redirection <- heredoc / append_redirect / output_redirect / input_redirect / stderr_to_stdout / fd_redirect
+
+heredoc <- fd_num? "<<" strip:"-"? spacing delimiter:heredoc_delimiter
+
+heredoc_delimiter <- single_quoted / double_quoted / bare_delimiter
+bare_delimiter <- [A-Za-z_] [A-Za-z0-9_]*
+
+append_redirect    <- fd_num? ">>" spacing target:word
+output_redirect     <- fd_num? ">" !">" spacing target:word
+input_redirect       <- fd_num? "<" !"<" spacing target:word
+stderr_to_stdout <- "2>&1"
+fd_redirect          <- fd_num (">&" / "<&") fd_num
+
+fd_num <- [0-9]+
+
+# ============================================================================
+# Words. A word is a quoted string, an opaque substitution, or a run of bare
+# characters -- exactly the alternation bash_parser.peg's unquoted_word uses,
+# minus var_ref (irrelevant to sink attribution: `$FOO` is just an opaque
+# bare-word component here).
+# ============================================================================
+
+word <- (quoted / opaque_subst / escaped_char / !delimiter .)+
+
+quoted <- single_quoted / double_quoted
+
+# Single-quoted: no escapes, no substitutions, everything literal to the closing quote.
+single_quoted <- "'" (!"'" .)* "'"
+
+# Double-quoted: everything up to the closing `"` is content, including a `$(...)` or a
+# bare `;` -- neither contains a literal `"`, so this already treats a quoted substitution
+# as inert without any nested-substitution rule of its own.
+double_quoted <- '"' (escaped_char / !'"' .)* '"'
+
+opaque_subst <- dollar_paren / backtick
+
+# $(...) as an opaque, paren-balanced span. Nested $(...) is tracked so a stray `)`
+# inside an inner substitution doesn't close the outer one.
+dollar_paren <- "$(" paren_body ")"
+paren_body <- (dollar_paren / single_quoted / double_quoted / !("(" / ")") .)*
+
+# `...` as an opaque span up to the next backtick (bash does not nest backticks).
+backtick <- "`" (!"`" .)* "`"
+
+escaped_char <- "\\" .
+
+# ============================================================================
+# Delimiters and spacing. `spacing` is horizontal-only: this grammar never
+# sees a newline, by construction (the caller hands it one physical line).
+# ============================================================================
+
+delimiter <- [ \t|&;<>()"'`]
+spacing <- [ \t]*
