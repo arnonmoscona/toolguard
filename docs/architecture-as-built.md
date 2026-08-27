@@ -1,6 +1,6 @@
 # Architecture, as built
 
-As of 2026-08-14 -- toolguard 0.5.1 -- commit 7460ffb (branch `too-45`)
+As of 2026-08-27 -- toolguard 0.6.0 -- commit 305caa3 (branch `too-45`)
 
 This document explains the shape of toolguard as it stands today, not how it got there.
 
@@ -12,7 +12,7 @@ It is organised in three parts.
 
 It complements [technical-notes.md](../technical-notes.md), on phase-by-phase design rationale.
 
-A note on how to read the claims below. This document states what the code does. Where a mechanism is checked by a test or a tool, that is named, including its limits. Where nothing checks it, that is said too. The suite is red on purpose right now -- 3,548 tests, 124 failures and 5 errors -- because a test-repair campaign is landing tests that assert correct behaviour production does not yet meet.
+A note on how to read the claims below. This document states what the code does. Where a mechanism is checked by a test or a tool, that is named, including its limits. Where nothing checks it, that is said too. Counts of tests, modules and lines are deliberately kept out of this document or rounded, because they decay faster than the architecture does -- ask the test runner and the tree.
 
 ## 1. What toolguard has to do, and what it may not
 
@@ -117,7 +117,7 @@ Sections 5-8 describe the hook. The hook is the smaller half.
 | | core runtime | operator tooling |
 |---|---|---|
 | where | `toolguard/*.py`, `toolguard/parser/` | `toolguard/tools/` |
-| size | 43 modules, 23,729 lines | 30 modules, 11,752 lines |
+| size | 43 modules, roughly 27k lines | 30 modules, roughly 12k lines |
 | invoked by | Claude Code, once per tool call | a person, or one of the skills |
 | dependencies | standard library only | standard library only (it ships in the wheel) |
 | time budget | tens of milliseconds | as long as it needs |
@@ -126,7 +126,7 @@ Sections 5-8 describe the hook. The hook is the smaller half.
 
 <sub>[diagram source](diagrams/core-vs-tooling.mmd)</sub>
 
-Tooling is 33% of those two halves taken together. It holds the installer, the maintenance and security-audit engines behind the two skills, the rule analyzers (danger, redundancy, consolidation, pattern overlap), the corpus/replay/mining machinery, and the self-integrity and self-permission checks. [skills.md](skills.md) covers the skill-facing surface.
+Tooling is roughly a third of those two halves taken together. It holds the installer, the maintenance and security-audit engines behind the two skills, the rule analyzers (danger, redundancy, consolidation, pattern overlap), the corpus/replay/mining machinery, and the self-integrity and self-permission checks. [skills.md](skills.md) covers the skill-facing surface.
 
 **`toolguard/tools/` is not the dev-only tree.** `pyproject.toml` packages all of `toolguard`, so operator tooling ships to users and section 2's rule binds it too. The dev-only tree is the *top-level* `tools/`, outside the package, where the fitness functions live.
 

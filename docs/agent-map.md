@@ -273,6 +273,7 @@ Every `##`/`###` heading in every doc, generated mechanically (see the drift war
   - [Error handling](configuration.md#error-handling)
 - [Configuration hierarchy](configuration.md#configuration-hierarchy)
 - [Configuration reference](configuration.md#configuration-reference)
+  - [Overriding a deny at a more specific level](configuration.md#overriding-a-deny-at-a-more-specific-level)
 - [Keeping toolguard up to date](configuration.md#keeping-toolguard-up-to-date)
 
 **`docs/heredoc-parsing-design.md`**
