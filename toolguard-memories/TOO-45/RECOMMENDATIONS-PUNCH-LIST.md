@@ -106,3 +106,39 @@ Everything not requiring his input is done. What remains, all blocked on him:
 **Four pre-flight failures caught before the deletion ran, worth keeping as method evidence**: wrong path base (301 false "missing"); Section C's rescue uses a different heading format (29 vs 30); Section D's two entries are `.txt` not `.md` (311 vs 313); and **my own `norm()` collapsed nest paths onto their top-level namesakes** — treating two files I had already measured as *differing* as one. The reconcile-or-abort gate is what caught all four.
 
 **The nest conflict resolved rather than needing a decision**: O5 and R10 are rescues that lived inside the nest, so both were moved out and the other two deleted.
+
+---
+
+# CONTINUATION STATE — end of 2026-08-27
+
+**Tree is clean at `03f5089`** (except this file, updated after that commit). Everything from Arnon's decision batch is executed.
+
+## Done today
+
+Doc findings 1/3/4/6 fixed, 5/7 left alone, **2 retracted** (the doc was already correct; the prescribed grep fired on the one legitimate use of the string). `15` converted to spelled-out names + colour. **300 files deleted, 30 rescued**, nest resolved, basic-memory reindexed and reconciled at **468 entities = 468 files**. Worktree `ask` -> `allow` applied by Arnon and verified live through the sandbox. All supporting TOO-45 material now committed (`03f5089`), so the DURABLE analysis no longer cites untracked evidence.
+
+## Open, nothing blocked on me
+
+1. **`tmp/git-rules-opinion.md`** — recommend making the TEMPORARY git allow block permanent **except `restore`** (it destroys uncommitted work with no reflog and no recovery path). Plus two cleanups the block's own comment asks for: tighten the prefix convention, delete the dead `<TEMPORARY-COMMENT-OUT>` fence. **Awaiting Arnon's call.**
+2. **TOO-71** (analysis `13`, architectural reviewer construction) and **TOO-72** (analysis `14`, conformance patterns) — Arnon invited comments on both. **Not yet written.**
+3. **`15` and `16`** — Arnon reading. `16` §0's claim that `CLAUDE.md` should get SHORTER is the one most worth pushing back on.
+
+## Pre-push checklist — three items not done
+
+- **Coverage** — on the global wrap-up list, not run.
+- **`install.md`** — not checked against this branch's code changes (item 108 moved `read_pre_tool_use_event` into the contract; internal, but unverified).
+- **toolguard maintenance skill** — interactive, needs Arnon at the keyboard.
+
+## Post-push, and it fails SILENTLY if skipped
+
+`uv tool upgrade toolguard`, then smoke-test — Claude Code treats only exit 2 as blocking, so a broken hook registration means **no permission hook at all**, with no error anywhere:
+
+```bash
+echo '{"session_id":"t","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"'$PWD'"}' | ~/.local/bin/toolguard
+```
+
+## Notes for whoever picks this up
+
+- **Anti-stall cron was deleted** at Arnon's word. Re-arm it before any unattended stretch — `12` C10's rejection was withdrawn today because no substitute has ever been demonstrated, and a punch list does not close the gap.
+- **Backup**: `~/backup/claude/toolguard-memories-2026-08-27.tgz`, verified 765/765 pre-deletion.
+- **The deletion pre-flight failed four times before reconciling.** If a similar operation comes up: reconcile counts against the stated totals and abort on mismatch. It caught a bug of mine that would have merged two genuinely different files.
