@@ -22,7 +22,11 @@ def first_docstring_line(path: Path) -> str:
     """Return the module docstring's first line, or '' when there is none."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    except SyntaxError, ValueError, OSError:
+    except (
+        SyntaxError,
+        ValueError,
+        OSError,
+    ):
         return ""
     doc = ast.get_docstring(tree)
     if not doc:
