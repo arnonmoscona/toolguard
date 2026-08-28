@@ -197,17 +197,20 @@ leaf command and therefore visible:
 TG_ATTEST_READONLY=1 uv run python tmp/count_calls.py
 ```
 
-**No rule enforces any of this today, and the previous wording here claimed otherwise.** It said
-undisclosed inline code was "rejected by rule" and pointed at
-`intent-disclosure-rules.example.toml`. That file is not in this repo, and nothing in
-`.claude/`, `~/.claude/*.json` or `~/.toolguard/` matches `TG_INTENT` or `TG_ATTEST_READONLY`.
-The markers are written and nothing reads them. The design work is in
-`tmp/intent-disclosure-enforcement.md`, still marked "nothing here is adopted".
+**User-level rules read these markers**, so the semantics of the global CLAUDE.md's
+*Disclose code you wrote before you run it* section govern here too -- read it there rather than
+re-deriving it. In short: the marker must lead the leaf it attests, a pipeline needs every leaf
+permitted, and foreign code takes an undecidable floor no attestation lifts.
 
-So the only thing standing between this rule and a silent miss is compliance -- which is exactly
-the failure mode the "Encoding rules as guidance vs. enforcing them" section of the global
-CLAUDE.md predicts, and it has now been measured happening. Until the rules exist, treat every
-qualifying command as one you will be audited on, because the log is the audit.
+**A rule also nudges when a command carries authored logic and no marker.** It allows the command
+and injects a line saying the disclosure was missing, so an omission is visible rather than
+silent. It catches a scratch-script path, composed `sed`/`awk`/`xargs`, and a loop body -- a loop
+itself is invisible to any rule, since matching happens per extracted leaf, but its body almost
+always references the loop variable.
+
+Detection is partial by design, so **the log is still the audit**. `disclosure_compliance.py` in
+the claude_tooling repo measures the rate over these logs; treat every qualifying command as one
+you will be measured on.
 
 Use `TG_ATTEST_READONLY=1` only when *every* leaf is read-only. Do **not** attest a compound
 containing a write, redirect, delete, or install -- not even an incidental one. If part of the
@@ -215,10 +218,11 @@ work writes, split it: attest the read-only part, let the writing part take a no
 This is an attestation you make on your own authority, and a false one is worse than none,
 because the rules trust it.
 
-**Known limitation**: a heredoc still hits the ASK floor for inline/heredoc foreign code even
-when attested -- that floor overrides allow rules by design. Attestation currently buys silence
-for scratch-script runs and ordinary leaf commands, not heredocs. Mark heredocs anyway: it costs
-nothing, it records the claim, and it keeps them out of the deny rule.
+**Known limitation**: a heredoc, `-c`/`-e` inline code, and interpreters such as `awk` are
+classified undecidable, and attesting the leaf does not change that -- the classification
+overrides allow rules. What it answers to is the project's `undecidable_fallback`. So attestation
+buys silence for scratch-script runs and ordinary leaf commands, not for foreign code. Mark
+foreign code anyway: it costs nothing and it records the claim.
 
 This is not a request for permission and doesn't replace one. Arnon reads these when deciding
 where to keep or remove friction, so specific beats short. If the honest answer to "why
