@@ -2658,7 +2658,7 @@ class TestSkillsStatus(InstallerTestCase):
         """
         user_claude_dir = self.home / ".claude"
         project_claude_dir = self.project_dir / ".claude"
-        for skill_name in installer_module._BUNDLED_SKILL_NAMES:
+        for skill_name in installer_module.bundled_skill_names():
             self._write_skill(user_claude_dir, skill_name)
             self._write_skill(project_claude_dir, skill_name)
 
@@ -2875,7 +2875,9 @@ class TestSkillsStatus(InstallerTestCase):
         self.assertEqual(code, 0)
         data = json.loads(out)
         project_paths = {e["path"] for e in data["skills"] if e["scope"] == "project"}
-        self.assertEqual(len(project_paths), len(installer_module._BUNDLED_SKILL_NAMES))
+        self.assertEqual(
+            len(project_paths), len(installer_module.bundled_skill_names())
+        )
         self.assertTrue(all(str(self.project_dir) in p for p in project_paths))
 
     def test_no_journal_entry_or_backup_is_ever_written(self):
@@ -2912,7 +2914,7 @@ class TestSkillsStatus(InstallerTestCase):
         self.assertEqual(code, 0)
         with self.assertRaises(json.JSONDecodeError):
             json.loads(out)
-        for skill_name in installer_module._BUNDLED_SKILL_NAMES:
+        for skill_name in installer_module.bundled_skill_names():
             self.assertIn(skill_name, out)
         self.assertIn("git", out)
 

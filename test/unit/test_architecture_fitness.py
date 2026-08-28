@@ -2409,7 +2409,7 @@ class TestParseEntryPointModules(unittest.TestCase):
         """
         Given this repo's real pyproject.toml
         When parse_entry_point_modules is called
-        Then it returns exactly the 7 declared console-script modules
+        Then it returns exactly the 8 declared console-script modules
         """
         modules = af.parse_entry_point_modules()
         self.assertEqual(
@@ -2422,6 +2422,7 @@ class TestParseEntryPointModules(unittest.TestCase):
                     "tools.security_audit",
                     "tools.maintenance",
                     "tools.installer",
+                    "tools.update_skills",
                     "scripts.migrate_permissions",
                 }
             ),

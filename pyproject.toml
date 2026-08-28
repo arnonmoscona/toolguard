@@ -1,6 +1,6 @@
 [project]
 name = "toolguard"
-version = "0.6.0"
+version = "0.6.1"
 description = "Pre-tool-use hook permission system and security audit for Claude Code"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -15,6 +15,15 @@ toolguard-audit = "toolguard.tools.security_audit:main"
 toolguard-maintain = "toolguard.tools.maintenance:main"
 toolguard-install = "toolguard.tools.installer:main"
 toolguard-migrate = "toolguard.scripts.migrate_permissions:main"
+toolguard-update-skills = "toolguard.tools.update_skills:main"
+
+[tool.toolguard]
+# The skills shipped with toolguard, declared once. Read at runtime by
+# installer.py (install-skills, skills-status) and by update_skills.py, rather
+# than hardcoded in any of them. This file is force-included into the wheel as
+# toolguard/_bundled/manifest.toml, so an installed copy answers from the same
+# declaration a checkout does.
+bundled_skills = ["toolguard-security-audit", "toolguard-maintenance"]
 
 [dependency-groups]
 dev = [
@@ -95,3 +104,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["toolguard"]
+
+# The skills ship INSIDE the wheel so `toolguard-update-skills` can refresh them
+# from the running installation. Without this the only source is the repo, which
+# is how a fixed skill kept shipping unfixed (0.6.0). pyproject.toml rides along
+# as the manifest so the bundled-skill list has exactly one declaration.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "toolguard/_bundled/skills"
+"pyproject.toml" = "toolguard/_bundled/manifest.toml"

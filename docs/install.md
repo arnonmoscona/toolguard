@@ -505,6 +505,20 @@ from this repo for the initial passes. **Ask the user which they want:**
 
 Record their choice; it decides how you invoke the audit/maintenance passes in Phases 8-9.
 
+**Keeping them current afterwards.** `uv tool upgrade toolguard` replaces the package and leaves
+installed skills untouched, so a skill fix ships without reaching anybody who already has the old
+copy. After any upgrade, run:
+
+```bash
+toolguard-update-skills
+```
+
+It force-refreshes the user-scope skills from the copy shipped inside the installation just
+upgraded -- no network, no `--source` to get right, and no way for the skills to be a different
+version from the binary. Each replaced skill is backed up into `~/.toolguard/backups/` and
+journalled first. `--list` shows what would be written without writing it. Use
+`install-skills` for the first install or for project scope; use this for every refresh after.
+
 ---
 
 ## Phase 6 -- Validate

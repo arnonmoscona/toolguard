@@ -267,6 +267,7 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
 
   ```bash
   uv tool upgrade toolguard      # re-resolves master; correct again as of 2026-08-03
+  toolguard-update-skills        # upgrade does NOT refresh installed skills; this does
   ```
 
   Then **smoke-test it**, because a hook that cannot launch fails SILENTLY -- Claude Code treats

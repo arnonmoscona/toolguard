@@ -1387,10 +1387,84 @@ Refuses (raises an error, installs nothing) if --source is neither an existing l
 path nor a working git remote.
 """
 
-_BUNDLED_SKILL_NAMES: Tuple[str, ...] = (
-    "toolguard-security-audit",
-    "toolguard-maintenance",
-)
+
+def bundle_root() -> Path:
+    """
+    Return the directory holding the bundled ``skills/`` tree and its manifest.
+
+    In an installed distribution this is ``toolguard/_bundled`` (both are
+    force-included there by the wheel build); in a source checkout it is the
+    repository root, where ``skills/`` and ``pyproject.toml`` already sit.
+    """
+    installed = Path(__file__).parent.parent / "_bundled"
+    if (installed / "skills").is_dir():
+        return installed
+    return Path(__file__).parent.parent.parent
+
+
+def _bundle_manifest(root: Path) -> Path:
+    """
+    Return the TOML file in *root* declaring ``[tool.toolguard] bundled_skills``.
+
+    Named ``manifest.toml`` in an installed distribution and ``pyproject.toml``
+    in a checkout; the wheel build force-includes the latter as the former.
+
+    Raises:
+        InstallerError: If neither file is present.
+    """
+    for name in ("manifest.toml", "pyproject.toml"):
+        candidate = root / name
+        if candidate.is_file():
+            return candidate
+    raise InstallerError(
+        f"{root} has no manifest.toml or pyproject.toml -- cannot read the "
+        "bundled skill list"
+    )
+
+
+def bundled_skill_names(root: Optional[Path] = None) -> Tuple[str, ...]:
+    """
+    Return the bundled skill names declared by ``[tool.toolguard] bundled_skills``.
+
+    Read from the manifest rather than hardcoded so that adding a skill is a
+    one-line pyproject edit. Not cached: every caller is a short-lived CLI.
+
+    Args:
+        root: The bundle to read, defaulting to this installation's own. Pass the
+            source root when installing from elsewhere, so an older checkout
+            installs the skills IT declares rather than the ones we declare.
+
+    Raises:
+        InstallerError: If the manifest is missing or declares no skills.
+    """
+    manifest = _bundle_manifest(bundle_root() if root is None else root)
+    declared = (
+        tomllib.loads(manifest.read_text(encoding="utf-8"))
+        .get("tool", {})
+        .get("toolguard", {})
+        .get("bundled_skills")
+    )
+    if not declared:
+        raise InstallerError(
+            f"{manifest} declares no [tool.toolguard] bundled_skills -- "
+            "nothing to install"
+        )
+    return tuple(declared)
+
+
+def _source_skill_names(source_root: Path) -> Tuple[str, ...]:
+    """
+    Return the skill names *source_root* declares, or ours when it declares none.
+
+    A checkout or clone carries its own manifest, so installing an older ref
+    installs the skills that ref declares. A bare directory holding nothing but
+    ``skills/`` remains valid input -- ``--source`` has always accepted one --
+    and falls back to this installation's declaration.
+    """
+    try:
+        return bundled_skill_names(source_root)
+    except InstallerError:
+        return bundled_skill_names()
 
 
 def _backup_directory(source_dir: Path, backups_dir: Path, name_prefix: str) -> Path:
@@ -1520,7 +1594,7 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
 
     with _resolve_skills_source(args.source) as source_root:
         source_skills_dir = source_root / "skills"
-        for skill_name in _BUNDLED_SKILL_NAMES:
+        for skill_name in _source_skill_names(source_root):
             src = source_skills_dir / skill_name
             if not src.is_dir():
                 raise InstallerError(
@@ -1743,7 +1817,7 @@ Reports three things, side by side:
     available upstream. A network-unreachable or undeterminable remote is
     reported plainly as "unknown" -- this subcommand never hangs or fails
     just because the remote could not be reached.
-  - bundled skill install status: for each name in _BUNDLED_SKILL_NAMES, at
+  - bundled skill install status: for each name in bundled_skill_names(), at
     BOTH the user scope (~/.claude/skills/<name>) and the project scope
     (<project-dir>/.claude/skills/<name>), one of:
       missing   -- the path does not exist. This correctly covers a broken/
@@ -2037,7 +2111,7 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
                 "path": str(claude_dir / "skills" / skill_name),
                 "status": _classify_skill_dir(claude_dir / "skills" / skill_name),
             }
-            for skill_name in _BUNDLED_SKILL_NAMES
+            for skill_name in bundled_skill_names()
             for scope, claude_dir in scoped_claude_dirs
         ]
         binary = _binary_status()
@@ -2076,7 +2150,7 @@ def cmd_skills_status(args: argparse.Namespace) -> int:
         print("  update status: up to date")
 
     print(f"\nbundled skills (project dir: {project_dir}):")
-    for skill_name in _BUNDLED_SKILL_NAMES:
+    for skill_name in bundled_skill_names():
         print(f"  {skill_name}:")
         for entry in skills:
             if entry["skill"] != skill_name:
