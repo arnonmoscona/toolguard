@@ -223,7 +223,9 @@ def _resolve_unclamped(
     ``overrides`` holding at most one ``(None, ConflictOverride)`` pair (no
     sub_command/target identifier is known at this layer; see
     ``RuntimeVerdict``'s docstring for how the two ``resolve.py`` callers
-    re-pair it with a real identifier).
+    re-pair it with a real identifier). The no-match branch below sets
+    ``fallback_cause='no_match'``; the genuine-match branch above leaves it
+    ``None``.
     """
     for index, (result, layers) in enumerate(levels):
         if result is None:
@@ -282,6 +284,7 @@ def _resolve_unclamped(
                 f"defaulting to 'ask'"
             ),
             provenance=None,
+            fallback_cause="no_match",
         )
     fallback = no_match_fallback
     if fallback == "allow_with_warning":
@@ -294,6 +297,7 @@ def _resolve_unclamped(
             ),
             provenance=None,
             fallback_warning=True,
+            fallback_cause="no_match",
         )
     if fallback == "allow":
         return RuntimeVerdict(
@@ -304,6 +308,7 @@ def _resolve_unclamped(
                 "silence this)"
             ),
             provenance=None,
+            fallback_cause="no_match",
         )
     if fallback == "ask":
         return RuntimeVerdict(
@@ -313,11 +318,13 @@ def _resolve_unclamped(
                 "decision (no_match_fallback=ask)"
             ),
             provenance=None,
+            fallback_cause="no_match",
         )
     return RuntimeVerdict(
         decision="deny",
         reason=f"{subject} does not match any allow patterns",
         provenance=None,
+        fallback_cause="no_match",
     )
 
 

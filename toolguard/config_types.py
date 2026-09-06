@@ -466,15 +466,20 @@ class UnitVerdict:
             hard-deny (pooled across levels, no single provenance), a
             fail-closed default deny, or an escape-hatch outcome (same
             reasoning as ``matched_rule`` above).
-        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- set once, here,
-            structurally, at the point this unit's outcome is decided; never re-derived by
-            parsing ``reason`` downstream. ``'warned'``/``'silent'`` name the ``allow`` escape
-            hatch (with/without a warning); ``'denied'`` names the ``undecidable_fallback=deny``
-            escape hatch. ``None`` whenever no allow/deny escape hatch produced this outcome --
-            including the ASK floor itself (not an allow or deny escape hatch) and a plain
-            ``no_match_fallback=deny`` (a real "no rule matched" outcome, but deliberately left
-            untagged the same as a genuine rule-matched deny -- see
-            :attr:`RuntimeVerdict.fallback_kind`).
+        fallback_kind: ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` -- an OUTCOME
+            flavour of whichever fallback decided this unit (allowed with a warning, allowed
+            silently, or denied). Set once, structurally, at the point of decision; never
+            re-derived by parsing ``reason`` downstream.
+
+            Does **not** identify WHICH fallback fired: an ordinary no-match allow and the
+            undecidable escape hatch can both set the identical value, so this field alone
+            cannot tell them apart (confirmed the costly way -- see :attr:`fallback_cause`,
+            which exists precisely because this one cannot answer that question).
+        fallback_cause: ``'no_match'``, ``'undecidable'``, or ``None`` -- WHY a fallback
+            decided this unit, independent of what it decided (``decision``) or which
+            outcome flavour resulted (``fallback_kind``). Set structurally at the point of
+            decision, in :mod:`toolguard.resolve`/:mod:`toolguard.compound`; never derived
+            downstream. ``None`` when a real rule (or hard-deny) decided instead.
         reason: Human-readable reason for THIS unit's own decision -- for an ask-floor leaf
             or an undecidable segment, it already names the escape hatch. Distinct from
             :attr:`RuntimeVerdict.reason`, which is the WHOLE compound's combined reason,
@@ -504,6 +509,7 @@ class UnitVerdict:
     reason: str
     additional_context: Optional[str]
     fallback_kind: Optional[str] = None
+    fallback_cause: Optional[str] = None
     audit_only: bool = False
 
 
@@ -603,6 +609,12 @@ class RuntimeVerdict:
             genuine deny -- both mean "nothing here permits this"). Always ``None`` for a
             non-``'deny'`` decision. ``hook.py``'s deny-side audit log reads this field
             directly, never *reason*.
+        fallback_cause: The counterpart of :attr:`UnitVerdict.fallback_cause` at the RUNTIME
+            altitude, propagated up from the single deciding unit (deny, ask, or a lone
+            allowed unit) -- see :func:`~toolguard.compound._combine_strictest`. ``None``
+            both when a real rule decided and when several allowed units would need to
+            agree and there is no single decider to attribute (the same ambiguity
+            :attr:`matched_rule` already has for that case).
         tool: See "``tool``/``target``" above.
         target: As ``tool``, the command string (Bash) or file path
             (file-path tools) under evaluation.
@@ -622,6 +634,7 @@ class RuntimeVerdict:
     fallback_warning: bool = False
     matched_rule: Optional[str] = None
     fallback_kind: Optional[str] = None
+    fallback_cause: Optional[str] = None
     tool: Optional[str] = None
     target: Optional[str] = None
 

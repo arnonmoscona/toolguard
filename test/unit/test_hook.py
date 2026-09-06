@@ -23,6 +23,7 @@ from toolguard.compound import FALLBACK_ALLOW_PLACEHOLDER, FALLBACK_DENY_PLACEHO
 from toolguard.config_types import RuntimeVerdict
 from toolguard.hook import (
     FILE_PATH_TOOLS,
+    _classify_fallback_cause,
     _emit_decision,
     _handle_command_tool,
     _handle_file_path_tool,
@@ -33,6 +34,12 @@ from toolguard.hook import (
     main,
 )
 from toolguard.error_log import log_crash
+from toolguard.auto_mode_trace import (
+    FALLBACK_CAUSE_NO_MATCH,
+    FALLBACK_CAUSE_PARSE_FAILURE,
+    FALLBACK_CAUSE_UNDECIDABLE,
+    FALLBACK_CAUSE_UNKNOWN,
+)
 from toolguard.log_writer import LogRecord
 from toolguard.file_matching import decide_file_path_at_level_detailed
 from toolguard.resolve import resolve_bash_permission_detailed
@@ -2791,6 +2798,560 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
         record = mock_log.call_args.args[0]
         self.assertEqual(record.violated_rules, [FALLBACK_DENY_PLACEHOLDER])
         self.assertIsNone(record.provenance)
+
+
+class TestAutoModeTrace(unittest.TestCase):
+    """
+    TOO-28 Phase 5: toolguard.hook._maybe_trace_auto_mode, driven through
+    _handle_command_tool against a real Configuration -- mirrors
+    TestHandleCommandToolAuditWiring's approach for the same reason: a real
+    resolver run, not a hand-built RuntimeVerdict, is what actually proves
+    the trigger and the resolution log agree on what "no rule matched" means.
+    """
+
+    @staticmethod
+    def _config(content):
+        """Build a single project-level toolguard_hook Configuration."""
+        return Configuration(
+            layers=(
+                ConfigLayer(
+                    Provenance(
+                        "project",
+                        "toolguard_hook",
+                        "toml",
+                        Path("/p/toolguard_hook.toml"),
+                        0,
+                    ),
+                    MappingProxyType(content),
+                ),
+            )
+        )
+
+    @classmethod
+    def _config_with_parse_failure(cls, content):
+        """As _config, but with a non-empty parse_failures (a broken config file)."""
+        return dataclasses.replace(
+            cls._config(content),
+            parse_failures=((Path("/p/broken.toml"), "unparseable"),),
+        )
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_broken_config_under_auto_mode_writes_parse_failure_cause(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing 'git *' but with a non-empty
+            parse_failures (a broken config file elsewhere), and
+            permission_mode='auto'
+        When _handle_command_tool resolves 'git status' -- a command that
+            WOULD have matched the allow rule
+        Then log_auto_mode_trace fires with fallback_cause='parse_failure'
+            -- the ASK floor is unconditional whenever parse_failures is
+            non-empty, clamping even this genuine match down to 'ask' and
+            wiping its matched_rule, so the trace correctly attributes the
+            fallback to the broken config rather than to no_match
+        """
+        config = self._config_with_parse_failure(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(git *)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "git status"},
+            )
+        )
+        self.assertEqual(verdict.decision, "ask")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_PARSE_FAILURE)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_unmatched_command_under_auto_mode_writes_a_trace_entry(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing only 'git *' (no_match_fallback
+            defaults to 'ask') and permission_mode='auto'
+        When _handle_command_tool resolves 'whoami' (matches no rule)
+        Then log_auto_mode_trace is called once with an AutoModeTraceEntry
+            recording the exact target, the emitted 'ask' decision,
+            fallback_cause='no_match' (carried structurally from
+            permission_resolution.py's own no-match branch -- round 6,
+            2026-09-06), and the invocation's permission_mode and session_id
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(git *)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "whoami"},
+                session_id="sess-42",
+            )
+        )
+        self.assertEqual(verdict.decision, "ask")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.target, "whoami")
+        self.assertEqual(entry.decision, "ask")
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_NO_MATCH)
+        self.assertEqual(entry.permission_mode, "auto")
+        self.assertEqual(entry.session_id, "sess-42")
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_matched_rule_under_auto_mode_writes_nothing(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing 'ls' and permission_mode='auto'
+        When _handle_command_tool resolves 'ls' (matches the allow rule)
+        Then log_auto_mode_trace is never called -- a genuine rule match is
+            not a fallback, regardless of permission_mode
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(ls)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto", config=config, tool_input={"command": "ls"}
+            )
+        )
+        self.assertEqual(verdict.decision, "allow")
+        mock_trace.assert_not_called()
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_unmatched_command_outside_auto_mode_writes_nothing(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given the SAME unmatched-command Configuration as the positive case,
+            but permission_mode='default' (not 'auto')
+        When _handle_command_tool resolves 'whoami'
+        Then log_auto_mode_trace is never called -- the trigger requires
+            auto mode even though the command still falls through to
+            no_match_fallback
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(git *)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="default",
+                config=config,
+                tool_input={"command": "whoami"},
+            )
+        )
+        self.assertEqual(verdict.decision, "ask")
+        mock_trace.assert_not_called()
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace", side_effect=RuntimeError("disk full"))
+    def test_trace_write_failure_does_not_change_the_returned_verdict(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given the same unmatched-command/auto-mode setup as the positive
+            case, but log_auto_mode_trace itself raises
+        When _handle_command_tool resolves 'whoami'
+        Then the returned verdict is unaffected (still 'ask', naming both
+            the unmatched command and no_match_fallback=ask) and no
+            exception propagates out of _handle_command_tool
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(git *)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "whoami"},
+            )
+        )
+        self.assertEqual(verdict.decision, "ask")
+        self.assertIn("whoami", verdict.reason)
+        self.assertIn("no_match_fallback=ask", verdict.reason)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_compound_with_one_matched_and_one_unmatched_leaf_writes_a_trace_entry(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing only 'git *' and permission_mode
+            ='auto', and a two-leaf compound whose FIRST leaf matches that
+            rule and whose SECOND leaf matches no rule at all
+        When _handle_command_tool resolves 'git status && whoami'
+        Then log_auto_mode_trace still fires -- RuntimeVerdict.matched_rule
+            is None here too (no single decider across the two leaves), but
+            that is a genuine partial fallback exposure, not the same case
+            as every leaf having its own real match (see the negative test
+            below). fallback_cause='no_match' -- unlike matched_rule, this
+            IS attributable here: strictest-wins picks whoami's own ask as
+            the SINGLE decider (git status's allow is not stricter), so
+            _combine_strictest propagates whoami's own carried cause
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(git *)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "git status && whoami"},
+            )
+        )
+        self.assertIsNone(verdict.matched_rule)
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_NO_MATCH)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_compound_with_every_leaf_genuinely_matched_writes_nothing(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing BOTH 'git *' and 'ls', and
+            permission_mode='auto'
+        When _handle_command_tool resolves 'git status && ls' -- a two-leaf
+            compound where EACH leaf matches its OWN real allow rule, so
+            RuntimeVerdict.matched_rule is None only because there is no
+            SINGLE decider to attribute across two genuine matches
+        Then log_auto_mode_trace is never called -- this is the exact
+            ambiguity the brief's Finding 2 flagged: matched_rule=None must
+            not be mistaken for "a fallback decided this" when every leaf's
+            own UnitVerdict.matched_rule is populated
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "permissions": {"allow": ["Bash(git *)", "Bash(ls)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "git status && ls"},
+            )
+        )
+        self.assertEqual(verdict.decision, "allow")
+        self.assertIsNone(verdict.matched_rule)
+        mock_trace.assert_not_called()
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_undecidable_deny_under_auto_mode_writes_undecidable_cause(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given undecidable_fallback='deny' and permission_mode='auto', and a
+            command that is foreign inline code (an ASK-floor leaf, denied
+            by the escape hatch rather than by any configured rule)
+        When _handle_command_tool resolves 'python -c "print(1)"'
+        Then log_auto_mode_trace fires with fallback_cause='undecidable' --
+            proven via RuntimeVerdict.fallback_kind == 'denied'
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "undecidable_fallback": "deny",
+                "permissions": {"allow": ["Bash(ls)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": 'python -c "print(1)"'},
+            )
+        )
+        self.assertEqual(verdict.decision, "deny")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_UNDECIDABLE)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_undecidable_allow_under_auto_mode_writes_undecidable_cause(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given no_match_fallback='allow' AND undecidable_fallback='allow'
+            (this repo's own live shape) and permission_mode='auto', and a
+            command that is foreign inline code, allowed silently by the
+            escape hatch rather than by any configured rule
+        When _handle_command_tool resolves 'node -e "console.log(1)"'
+        Then log_auto_mode_trace fires with fallback_cause='undecidable' --
+            round 6 (2026-09-06): _judge_inline_code_unit now sets
+            UnitVerdict.fallback_cause='undecidable' structurally, at the
+            point of decision, rather than the trace trying to re-derive it
+            downstream from fallback_kind (which cannot distinguish this
+            from an ordinary no-match allow -- see the sibling test below
+            for that exact live regression, and UnitVerdict.fallback_kind's
+            own docstring)
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "no_match_fallback": "allow",
+                "undecidable_fallback": "allow",
+                "permissions": {"allow": ["Bash(ls)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": 'node -e "console.log(1)"'},
+            )
+        )
+        self.assertEqual(verdict.decision, "allow")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_UNDECIDABLE)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_plain_unmatched_command_under_auto_mode_never_writes_undecidable_cause(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given no_match_fallback='allow_with_no_warnings' (this repo's own
+            live shape) and permission_mode='auto', and an ORDINARY
+            unmatched command -- no interpreter, no heredoc, nothing
+            undecidable about it
+        When _handle_command_tool resolves 'some-unmatched-command-xyz --flag'
+        Then log_auto_mode_trace fires with fallback_cause='no_match', NEVER
+            'undecidable' -- an earlier version of this classifier tried to
+            infer the cause from UnitVerdict.fallback_kind='silent', which
+            resolve.py's own plain no_match_fallback path sets to the
+            IDENTICAL value the undecidable escape hatch uses, so every
+            unmatched command under this exact configuration was mislabelled
+            'undecidable'. Round 6 (2026-09-06) fixes this at the source:
+            resolve.py's _decide() now carries fallback_cause='no_match'
+            structurally, set in permission_resolution.py's own no-match
+            branch, so the trace reads it instead of re-deriving it
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "no_match_fallback": "allow_with_no_warnings",
+                "permissions": {"allow": ["Bash(ls)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "some-unmatched-command-xyz --flag"},
+            )
+        )
+        self.assertEqual(verdict.decision, "allow")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertNotEqual(entry.fallback_cause, FALLBACK_CAUSE_UNDECIDABLE)
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_NO_MATCH)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_unmatched_file_path_under_auto_mode_writes_bare_path_and_no_match_cause(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing only 'Read(/tmp/x/**)' (no
+            parse_failures) and permission_mode='auto'
+        When _handle_file_path_tool resolves a Read of '/other/path.txt'
+            (matches no rule)
+        Then log_auto_mode_trace fires with target='/other/path.txt' -- the
+            BARE path, never the decision log's rendered 'Read(...)' form --
+            and fallback_cause='no_match', provable for a file-path tool
+            with an empty Configuration.parse_failures (see
+            TestClassifyFallbackCause)
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Read"],
+                "permissions": {"allow": ["Read(/tmp/x/**)"], "deny": []},
+            }
+        )
+        verdict = _handle_file_path_tool(
+            _invocation(
+                permission_mode="auto",
+                tool_name="Read",
+                config=config,
+                tool_input={"file_path": "/other/path.txt"},
+            )
+        )
+        self.assertEqual(verdict.decision, "ask")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.target, "/other/path.txt")
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_NO_MATCH)
+
+    @patch("toolguard.hook.log_command")
+    @patch("toolguard.hook.log_auto_mode_trace")
+    def test_compound_with_mixed_causes_across_allowed_leaves_writes_unknown_cause(
+        self, mock_trace, mock_log_command
+    ):
+        """
+        Given a real Configuration allowing 'git *' AND no_match_fallback
+            ='allow' (so an unrelated unmatched leaf also allows), and
+            permission_mode='auto'
+        When _handle_command_tool resolves 'git status && whoami' -- a
+            two-leaf ALL-ALLOW compound where the FIRST leaf allows via a
+            genuine rule match (cause=None) and the SECOND allows via
+            no_match_fallback (cause='no_match') -- two DIFFERENT causes,
+            neither leaf stricter than the other
+        Then log_auto_mode_trace fires with fallback_cause='unknown' -- the
+            genuinely ambiguous case _combine_strictest's own docstring
+            names: several allowed units with no single decider to
+            attribute a cause to, the same ambiguity matched_rule/
+            provenance already have for this shape
+        """
+        config = self._config(
+            {
+                "governed_tools": ["Bash"],
+                "no_match_fallback": "allow",
+                "permissions": {"allow": ["Bash(git *)"], "deny": []},
+            }
+        )
+        verdict = _handle_command_tool(
+            _invocation(
+                permission_mode="auto",
+                config=config,
+                tool_input={"command": "git status && whoami"},
+            )
+        )
+        self.assertEqual(verdict.decision, "allow")
+        mock_trace.assert_called_once()
+        entry = mock_trace.call_args.args[0]
+        self.assertEqual(entry.fallback_cause, FALLBACK_CAUSE_UNKNOWN)
+
+
+class TestClassifyFallbackCause(unittest.TestCase):
+    """
+    toolguard.hook._classify_fallback_cause in isolation, against
+    hand-built RuntimeVerdicts/Invocations. TOO-28 Phase 5 round 6
+    (2026-09-06): the cause is now carried on RuntimeVerdict.fallback_cause,
+    set structurally at the point of decision in permission_resolution.py/
+    resolve.py/compound.py (see test_resolve.py/test_compound.py/
+    test_permission_resolution.py for that propagation) -- this class tests
+    only hook.py's own remaining logic: reading that field, and the one
+    exception it checks independently (parse_failure, ahead of whatever
+    cause the possibly-floor-overwritten verdict carries).
+    """
+
+    def test_undecidable_cause_is_read_through(self):
+        """
+        Given a RuntimeVerdict with fallback_cause='undecidable'
+        When _classify_fallback_cause classifies it
+        Then it returns FALLBACK_CAUSE_UNDECIDABLE
+        """
+        result = RuntimeVerdict(
+            decision="deny", reason="x", fallback_cause="undecidable"
+        )
+        self.assertEqual(
+            _classify_fallback_cause(result, _invocation()),
+            FALLBACK_CAUSE_UNDECIDABLE,
+        )
+
+    def test_no_match_cause_is_read_through(self):
+        """
+        Given a RuntimeVerdict with fallback_cause='no_match'
+        When _classify_fallback_cause classifies it
+        Then it returns FALLBACK_CAUSE_NO_MATCH
+        """
+        result = RuntimeVerdict(decision="ask", reason="x", fallback_cause="no_match")
+        self.assertEqual(
+            _classify_fallback_cause(result, _invocation()),
+            FALLBACK_CAUSE_NO_MATCH,
+        )
+
+    def test_untagged_cause_is_unknown(self):
+        """
+        Given a RuntimeVerdict with fallback_cause=None -- the genuinely
+            ambiguous case (e.g. a multi-leaf compound where several
+            allowed units would need to agree on a cause -- see
+            _combine_strictest's own docstring)
+        When _classify_fallback_cause classifies it
+        Then it returns FALLBACK_CAUSE_UNKNOWN
+        """
+        result = RuntimeVerdict(decision="allow", reason="x")
+        self.assertEqual(
+            _classify_fallback_cause(result, _invocation()),
+            FALLBACK_CAUSE_UNKNOWN,
+        )
+
+    def test_parse_failure_takes_precedence_over_a_carried_cause(self):
+        """
+        Given a RuntimeVerdict with fallback_cause='no_match' (whatever the
+            resolver carried before the compound-level floor reapplication),
+            but the config's own parse_failures is non-empty and the
+            decision is 'ask' (not 'deny')
+        When _classify_fallback_cause classifies it
+        Then it returns FALLBACK_CAUSE_PARSE_FAILURE, not FALLBACK_CAUSE_NO_MATCH
+            -- checked first, since the ASK floor is unconditional here and
+            the carried cause cannot be trusted once it has fired
+        """
+        result = RuntimeVerdict(decision="ask", reason="x", fallback_cause="no_match")
+        invocation = _invocation(
+            tool_name="Bash",
+            config=Configuration(
+                layers=(), parse_failures=((Path("/p/bad.toml"), "broken"),)
+            ),
+        )
+        self.assertEqual(
+            _classify_fallback_cause(result, invocation), FALLBACK_CAUSE_PARSE_FAILURE
+        )
+
+    def test_parse_failures_present_but_decision_is_deny_reads_the_carried_cause(self):
+        """
+        Given a RuntimeVerdict with fallback_cause='undecidable' and a
+            'deny' decision, and an Invocation whose config's parse_failures
+            is non-empty
+        When _classify_fallback_cause classifies it
+        Then it returns FALLBACK_CAUSE_UNDECIDABLE, not FALLBACK_CAUSE_PARSE_FAILURE
+            -- apply_parse_failure_floor never touches an already-'deny'
+            decision, so a non-empty parse_failures proves nothing about a
+            deny and the carried cause is trustworthy
+        """
+        result = RuntimeVerdict(
+            decision="deny", reason="x", fallback_cause="undecidable"
+        )
+        invocation = _invocation(
+            tool_name="Bash",
+            config=Configuration(
+                layers=(), parse_failures=((Path("/p/bad.toml"), "broken"),)
+            ),
+        )
+        self.assertEqual(
+            _classify_fallback_cause(result, invocation), FALLBACK_CAUSE_UNDECIDABLE
+        )
 
 
 class TestHandleCommandToolReadsTargetFromRegisteredKey(unittest.TestCase):

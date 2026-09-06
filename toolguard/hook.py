@@ -39,6 +39,14 @@ from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
 from toolguard.error_reporter import Reporter
+from toolguard.auto_mode_trace import (
+    AutoModeTraceEntry,
+    FALLBACK_CAUSE_NO_MATCH,
+    FALLBACK_CAUSE_PARSE_FAILURE,
+    FALLBACK_CAUSE_UNDECIDABLE,
+    FALLBACK_CAUSE_UNKNOWN,
+    log_auto_mode_trace,
+)
 from toolguard.invocation import Invocation
 from toolguard.log_writer import LogRecord, log_command, log_discovery, resolve_log_dir
 from toolguard.resolve import (
@@ -975,6 +983,134 @@ def _log_non_allow_decision(
     )
 
 
+#: The one Claude Code permission mode the auto-mode trace triggers on
+#: (TOO-28 spec 4.4). Not 'plan': Claude Code's own plan mode is meant to be
+#: read-only, so it is not the "less-governed" case this trace exists to
+#: surface (Arnon, 2026-09-06).
+AUTO_PERMISSION_MODE = "auto"
+
+
+def _fallback_decided(result: RuntimeVerdict) -> bool:
+    """
+    Whether *result* was decided by a fallback rather than a matched rule.
+
+    For a compound Bash verdict, ``result.matched_rule`` is ``None`` both
+    when a fallback fired AND when several sub-commands each matched a real
+    rule but there was no single decider to attribute (see
+    :func:`~toolguard.resolve._deciding_sub_match`) -- those are not the
+    same thing, so this checks each non-audit-only ``sub_matches`` entry
+    instead: any one of them with its OWN ``matched_rule`` unset means a
+    fallback decided that leaf. A file-path verdict's ``sub_matches`` is
+    always empty (file paths are never compound), so the top-level
+    ``matched_rule`` is unambiguous there and used directly.
+
+    Args:
+        result: The resolved verdict.
+
+    Returns:
+        True if any part of *result* was decided by a fallback.
+    """
+    if result.sub_matches:
+        return any(
+            unit.matched_rule is None
+            for unit in result.sub_matches
+            if not unit.audit_only
+        )
+    return result.matched_rule is None
+
+
+def _classify_fallback_cause(result: RuntimeVerdict, invocation: Invocation) -> str:
+    """
+    Classify WHY there was a fallback for *result* -- never what the outcome
+    was (that is ``result.decision``, an unrelated field).
+
+    Reads ``result.fallback_cause`` directly -- set structurally, at the
+    point of decision, in :mod:`toolguard.permission_resolution`/
+    :mod:`toolguard.compound`/:mod:`toolguard.resolve` -- rather than
+    re-deriving it here. An earlier version of this function tried to infer
+    the cause from ``fallback_kind`` downstream and produced a wrong label;
+    see :attr:`~toolguard.config_types.UnitVerdict.fallback_kind`'s own
+    docstring for why that field cannot answer this question.
+
+    ``parse_failure`` is the one exception, checked independently via
+    ``invocation.config.parse_failures`` rather than read off *result*:
+    :func:`~toolguard.permission_resolution.apply_parse_failure_floor`'s own
+    hard invariant makes it unconditional whenever ``parse_failures`` is
+    non-empty and the decision isn't ``'deny'`` (which bypasses the floor
+    entirely), so it is checked first, ahead of whatever ``fallback_cause``
+    the (possibly floor-overwritten) verdict carries.
+
+    Args:
+        result: The resolved verdict (already known to be fallback-decided).
+        invocation: Supplies ``config.parse_failures``.
+
+    Returns:
+        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_PARSE_FAILURE`,
+        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_UNDECIDABLE`,
+        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_NO_MATCH`, or
+        :data:`~toolguard.auto_mode_trace.FALLBACK_CAUSE_UNKNOWN`.
+    """
+    # invocation.config is None only for a synthetic/test Invocation that
+    # never resolves a real verdict -- the live call site in
+    # _maybe_trace_auto_mode always has a real Configuration by this point.
+    # Treated the same as "no parse failures known" rather than crashing.
+    parse_failures = (
+        invocation.config.parse_failures if invocation.config is not None else ()
+    )
+    if parse_failures and result.decision != "deny":
+        return FALLBACK_CAUSE_PARSE_FAILURE
+    if result.fallback_cause == "undecidable":
+        return FALLBACK_CAUSE_UNDECIDABLE
+    if result.fallback_cause == "no_match":
+        return FALLBACK_CAUSE_NO_MATCH
+    return FALLBACK_CAUSE_UNKNOWN
+
+
+def _maybe_trace_auto_mode(
+    result: RuntimeVerdict, target: str, invocation: Invocation
+) -> None:
+    """
+    Record *result* to the auto-mode trace (TOO-28 spec 4.4), if it qualifies.
+
+    Fires only when Claude Code's own ``permission_mode`` is
+    :data:`AUTO_PERMISSION_MODE` AND a fallback (not a matched rule)
+    decided *result* -- see :func:`_fallback_decided`. This is a read-only
+    side channel: :func:`~toolguard.auto_mode_trace.log_auto_mode_trace`
+    already swallows its own write failures, and the call here is wrapped
+    too, as a second safety net -- an unexpected bug in the tracing path
+    must never be able to change the verdict this function is annotating.
+
+    Args:
+        result: The resolved verdict for *target*.
+        target: The bare command (Bash) or file path (Read/Write/Edit) --
+            never the decision log's rendered ``Tool(path)`` form, so a
+            reader grouping entries by shape never has to strip a prefix
+            first.
+        invocation: Supplies ``permission_mode``/``session_id``/``cwd``/
+            ``agent_info``/``tool_name`` and the log directory.
+    """
+    if invocation.permission_mode != AUTO_PERMISSION_MODE:
+        return
+    if not _fallback_decided(result):
+        return
+    try:
+        log_auto_mode_trace(
+            AutoModeTraceEntry(
+                tool_name=invocation.tool_name,
+                target=target,
+                decision=result.decision,
+                fallback_cause=_classify_fallback_cause(result, invocation),
+                permission_mode=invocation.permission_mode,
+                session_id=invocation.session_id,
+                cwd=invocation.cwd,
+                agent_info=invocation.agent_info,
+            ),
+            invocation.env_config.get("log_dir"),
+        )
+    except Exception as e:
+        print(f"Warning: auto-mode trace failed: {e}", file=sys.stderr)
+
+
 def _handle_file_path_tool(invocation: Invocation) -> RuntimeVerdict:
     """
     Resolve and log a file-path tool event (Read, Write, Edit).
@@ -1032,6 +1168,7 @@ def _handle_file_path_tool(invocation: Invocation) -> RuntimeVerdict:
     else:
         _log_non_allow_decision(result, log_target, invocation)
 
+    _maybe_trace_auto_mode(result, file_path, invocation)
     return result
 
 
@@ -1095,6 +1232,7 @@ def _handle_command_tool(invocation: Invocation) -> RuntimeVerdict:
     else:
         _log_non_allow_decision(result, command, invocation)
 
+    _maybe_trace_auto_mode(result, command, invocation)
     return result
 
 
@@ -1216,6 +1354,7 @@ def main() -> None:
                 extended_syntax=env_config.get("extended_syntax", True),
                 cwd=cwd,
                 env_config=env_config,
+                session_id=hook_data.session_id,
             )
 
             _warn_if_settings_path_override(reporter)

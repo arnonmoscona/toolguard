@@ -441,6 +441,10 @@ def _judge_undecidable_unit(
         reason=reason,
         additional_context=None,
         fallback_kind=unit_fallback_kind,
+        # A grammar-level undecidable segment has no parts to match against
+        # any rule at all (see CommandUnit's own docstring) -- every branch
+        # above is floor-decided, unconditionally, regardless of *floored*.
+        fallback_cause="undecidable",
     )
 
 
@@ -512,6 +516,10 @@ def _judge_inline_code_unit(
             reason=reason,
             additional_context=additional_context,
             fallback_kind=None,
+            # A real rule (or no-match fallback) on a verifiable
+            # sub-command decided this, not the floor -- carry whichever
+            # cause *deciding* already carries rather than guessing.
+            fallback_cause=deciding.fallback_cause,
         )
     # allow or ask -> floor per undecidable_fallback. Bound the command
     # shown in the reason so an unbounded inline-code blob never reaches
@@ -539,6 +547,9 @@ def _judge_inline_code_unit(
                 reason=reason,
                 additional_context=additional_context,
                 fallback_kind=None,
+                # Same reasoning as the deny branch above: a real rule
+                # (or no-match fallback) decided, not the floor.
+                fallback_cause=deciding.fallback_cause,
             )
         # Genuine floor case: undecidable_fallback raised 'allow' to
         # 'ask'. The floor, not whatever the stub matched, decided --
@@ -551,6 +562,7 @@ def _judge_inline_code_unit(
             reason=f"ASK floor applied (inline/heredoc foreign code): {display_cmd}",
             additional_context=None,
             fallback_kind=None,
+            fallback_cause="undecidable",
         )
     if floored == "deny":
         # fallback_kind='denied' here is safe: _combine_strictest
@@ -568,6 +580,7 @@ def _judge_inline_code_unit(
             ),
             additional_context=None,
             fallback_kind="denied",
+            fallback_cause="undecidable",
         )
     # floored == "allow": undecidable_fallback is either
     # 'allow_with_warning' or 'allow' -- both are the deliberate
@@ -629,6 +642,7 @@ def _judge_inline_code_unit(
         reason=combined_reason,
         additional_context=combined_context,
         fallback_kind=fallback_kind,
+        fallback_cause="undecidable",
     )
 
 
@@ -684,7 +698,9 @@ def _judge_plain_unit(
     # warning stream.
     combined = _combine_strictest(inner_units)
     # No single decider to attribute across potentially several inner
-    # sub-commands, so matched_rule/provenance stay None.
+    # sub-commands, so matched_rule/provenance stay None. fallback_cause
+    # follows the same rule combined.fallback_cause already applies (single
+    # decider or single-allowed-part propagates; several mixed parts don't).
     return UnitVerdict(
         sub_command=unit.text,
         decision=combined.decision,
@@ -693,6 +709,7 @@ def _judge_plain_unit(
         reason=combined.reason,
         additional_context=combined.additional_context,
         fallback_kind=("warned" if combined.fallback_warning else None),
+        fallback_cause=combined.fallback_cause,
     )
 
 
@@ -1050,10 +1067,7 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
 
     Args:
         unit_verdicts: List of per-unit :class:`~toolguard.config_types.UnitVerdict`
-            records, in extraction order. ``sub_command`` is the original
-            command/leaf/segment text for the unit; ``fallback_kind`` is
-            ``'warned'``, ``'silent'``, ``'denied'``, or ``None`` (see
-            :class:`~toolguard.config_types.UnitVerdict`'s own docstring).
+            records, in extraction order.
 
     Returns:
         A :class:`~toolguard.config_types.RuntimeVerdict` with
@@ -1061,12 +1075,12 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
         defaults: this function combines already-decided reason text for
         the verdict's own wording, never structured per-sub-command data --
         that lives on ``RuntimeVerdict.sub_matches``, populated
-        independently by :mod:`toolguard.resolve`'s own driver loop. The
-        deny branch carries the deciding unit's own ``fallback_kind``
-        through to ``RuntimeVerdict.fallback_kind`` unchanged (``'denied'``
-        for the ``undecidable_fallback=deny`` escape hatch, else ``None``).
-        An empty *unit_verdicts* fails closed: ``deny``, "No commands to
-        evaluate".
+        independently by :mod:`toolguard.resolve`'s own driver loop.
+        ``fallback_kind``/``fallback_cause`` carry the single deciding
+        unit's own values through unchanged whenever there is one (deny,
+        ask, or exactly one allowed unit); with several allowed units there
+        is no single decider, so both stay at their defaults. An empty
+        *unit_verdicts* fails closed: ``deny``, "No commands to evaluate".
     """
     kind, deciding = _pick_strictest(unit_verdicts)
     if kind == "deny":
@@ -1075,12 +1089,14 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
             reason=deciding.reason,
             additional_context=deciding.additional_context,
             fallback_kind=deciding.fallback_kind,
+            fallback_cause=deciding.fallback_cause,
         )
     if kind == "ask":
         return RuntimeVerdict(
             decision="ask",
             reason=deciding.reason,
             additional_context=deciding.additional_context,
+            fallback_cause=deciding.fallback_cause,
         )
     allowed = [uv for uv in unit_verdicts if uv.decision == "allow"]
     if allowed:
@@ -1095,6 +1111,7 @@ def _combine_strictest(unit_verdicts: List[UnitVerdict]) -> RuntimeVerdict:
                 reason=deciding.reason,
                 additional_context=accumulated_context,
                 fallback_warning=fallback_warning,
+                fallback_cause=deciding.fallback_cause,
             )
         # Multiple allowed units: build "cmd -> pattern" summary.
         match_details = []

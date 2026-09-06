@@ -65,6 +65,8 @@ class Invocation:
             outside a live hook evaluation.
         permission_mode: Claude Code's own permission mode for this call, e.g.
             ``'default'`` or an auto mode, or ``None`` outside a live hook evaluation.
+        session_id: Claude Code's session identifier for this call, or ``None``
+            outside a live hook evaluation.
 
     Frozen because it is a record of what was loaded, not a place to accumulate state
     during a decision. A mutable one would reintroduce, inside a single process, exactly
@@ -82,6 +84,7 @@ class Invocation:
     governed_tools: Optional[Tuple[str, ...]] = None
     agent_info: Optional[str] = None
     permission_mode: Optional[str] = None
+    session_id: Optional[str] = None
 
     @classmethod
     def for_evaluation(
@@ -103,7 +106,6 @@ class Invocation:
         """
         return cls(
             tool_name=tool_name,
-
             tool_input=tool_input if tool_input is not None else {},
             config=config,
             extended_syntax=extended_syntax,

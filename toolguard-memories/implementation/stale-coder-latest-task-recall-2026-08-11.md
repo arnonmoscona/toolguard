@@ -8,8 +8,96 @@ tags:
 ---
 
 ---
-tags: [task-memory, TOO-28, coder-recall]
+tags: [task-memory, TOO-28]
 ---
+
+# TOO-28 Phase 5 -- coder task recall (this session; content below down to the next '---'
+divider that starts a new '## TOO-28' or '## Ticket' section is STALE, from an earlier
+session, and is being replaced piecemeal since this note's write_note overwrite is not
+taking effect for this permalink -- see basic-memory quirk noted in the implementation
+report)
+
+## Brief
+`/home/arnon/projects/toolguard/toolguard-memories/TOO-28/brief-phase5.md` -- validated
+(5/5 slots) before starting.
+
+## Task
+Spec section 4.4: when no toolguard rule matched AND `permission_mode == "auto"`, record
+what happened in a dedicated JSONL log (`logs/toolguard-gap-YYYY-MM-DD.jsonl`). Read-only
+side channel -- nothing in the decision path reads it, a write failure must never change a
+verdict. Phase 1 (already committed) made `Invocation.permission_mode` reachable at the
+decision path; this phase is the first consumer of it.
+
+## Scope
+In scope: new log writer + trigger + classification, registered in
+`test/unit/_real_log_dir_guard.py`. Out of scope: PostToolUse hook, install-flow/skill
+changes (TOO-77), new config setting, anything that READS the log, Phases 2/3 (auto-mode
+fallback config, per-rule override).
+
+## Coordinator mid-task clarification (2026-09-06)
+- Finding 2 (whether `plan` mode should also trigger) is CLOSED: auto only, do not widen,
+  do not report as open. Plan mode is meant to be read-only by Claude Code's own design.
+- Finding 1 (PostToolUse/classifier-verdict limitation) de-prioritised: state as a scope
+  boundary in the docstring, not as a shortfall.
+- Field selection: the governed subject must be the FULL, untruncated command/path text --
+  "prose is output" rule applied to this log's primary field. Same subject text and tool
+  naming as the existing decision log, so the two corpora can be correlated/compared.
+- Do NOT log non-auto entries (the decision log already carries permission_mode on every
+  entry, so that comparison is already possible).
+- Must NOT claim in the docstring that auto-mode commands were governed more permissively
+  -- Phase 2 (auto-mode fallback config) hasn't landed, so today the SAME fallback applies
+  regardless of mode. This log is a pre-relaxation baseline.
+
+## Key design decisions made (all documented in code + implementation report)
+1. Call site: `toolguard/hook.py::_handle_command_tool` / `_handle_file_path_tool`, right
+   after `result: RuntimeVerdict` is computed -- both already have `invocation` in hand.
+   One shared helper `_maybe_log_auto_mode_gap`, not scattered.
+2. Trigger (`_fallback_decided`): for Bash (possibly compound), check `result.sub_matches`
+   -- fires if ANY non-audit-only unit has `matched_rule is None`. This correctly
+   distinguishes "some/all leaves fell to a fallback" from "no single decider because
+   multiple leaves each matched a DIFFERENT real rule" (RuntimeVerdict.matched_rule is
+   None in BOTH cases at the top level -- brief's Finding 2 flagged this ambiguity
+   explicitly). For file-path verdicts (never compound), `result.matched_rule is None`
+   directly.
+3. Classification (`_classify_fallback_source`): only the deny-side undecidable escape
+   hatch is structurally unambiguous (`RuntimeVerdict.fallback_kind == "denied"`). Ask-floor
+   and allow-side escape hatches collapse to the same shape as a plain no_match_fallback
+   outcome at every altitude available without touching resolve.py/compound.py (which
+   would need CommandUnit.kind, not carried on UnitVerdict) -- reported as "no_match" by
+   default. Documented as a known, honest limitation, not silently guessed.
+4. `gap_log.py` lives in the "observability" architecture layer (same as log_writer.py/
+   error_log.py), so it must NOT import config_types.py (RuntimeVerdict/UnitVerdict) --
+   confirmed via .pyscn.toml's layer rules before writing code. hook.py (runtime layer)
+   extracts primitives into a GapLogEntry dataclass, exactly like LogRecord.
+5. Added `Invocation.session_id` (mirrors Phase 1's `permission_mode` addition) -- an
+   invocation-wide fact, threaded via the initial Invocation() construction in main()
+   (available immediately from hook_data, unlike governed_tools/agent_info/permission_mode
+   which need a later replace()).
+6. Defense in depth: `_maybe_log_auto_mode_gap` wraps its own call to log_gap in try/except
+   too (log_gap already swallows internally) -- makes "a write failure does not change the
+   verdict" independently testable and true even against a bug in log_gap itself.
+
+## Findings / corrections to the brief
+- The brief's premise that JSONL precedent is `toolguard-discovery.jsonl` is WRONG -- no
+  such file exists; the real discovery log is `toolguard-discovery.log`, plain
+  tab-separated text, not JSON at all. Followed the error/warning/conflict DATED-file
+  convention instead, with JSONL content per log_writer.py's actual (currently-unused)
+  LOG_FORMAT_JSONLINES rendering.
+- `--ambient` fitness check false-positived on `GapLogEntry.cwd`/`entry.cwd` (bare
+  attribute-name match, no type-awareness) -- same class of false positive already solved
+  for `hook.cwd` (PreToolUseEvent.cwd). Added a matching PATH_AMBIENT_OWNERS entry in
+  tools/architecture_fitness.py with the same style of justification.
+
+## Baseline (measured before any change)
+4021 tests / OK (expected failures=4); ruff check clean; ruff format flagged ONE
+pre-existing issue in invocation.py (stray blank line, unrelated to Phase 5, fixed
+incidentally since the file was already being touched); all 3 fitness checks exit 0;
+corpus `OK: no differences` at 6401/61; all 8 entry points import cleanly.
+
+---
+
+(Everything below this line is STALE content from an earlier session's recall, left in
+place only because this permalink resists a clean overwrite; ignore it.)
 
 # TOO-28 Phase 1 round 3 -- thread Invocation through the engine layer (Protocol refactor)
 

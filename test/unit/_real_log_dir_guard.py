@@ -19,8 +19,9 @@ toolguard code path that can write into the real project logs/ directory
 does so by calling one of a small, fixed set of functions
 (``log_writer.log_command``, ``log_writer.log_discovery``,
 ``error_log.log_conflict``, ``error_log.log_error``, ``error_log.log_warning``,
-``once_per_store.reap``) with a ``log_dir``/``logs_dir`` (directly, or -- for
-``log_command`` specifically -- via a ``config["log_dir"]`` dict, the shape
+``auto_mode_trace.log_auto_mode_trace``, ``once_per_store.reap``) with a
+``log_dir``/``logs_dir`` (directly, or -- for ``log_command`` specifically -- via a
+``config["log_dir"]`` dict, the shape
 ``toolguard.hook.main()`` uses). ``install()`` wraps each of these, at their
 DEFINING module, with a guard that:
 
@@ -52,6 +53,7 @@ import inspect
 import traceback
 from pathlib import Path
 
+import toolguard.auto_mode_trace as auto_mode_trace
 import toolguard.error_log as error_log
 import toolguard.log_writer as log_writer
 import toolguard.once_per_store as once_per_store
@@ -191,6 +193,9 @@ def install() -> None:
     log_writer.log_discovery = _guard_simple_log_dir_arg(log_writer.log_discovery)
     for name in ("log_conflict", "log_error", "log_warning"):
         setattr(error_log, name, _guard_simple_log_dir_arg(getattr(error_log, name)))
+    auto_mode_trace.log_auto_mode_trace = _guard_simple_log_dir_arg(
+        auto_mode_trace.log_auto_mode_trace
+    )
     # reap() is the only once_per_store function still keyed by a project
     # logs_dir; claim/is_claimed/release use the shared ~/.toolguard/ store
     # and are guarded separately, by _real_once_per_home_guard.py.

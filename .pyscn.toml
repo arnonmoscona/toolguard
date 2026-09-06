@@ -199,7 +199,7 @@ name = "observability"
 # imports only error_log, same-layer -- log_writer.resolve_log_dir is called
 # by hook.py (runtime layer), which passes the resolved Path in, not by
 # error_reporter itself (TOO-45 punch-list #04 follow-up: Reporter).
-packages = ["log_writer", "error_log", "session_warnings", "update_check", "once_per_store", "once_per", "error_reporter"]
+packages = ["log_writer", "error_log", "session_warnings", "update_check", "once_per_store", "once_per", "error_reporter", "auto_mode_trace"]
 
 [[architecture.layers]]
 name = "config"

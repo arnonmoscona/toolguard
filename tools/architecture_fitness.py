@@ -4025,6 +4025,10 @@ PATH_AMBIENT_OWNERS: Dict[Tuple[str, str], str] = {
         "cwd",
     ): "PreToolUseEvent.cwd, a wire field parsed from stdin JSON -- not Path.cwd()",
     (
+        "auto_mode_trace",
+        "cwd",
+    ): "AutoModeTraceEntry.cwd, a plain str field carried from Invocation.cwd -- not Path.cwd()",
+    (
         "install_provenance",
         "resolve",
     ): "install-location paths: __file__, git rev-parse output, a checkout root",

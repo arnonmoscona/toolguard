@@ -130,6 +130,9 @@ def resolve_file_path_permission_detailed(
         # permission_resolution.py never sets this today -- threaded through
         # regardless, rather than silently dropped, in case it ever does.
         fallback_kind=resolved.fallback_kind,
+        # 'no_match' when unclamped resolution's own no-match branch decided
+        # (or None for a genuine match) -- carried, not re-derived.
+        fallback_cause=resolved.fallback_cause,
         tool=invocation.tool_name,
         target=file_path,
     )
@@ -286,6 +289,11 @@ def resolve_bash_permission_detailed(
                 reason=resolved.reason,
                 additional_context=resolved.additional_context,
                 fallback_kind=fallback_kind,
+                # Carried, not re-derived: resolved.fallback_cause was set
+                # structurally by permission_resolution.py's own no-match
+                # branch (or left None for a genuine match), independent of
+                # what resolved.decision ended up being.
+                fallback_cause=resolved.fallback_cause,
             ),
             override,
         )
@@ -414,6 +422,7 @@ def resolve_bash_permission_detailed(
         # != 'deny', and the parse-failure floor above never turns a 'deny'
         # into anything else, so this survives the floor unchanged.
         fallback_kind=combined.fallback_kind,
+        fallback_cause=combined.fallback_cause,
         tool="Bash",
         target=command,
     )
