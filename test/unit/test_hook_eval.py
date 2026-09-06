@@ -24,6 +24,7 @@ from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.hook import _resolve_event, _run_divergence_check, main
+from toolguard.invocation import Invocation
 from toolguard.tool_spec import ToolKind, ToolSpec
 
 from test.unit._config_isolation import ConfigIsolationMixin, isolate_log_dir_for_module
@@ -110,7 +111,14 @@ class TestResolveEventAntiDrift(unittest.TestCase):
         ]
         for command, decision, matched_rule in expected:
             with self.subTest(command=command):
-                verdict = _resolve_event("Bash", {"command": command}, cfg, True)
+                verdict = _resolve_event(
+                    Invocation.for_evaluation(
+                        cfg,
+                        tool_name="Bash",
+                        tool_input={"command": command},
+                        extended_syntax=True,
+                    )
+                )
                 self.assertEqual(verdict.decision, decision)
                 self.assertEqual(verdict.matched_rule, matched_rule)
                 self.assertEqual(
@@ -132,7 +140,14 @@ class TestResolveEventAntiDrift(unittest.TestCase):
         ]
         for file_path, decision, matched_rule in expected:
             with self.subTest(file_path=file_path):
-                verdict = _resolve_event("Read", {"file_path": file_path}, cfg, True)
+                verdict = _resolve_event(
+                    Invocation.for_evaluation(
+                        cfg,
+                        tool_name="Read",
+                        tool_input={"file_path": file_path},
+                        extended_syntax=True,
+                    )
+                )
                 self.assertEqual(verdict.decision, decision)
                 self.assertEqual(verdict.matched_rule, matched_rule)
                 self.assertEqual(
@@ -160,7 +175,14 @@ class TestResolveEventAntiDrift(unittest.TestCase):
                 },
             }
         )
-        verdict = _resolve_event("mcp__shell__run", {"command": "rm x"}, cfg, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                cfg,
+                tool_name="mcp__shell__run",
+                tool_input={"command": "rm x"},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual(verdict.decision, "deny")
         self.assertEqual(verdict.matched_rule, "rm:*")
         self.assertEqual(verdict.tool, "mcp__shell__run")
@@ -182,11 +204,25 @@ class TestResolveEventAntiDrift(unittest.TestCase):
                 },
             }
         )
-        enabled = _resolve_event("Bash", {"command": "echo ok"}, cfg, True)
+        enabled = _resolve_event(
+            Invocation.for_evaluation(
+                cfg,
+                tool_name="Bash",
+                tool_input={"command": "echo ok"},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual(enabled.decision, "allow")
         self.assertEqual(enabled.matched_rule, r"[regex]^echo\s+ok$")
 
-        disabled = _resolve_event("Bash", {"command": "echo ok"}, cfg, False)
+        disabled = _resolve_event(
+            Invocation.for_evaluation(
+                cfg,
+                tool_name="Bash",
+                tool_input={"command": "echo ok"},
+                extended_syntax=False,
+            )
+        )
         self.assertEqual(disabled.decision, "ask")
         self.assertIsNone(disabled.matched_rule)
 
@@ -201,7 +237,14 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is allowed with a 'Not a governed tool' reason, matching no rule
         """
         cfg = _config(tool="Bash", allow=["ls:*"])
-        verdict = _resolve_event("WebFetch", {"command": "x"}, cfg, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                cfg,
+                tool_name="WebFetch",
+                tool_input={"command": "x"},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual(verdict.decision, "allow")
         self.assertIn("Not a governed tool", verdict.reason)
         self.assertIsNone(verdict.matched_rule)
@@ -214,7 +257,11 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is denied by the guard (fail-closed), matching no rule
         """
         cfg = _config(tool="Bash", allow=["ls:*"])
-        verdict = _resolve_event("Bash", {"command": ""}, cfg, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                cfg, tool_name="Bash", tool_input={"command": ""}, extended_syntax=True
+            )
+        )
         self.assertEqual(verdict.decision, "deny")
         self.assertIn("No command provided", verdict.reason)
         self.assertIsNone(verdict.matched_rule)
@@ -227,7 +274,14 @@ class TestResolveEventEdgeCases(unittest.TestCase):
         Then it is denied by the guard (fail-closed), matching no rule
         """
         cfg = _config(tool="Read", allow=["/proj/**"])
-        verdict = _resolve_event("Read", {"file_path": ""}, cfg, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                cfg,
+                tool_name="Read",
+                tool_input={"file_path": ""},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual(verdict.decision, "deny")
         self.assertIn("No file_path provided", verdict.reason)
         self.assertIsNone(verdict.matched_rule)
@@ -257,7 +311,14 @@ class TestResolveEventPayloadKeySeam(unittest.TestCase):
              treated as empty/fail-closed)
         """
         cfg = _config(tool="Read", allow=["/proj/**"])
-        verdict = _resolve_event("Read", {"target_path": "/proj/readme.md"}, cfg, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                cfg,
+                tool_name="Read",
+                tool_input={"target_path": "/proj/readme.md"},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual(verdict.decision, "allow")
         self.assertEqual(verdict.matched_rule, "/proj/**")
 
@@ -279,7 +340,11 @@ class TestResolveEventPayloadKeySeam(unittest.TestCase):
         Then the fail-closed deny reason names 'target_path', not 'file_path'
         """
         cfg = _config(tool="Read", allow=["/proj/**"])
-        verdict = _resolve_event("Read", {}, cfg, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                cfg, tool_name="Read", tool_input={}, extended_syntax=True
+            )
+        )
         self.assertEqual(verdict.decision, "deny")
         self.assertIn("No target_path provided", verdict.reason)
         self.assertIsNone(verdict.matched_rule)
@@ -816,7 +881,10 @@ class TestAutoMigrationGate(ConfigIsolationMixin, unittest.TestCase):
             ),
             patch("toolguard.hook.run_auto_migration") as mock_mig,
         ):
-            _run_divergence_check(config, env_config, takeover_dict)
+            invocation = Invocation(
+                tool_name="Bash", tool_input={}, config=config, env_config=env_config
+            )
+            _run_divergence_check(invocation, takeover_dict)
         return mock_mig, project
 
     def test_divergence_without_auto_migrate_does_not_migrate(self):

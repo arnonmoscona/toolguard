@@ -17,6 +17,7 @@ from toolguard.hook import (
     _log_allowed_command,
     _log_non_allow_decision,
 )
+from toolguard.invocation import Invocation
 from toolguard.resolve import (
     RuntimeVerdict,
     resolve_bash_permission_detailed,
@@ -37,6 +38,17 @@ def _make_config(layers_content):
         )
         layers.append(ConfigLayer(provenance=prov, content=MappingProxyType(content)))
     return Configuration(layers=tuple(layers), start_dir=None)
+
+
+def _logging_invocation(env_config):
+    """An Invocation carrying only what _log_allowed_command/_log_non_allow_decision read."""
+    return Invocation(
+        tool_name="Bash",
+        tool_input={},
+        config=None,
+        agent_info="main",
+        env_config=env_config,
+    )
 
 
 class TestNoDrift(unittest.TestCase):
@@ -93,9 +105,8 @@ class TestNoDrift(unittest.TestCase):
 
         decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
         self.assertIsInstance(bash_result, RuntimeVerdict)
         resolve_verdict = bash_result.decision
@@ -121,9 +132,8 @@ class TestNoDrift(unittest.TestCase):
 
         decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
         self.assertIsInstance(bash_result, RuntimeVerdict)
         resolve_verdict = bash_result.decision
@@ -148,9 +158,8 @@ class TestNoDrift(unittest.TestCase):
 
         decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
         self.assertIsInstance(bash_result, RuntimeVerdict)
         resolve_verdict = bash_result.decision
@@ -177,7 +186,10 @@ class TestNoDrift(unittest.TestCase):
         decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
         self.assertIsInstance(file_result, RuntimeVerdict)
         resolve_verdict = file_result.decision
@@ -205,7 +217,10 @@ class TestNoDrift(unittest.TestCase):
         decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
         self.assertIsInstance(file_result, RuntimeVerdict)
         resolve_verdict = file_result.decision
@@ -272,9 +287,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
         resolve_verdict = bash_result.decision
 
@@ -299,7 +313,10 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
         resolve_verdict = file_result.decision
 
@@ -327,9 +344,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
         resolve_verdict = bash_result.decision
 
@@ -356,7 +372,10 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
         resolve_verdict = file_result.decision
 
@@ -396,9 +415,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision_verdict = decide(config, "Bash", command, extended_syntax).decision
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
         resolve_verdict = bash_result.decision
 
@@ -439,7 +457,10 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         decision_verdict = decide(config, "Read", file_path, extended_syntax).decision
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
         resolve_verdict = file_result.decision
 
@@ -480,9 +501,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(
@@ -524,7 +544,10 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         decision = decide(config, "Read", file_path, extended_syntax)
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
 
         self.assertEqual(
@@ -565,9 +588,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(
@@ -609,7 +631,10 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
         decision = decide(config, "Read", file_path, extended_syntax)
 
         file_result = resolve_file_path_permission_detailed(
-            "Read", file_path, config, extended_syntax
+            file_path,
+            Invocation.for_evaluation(
+                config, tool_name="Read", extended_syntax=extended_syntax
+            ),
         )
 
         self.assertEqual(
@@ -649,9 +674,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(bash_result.decision, decision.decision)
@@ -687,9 +711,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(bash_result.decision, decision.decision)
@@ -724,9 +747,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(bash_result.decision, decision.decision)
@@ -761,9 +783,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(
@@ -806,9 +827,8 @@ class TestNoMatchSemanticsNoDrift(unittest.TestCase):
 
         decision = decide(config, "Bash", command, extended_syntax)
 
-        hd_deny, hd_allow = config.hard_deny("Bash")
         bash_result = resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
         self.assertEqual(bash_result.decision, decision.decision)
@@ -831,9 +851,8 @@ class TestUndecidableFallbackThreading(unittest.TestCase):
 
     def _resolve(self, config, command):
         """Resolve *command* through resolve_bash_permission_detailed."""
-        hd_deny, hd_allow = config.hard_deny("Bash")
         return resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
 
     def test_ask_floor_leaf_under_each_fallback(self):
@@ -1006,9 +1025,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         Then the decision is allow and fallback_warning is True
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'python -c "print(1)"', config, True, hd_deny, hd_allow
+            'python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(result.fallback_warning)
@@ -1020,9 +1039,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
         Then the decision is allow and fallback_warning is True
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+            'ls && python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(
@@ -1039,9 +1058,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             a matched rule for that leaf
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+            'ls && python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertNotIn(
             "-> python -c",
@@ -1059,11 +1078,10 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             'python -c' rule match
         """
         config = self._repro_config("allow")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         for command in ('python -c "print(1)"', 'ls && python -c "print(1)"'):
             with self.subTest(command=command):
                 result = resolve_bash_permission_detailed(
-                    command, config, True, hd_deny, hd_allow
+                    command, Invocation.for_evaluation(config, extended_syntax=True)
                 )
                 self.assertEqual(result.decision, "allow")
                 self.assertFalse(result.fallback_warning)
@@ -1078,9 +1096,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             and fallback_kind='warned'
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+            'ls && python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         by_command = {sm.sub_command: sm for sm in result.sub_matches}
@@ -1103,9 +1121,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             result.provenance is non-None and identifies the project layer
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'ls && python -c "print(1)"', config, True, hd_deny, hd_allow
+            'ls && python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(result.matched_rule, "ls")
@@ -1121,9 +1139,9 @@ class TestUndecidableFallbackMultiLeafWarningParity(unittest.TestCase):
             genuine leaf ('ls -> ls') is mislabelled as a fallback allow
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'ls && python -c "print(1)" && ls', config, True, hd_deny, hd_allow
+            'ls && python -c "print(1)" && ls',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(result.fallback_warning)
@@ -1160,9 +1178,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
             breakdown is not collapsed down to the floored leaf alone
         """
         config = self._repro_config()
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'PKG=$(uv run python -c "print(1)")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         sub_commands = {sm.sub_command for sm in result.sub_matches}
         self.assertIn(cmd, sub_commands)
@@ -1176,9 +1195,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
             floored leaf's own text
         """
         config = self._repro_config()
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'PKG=$(uv run python -c "print(1)")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertIn('uv run python -c "print(1)"', result.reason)
 
     def test_unrelated_substitution_is_not_itemised(self):
@@ -1191,9 +1211,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
             unrelated 'mktemp -d' one
         """
         config = self._repro_config()
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'X=$(mktemp -d) PKG=$(uv run python -c "print(1)")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         sub_commands = {sm.sub_command for sm in result.sub_matches}
         self.assertIn('uv run python -c "print(1)"', sub_commands)
@@ -1228,9 +1249,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "p") $(some_unmatched_tool --x)'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(result.fallback_warning)
         sub_commands = {sm.sub_command for sm in result.sub_matches}
@@ -1274,9 +1296,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "p") $(mktemp -d)'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(result.additional_context, "CTX-AUDITPART\n\nCTX-SIBLING")
         sub_commands = {sm.sub_command for sm in result.sub_matches}
@@ -1307,9 +1330,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "ask")
 
     def test_unrelated_substitution_deny_raises_over_the_ask_floor(self):
@@ -1336,9 +1360,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os") $(rm -rf /tmp/x)'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "rm:*")
 
@@ -1363,9 +1388,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os") $(rm -rf /tmp/x)'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "rm:*")
 
@@ -1394,9 +1420,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         self.assertIsNone(result.matched_rule)
 
@@ -1426,9 +1453,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(result.fallback_warning)
 
@@ -1456,9 +1484,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os") $(curl http://evil)'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "ask")
         self.assertEqual(result.matched_rule, "curl:*")
 
@@ -1486,9 +1515,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'echo $(python -c "import os")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "ask")
         self.assertEqual(result.matched_rule, "python:*")
 
@@ -1516,9 +1546,10 @@ class TestInlineCodeSubstitutionAuditParts(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         cmd = 'ls && X=$(mktemp -d) PKG=$(uv run python -c "print(1)")'
-        result = resolve_bash_permission_detailed(cmd, config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            cmd, Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         self.assertIn("All 2 sub-commands allowed", result.reason)
         self.assertEqual(result.reason.count("["), result.reason.count("]"))
@@ -1548,13 +1579,14 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
     def _logged_rules(self, command, undecidable_fallback="allow_with_warning"):
         """Resolve *command*, log the allow, and return the (cmd, matched_rule) pairs."""
         config = self._repro_config(undecidable_fallback)
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         with patch("toolguard.hook.log_command") as mock_log:
-            _log_allowed_command(result, command, "main", {"logging_enabled": True})
+            _log_allowed_command(
+                result, command, _logging_invocation({"logging_enabled": True})
+            )
         return [
             (call.args[0].command_str, call.args[0].matched_rule)
             for call in mock_log.call_args_list
@@ -1587,9 +1619,9 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
         Then RuntimeVerdict.matched_rule is already None
         """
         config = self._repro_config("allow_with_warning")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'python -c "print(1)"', config, True, hd_deny, hd_allow
+            'python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertIsNone(result.matched_rule)
@@ -1659,14 +1691,13 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "cat README.md", config, True, hd_deny, hd_allow
+            "cat README.md", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         with patch("toolguard.hook.log_command") as mock_log:
             _log_allowed_command(
-                result, "cat README.md", "main", {"logging_enabled": True}
+                result, "cat README.md", _logging_invocation({"logging_enabled": True})
             )
         self.assertEqual(
             mock_log.call_args_list[0].args[0].matched_rule,
@@ -1698,14 +1729,15 @@ class TestAuditLogMatchedRuleNeverFabricated(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         command = 'ls && echo $(python -c "print(1)")'
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         with patch("toolguard.hook.log_command") as mock_log:
-            _log_allowed_command(result, command, "main", {"logging_enabled": True})
+            _log_allowed_command(
+                result, command, _logging_invocation({"logging_enabled": True})
+            )
         logged = {
             call.args[0].command_str: call.args[0].matched_rule
             for call in mock_log.call_args_list
@@ -1740,9 +1772,8 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
 
     def _log_and_capture(self, config, command):
         """Resolve *command* against *config* and return (result, mock_log_command call)."""
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         verdict = RuntimeVerdict(
             decision=result.decision,
@@ -1753,7 +1784,7 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                verdict, command, "main", {"logging_enabled": True}, None
+                verdict, command, _logging_invocation({"logging_enabled": True})
             )
         self.assertEqual(len(mock_log.call_args_list), 1)
         return result, mock_log.call_args_list[0]
@@ -1910,7 +1941,9 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
                 )
             ]
         )
-        result = resolve_file_path_permission_detailed("Read", "README.md", config)
+        result = resolve_file_path_permission_detailed(
+            "README.md", Invocation.for_evaluation(config, tool_name="Read")
+        )
         self.assertEqual(result.decision, "deny")
         self.assertNotIn(": ", result.reason)
         verdict = RuntimeVerdict(
@@ -1921,7 +1954,9 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                verdict, "Read(README.md)", "main", {"logging_enabled": True}, None
+                verdict,
+                "Read(README.md)",
+                _logging_invocation({"logging_enabled": True}),
             )
         self.assertEqual(len(mock_log.call_args_list), 1)
         self.assertEqual(
@@ -1939,9 +1974,9 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
             stays that way
         """
         config = self._repro_config("ask")
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'python -c "print(1)"', config, True, hd_deny, hd_allow
+            'python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "ask")
         verdict = RuntimeVerdict(
@@ -1952,7 +1987,9 @@ class TestAuditLogViolatedRuleNeverFabricated(unittest.TestCase):
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                verdict, 'python -c "print(1)"', "main", {"logging_enabled": True}, None
+                verdict,
+                'python -c "print(1)"',
+                _logging_invocation({"logging_enabled": True}),
             )
         self.assertEqual(len(mock_log.call_args_list), 1)
         call = mock_log.call_args_list[0]
@@ -1976,8 +2013,9 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
             description as result.provenance.describe_brief()
         """
         config = self._config({"permissions": {"allow": ["Bash(ls)"], "deny": []}})
-        hd_deny, hd_allow = config.hard_deny("Bash")
-        result = resolve_bash_permission_detailed("ls", config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            "ls", Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
         self.assertIsNotNone(result.provenance)
         verdict = RuntimeVerdict(
@@ -1987,7 +2025,9 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
             provenance=result.provenance,
         )
         with patch("toolguard.hook.log_command") as mock_log:
-            _log_allowed_command(verdict, "ls", "main", {"logging_enabled": True})
+            _log_allowed_command(
+                verdict, "ls", _logging_invocation({"logging_enabled": True})
+            )
         self.assertEqual(
             mock_log.call_args_list[0].args[0].provenance,
             result.provenance.describe_brief(),
@@ -2003,9 +2043,8 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
         config = self._config(
             {"permissions": {"allow": ["Bash(*)"], "deny": ["Bash(rm -rf *)"]}}
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "rm -rf /tmp/x", config, True, hd_deny, hd_allow
+            "rm -rf /tmp/x", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNotNone(result.provenance)
@@ -2018,7 +2057,7 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                verdict, "rm -rf /tmp/x", "main", {"logging_enabled": True}, None
+                verdict, "rm -rf /tmp/x", _logging_invocation({"logging_enabled": True})
             )
         self.assertEqual(
             mock_log.call_args_list[0].args[0].provenance,
@@ -2033,9 +2072,8 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
             provenance kwarg is None too -- by design, not omission
         """
         config = self._config({"hard_deny": {"deny": ["Bash(curl:*)"]}})
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "curl http://x", config, True, hd_deny, hd_allow
+            "curl http://x", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.provenance)
@@ -2048,7 +2086,7 @@ class TestAuditLogProvenanceThreading(unittest.TestCase):
         )
         with patch("toolguard.hook.log_command") as mock_log:
             _log_non_allow_decision(
-                verdict, "curl http://x", "main", {"logging_enabled": True}, None
+                verdict, "curl http://x", _logging_invocation({"logging_enabled": True})
             )
         self.assertIsNone(mock_log.call_args_list[0].args[0].provenance)
 
@@ -2076,9 +2114,8 @@ class TestFallbackWarningField(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "ls -la", config, True, hd_deny, hd_allow
+            "ls -la", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(result.fallback_warning)
@@ -2102,9 +2139,8 @@ class TestFallbackWarningField(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "ls -la", config, True, hd_deny, hd_allow
+            "ls -la", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         self.assertFalse(result.fallback_warning)
@@ -2130,9 +2166,8 @@ class TestFallbackWarningField(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "ls -la", config, True, hd_deny, hd_allow
+            "ls -la", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         self.assertFalse(result.fallback_warning)
@@ -2163,7 +2198,8 @@ class TestFallbackWarningField(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/etc/passwd", config, True
+            "/etc/passwd",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertTrue(result.fallback_warning)
@@ -2191,7 +2227,8 @@ class TestFallbackWarningField(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/etc/passwd", config, True
+            "/etc/passwd",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertFalse(result.fallback_warning)
@@ -2219,9 +2256,8 @@ class TestFallbackWarningField(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "git status", config, True, hd_deny, hd_allow
+            "git status", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         self.assertFalse(result.fallback_warning)
@@ -2252,9 +2288,8 @@ class TestFallbackWarningField(unittest.TestCase):
                         )
                     ]
                 )
-                hd_deny, hd_allow = config.hard_deny("Bash")
                 result = resolve_bash_permission_detailed(
-                    cmd, config, True, hd_deny, hd_allow
+                    cmd, Invocation.for_evaluation(config, extended_syntax=True)
                 )
                 self.assertEqual(result.decision, "allow")
                 self.assertEqual(result.fallback_warning, warned)
@@ -2292,9 +2327,8 @@ class TestFallbackWarningField(unittest.TestCase):
                         )
                     ]
                 )
-                hd_deny, hd_allow = config.hard_deny("Bash")
                 result = resolve_bash_permission_detailed(
-                    cmd, config, True, hd_deny, hd_allow
+                    cmd, Invocation.for_evaluation(config, extended_syntax=True)
                 )
                 self.assertEqual(result.decision, "allow")
                 self.assertEqual(result.fallback_warning, warned)
@@ -2333,9 +2367,9 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'python -c "print(1)"', config, True, hd_deny, hd_allow
+            'python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.fallback_kind, "denied")
@@ -2356,9 +2390,8 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "rm -rf /tmp/x", config, True, hd_deny, hd_allow
+            "rm -rf /tmp/x", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.fallback_kind)
@@ -2373,9 +2406,8 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
         config = _make_config(
             [("project", "toolguard_hook", {"hard_deny": {"deny": ["Bash(curl:*)"]}})]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "curl http://x", config, True, hd_deny, hd_allow
+            "curl http://x", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.fallback_kind)
@@ -2401,9 +2433,8 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
                 )
             ]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "ls -la", config, True, hd_deny, hd_allow
+            "ls -la", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.fallback_kind)
@@ -2428,7 +2459,9 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
                 )
             ]
         )
-        result = resolve_file_path_permission_detailed("Read", "README.md", config)
+        result = resolve_file_path_permission_detailed(
+            "README.md", Invocation.for_evaluation(config, tool_name="Read")
+        )
         self.assertEqual(result.decision, "deny")
         self.assertIsNone(result.fallback_kind)
 
@@ -2443,9 +2476,9 @@ class TestRuntimeVerdictFallbackKind(unittest.TestCase):
         config = _make_config(
             [("project", "toolguard_hook", {"permissions": {"allow": [], "deny": []}})]
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            'python -c "print(1)"', config, True, hd_deny, hd_allow
+            'python -c "print(1)"',
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "ask")
         self.assertIsNone(result.fallback_kind)
@@ -2472,9 +2505,8 @@ class TestParseFailureFloorCoversUndecidableSegments(unittest.TestCase):
 
     def _resolve(self, config, command):
         """Resolve *command* through resolve_bash_permission_detailed."""
-        hd_deny, hd_allow = config.hard_deny("Bash")
         return resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
 
     def test_parse_failure_floor_covers_undecidable_segments_that_bypass_the_per_leaf_chokepoint(
@@ -2601,7 +2633,9 @@ class TestFilePathMatchedRuleExact(unittest.TestCase):
                 )
             ]
         )
-        result = resolve_file_path_permission_detailed("Read", "/tmp/x/foo.txt", config)
+        result = resolve_file_path_permission_detailed(
+            "/tmp/x/foo.txt", Invocation.for_evaluation(config, tool_name="Read")
+        )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(result.matched_rule, "/tmp/x/**")
 
@@ -2626,7 +2660,7 @@ class TestFilePathMatchedRuleExact(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/secrets/passwd", config
+            "/secrets/passwd", Invocation.for_evaluation(config, tool_name="Read")
         )
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "/secrets/**")
@@ -2648,7 +2682,9 @@ class TestFilePathMatchedRuleExact(unittest.TestCase):
                 )
             ]
         )
-        result = resolve_file_path_permission_detailed("Read", "/etc/passwd", config)
+        result = resolve_file_path_permission_detailed(
+            "/etc/passwd", Invocation.for_evaluation(config, tool_name="Read")
+        )
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.matched_rule, "/etc/**")
         self.assertIsNone(result.provenance)
@@ -2685,7 +2721,8 @@ class TestFilePathAdditionalContext(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/tmp/some/file.txt", config, True
+            "/tmp/some/file.txt",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(result.additional_context, "scratch space only")
@@ -2720,7 +2757,8 @@ class TestFilePathAdditionalContext(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Write", "/etc/passwd", config, True
+            "/etc/passwd",
+            Invocation.for_evaluation(config, tool_name="Write", extended_syntax=True),
         )
         self.assertEqual(result.decision, "deny")
         self.assertEqual(result.additional_context, "system files are off limits")
@@ -2755,7 +2793,8 @@ class TestFilePathAdditionalContext(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Edit", "/srv/shared/file.txt", config, True
+            "/srv/shared/file.txt",
+            Invocation.for_evaluation(config, tool_name="Edit", extended_syntax=True),
         )
         self.assertEqual(result.decision, "ask")
         self.assertEqual(
@@ -2779,7 +2818,8 @@ class TestFilePathAdditionalContext(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/tmp/some/file.txt", config, True
+            "/tmp/some/file.txt",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertIsNone(result.additional_context)
@@ -2812,7 +2852,8 @@ class TestFilePathAdditionalContext(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/secret/key.txt", config, True
+            "/secret/key.txt",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "deny")
         self.assertIn("hard_deny", result.reason)
@@ -2824,9 +2865,8 @@ class TestBashAdditionalContext(unittest.TestCase):
 
     def _resolve(self, config, command, extended_syntax=True):
         """Resolve a Bash command through resolve_bash_permission_detailed."""
-        hd_deny, hd_allow = config.hard_deny("Bash")
         return resolve_bash_permission_detailed(
-            command, config, extended_syntax, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=extended_syntax)
         )
 
     def test_single_allow_structured_entry_surfaces_additional_context(self):
@@ -3010,9 +3050,8 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
 
     def _resolve_bash(self, config, command):
         """Resolve a Bash command through resolve_bash_permission_detailed."""
-        hd_deny, hd_allow = config.hard_deny("Bash")
         return resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
 
     def test_lone_oversize_bash_allow_context_is_truncated_not_dropped(self):
@@ -3075,7 +3114,8 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/tmp/some/file.txt", config, True
+            "/tmp/some/file.txt",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertIsNotNone(result.additional_context)
@@ -3172,7 +3212,8 @@ class TestAdditionalContextBudgetAtInjectionBoundary(unittest.TestCase):
             ]
         )
         result = resolve_file_path_permission_detailed(
-            "Read", "/secret/key.txt", config, True
+            "/secret/key.txt",
+            Invocation.for_evaluation(config, tool_name="Read", extended_syntax=True),
         )
         self.assertEqual(result.decision, "deny")
         self.assertIsNotNone(result.additional_context)

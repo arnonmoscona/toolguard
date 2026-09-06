@@ -26,6 +26,7 @@ from toolguard.hook import (
     _emit_decision,
     _handle_command_tool,
     _handle_file_path_tool,
+    Invocation,
     _log_allowed_command,
     create_hook_output,
     load_file_path_patterns,
@@ -39,6 +40,33 @@ from toolguard.tool_spec import TOOLS_BY_NAME, ToolKind, ToolSpec
 from toolguard import ambient, once_per_store
 
 from test.unit._config_isolation import isolate_log_dir_for_module
+
+
+def _invocation(permission_mode=None, **overrides):
+    """An :class:`Invocation` with every field defaulted.
+
+    Args:
+        permission_mode: Claude Code's mode for this call.
+        **overrides: any other field.
+
+    Returns:
+        A populated :class:`Invocation`.
+
+    Defaulted so a test varying one field shows only that field.
+    """
+    fields = {
+        "tool_name": "Bash",
+        "tool_input": {},
+        "cwd": "/p",
+        "config": None,
+        "env_config": {},
+        "governed_tools": (),
+        "agent_info": "main",
+        "permission_mode": permission_mode,
+    }
+    fields.update(overrides)
+    return Invocation(**fields)
+
 
 _NO_TAKEOVER = TakeoverConfig(False, (), (), "deny")
 
@@ -2213,7 +2241,11 @@ class TestStartupValidation(unittest.TestCase):
             from toolguard.hook import _run_startup_validation
 
             with patch("sys.stderr", new_callable=StringIO):
-                _run_startup_validation(env_config, str(project_dir), config)
+                _run_startup_validation(
+                    _invocation(
+                        cwd=str(project_dir), config=config, env_config=env_config
+                    )
+                )
 
             # Warnings land in toolguard-warning-*.md, not toolguard-error-*.md
             # -- globbing the wrong stream is a second way for this to assert
@@ -2248,7 +2280,11 @@ class TestStartupValidation(unittest.TestCase):
         with patch("toolguard.hook.log_warning") as mock_log_warning:
             from toolguard.hook import _run_startup_validation
 
-            _run_startup_validation(env_config, "/some/dir", _IssueConfig())
+            _run_startup_validation(
+                _invocation(
+                    cwd="/some/dir", config=_IssueConfig(), env_config=env_config
+                )
+            )
             mock_log_warning.assert_called_once_with(
                 "bad tool WebSearch", "remove it", Path("/fake/logs")
             )
@@ -2271,7 +2307,9 @@ class TestStartupValidation(unittest.TestCase):
             with patch("toolguard.hook.log_warning"):
                 from toolguard.hook import _run_startup_validation
 
-                _run_startup_validation(env_config, "/some/dir")
+                _run_startup_validation(
+                    _invocation(cwd="/some/dir", config=None, env_config=env_config)
+                )
                 mock_load.assert_called_once_with("/some/dir")
 
 
@@ -2337,11 +2375,12 @@ class TestLogAllowedCommand(unittest.TestCase):
             pipeline, not a tautology
         """
         config = self._config({"permissions": {"allow": ["Bash(ls)"], "deny": []}})
-        hd_deny, hd_allow = config.hard_deny("Bash")
-        result = resolve_bash_permission_detailed("ls", config, True, hd_deny, hd_allow)
+        result = resolve_bash_permission_detailed(
+            "ls", Invocation.for_evaluation(config, extended_syntax=True)
+        )
         self.assertEqual(result.decision, "allow")
 
-        _log_allowed_command(result, "ls", "main", {})
+        _log_allowed_command(result, "ls", _invocation())
         mock_log.assert_called_once_with(
             LogRecord(
                 command_str="ls",
@@ -2365,14 +2404,14 @@ class TestLogAllowedCommand(unittest.TestCase):
             matched rule and provenance -- one UnitVerdict per sub-command
         """
         config = self._config({"permissions": {"allow": ["Bash(git *)"], "deny": []}})
-        hd_deny, hd_allow = config.hard_deny("Bash")
         result = resolve_bash_permission_detailed(
-            "git status && git log", config, True, hd_deny, hd_allow
+            "git status && git log",
+            Invocation.for_evaluation(config, extended_syntax=True),
         )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(len(result.sub_matches), 2)
 
-        _log_allowed_command(result, "git status && git log", "main", {})
+        _log_allowed_command(result, "git status && git log", _invocation())
         self.assertEqual(mock_log.call_count, 2)
         mock_log.assert_any_call(
             LogRecord(
@@ -2416,15 +2455,14 @@ class TestLogAllowedCommand(unittest.TestCase):
                 }
             }
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         command = "git status && cat file | grep pat"
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(len(result.sub_matches), 3)
 
-        _log_allowed_command(result, command, "sub-agent", {})
+        _log_allowed_command(result, command, _invocation(agent_info="sub-agent"))
         self.assertEqual(mock_log.call_count, 3)
         mock_log.assert_any_call(
             LogRecord(
@@ -2483,10 +2521,9 @@ class TestLogAllowedCommand(unittest.TestCase):
                 "permissions": {"allow": ["Bash(ls)"], "deny": []},
             }
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         command = "ls && cat README.md"
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
         self.assertEqual(
@@ -2495,7 +2532,7 @@ class TestLogAllowedCommand(unittest.TestCase):
             "sub_matches must have one entry per sub-command",
         )
 
-        _log_allowed_command(result, command, "main", {})
+        _log_allowed_command(result, command, _invocation())
         self.assertEqual(
             mock_log.call_count,
             2,
@@ -2535,14 +2572,13 @@ class TestLogAllowedCommand(unittest.TestCase):
                 },
             }
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         command = 'ls && python -c "print(1)"'
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
 
-        _log_allowed_command(result, command, "main", {})
+        _log_allowed_command(result, command, _invocation())
         for call in mock_log.call_args_list:
             matched_rule = call.args[0].matched_rule
             self.assertIsNotNone(matched_rule)
@@ -2585,14 +2621,13 @@ class TestLogAllowedCommand(unittest.TestCase):
                 ),
             )
         )
-        hd_deny, hd_allow = config.hard_deny("Bash")
         command = "git status && cat file"
         result = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual(result.decision, "allow")
 
-        _log_allowed_command(result, command, "main", {})
+        _log_allowed_command(result, command, _invocation())
         logged = {
             call.args[0].command_str: call.args[0] for call in mock_log.call_args_list
         }
@@ -2646,7 +2681,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            "Bash", {"command": "ls"}, config, {}, "main", None
+            _invocation(config=config, tool_input={"command": "ls"})
         )
         self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
@@ -2671,7 +2706,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            "Bash", {"command": "rm -rf /tmp/x"}, config, {}, "main", None
+            _invocation(config=config, tool_input={"command": "rm -rf /tmp/x"})
         )
         self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
@@ -2708,7 +2743,7 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            "Bash", {"command": 'python -c "print(1)"'}, config, {}, "main", None
+            _invocation(config=config, tool_input={"command": 'python -c "print(1)"'})
         )
         self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
@@ -2747,12 +2782,9 @@ class TestHandleCommandToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_command_tool(
-            "Bash",
-            {"command": 'python -c "print(1)" && rm foo'},
-            config,
-            {},
-            "main",
-            None,
+            _invocation(
+                config=config, tool_input={"command": 'python -c "print(1)" && rm foo'}
+            )
         )
         self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
@@ -2792,7 +2824,7 @@ class TestHandleCommandToolReadsTargetFromRegisteredKey(unittest.TestCase):
         }
         with patch.dict("toolguard.tool_spec.TOOLS_BY_NAME", rebound):
             verdict = _handle_command_tool(
-                "Bash", {"shell_input": "ls -la"}, config, {}, "main", None
+                _invocation(config=config, tool_input={"shell_input": "ls -la"})
             )
         self.assertEqual(verdict.decision, "allow")
 
@@ -2898,7 +2930,11 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_file_path_tool(
-            "Read", {"file_path": "/tmp/x/foo.txt"}, config, {}, "main", None
+            _invocation(
+                tool_name="Read",
+                config=config,
+                tool_input={"file_path": "/tmp/x/foo.txt"},
+            )
         )
         self.assertEqual(verdict.decision, "allow")
         mock_log.assert_called_once()
@@ -2927,7 +2963,9 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_file_path_tool(
-            "Read", {"file_path": "/secrets/x"}, config, {}, "main", None
+            _invocation(
+                tool_name="Read", config=config, tool_input={"file_path": "/secrets/x"}
+            )
         )
         self.assertEqual(verdict.decision, "deny")
         mock_log.assert_called_once()
@@ -2960,7 +2998,11 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
             }
         )
         verdict = _handle_file_path_tool(
-            "Read", {"target_path": "/tmp/x/foo.txt"}, config, {}, "main", None
+            _invocation(
+                tool_name="Read",
+                config=config,
+                tool_input={"target_path": "/tmp/x/foo.txt"},
+            )
         )
         self.assertEqual(verdict.decision, "allow")
 
@@ -2988,7 +3030,7 @@ class TestHandleFilePathToolAuditWiring(unittest.TestCase):
                 "permissions": {"allow": ["Read(/tmp/x/**)"], "deny": []},
             }
         )
-        verdict = _handle_file_path_tool("Read", {}, config, {}, "main", None)
+        verdict = _handle_file_path_tool(_invocation(tool_name="Read", config=config))
         self.assertEqual(verdict.decision, "deny")
         self.assertIn("No target_path provided", verdict.reason)
 

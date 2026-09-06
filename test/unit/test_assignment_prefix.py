@@ -15,6 +15,7 @@ from pathlib import Path
 from test.unit._config_isolation import ConfigIsolationMixin
 
 from toolguard.config import load_configuration
+from toolguard.invocation import Invocation
 from toolguard.parser.command_extractor import command_spellings, leading_assignments
 from toolguard.permissions import (
     check_hard_deny,
@@ -408,7 +409,9 @@ class TestTheLiveResolverAppliesTheAsymmetry(ConfigIsolationMixin, unittest.Test
     def _resolve(self, project, command):
         """Resolve *command* through the Bash resolver against real config files."""
         config = load_configuration(project)
-        return resolve_bash_permission_detailed(command, config, True, (), ()).decision
+        return resolve_bash_permission_detailed(
+            command, Invocation.for_evaluation(config, extended_syntax=True)
+        ).decision
 
     def test_a_deny_rule_fires_through_the_prefix(self):
         """

@@ -17,12 +17,15 @@ methods through the Protocol-typed ``config`` parameter below -- a real coupling
 graph does not show, and nothing would flag a future ``Configuration`` method calling back into
 this module.
 
-Everything this module needs from a configuration arrives through ``config``.
-:func:`resolve_command_permission` takes :class:`~toolguard.config_types.ResolutionConfig`;
-:func:`resolve_file_path_permission` takes
-:class:`~toolguard.config_types.FilePathResolutionConfig`, the same surface plus
-``resolve_config_path`` (project-root anchoring, forwarded to :mod:`toolguard.file_matching`)
--- see those Protocols' own docstrings for what each member means.
+Everything this module needs about one decision arrives through a single ``context``
+parameter (TOO-28): :func:`resolve_command_permission` takes
+:class:`~toolguard.config_types.ResolutionContext`; :func:`resolve_file_path_permission`
+takes :class:`~toolguard.config_types.FilePathResolutionContext`, the same surface narrowed
+so ``context.config`` additionally supports ``resolve_config_path`` (project-root anchoring,
+forwarded to :mod:`toolguard.file_matching`) -- see those Protocols' own docstrings for what
+each member means. A concrete :class:`~toolguard.invocation.Invocation` structurally
+satisfies both; this module never imports it, the same way it never imports
+:mod:`toolguard.config`.
 :func:`~toolguard.config_types.provenance_for_pattern`/
 :func:`~toolguard.config_types.entry_for_pattern` live in :mod:`toolguard.config_types`,
 beside :class:`~toolguard.config_types.ToolPatternLayer`, and are imported and called
@@ -43,9 +46,9 @@ from typing import List, Optional, Sequence, Tuple
 from toolguard.config_types import (
     CommandSpellings,
     ConflictOverride,
-    FilePathResolutionConfig,
+    FilePathResolutionContext,
     LevelMatch,
-    ResolutionConfig,
+    ResolutionContext,
     RuntimeVerdict,
     ToolPatternLayer,
     entry_for_pattern,
@@ -366,34 +369,36 @@ def resolve_permission_cascade(
 
 
 def resolve_command_permission(
-    config: ResolutionConfig,
-    tool_name: str,
+    context: ResolutionContext,
     command: str,
-    extended_syntax: bool = True,
     *,
     spellings: CommandSpellings = CommandSpellings(),
 ) -> RuntimeVerdict:
     """
-    Resolve one (already-decomposed) command against ``tool_name``'s cascade.
+    Resolve one (already-decomposed) command against ``context.tool_name``'s cascade.
 
     Matches *command* against every hierarchy level eagerly, via
     :func:`~toolguard.permissions.decide_command_at_level_detailed`, then
     folds the results with :func:`resolve_permission_cascade`. The
     production entry point for Bash/MCP-terminal resolution.
 
-    *spellings* is built by the caller: this module does not import the parser, an
-    import ``test/unit/test_architecture.py``'s per-module allow-list rejects.
-    Omitting it matches *command* as spelled, which is what a caller with no leaf in
-    hand should do.
+    Args:
+        context: Supplies ``tool_name``, ``config``, and ``extended_syntax`` --
+            see :class:`~toolguard.config_types.ResolutionContext`.
+        command: The already-decomposed command string to resolve.
+        spellings: Built by the caller: this module does not import the parser, an
+            import ``test/unit/test_architecture.py``'s per-module allow-list rejects.
+            Omitting it matches *command* as spelled, which is what a caller with no
+            leaf in hand should do.
     """
-    levels = config.permission_levels_with_provenance(tool_name)
+    levels = context.config.permission_levels_with_provenance(context.tool_name)
     matched_levels: List[LevelOutcome] = [
         (
             decide_command_at_level_detailed(
                 command,
                 list(allow),
                 list(deny),
-                extended_syntax,
+                context.extended_syntax,
                 ask_patterns=list(ask),
                 spellings=spellings,
             ),
@@ -403,21 +408,19 @@ def resolve_command_permission(
     ]
     return resolve_permission_cascade(
         matched_levels,
-        tool_name,
-        config.parse_failures,
-        config.has_any_rules(tool_name),
-        config.resolved_no_match_fallback(),
+        context.tool_name,
+        context.config.parse_failures,
+        context.config.has_any_rules(context.tool_name),
+        context.config.resolved_no_match_fallback(),
     )
 
 
 def resolve_file_path_permission(
-    config: FilePathResolutionConfig,
-    tool_name: str,
+    context: FilePathResolutionContext,
     file_path: str,
-    extended_syntax: bool = True,
 ) -> RuntimeVerdict:
     """
-    Resolve one file path against ``tool_name``'s cascade.
+    Resolve one file path against ``context.tool_name``'s cascade.
 
     Matches *file_path* against every hierarchy level eagerly, via
     :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`
@@ -427,16 +430,21 @@ def resolve_file_path_permission(
     entry point for Read/Write/Edit resolution -- see
     :mod:`toolguard.resolve`'s file-path resolver, called AFTER the
     unoverridable ``[hard_deny]`` pool check.
+
+    Args:
+        context: Supplies ``tool_name``, ``config``, and ``extended_syntax`` --
+            see :class:`~toolguard.config_types.FilePathResolutionContext`.
+        file_path: The file path under evaluation.
     """
-    levels = config.permission_levels_with_provenance(tool_name)
+    levels = context.config.permission_levels_with_provenance(context.tool_name)
     matched_levels: List[LevelOutcome] = [
         (
             decide_file_path_at_level_detailed(
                 file_path,
                 list(allow),
                 list(deny),
-                config,
-                extended_syntax,
+                context.config,
+                context.extended_syntax,
                 ask_patterns=list(ask),
             ),
             layers,
@@ -445,9 +453,9 @@ def resolve_file_path_permission(
     ]
     return resolve_permission_cascade(
         matched_levels,
-        tool_name,
-        config.parse_failures,
-        config.has_any_rules(tool_name),
-        config.resolved_no_match_fallback(),
+        context.tool_name,
+        context.config.parse_failures,
+        context.config.has_any_rules(context.tool_name),
+        context.config.resolved_no_match_fallback(),
         subject="Path",
     )

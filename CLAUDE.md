@@ -257,6 +257,15 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
   ambient state directly: owner entries exempt real reads, and an unowned `resolve()` is
   reported without failing. The suite asserts this too, so this is a second reading rather
   than the only one.
+* `uv run python tools/architecture_fitness.py --layers` -- completeness and direction against
+  the map in `.pyscn.toml`. Completeness is strong: every module must have an entry. Direction
+  is weaker than it looks, because the map is both the specification and the thing satisfied.
+* **Then ask the what-vs-how question out loud, because no check can answer it.** For each new
+  or changed class and function: is this about *what to do* or *how to do it*, and is it stable
+  under ongoing maintenance or too thin to survive a change underneath it? A facade of thin
+  pass-throughs passes `--layers` and fails this. Measured precedent: `config` and `resolve` had
+  **zero import edges between them and called each other 46,481 times** through an injected
+  callback, and `--layers` reported clean.
 * Do the code changes require updates to the maintenance skill or the security-audit skill?
 * Do they require updates to `install.md`?
 * Release notes?
@@ -289,13 +298,12 @@ Installed here. Generic guidance: `~/.claude/reference/search.md` and
   ever a local path again, `upgrade` silently does the wrong thing: check `uv tool list` first.
   The SessionStart check now also raises staleness by itself when the tree is clean and differs
   from the installed copy, so this no longer depends solely on remembering.
-* **Open commitment (Arnon, 2026-08-02): after pushing TOO-19, remove the hooks and config that
-  are no longer needed** -- both configuration entries and hook code. Known candidate:
-  `.claude/toolguard_hook.toml:58` is marked *"TEMPORARY -- TOO-19 Phase 0 unattended
-  implementation run (2026-07-25)"*. Sweep for other `TEMPORARY` / `FIX after` markers, the
-  auto-mode `soft_deny` rules added to `~/.claude/settings.json` during TOO-19, and any hook
-  registration that only existed to support this ticket. Ask before touching anything outside
-  the project.
+* **Decide whether the `<TEMPORARY>` fence in `.claude/toolguard_hook.toml` still earns its
+  place.** It holds the TOO-45 refactoring-loop guards -- denies that stop the loop writing to
+  settings and memory. TOO-45 has shipped, so the loop they guarded is over, but they are
+  protective and removing them is a judgement rather than a cleanup. Keep or drop, then delete
+  the fence either way: a marker that outlives its reason is the failure this project measured
+  at 9 of 9.
 
 ## Technical notes
 

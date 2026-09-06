@@ -13,7 +13,7 @@ from ``resolve.py``, creating a cycle.
 
 from typing import List, Optional, Tuple
 
-from toolguard.config_types import LevelMatch, PathAnchoring, ResolveConfig
+from toolguard.config_types import LevelMatch, PathAnchoring, ResolveContext
 from toolguard.normalization import expand_tilde
 from toolguard.patterns import PatternType, match_pattern, parse_pattern
 from toolguard.permissions import is_universal_pattern, resolve_allow_ask
@@ -197,12 +197,12 @@ def decide_file_path_at_level_detailed(
 
 
 def check_file_path_hard_deny(
-    tool_name: str, file_path: str, config: ResolveConfig, extended_syntax: bool
+    context: ResolveContext, file_path: str
 ) -> Optional[LevelMatch]:
     """
     Apply the unoverridable hard-deny rule to a file path, checked FIRST.
 
-    The pooled ``[hard_deny]`` (deny, allow) patterns for ``tool_name`` are
+    The pooled ``[hard_deny]`` (deny, allow) patterns for ``context.tool_name`` are
     collected across all ``toolguard_hook`` layers (see
     :meth:`~toolguard.config.Configuration.hard_deny`). The path is hard-denied
     when it matches any hard-deny ``deny`` pattern AND does NOT match a hard-deny
@@ -210,11 +210,10 @@ def check_file_path_hard_deny(
     same as normal file-path patterns.
 
     Args:
-        tool_name: ``'Read'``, ``'Write'``, or ``'Edit'``.
+        context: Supplies ``tool_name`` (``'Read'``, ``'Write'``, or ``'Edit'``),
+            the hard_deny pool + anchoring ``config``, and ``extended_syntax`` -- see
+            :class:`~toolguard.config_types.ResolveContext`.
         file_path: The file path under evaluation.
-        config: Provides the hard_deny pool + anchoring -- see
-            :class:`~toolguard.config_types.ResolveConfig`.
-        extended_syntax: Whether extended prefixes are honoured.
 
     Returns:
         A :class:`~toolguard.config_types.LevelMatch` with
@@ -223,7 +222,7 @@ def check_file_path_hard_deny(
         so the caller falls through to the normal more-specific-wins
         cascade.
     """
-    deny_patterns, allow_patterns = config.hard_deny(tool_name)
+    deny_patterns, allow_patterns = context.config.hard_deny(context.tool_name)
     if not deny_patterns:
         return None
 
@@ -231,8 +230,10 @@ def check_file_path_hard_deny(
 
     matched_deny = None
     for pattern in deny_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+        anchored = _anchor_file_pattern(
+            pattern, context.config, context.extended_syntax
+        )
+        if _match_file_path_pattern(anchored, expanded_path, context.extended_syntax):
             matched_deny = pattern
             break
 
@@ -241,8 +242,10 @@ def check_file_path_hard_deny(
 
     # A hard-deny matched. An allow carve-out exempts the path from the hard deny.
     for pattern in allow_patterns:
-        anchored = _anchor_file_pattern(pattern, config, extended_syntax)
-        if _match_file_path_pattern(anchored, expanded_path, extended_syntax):
+        anchored = _anchor_file_pattern(
+            pattern, context.config, context.extended_syntax
+        )
+        if _match_file_path_pattern(anchored, expanded_path, context.extended_syntax):
             return None
 
     return LevelMatch(

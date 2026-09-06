@@ -24,6 +24,7 @@ from toolguard.config_validation import KNOWN_SUPPORTED_TOOLS, validate_permissi
 from toolguard.constants import BUILTIN_TOOLS as CONSTANTS_BUILTIN_TOOLS
 from toolguard.constants import FILE_TOOLS
 from toolguard.hook import _resolve_event
+from toolguard.invocation import Invocation
 from toolguard.tool_spec import (
     _REGISTRY,
     _index_by_name,
@@ -275,7 +276,14 @@ class TestRegistryDrivesGovernance(unittest.TestCase):
         config = _deny_config()
         for tool in BUILTIN_NAMES:
             with self.subTest(tool=tool):
-                verdict = _resolve_event(tool, _payload_for(tool), config, True)
+                verdict = _resolve_event(
+                    Invocation.for_evaluation(
+                        config,
+                        tool_name=tool,
+                        tool_input=_payload_for(tool),
+                        extended_syntax=True,
+                    )
+                )
                 self.assertEqual("deny", verdict.decision)
                 self.assertEqual(_expected_rule_body(tool), verdict.matched_rule)
 
@@ -287,7 +295,12 @@ class TestRegistryDrivesGovernance(unittest.TestCase):
             contrast that makes the denies above attributable to governance
         """
         verdict = _resolve_event(
-            UNREGISTERED_TOOL, {"command": COMMAND_TARGET}, _deny_config(), True
+            Invocation.for_evaluation(
+                _deny_config(),
+                tool_name=UNREGISTERED_TOOL,
+                tool_input={"command": COMMAND_TARGET},
+                extended_syntax=True,
+            )
         )
         self.assertEqual("allow", verdict.decision)
         self.assertIsNone(verdict.matched_rule)
@@ -300,11 +313,25 @@ class TestRegistryDrivesGovernance(unittest.TestCase):
             denied -- is_builtin=False is what separates the two
         """
         config = _deny_config()
-        mcp = _resolve_event(MCP_TERMINAL, {"command": COMMAND_TARGET}, config, True)
+        mcp = _resolve_event(
+            Invocation.for_evaluation(
+                config,
+                tool_name=MCP_TERMINAL,
+                tool_input={"command": COMMAND_TARGET},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual("allow", mcp.decision)
         self.assertIsNone(mcp.matched_rule)
 
-        bash = _resolve_event("Bash", {"command": COMMAND_TARGET}, config, True)
+        bash = _resolve_event(
+            Invocation.for_evaluation(
+                config,
+                tool_name="Bash",
+                tool_input={"command": COMMAND_TARGET},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual("deny", bash.decision)
 
     def test_configuring_the_mcp_terminal_governs_it_under_the_bash_rules(self):
@@ -316,7 +343,12 @@ class TestRegistryDrivesGovernance(unittest.TestCase):
         """
         config = _deny_config({"governed_tools": [MCP_TERMINAL]})
         verdict = _resolve_event(
-            MCP_TERMINAL, {"command": COMMAND_TARGET}, config, True
+            Invocation.for_evaluation(
+                config,
+                tool_name=MCP_TERMINAL,
+                tool_input={"command": COMMAND_TARGET},
+                extended_syntax=True,
+            )
         )
         self.assertEqual("deny", verdict.decision)
         self.assertEqual(COMMAND_RULE_BODY, verdict.matched_rule)
@@ -359,7 +391,12 @@ class TestPayloadKeyIsWhatConsumersRead(unittest.TestCase):
                 with self.subTest(tool=tool):
                     self.assertEqual("target_path", payload_key(tool))
                     verdict = _resolve_event(
-                        tool, {"target_path": FILE_TARGET}, config, True
+                        Invocation.for_evaluation(
+                            config,
+                            tool_name=tool,
+                            tool_input={"target_path": FILE_TARGET},
+                            extended_syntax=True,
+                        )
                     )
                     self.assertEqual("allow", verdict.decision)
                     self.assertEqual(FILE_GLOB, verdict.matched_rule)
@@ -373,7 +410,14 @@ class TestPayloadKeyIsWhatConsumersRead(unittest.TestCase):
         """
         config = _config({"permissions": {"allow": [f"Read({FILE_GLOB})"], "deny": []}})
         self.assertEqual("file_path", payload_key("Read"))
-        verdict = _resolve_event("Read", {"target_path": FILE_TARGET}, config, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                config,
+                tool_name="Read",
+                tool_input={"target_path": FILE_TARGET},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual("deny", verdict.decision)
 
     def test_the_hook_reads_a_command_tools_target_from_the_registered_key(self):
@@ -391,7 +435,14 @@ class TestPayloadKeyIsWhatConsumersRead(unittest.TestCase):
         config = _config({"permissions": {"allow": ["Bash(ls:*)"], "deny": []}})
         with patch.dict("toolguard.tool_spec.TOOLS_BY_NAME", rebound):
             self.assertEqual("shell_input", payload_key("Bash"))
-            verdict = _resolve_event("Bash", {"shell_input": "ls -la"}, config, True)
+            verdict = _resolve_event(
+                Invocation.for_evaluation(
+                    config,
+                    tool_name="Bash",
+                    tool_input={"shell_input": "ls -la"},
+                    extended_syntax=True,
+                )
+            )
         self.assertEqual("allow", verdict.decision)
         self.assertEqual("ls:*", verdict.matched_rule)
 
@@ -479,7 +530,14 @@ class TestPopulationAndTheEmptyRegistry(unittest.TestCase):
         """
         config = _deny_config({"governed_tools": []})
         self.assertIs(DEFAULT_GOVERNED_TOOLS, config.governed_tools())
-        verdict = _resolve_event("Bash", {"command": COMMAND_TARGET}, config, True)
+        verdict = _resolve_event(
+            Invocation.for_evaluation(
+                config,
+                tool_name="Bash",
+                tool_input={"command": COMMAND_TARGET},
+                extended_syntax=True,
+            )
+        )
         self.assertEqual("deny", verdict.decision)
 
     def test_an_empty_default_governed_tools_fails_closed_not_open(self):
@@ -495,13 +553,27 @@ class TestPopulationAndTheEmptyRegistry(unittest.TestCase):
         config = _deny_config(
             {"hard_deny": {"deny": [f"Bash({COMMAND_RULE_BODY})"], "allow": []}}
         )
-        before = _resolve_event("Bash", _payload_for("Bash"), config, True)
+        before = _resolve_event(
+            Invocation.for_evaluation(
+                config,
+                tool_name="Bash",
+                tool_input=_payload_for("Bash"),
+                extended_syntax=True,
+            )
+        )
         self.assertEqual("deny", before.decision)
         self.assertEqual(COMMAND_RULE_BODY, before.matched_rule)
 
         with patch("toolguard.config.DEFAULT_GOVERNED_TOOLS", ()):
             self.assertEqual((), config.governed_tools())
-            verdict = _resolve_event("Bash", _payload_for("Bash"), config, True)
+            verdict = _resolve_event(
+                Invocation.for_evaluation(
+                    config,
+                    tool_name="Bash",
+                    tool_input=_payload_for("Bash"),
+                    extended_syntax=True,
+                )
+            )
         self.assertEqual("deny", verdict.decision)
         self.assertIsNone(verdict.matched_rule)
         self.assertIn("no built-in tools are registered", verdict.reason)
@@ -625,8 +697,22 @@ class TestNoAmbientStateIsTouched(unittest.TestCase):
 
         for tool, (_, target, _rule) in sorted(PROBES.items()):
             decide(config, tool, target)
-            _resolve_event(tool, _payload_for(tool), config, True)
-        _resolve_event(UNREGISTERED_TOOL, {"command": COMMAND_TARGET}, config, True)
+            _resolve_event(
+                Invocation.for_evaluation(
+                    config,
+                    tool_name=tool,
+                    tool_input=_payload_for(tool),
+                    extended_syntax=True,
+                )
+            )
+        _resolve_event(
+            Invocation.for_evaluation(
+                config,
+                tool_name=UNREGISTERED_TOOL,
+                tool_input={"command": COMMAND_TARGET},
+                extended_syntax=True,
+            )
+        )
 
         self.assertEqual(before, self._snapshot())
         self.assertEqual(leaks_before, len(get_leak_events()))

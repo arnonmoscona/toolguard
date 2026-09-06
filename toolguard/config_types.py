@@ -815,3 +815,60 @@ class FilePathResolutionConfig(ResolutionConfig, PathAnchoring, Protocol):
     layer down into :func:`~toolguard.file_matching.decide_file_path_at_level_detailed`
     for project-root anchoring, which the Bash cascade never needs.
     """
+
+
+# ---------------------------------------------------------------------------
+# Context Protocols (TOO-28) -- the (config, tool_name, extended_syntax)
+# triple an engine-layer entry point needs about ONE decision, expressed one
+# level out from the Config Protocols above rather than replacing them: "I
+# need something that gets me a ResolutionConfig", not "I need a
+# Configuration". A concrete :class:`~toolguard.invocation.Invocation`
+# structurally satisfies every one of these -- this module still never
+# imports it, the same way it never imports Configuration itself.
+# ---------------------------------------------------------------------------
+
+
+class ResolutionContext(Protocol):
+    """
+    What :func:`~toolguard.permission_resolution.resolve_command_permission` needs about one
+    decision, bundled instead of taken as three loose parameters.
+
+    Attributes:
+        tool_name: The governed-tool identity to resolve against.
+        extended_syntax: Whether ``[regex]``/``[glob]``/``[native]`` prefixes are honoured.
+    """
+
+    tool_name: str
+    extended_syntax: bool
+
+    @property
+    def config(self) -> ResolutionConfig:
+        """The cascade surface -- see :class:`ResolutionConfig`."""
+        ...
+
+
+class ResolveContext(ResolutionContext, Protocol):
+    """
+    As :class:`ResolutionContext`, narrowed for
+    :func:`~toolguard.file_matching.check_file_path_hard_deny`: ``config`` must additionally
+    supply the wider :class:`ResolveConfig` surface (the hard-deny pool lookup this function
+    needs).
+    """
+
+    @property
+    def config(self) -> ResolveConfig:
+        """The wider engine surface -- see :class:`ResolveConfig`."""
+        ...
+
+
+class FilePathResolutionContext(ResolutionContext, Protocol):
+    """
+    As :class:`ResolutionContext`, narrowed for
+    :func:`~toolguard.permission_resolution.resolve_file_path_permission`: ``config`` must
+    additionally supply project-root anchoring -- see :class:`FilePathResolutionConfig`.
+    """
+
+    @property
+    def config(self) -> FilePathResolutionConfig:
+        """The file-path cascade surface -- see :class:`FilePathResolutionConfig`."""
+        ...

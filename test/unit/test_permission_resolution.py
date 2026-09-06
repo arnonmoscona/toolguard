@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from toolguard.config import Configuration, ConfigLayer, Provenance
+from toolguard.invocation import Invocation
 from toolguard.permission_resolution import (
     apply_parse_failure_floor,
     resolve_command_permission,
@@ -115,7 +116,9 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
         """
         config = _project_bash_config(deny=[_DENY_RM], parse_failures=_PARSE_FAILURES)
 
-        resolved = resolve_command_permission(config, "Bash", "rm -rf /tmp/x")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "rm -rf /tmp/x"
+        )
 
         self.assertEqual(resolved.decision, "deny")
         self.assertIsNotNone(resolved.provenance)
@@ -138,7 +141,9 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
         """
         config = _project_bash_config(deny=[_DENY_RM], parse_failures=_PARSE_FAILURES)
 
-        resolved = resolve_command_permission(config, "Bash", "ls -la")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "ls -la"
+        )
 
         self.assertEqual(resolved.decision, "ask")
         self.assertIn(str(_BROKEN_PATH), resolved.reason)
@@ -153,13 +158,14 @@ class TestDenyUnderBrokenConfigKeepsProvenance(unittest.TestCase):
             changes nothing when nothing failed to parse
         """
         config = _project_bash_config(deny=[_DENY_RM])
+        context = Invocation.for_evaluation(config)
 
-        unmatched = resolve_command_permission(config, "Bash", "ls -la")
+        unmatched = resolve_command_permission(context, "ls -la")
         self.assertEqual(unmatched.decision, "allow")
         self.assertTrue(unmatched.fallback_warning)
         self.assertNotIn(str(_BROKEN_PATH), unmatched.reason)
 
-        matched = resolve_command_permission(config, "Bash", "rm -rf /tmp/x")
+        matched = resolve_command_permission(context, "rm -rf /tmp/x")
         self.assertEqual(matched.decision, "deny")
         self.assertEqual(matched.matched_rule, "rm -rf *")
 
@@ -247,7 +253,8 @@ class TestFloorInteractionWithTheCascade(unittest.TestCase):
             level's deny as the overridden rule
         """
         resolved = resolve_command_permission(
-            self._two_level_config(), "Bash", "git push origin main"
+            Invocation.for_evaluation(self._two_level_config()),
+            "git push origin main",
         )
 
         self.assertEqual(resolved.decision, "allow")
@@ -267,8 +274,9 @@ class TestFloorInteractionWithTheCascade(unittest.TestCase):
             longer determines the verdict
         """
         resolved = resolve_command_permission(
-            self._two_level_config(parse_failures=_PARSE_FAILURES),
-            "Bash",
+            Invocation.for_evaluation(
+                self._two_level_config(parse_failures=_PARSE_FAILURES)
+            ),
             "git push origin main",
         )
 
@@ -299,7 +307,10 @@ class TestFloorCoversFilePathTools(unittest.TestCase):
         Then the decision is 'ask' and the reason names the broken file
         """
         resolved = resolve_file_path_permission(
-            self._read_config(parse_failures=_PARSE_FAILURES), "Read", "/etc/hosts"
+            Invocation.for_evaluation(
+                self._read_config(parse_failures=_PARSE_FAILURES), tool_name="Read"
+            ),
+            "/etc/hosts",
         )
 
         self.assertEqual(resolved.decision, "ask")
@@ -313,7 +324,8 @@ class TestFloorCoversFilePathTools(unittest.TestCase):
             failure, not from file-path resolution being ask-by-default
         """
         resolved = resolve_file_path_permission(
-            self._read_config(), "Read", "/etc/hosts"
+            Invocation.for_evaluation(self._read_config(), tool_name="Read"),
+            "/etc/hosts",
         )
 
         self.assertEqual(resolved.decision, "allow")

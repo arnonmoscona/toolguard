@@ -4,99 +4,97 @@ type: note
 permalink: toolguard/toolguard-memories/implementation/coder-latest-task-recall
 tags:
 - task-memory
-- TOO-45
+- claude_tooling
+- tests-package
 ---
 
-# Task: comment/docstring rewrite of `toolguard/error_reporter.py`
 
-Single-file pass under the TOO-45 comment standard (`TOO-45 comment standard.md`).
-Comments and docstrings only — no code-shape changes, no string changes. Only
-`toolguard/error_reporter.py` and `toolguard-memories/TOO-45/reports/follow-up-queue.md`
-may be touched. `technical-notes.md` is off-limits (concurrent agents) — no pointers
-into it; propose additions verbatim in the report instead (none were needed here).
+# Task: TOO-28 Phase 1 Round 4 -- delete unpacking aliases -- toolguard project
 
-Two known-and-flagged issues in this module, told not to fix and not to describe as
-already fixed:
-- `_ROUTING`'s `stderr_fallback` column does not control stderr on the logged path —
-  `error_log._log_entry` echoes unconditionally.
-- `_dispatch` uses `getattr(error_log, rule.log_fn_name)`, so those calls have no
-  static caller. Not to be documented as a virtue.
+Brief: toolguard-memories/TOO-28/brief-phase1-round4.md (validated 5/5 slots present).
 
-Acceptance: `tools/comment_hygiene.py --compare-against HEAD` zero drift for this
-file; full suite (2733 tests) green; golden verdict corpus byte-identical; ruff
-format/check clean; no git writes.
+## Task
+Rounds 1-3 collapsed loose parameters into one context object (Invocation), but function
+bodies re-created the same unpacking as local aliases (`tool_name = invocation.tool_name`,
+etc). 39 such lines claimed across 4 files (hook.py 27, permission_resolution.py 6,
+resolve.py 3, file_matching.py 3) -- brief says this count is unverified, re-measure.
+Arnon: "not sure why we need constructs like [these] - it just adds lots of lines without
+adding any clarity... You can always choose a shorter name for the invocation variable in
+those cases (say, inv) if your goal is brevity at the use site." Round 2's "used 7-15 times,
+inlining unreadable" justification is REJECTED: brevity is a naming problem, not structural.
 
-## Outcome
-Rewrote module docstring, `_Routing`/`_ROUTING`, `Reporter` class docstring,
-`_dispatch`'s except-branch comment, `_print_fallback` docstring, and `active()`'s
-docstring. Cut all TOO-45/punch-list/item-N ticket narrative. Removed a stale,
-outward-reaching claim (module docstring said "four config-layer modules, 8 call
-sites" — actual count verified as five modules, twelve call sites, so cut the
-enumeration entirely per Rule 0 rather than correcting it to a number that will
-drift again). Fixed a false universal in `_print_fallback`'s docstring (claimed
-the fallback and logged echo "render identically" — false when `corrective_steps`
-is empty, since `error_log._log_entry` always prints that line and `_print_fallback`
-only does when truthy). Corrected the `_ROUTING` table's "the one thing to read or
-edit to change policy" claim, which is false for the reason the task flagged.
-Verified true and kept: `patch.object(error_log, "log_warning", ...)` test-patching
-claim (confirmed against `test_error_reporter.py::test_dispatch_calls_whatever_is_currently_bound_on_error_log`),
-the takeover-mode-notice/`session_warnings.py` asymmetry (confirmed against that
-module).
+## In scope
+Delete PURE aliases (`x = <context>.x`), inline through context object at use sites.
+Renaming invocation->inv / context->ctx permitted per-scope, not required. Don't merge the
+concrete Invocation-typed name with the Protocol-typed context name -- they're deliberately
+different types.
 
-Full suite green (2733), comment_hygiene zero drift for this file (only
-`tools/architecture_fitness.py` differs, pre-existing/unrelated), ruff clean.
+## NOT in scope / must stay
+- `takeover = invocation.config.takeover_mode()` (hook.py:846) -- computed, not alias.
+- `hook.py:677` `target = invocation.tool_input.get(key, "")` -- lookup, not alias.
+- Any local with different name than the attribute, or REASSIGNED later in body -- highest
+  risk item, brief explicitly did NOT check this, must classify before editing any of them.
+- `_run_startup_validation`'s `config = invocation.config; if config is None:
+  config = load_configuration(invocation.cwd)` -- deliberate documented behavior with a test,
+  keep working; local may stay if removing it makes the branch worse.
 
-Follow-up queue: added item 7 — `permission_migration.py`'s `_EXIT_CODES` comment
-quotes `_ROUTING`'s old (now-corrected) "one table, one place to change" framing;
-now a stale cross-file analogy, out of scope for this single-file pass.
+## env_config `or {}` cases (hook.py:81,795,847,872)
+Preferred fix: give env_config dataclass field a non-None default
+(`field(default_factory=lambda: MappingProxyType({}))`, idiom already in rule_entry.py),
+removing `or {}` entirely so the alias becomes pure and gets deleted too. If a caller
+genuinely relies on None, say so and keep the local instead.
 
-## Follow-up round: cold-review fixes (2026-08-11)
+## Compound.py finding carried forward (do not re-derive)
+`check_compound_permission` DOES take extended_syntax (round 3's "empty of such functions"
+claim was false), but its conclusion holds for a different reason: test-only helper (module
+comment at compound.py:307, all callers in test_compound.py), takes no config/tool_name, no
+context object in its callers. Nothing to do here.
 
-Coordinator sent judge report `R-error-reporter-1.md`, section 6, items 1-5 and 7
-(item 6 is `permission_migration.py` — out of scope, recorded only). Applied:
+## PEP 758 finding carried forward
+`except ValueError, TypeError:` at file_matching.py:113 -- ACCEPTED correct, requires-python
+>=3.14, verified pre-existing against tag TOO-28-start-of-work. Leave it.
 
-1. (2.1) Module docstring: dropped "no throttling question" — false; throttling is
-   `once_per`'s and the caller's job, not this module's, verified via `config_divergence.py`/`auto_migrate.py` `once_per.day(...)` gates.
-2. (2.2) `stderr_fallback` first sentence: was wrong-half ("or the write itself
-   failed" named the case where the fallback does NOT fire — `error_log._log_entry`
-   catches its own write failure internally and returns normally). Rewrote to the
-   three real firing conditions: no log stream, log call didn't run (no `log_dir`),
-   or it raised.
-3. (2.3 + §3) `notice` TEMPORARY paragraph: cut to the one load-bearing clause
-   (deliberate, no log stream, don't tidy). Removed the false "on every tool call"
-   universal (takeover notice only fires in takeover-mode projects) along with the
-   rest of the planning narrative.
-4. (§4, the one restoration) Module docstring: restored the real reason for the
-   ambient registry — `get_env_config()` entered from many places besides the hook
-   (verified: 8 files call it, not just `hook.py`) — and dropped the false "only"
-   from "reached only through several layers".
-5. (2.5) `_dispatch` docstring: "Never raises into the caller" overclaimed past what
-   `except Exception` guarantees (BaseException, unguarded `print` calls). Softened
-   to "Swallows a failing log write rather than propagating it".
-7. (2.6/§3, optional) "no process-wide state" -> "no shared/global state" (exact,
-   per judge). Removed the duplicated output-shape fact from `stderr_label`,
-   pointing to `_print_fallback` as its single home instead.
+## No widening authorized. Behavior-neutral only. TDD not required (no signature changes).
+If a test needs touching -> STOP and explain why -- means something moved that shouldn't have.
 
-**New finding during the mandated full re-verify pass (not on the judge's list):**
-`Reporter`'s own docstring claimed `log_dir=None` means "no Claude buffer" — false.
-`_dispatch`'s `reaches_claude` check is unconditional on `log_dir`; the named test
-`test_fault_still_reaches_claude_with_no_log_dir` proves `fault()` still populates
-the Claude buffer with no `log_dir` set. Fixed: the safe-fallback sentence now
-covers logging only, with a separate clause stating the Claude buffer is
-independent state that still accumulates `fault()` calls regardless of `log_dir`.
+## Steps (9) with completion artifacts
+1. List candidate lines, classify each (pure/computed/reassigned/or{}) -- classification in
+   report. Re-measure the "39" count; brief's grep misses multi-line aliases, nested-attribute
+   assigns, and differently-named locals.
+2. Decide the env_config default question -- decision + reason.
+3. Delete pure aliases, inline at use sites -- suite green at baseline counts.
+4. ruff check/format clean.
+5. Architecture fitness --stdlib --ambient --layers exit 0.
+6. Verdict-corpus equivalence: OK no differences, 6401/61.
+7. Calibrate BEFORE believing step 6: plant a decision-altering change, confirm --verify
+   FAILS, revert, confirm passes, confirm git status --porcelain clean for that file.
+8. Entry-point smoke test: all 8 [project.scripts] console scripts load.
+9. Sibling sweep: regrep `^\s*[a-z_]* = (invocation|context|inv|ctx)\.`, report what remains
+   and why.
 
-Item 6 (`permission_migration.py:94-96`) — not touched, recorded for the
-coordinator to route: the `_EXIT_CODES` comment quotes `_ROUTING`'s old "one table
-to read, one place to change" phrasing, which this pass corrected away as false.
-The quoted phrase now exists nowhere in the repo and the parenthetical re-asserts
-a claim already found wrong, plus a second rule-1 "mirrors Z" violation. Fix belongs
-in that file: drop the parenthetical; `_EXIT_CODES`'s own `DECLINED_LOCKED != 2`
-rationale stands alone.
+## Baseline (from round 3, independently reverified by Arnon)
+Ran 4021 tests / OK (expected failures=4); ruff check -> All checks passed!;
+corpus OK: no differences at 6401 / 61; 3 fitness checks pass; 8 entry points load.
+A changed test count is a finding, not a pass.
 
-Also worth queuing per the judge (outside this file, not actioned): the same stale
-"four config-layer modules" figure survives at `hook.py:1239` and
-`test/unit/test_error_reporter.py:331` (actual count is five).
+## Constraints
+- uv run python only, never bare python/python3 (denied by permission rules).
+- unittest not pytest.
+- Disclosure rule (INTENT/TOUCHES/INLINE BECAUSE + TG_INTENT=1/TG_ATTEST_READONLY=1) for any
+  bash carrying authored logic. Required even when blocked or fails.
+- No git write ops. Revert step 7's planted change by editing the file back, never
+  git checkout.
+- Don't touch test/verdict_corpus/ (frozen baseline).
+- Comments short, explain why not what.
 
-Verification after this round: `tools/comment_hygiene.py --compare-against HEAD`
-zero drift for `error_reporter.py`; `ruff format`/`ruff check` clean; full suite
-2733 tests, OK.
+## Unverified brief claims -- must check, don't trust
+- Count of 39 (grep missed multi-line, nested attr, different local names).
+- "Nothing distinguishes None from {} for env_config" -- brief only checked the 4 or{} sites.
+- "No local reassigned after aliasing" -- NOT CHECKED by brief author, highest risk item.
+- "Removing aliases reads better" -- judgement call; flag any concrete counter-example.
+
+## Success criteria
+All 9 steps completed with artifacts. Suite green at baseline counts (or explained
+deviation). Corpus equivalence proven AND calibrated. Sibling sweep reported. Report anything
+found wrong in the brief's premises -- every round so far has produced its most valuable
+output as a correction to the brief.

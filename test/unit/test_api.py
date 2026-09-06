@@ -18,6 +18,7 @@ from toolguard.config import (
 )
 from toolguard.config_types import RuntimeVerdict
 from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.invocation import Invocation
 from toolguard.resolve import (
     UnitVerdict,
     resolve_bash_permission_detailed,
@@ -416,7 +417,9 @@ class TestDecideFilePath(unittest.TestCase):
         self.assertEqual("deny", decision.decision)
         self.assertIsNone(decision.provenance)
 
-        hard = check_file_path_hard_deny("Read", "/etc/passwd", config, True)
+        hard = check_file_path_hard_deny(
+            Invocation.for_evaluation(config, tool_name="Read"), "/etc/passwd"
+        )
         self.assertIsNotNone(hard)
         self.assertEqual("deny", hard.decision)
         self.assertEqual("[glob]/etc/**", hard.matched_pattern)
@@ -947,9 +950,8 @@ class TestDecideBashToolOverride(unittest.TestCase):
         config = _make_config(
             [("project", "toolguard_hook", {"permissions": {"allow": ["Bash(ls *)"]}})]
         )
-        hard_deny_deny, hard_deny_allow = config.hard_deny("Bash")
         baseline = resolve_bash_permission_detailed(
-            "ls -la", config, True, hard_deny_deny, hard_deny_allow
+            "ls -la", Invocation.for_evaluation(config, extended_syntax=True)
         )
         self.assertEqual("Bash", baseline.tool)
         self.assertEqual("ls *", baseline.matched_rule)
@@ -1013,13 +1015,11 @@ class TestDecideRoutesWithoutAddingLogic(unittest.TestCase):
         Then the two verdicts are equal field for field, for a rule match, an
             unmatched command and a hard-denied command alike
         """
-        hard_deny_deny, hard_deny_allow = self.config.hard_deny("Bash")
+        invocation = Invocation.for_evaluation(self.config, extended_syntax=True)
         for command in ("git status", "whoami", "curl http://x"):
             with self.subTest(command=command):
                 self.assertEqual(
-                    resolve_bash_permission_detailed(
-                        command, self.config, True, hard_deny_deny, hard_deny_allow
-                    ),
+                    resolve_bash_permission_detailed(command, invocation),
                     decide(self.config, "Bash", command),
                 )
 
@@ -1033,10 +1033,11 @@ class TestDecideRoutesWithoutAddingLogic(unittest.TestCase):
         for tool in ("Read", "Write", "Edit"):
             for path in ("/tmp/abc.txt", "/etc/passwd"):
                 with self.subTest(tool=tool, path=path):
+                    invocation = Invocation.for_evaluation(
+                        self.config, tool_name=tool, extended_syntax=True
+                    )
                     self.assertEqual(
-                        resolve_file_path_permission_detailed(
-                            tool, path, self.config, True
-                        ),
+                        resolve_file_path_permission_detailed(path, invocation),
                         decide(self.config, tool, path),
                     )
 

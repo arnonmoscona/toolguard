@@ -19,6 +19,7 @@ from toolguard.config import (
 from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.config_types import provenance_for_pattern
 from toolguard.error_log import log_conflict, log_error, log_warning
+from toolguard.invocation import Invocation
 from toolguard.log_writer import (
     _DISCOVERY_LOG_FILENAME,
     _DISCOVERY_TAIL_READ_BYTES,
@@ -28,6 +29,13 @@ from toolguard.log_writer import (
 )
 from toolguard.permission_resolution import resolve_command_permission
 from toolguard.session_start import _count_conflict_entries
+
+
+def _invocation(config, env_config, cwd=None):
+    """An Invocation carrying only what hook.py's own early-startup helpers read."""
+    return Invocation(
+        tool_name="Bash", tool_input={}, config=config, cwd=cwd, env_config=env_config
+    )
 
 
 def _bash_layer(allow, deny, specificity, path):
@@ -193,7 +201,9 @@ class TestProvenanceInReasons(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = resolve_command_permission(config, "Bash", "git status")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "git status"
+        )
         self.assertIsInstance(resolved, RuntimeVerdict)
         self.assertEqual(resolved.decision, "allow")
         self.assertIn("matches allow pattern: git *", resolved.reason)
@@ -212,7 +222,9 @@ class TestProvenanceInReasons(unittest.TestCase):
         config = Configuration(
             layers=(_bash_layer(["git *"], [], 0, "/proj/.claude/toolguard_hook.toml"),)
         )
-        resolved = resolve_command_permission(config, "Bash", "rm -rf /")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "rm -rf /"
+        )
         self.assertEqual(resolved.decision, "ask")
         self.assertIsNone(resolved.provenance)
         self.assertEqual(
@@ -239,7 +251,9 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer([], ["git *"], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_command_permission(config, "Bash", "git push")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "git push"
+        )
         self.assertEqual(resolved.decision, "allow")
         self.assertEqual(len(resolved.overrides), 1)
         identifier, override = resolved.overrides[0]
@@ -267,7 +281,9 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer(["git *"], [], 1, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_command_permission(config, "Bash", "git push")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "git push"
+        )
         self.assertEqual(resolved.decision, "allow")
         self.assertEqual(resolved.overrides, [])
 
@@ -287,7 +303,9 @@ class TestConflictDetection(unittest.TestCase):
                 _bash_layer([], ["rm *"], 2, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_command_permission(config, "Bash", "rm -rf /")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "rm -rf /"
+        )
         self.assertEqual(resolved.decision, "deny")
         self.assertEqual(resolved.overrides, [])
 
@@ -332,7 +350,9 @@ class TestProvenanceHelpers(unittest.TestCase):
                 _bash_layer([], ["git *"], 2, "/home/.claude/toolguard_hook.toml"),
             )
         )
-        resolved = resolve_command_permission(config, "Bash", "git push")
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), "git push"
+        )
         self.assertEqual(resolved.decision, "allow")
         self.assertEqual(len(resolved.overrides), 1)
         self.assertEqual(resolved.overrides[0][1].overridden_provenance.specificity, 2)
@@ -849,7 +869,9 @@ class TestM1SingleSourceWarning(ConfigIsolationMixin, unittest.TestCase):
         env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
 
-        hook_mod._run_startup_validation(env_config, str(proj_root), config)
+        hook_mod._run_startup_validation(
+            _invocation(config, env_config, cwd=str(proj_root))
+        )
 
         warning_files = list(log_dir.glob("toolguard-warning-*.md"))
         self.assertEqual(len(warning_files), 1)
@@ -894,9 +916,9 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         log_dir = proj_root / "logs"
         env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
-        takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
+        takeover_dict = hook_mod._resolve_takeover_mode(_invocation(config, env_config))
 
-        hook_mod._run_divergence_check(config, env_config, takeover_dict)
+        hook_mod._run_divergence_check(_invocation(config, env_config), takeover_dict)
 
         warning_files = list(log_dir.glob("toolguard-warning-*.md"))
         self.assertEqual(len(warning_files), 1)
@@ -949,7 +971,7 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         log_dir = proj_root / "logs"
         env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
-        takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
+        takeover_dict = hook_mod._resolve_takeover_mode(_invocation(config, env_config))
 
         with patch.object(
             divergence_mod,
@@ -959,8 +981,12 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
             with patch(
                 "toolguard.auto_migrate.migrate", return_value=1
             ) as mock_migrate:
-                hook_mod._run_divergence_check(config, env_config, takeover_dict)
-                hook_mod._run_divergence_check(config, env_config, takeover_dict)
+                hook_mod._run_divergence_check(
+                    _invocation(config, env_config), takeover_dict
+                )
+                hook_mod._run_divergence_check(
+                    _invocation(config, env_config), takeover_dict
+                )
 
         self.assertEqual(mock_migrate.call_count, 1)
         # wraps=, so the real analysis ran: mock_migrate above only reaches 1
@@ -1008,7 +1034,7 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
         log_dir = proj_root / "logs"
         env_config = {"log_dir": log_dir}
         config = load_configuration(proj_root, ignore_env_override=True)
-        takeover_dict = hook_mod._resolve_takeover_mode(config, env_config)
+        takeover_dict = hook_mod._resolve_takeover_mode(_invocation(config, env_config))
         always_divergent = DivergenceCheckResult(
             divergent_patterns=["Bash(git push:*)"]
         )
@@ -1024,8 +1050,12 @@ class TestDivergenceWarningLogging(ConfigIsolationMixin, unittest.TestCase):
                 with patch(
                     "toolguard.auto_migrate.migrate", return_value=1
                 ) as mock_migrate:
-                    hook_mod._run_divergence_check(config, env_config, takeover_dict)
-                    hook_mod._run_divergence_check(config, env_config, takeover_dict)
+                    hook_mod._run_divergence_check(
+                        _invocation(config, env_config), takeover_dict
+                    )
+                    hook_mod._run_divergence_check(
+                        _invocation(config, env_config), takeover_dict
+                    )
 
         # The stub must be the thing that ran, or the divergence claim is
         # still in play and this test measures the wrong gate.
@@ -1065,7 +1095,7 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
             )
             config = self._FakeConfig([issue])
 
-            hook_mod._run_startup_validation(env_config, proj, config)
+            hook_mod._run_startup_validation(_invocation(config, env_config, cwd=proj))
 
             error_files = list(log_dir.glob("toolguard-error-*.md"))
             self.assertEqual(len(error_files), 1)
@@ -1090,7 +1120,7 @@ class TestValidationIssueRoutingByLevel(unittest.TestCase):
             )
             config = self._FakeConfig([issue])
 
-            hook_mod._run_startup_validation(env_config, proj, config)
+            hook_mod._run_startup_validation(_invocation(config, env_config, cwd=proj))
 
             warning_files = list(log_dir.glob("toolguard-warning-*.md"))
             self.assertEqual(len(warning_files), 1)

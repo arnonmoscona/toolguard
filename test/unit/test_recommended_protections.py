@@ -22,6 +22,7 @@ from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.api import decide
 from toolguard.config import ConfigLayer, Configuration, Provenance
 from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.invocation import Invocation
 from toolguard.tools.recommended_protections import (
     RecommendedProtection,
     required_hard_deny_patterns,
@@ -242,7 +243,8 @@ class TestRecommendedProtectionsBehavior(ConfigIsolationMixin, unittest.TestCase
         """
         verdict = decide(self.config, tool, str(path))
         self.assertEqual(verdict.decision, "deny", f"{tool} {path}")
-        matched = check_file_path_hard_deny(tool, str(path), self.config, True)
+        context = Invocation.for_evaluation(self.config, tool_name=tool)
+        matched = check_file_path_hard_deny(context, str(path))
         self.assertIsNotNone(matched, f"no hard_deny matched for {tool} {path}")
         self.assertEqual(matched.matched_pattern, expected_pattern)
 
@@ -444,7 +446,8 @@ class TestGapsInTheCanonicalSet(ConfigIsolationMixin, unittest.TestCase):
     def assert_denied(self, tool, path):
         """Assert the path is denied by some hard-deny pattern in the pool."""
         verdict = decide(self.config, tool, str(path))
-        matched = check_file_path_hard_deny(tool, str(path), self.config, True)
+        context = Invocation.for_evaluation(self.config, tool_name=tool)
+        matched = check_file_path_hard_deny(context, str(path))
         self.assertEqual(verdict.decision, "deny", f"{tool} {path}")
         self.assertIsNotNone(matched)
 

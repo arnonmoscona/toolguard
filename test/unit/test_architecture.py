@@ -39,6 +39,11 @@ LAYERS = (
     ("toolguard.normalization", frozenset({"toolguard.ambient"})),
     ("toolguard.toml_scan", frozenset()),
     ("toolguard.file_lock", frozenset()),
+    # TOO-28: invocation context. The empty set is the point -- it carries facts and
+    # imports nothing, which is what keeps it usable from every layer above without
+    # creating an edge. In particular it must never import config: config and resolve
+    # deliberately have no edge between them, and this must not become the first one.
+    ("toolguard.invocation", frozenset()),
     ("toolguard.tool_spec", frozenset({"toolguard.claude_code_contract"})),
     ("toolguard.patterns", frozenset({"toolguard.normalization"})),
     (

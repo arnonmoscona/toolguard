@@ -9,6 +9,7 @@ from unittest.mock import patch
 from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.compound import ResolveOneResult, resolve_compound_permission
 from toolguard.config import _discover_levels, load_configuration
+from toolguard.invocation import Invocation
 from toolguard.permission_resolution import resolve_command_permission
 
 
@@ -176,7 +177,9 @@ class TestDiscoveredHierarchyPrecedence(ConfigIsolationMixin, unittest.TestCase)
     def _resolve(self, project, command):
         """Resolve a Bash command against a configuration loaded from real files."""
         config = load_configuration(project)
-        return resolve_command_permission(config, "Bash", command).decision
+        return resolve_command_permission(
+            Invocation.for_evaluation(config), command
+        ).decision
 
     def test_project_file_beats_ancestor_and_user_files(self):
         """
@@ -261,7 +264,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
 
     def _resolve(self, config, command):
         """Resolve one command through the Bash level cascade; return ``(decision, reason)``."""
-        resolved = resolve_command_permission(config, "Bash", command)
+        resolved = resolve_command_permission(
+            Invocation.for_evaluation(config), command
+        )
         return resolved.decision, resolved.reason
 
     def test_child_allow_overrides_parent_deny(self):
@@ -348,7 +353,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
         config = self._config((["git *"], []), ([], ["rm *"]))
 
         def _resolve_one(sub):
-            resolved = resolve_command_permission(config, "Bash", sub)
+            resolved = resolve_command_permission(
+                Invocation.for_evaluation(config), sub
+            )
             return ResolveOneResult(
                 resolved.decision, resolved.reason, resolved.additional_context
             )
@@ -375,7 +382,9 @@ class TestMoreSpecificWinsResolution(unittest.TestCase):
 
         def _resolve_one(sub):
             cascaded.append(sub)
-            resolved = resolve_command_permission(config, "Bash", sub)
+            resolved = resolve_command_permission(
+                Invocation.for_evaluation(config), sub
+            )
             return ResolveOneResult(
                 resolved.decision, resolved.reason, resolved.additional_context
             )
@@ -473,6 +482,7 @@ class TestRelativeFilePathPatterns(ConfigIsolationMixin, unittest.TestCase):
     def _resolve_read(self, level_name):
         """Resolve a Read of <project_root>/src/x.py against a relative pattern at the given level."""
         from toolguard.hook import resolve_file_path_permission_detailed
+        from toolguard.invocation import Invocation
 
         home, project = self.isolate_config_environment(project_under_home="a/b/proj")
         target = {
@@ -490,7 +500,9 @@ class TestRelativeFilePathPatterns(ConfigIsolationMixin, unittest.TestCase):
 
         target_file = str(project / "src" / "x.py")
         config = load_configuration(project)
-        result = resolve_file_path_permission_detailed("Read", target_file, config)
+        result = resolve_file_path_permission_detailed(
+            target_file, Invocation.for_evaluation(config, tool_name="Read")
+        )
         return result.decision
 
     def test_relative_read_pattern_at_project_level(self):
@@ -592,6 +604,7 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
             alone is 'ask' under both implementations.
         """
         from toolguard.hook import resolve_file_path_permission_detailed
+        from toolguard.invocation import Invocation
 
         home, project = self.isolate_config_environment(project_under_home="a/b/proj")
         _write(
@@ -603,8 +616,9 @@ class TestAnchorFilePattern(ConfigIsolationMixin, unittest.TestCase):
         inside_file = str(project / "src" / "x.py")
         outside_file = str(home / "a" / "src" / "x.py")
         config = load_configuration(project)
-        inside = resolve_file_path_permission_detailed("Read", inside_file, config)
-        outside = resolve_file_path_permission_detailed("Read", outside_file, config)
+        read_invocation = Invocation.for_evaluation(config, tool_name="Read")
+        inside = resolve_file_path_permission_detailed(inside_file, read_invocation)
+        outside = resolve_file_path_permission_detailed(outside_file, read_invocation)
         self.assertEqual(inside.decision, "allow")
         self.assertEqual(outside.decision, "ask")
 

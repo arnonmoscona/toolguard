@@ -39,6 +39,7 @@ from toolguard.config_divergence import check_and_warn_divergence
 from toolguard.env_config import get_env_config
 from toolguard.error_log import log_conflict, log_crash, log_error, log_warning
 from toolguard.error_reporter import Reporter
+from toolguard.invocation import Invocation
 from toolguard.log_writer import LogRecord, log_command, log_discovery, resolve_log_dir
 from toolguard.resolve import (
     RuntimeVerdict,
@@ -58,9 +59,7 @@ from toolguard.tool_spec import payload_key as _tool_payload_key
 FILE_PATH_TOOLS = FILE_TOOLS
 
 
-def _run_startup_validation(
-    env_config: Dict[str, Any], start_dir: str = None, config=None
-) -> None:
+def _run_startup_validation(invocation: Invocation) -> None:
     """
     Route this invocation's configuration issues to the log stream matching each one's severity.
 
@@ -70,16 +69,16 @@ def _run_startup_validation(
     format branching here -- that lives entirely in the config module.
 
     Args:
-        env_config: Environment configuration dict with log_dir
-        start_dir: Directory to start searching for project root from. Defaults to cwd.
-        config: Pre-loaded Configuration to reuse. When None, one is loaded via
-            ``load_configuration(start_dir)`` so this function remains usable on
-            its own.
+        invocation: ``env_config`` supplies ``log_dir``. When
+            ``invocation.config`` is None, one is loaded via
+            ``load_configuration(invocation.cwd)`` so this function remains
+            usable on its own (see ``test_validation_loads_config_when_none``).
     """
+    config = invocation.config
     if config is None:
-        config = load_configuration(start_dir)
+        config = load_configuration(invocation.cwd)
 
-    log_dir = env_config.get("log_dir")
+    log_dir = invocation.env_config.get("log_dir")
     if not log_dir:
         project_root = config.project_root
         if project_root is None:
@@ -453,9 +452,7 @@ def _unit_matched_rule_for_log(unit: UnitVerdict) -> Optional[str]:
 def _log_allowed_command(
     verdict: RuntimeVerdict,
     log_target: str,
-    agent_info: str,
-    env_config: dict,
-    permission_mode: Optional[str] = None,
+    invocation: Invocation,
 ) -> None:
     """
     Log an allowed governed-tool verdict, one entry per unit in ``verdict.sub_matches``.
@@ -488,11 +485,9 @@ def _log_allowed_command(
             ``f"{tool_name}({file_path})"`` for a file-path verdict. Also the
             defensive fallback for a synthetic/hand-built Bash verdict with
             no populated ``sub_matches``.
-        agent_info: Agent identification string.
-        env_config: Environment configuration dict.
-        permission_mode: Claude Code's own ``permission_mode`` from the hook
-            input, if present -- recorded on the log entry for diagnosis only
-            (see :func:`main`).
+        invocation: ``agent_info``/``permission_mode`` are recorded on the
+            log entry (the latter for diagnosis only, see :func:`main`);
+            ``env_config`` names the log stream.
     """
     if not verdict.sub_matches:
         # The normal path for a file-path verdict (sub_matches is always
@@ -505,11 +500,11 @@ def _log_allowed_command(
                 status="executed",
                 matched_rule=verdict.matched_rule,
                 provenance=_provenance_brief(verdict.provenance),
-                extra_info=agent_info,
-                permission_mode=permission_mode,
+                extra_info=invocation.agent_info,
+                permission_mode=invocation.permission_mode,
                 additional_context=verdict.additional_context,
             ),
-            config=env_config,
+            config=invocation.env_config,
         )
         return
 
@@ -529,11 +524,11 @@ def _log_allowed_command(
                 status="executed",
                 matched_rule=matched_rule,
                 provenance=provenance,
-                extra_info=agent_info,
-                permission_mode=permission_mode,
+                extra_info=invocation.agent_info,
+                permission_mode=invocation.permission_mode,
                 additional_context=verdict.additional_context,
             ),
-            config=env_config,
+            config=invocation.env_config,
         )
 
 
@@ -630,12 +625,7 @@ def _governed_tool_verdict(
     return None
 
 
-def _resolve_event(
-    tool_name: str,
-    tool_input: Dict[str, Any],
-    config,
-    extended_syntax: bool,
-) -> RuntimeVerdict:
+def _resolve_event(invocation: Invocation) -> RuntimeVerdict:
     """
     Resolve a single hook event to a :class:`~toolguard.config_types.RuntimeVerdict`,
     read-only.
@@ -661,31 +651,32 @@ def _resolve_event(
     :class:`~toolguard.config_types.RuntimeVerdict`'s defaults.
 
     Args:
-        tool_name: The tool being invoked (e.g. ``'Bash'``, ``'Read'``).
-        tool_input: The tool input dict (carrying ``command`` or ``file_path``).
-        config: The resolved configuration to evaluate against.
-        extended_syntax: Whether extended (regex/glob) prefixes are honoured.
+        invocation: ``tool_name``/``tool_input`` name the event; ``config``
+            is evaluated against; ``extended_syntax`` controls prefix
+            honouring.
 
     Returns:
         The resolved :class:`~toolguard.config_types.RuntimeVerdict`, whose
         ``decision`` is ``'allow'``, ``'deny'``, or ``'ask'``.
     """
-    governed_tools = list(config.governed_tools())
-    verdict = _governed_tool_verdict(tool_name, governed_tools)
+    governed_tools = list(invocation.config.governed_tools())
+    verdict = _governed_tool_verdict(invocation.tool_name, governed_tools)
     if verdict is not None:
         return verdict
 
-    if tool_name in FILE_PATH_TOOLS:
-        key = _tool_payload_key(tool_name)
+    if invocation.tool_name in FILE_PATH_TOOLS:
+        key = _tool_payload_key(invocation.tool_name)
     else:
-        key = _command_target_key(tool_name)
-    target = tool_input.get(key, "")
+        key = _command_target_key(invocation.tool_name)
+    target = invocation.tool_input.get(key, "")
     if not target:
         return RuntimeVerdict(
             decision="deny", reason=f"No {key} provided in tool input"
         )
 
-    return decide(config, tool_name, target, extended_syntax)
+    return decide(
+        invocation.config, invocation.tool_name, target, invocation.extended_syntax
+    )
 
 
 def _run_eval_mode() -> None:
@@ -717,8 +708,15 @@ def _run_eval_mode() -> None:
         # This keeps a cross-project sweep faithful to each probed project.
         config = load_configuration(cwd, ignore_env_override=True)
         env_config = get_env_config(start_dir=cwd)
-        extended_syntax = env_config.get("extended_syntax", True)
-        verdict = _resolve_event(tool_name, tool_input, config, extended_syntax)
+        invocation = Invocation(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            config=config,
+            extended_syntax=env_config.get("extended_syntax", True),
+            cwd=cwd,
+            env_config=env_config,
+        )
+        verdict = _resolve_event(invocation)
         _emit_decision(create_hook_output(verdict))
     except json.JSONDecodeError as e:
         _emit_decision(
@@ -776,7 +774,7 @@ def _warn_if_settings_path_override(reporter: Reporter) -> None:
     )
 
 
-def _log_config_discovery(config, env_config: Dict[str, Any]) -> None:
+def _log_config_discovery(invocation: Invocation) -> None:
     """
     Emit a config-discovery diagnostic when the discovered levels changed.
 
@@ -785,17 +783,17 @@ def _log_config_discovery(config, env_config: Dict[str, Any]) -> None:
     mechanism and why toolguard needs one at all).
 
     Args:
-        config: The resolved configuration whose levels are described.
-        env_config: Environment configuration dict carrying ``log_dir`` and
-            ``project_root``. A no-op when no log dir is resolved.
+        invocation: ``config``'s levels are described; ``env_config``
+            carries ``log_dir`` and ``project_root``. A no-op when no log
+            dir is resolved.
     """
-    disco_log_dir = env_config.get("log_dir")
+    disco_log_dir = invocation.env_config.get("log_dir")
     if not disco_log_dir:
         return
     log_discovery(
-        list(config.describe_levels()),
+        list(invocation.config.describe_levels()),
         disco_log_dir,
-        str(env_config.get("project_root", "")),
+        str(invocation.env_config.get("project_root", "")),
     )
 
 
@@ -825,7 +823,7 @@ def _announce_takeover_state(takeover, log_dir) -> None:
     issue_takeover_warning(enabled=True, conflict_message=message)
 
 
-def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_takeover_mode(invocation: Invocation) -> Dict[str, Any]:
     """
     Resolve takeover mode, announce its state, and return the legacy dict form.
 
@@ -834,14 +832,13 @@ def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]
     unchanged.
 
     Args:
-        config: The resolved configuration.
-        env_config: Environment configuration dict (for ``log_dir``).
+        invocation: ``config`` is resolved; ``env_config`` supplies ``log_dir``.
 
     Returns:
         The takeover settings as the plain dict those clients expect.
     """
-    takeover = config.takeover_mode()
-    _announce_takeover_state(takeover, env_config.get("log_dir"))
+    takeover = invocation.config.takeover_mode()
+    _announce_takeover_state(takeover, invocation.env_config.get("log_dir"))
     return {
         "enabled": takeover.enabled,
         "ignored_allow_patterns": list(takeover.ignored_allow_patterns),
@@ -851,7 +848,7 @@ def _resolve_takeover_mode(config, env_config: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _run_divergence_check(
-    config, env_config: Dict[str, Any], takeover_dict: Dict[str, Any]
+    invocation: Invocation, takeover_dict: Dict[str, Any]
 ) -> None:
     """
     Check for config divergence, auto-migrating when configured.
@@ -861,14 +858,13 @@ def _run_divergence_check(
     warning is due.
 
     Args:
-        config: The resolved configuration.
-        env_config: Environment configuration dict (for ``log_dir``).
+        invocation: ``config`` and ``env_config`` (for ``log_dir``).
         takeover_dict: Takeover settings in the plain-dict form these clients take.
     """
-    log_dir = env_config.get("log_dir")
+    log_dir = invocation.env_config.get("log_dir")
     if not log_dir:
         return
-    project_root = config.project_root
+    project_root = invocation.config.project_root
     if project_root is None:
         return
 
@@ -878,7 +874,7 @@ def _run_divergence_check(
     if not divergence.divergent_patterns:
         return
 
-    config_sync = config.config_sync_settings()
+    config_sync = invocation.config.config_sync_settings()
     if config_sync["auto_migrate"]:
         run_auto_migration(project_root, dict(config_sync), takeover_dict)
 
@@ -904,9 +900,7 @@ def _agent_info_for(transcript_path: str) -> str:
 def _log_non_allow_decision(
     verdict: RuntimeVerdict,
     log_target: str,
-    agent_info: str,
-    env_config: Dict[str, Any],
-    permission_mode: Optional[str],
+    invocation: Invocation,
 ) -> None:
     """
     Write the resolution-log entry for an 'ask' or 'deny' verdict.
@@ -934,10 +928,9 @@ def _log_non_allow_decision(
             naturally absent for a hard deny (pooled across levels, no
             single provenance).
         log_target: What is being logged -- a command, or ``Tool(path)``.
-        agent_info: Agent identification string.
-        env_config: Environment configuration dict.
-        permission_mode: Claude Code's own permission mode, recorded on the
-            log entry for diagnosis only (see :func:`main`).
+        invocation: ``agent_info``/``permission_mode`` are recorded on the
+            log entry (the latter for diagnosis only, see :func:`main`);
+            ``env_config`` names the log stream.
     """
     if verdict.decision == "ask":
         log_command(
@@ -945,11 +938,11 @@ def _log_non_allow_decision(
                 command_str=log_target,
                 status="ask",
                 note=verdict.reason,
-                extra_info=agent_info,
-                permission_mode=permission_mode,
+                extra_info=invocation.agent_info,
+                permission_mode=invocation.permission_mode,
                 additional_context=verdict.additional_context,
             ),
-            config=env_config,
+            config=invocation.env_config,
         )
         return
 
@@ -973,23 +966,16 @@ def _log_non_allow_decision(
             command_str=log_target,
             status="refused",
             violated_rules=violated_rules,
-            extra_info=agent_info,
-            permission_mode=permission_mode,
+            extra_info=invocation.agent_info,
+            permission_mode=invocation.permission_mode,
             additional_context=verdict.additional_context,
             provenance=logged_provenance,
         ),
-        config=env_config,
+        config=invocation.env_config,
     )
 
 
-def _handle_file_path_tool(
-    tool_name: str,
-    tool_input: Dict[str, Any],
-    config,
-    env_config: Dict[str, Any],
-    agent_info: str,
-    permission_mode: Optional[str],
-) -> RuntimeVerdict:
+def _handle_file_path_tool(invocation: Invocation) -> RuntimeVerdict:
     """
     Resolve and log a file-path tool event (Read, Write, Edit).
 
@@ -1001,68 +987,55 @@ def _handle_file_path_tool(
     ``permission_resolution.resolve_file_path_permission``.
 
     Args:
-        tool_name: The file tool being invoked.
-        tool_input: The tool input dict (read for ``file_path``).
-        config: The resolved configuration.
-        env_config: Environment configuration dict.
-        agent_info: Agent identification string.
-        permission_mode: Claude Code's own permission mode, recorded on the
-            log entry for diagnosis only (see :func:`main`).
+        invocation: This run's :class:`Invocation` -- ``tool_name`` and
+            ``tool_input`` name the file-path event, the rest is what
+            :func:`_log_allowed_command` / :func:`_log_non_allow_decision`
+            need to record it.
 
     Returns:
         The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
     """
-    key = _tool_payload_key(tool_name)
-    file_path = tool_input.get(key, "")
+    key = _tool_payload_key(invocation.tool_name)
+    file_path = invocation.tool_input.get(key, "")
     if not file_path:
         log_command(
             LogRecord(
-                command_str=f"{tool_name}()",
+                command_str=f"{invocation.tool_name}()",
                 status="refused",
                 violated_rules=[f"no {key} provided"],
-                extra_info=agent_info,
-                permission_mode=permission_mode,
+                extra_info=invocation.agent_info,
+                permission_mode=invocation.permission_mode,
             ),
-            config=env_config,
+            config=invocation.env_config,
         )
         return RuntimeVerdict(
             decision="deny", reason=f"No {key} provided in tool input"
         )
 
-    extended_syntax = env_config.get("extended_syntax", True)
-    result = resolve_file_path_permission_detailed(
-        tool_name, file_path, config, extended_syntax
-    )
-    log_target = f"{tool_name}({file_path})"
+    result = resolve_file_path_permission_detailed(file_path, invocation)
+    log_target = f"{invocation.tool_name}({file_path})"
 
     if result.decision == "allow":
         # Conflict: a more-specific allow overrode a less-specific deny. A
         # file-path result carries 0 or 1 overrides in this always-a-list
         # field, so this loop runs 0 or 1 times.
         for _, override in result.overrides:
-            _log_conflict_override(log_target, override, env_config.get("log_dir"))
+            _log_conflict_override(
+                log_target, override, invocation.env_config.get("log_dir")
+            )
         _log_fallback_allow_warning(
-            result.fallback_warning, result.reason, env_config.get("log_dir")
+            result.fallback_warning,
+            result.reason,
+            invocation.env_config.get("log_dir"),
         )
-        _log_allowed_command(
-            result, log_target, agent_info, env_config, permission_mode
-        )
+        _log_allowed_command(result, log_target, invocation)
     else:
-        _log_non_allow_decision(
-            result, log_target, agent_info, env_config, permission_mode
-        )
+        _log_non_allow_decision(result, log_target, invocation)
 
     return result
 
 
-def _handle_command_tool(
-    tool_name: str,
-    tool_input: Dict[str, Any],
-    config,
-    env_config: Dict[str, Any],
-    agent_info: str,
-    permission_mode: Optional[str],
-) -> RuntimeVerdict:
+def _handle_command_tool(invocation: Invocation) -> RuntimeVerdict:
     """
     Resolve and log a command tool event (Bash, MCP terminals).
 
@@ -1083,56 +1056,44 @@ def _handle_command_tool(
     sub-command is hard-denied.
 
     Args:
-        tool_name: The command tool being invoked -- names the ``tool_input``
-            key via :func:`_command_target_key`, since not every command tool
-            necessarily shares Bash's ``'command'`` key.
-        tool_input: The tool input dict.
-        config: The resolved configuration.
-        env_config: Environment configuration dict.
-        agent_info: Agent identification string.
-        permission_mode: Claude Code's own permission mode, recorded on the
-            log entry for diagnosis only (see :func:`main`).
+        invocation: This run's :class:`Invocation`. ``tool_name`` names the
+            ``tool_input`` key via :func:`_command_target_key`, since not
+            every command tool necessarily shares Bash's ``'command'`` key.
 
     Returns:
         The resolved :class:`~toolguard.config_types.RuntimeVerdict`.
     """
-    key = _command_target_key(tool_name)
-    command = tool_input.get(key, "")
+    key = _command_target_key(invocation.tool_name)
+    command = invocation.tool_input.get(key, "")
     if not command:
         log_command(
             LogRecord(
                 command_str=command,
                 status="refused",
                 violated_rules=[f"no {key} provided"],
-                extra_info=agent_info,
-                permission_mode=permission_mode,
+                extra_info=invocation.agent_info,
+                permission_mode=invocation.permission_mode,
             ),
-            config=env_config,
+            config=invocation.env_config,
         )
         return RuntimeVerdict(
             decision="deny", reason=f"No {key} provided in tool input"
         )
 
-    extended_syntax = env_config.get("extended_syntax", True)
-    hd_deny, hd_allow = config.hard_deny("Bash")
-    result = resolve_bash_permission_detailed(
-        command, config, extended_syntax, hd_deny, hd_allow
-    )
+    result = resolve_bash_permission_detailed(command, invocation)
 
     if result.decision == "allow":
         # Conflict logging: any sub-command whose more-specific allow overrode
         # a less-specific deny is recorded to the conflict stream.
-        conflict_log_dir = env_config.get("log_dir")
+        conflict_log_dir = invocation.env_config.get("log_dir")
         for sub_command, override in result.overrides:
             _log_conflict_override(sub_command, override, conflict_log_dir)
         _log_fallback_allow_warning(
             result.fallback_warning, result.reason, conflict_log_dir
         )
-        _log_allowed_command(result, command, agent_info, env_config, permission_mode)
+        _log_allowed_command(result, command, invocation)
     else:
-        _log_non_allow_decision(
-            result, command, agent_info, env_config, permission_mode
-        )
+        _log_non_allow_decision(result, command, invocation)
 
     return result
 
@@ -1241,14 +1202,30 @@ def main() -> None:
             # here on.
             config = load_configuration(cwd)
 
+            # The statics this run has loaded so far, named as one value: built
+            # as soon as config/env_config/cwd are all in hand, rather than each
+            # of the functions below taking whichever piece it happened to
+            # need. governed_tools/agent_info/permission_mode are not yet
+            # known -- filled in via dataclasses.replace() below, once they
+            # are -- so this does not change WHEN any of the calls between
+            # here and there run, or what they read.
+            invocation = Invocation(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                config=config,
+                extended_syntax=env_config.get("extended_syntax", True),
+                cwd=cwd,
+                env_config=env_config,
+            )
+
             _warn_if_settings_path_override(reporter)
-            _log_config_discovery(config, env_config)
+            _log_config_discovery(invocation)
 
             # Run startup validation, reusing the loaded config.
-            _run_startup_validation(env_config, cwd, config)
+            _run_startup_validation(invocation)
 
-            takeover_dict = _resolve_takeover_mode(config, env_config)
-            _run_divergence_check(config, env_config, takeover_dict)
+            takeover_dict = _resolve_takeover_mode(invocation)
+            _run_divergence_check(invocation, takeover_dict)
 
             governed_tools = list(config.governed_tools())
 
@@ -1263,29 +1240,23 @@ def main() -> None:
             # Claude Code's own permission_mode (e.g. 'default', 'plan', an auto
             # mode) is recorded alongside the decision, purely for diagnosis --
             # it never affects the verdict itself.
+            # TOO-28-SCAFFOLD: the sentence above stops being true in Phase 2.
             permission_mode = hook_data.permission_mode
+
+            invocation = replace(
+                invocation,
+                governed_tools=tuple(governed_tools),
+                agent_info=agent_info,
+                permission_mode=permission_mode,
+            )
 
             # File path tools (Read, Write, Edit) and command tools (Bash, MCP
             # terminals) differ only in how the target is extracted and
             # resolved; both return the same RuntimeVerdict shape.
             if tool_name in FILE_PATH_TOOLS:
-                verdict = _handle_file_path_tool(
-                    tool_name,
-                    tool_input,
-                    config,
-                    env_config,
-                    agent_info,
-                    permission_mode,
-                )
+                verdict = _handle_file_path_tool(invocation)
             else:
-                verdict = _handle_command_tool(
-                    tool_name,
-                    tool_input,
-                    config,
-                    env_config,
-                    agent_info,
-                    permission_mode,
-                )
+                verdict = _handle_command_tool(invocation)
 
             output = _finalize_output(verdict, reporter)
             _emit_decision(output)

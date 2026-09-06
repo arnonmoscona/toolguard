@@ -10,6 +10,7 @@ from test.unit._config_isolation import ConfigIsolationMixin
 from toolguard.config import ConfigLayer, Configuration, Provenance, load_configuration
 from toolguard.config_divergence import DivergenceCheckResult
 from toolguard.hook import resolve_file_path_permission_detailed
+from toolguard.invocation import Invocation
 from toolguard.permissions import check_hard_deny
 from toolguard.resolve import resolve_bash_permission_detailed
 from toolguard.rule_entry import normalize_entry
@@ -339,9 +340,8 @@ class TestHardDenyCommand(_IsolatedEnvTestCase):
 
     def _resolve(self, config, command):
         """Resolve a command through production's Bash entry point; return (decision, reason)."""
-        hd_deny, hd_allow = config.hard_deny("Bash")
         verdict = resolve_bash_permission_detailed(
-            command, config, True, hd_deny, hd_allow
+            command, Invocation.for_evaluation(config, extended_syntax=True)
         )
         return verdict.decision, verdict.reason
 
@@ -595,7 +595,9 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
 
         target_file = str(project / ".env")
         config = load_configuration(project)
-        result = resolve_file_path_permission_detailed("Read", target_file, config)
+        result = resolve_file_path_permission_detailed(
+            target_file, Invocation.for_evaluation(config, tool_name="Read")
+        )
         self.assertEqual(result.decision, "deny")
         self.assertIn("hard_deny", result.reason)
 
@@ -618,10 +620,10 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         denied_file = str(project / "src" / "y.txt")
         config = load_configuration(project)
         allow_result = resolve_file_path_permission_detailed(
-            "Write", allowed_file, config
+            allowed_file, Invocation.for_evaluation(config, tool_name="Write")
         )
         deny_result = resolve_file_path_permission_detailed(
-            "Write", denied_file, config
+            denied_file, Invocation.for_evaluation(config, tool_name="Write")
         )
         self.assertEqual(allow_result.decision, "allow")
         self.assertEqual(deny_result.decision, "deny")
@@ -654,8 +656,12 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         inside = str(project / "secrets" / "key.txt")
         outside = str(home / "secrets" / "key.txt")
         config = load_configuration(project)
-        inside_result = resolve_file_path_permission_detailed("Edit", inside, config)
-        outside_result = resolve_file_path_permission_detailed("Edit", outside, config)
+        inside_result = resolve_file_path_permission_detailed(
+            inside, Invocation.for_evaluation(config, tool_name="Edit")
+        )
+        outside_result = resolve_file_path_permission_detailed(
+            outside, Invocation.for_evaluation(config, tool_name="Edit")
+        )
         self.assertEqual(inside_result.decision, "deny")
         self.assertEqual(outside_result.decision, "ask")
         self.assertNotIn("hard_deny", outside_result.reason)
@@ -674,7 +680,9 @@ class TestHardDenyFilePath(ConfigIsolationMixin, _IsolatedEnvTestCase):
         )
         target_file = str(project / "src" / "x.py")
         config = load_configuration(project)
-        result = resolve_file_path_permission_detailed("Read", target_file, config)
+        result = resolve_file_path_permission_detailed(
+            target_file, Invocation.for_evaluation(config, tool_name="Read")
+        )
         self.assertEqual(result.decision, "allow")
 
 

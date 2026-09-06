@@ -42,6 +42,7 @@ from test.verdict_corpus.fixture_loader import (
 )
 from toolguard.constants import FILE_TOOLS
 from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.invocation import Invocation
 from toolguard.tool_spec import ToolKind, ToolSpec
 
 #: Set to "1" to acknowledge already-reviewed TRACKED-tier differences without
@@ -526,9 +527,10 @@ class TestFilePathHardDenyAttribution(unittest.TestCase):
         for fixture_id, goldens in sorted(denied_by_fixture.items()):
             with load_fixture_configuration(fixture_id) as (config, _sanitize):
                 for golden in goldens:
-                    hard = check_file_path_hard_deny(
-                        golden["tool"], golden["target"], config, True
+                    context = Invocation.for_evaluation(
+                        config, tool_name=golden["tool"]
                     )
+                    hard = check_file_path_hard_deny(context, golden["target"])
                     # None means the cascade denied instead; that branch does
                     # pass matched_rule through, so it is not this gap.
                     if (

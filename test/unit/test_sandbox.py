@@ -21,6 +21,7 @@ from unittest import mock
 import toolguard.config as toolguard_config
 from toolguard.api import decide
 from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.invocation import Invocation
 from toolguard.testing.sandbox import (
     SCRUBBED_ENV_VARS,
     SandboxEscapeError,
@@ -741,12 +742,11 @@ class TestSandboxEvaluation(unittest.TestCase):
             verdict = sandbox.evaluate("Read", "/etc/passwd")
             self.assertEqual(verdict.decision, "deny")
             self.assertEqual(verdict.matched_rule, "/etc/**")
-            hard = check_file_path_hard_deny("Read", "/etc/passwd", config, True)
+            context = Invocation.for_evaluation(config, tool_name="Read")
+            hard = check_file_path_hard_deny(context, "/etc/passwd")
             self.assertIsNotNone(hard)
             self.assertEqual(hard.matched_pattern, "/etc/**")
-            self.assertIsNone(
-                check_file_path_hard_deny("Read", "/var/log/x", config, True)
-            )
+            self.assertIsNone(check_file_path_hard_deny(context, "/var/log/x"))
 
     def test_ask_floor_applies_to_inline_foreign_code(self):
         """

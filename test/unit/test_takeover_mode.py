@@ -19,6 +19,7 @@ from toolguard.config import (
     load_configuration,
 )
 from toolguard.hook import load_file_path_patterns
+from toolguard.invocation import Invocation
 from toolguard.permission_resolution import resolve_command_permission
 
 #: The four blanket allows takeover suppresses by default. Seeded by
@@ -369,7 +370,9 @@ class TestBashTakeoverFiltering(unittest.TestCase):
         with patch.object(
             Configuration, "takeover_mode", return_value=takeover
         ) as takeover_mock:
-            verdict = resolve_command_permission(config, "Bash", command)
+            verdict = resolve_command_permission(
+                Invocation.for_evaluation(config), command
+            )
         self.assertTrue(
             takeover_mock.called, "the takeover_mode patch was never consulted"
         )

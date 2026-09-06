@@ -18,6 +18,7 @@ from toolguard.compound import (
     resolve_compound_permission_detailed,
 )
 from toolguard.config import ConfigLayer, Configuration, Provenance
+from toolguard.invocation import Invocation
 from toolguard.parser.command_extractor import LeafCommand, UndecidableSegment
 from toolguard.resolve import resolve_bash_permission_detailed
 from toolguard.rule_entry import ADDITIONAL_CONTEXT_KEY
@@ -54,8 +55,9 @@ def _config(allow=(), deny=(), hard_deny=(), fallback="ask"):
 
 def _resolve(config, command):
     """Resolve *command* through :func:`resolve_bash_permission_detailed`."""
-    hd_deny, hd_allow = config.hard_deny("Bash")
-    return resolve_bash_permission_detailed(command, config, True, hd_deny, hd_allow)
+    return resolve_bash_permission_detailed(
+        command, Invocation.for_evaluation(config, extended_syntax=True)
+    )
 
 
 def _shape(sub_match):

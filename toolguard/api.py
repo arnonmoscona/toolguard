@@ -29,11 +29,13 @@ import dataclasses
 
 from toolguard.config import Configuration
 from toolguard.config_types import RuntimeVerdict
-from toolguard.constants import FILE_TOOLS
+from toolguard.constants import DEFAULT_COMMAND_PAYLOAD_KEY, FILE_TOOLS
+from toolguard.invocation import Invocation
 from toolguard.resolve import (
     resolve_bash_permission_detailed,
     resolve_file_path_permission_detailed,
 )
+from toolguard.tool_spec import payload_key
 
 
 def decide(
@@ -66,9 +68,13 @@ def decide(
         arguments above.
     """
     if tool in FILE_TOOLS:
-        return resolve_file_path_permission_detailed(
-            tool, target, config, extended_syntax
+        invocation = Invocation.for_evaluation(
+            config,
+            tool_name=tool,
+            tool_input={payload_key(tool): target},
+            extended_syntax=extended_syntax,
         )
+        return resolve_file_path_permission_detailed(target, invocation)
     return _decide_bash(config, tool, target, extended_syntax)
 
 
@@ -98,10 +104,13 @@ def _decide_bash(
         The :class:`~toolguard.config_types.RuntimeVerdict` from
         :func:`~toolguard.resolve.resolve_bash_permission_detailed`.
     """
-    hd_deny, hd_allow = config.hard_deny("Bash")
-    result = resolve_bash_permission_detailed(
-        command, config, extended_syntax, hd_deny, hd_allow
+    invocation = Invocation.for_evaluation(
+        config,
+        tool_name=tool,
+        tool_input={DEFAULT_COMMAND_PAYLOAD_KEY: command},
+        extended_syntax=extended_syntax,
     )
+    result = resolve_bash_permission_detailed(command, invocation)
     if tool != result.tool:
         return dataclasses.replace(result, tool=tool)
     return result

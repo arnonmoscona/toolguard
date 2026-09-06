@@ -26,10 +26,10 @@ from toolguard.compound import (
 )
 from toolguard.config_types import ConflictOverride
 from toolguard.config_types import LevelMatch as LevelMatch
-from toolguard.config_types import ResolveConfig
 from toolguard.config_types import RuntimeVerdict as RuntimeVerdict
 from toolguard.config_types import UnitVerdict as UnitVerdict
 from toolguard.file_matching import check_file_path_hard_deny
+from toolguard.invocation import Invocation
 from toolguard.parser.command_extractor import command_spellings
 from toolguard.permission_resolution import (
     apply_parse_failure_floor,
@@ -45,7 +45,7 @@ from toolguard.permissions import check_hard_deny
 
 
 def _hard_deny_additional_context(
-    config, tool_name: str, matched_pattern: Optional[str]
+    invocation: Invocation, matched_pattern: Optional[str]
 ) -> Optional[str]:
     """
     Look up the ``additionalContext`` of a matched ``[hard_deny]`` pattern.
@@ -55,8 +55,13 @@ def _hard_deny_additional_context(
     it degrades to ``None`` and never affects the deny itself.
 
     Args:
-        config: The resolved configuration.
-        tool_name: The governed tool whose hard-deny pool was matched.
+        invocation: Supplies ``config`` and the governed tool whose hard-deny
+            pool was matched. For the file-path path this is genuinely
+            ``invocation.tool_name``; the Bash path passes a copy with
+            ``tool_name`` forced to ``"Bash"`` -- see
+            :func:`resolve_bash_permission_detailed`'s ``bash_context``, since
+            hard-deny is always pooled under Bash regardless of the calling
+            tool.
         matched_pattern: The wrapper-stripped pattern that matched.
 
     Returns:
@@ -65,7 +70,9 @@ def _hard_deny_additional_context(
     """
     if matched_pattern is None:
         return None
-    deny_entries, _allow_entries = config.hard_deny_entries(tool_name)
+    deny_entries, _allow_entries = invocation.config.hard_deny_entries(
+        invocation.tool_name
+    )
     for entry in deny_entries:
         if entry.stripped_pattern == matched_pattern:
             return entry.additional_context
@@ -73,10 +80,8 @@ def _hard_deny_additional_context(
 
 
 def resolve_file_path_permission_detailed(
-    tool_name: str,
     file_path: str,
-    config: ResolveConfig,
-    extended_syntax: bool = True,
+    invocation: Invocation,
 ) -> "RuntimeVerdict":
     """
     Resolve a file-path tool decision, hard-deny-first, more-specific-wins.
@@ -86,32 +91,29 @@ def resolve_file_path_permission_detailed(
     :func:`~toolguard.permission_resolution.resolve_file_path_permission`.
 
     Args:
-        tool_name: ``'Read'``, ``'Write'``, or ``'Edit'``.
         file_path: The file path under evaluation.
-        config: The resolved configuration.
-        extended_syntax: Whether extended prefixes are honoured.
+        invocation: Supplies ``tool_name`` (``'Read'``, ``'Write'``, or
+            ``'Edit'``), ``config``, and ``extended_syntax``.
 
     Returns:
         A :class:`~toolguard.config_types.RuntimeVerdict` (see that class's
         docstring for field meanings).
     """
-    hard = check_file_path_hard_deny(tool_name, file_path, config, extended_syntax)
+    hard = check_file_path_hard_deny(invocation, file_path)
     if hard is not None:
         return RuntimeVerdict(
             decision=hard.decision,
             reason=hard.reason,
             provenance=None,
             additional_context=cap_context_words(
-                _hard_deny_additional_context(config, tool_name, hard.matched_pattern)
+                _hard_deny_additional_context(invocation, hard.matched_pattern)
             ),
             matched_rule=hard.matched_pattern,
-            tool=tool_name,
+            tool=invocation.tool_name,
             target=file_path,
         )
 
-    resolved = resolve_file_path_permission(
-        config, tool_name, file_path, extended_syntax
-    )
+    resolved = resolve_file_path_permission(invocation, file_path)
     # The per-level verdict pairs its bare override with identifier None
     # (see RuntimeVerdict's "overrides" docstring); re-pair with the real
     # file path now that it is known.
@@ -128,7 +130,7 @@ def resolve_file_path_permission_detailed(
         # permission_resolution.py never sets this today -- threaded through
         # regardless, rather than silently dropped, in case it ever does.
         fallback_kind=resolved.fallback_kind,
-        tool=tool_name,
+        tool=invocation.tool_name,
         target=file_path,
     )
 
@@ -199,10 +201,7 @@ def _deciding_sub_match(
 
 def resolve_bash_permission_detailed(
     command: str,
-    config: ResolveConfig,
-    extended_syntax: bool,
-    hard_deny_deny,
-    hard_deny_allow,
+    invocation: Invocation,
 ) -> "RuntimeVerdict":
     """
     Resolve a (possibly compound) Bash command, with per-sub-command provenance.
@@ -222,10 +221,11 @@ def resolve_bash_permission_detailed(
 
     Args:
         command: The bash command line (may be compound).
-        config: The resolved configuration.
-        extended_syntax: Whether extended prefixes are honoured.
-        hard_deny_deny: Pooled hard-deny deny patterns for Bash.
-        hard_deny_allow: Pooled hard-deny allow (carve-out) patterns for Bash.
+        invocation: Supplies ``config`` and ``extended_syntax``. The Bash
+            hard-deny pool is looked up from ``invocation.config`` here --
+            always ``config.hard_deny("Bash")``, never the caller's own
+            ``tool_name`` (an MCP terminal tool is still checked under the
+            Bash pool; see :mod:`toolguard.api`).
 
     Returns:
         A :class:`~toolguard.config_types.RuntimeVerdict` (see that class's
@@ -233,9 +233,16 @@ def resolve_bash_permission_detailed(
         in ``sub_matches`` and ``provenance``/``matched_rule`` sourced from
         :func:`_deciding_sub_match`.
     """
+    # This function always evaluates against the 'Bash' permission set,
+    # regardless of the invoking tool's own name (an MCP terminal tool
+    # routed through the Bash rules, say) -- forced here ONCE so every
+    # per-sub-command lookup below shares the correctly-scoped context,
+    # never invocation.tool_name itself.
+    bash_context = replace(invocation, tool_name="Bash")
+    hard_deny_deny, hard_deny_allow = invocation.config.hard_deny("Bash")
     overrides: List[Tuple[str, ConflictOverride]] = []
     sub_matches: List[UnitVerdict] = []
-    looked_past = config.assignments_looked_past_when_granting()
+    looked_past = invocation.config.assignments_looked_past_when_granting()
 
     def _decide(sub_command: str) -> Tuple[UnitVerdict, Optional[ConflictOverride]]:
         """Resolve one sub-command: hard-deny pool first, then the cascade."""
@@ -244,7 +251,7 @@ def resolve_bash_permission_detailed(
             sub_command,
             list(hard_deny_deny),
             list(hard_deny_allow),
-            extended_syntax,
+            invocation.extended_syntax,
             spellings=spellings,
         )
         if hard is not None:
@@ -256,7 +263,7 @@ def resolve_bash_permission_detailed(
                     provenance=None,  # hard_deny is pooled; no single provenance
                     reason=hard.reason,
                     additional_context=_hard_deny_additional_context(
-                        config, "Bash", hard.matched_pattern
+                        bash_context, hard.matched_pattern
                     ),
                     fallback_kind=None,  # hard-deny is always a genuine match, never an escape hatch
                 ),
@@ -264,7 +271,7 @@ def resolve_bash_permission_detailed(
             )
 
         resolved = resolve_command_permission(
-            config, "Bash", sub_command, extended_syntax, spellings=spellings
+            bash_context, sub_command, spellings=spellings
         )
         fallback_kind = None
         if resolved.decision == "allow" and resolved.matched_rule is None:
@@ -335,7 +342,7 @@ def resolve_bash_permission_detailed(
         judged = judge_unit(
             unit,
             part_verdicts,
-            config.resolved_undecidable_fallback(),
+            invocation.config.resolved_undecidable_fallback(),
             audit_part_verdicts=audit_part_verdicts,
             deny_check_verdicts=deny_check_verdicts,
         )
@@ -383,7 +390,7 @@ def resolve_bash_permission_detailed(
     # NOT remove this as "redundant" -- doing so reopens a fail-open bypass
     # for undecidable segments.
     decision, reason = apply_parse_failure_floor(
-        config.parse_failures, decision, reason
+        invocation.config.parse_failures, decision, reason
     )
 
     # Overrides are only conflicts when the overall decision is 'allow';
